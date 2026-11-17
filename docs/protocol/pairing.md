@@ -563,9 +563,17 @@ verified, and our own keyless request, open nothing.
   household sends to end a handshake; read under an approval's keys they
   prove the opposite of "it confirmed". A staged approval is cancelled by
   them (exactly the half those keys belong to) and nothing is dispatched;
-  a row approval is left unconfirmed to the event's handler. Every other
-  event is something a household sends only once its own side is
-  confirmed.
+  a row approval is left unconfirmed to the event's handler.
+- **Only listed events confirm (fail closed).** Every
+  `FederationEventType` is classified in
+  [`domain/pairing_events.py`](../../socialhome/domain/pairing_events.py):
+  it *confirms* (ordinary traffic a household seals under a pairing's keys
+  only once its own side is confirmed — the post-pair capabilities and
+  `USERS_SYNC`, space and DM events…), it *ends* a pairing (above), or it
+  is a *handshake* message (`PAIRING_*`), which proves nothing. A type
+  nobody classified confirms nothing, and a test fails until it is
+  classified. An envelope that does not confirm a staged approval is
+  refused.
 - The first such envelope confirms the pair before dispatch — the half it
   was read under, not another handshake's that took its place meanwhile;
   the others the peer sent at the same time go on once it is confirmed.

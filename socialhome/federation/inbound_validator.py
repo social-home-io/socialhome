@@ -71,6 +71,10 @@ from ..domain.federation import (
     is_space_seat,
     pending_kind,
 )
+from ..domain.pairing_events import (
+    CONFIRMS_PAIRING_EVENT_TYPES,
+    ENDS_PAIRING_EVENT_TYPES,
+)
 from ..domain.space import WRITER_ROLES, SpaceRole
 from .host_equivalence import acts_as_host
 from .multi_recipient import (
@@ -859,13 +863,11 @@ def make_check_unpairing(
     return check_unpairing
 
 
-#: What a household sends to END a handshake. Read under the keys of a
-#: pairing that waits for the peer's first envelope, these prove the
-#: opposite of "it confirmed": they never confirm it. Every other event is
-#: something a household sends only once its own side is confirmed.
-_ENDS_A_PAIRING: frozenset[str] = frozenset(
-    {FederationEventType.PAIRING_ABORT.value, FederationEventType.UNPAIR.value}
-)
+def _known_event_type(raw: object) -> FederationEventType | None:
+    try:
+        return FederationEventType(raw)
+    except ValueError:
+        return None
 
 
 def make_confirm_relay_approval(
@@ -915,7 +917,8 @@ def make_confirm_relay_approval(
         # The handshake this envelope was verified and decrypted under.
         inbox_id = str(getattr(inst, "local_inbox_id", "") or "")
         staged = getattr(inst, "staged", False) is True
-        if ctx.envelope.get("event_type") in _ENDS_A_PAIRING:
+        event_type = _known_event_type(ctx.envelope.get("event_type"))
+        if event_type in ENDS_PAIRING_EVENT_TYPES:
             # The peer cancelled (or unpaired): never a confirmation. A
             # row approval is left to the event's handler, which drops the
             # pending row. A half beside a seat has no row of its own —
@@ -929,7 +932,12 @@ def make_confirm_relay_approval(
             return
         confirmed: object = False
         try:
-            confirmed = await on_contact(sender, inbox_id)
+            # Fail closed: only an event the peer sends once ITS side is
+            # confirmed proves that (``domain.pairing_events``). A
+            # handshake message, or a type nobody classified, confirms
+            # nothing.
+            if event_type in CONFIRMS_PAIRING_EVENT_TYPES:
+                confirmed = await on_contact(sender, inbox_id)
         except Exception:
             log.warning(
                 "inbound: could not confirm the approved pairing with %s",

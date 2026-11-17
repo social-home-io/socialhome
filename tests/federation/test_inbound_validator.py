@@ -2534,3 +2534,48 @@ async def test_a_signature_neither_key_set_verifies_is_refused():
         await make_verify_signature(encoder=_HybridOnlyEncoder())(ctx)
     with pytest.raises(ValueError, match="Invalid envelope signature"):
         await make_verify_signature(encoder=_HybridOnlyEncoder())(_signed_ctx(alt=None))
+
+
+@pytest.mark.parametrize("staged", [True, False])
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.PAIRING_CONFIRM,
+        FederationEventType.PAIRING_INTRO_AUTO,
+        FederationEventType.PAIRING_PEER_CONFIRM,
+    ],
+)
+async def test_only_listed_events_confirm_an_approval(event_type, staged):
+    """Fail closed: the confirm step promotes on an explicit list
+    (``CONFIRMS_PAIRING_EVENT_TYPES``) — a handshake message, or a type
+    nobody classified yet, confirms nothing. A staged approval then
+    refuses the envelope (its row is the seat); a row approval lets it go
+    on unconfirmed."""
+    confirmed: list[str] = []
+
+    async def _confirm(iid: str, inbox_id: str = "") -> bool:
+        confirmed.append(iid)
+        return True
+
+    step = make_confirm_relay_approval(on_contact=_confirm)
+    ctx = _approval_ctx(event_type, staged=staged)
+    if staged:
+        with pytest.raises(ValueError, match="No instance found"):
+            await step(ctx)
+    else:
+        await step(ctx)
+        assert ctx.early_response is None
+    assert confirmed == []
+
+
+async def test_an_unknown_event_type_confirms_nothing():
+    confirmed: list[str] = []
+
+    async def _confirm(iid: str, inbox_id: str = "") -> bool:
+        confirmed.append(iid)
+        return True
+
+    ctx = _approval_ctx(FederationEventType.SPACE_POST_CREATED, staged=False)
+    ctx.envelope["event_type"] = "something_new"
+    await make_confirm_relay_approval(on_contact=_confirm)(ctx)
+    assert confirmed == []
