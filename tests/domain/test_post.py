@@ -422,5 +422,12 @@ def test_file_meta_from_wire_keeps_only_a_space_file():
         {**meta, "url": "api/media/dm-stolen.pdf"},
         {**meta, "surprise": 1},
         {"url": "api/media/doc.pdf"},
+        # A wrong-typed field would make every read of the stored row raise.
+        {**meta, "size_bytes": None},
+        {**meta, "size_bytes": -1},
+        {**meta, "size_bytes": True},
+        {**meta, "size_bytes": "7"},
+        {**meta, "mime_type": None},
+        {**meta, "original_name": 7},
     ):
         assert file_meta_from_wire(bad) is None

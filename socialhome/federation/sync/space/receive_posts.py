@@ -36,6 +36,7 @@ from ....services.inbound_media_store import space_media_refs
 from ....services.link_preview_service import space_wire_link_preview
 from ....services.space_media_names import comment_media_ref
 from ...owner_bound_id import (
+    SPACE_CALENDAR_EVENT_KIND,
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
     OwnerBinding,
@@ -247,9 +248,15 @@ class PostsMixin(ReceiverBase):
         post we lack — it is taken only from the **host**, only while no
         card for the event is held here (ours, or one taken earlier), and
         stored linked, so the bridge finds it when the event arrives and
-        mints no second one. Never for an event another space holds (the
-        card would mirror that event's words here). Stored unlinked, as
-        before, the host's card stood next to ours: two cards per event."""
+        mints no second one. Stored unlinked, as before, the host's card
+        stood next to ours: two cards per event.
+
+        The event must be THIS space's (a card linked to another space's
+        event would have that event's words written into it here): held
+        here in this space, or — ``posts`` streams before ``calendar``, so
+        on a first sync it is not held yet — proved by its id, owner-bound
+        (v_36) to the card's author in this space. A legacy id not held
+        proves nothing: the card waits for a stream that finds the event."""
         linked = r.get("linked_event_id")
         if not isinstance(linked, str) or not linked:
             return True, None
@@ -264,10 +271,22 @@ class PostsMixin(ReceiverBase):
         if await self._space_post_repo.get_by_linked_event_id(linked) is not None:
             return False, None
         held_event = await self._space_calendar_repo.get_event(linked)
-        if held_event is not None and held_event[0] != space_id:
+        if held_event is not None:
+            ours = held_event[0] == space_id
+        else:
+            ours = (
+                check_owner_bound_id(
+                    SPACE_CALENDAR_EVENT_KIND,
+                    linked,
+                    space_id=space_id,
+                    owner_user_id=str(r.get("author") or ""),
+                )
+                is OwnerBinding.VALID
+            )
+        if not ours:
             log.warning(
-                "space sync: feed card %s from %s links calendar event %s of "
-                "another space — refusing the write for %s",
+                "space sync: feed card %s from %s links calendar event %s, "
+                "which is not proved to be of space %s — refusing the write",
                 post_id,
                 provider,
                 linked,

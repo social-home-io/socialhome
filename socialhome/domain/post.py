@@ -864,13 +864,25 @@ def file_meta_from_wire(raw: object) -> FileMeta | None:
     (:func:`~.media_constraints.space_media_ref` — never a name another
     receiving path owns, a foreign URL or junk), normalised. A file post
     means nothing without its file, so a refused url drops the whole
-    attachment (the registry's ``parent_requires``)."""
-    if not isinstance(raw, dict):
+    attachment (the registry's ``parent_requires``). Exactly the four
+    fields, each of its type: a stored attachment with a wrong-typed one
+    would make every read of the row raise."""
+    if not isinstance(raw, dict) or set(raw) != _FILE_META_KEYS:
         return None
     url = space_media_ref(raw.get("url"))
-    if url is None:
+    mime_type, name, size = raw["mime_type"], raw["original_name"], raw["size_bytes"]
+    if (
+        url is None
+        or not isinstance(mime_type, str)
+        or not isinstance(name, str)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+    ):
         return None
-    try:
-        return FileMeta(**{**raw, "url": url})
-    except TypeError:
-        return None
+    return FileMeta(url=url, mime_type=mime_type, original_name=name, size_bytes=size)
+
+
+_FILE_META_KEYS: frozenset[str] = frozenset(
+    {"url", "mime_type", "original_name", "size_bytes"}
+)

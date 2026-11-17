@@ -333,3 +333,86 @@ async def test_other_is_not_the_author(env):
         app, FET.SPACE_POST_CREATED, _create("hijack", edited_at=TEN), sender=OTHER
     )
     assert await _content(db) == "v1"
+
+
+# ── Hostile shapes ────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"size_bytes": None},
+        {"size_bytes": [1]},
+        {"size_bytes": -1},
+        {"size_bytes": True},
+        {"mime_type": None},
+        {"original_name": 7},
+    ],
+    ids=str,
+)
+@pytest.mark.parametrize("path", ["live", "stream"])
+async def test_a_malformed_file_attachment_never_reaches_the_row(env, bad, path):
+    """A stored ``file_meta`` with a wrong-typed field made every read of
+    the row raise — the feed of the whole space. The post lands without
+    the attachment, and reads back."""
+    app, db = env
+    meta = {
+        "url": "api/media/clip.webm",
+        "mime_type": "video/webm",
+        "original_name": "clip.webm",
+        "size_bytes": 4,
+        **bad,
+    }
+    if path == "live":
+        await _deliver(
+            app,
+            FET.SPACE_POST_CREATED,
+            {**_create("see"), "type": "file", "file_meta": meta},
+            sender=AUTHOR,
+        )
+    else:
+        await _stream(app, {**_record("see"), "type": "file", "file_meta": meta})
+    row = await db.fetchone("SELECT file_meta_json FROM space_posts WHERE id='p-1'")
+    assert row is not None and row["file_meta_json"] is None
+    held = await app[space_sync_receiver_key]._space_post_repo.get("p-1")
+    assert held is not None and held[1].file_meta is None
+
+
+async def test_a_far_future_edit_stamp_on_a_create_freezes_nothing(env):
+    """A stamp years ahead would beat every later edit: it is not taken
+    (the live skew bound), and the author's next edit lands."""
+    app, db = env
+    await _deliver(app, FET.SPACE_POST_CREATED, _create("v1"), sender=AUTHOR)
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        _create("v1", edited_at="2999-01-01T00:00:00+00:00"),
+        sender=AUTHOR,
+    )
+    row = await db.fetchone("SELECT edited_at FROM space_posts WHERE id='p-1'")
+    assert row["edited_at"] is None
+    await _edit(app, "v2", TEN)
+    assert await _content(db) == "v2"
+
+
+@pytest.mark.parametrize(
+    "event_id",
+    [
+        mint_owner_bound_id(
+            SPACE_CALENDAR_EVENT_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
+        ),
+        mint_owner_bound_id(
+            SPACE_CALENDAR_EVENT_KIND, space_id=SP, owner_user_id="u-somebody-else"
+        ),
+        "legacy-event-id",
+    ],
+    ids=["bound to another space", "bound to another creator", "legacy, not held"],
+)
+async def test_a_card_for_an_event_not_held_must_prove_it_is_this_spaces(env, event_id):
+    """``posts`` streams before ``calendar``: on a first sync the event is
+    never held yet. The link is then taken only on the id's own proof — it
+    is bound to the card's author in THIS space — or a host could plant a
+    card that another space's event would later write its words into."""
+    app, db = env
+    await _stream(app, _card(event_id))
+    assert await _cards(db, event_id) == []

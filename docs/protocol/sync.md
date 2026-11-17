@@ -120,9 +120,11 @@ row it already holds as an upsert of that row, and reads an absent field
 by its default — so a replay carries what the live fan-out carries, built
 by the same function:
 
-- a post is `post_to_wire_dict`: every picture in `image_urls`, the file
-  attachment, `hidden_from_feed`, and — on an edited post only —
-  `edited_at`;
+- a post is `post_to_wire_dict`: every picture in `image_urls`,
+  `hidden_from_feed`, the file attachment (`file_meta`; a live receiver
+  stores it when it passes the §5.2 gate — WebP / WebM — and is a space
+  file with well-typed fields) and — on an edited post only — `edited_at`
+  (not taken when more than the live skew ahead of the receiver's clock);
 - a calendar event is `calendar_event_to_wire_dict`: `tz`, `location`,
   `capacity`, `announce_in_feed` (absent reads as "announce");
 - a post, comment, calendar event or gallery item with files also names
@@ -189,7 +191,9 @@ closure heal on the host's stream). Today's cut replays:
   `posts` resource does carry the host's card, for a household whose
   bridge never ran for the event (a calendar record mints none): its
   receiver takes a card only from the host, only while it holds no card
-  for that event, never for an event another space holds, and stores it
+  for that event, only for an event of this space (held here in it, or —
+  `posts` streams before `calendar` — an id owner-bound to the card's
+  author in this space), and stores it
   linked — so the bridge finds it when the event arrives live and mints
   no second one (`receive_posts._feed_card_link`). A member household's
   card in its own stream is dropped.

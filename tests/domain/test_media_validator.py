@@ -100,3 +100,11 @@ def test_exact_limit_video_ok():
             "size_bytes": VIDEO_MAX_UPLOAD_BYTES,
         }
     )
+
+
+@pytest.mark.parametrize("size", [None, [1], "x", {}])
+def test_a_size_that_is_not_a_number_is_refused_not_a_crash(size):
+    """``int(None)`` raised ``TypeError``, which the caller does not catch:
+    the attachment then passed the gate unchecked."""
+    with pytest.raises(ValueError):
+        validate_inbound_media_meta({"mime_type": "image/webp", "size_bytes": size})
