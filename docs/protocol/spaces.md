@@ -371,14 +371,6 @@ household asks the host, then one trusted helper at a time, for files of
 live items it holds but never received; the answer is `SPACE_MEDIA_BLOB`.
 See [media.md](./media.md#older-files-on-view--space_media_wanted-v_92).
 
-**Credentials on demand (followers, unreleased)**
-
-`SPACE_CREDENTIALS_WANTED` `{space_id, cert_wanted, key_wanted}` — a member
-or follower household asks the space's host for its OWN writer cert and / or
-writer group key when one of its people first writes; the answer is a
-`SPACE_ROSTER_SNAPSHOT` with no roster entry. See "Followers: the role plus
-the switches" below.
-
 **GFS public-content relay (Phase 5)**
 
 `SPACE_SUBSCRIBER_KEY_HANDOFF` (`space_subscriber_key_handoff`). These ride the
@@ -456,16 +448,14 @@ The rule, precisely:
   editing or deleting somebody else's row is a write. The classification
   is exhaustive over the enum and pinned by a test, so a new space event
   type is refused-by-default until somebody classifies it.
-- **Two opt-ins:** `SPACE_COMMENT_CREATED` — and a follower's edit /
-  delete of its own comment, `SPACE_COMMENT_UPDATED` / `SPACE_COMMENT_DELETED`
-  (their payload names the comment's `author`; the handler checks the
-  comment is the sender household's own) — when the space has
+- **Two opt-ins:** `SPACE_COMMENT_CREATED` and the author's own
+  `SPACE_COMMENT_UPDATED` / `SPACE_COMMENT_DELETED`, when the space has
   `allow_subscriber_comment` on, and (v_93) `SPACE_POST_REACTION`, when it
   has `allow_subscriber_react` on — each only when the payload's acting
   user (`author` / `user_id`) names a live `subscriber` seat of that same
-  household. Neither flag covers the other's event. The GFS-relayed
-  `space_item` path follows the same switches for the same items
-  (`comment`, `comment_edit`, `comment_delete`; `reaction_*`). Reactions on space
+  household (an edit / delete carries the comment's `author` for this; the
+  handler still checks the row is that author's). Neither flag covers the
+  other's event. Reactions on space
   posts reach every member household since v_93 — see
   [feeds.md](./feeds.md#reactions-on-space-posts-v_93).
 - **A household the receiver holds no roster row for is not a writer** —
@@ -548,8 +538,9 @@ the v_34 and v_36 rows in [`capabilities.md`](./capabilities.md)).
 A **read-only (`subscriber`) seat authors nothing**, with the two opt-ins
 the Follower gate already has: a comment, when the space turned
 `allow_subscriber_comment` on, and a reaction on a post (v_93), when it
-turned `allow_subscriber_react` on. It may still change a row it already
-owns.
+turned `allow_subscriber_react` on. Editing or deleting its own comment
+needs the same comment right as writing one — see "Followers are members
+with a read-only role".
 
 **A reaction is the reactor's own** (`SPACE_POST_REACTION`, v_93): the
 named `user_id` must hold a live seat on the sending household — a writer
@@ -641,12 +632,6 @@ member household, not only on the host:
   however it is reached (paired, mesh, or seated from an invite link over
   the GFS relay):
   - digest and cert epoch match → nothing;
-  - the digest matches but a MEMBER household's cert epoch is behind ours
-    → a snapshot with NO roster entry, only its own credentials (writer
-    cert, writer group key, channel grant), unasked as before. ~1–2 KB
-    sealed. A follower household's cert, and any household's writer group
-    key, are asked for with `SPACE_CREDENTIALS_WANTED` instead (see
-    "Followers: the role plus the switches").
   - otherwise → one repair snapshot, unless one went to this (space,
     household) within its cooldown. The cooldown is 30 min after a
     snapshot that went out (`send_roster_snapshot` returned true). It
@@ -670,8 +655,12 @@ member household, not only on the host:
     budget holds back is not recorded and asks again on its next admitted
     BEGIN. Nothing is persisted: the budget bounds what a restart costs.
 
-  A writer cert behind or ahead of the host's is a mismatch like any other
-  (the snapshot carries the host's cert). An unknown suite, a suite that is
+  A writer cert behind or ahead of the host's, with the roster digest
+  matching, is repaired with the household's credentials alone: a snapshot
+  with `entries: []` and only its own writer cert / writer group key /
+  channel grant (~1–2 KB sealed), under the same cooldown. It has its own
+  outbox slot (`roster-credentials:<space>`) and never replaces or drops a
+  queued roster snapshot. An unknown suite, a suite that is
   not a string, or a malformed digest (a cert epoch outside 0 … 2^63−1) is
   refused — no repair, no fall-back to `roster_echo` — and logged at
   WARNING at most once per (space, household) an hour, its text cut short.
@@ -680,10 +669,8 @@ member household, not only on the host:
   is dissolved or no longer hosted here). The snapshot goes as a tracked
   background task. Followers of a PUBLIC or PRIVATE space sync and so send
   a digest like any member; only a follower-only household of a GLOBAL
-  space sends no BEGIN at all (it reads through the GFS), so it gets no
-  periodic repair: only seat / upgrade snapshots and live gossip. It DOES
-  send its host `SPACE_CREDENTIALS_WANTED` when one of its people writes
-  (over the seat's own transport — the GFS relay for a link-joined seat). A new snapshot drops every queued part
+  space sends no BEGIN at all, so it gets no periodic repair: only seat /
+  upgrade snapshots and live gossip. A new snapshot drops every queued part
   of an older one to the same household first (outbox key prefix per
   space), and a queued part is replaced by a newer one (supersede key per
   space and part). The same BEGIN also echoes `dir_seq`, the version of
@@ -1456,10 +1443,8 @@ inside the encrypted `SPACE_POST_CREATED` payload:
 ## Writer certificates (v_49)
 
 A **writer certificate** is the space authority key's per-epoch statement
-that one household may write (`scope: "write"`), only comment and react
-(`scope: "comment"`), or — a follower household — what the space's follower
-switches allow (`"follower"`, `"follower_comment"`, `"follower_react"`) in a
-space. It is the foundation for members publishing over the
+that one household may write (`scope: "write"`) or only comment (`scope:
+"comment"`) in a space. It is the foundation for members publishing over the
 connection server without the host signing every post: one host-side
 signature per seat per epoch, never per item. Format and suite:
 [`../crypto.md`](../crypto.md) ("Space writer certificate"); code:
@@ -1474,12 +1459,9 @@ space's `posts` access level, never stored: a seat gets `write` only where
 the level lets that role post directly — `OPEN`: owner / admin / moderator /
 member; `MODERATED`: owner / admin / moderator (a plain member's post keeps
 going through the host's review queue); `ADMIN_ONLY`: owner / admin. Other
-writer seats get `comment`; a follower (`subscriber`) seat gets the
-follower scope the switches allow — `follower` with both
-`allow_subscriber_comment` and `allow_subscriber_react` on,
-`follower_comment` or `follower_react` with one, nothing with neither; a
-household with several seats → one cert at its strongest scope (`write`,
-`comment`, then the follower scopes); no live seat → no cert.
+writer seats get `comment`; a follower seat gets `comment` only while
+`allow_subscriber_comment` is on; a household with several seats → one cert
+at its strongest scope; no live seat → no cert.
 
 **User binding (v2).** The cert also names the household's users that hold
 its scope — `writer_user_ids`, signed by the space authority in a SECOND
@@ -1502,8 +1484,7 @@ connection server is the v1 fields only.
 **Comments and reactions use the same cert.** Comments have no access level
 of their own, so no entitlement change: a `comment` cert lets its bound
 users comment and react over the member relay, `write` adds posts and an
-author's own post edits / deletes; a follower scope grants what its name
-says, never a post (per-type table in
+author's own post edits / deletes (per-type table in
 [`discovery.md`](discovery.md#comments-reactions-and-own-edits--deletes-v_49)).
 A comment-only user of a household holding a `write` cert is not in its
 binding and comments on the host path.
@@ -1644,71 +1625,58 @@ run the gate either.
 **Revocation = rotation.** Any change that weakens a household's rights
 rotates the content key, so its old cert dies with the epoch: a role change
 from write to comment or none (remote or local), a household leaving the
-space (`SPACE_INSTANCE_LEFT`, see "Member leave (v_49)"), and — as before —
-every kick and ban. Promotions do not rotate; the new cert is delivered in a
-roster snapshot.
+space (`SPACE_INSTANCE_LEFT`, see "Member leave (v_49)"),
+`allow_subscriber_comment` turned off while a follower seat exists,
+and — as before — every kick and ban. Promotions do not rotate; the new
+cert is delivered in a roster snapshot.
 
-**Followers: the role plus the switches (owner decision 2026-11-16).** A
-follower is a member status — role `subscriber`, read-only, with the
-space's two switches deciding whether it may comment
-(`allow_subscriber_comment`) and react (`allow_subscriber_react`). Turning a
-switch ON or OFF sends nothing but the ordinary `SPACE_CONFIG_CHANGED` —
-no snapshot to every follower (it used to be ≈ 55 GB at 10 000 followers:
-a ~5.5 MB roster snapshot each) and no rotation:
-- **A follower cert is short-lived.** A `follower*` cert is refused by
-  every receiver once its signed `issued_at` is more than
-  `FOLLOWER_CERT_TTL_S` (24 h) old, or dated more than 5 min ahead
-  (`domain.writer_cert.follower_cert_fresh`). Member scopes have no
-  lifetime (they die with their epoch, as before).
-- **Config holders check the switch.** A member household holds the config
-  and the roster: it refuses a follower's comment, reaction, or edit /
-  delete of its own comment the moment its copy of the switch is off — on
-  the direct `SPACE_COMMENT_*` / `SPACE_POST_REACTION` path (§24.11 writer
-  gate) and on the GFS-relayed `space_item` path (`item_seat_admits`). A
-  follower household seated in the space holds the config too (its row is
-  no GFS mirror stub): a follower-scope item relayed to it follows the
-  switch there as well. A GFS subscriber holds no config (its directory
-  stub has every follower switch off) and no roster: it checks only the
-  cert — the follower scope says which switch it was issued under, and its
-  lifetime ends it.
-- **Worst case after a switch goes OFF:** seconds (the config event's
-  travel time) at every member household and every seated follower
-  household; up to 24 h (the follower cert's lifetime) at a GFS subscriber.
-- **The writer group key outlives a follower cert** (it changes only with
-  the content epoch, and a switch-off rotates nothing). A follower household
-  keeps it — without it a follower's comment would never reach a GFS
-  subscriber — but its own publisher checks the switch (and the cert's
-  lifetime) before every GFS publish, so an honest follower stops at once
-  and its write takes the host path, which every member household refuses.
-  A follower that ignores its switch can still have the GFS fan out its
-  ciphertext until the next rotation; every config holder drops it at once
-  and a GFS subscriber once the cert ends (≤ 24 h).
-- **The cert goes on demand.** A follower household holds no cert until one
-  of its people comments or reacts. That write takes the host path (as
-  every write without a cert always did), and the household asks the host
-  with one small request — never a sync:
-  `SPACE_CREDENTIALS_WANTED {space_id, cert_wanted, key_wanted}` (inside
-  the encrypted payload; to the host only, over the seat's own transport;
-  allowed from a link-joined seat and from a reader). The host checks the
-  sender holds a live seat, re-derives what it may hold from its roster and
-  the switches (nothing → no answer), and answers with a
-  `SPACE_ROSTER_SNAPSHOT` holding no roster entry, only the asker's own
-  credentials. Its own limiter: at most one ask looked at (and answered)
-  per (space, household) per 10 min (`CREDENTIALS_ANSWER_INTERVAL_S`), no
-  doubling, outside the roster repair's budget — a renewal a day, a re-ask
-  after a switch change, and many followers asking at once are all
-  answered. The answer has its own outbox slot (`roster-credentials:<space>`)
-  and never replaces or drops a queued roster snapshot. The asker repeats
-  an unanswered ask after 15 min, doubling to 6 h
-  (`CREDENTIALS_RETRY_S` / `_MAX_S`), and only while someone writes; queued
-  asks are latest-only (`credentials-wanted:<space>`). It asks
-  again when its cert is within an hour of its end, or lacks the right the
-  write needs. The same request brings any household its writer group key
-  (`key_wanted`) when it first publishes over a GFS and holds none — the
-  space gaining a writer key (followers on, a public tier) sends only the
-  owner's GFS epoch notice. Gated on the host's version
-  (`FederationCapability.MIN_FOR_CREDENTIALS_WANTED`, the first unreleased
-  line); a released v_80 host never gets it.
+**Followers are members with a read-only role** (owner decision
+2026-11-17). A follower holds the `subscriber` role; the space's switches
+"followers may comment" (`allow_subscriber_comment`) and "followers may
+react" (`allow_subscriber_react`) are that role's rights, checked like any
+role's. There is no follower cert, scope, lifetime or request of its own:
+
+- **One rights rule.** A comment — and editing or deleting one's OWN
+  comment — needs a seat whose role may comment: every writer role, and
+  `subscriber` while the comment switch is on. A reaction needs a writer
+  role, or `subscriber` while the react switch is on. The same rule on
+  every path: the author's household (`SpaceService._require_comment_right`
+  / `_assert_writable_member`), the direct events (§24.11 writer gate, the
+  two opt-ins above), and the GFS-relayed `space_item` at a member
+  household (`SpaceAuthorship.item_seat_admits`). A moderator's removal of
+  someone else's comment is content authority, as for any role.
+- **Same cert, same key.** With the comment switch on a follower household
+  is entitled to the `comment` cert a comment-only member holds
+  (`entitlement_for_instance`) and, in a publicly readable space, the same
+  writer group key. A household without the roster (a GFS subscriber) goes
+  by the cert alone, so it keeps a `comment`-scope reaction (it used to drop
+  every one as "maybe a follower's").
+- **A setting that changes rights follows one rule**
+  (`SpaceService._writer_certs_after_rights_change`, for the `posts` access
+  level and the comment switch alike): if any household's entitlement
+  shrinks → ONE rotation, so the old certs and the writer key die with the
+  epoch; otherwise each household that gained gets its credentials alone —
+  the `entries: []` snapshot above, ~1–2 KB to that one household. No roster
+  goes out (it used to be the whole roster to every follower household:
+  ~5.5 MB each at 11 000 seats). A household below the roster-digest line
+  (v_81) does not know the credentials-only shape and gets the full
+  snapshot as before. The same credentials-only message hands out the
+  writer group key when a space first becomes publicly readable.
+- **Cost of a comment-switch toggle,** for F seated follower households and
+  H households in all: ON = the config event + F × ~1–2 KB (≤ 3 signatures
+  each at the host); OFF with at least one follower seat = the config event
+  + one rotation (a sealed rekey of ~1–2 KB to each of the H households);
+  OFF with no follower = the config event. One rotation per toggle, never
+  per follower. The react switch changes no cert (a `comment` cert carries
+  reactions): toggling it sends the config event only.
+- **A follower leaving or being removed** is a member leaving: a rotation
+  only if it could write (the comment switch was on).
+- **What the cert cannot say.** A `comment` cert does not record the react
+  switch: with comments on and reactions off, a follower household that
+  ignored its own switch could publish a reaction over a GFS; every
+  household with the roster refuses it, a GFS subscriber keeps it. With
+  comments off and reactions on a follower holds no cert, so its reactions
+  reach every seated household (the direct path) but no GFS subscriber.
 
 **Residuals.** A revoked writer can still post until the rotation reaches a
 receiver, plus the 10-minute grace — and if no seed holder is online to
@@ -1719,8 +1687,8 @@ publicly readable space the same four channels also carry `writer_key` —
 the epoch's writer group key (`{writer_key_suite, space_id, epoch,
 writer_seed, writer_key_cert}`, derived from the space seed per epoch) —
 next to the cert, only to a v_90 household holding a publishing scope
-(`write`, `comment` and the follower scopes get the same key — see "The
-writer group key outlives a follower cert" above). The receiver verifies it against
+(`write` and `comment` get the same key — a follower household that may
+comment included). The receiver verifies it against
 the pinned space key and keeps it KEK-wrapped on `space_keys.writer_key`; it
 signs the household's anonymous publishes to the connection server (see
 [`discovery.md`](./discovery.md#the-writer-group-key-v_50-every-publicly-readable-space-since-v_90)). It

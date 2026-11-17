@@ -1915,20 +1915,6 @@ class SpaceAdminSeedsRetiredAfterRestore(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
-class SpaceCredentialsWanted(DomainEvent):
-    """This household needs its writer cert or writer group key for a space
-    another household hosts — one of its people just commented, reacted or
-    published and it holds none (or its follower cert is about to end).
-    ``SpaceService.ask_host_for_credentials`` sends the host one small
-    ``SPACE_CREDENTIALS_WANTED`` (never a sync); the host answers with the
-    credentials alone."""
-
-    space_id: str
-    host_instance_id: str
-    occurred_at: datetime = field(default_factory=_now)
-
-
-@dataclass(slots=True, frozen=True)
 class SpaceDelegationBlocked(DomainEvent):
     """No admin household of a space this household owns can get the
     space's signing seed right now (D1, owner decision 2026-11-15): a GFS the

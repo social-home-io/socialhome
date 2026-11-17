@@ -12,8 +12,8 @@ the host path:
 * a post edit or delete needs ``write`` — the post's own right — and only
   the post's author may make it;
 * a comment edit or delete: only the comment's author;
-* a reaction needs ``write`` at a follower (it cannot tell a comment-only
-  member from a follower) unless the space lets followers react;
+* a reaction needs the ``comment`` right, like a comment (a follower who
+  may comment holds the same ``comment`` cert a comment-only member does);
 * a stale epoch, a forged author, a re-wrap to another type, a binding that
   does not name the author: refused for every type.
 
@@ -120,10 +120,6 @@ async def env(tmp_dir):
             join_mode=JoinMode.OPEN,
         )
     )
-    # The receiver is a GFS subscriber: its row is a mirror stub seated off
-    # a GFS listing (provenance recorded), so it knows no follower switch and
-    # decides a follower's item by the cert alone.
-    await spaces.set_mirror_provenance(SPACE, gfs_id="gfs-1", rotation_seq=0)
     await crypto.initialise_for_space(SPACE)
     inbound = SpacePublicInbound(
         bus=EventBus(), space_repo=spaces, space_crypto=crypto, space_post_repo=posts
@@ -316,15 +312,10 @@ MATRIX = [
     ("post_delete", "comment", BOB, False),
     ("post_delete", "write", EVE, False),
     ("reaction_add", "write", EVE, True),
-    # A comment-only MEMBER reacts (a follower now carries its own scope).
+    # ``comment`` is every commenter's scope (a comment-only member, a
+    # follower who may comment) and carries reactions: a GFS subscriber
+    # keeps it instead of guessing who sent it.
     ("reaction_add", "comment", EVE, True),
-    # A follower's cert says which switch it was issued under.
-    ("reaction_add", "follower", EVE, True),
-    ("reaction_add", "follower_react", EVE, True),
-    ("reaction_add", "follower_comment", EVE, False),
-    ("comment", "follower_comment", EVE, True),
-    ("comment", "follower_react", EVE, False),
-    ("post_edit", "follower", BOB, False),  # a follower never posts
 ]
 
 
@@ -334,36 +325,6 @@ async def test_the_authorization_matrix(env, item_type, scope, signer, lands):
         env, item_type, _build(env, item_type, signer), await _cert(env, signer, scope)
     )
     assert await _landed(env, item_type) is lands
-
-
-@pytest.mark.parametrize(
-    ("item_type", "scope"),
-    [("comment", "follower_comment"), ("reaction_add", "follower_react")],
-)
-async def test_a_seated_follower_household_follows_its_copy_of_the_switch(
-    env, item_type, scope
-):
-    """N4 (#1375 review): a follower household SEATED in the space (its row
-    is no GFS mirror stub) holds the owner's config, so a follower's item
-    relayed over the GFS is refused there while the switch is off and lands
-    once it is on — the cert alone does not decide."""
-    await env["db"].enqueue("UPDATE spaces SET mirror_gfs_id=NULL WHERE id=?", (SPACE,))
-    cert = await _cert(env, EVE, scope)
-    await _send(env, item_type, _build(env, item_type, EVE), cert)
-    assert await _landed(env, item_type) is False
-    space = await env["spaces"].get(SPACE)
-    await env["spaces"].save(
-        replace(
-            space,
-            features=replace(
-                space.features,
-                allow_subscriber_comment=True,
-                allow_subscriber_react=True,
-            ),
-        )
-    )
-    await _send(env, item_type, _build(env, item_type, EVE), cert)
-    assert await _landed(env, item_type) is True
 
 
 async def test_reactions_need_no_write_cert_where_followers_may_react(env):
@@ -655,7 +616,7 @@ async def test_a_late_copy_of_a_reaction_never_undoes_its_removal(env):
     assert not await _landed(env, "reaction_add")
 
 
-# ── B1 (#1375 review): a follower's cert, end to end ─────────────────────
+# ── A follower's cert, end to end (followers are members) ────────────────
 
 
 class _HostSpaces:
@@ -713,10 +674,12 @@ class _HostFed:
 
 
 async def test_a_followers_cert_works_end_to_end(env):
-    """B1 (#1375 review): host issues → the follower household stores it →
-    publishes a comment under it → a GFS subscriber accepts it (cert alone)
-    → a member household accepts it (cert, roster seat and switch). Before
-    the fix the follower could not store its own follower cert at all."""
+    """Followers are members with a read-only role (owner decision
+    2026-11-17): with "followers may comment" on, the host issues a follower
+    household the SAME ``comment`` cert a comment-only member gets → the
+    household stores it → publishes a comment under it → a GFS subscriber
+    accepts it (cert alone) → a member household accepts it (cert, roster
+    seat and switch)."""
     space = await env["spaces"].get(SPACE)
     on = replace(space, features=replace(space.features, allow_subscriber_comment=True))
     await env["spaces"].save(on)
@@ -739,7 +702,7 @@ async def test_a_followers_cert_works_end_to_end(env):
     )
     host.attach_federation(_HostFed({EVE.origin: EVE.kp.public_key}))  # type: ignore[arg-type]
     wire = await host.cert_for_peer(SPACE, EVE.origin)
-    assert wire is not None and wire["scope"] == "follower_comment"
+    assert wire is not None and wire["scope"] == "comment"
     # 2. The follower household stores it (and it is its current cert).
     follower = SpaceWriterCertService(
         space_repo=env["spaces"],
@@ -751,9 +714,8 @@ async def test_a_followers_cert_works_end_to_end(env):
     assert await follower.accept(SPACE, wire) is True
     held = await follower.current_own_cert_wire(SPACE)
     assert held == wire
-    # 3–4. It publishes a comment under that cert; a GFS subscriber (its
-    # row is a GFS mirror stub: the cert alone decides) applies it.
-    await env["spaces"].set_mirror_provenance(SPACE, gfs_id="gfs-1", rotation_seq=0)
+    # 3–4. It publishes a comment under that cert; a GFS subscriber (no
+    # roster: the cert alone decides) applies it.
     inner = _build(env, "comment", EVE)
     await _send(env, "comment", inner, held)
     assert await _landed(env, "comment")

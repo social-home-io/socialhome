@@ -22,14 +22,7 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.domain.writer_cert import (
-    FOLLOWER_CERT_SKEW_S,
-    FOLLOWER_CERT_TTL_S,
-    WRITER_ACTION_PROFILE,
-    WRITER_ACTION_REACT,
     WRITER_SCOPE_COMMENT,
-    WRITER_SCOPE_FOLLOWER,
-    WRITER_SCOPE_FOLLOWER_COMMENT,
-    WRITER_SCOPE_FOLLOWER_REACT,
     WRITER_SCOPE_WRITE,
     WriterCert,
     WriterEntitlement,
@@ -37,7 +30,6 @@ from socialhome.domain.writer_cert import (
 from socialhome.domain.writer_key import WriterKeyGrant
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
-from socialhome.services import space_writer_cert_service as wcs_mod
 from socialhome.services.space_writer_cert_service import (
     WRITER_CERT_EPOCH_GRACE_S,
     SpaceWriterCertService,
@@ -259,41 +251,16 @@ async def test_writer_seats_get_write_scope(role):
     _check(cert, PEER_PK, WRITER_SCOPE_WRITE)
 
 
-@pytest.mark.parametrize(
-    ("comment", "react", "scope"),
-    [
-        (False, False, None),
-        (True, False, WRITER_SCOPE_FOLLOWER_COMMENT),
-        (False, True, WRITER_SCOPE_FOLLOWER_REACT),
-        (True, True, WRITER_SCOPE_FOLLOWER),
-    ],
-)
-async def test_a_follower_gets_the_follower_scope_its_switches_allow(
-    comment, react, scope
-):
-    """The subscriber role plus the space's comment / react switches decide
-    a follower household's cert — its own scope, never a member's."""
+async def test_follower_gets_comment_scope_only_when_allowed():
+    svc, _ = _svc(remote_rows=[_remote("fol", SpaceRole.SUBSCRIBER.value)])
+    assert await svc.issue_for_instance("sp-1", "fol") is None
     svc, _ = _svc(
-        space=_space(allow_subscriber_comment=comment, allow_subscriber_react=react),
+        space=_space(allow_subscriber_comment=True),
         remote_rows=[_remote("fol", SpaceRole.SUBSCRIBER.value)],
     )
     cert = await svc.issue_for_instance("sp-1", "fol")
-    assert (cert.scope if cert is not None else None) == scope
-    if cert is not None:
-        with pytest.raises(InvalidWriterCert):
-            _check(cert, FOLLOWER_PK, WRITER_SCOPE_WRITE)
-
-
-async def test_a_comment_only_member_keeps_the_comment_scope():
-    """A member of a space whose posts are moderated keeps ``comment`` (and
-    reacts with it), whatever the follower switches say."""
-    svc, _ = _svc(
-        space=_space(posts_access=SpaceFeatureAccess.MODERATED),
-        remote_rows=[_remote("peer", SpaceRole.MEMBER.value)],
-    )
-    cert = await svc.issue_for_instance("sp-1", "peer")
     assert cert is not None and cert.scope == WRITER_SCOPE_COMMENT
-    _check(cert, PEER_PK, WRITER_ACTION_REACT)
+    _check(cert, FOLLOWER_PK, WRITER_SCOPE_COMMENT)
 
 
 async def test_household_with_several_seats_gets_one_strongest_cert():
@@ -505,40 +472,6 @@ def _issued(pk: bytes = OWN_PK, **over) -> dict:
     return sign_writer_cert(**kw).to_wire()
 
 
-async def test_an_unanswered_ask_is_retried_with_a_bounded_backoff(monkeypatch):
-    """B2 (#1375 review): ``want`` said "ask" once and cleared only on
-    store, so an ask that went unanswered was never repeated until a
-    restart. It is due again after 15 min, then 30, 60 … up to 6 h; the
-    credential's arrival clears it (and the backoff)."""
-    now = [1000.0]
-    monkeypatch.setattr(wcs_mod.time, "monotonic", lambda: now[0])
-    svc, _keys = _svc(seed=None)
-    assert svc.wanted("sp-1") == (False, False)
-    assert svc.want("sp-1", cert=True) is True
-    assert svc.want("sp-1", cert=True) is False
-    asked = []
-    for _ in range(14):
-        now[0] += 60
-        if svc.want("sp-1", cert=True):
-            asked.append(now[0])
-    assert asked == []
-    gaps = []
-    last = 1000.0
-    for _ in range(60 * 60):  # 60 h in minutes
-        now[0] += 60
-        if svc.want("sp-1", cert=True):
-            gaps.append(round((now[0] - last) / 60))
-            last = now[0]
-    # First retry a little after the host's 10 min answer interval, so a
-    # retry never lands a moment too early and waits out a doubled gap.
-    assert gaps[:5] == [15, 30, 60, 120, 240]
-    assert max(gaps) == 360
-    assert svc.want("sp-1", key=True) is False  # one ask carries both
-    assert svc.wanted("sp-1") == (True, True)
-    assert await svc.accept("sp-1", _issued()) is True
-    assert svc.wanted("sp-1") == (False, True)
-
-
 async def test_accept_stores_a_valid_cert_for_us():
     svc, keys = _svc(seed=None)
     wire = _issued()
@@ -642,34 +575,6 @@ async def test_check_item_cert_round_trip_and_failures():
     )
 
 
-async def test_a_follower_cert_is_refused_outside_its_lifetime(monkeypatch):
-    """A receiver refuses a follower cert older than ``FOLLOWER_CERT_TTL_S``
-    or dated beyond the skew allowance; a member's cert has no lifetime."""
-    svc, _ = _svc()
-    space = _space()
-    now = 1_900_000_000
-    monkeypatch.setattr(wcs_mod.time, "time", lambda: now)
-
-    def ok(scope, issued_at, required):
-        wire = _issued(pk=PEER_PK, scope=scope, issued_at=issued_at)
-        return svc.check_item_cert(
-            space, wire, epoch=2, author_pk=PEER_PK, required_scope=required
-        )
-
-    assert ok(WRITER_SCOPE_FOLLOWER, now - 60, WRITER_SCOPE_COMMENT)
-    assert not ok(
-        WRITER_SCOPE_FOLLOWER, now - FOLLOWER_CERT_TTL_S - 1, WRITER_SCOPE_COMMENT
-    )
-    assert not ok(
-        WRITER_SCOPE_FOLLOWER, now + FOLLOWER_CERT_SKEW_S + 1, WRITER_SCOPE_COMMENT
-    )
-    assert ok(
-        WRITER_SCOPE_COMMENT, now - 10 * FOLLOWER_CERT_TTL_S, WRITER_SCOPE_COMMENT
-    )
-    # A follower cannot write anything a post-shaped item needs.
-    assert not ok(WRITER_SCOPE_FOLLOWER, now, WRITER_SCOPE_WRITE)
-
-
 async def test_without_federation_nothing_is_delivered():
     svc = SpaceWriterCertService(
         space_repo=_Spaces(_space(), SEED, ()),
@@ -697,21 +602,6 @@ def test_scope_weakened():
     assert not scope_weakened("comment", "write")
     assert not scope_weakened(None, "comment")
     assert not scope_weakened("write", "write")
-
-
-async def test_a_same_second_cert_wins_by_rank_follower_scopes_included():
-    """#1375 adversarial review: the tie-break asked ``scope_permits(new,
-    held)`` — a follower scope is no action, so a same-second ``write`` cert
-    did not replace a held follower cert (a promotion), and a ``follower``
-    cert replaced a held ``comment`` one. Ties go by scope rank."""
-    svc, _keys = _svc(seed=None)
-    assert await svc.accept("sp-1", _issued(issued_at=200, scope="follower_comment"))
-    assert await svc.accept("sp-1", _issued(issued_at=200, scope="follower"))
-    assert not await svc.accept("sp-1", _issued(issued_at=200, scope="follower_react"))
-    assert await svc.accept("sp-1", _issued(issued_at=200, scope="comment"))
-    assert not await svc.accept("sp-1", _issued(issued_at=200, scope="follower"))
-    assert await svc.accept("sp-1", _issued(issued_at=200))
-    assert (await svc.own_cert("sp-1", 2)).scope == "write"  # type: ignore[union-attr]
 
 
 async def test_accept_keeps_a_newer_or_stronger_cert():
@@ -1283,55 +1173,4 @@ async def test_no_current_cert_for_an_author_who_left_or_without_the_seed():
             _space(), bad, epoch=2, required_scope=WRITER_SCOPE_COMMENT
         )
         is None
-    )
-
-
-@pytest.mark.parametrize(
-    "scope",
-    [
-        WRITER_SCOPE_FOLLOWER,
-        WRITER_SCOPE_FOLLOWER_COMMENT,
-        WRITER_SCOPE_FOLLOWER_REACT,
-        WRITER_SCOPE_COMMENT,
-        WRITER_SCOPE_WRITE,
-    ],
-)
-async def test_a_household_stores_its_cert_whatever_its_scope(scope):
-    """B1 (#1375 review): ``accept`` / ``_stored_valid`` verified a cert
-    "for its own scope" — a follower scope is no requirement, so a follower
-    household could never store its cert (and kept asking for it)."""
-    svc, _keys = _svc(seed=None)
-    wire = _issued(scope=scope)
-    assert await svc.accept("sp-1", wire) is True
-    assert await svc.current_own_cert_wire("sp-1") == wire
-
-
-async def test_a_bundled_item_with_an_expired_follower_cert_is_re_stamped():
-    """S3 (#1375 review): a new-follower bundle took an item's own cert
-    while it verified — an expired follower cert verifies (the signature
-    is fine), so the receiver refused the bundled profile. A follower cert
-    past its lifetime is re-issued like one from an old authority key."""
-    space = _space(allow_subscribers=True, allow_subscriber_comment=True)
-    old = bind_writer_users(
-        sign_writer_cert(
-            space_seed=SEED,
-            space_id="sp-1",
-            epoch=2,
-            instance_pk=FOLLOWER_PK,
-            scope=WRITER_SCOPE_FOLLOWER_COMMENT,
-            issued_at=int(wcs_mod.time.time()) - FOLLOWER_CERT_TTL_S - 60,
-        ),
-        space_seed=SEED,
-        user_ids=["u@fol"],
-    )
-    svc, _ = _svc(space=space, remote_rows=[_remote("fol", "subscriber")])
-    item = _profile_item(old, author="u@fol")
-    item["author_pk"] = FOLLOWER_PK.hex()
-    item["origin_instance_id"] = "fol"
-    got = await svc.current_item_cert(
-        space, item, epoch=2, required_scope=WRITER_ACTION_PROFILE
-    )
-    assert got is not None and got != old.to_wire()
-    assert SpaceWriterCertService.check_item_cert(
-        space, got, epoch=2, author_pk=FOLLOWER_PK, required_scope=WRITER_ACTION_PROFILE
     )

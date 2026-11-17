@@ -253,10 +253,6 @@ def supersede_key(
             # it never replaces or drops a queued roster snapshot.
             return f"roster-credentials:{space_id}"
         return f"{roster_snapshot_key_prefix(space_id)}{part}"
-    if event_type is FederationEventType.SPACE_CREDENTIALS_WANTED:
-        # Only the newest ask is worth delivering: retries queued for an
-        # offline host do not pile up.
-        return f"credentials-wanted:{space_id}" if space_id else None
     user_id = payload.get("user_id")
     if not isinstance(user_id, str) or not user_id:
         return None

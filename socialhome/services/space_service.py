@@ -131,7 +131,6 @@ from ..domain.events import (
     RemoteJoinRequestApproved,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
-    SpaceCredentialsWanted,
     SpaceDelegationBlocked,
     SpaceInviteAnswered,
     SpaceJoinApproved,
@@ -533,11 +532,6 @@ ROSTER_REPAIR_PER_SPACE_PER_MINUTE: int = 2
 #: the window — its LEFT gossip left the outbox after 7 days — still learns
 #: of a kick.
 ROSTER_TOMBSTONE_WINDOW_S: float = 30 * 24 * 60 * 60
-#: At most one answer to a household's ``SPACE_CREDENTIALS_WANTED`` per
-#: space in this window (no doubling): a renewal a day, or a second ask after
-#: a switch change, is answered; a household cannot make us build more than
-#: one small snapshot per 10 min.
-CREDENTIALS_ANSWER_INTERVAL_S: float = 10 * 60
 #: A malformed or unknown-suite digest is logged at most once per (space,
 #: household) in this window.
 ROSTER_REFUSAL_LOG_S: float = 60 * 60
@@ -658,7 +652,6 @@ class SpaceService(
         "_bus",
         "_child_protection",
         "_covers",
-        "_credentials_answered",
         "_delegation_blocked_told",
         "_federation",
         "_federation_repo",
@@ -753,9 +746,6 @@ class SpaceService(
         self._roster_repairs: dict[str, dict[str, _RosterRepair]] = {}
         #: Host side — (space, household) repairs being sent right now.
         self._roster_inflight: set[tuple[str, str]] = set()
-        #: Host side — space → household → when its last credentials ask
-        #: was answered (:data:`CREDENTIALS_ANSWER_INTERVAL_S`).
-        self._credentials_answered: dict[str, dict[str, float]] = {}
         #: Host side — space → household → when its refused digest was
         #: last logged (:data:`ROSTER_REFUSAL_LOG_S`).
         self._roster_refused: dict[str, dict[str, float]] = {}
@@ -938,8 +928,6 @@ class SpaceService(
         forward-secrecy rekey then carry each household its own cert."""
         self._writer_certs = writer_certs
         self._bus.subscribe(SpaceRemoteSeatLive, self._reissue_cert_on_new_seat)
-        # A household that needs its cert / writer key asks its host.
-        self._bus.subscribe(SpaceCredentialsWanted, self.ask_host_for_credentials)
 
     async def _reissue_cert_on_new_seat(self, event: SpaceRemoteSeatLive) -> None:
         """v_49 v2 — a user just took a seat in a household that already
@@ -2513,7 +2501,6 @@ class SpaceService(
         for book in (
             self._roster_repairs.get(space_id, {}),
             self._roster_refused.get(space_id, {}),
-            self._credentials_answered.get(space_id, {}),
         ):
             for inst in [i for i in book if i not in members]:
                 del book[inst]
@@ -2536,16 +2523,9 @@ class SpaceService(
                     space, sender, right=False, took=False, known_version=None
                 )
                 return
-            # The roster is right: at most a MEMBER household's cert is
-            # behind ours — it goes alone (no roster entry). A follower
-            # household asks for its cert itself, and any household for the
-            # writer group key, with ``SPACE_CREDENTIALS_WANTED``
-            # (:meth:`on_credentials_wanted`).
-            wants = (
-                host_epoch is not None
-                and digest.cert_epoch != host_epoch
-                and not await self._follower_household(space.id, sender)
-            )
+            # The roster is right: at most the household's cert is behind
+            # ours — its credentials go alone (no roster entry).
+            wants = host_epoch is not None and digest.cert_epoch != host_epoch
             await self._repair_roster(
                 space,
                 sender,
@@ -2611,32 +2591,6 @@ class SpaceService(
             space_id,
             repr(why)[:80],
         )
-
-    async def _follower_household(self, space_id: str, instance_id: str) -> bool:
-        """Whether *instance_id* holds only follower (``subscriber``) seats
-        in *space_id* — its writer cert is asked for, never pushed."""
-        if self._remote_members is None:
-            return False
-        roles = {
-            str(r.role)
-            for r in await self._remote_members.list_for_instance(
-                space_id, instance_id, include_tombstoned=False
-            )
-        }
-        return roles == {SpaceRole.SUBSCRIBER.value}
-
-    async def _writer_key_for(self, space_id: str, instance_id: str) -> bool:
-        """Whether we would hand *instance_id* a writer group key now."""
-        if self._writer_certs is None:
-            return False
-        try:
-            return (
-                await self._writer_certs.writer_key_for_peer(space_id, instance_id)
-                is not None
-            )
-        except Exception:
-            log.exception("roster repair: writer key for %s failed", instance_id)
-            return False
 
     async def _repair_roster(
         self,
@@ -2753,108 +2707,6 @@ class SpaceService(
         self._roster_repairs.pop(space_id, None)
         self._roster_refused.pop(space_id, None)
         self._roster_seats_cache.pop(space_id, None)
-        self._credentials_answered.pop(space_id, None)
-
-    async def on_credentials_wanted(self, event: FederationEvent) -> None:
-        """Host side of ``SPACE_CREDENTIALS_WANTED``: a household of a space
-        we host asks for its OWN writer cert (``cert_wanted``) and / or
-        writer group key (``key_wanted``) — one of its people just wrote.
-
-        Answered with a ``SPACE_ROSTER_SNAPSHOT`` holding no roster entry,
-        only the asker's credentials — never a sync, never a roster repair.
-        The asker must hold a live seat here (the §24.11-authenticated
-        sender); what it gets is re-derived from our roster and the space's
-        switches, so a follower that may not write, or a household asking for
-        a key we would not give, gets nothing. At most one ask is looked at
-        (and answered) per (space, household) per
-        :data:`CREDENTIALS_ANSWER_INTERVAL_S`, no doubling, and outside the
-        roster repair's budget; the answer never touches a queued roster
-        snapshot."""
-        p = event.payload if isinstance(event.payload, dict) else {}
-        space_id = str(event.space_id or p.get("space_id") or "")
-        sender = event.from_instance
-        own = self._own_instance_id
-        if not space_id or not sender or not own or sender == own:
-            return
-        cert_wanted = p.get("cert_wanted") is True
-        key_wanted = p.get("key_wanted") is True
-        if not (cert_wanted or key_wanted):
-            return
-        space = await self._spaces.get(space_id)
-        if space is None or space.owner_instance_id != own:
-            return
-        if sender not in set(await self._spaces.list_member_instances(space_id)):
-            return
-        now = _monotonic()
-        book = self._credentials_answered.setdefault(space_id, {})
-        last = book.get(sender)
-        if last is not None and now - last < CREDENTIALS_ANSWER_INTERVAL_S:
-            return
-        # Counted before we look: an ask we have nothing for costs the same
-        # reads, so it is limited like an answered one.
-        book[sender] = now
-        has = (
-            cert_wanted and await self._cert_epoch_for(space_id, sender) is not None
-        ) or (key_wanted and await self._writer_key_for(space_id, sender))
-        if not has:
-            log.info(
-                "credentials for %s in %s: nothing it may hold — not answered",
-                sender,
-                space_id,
-            )
-            return
-        try:
-            await self.send_roster_snapshot(
-                space_id, to_instance_id=sender, credentials_only=True
-            )
-        except Exception:
-            log.exception(
-                "credentials for %s in %s could not be sent", sender, space_id
-            )
-
-    async def ask_host_for_credentials(self, event: SpaceCredentialsWanted) -> None:
-        """Member side: send the space's host ``SPACE_CREDENTIALS_WANTED``
-        with what this household wants (:meth:`SpaceWriterCertService.wanted`)
-        — one small request, never a sync."""
-        if self._federation is None or self._writer_certs is None:
-            return
-        host = event.host_instance_id
-        if not host or host == self._own_instance_id:
-            return
-        cert_wanted, key_wanted = self._writer_certs.wanted(event.space_id)
-        if not (cert_wanted or key_wanted):
-            return
-        if not await self._federation.space_member_supports(
-            host, min_version=FederationCapability.MIN_FOR_CREDENTIALS_WANTED
-        ):
-            log.info(
-                "credentials: host %s of %s does not answer asks yet — not asked",
-                host,
-                event.space_id,
-            )
-            return
-        log.info(
-            "credentials: asking host %s for %s (cert=%s key=%s)",
-            host,
-            event.space_id,
-            cert_wanted,
-            key_wanted,
-        )
-        try:
-            await self._federation.send_with_mesh_fallback(
-                to_instance_id=host,
-                event_type=FederationEventType.SPACE_CREDENTIALS_WANTED,
-                payload={
-                    "space_id": event.space_id,
-                    "cert_wanted": cert_wanted,
-                    "key_wanted": key_wanted,
-                },
-                space_id=event.space_id,
-            )
-        except Exception:
-            log.exception(
-                "credentials: asking host %s for %s failed", host, event.space_id
-            )
 
     async def _cert_epoch_for(self, space_id: str, instance_id: str) -> int | None:
         """The writer-cert epoch a snapshot to *instance_id* would carry —
@@ -4007,11 +3859,12 @@ class SpaceService(
                 space_id
             ):
                 await self.share_admin_signing_seed(updated, instance_id=admin_instance)
-        if (
-            features is not None
-            and features.posts_access != space.features.posts_access
+        if features is not None and (
+            features.posts_access != space.features.posts_access
+            or features.allow_subscriber_comment
+            != space.features.allow_subscriber_comment
         ):
-            await self._writer_certs_after_posts_access_change(space, updated)
+            await self._writer_certs_after_rights_change(space, updated)
         if (
             space.owner_instance_id == self._own_instance_id
             and writer_key_min_version(updated) is not None
@@ -4062,14 +3915,19 @@ class SpaceService(
         """A config change gave the space we host a writer group key it
         did not have (followers turned on, or the space entered a public
         tier): pin the current epoch's key at every GFS listing it (the
-        owner's epoch notice). Each household asks for the key itself when
-        it first publishes (``key_wanted`` in ``SPACE_CREDENTIALS_WANTED``,
-        answered with its credentials alone) — nothing goes to every member household."""
+        owner's epoch notice) and hand it to the member households — each
+        gets its own credentials alone (:meth:`_send_credentials`) — without
+        waiting for the next rotation, or members' anonymous publishes are
+        refused until then."""
         if self._member_gfs is not None:
             try:
                 await self._member_gfs.announce_epoch(space.id)
             except Exception:
                 log.exception("writer key: GFS notice failed for %s", space.id)
+        own = self._own_instance_id
+        for inst in await self._spaces.list_member_instances(space.id):
+            if inst != own:
+                await self._send_credentials(space.id, inst)
 
     async def enable_private_gfs_for_legacy_link(
         self, space_id: str, *, gfs_id: str | None = None
@@ -4216,15 +4074,16 @@ class SpaceService(
                 log.exception("private gfs off: retiring the channel failed")
         await self._rotate_and_distribute_space_key(space.id)
 
-    async def _writer_certs_after_posts_access_change(
+    async def _writer_certs_after_rights_change(
         self, before: Space, after: Space
     ) -> None:
-        """v_49 — the ``posts`` access level changed, which decides who a
-        writer cert lets post (``write`` only for seats the level lets post
-        directly). Any household whose entitlement shrank (scope, or the
-        users it covers) → rotate once, so the old certs die with the epoch;
-        otherwise the households that gained deserve their new cert now — a
-        roster snapshot to each carries it."""
+        """v_49 — a setting that decides a seat's write rights changed: the
+        ``posts`` access level (who posts directly) or "followers may
+        comment" (the ``subscriber`` role's comment right). One rule for
+        every role: any household whose entitlement shrank (scope, or the
+        users it covers) → rotate once, so the old certs and writer key die
+        with the epoch; otherwise each household that gained gets its new
+        credentials now, alone (:meth:`_send_credentials`)."""
         if self._writer_certs is None or self._remote_members is None:
             return
         instances = {
@@ -4240,11 +4099,9 @@ class SpaceService(
             now = await self._writer_certs.entitlement_for_instance(after, instance_id)
             if scope_weakened(was, now):
                 log.info(
-                    "space %s: posts access %s → %s narrows household %s's "
-                    "writers — rotating the content key",
+                    "space %s: a rights change narrows household %s's writers "
+                    "— rotating the content key",
                     after.id,
-                    before.features.posts_access.value,
-                    after.features.posts_access.value,
                     instance_id,
                 )
                 await self._rotate_and_distribute_space_key(after.id)
@@ -4253,7 +4110,30 @@ class SpaceService(
                 gained.append(instance_id)
         for instance_id in gained:
             if instance_id != self._own_instance_id:
-                await self.send_roster_snapshot(after.id, to_instance_id=instance_id)
+                await self._send_credentials(after.id, instance_id)
+
+    async def _send_credentials(self, space_id: str, instance_id: str) -> None:
+        """Hand one household its own writer cert / writer group key /
+        channel grant after they changed without a roster change: a snapshot
+        with no roster entry (~1–2 KB). A household below the roster-digest
+        line does not know that shape and gets the full roster snapshot, as
+        before."""
+        credentials_only = (
+            self._federation is not None
+            and await self._federation.space_member_supports(
+                instance_id, min_version=FederationCapability.MIN_FOR_ROSTER_DIGEST
+            )
+        )
+        try:
+            await self.send_roster_snapshot(
+                space_id,
+                to_instance_id=instance_id,
+                credentials_only=credentials_only,
+            )
+        except Exception:
+            log.exception(
+                "credentials for %s in %s could not be sent", instance_id, space_id
+            )
 
     # ── Membership ─────────────────────────────────────────────────────
 
@@ -9178,19 +9058,7 @@ class SpaceService(
         if post.deleted:
             raise NotFoundError("cannot comment on deleted post")
         await self._require_writable_space(space_id)
-        # Membership check
-        member = await self._spaces.get_member(space_id, author_user_id)
-        if member is None:
-            raise SpacePermissionError("not a member of this space")
-        # Subscribers may comment when the space's
-        # ``allow_subscriber_comment`` opt-in is on.  Non-subscribers
-        # short-circuit before the (cheap) space lookup.
-        space = (
-            await self._spaces.get(space_id)
-            if member.role == SpaceRole.SUBSCRIBER
-            else None
-        )
-        self._assert_writable_member(member, action="comment", space=space)
+        await self._require_comment_right(space_id, author_user_id)
         ctype = _coerce_comment_type(comment_type)
         if ctype is CommentType.TEXT:
             _validate_text_length(content, limit=MAX_COMMENT_LENGTH)
@@ -9264,14 +9132,14 @@ class SpaceService(
             raise NotFoundError("post disappeared")
         space_id, _post = got
         await self._require_writable_space(space_id)
-        member = await self._spaces.get_member(space_id, editor_user_id)
         if comment.author != editor_user_id:
+            member = await self._spaces.get_member(space_id, editor_user_id)
             if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
                 raise PermissionError(
                     "only the author or a space moderator can edit this comment",
                 )
-        elif member is not None:
-            await self._follower_may_change_comment(space_id, member)
+        else:
+            await self._require_comment_right(space_id, editor_user_id)
         _validate_text_length(new_content, limit=MAX_COMMENT_LENGTH)
         if not new_content.strip():
             raise ValueError("comment body cannot be empty")
@@ -9310,14 +9178,14 @@ class SpaceService(
         if got is None:
             raise NotFoundError("post disappeared")
         space_id, _post = got
-        member = await self._spaces.get_member(space_id, actor_user_id)
         if comment.author != actor_user_id:
+            member = await self._spaces.get_member(space_id, actor_user_id)
             if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
                 raise PermissionError(
                     "only the author or a space moderator can delete this comment"
                 )
-        elif member is not None:
-            await self._follower_may_change_comment(space_id, member)
+        else:
+            await self._require_comment_right(space_id, actor_user_id)
         await self._posts.soft_delete_comment(comment_id, space_id=space_id)
         await self._posts.decrement_comment_count(comment.post_id, space_id=space_id)
         await self._bus.publish(
@@ -9330,19 +9198,24 @@ class SpaceService(
             ),
         )
 
-    async def _follower_may_change_comment(
-        self, space_id: str, member: SpaceMember
-    ) -> None:
-        """A follower's edit / delete of its OWN comment follows the comment
-        switch, like the comment itself: with the switch off every other
-        household refuses the change (the §24.11 writer gate, the
-        ``space_item`` handlers), so applying it here would only make this
-        copy differ. A moderator still removes the comment."""
-        if member.role != SpaceRole.SUBSCRIBER:
-            return
-        self._assert_writable_member(
-            member, action="comment", space=await self._require_space(space_id)
+    async def _require_comment_right(self, space_id: str, user_id: str) -> None:
+        """The one rule for writing, editing and deleting one's OWN comment:
+        a seat whose role may comment — every writer role, and
+        ``subscriber`` while the space's "followers may comment" switch is
+        on. The same right every other household checks (the §24.11 writer
+        gate, the ``space_item`` handlers), so a change refused there is
+        refused here too. A moderator's edit / delete of someone else's
+        comment is content authority, not this."""
+        member = await self._spaces.get_member(space_id, user_id)
+        if member is None:
+            raise SpacePermissionError("not a member of this space")
+        # Non-subscribers short-circuit before the (cheap) space lookup.
+        space = (
+            await self._spaces.get(space_id)
+            if member.role == SpaceRole.SUBSCRIBER
+            else None
         )
+        self._assert_writable_member(member, action="comment", space=space)
 
     async def set_my_location_sharing(
         self, space_id: str, user_id: str, enabled: bool

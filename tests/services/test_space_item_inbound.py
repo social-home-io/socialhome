@@ -172,7 +172,6 @@ async def _apply(
     cert_scope="write",
     member=False,
     authorship=None,
-    config_holder=False,
 ) -> bool:
     space = await env["spaces"].get(SPACE)
     return await env["applier"].apply(
@@ -183,7 +182,6 @@ async def _apply(
         cert_scope=cert_scope,
         member_household=member,
         authorship=authorship,
-        config_holder=config_holder,
     )
 
 
@@ -514,10 +512,10 @@ async def test_a_malformed_emoji_is_dropped(env, emoji):
 
 async def test_a_comment_only_members_reaction_is_kept_at_a_gfs_subscriber(env):
     """A GFS subscriber holds no config (its directory stub has every
-    follower switch off) and no roster: a ``comment`` cert is a MEMBER's
-    (a moderated space's plain member) — its reaction is applied, not
-    mistaken for a follower's. A follower's reaction is decided by its own
-    scope (the react switch it was issued under), checked with the cert."""
+    follower switch off) and no roster: it goes by the cert. ``comment`` is
+    every commenter's scope (a moderated space's plain member, a follower
+    alike) and carries reactions — it used to be dropped there as "maybe a
+    follower's"."""
     inner = _react(env, "reaction_add", "👍", 1)
     assert await _apply(env, "reaction_add", inner, cert_scope="comment")
 
@@ -877,10 +875,10 @@ async def _switches(env, *, comment: bool, react: bool) -> None:
 async def test_a_member_household_refuses_a_follower_write_once_its_switch_is_off(
     env, kind
 ):
-    """A member household holds the config: with the switch off it refuses
-    a follower's comment / reaction even though the follower's cert (issued
-    while the switch was on) is still within its 24 h — the window is the
-    config event's travel time, not the cert's lifetime."""
+    """A member household holds the config and the roster: with the switch
+    off it refuses a follower's comment / reaction at once, whatever cert
+    the item carries (the rotation that follows a comment switch-off then
+    ends that cert everywhere)."""
     inner = (
         _comment(env, _cid())
         if kind == "comment"
@@ -888,11 +886,11 @@ async def test_a_member_household_refuses_a_follower_write_once_its_switch_is_of
     )
     await _switches(env, comment=False, react=False)
     assert not await _apply(
-        env, kind, inner, cert_scope="follower", member=True, authorship=_FollowerSeat()
+        env, kind, inner, cert_scope="comment", member=True, authorship=_FollowerSeat()
     )
     await _switches(env, comment=True, react=True)
     assert await _apply(
-        env, kind, inner, cert_scope="follower", member=True, authorship=_FollowerSeat()
+        env, kind, inner, cert_scope="comment", member=True, authorship=_FollowerSeat()
     )
 
 
@@ -955,17 +953,16 @@ async def test_a_relayed_comments_hashes_moved_to_another_comment_are_ignored(en
 async def test_a_follower_edit_or_delete_over_the_gfs_follows_the_comment_switch(
     env, kind
 ):
-    """S2 (#1375 review): a follower's edit / delete of its own comment was
-    admitted with the switch off (``subscriber_ok=True``) — for 24 h it could
-    rewrite its comments at every member household. It follows the comment
-    switch like a create."""
+    """A follower's edit / delete of its own comment was admitted with the
+    switch off (``subscriber_ok=True``). It needs the comment right, like the
+    comment itself — one rule for every role."""
     cid = _cid()
     await _switches(env, comment=True, react=False)
     assert await _apply(
         env,
         "comment",
         _comment(env, cid),
-        cert_scope="follower",
+        cert_scope="comment",
         member=True,
         authorship=_FollowerSeat(),
     )
@@ -973,36 +970,6 @@ async def test_a_follower_edit_or_delete_over_the_gfs_follows_the_comment_switch
     seats = _FollowerSeat()
     change = _inner(kind, cid, env["post_id"], content="rewritten", created_at=_ts(5))
     assert not await _apply(
-        env, kind, change, cert_scope="follower", member=True, authorship=seats
+        env, kind, change, cert_scope="comment", member=True, authorship=seats
     )
     assert seats.calls and all(not kw["subscriber_ok"] for _k, kw in seats.calls)
-
-
-@pytest.mark.parametrize("kind", ["comment", "reaction_add"])
-async def test_a_seated_follower_household_checks_the_switch_itself(env, kind):
-    """N4 (#1375 review): a follower household seated in the space holds the
-    config — it refuses a follower's comment / reaction once the switch is
-    off (seconds), like a member household. A GFS subscriber, whose stub
-    knows no switch, still decides by the cert alone (its 24 h)."""
-    inner = (
-        _comment(env, _cid())
-        if kind == "comment"
-        else _react(env, "reaction_add", "👍", 1)
-    )
-    await _switches(env, comment=False, react=False)
-    assert not await _apply(env, kind, inner, cert_scope="follower", config_holder=True)
-    # The same item at a GFS subscriber: the cert alone decides.
-    assert await _apply(env, kind, inner, cert_scope="follower")
-
-
-async def test_a_seated_follower_household_keeps_a_members_comment_scope_items(env):
-    """Only a follower's scope follows the switch there: a comment-only
-    member's reaction is applied whatever the follower switches say."""
-    await _switches(env, comment=False, react=False)
-    assert await _apply(
-        env,
-        "reaction_add",
-        _react(env, "reaction_add", "👍", 1),
-        cert_scope="comment",
-        config_holder=True,
-    )

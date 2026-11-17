@@ -1585,13 +1585,7 @@ from __future__ import annotations
 #:   ``MIN_FOR_CAPPED_SPACE_IMAGES`` (v_81, the first unreleased line) and
 #:   re-encoded from the released v_80 line; the host repairs a member's
 #:   roster only on a ``roster_digest`` mismatch (``MIN_FOR_ROSTER_DIGEST``,
-#:   v_81). Followers (owner decision 2026-11-16): a follower household's
-#:   writer cert has its own scope (``follower`` / ``follower_comment`` /
-#:   ``follower_react``) and lives 24 h, asked for on demand
-#:   (``SPACE_CREDENTIALS_WANTED {space_id, cert_wanted, key_wanted}``,
-#:   ``MIN_FOR_CREDENTIALS_WANTED``) and answered with the credentials
-#:   alone; a switch toggle sends only the config
-#:   event. Wire otherwise unchanged.
+#:   v_81). Wire otherwise unchanged.
 OURS: int = 94
 
 
@@ -2315,10 +2309,6 @@ class FederationCapability:
     #: ``roster_digest`` on every BEGIN to its host; a BEGIN without one
     #: from it asks for no roster repair (only an older one's echo does).
     MIN_FOR_ROSTER_DIGEST = 81
-    #: Followers (owner decision 2026-11-16) — a host at or above it answers
-    #: ``SPACE_CREDENTIALS_WANTED`` (unreleased: v_81–v_94 ship together, so
-    #: the first unreleased line; a released v_80 host never gets the ask).
-    MIN_FOR_CREDENTIALS_WANTED = 81
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so

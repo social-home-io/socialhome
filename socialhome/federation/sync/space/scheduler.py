@@ -1461,10 +1461,8 @@ class SpaceSyncScheduler:
         )
         # A GLOBAL space is synced like any other for its members (a
         # household seated from an invite link included) — but never for a
-        # household that only follows it: it reads through the GFS, so a
-        # follower never BEGINs the host or asks a helper. (A seated
-        # follower asks its host for its own credentials with
-        # ``SPACE_CREDENTIALS_WANTED`` — not a sync.)
+        # household that only follows it: the GFS shields followers from
+        # hosts, so a follower must not BEGIN the host or ask a helper.
         for space in await self._space_repo.list_by_type(SpaceType.GLOBAL):
             if await self._holds_member_seat(space):
                 spaces.append(space)

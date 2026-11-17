@@ -1,18 +1,14 @@
 """Issue, deliver, store and check space writer certificates (v_49).
 
 A writer cert (:mod:`socialhome.writer_cert`) is the space AUTHORITY key's
-per-epoch statement that one household may write, only comment and
-react, or — a follower household — what the space's follower switches
-allow. This service is the one place that
+per-epoch statement that one household may write (or only comment). This
+service is the one place that
 
 * **derives** what a household is entitled to from the roster the issuer
-  already holds — owner / admin / moderator / member seats → ``write``
-  (where the ``posts`` level lets them post) or ``comment``; a follower
-  (``subscriber``) seat → ``follower`` / ``follower_comment`` /
-  ``follower_react`` after ``allow_subscriber_comment`` /
-  ``allow_subscriber_react`` (nothing with both off; it lives 24 h and is
-  asked for on demand, ``SPACE_CREDENTIALS_WANTED``); several seats → ONE
-  cert at the strongest scope. Nothing about issued certs is stored: a seed holder
+  already holds — owner / admin / moderator / member seats → ``write``; a
+  follower (subscriber) seat → ``comment`` only while the space has
+  ``allow_subscriber_comment`` on; several seats → ONE cert at the
+  strongest scope. Nothing about issued certs is stored: a seed holder
   re-derives them from the roster at every epoch rotation;
 * **issues** them — only a household holding the space seed (the owner, or a
   delegated admin), and only while that seed still matches the pinned space
@@ -52,7 +48,6 @@ retires the writer key with it.
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -65,16 +60,10 @@ from ..domain.gfs_channel import GFS_CHANNEL_FIELD
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatureAccess, SpaceRole
 from ..domain.writer_cert import (
     MAX_WRITER_USERS,
-    WRITER_ACTION_PROFILE,
     WRITER_SCOPE_COMMENT,
-    WRITER_SCOPE_FOLLOWER,
-    WRITER_SCOPE_FOLLOWER_COMMENT,
-    WRITER_SCOPE_FOLLOWER_REACT,
     WRITER_SCOPE_WRITE,
     WriterCert,
     WriterEntitlement,
-    follower_cert_fresh,
-    follower_scope,
     scope_permits,
     strongest_scope,
 )
@@ -139,21 +128,11 @@ PeerPayloadHook = Callable[[str, dict], Awaitable[dict]]
 #: needs no seed holder online (an expiry on the cert itself would).
 WRITER_CERT_EPOCH_GRACE_S: int = 600
 
-#: Member side: an ask for our credentials that went unanswered is repeated
-#: after this (a margin over the host's one answer per 10 min, so a retry
-#: never arrives a moment early and waits out a doubled gap), doubling up to
-#: :data:`CREDENTIALS_RETRY_MAX_S` — and only while someone still writes.
-CREDENTIALS_RETRY_S: float = 15 * 60
-CREDENTIALS_RETRY_MAX_S: float = 6 * 60 * 60
-
 #: Ordering of scopes for "did this household's rights get weaker?".
 _SCOPE_RANK: dict[str | None, int] = {
     None: 0,
-    WRITER_SCOPE_FOLLOWER_COMMENT: 1,
-    WRITER_SCOPE_FOLLOWER_REACT: 1,
-    WRITER_SCOPE_FOLLOWER: 2,
-    WRITER_SCOPE_COMMENT: 3,
-    WRITER_SCOPE_WRITE: 4,
+    WRITER_SCOPE_COMMENT: 1,
+    WRITER_SCOPE_WRITE: 2,
 }
 
 
@@ -196,7 +175,6 @@ class SpaceWriterCertService:
     """Writer-cert issuer (seed holders) and holder (every household)."""
 
     __slots__ = (
-        "_asked",
         "_channels",
         "_federation",
         "_kek",
@@ -206,7 +184,6 @@ class SpaceWriterCertService:
         "_remote_members",
         "_spaces",
         "_truncation_warned",
-        "_wanted",
     )
 
     def __init__(
@@ -231,12 +208,6 @@ class SpaceWriterCertService:
         #: (space id, instance id) pairs already warned about a binding
         #: truncated to MAX_WRITER_USERS — once each per process.
         self._truncation_warned: set[tuple[str, str]] = set()
-        #: Member side — space → what this household asked its host for
-        #: (``"cert"`` / ``"key"``), until it arrives. In memory: a restart
-        #: asks again on the next write.
-        self._wanted: dict[str, set[str]] = {}
-        #: Member side — space → (when the next ask is due, its backoff).
-        self._asked: dict[str, tuple[float, float]] = {}
         #: v_51 — the private-space channel service (grants ride the same
         #: per-peer payloads as certs). ``None`` → no channel grants.
         self._channels: GfsChannelService | None = None
@@ -305,10 +276,8 @@ class SpaceWriterCertService:
         authority (owner / admin / moderator), so a plain member's post keeps
         going through the host's review queue; ``OPEN``: every writer role.
         A seat that may not post keeps ``comment`` (comments are judged per
-        item by the receivers); a follower seat gets the follower scope the
-        space's switches allow (:func:`follower_scope`: comments while
-        ``allow_subscriber_comment``, reactions while
-        ``allow_subscriber_react``), never a member's."""
+        item by the receivers); a follower seat gets ``comment`` only while
+        ``allow_subscriber_comment`` is on."""
         if instance_id == self._own_instance_id:
             # Our own people only: ``space_members`` on a member household
             # (a seed-holding delegated admin) also mirrors the host's —
@@ -327,26 +296,22 @@ class SpaceWriterCertService:
                 )
             ]
         posting = _POSTING_ROLES[space.features.access_level("posts")]
-        following = follower_scope(
-            comment=space.features.allow_subscriber_comment,
-            react=space.features.allow_subscriber_react,
-        )
-        by_scope: dict[str, set[str]] = {}
+        by_scope: dict[str, set[str]] = {
+            WRITER_SCOPE_WRITE: set(),
+            WRITER_SCOPE_COMMENT: set(),
+        }
         for user_id, role in seats:
             if role in posting:
-                scope: str | None = WRITER_SCOPE_WRITE
-            elif role in _WRITE_ROLES:
-                scope = WRITER_SCOPE_COMMENT
-            elif role == SpaceRole.SUBSCRIBER.value:
-                scope = following
-            else:
-                scope = None
-            if scope is not None:
-                by_scope.setdefault(scope, set()).add(user_id)
-        strongest = strongest_scope(k for k, v in by_scope.items() if v)
-        if strongest is None:
+                by_scope[WRITER_SCOPE_WRITE].add(user_id)
+            elif role in _WRITE_ROLES or (
+                role == SpaceRole.SUBSCRIBER.value
+                and space.features.allow_subscriber_comment
+            ):
+                by_scope[WRITER_SCOPE_COMMENT].add(user_id)
+        scope = strongest_scope(k for k, v in by_scope.items() if v)
+        if scope is None:
             return WriterEntitlement(None)
-        return WriterEntitlement(strongest, frozenset(by_scope[strongest]))
+        return WriterEntitlement(scope, frozenset(by_scope[scope]))
 
     async def verified_instance_pk(
         self, instance_id: str, *, claimed: bytes | None = None
@@ -573,10 +538,8 @@ class SpaceWriterCertService:
         ``epoch`` (default: our current content epoch), or ``None``.
 
         Only from a seed holder whose seed matches the pin, only to a peer
-        that holds a publishing scope (``write``, ``comment`` or a follower
-        scope alike — the key outlives a follower cert, so the follower's
-        own publisher checks the switch) — never to a non-publisher — and
-        only where the peer can use it: in a
+        that holds a publishing scope (``write`` or ``comment`` alike) — never
+        to a non-publisher — and only where the peer can use it: in a
         publicly readable space (the key is how a member publishes, always
         anonymously, to every server on the owner's list) to a v_90 peer. An
         older household gets no key: its items take the host path."""
@@ -635,8 +598,6 @@ class SpaceWriterCertService:
             associated_data=self._writer_key_aad(space_id, grant.epoch),
         )
         stored = await self._keys.set_writer_key(space_id, grant.epoch, wrapped)
-        if stored:
-            self._got(space_id, "key")
         if not stored:
             log.info(
                 "writer key for space %s epoch %d: no key for that epoch — dropped",
@@ -720,8 +681,7 @@ class SpaceWriterCertService:
                 space_id=space_id,
                 epoch=cert.epoch,
                 author_pk=self._own_pk,
-                # Every scope grants ``profile``: "is this a cert at all".
-                required_scope=WRITER_ACTION_PROFILE,
+                required_scope=cert.scope,
             )
         except (UnsupportedWriterCertSuite, InvalidWriterCert) as exc:
             log.warning("writer cert for space %s refused: %s", space_id, exc)
@@ -743,8 +703,6 @@ class SpaceWriterCertService:
             cert.epoch,
             orjson.dumps(cert.to_wire(), option=orjson.OPT_SORT_KEYS).decode(),
         )
-        if stored:
-            self._got(space_id, "cert")
         if not stored:
             log.info(
                 "writer cert for space %s epoch %d: no key for that epoch — dropped",
@@ -752,42 +710,6 @@ class SpaceWriterCertService:
                 cert.epoch,
             )
         return stored
-
-    def want(self, space_id: str, *, cert: bool = False, key: bool = False) -> bool:
-        """Member side: note that this household wants its writer *cert* /
-        writer group *key* for *space_id* from its host. ``True`` when the
-        caller should ask now (``SPACE_CREDENTIALS_WANTED``, carrying
-        everything wanted): never asked yet, or the last ask went unanswered
-        for :data:`CREDENTIALS_RETRY_S`, doubling to
-        :data:`CREDENTIALS_RETRY_MAX_S`. The credential's arrival clears it."""
-        new = {w for w, on in (("cert", cert), ("key", key)) if on}
-        held = self._wanted.setdefault(space_id, set())
-        held |= new
-        if not held:
-            del self._wanted[space_id]
-            return False
-        now = time.monotonic()
-        due_at, backoff = self._asked.get(space_id, (now, CREDENTIALS_RETRY_S / 2))
-        if now < due_at:
-            return False
-        backoff = min(backoff * 2, CREDENTIALS_RETRY_MAX_S)
-        self._asked[space_id] = (now + backoff, backoff)
-        return True
-
-    def _got(self, space_id: str, what: str) -> None:
-        """A wanted credential arrived: nothing more to ask for it."""
-        held = self._wanted.get(space_id)
-        if held is None:
-            return
-        held.discard(what)
-        if not held:
-            del self._wanted[space_id]
-            self._asked.pop(space_id, None)
-
-    def wanted(self, space_id: str) -> tuple[bool, bool]:
-        """``(cert wanted, key wanted)`` for *space_id*."""
-        held = self._wanted.get(space_id, set())
-        return "cert" in held, "key" in held
 
     async def _stored_valid(self, space_id: str, epoch: int) -> WriterCert | None:
         """The stored cert for ``(space, epoch)`` iff it still verifies for
@@ -806,8 +728,7 @@ class SpaceWriterCertService:
                 space_id=space_id,
                 epoch=epoch,
                 author_pk=self._own_pk,
-                # Every scope grants ``profile``: "is this a cert at all".
-                required_scope=WRITER_ACTION_PROFILE,
+                required_scope=cert.scope,
             )
         except ValueError as exc:
             log.info(
@@ -852,15 +773,10 @@ class SpaceWriterCertService:
     ) -> bool:
         """True iff ``raw`` is a valid cert for ``author_pk`` at
         ``required_scope`` in ``space`` / ``epoch`` against the pinned space
-        key (``space_pubkey_hex`` overrides the space row's pin), and — a
-        follower cert — within its lifetime (:func:`follower_cert_fresh`).
-        Logs the reason at WARNING on failure."""
+        key (``space_pubkey_hex`` overrides the space row's pin). Logs the
+        reason at WARNING on failure."""
         try:
             cert = WriterCert.from_wire(raw)
-            if not follower_cert_fresh(cert, now=int(time.time())):
-                raise ValueError(
-                    f"follower cert issued at {cert.issued_at} is outside its lifetime"
-                )
             verify_writer_cert(
                 cert,
                 space_pubkey=bytes.fromhex(
@@ -897,19 +813,15 @@ class SpaceWriterCertService:
             return None
         raw = item.get(WRITER_CERT_FIELD)
         try:
-            held = WriterCert.from_wire(raw)
             verify_writer_cert(
-                held,
+                WriterCert.from_wire(raw),
                 space_pubkey=bytes.fromhex(space.identity_public_key),
                 space_id=space.id,
                 epoch=epoch,
                 author_pk=author_pk,
                 required_scope=required_scope,
             )
-            # A follower cert past its lifetime is refused by every
-            # receiver: re-stamp it like an old-key one.
-            if follower_cert_fresh(held, now=int(time.time())):
-                return raw if isinstance(raw, dict) else None
+            return raw if isinstance(raw, dict) else None
         except ValueError:
             pass
         origin = str(item.get("origin_instance_id") or "")
@@ -1008,8 +920,7 @@ def writer_key_min_version(space: Space | None) -> int | None:
 
 def _supersedes(new: WriterCert, held: WriterCert) -> bool:
     """A received cert replaces the one we hold only when it is newer, or as
-    new and at least as strong (by scope rank: ``write`` wins a tie, a
-    member scope beats a follower scope; an unknown scope never wins)."""
+    new and at least as strong (``write`` wins a tie)."""
     if new.issued_at != held.issued_at:
         return new.issued_at > held.issued_at
-    return _SCOPE_RANK.get(new.scope, -1) >= _SCOPE_RANK.get(held.scope, 0)
+    return scope_permits(new.scope, held.scope)

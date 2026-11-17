@@ -224,13 +224,6 @@ class FederationEventType(str, enum.Enum):
     #: (≤ 50 entries; ``name`` is the ``sc-`` content name). The answer is
     #: ordinary ``SPACE_MEDIA_BLOB`` pushes (``services/space_media_wanted``).
     SPACE_MEDIA_WANTED = "space_media_wanted"
-    #: Followers (owner decision 2026-11-16, unreleased) — a member or
-    #: follower household asks the space's HOST for its own credentials when
-    #: one of its people first writes: ``{space_id, cert_wanted, key_wanted}``
-    #: (inside the encrypted payload). The answer is a
-    #: ``SPACE_ROSTER_SNAPSHOT`` with no roster entry, only the asker's
-    #: writer cert / writer group key / channel grant. Never a sync.
-    SPACE_CREDENTIALS_WANTED = "space_credentials_wanted"
     #: v_93 — a member's reaction on a space post, added or removed, to
     #: every member household: ``{space_id, post_id, user_id, emoji, action:
     #: "add" | "remove", at}`` (all inside the encrypted payload). ``at`` is
@@ -821,9 +814,6 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: for files of items it holds, and a link-joined admin / moderator
         #: may be asked. The provider re-checks membership.
         FederationEventType.SPACE_MEDIA_WANTED,
-        #: A link-joined member or follower asks its host for its own writer
-        #: cert / key (the host re-checks the seat; the answer is its own).
-        FederationEventType.SPACE_CREDENTIALS_WANTED,
         # ── Content-key epochs ──
         #: The per-space AES key handshake and its rotations. Excluded from
         #: this set, a member decrypts nothing after the first rekey.
@@ -923,8 +913,6 @@ MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
         #: v_92 — a member's file request goes to ONE provider.
         FederationEventType.SPACE_MEDIA_WANTED,
-        #: A household's ask for its own credentials goes to the host only.
-        FederationEventType.SPACE_CREDENTIALS_WANTED,
         #: Pairwise teardown of one space session.
         FederationEventType.SPACE_SESSION_CLEANUP,
         #: A private seller ↔ asker thread, and an offer to the seller only.
@@ -1218,10 +1206,6 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: ``SPACE_MEDIA_BLOB``), and the provider re-checks membership. Only
         #: member households send it; a follower reads through the GFS.
         FederationEventType.SPACE_MEDIA_WANTED,
-        #: An ask for the sender's OWN credentials: lands nothing on the
-        #: host; the host re-derives the entitlement from its roster and the
-        #: switches (a follower that may not write gets nothing).
-        FederationEventType.SPACE_CREDENTIALS_WANTED,
         # ── Directory + moderation ──
         FederationEventType.SPACE_DIRECTORY_SYNC,
         #: A report is *about* content, not content: the whole point is

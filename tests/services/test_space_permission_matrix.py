@@ -289,13 +289,6 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "wait_roster_repairs",
         "roster_digest_for",
         "roster_echo_for",
-        # A household's SPACE_CREDENTIALS_WANTED on the host, and the member
-        # side that sends it. The authorization is the §24.11-authenticated
-        # sender holding a live seat: it only ever gets ITS OWN writer cert /
-        # writer key, re-derived from the host's roster and the space's
-        # switches. No actor, no route.
-        "on_credentials_wanted",
-        "ask_host_for_credentials",
         # Internal seam the invite-redeem coordinator calls after it has
         # already consumed the token and seated the household as a member;
         # it only records a pending admin/mod elevation (a join_requests

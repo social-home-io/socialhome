@@ -1121,21 +1121,19 @@ older follower: it clears bits 2 and 4 of d's seat (``space_subscribers
 the compressed item (e logs ``refused a compressed item``), e sent JSON
 (``suite=json``) and d still got the post. The bit is restored afterwards.
 
-### ``gfs-follower-comment`` — a follower comments under the switch; its cert comes on demand
+### ``gfs-follower-comment`` — a follower comments like a comment-only member
 
 Needs ``gfs-invite-link`` (e holds a link-joined FOLLOWER seat on a's third,
 global space). a opens the space to readers (``allow_subscribers``, left
-on: only a publicly readable space is published over a GFS, so only there
-does a household ask for a writer cert) and turns
-``allow_subscriber_comment`` on — only the config event goes out. a posts; e
-(the follower) comments: the comment takes the host path (e holds no cert
-yet) and a holds it; e asks a for its own cert with one
-``SPACE_CREDENTIALS_WANTED`` (e logs ``credentials: asking host``; never a
-sync) and stores a ``follower_comment`` cert and the writer group key (e's
-``space_keys``). e's second comment reaches a too and goes over the GFS
-(``POST /gfs/member-publish-anon`` 200 in the GFS log). a turns the switch
-off: e's next comment never reaches a. The comment switch is left off (its
-default). Reads a's / e's DB (no REST bucket).
+on: only a publicly readable space is published over a GFS) and turns
+``allow_subscriber_comment`` on: e gets its credentials alone — the same
+``comment`` cert and writer group key a comment-only member holds (e's
+``space_keys``). a posts; e (the follower) comments on the normal member
+path: a holds the comment, the GFS accepted e's anonymous publish (``POST
+/gfs/member-publish-anon`` 200) and a took the relayed ``space_item``. a
+turns the switch off: exactly one rotation (a's content epoch + 1), and e's
+next comment is refused. The comment switch is left off (its default). Reads
+a's / e's DB (no REST bucket).
 
 ### ``gfs-member-publish-strict`` — anonymous member publish (v_50; the one mode since v_90)
 

@@ -16,8 +16,7 @@ Wire shape (every field always present, never positional)::
 
     {"cert_suite": "ed25519", "space_id", "epoch": N,
      "instance_pk": <b64url Ed25519 household identity pubkey>,
-     "scope": "write" | "comment" | "follower" | "follower_comment"
-              | "follower_react", "issued_at": <unix seconds>,
+     "scope": "write" | "comment", "issued_at": <unix seconds>,
      "cert_sig": <b64url>}
 """
 
@@ -31,72 +30,16 @@ from .errors import WrongTypeError
 #: Full write rights: posts, comments, reactions (owner / admin / moderator /
 #: member seats).
 WRITER_SCOPE_WRITE: str = "write"
-#: Comment-only rights of a MEMBER seat that may not post directly (the
-#: ``posts`` access level): comments and reactions.
+#: Comment-only rights: follower (subscriber) seats, and only while the space
+#: has ``allow_subscriber_comment`` on.
 WRITER_SCOPE_COMMENT: str = "comment"
-#: A follower (``subscriber``-only) household's rights, named by the space's
-#: switches when the cert was issued — so a receiver that holds no config (a
-#: GFS subscriber) still refuses what a switch forbids: both on, comments
-#: only (``allow_subscriber_comment``), reactions only
-#: (``allow_subscriber_react``). Never a post. Short-lived
-#: (:data:`FOLLOWER_CERT_TTL_S`): turning a switch off needs no key rotation.
-WRITER_SCOPE_FOLLOWER: str = "follower"
-WRITER_SCOPE_FOLLOWER_COMMENT: str = "follower_comment"
-WRITER_SCOPE_FOLLOWER_REACT: str = "follower_react"
-FOLLOWER_SCOPES: frozenset[str] = frozenset(
-    {WRITER_SCOPE_FOLLOWER, WRITER_SCOPE_FOLLOWER_COMMENT, WRITER_SCOPE_FOLLOWER_REACT}
-)
-WRITER_SCOPES: frozenset[str] = frozenset(
-    {WRITER_SCOPE_WRITE, WRITER_SCOPE_COMMENT} | FOLLOWER_SCOPES
-)
+WRITER_SCOPES: frozenset[str] = frozenset({WRITER_SCOPE_WRITE, WRITER_SCOPE_COMMENT})
 
-#: Actions a receiver asks a scope for (:func:`scope_permits`) besides
-#: ``write`` and ``comment``: a reaction, and a household's own author
-#: profile (every scope publishes its people's profiles).
-WRITER_ACTION_REACT: str = "react"
-WRITER_ACTION_PROFILE: str = "profile"
-#: Everything a receiver may ask a cert for.
-WRITER_REQUIREMENTS: frozenset[str] = frozenset(
-    {
-        WRITER_SCOPE_WRITE,
-        WRITER_SCOPE_COMMENT,
-        WRITER_ACTION_REACT,
-        WRITER_ACTION_PROFILE,
-    }
-)
-
-#: What each scope grants. Receiver-side only (the wire carries the scope).
+#: What each scope grants. ``write`` implies ``comment``.
 _GRANTS: dict[str, frozenset[str]] = {
-    WRITER_SCOPE_WRITE: frozenset(
-        {
-            WRITER_SCOPE_WRITE,
-            WRITER_SCOPE_COMMENT,
-            WRITER_ACTION_REACT,
-            WRITER_ACTION_PROFILE,
-        }
-    ),
-    WRITER_SCOPE_COMMENT: frozenset(
-        {WRITER_SCOPE_COMMENT, WRITER_ACTION_REACT, WRITER_ACTION_PROFILE}
-    ),
-    WRITER_SCOPE_FOLLOWER: frozenset(
-        {WRITER_SCOPE_COMMENT, WRITER_ACTION_REACT, WRITER_ACTION_PROFILE}
-    ),
-    WRITER_SCOPE_FOLLOWER_COMMENT: frozenset(
-        {WRITER_SCOPE_COMMENT, WRITER_ACTION_PROFILE}
-    ),
-    WRITER_SCOPE_FOLLOWER_REACT: frozenset(
-        {WRITER_ACTION_REACT, WRITER_ACTION_PROFILE}
-    ),
+    WRITER_SCOPE_WRITE: frozenset({WRITER_SCOPE_WRITE, WRITER_SCOPE_COMMENT}),
+    WRITER_SCOPE_COMMENT: frozenset({WRITER_SCOPE_COMMENT}),
 }
-
-#: How long a follower cert is good for after its signed ``issued_at``. The
-#: worst-case window after a switch goes OFF at a receiver that holds no
-#: config (a GFS subscriber); config holders check the switch itself.
-FOLLOWER_CERT_TTL_S: int = 24 * 60 * 60
-#: How far ahead of a receiver's clock a follower cert may be dated.
-FOLLOWER_CERT_SKEW_S: int = 300
-#: A follower household asks for a new cert this long before its cert ends.
-FOLLOWER_CERT_RENEW_S: int = 60 * 60
 
 #: Largest epoch a cert may carry (signed 64-bit SQLite INTEGER).
 MAX_WRITER_CERT_EPOCH: int = 2**63 - 1
@@ -113,44 +56,16 @@ def scope_permits(held: str, required: str) -> bool:
 
 
 def strongest_scope(scopes: Iterable[str]) -> str | None:
-    """The strongest of ``scopes`` (``write``, then ``comment``, then a
-    follower scope), or ``None``.
+    """The strongest of ``scopes`` (``write`` beats ``comment``), or ``None``.
 
     A household with several seats in one space gets ONE cert covering its
     strongest seat."""
     held = set(scopes)
-    for scope in (
-        WRITER_SCOPE_WRITE,
-        WRITER_SCOPE_COMMENT,
-        WRITER_SCOPE_FOLLOWER,
-        WRITER_SCOPE_FOLLOWER_COMMENT,
-        WRITER_SCOPE_FOLLOWER_REACT,
-    ):
-        if scope in held:
-            return scope
+    if WRITER_SCOPE_WRITE in held:
+        return WRITER_SCOPE_WRITE
+    if WRITER_SCOPE_COMMENT in held:
+        return WRITER_SCOPE_COMMENT
     return None
-
-
-def follower_scope(*, comment: bool, react: bool) -> str | None:
-    """The scope a follower household gets while the space's switches are
-    *comment* / *react* (``None``: both off)."""
-    if comment and react:
-        return WRITER_SCOPE_FOLLOWER
-    if comment:
-        return WRITER_SCOPE_FOLLOWER_COMMENT
-    if react:
-        return WRITER_SCOPE_FOLLOWER_REACT
-    return None
-
-
-def follower_cert_fresh(cert: WriterCert, *, now: int) -> bool:
-    """Whether *cert* is within its lifetime at *now* (unix seconds): a
-    follower cert for :data:`FOLLOWER_CERT_TTL_S` after its ``issued_at``
-    and dated at most :data:`FOLLOWER_CERT_SKEW_S` ahead; any other scope
-    always (it dies with its epoch)."""
-    if cert.scope not in FOLLOWER_SCOPES:
-        return True
-    return now - FOLLOWER_CERT_TTL_S <= cert.issued_at <= now + FOLLOWER_CERT_SKEW_S
 
 
 @dataclass(slots=True, frozen=True)

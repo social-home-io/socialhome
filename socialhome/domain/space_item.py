@@ -46,12 +46,7 @@ import orjson
 from .errors import CodedError
 from .item_zdict import ZDICT_V1
 from .user import looks_like_emoji
-from .writer_cert import (
-    WRITER_ACTION_PROFILE,
-    WRITER_ACTION_REACT,
-    WRITER_SCOPE_COMMENT,
-    WRITER_SCOPE_WRITE,
-)
+from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
 
 ITEM_TYPE_POST: str = "post"
 #: The author's own edit of their post (full signed snapshot + ``edited_at``).
@@ -88,15 +83,12 @@ GENERIC_ITEM_TYPES: frozenset[str] = frozenset(
 )
 SUPPORTED_ITEM_TYPES: frozenset[str] = POST_SHAPED_ITEM_TYPES | GENERIC_ITEM_TYPES
 
-#: The right each type needs from a writer cert at the receivers
-#: (:func:`~socialhome.domain.writer_cert.scope_permits`). Post edits and
+#: The writer-cert scope each type needs at the receivers. Post edits and
 #: deletes need ``write`` — the same right as the post itself — so a
 #: comment-only household (a follower, or a plain member under a
 #: ``MODERATED`` / ``ADMIN_ONLY`` posts level) edits or deletes its post on
-#: the host path, never over the relay. Comments need ``comment``,
-#: reactions ``react`` (a follower scope grants each only under its
-#: switch), an author profile ``profile`` (every scope); a config holder
-#: also checks the follower switch (``space_item_inbound``).
+#: the host path, never over the relay. Reactions need ``comment`` plus the
+#: per-receiver rules in ``space_item_inbound`` (followers ask for more).
 _REQUIRED_SCOPE: dict[str, str] = {
     ITEM_TYPE_POST: WRITER_SCOPE_WRITE,
     ITEM_TYPE_POST_EDIT: WRITER_SCOPE_WRITE,
@@ -104,12 +96,10 @@ _REQUIRED_SCOPE: dict[str, str] = {
     ITEM_TYPE_COMMENT: WRITER_SCOPE_COMMENT,
     ITEM_TYPE_COMMENT_EDIT: WRITER_SCOPE_COMMENT,
     ITEM_TYPE_COMMENT_DELETE: WRITER_SCOPE_COMMENT,
-    # A reaction is its own right: a follower cert grants it only while the
-    # space's react switch was on.
-    ITEM_TYPE_REACTION_ADD: WRITER_ACTION_REACT,
-    ITEM_TYPE_REACTION_REMOVE: WRITER_ACTION_REACT,
-    # Any publishing household's own users — the cert's v2 binding names them.
-    ITEM_TYPE_AUTHOR_PROFILE: WRITER_ACTION_PROFILE,
+    ITEM_TYPE_REACTION_ADD: WRITER_SCOPE_COMMENT,
+    ITEM_TYPE_REACTION_REMOVE: WRITER_SCOPE_COMMENT,
+    # Any member household's own users — the cert's v2 binding names them.
+    ITEM_TYPE_AUTHOR_PROFILE: WRITER_SCOPE_COMMENT,
 }
 
 #: How far in the future a signed item stamp may lie (seconds). An edit

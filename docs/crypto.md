@@ -932,14 +932,9 @@ statement that one household may write in a space, so a member's own signed
 item can be authorized without a host signature on every post. Issued by a
 seed holder (owner or delegated admin, and only while its seed still matches
 the pinned space key) once per writer household per content epoch: `scope:
-"write"` for owner / admin / moderator / member seats that may post,
-`"comment"` for the other member seats, and for a follower (`subscriber`)
-seat `"follower"` / `"follower_comment"` / `"follower_react"` after the
-space's comment / react switches (none with both off); a household with
-several seats gets one cert at its strongest scope. Scopes are named
-constants (`WRITER_SCOPES`); a receiver refuses an unknown one. A follower
-cert lives `FOLLOWER_CERT_TTL_S` (24 h) after its signed `issued_at` and may
-be dated at most 5 min ahead; member scopes have no lifetime. Wire shape (every field
+"write"` for owner / admin / moderator / member seats, `"comment"` for a
+follower seat while `allow_subscriber_comment` is on; a household with
+several seats gets one cert at its strongest scope. Wire shape (every field
 always present) `{cert_suite, space_id, epoch, instance_pk, scope,
 issued_at, cert_sig}` — `instance_pk` is the household's Ed25519 identity
 public key (b64url), `issued_at` unix seconds. Signing bytes
@@ -951,10 +946,8 @@ other. Suite `cert_suite` validated against `SUPPORTED_WRITER_CERT_SUITES`
 `UnsupportedWriterCertSuite`, never a default. `verify_writer_cert(cert, *,
 space_pubkey, space_id, epoch, author_pk, required_scope)` checks the suite,
 the signature against the pinned space key, `space_id` and `epoch` equal,
-`instance_pk == author_pk`, and that `scope` permits the action (`write`,
-`comment`, `react` or `profile`: `write` grants all four, `comment` all but
-`write`, a follower scope what its name says plus `profile`); every failure
-raises. Receivers additionally require
+`instance_pk == author_pk`, and that `scope` permits the action (`write`
+implies `comment`); every failure raises. Receivers additionally require
 the item's epoch to be the newest they hold, or the previous one for
 `WRITER_CERT_EPOCH_GRACE_S` (600 s) after the newest key arrived, so an
 old epoch's cert cannot authorize items forever; any scope-reducing change

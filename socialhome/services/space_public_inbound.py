@@ -716,7 +716,6 @@ class SpacePublicInbound:
                     member_household=member_household,
                     authorship=self._authorship,
                     epoch=item.epoch,
-                    config_holder=await self._holds_config(item.space_id),
                 )
             except AwaitingParent as wait:
                 # Re-run the whole frame when the parent lands: decrypt,
@@ -1214,17 +1213,6 @@ class SpacePublicInbound:
             replay=replay,
             label=label,
         )
-
-    async def _holds_config(self, space_id: str) -> bool:
-        """We hold the space's real config: our row is not a GFS mirror stub
-        (a follower household seated from an invite link gets the owner's
-        config events; a GFS subscriber's stub knows no follower switch)."""
-        try:
-            mirror_gfs, _seq = await self._spaces.get_mirror_provenance(space_id)
-        except Exception:
-            log.exception("space_public.inbound: provenance of %s unread", space_id)
-            return False
-        return mirror_gfs is None
 
     async def _holds_writer_seat(self, space_id: str) -> bool:
         """We are a member household here (a local non-follower seat), so we

@@ -2308,11 +2308,11 @@ acts on bound inside the author signature:
 | `post` | post (`space_public_author`) | `write` | the author | `posts` access level (`item_access_admits`) |
 | `post_edit` | post — full snapshot + signed `edited_at` | `write` | the post's author only | `posts` access level |
 | `post_delete` | generic (`space_item_author`) | `write` | the post's author only | `posts` access level |
-| `comment` | generic | `comment` (granted by `write`, `comment`, `follower`, `follower_comment`) | anyone whose cert binds them; id owner-bound to them | live writer seat on the origin, or a follower seat while `allow_subscriber_comment` is on |
-| `comment_edit` | generic — full snapshot | `comment` | the comment's author only | any live seat on the origin (own row) |
-| `comment_delete` | generic | `comment` | the comment's author only | any live seat on the origin (own row) |
-| `reaction_add` / `reaction_remove` | generic | `react` (granted by `write`, `comment`, `follower`, `follower_react`) | the reactor | live writer seat, or a follower seat while `allow_subscriber_react` is on |
-| `author_profile` (v_60) | generic — the profile in the signed `content` | `profile` (every scope) | the author, about themself only (`item_target == post_id == author_user_id`) | — (kept, never a seat; see [Author profiles for followers](#author-profiles-for-followers-v_60)) |
+| `comment` | generic | `comment` (`write` implies it) | anyone whose cert binds them; id owner-bound to them | live writer seat on the origin, or a follower seat while `allow_subscriber_comment` is on |
+| `comment_edit` | generic — full snapshot | `comment` | the comment's author only | as for `comment` (own row) |
+| `comment_delete` | generic | `comment` | the comment's author only | as for `comment` (own row) |
+| `reaction_add` / `reaction_remove` | generic | `comment` | the reactor | live writer seat, or a follower seat while `allow_subscriber_react` is on |
+| `author_profile` (v_60) | generic — the profile in the signed `content` | `comment` | the author, about themself only (`item_target == post_id == author_user_id`) | — (kept, never a seat; see [Author profiles for followers](#author-profiles-for-followers-v_60)) |
 
 - **Never more permissive than the host path.** The rules mirror the
   federated `SPACE_COMMENT_*`, `SPACE_POST_UPDATED` / `DELETED` handlers and
@@ -2332,10 +2332,8 @@ acts on bound inside the author signature:
   signed author — else a household could pre-empt someone else's row.
   New comment ids must be owner-bound to their author.
 - **Followers rely on the cert.** They hold no roster: the scope plus the v2
-  user binding is the whole check. A follower household's cert has its own
-  scope, named by the switches it was issued under, and lives 24 h — so a
-  `comment`-scope reaction is a member's and is applied (it used to be
-  dropped at a GFS subscriber, whose stub has every follower switch off).
+  user binding is the whole check. `comment` is every commenter's scope (a
+  comment-only member, a follower who may comment) and carries reactions.
 
 **Ordering independence.**
 

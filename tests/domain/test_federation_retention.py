@@ -360,13 +360,3 @@ def test_a_credentials_only_snapshot_has_its_own_key():
         )
         is None
     )
-
-
-def test_a_credentials_ask_is_latest_only():
-    """Asks queued for an offline host do not pile up: one per space."""
-    t = FederationEventType.SPACE_CREDENTIALS_WANTED
-    a = supersede_key(t, space_id="s1", payload={"cert_wanted": True})
-    assert a == "credentials-wanted:s1"
-    assert a == supersede_key(t, space_id="s1", payload={"key_wanted": True})
-    assert a != supersede_key(t, space_id="s2", payload={})
-    assert supersede_key(t, space_id=None, payload={}) is None

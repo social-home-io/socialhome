@@ -105,9 +105,6 @@ class SpaceMembershipInboundHandlers:
             FederationEventType.SPACE_SYNC_REJECTED, self._on_sync_rejected
         )
         registry.register(
-            FederationEventType.SPACE_CREDENTIALS_WANTED, self._on_credentials_wanted
-        )
-        registry.register(
             FederationEventType.SPACE_INSTANCE_LEFT, self._on_instance_left
         )
         registry.register(FederationEventType.SPACE_MEMBER_BANNED, self._on_banned)
@@ -361,12 +358,6 @@ class SpaceMembershipInboundHandlers:
             )
         ):
             await store_owner_statement(self._space_repo, space_id, statement_json)
-
-    async def _on_credentials_wanted(self, event: FederationEvent) -> None:
-        """A household asks us, its space's host, for its own writer cert /
-        writer group key (:meth:`SpaceService.on_credentials_wanted`)."""
-        if self._space_service is not None:
-            await self._space_service.on_credentials_wanted(event)
 
     async def _on_instance_left(self, event: FederationEvent) -> None:
         """A member household left (all its seats, or ``user_id``'s).
