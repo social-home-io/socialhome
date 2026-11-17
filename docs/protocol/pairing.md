@@ -24,7 +24,9 @@ creates a **space-scoped** `remote_instances` row
 roster, presence, the friends constellation and the auto-pair vouching
 relay, and it publishes no `PairingConfirmed`. It runs over the
 connection server rather than the inbox URL, and it never creates a
-paired (`manual`) row — a GFS-reach pairing does.
+paired (`manual`) row — a GFS-reach pairing does. Such a seat is never
+taken for a pairing, and the two households can still pair
+([below](#pairing-with-a-household-you-share-a-space-with)).
 
 ## Event types
 
@@ -43,6 +45,12 @@ paired (`manual`) row — a GFS-reach pairing does.
   through a trust relay (a keyed `pending_sent` row) confirms that pairing
   ([auto-pair](#flow--auto-pair-via-relay)); nothing a pending peer sends
   ever confirms a pairing-code half-pair.
+- A household we hold a space seat for is not paired: every pairing check
+  asks `is_paired` (confirmed and not `space_session`), never the status
+  alone. Its pending half waits beside the seat
+  ([below](#pairing-with-a-household-you-share-a-space-with)); an approval
+  kept that way that does not confirm on the requester's first envelope
+  refuses that envelope.
 - `PAIRING_ABORT` cancels a pending session only when the peer identity
   stored on it derives to the envelope's `from_instance` — a household
   can cancel its own handshake, never another's. It also drops the
@@ -424,6 +432,97 @@ check. Both legs of the ack are over established trust (A↔B and
 B↔C are confirmed pairs, set up via QR before the auto-pair flow
 started).
 
+## Pairing with a household you share a space with
+
+Two households that share a space reached through a GFS hold a **space
+seat** for each other: a confirmed `space_session` row whose keys carry the
+space's events (a sealed-redeem seat between a link-joined household and
+the host, or the lazy directory seat two members make from each other's
+[member card](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89)).
+
+**A seat is not a pairing.** Sharing a space never pairs anybody — the
+people have not chosen each other, and households met through a GFS stay
+shielded from each other until they do. Only a handshake the people
+approve (a pairing code, or an introduction through a household both know)
+upgrades a seat, and both handshakes follow one rule
+([`PendingPairings`](../../socialhome/federation/pending_pairing.py)):
+
+- **Over a seat, the pending half waits beside it.** The `pending_*` half
+  a handshake normally stores in the `remote_instances` row (its keys, the
+  peer's inbox URL, our inbox id for it, the per-pair choices) is kept in
+  memory instead, and the seat row is not touched. The space keeps flowing
+  under the seat's keys the whole time — there is no pause while the
+  people compare a code or wait for an approval.
+- **Only the confirmed pairing replaces the seat**, in one transaction
+  (`upgrade_seat_instance`): keys, inbox URL, a fresh inbox id (a seat has
+  no address; the pairing never inherits the seat's), `share_home` /
+  `gfs_relay` as chosen in this handshake. What is queued for the seat
+  goes out to the pair (queued envelopes are sealed at delivery).
+- **A cancel or an expiry forgets the half.** The seat is as it was.
+- **A seat is never "already paired"**, never vouches for an
+  introduction, and is nobody an introducer vouches to.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as HFS A<br/>(seat for C)
+    participant B as HFS B<br/>(paired with both)
+    participant C as HFS C<br/>(seat for A)
+    Note over A,C: A and C share a space: SPACE_* flow under the seat keys<br/>(GFS mailbox) — before, during and until the pair confirms
+    A->>B: PAIRING_INTRO_AUTO {target_id: C, …}
+    Note over A: request kept BESIDE the seat (pending_sent, no key)
+    B->>C: PAIRING_INTRO_AUTO {from_a_*, vouch_sig}
+    Note over C: admin approves → approval kept BESIDE the seat<br/>(pending_sent, new keys, its own inbox id)
+    C->>B: PAIRING_INTRO_AUTO_ACK_VIA
+    B->>A: PAIRING_INTRO_AUTO_ACK
+    Note over A: sigs verify → the confirmed pair REPLACES the seat
+    A->>C: first envelope, under the NEW keys, on the approval's inbox
+    Note over C: verifies + decrypts under the approved keys<br/>→ the confirmed pair REPLACES the seat → dispatch
+    Note over A,C: paired: SPACE_* and everything else go direct
+```
+
+The wire is unchanged — no new event, no new field; a household that has
+no seat for the other (or runs an older version) sees and stores exactly
+what it always did.
+
+**Bounds.** A staged half lives as long as its handshake can complete —
+`PAIRING_TTL_SECONDS` (5 min) for a pairing code,
+`AUTO_PAIR_REQUEST_TTL_SECONDS` (24 h) for a trust-relay request or
+approval — and at most 64 are kept. They are in memory only: a restart
+forgets them exactly as it forgets a trust-relay request, and no key of an
+unconfirmed handshake is written to disk. The connections list shows a
+staged half as the pending pairing it is, in the seat's place
+(`shares_space: true`).
+
+**What the inbound pipeline accepts.** Exactly one staged half is ever
+resolved for an inbound envelope: an **approval**, by its own inbox id
+(`FederationService._lookup_inbox`). The requester's first envelope under
+the approved keys verifies and decrypts against it and confirms the pair
+before dispatch; if the pair does not confirm, the envelope is refused
+like one on an unknown inbox (fail closed — the row still says
+"confirmed seat", so no handler may see it). A pairing code's half opens
+no inbox until our own people confirmed it. The seat's own traffic
+(mailbox, relay, host hop) is resolved by the household's id and keeps
+using the seat row.
+
+**The moment of the switch.** Each side switches from the seat's keys to
+the pair's when IT confirms; the two confirmations are one message apart
+(the peer-confirm, or the requester's first envelope). A space envelope
+sealed under the seat's keys that crosses that message is refused by the
+side that already switched and is caught up by the space's sync — a
+sub-second window, against a pause that used to last until the people had
+finished (or forever, after a cancel).
+
+**After an unpair** the seat is back: the purge of the pair's row is
+followed by the member directory seating the household again from its
+card (`SpaceMemberDirectory.reseat`, wired as
+`PeerUnpairService.attach_after_purge`), when our own roster still holds a
+member's seat for it in a space our people are in. Both households derive
+the same static-static keys as before, so the space is as it was before
+the people paired. An unpair tombstone (the peer was offline) is re-seated
+only once it is purged — a seat made earlier would replace the tombstone
+and cancel the queued `UNPAIR`.
+
 ## Roster catch-up on pair-confirm — `USERS_SYNC`
 
 Pairing carries the *instance's* metadata but no per-user roster.
@@ -727,6 +826,12 @@ a pending card; `DELETE /api/pairing/connections/{instance_id}` on a pending
 row takes the same path). Implemented by
 [`PairingCancelService`](../../socialhome/services/pairing_cancel_service.py).
 
+A pending pairing with a household we share a space with has no row of its
+own ([above](#pairing-with-a-household-you-share-a-space-with)): its
+cancel drops the sessions and forgets the half in the same order, tells
+the peer with the half's keys, and never touches the seat — the space
+keeps working, and a second cancel is a `404` like any other.
+
 ### Pending states
 
 | Our state (`pending_kind`) | Where it comes from | What we hold | What the peer holds | Cancel |
@@ -1001,7 +1106,12 @@ sequenceDiagram
   inbound handlers for already-paired peers (covers
   `PAIRING_INTRO_RELAY`, `URL_UPDATED`, `UNPAIR`).
 - `socialhome/services/peer_unpair_service.py` — `unpair` (send
-  `UNPAIR`, then forget) and the shared `forget` step both directions use.
+  `UNPAIR`, then forget) and the shared `forget` step both directions use;
+  `attach_after_purge` re-seats a household we still share a space with.
+- `socialhome/federation/pending_pairing.py` — `PendingPairings`: where a
+  handshake's pending half lives (the row, or beside a space seat), for
+  the QR handshake, the trust relay, the cancel and the inbound pipeline.
+  `domain/federation.py` — `is_space_seat` / `is_paired`.
 - `socialhome/services/pairing_cancel_service.py` — `cancel_pending`
   (close the handshake, `PAIRING_ABORT`, forget the half-pair) for a
   pairing that was never confirmed.

@@ -328,7 +328,10 @@ ends (kick, ban, leave, dissolve), we delete their `space_session`
 their mirror. The receiver re-derives the answer from its own
 `space_instances` rows rather than trusting the sender, so it cannot be
 used to tear down a seat that is still carrying another shared space. See
-[`invites.md`](./invites.md).
+[`invites.md`](./invites.md). A seat that the two households upgraded to a
+pairing is no seat any more and is never torn down this way; when that
+pairing ends, the seat is made again from the member card
+([pairing](./pairing.md#pairing-with-a-household-you-share-a-space-with)).
 
 **Cross-household admin**
 

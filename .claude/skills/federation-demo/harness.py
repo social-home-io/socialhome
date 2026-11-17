@@ -11529,6 +11529,13 @@ def cmd_relay_pair() -> None:
     # already in place" and fall through to the assertions, so re-running
     # the step after a flake is actually possible (it was not: every
     # retry died here).
+    #
+    # Only a real pairing answers that. In the GFS chain a and d already
+    # share a space when this step runs and hold a space seat for each
+    # other (a confirmed ``space_session`` row): that is NOT a pairing, the
+    # request must go through (202), and the assertions below demand a
+    # ``manual`` row — a seat reads "confirmed" too, which is how this step
+    # once passed without pairing anybody.
     already_paired = s == 422 and "already paired" in str(_resp)
     if already_paired:
         print("  a ↔ d already trust-relay paired — re-checking assertions")
@@ -11613,14 +11620,19 @@ def cmd_relay_pair() -> None:
             _must(f"connections({label})", s, conns)
             match = [c for c in conns if c["instance_id"] == peer]
             last = match
-            if match and match[0]["status"] == "confirmed":
+            if (
+                match
+                and match[0]["status"] == "confirmed"
+                and match[0].get("source") == "manual"
+            ):
                 confirmed = True
                 pv = int(match[0].get("proto_version") or 1)
                 if pv >= 2:
                     break
         if not confirmed:
             raise SystemExit(
-                f"{label} → {peer[:8]}: expected confirmed, got {last!r}",
+                f"{label} → {peer[:8]}: expected a confirmed pairing "
+                f"(source=manual), got {last!r}",
             )
         if pv < 2:
             raise SystemExit(
@@ -13487,9 +13499,15 @@ def cmd_verify() -> None:
             )
             _must(f"connections({viewer})", s, conns)
             match = [c for c in conns if c["instance_id"] == peer]
-            if not match or match[0]["status"] != "confirmed":
+            if (
+                not match
+                or match[0]["status"] != "confirmed"
+                # A space seat reads "confirmed" too and is no pairing.
+                or match[0].get("source") != "manual"
+            ):
                 failures.append(
-                    f"{viewer}: relay-paired peer {peer[:8]} missing or not confirmed",
+                    f"{viewer}: relay-paired peer {peer[:8]} missing or not "
+                    f"a confirmed pairing (source=manual)",
                 )
                 continue
             print(f"  {viewer} ↔ {peer[:8]} confirmed via trust relay ✓")

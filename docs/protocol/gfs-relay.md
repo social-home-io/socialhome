@@ -1361,6 +1361,13 @@ member's card and no host hop.
 - Triggers for deltas: a card received, a seat that goes live or ends in a
   space we host, our own card, and the ~10 min sweep (role changes).
 - Nothing is sent while no card of the space carries a mailbox.
+- A directory seat is not a pairing. The two households can pair (a
+  pairing code or a trust-relay introduction): the pending handshake waits
+  beside the seat, which keeps carrying the space, and the confirmed pair
+  replaces the seat — from then on the two talk directly, for the space
+  too. An unpair seats the household again from its card
+  (`SpaceMemberDirectory.reseat`). See
+  [pairing](./pairing.md#pairing-with-a-household-you-share-a-space-with).
 - A household the directory drops loses its card AND its `space_instances`
   row on every member, so no member's fan-out of that space reaches it, and
   its directory seat ends once no shared space is left
