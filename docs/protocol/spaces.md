@@ -1661,16 +1661,28 @@ a ~5.5 MB roster snapshot each) and no rotation:
   (`domain.writer_cert.follower_cert_fresh`). Member scopes have no
   lifetime (they die with their epoch, as before).
 - **Config holders check the switch.** A member household holds the config
-  and the roster: it refuses a follower's comment / reaction the moment its
-  copy of the switch is off — on the direct `SPACE_COMMENT_CREATED` /
-  `SPACE_POST_REACTION` path (§24.11 writer gate) and on the GFS-relayed
-  `space_item` path (`item_seat_admits`). A GFS subscriber holds no config
-  (its directory stub has every follower switch off) and no roster: it
-  checks only the cert — the follower scope says which switch it was issued
-  under, and its lifetime ends it.
+  and the roster: it refuses a follower's comment, reaction, or edit /
+  delete of its own comment the moment its copy of the switch is off — on
+  the direct `SPACE_COMMENT_*` / `SPACE_POST_REACTION` path (§24.11 writer
+  gate) and on the GFS-relayed `space_item` path (`item_seat_admits`). A
+  follower household seated in the space holds the config too (its row is
+  no GFS mirror stub): a follower-scope item relayed to it follows the
+  switch there as well. A GFS subscriber holds no config (its directory
+  stub has every follower switch off) and no roster: it checks only the
+  cert — the follower scope says which switch it was issued under, and its
+  lifetime ends it.
 - **Worst case after a switch goes OFF:** seconds (the config event's
-  travel time) at every member household; up to 24 h at a GFS subscriber
-  and at a follower household reading a GFS-relayed item.
+  travel time) at every member household and every seated follower
+  household; up to 24 h (the follower cert's lifetime) at a GFS subscriber.
+- **The writer group key outlives a follower cert** (it changes only with
+  the content epoch, and a switch-off rotates nothing). A follower household
+  keeps it — without it a follower's comment would never reach a GFS
+  subscriber — but its own publisher checks the switch (and the cert's
+  lifetime) before every GFS publish, so an honest follower stops at once
+  and its write takes the host path, which every member household refuses.
+  A follower that ignores its switch can still have the GFS fan out its
+  ciphertext until the next rotation; every config holder drops it at once
+  and a GFS subscriber once the cert ends (≤ 24 h).
 - **The cert goes on demand.** A follower household holds no cert until one
   of its people comments or reacts. That write takes the host path (as
   every write without a cert always did), and the household asks the host
