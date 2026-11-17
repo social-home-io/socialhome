@@ -434,8 +434,8 @@ class PairingConnectionCollectionView(BaseView):
         # A pending pairing with a household we share a space with has no
         # row of its own (the row is the space seat, which keeps working):
         # it is listed in the seat's place, as the pending pairing it is.
-        staged = {half.id: half for half in fed.pending_pairings.list_staged()}
         listed = await self.svc(federation_repo_key).list_instances()
+        staged = {half.id: half for half in fed.pending_pairings.list_staged()}
         shares_space = staged.keys() & {inst.id for inst in listed}
         instances = [staged.pop(inst.id, inst) for inst in listed]
         # (A half whose seat ended meanwhile still waits: listed too.)

@@ -2697,8 +2697,15 @@ async def test_a_pending_pairing_over_a_seat_is_listed_as_pending(client):
     assert rows["peer-only-seat"]["shares_space"] is False
     assert rows["peer-only-seat"]["pending_kind"] is None
     assert rows["peer-paired"]["shares_space"] is False
-    # No key of the unconfirmed handshake is in the row.
-    assert "enc" not in (await r.text())
+    # No key of the unconfirmed handshake, and no inbox id, is in the row.
+    assert not {
+        "key_self_to_remote",
+        "key_remote_to_self",
+        "remote_identity_pk",
+        "local_inbox_id",
+        "remote_inbox_url",
+    } & set(staged)
+    assert "pair-peer-seat" not in (await r.text())
 
 
 async def test_cancelling_a_pending_pairing_over_a_seat_keeps_the_seat(client):

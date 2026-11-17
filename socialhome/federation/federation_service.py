@@ -83,6 +83,7 @@ from ..domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    is_paired,
     pending_kind,
 )
 from ..domain.federation_capabilities import FederationCapability
@@ -944,16 +945,18 @@ class FederationService:
         (:func:`~socialhome.domain.federation.pending_kind`) — in the row,
         or beside the household's space seat, which the confirmed pair then
         replaces: a cancel that committed first leaves nothing to confirm.
-        Returns whether the pair is confirmed now."""
+        Returns whether the pair is confirmed now — also when another
+        envelope of the requester's got here first (it sends several at
+        once when its side confirms): the pair is announced once, and
+        every one of those envelopes goes on."""
         inst = await self._pending_pairings.get(instance_id)
-        if inst is None or pending_kind(inst) != PENDING_KIND_APPROVAL:
-            return False
-        confirmed = replace(inst, status=PairingStatus.CONFIRMED)
-        if not await self._pending_pairings.promote(confirmed):
-            return False
-        log.info("auto-pair: %s confirmed the approved pairing", instance_id)
-        await self._bus.publish(PairingConfirmed(instance_id=instance_id))
-        return True
+        if inst is not None and pending_kind(inst) == PENDING_KIND_APPROVAL:
+            confirmed = replace(inst, status=PairingStatus.CONFIRMED)
+            if await self._pending_pairings.promote(confirmed):
+                log.info("auto-pair: %s confirmed the approved pairing", instance_id)
+                await self._bus.publish(PairingConfirmed(instance_id=instance_id))
+                return True
+        return is_paired(await self._federation_repo.get_instance(instance_id))
 
     async def drop_queued(
         self,

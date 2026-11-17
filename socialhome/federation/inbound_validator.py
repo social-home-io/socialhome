@@ -831,9 +831,12 @@ def make_confirm_relay_approval(
     the envelope proceeds (the row says ``pending_sent`` to every handler).
     An approval kept beside a space seat (``ctx.instance.staged``) fails
     CLOSED: the row for that household is still its seat, so every handler
-    would take the sender for a confirmed household — unless the pair
-    confirmed, the envelope is refused exactly like one on an unknown
-    inbox (the sender's outbox retries that).
+    would take the sender for a confirmed household — unless the pair IS
+    confirmed (by this envelope, or by another of the requester's that got
+    here first), the envelope is refused with the answer an unknown inbox
+    gets. That refusal is final for this envelope (its id is in the replay
+    cache by now): it happens only when our admin withdrew the approval,
+    or it expired, between the lookup and this step.
     """
 
     async def confirm_relay_approval(ctx: InboundContext) -> None:

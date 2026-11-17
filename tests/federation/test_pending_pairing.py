@@ -7,6 +7,7 @@ the people have confirmed.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 
 import pytest
@@ -396,3 +397,68 @@ async def test_a_failed_route_seed_never_fails_the_confirmation(pending, repo):
     confirmed = replace(half, status=PairingStatus.CONFIRMED)
     assert await pending.promote(confirmed)
     assert repo.rows[PEER] is confirmed and pending.staged(PEER) is None
+
+
+# ── one winner: a confirm and a cancel of the same half ──────────────────
+
+
+class _SlowRepo(_Repo):
+    """Holds the upgrade write open until the test lets it finish."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writing = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def upgrade_seat_instance(self, inst, *, token=None):
+        self.writing.set()
+        await self.release.wait()
+        return await super().upgrade_seat_instance(inst, token=token)
+
+
+async def test_a_cancel_during_the_confirm_loses(clock):
+    """The row path decides this in one transaction — whichever commits
+    first wins, the other changes nothing. A half kept beside a seat has no
+    token to consume (an approval, a request), so the store decides it: a
+    cancel that arrives while the confirm is writing finds nothing left."""
+    repo = _SlowRepo()
+    pending = PendingPairings(repo, clock=clock)
+    repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_SENT)
+    await pending.save(half, ttl_s=300)
+    confirmed = replace(half, status=PairingStatus.CONFIRMED)
+
+    promote = asyncio.create_task(pending.promote(confirmed))
+    await repo.writing.wait()
+    cancel = asyncio.create_task(pending.cancel(PEER))
+    await asyncio.sleep(0)
+    repo.release.set()
+
+    assert await promote is True
+    assert await cancel is None
+    assert repo.rows[PEER] is confirmed
+    assert ("sessions", "pair-inbox", "ab" * 32) not in repo.calls
+
+
+async def test_a_handshake_started_during_a_confirm_is_not_swept_away(clock):
+    """The confirm's own clean-up must not drop a half that a NEW
+    handshake staged while the write was in flight."""
+    repo = _SlowRepo()
+    pending = PendingPairings(repo, clock=clock)
+    repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_SENT, inbox="first")
+    await pending.save(half, ttl_s=300)
+    repo.upgrade_ok = False  # the write will be refused
+
+    promote = asyncio.create_task(
+        pending.promote(replace(half, status=PairingStatus.CONFIRMED))
+    )
+    await repo.writing.wait()
+    newer = _inst(PairingStatus.PENDING_RECEIVED, inbox="second")
+    save = asyncio.create_task(pending.save(newer, ttl_s=300))
+    await asyncio.sleep(0)
+    repo.release.set()
+
+    assert await promote is False
+    assert await save is True
+    assert pending.staged(PEER) is newer

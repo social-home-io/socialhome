@@ -551,7 +551,7 @@ class SqliteFederationRepo:
             if not conn.execute(
                 _UPGRADE_SEAT_SQL,
                 (
-                    *_promote_params(inst)[:-1],
+                    *_promote_set_params(inst),
                     inst.local_inbox_id,
                     int(inst.share_home),
                     int(inst.gfs_relay),
@@ -1162,7 +1162,9 @@ class _NotPending(Exception):
     """Rolls back :meth:`SqliteFederationRepo.promote_pending_instance`."""
 
 
-_PROMOTE_PENDING_SQL = """
+#: What a confirmation writes over the row it confirms — bound by
+#: :func:`_promote_set_params`, in this order.
+_PROMOTE_SET_SQL = """
 UPDATE remote_instances SET
     display_name=?,
     remote_identity_pk=?,
@@ -1182,15 +1184,20 @@ UPDATE remote_instances SET
     home_lon=?,
     paired_at=?,
     last_reachable_at=?,
-    unreachable_since=?
+    unreachable_since=?"""
+
+_PROMOTE_PENDING_SQL = (
+    _PROMOTE_SET_SQL
+    + """
 WHERE id=? AND status IN ('pending_sent', 'pending_received')
 """
+)
 
 
 #: :data:`_PROMOTE_PENDING_SQL` for a row that is a live space seat, plus the
 #: columns a seat holds its own value of (see ``upgrade_seat_instance``).
 _UPGRADE_SEAT_SQL = (
-    _PROMOTE_PENDING_SQL.rsplit("WHERE", 1)[0].rstrip()
+    _PROMOTE_SET_SQL
     + """,
     local_inbox_id=?,
     share_home=?,
@@ -1221,6 +1228,11 @@ def _drop_pairing_sessions(conn, inbox_id: str, peer_pk: str) -> list[str]:
 
 
 def _promote_params(inst: RemoteInstance) -> tuple:
+    return (*_promote_set_params(inst), inst.id)
+
+
+def _promote_set_params(inst: RemoteInstance) -> tuple:
+    """The values of :data:`_PROMOTE_SET_SQL`, in its order."""
     return (
         inst.display_name,
         inst.remote_identity_pk,
@@ -1241,7 +1253,6 @@ def _promote_params(inst: RemoteInstance) -> tuple:
         inst.paired_at,
         inst.last_reachable_at,
         inst.unreachable_since,
-        inst.id,
     )
 
 

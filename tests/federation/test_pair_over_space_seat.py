@@ -21,6 +21,7 @@ it. After an unpair the plain seat is back.
 # ruff: noqa: F811 — the fixtures imported below are used as test arguments
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import orjson
@@ -340,6 +341,83 @@ async def test_the_space_keeps_flowing_until_the_trust_relay_pair_confirms(world
     assert c.refused == [] and a.refused == []
 
     await _assert_space_over_the_pairing(world, "paired")
+
+
+async def test_envelopes_racing_the_confirmation_all_arrive(world):
+    """The requester talks at once and in parallel when its side confirms
+    (capabilities, a DataChannel offer, queued space events). Every one of
+    those envelopes resolves to the staged approval; only the first can
+    confirm it. The others must not be refused for that — a refusal after
+    the replay check is final: the retry is answered "replay" and dropped
+    (review finding)."""
+    a, c = world.a, world.c
+    approval = await _request_and_approve(world)
+    a_row = await _row(a, c)
+    raws = [
+        orjson.dumps(
+            a.h.federation._seal_envelope(
+                a_row,
+                event_type=FederationEventType.SPACE_POST_CREATED,
+                payload={**_post_payload(f"racing-{n}"), "post_id": f"race-{n}"},
+                space_id=world.space.id,
+            )
+        )
+        for n in range(4)
+    ]
+    c.h.received.clear()
+
+    # All four are in c's pipeline at the same time.
+    results = await asyncio.gather(
+        *(
+            c.h.federation.handle_inbound_envelope(approval.local_inbox_id, raw)
+            for raw in raws
+        ),
+        return_exceptions=True,
+    )
+
+    assert results == [{"status": "ok"}] * 4
+    got = sorted(
+        e.payload["content"]
+        for e in c.h.received
+        if e.event_type is FederationEventType.SPACE_POST_CREATED
+    )
+    assert got == [f"racing-{n}" for n in range(4)]
+    # Confirmed once, however many envelopes raced for it.
+    assert c.confirmed == [a.h.instance_id]
+    assert is_paired(await _row(c, a))
+
+
+async def test_a_withdrawn_approval_and_a_racing_confirmation_have_one_winner(world):
+    """c's admin withdraws the approval in the very moment a's first
+    envelope confirms it: exactly one of the two happens — never a
+    "cancelled" answer (and an UNPAIR) for a pairing that went live."""
+    a, c = world.a, world.c
+    approval = await _request_and_approve(world)
+    a_row = await _row(a, c)
+    raw = orjson.dumps(
+        a.h.federation._seal_envelope(
+            a_row,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload=_post_payload("first"),
+            space_id=world.space.id,
+        )
+    )
+
+    confirm, cancel = await asyncio.gather(
+        c.h.federation.handle_inbound_envelope(approval.local_inbox_id, raw),
+        c.cancel.cancel_pending(a.h.instance_id),
+        return_exceptions=True,
+    )
+
+    row = await _row(c, a)
+    if isinstance(cancel, Exception):
+        # The confirmation won: the cancel changed and sent nothing.
+        assert confirm == {"status": "ok"} and is_paired(row)
+        assert c.confirmed == [a.h.instance_id]
+    else:
+        # The cancel won: the envelope was refused, the seat is untouched.
+        assert isinstance(confirm, ValueError) and is_space_seat(row)
+        assert c.confirmed == []
 
 
 async def test_an_approved_pair_does_not_confirm_on_seat_traffic(world):

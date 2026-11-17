@@ -44,6 +44,7 @@ What the inbound pipeline reads of a staged half
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -86,7 +87,7 @@ class PendingPairings:
     """Reads and writes the pending half of a pairing handshake: in the
     ``remote_instances`` row, or beside a space seat (module docstring)."""
 
-    __slots__ = ("_clock", "_repo", "_staged")
+    __slots__ = ("_clock", "_locks", "_repo", "_staged")
 
     def __init__(
         self,
@@ -97,6 +98,26 @@ class PendingPairings:
         self._repo = federation_repo
         self._clock = clock
         self._staged: dict[str, _Staged] = {}
+        #: One writer per household. The row path settles "confirm or
+        #: cancel, whichever commits first" in one transaction; a half kept
+        #: here spans a memory entry AND a database write, and an approval
+        #: or a request has no session token to consume — so the store
+        #: serialises :meth:`save`, :meth:`promote` and :meth:`cancel` per
+        #: household itself: the loser finds the half gone.
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock(self, instance_id: str) -> asyncio.Lock:
+        lock = self._locks.get(instance_id)
+        if lock is None:
+            # Dropped again with nothing staged and nobody waiting.
+            for iid in [
+                i
+                for i, held in self._locks.items()
+                if i not in self._staged and not held.locked()
+            ]:
+                del self._locks[iid]
+            lock = self._locks[instance_id] = asyncio.Lock()
+        return lock
 
     def _live(self, instance_id: str) -> _Staged | None:
         entry = self._staged.get(instance_id)
@@ -128,21 +149,22 @@ class PendingPairings:
         """
         if pending.status not in _PENDING:
             raise ValueError("only a pending pairing is saved here")
-        if not is_space_seat(await self._repo.get_instance(pending.id)):
-            self._staged.pop(pending.id, None)
-            await self._repo.save_instance(pending)
-            return False
-        self._prune()
-        if pending.id not in self._staged and len(self._staged) >= STAGED_MAX:
-            raise TooManyPendingPairingsError(
-                "too many pairings are waiting — cancel one or try again later"
+        async with self._lock(pending.id):
+            if not is_space_seat(await self._repo.get_instance(pending.id)):
+                self._staged.pop(pending.id, None)
+                await self._repo.save_instance(pending)
+                return False
+            self._prune()
+            if pending.id not in self._staged and len(self._staged) >= STAGED_MAX:
+                raise TooManyPendingPairingsError(
+                    "too many pairings are waiting — cancel one or try again later"
+                )
+            self._staged[pending.id] = _Staged(
+                instance=pending,
+                expires_at=self._clock() + ttl_s,
+                gfs_route=gfs_route,
             )
-        self._staged[pending.id] = _Staged(
-            instance=pending,
-            expires_at=self._clock() + ttl_s,
-            gfs_route=gfs_route,
-        )
-        return True
+            return True
 
     def staged(self, instance_id: str) -> RemoteInstance | None:
         """The pending half kept beside *instance_id*'s seat, if any."""
@@ -207,6 +229,12 @@ class PendingPairings:
             and confirmed.key_remote_to_self
         ):
             return False
+        async with self._lock(confirmed.id):
+            return await self._promote_locked(confirmed, token)
+
+    async def _promote_locked(
+        self, confirmed: RemoteInstance, token: str | None
+    ) -> bool:
         entry = self._live(confirmed.id)
         if entry is None:
             return await self._repo.promote_pending_instance(confirmed, token=token)
@@ -216,7 +244,7 @@ class PendingPairings:
         # the write leaves it in place for the retry (the peer's next
         # envelope, the admin's next click).
         ok = await self._repo.upgrade_seat_instance(confirmed, token=token)
-        self._staged.pop(confirmed.id, None)
+        del self._staged[confirmed.id]
         if not ok:
             return False
         if entry.gfs_route is not None:
@@ -241,18 +269,20 @@ class PendingPairings:
         it and drop the ``pending_pairings`` sessions behind it. Returns
         the half and the consumed tokens, or ``None`` when nothing is
         staged (the caller then cancels the row). The seat stays."""
-        entry = self._live(instance_id)
-        if entry is None:
-            return None
-        inst = entry.instance
-        # Sessions first: if that write fails the half is still here and
-        # the cancel can be tried again.
-        tokens = await self._repo.cancel_pairing_sessions(
-            local_inbox_id=inst.local_inbox_id,
-            peer_identity_pk=inst.remote_identity_pk,
-        )
-        self._staged.pop(instance_id, None)
-        return inst, tokens
+        async with self._lock(instance_id):
+            entry = self._live(instance_id)
+            if entry is None:
+                # Nothing staged — or a confirm took the half first.
+                return None
+            inst = entry.instance
+            # Sessions first: if that write fails the half is still here
+            # and the cancel can be tried again.
+            tokens = await self._repo.cancel_pairing_sessions(
+                local_inbox_id=inst.local_inbox_id,
+                peer_identity_pk=inst.remote_identity_pk,
+            )
+            del self._staged[instance_id]
+            return inst, tokens
 
 
 __all__ = [

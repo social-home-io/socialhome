@@ -502,6 +502,12 @@ requester's first envelope only an `approval` — and an approval never
 reuses the inbox id a code or a request gave out. A code can therefore
 never confirm keys and an address an introducer vouched for. A half
 without the peer's identity key or session keys is never confirmed.
+Saving, confirming and cancelling a half kept beside a seat are
+serialised per household, so a confirm and a cancel of the same half have
+exactly one winner, as the row path's single transaction guarantees. (Two
+households that each request the other through a friend, and each approve
+before either ack arrives, both hold an approval and both ignore the ack
+for their own request: either cancels and pairs again.)
 
 **What the inbound pipeline accepts.** A keyed staged half is resolved by
 its own inbox id (`FederationService._lookup_inbox`) and then held to its
@@ -511,8 +517,12 @@ half's keys must not open what a pending row's status keeps shut:
 
 - an **approval** takes the requester's first envelope under the approved
   keys; it verifies and decrypts against the approval and confirms the
-  pair before dispatch. If the pair does not confirm, the envelope is
-  refused like one on an unknown inbox (fail closed);
+  pair before dispatch. The requester sends several envelopes at once
+  when its side confirms: the first confirms, the pair is announced once,
+  and the others go on as soon as it is confirmed. If the pair is NOT
+  confirmed by then (the approval was withdrawn or expired in that very
+  moment), the envelope is refused with the answer an unknown inbox gets
+  (fail closed);
 - a **pairing code**'s half takes exactly one event, the peer's
   `PAIRING_ABORT` — the other household cancelled, and our half and its
   session go with it, so our admin cannot confirm alone afterwards;
@@ -872,8 +882,10 @@ own ([above](#pairing-with-a-household-you-share-a-space-with)): its
 cancel drops the sessions, then forgets the half, then tells the peer with
 the half's keys — and never touches the seat: the space keeps working, and
 a second cancel is a `404` like any other. The peer's half is beside ITS
-seat too; its pipeline takes the `PAIRING_ABORT` on the handshake's inbox
-and drops that half and its session. `DELETE
+seat too; when it has an inbox address, its pipeline takes the
+`PAIRING_ABORT` on the handshake's inbox and drops that half and its
+session (a peer without an address is not told, as for any pending
+pairing: its half expires with its session). `DELETE
 /api/pairing/connections/{instance_id}` never unpairs a seat (`404`).
 
 ### Pending states
