@@ -1781,6 +1781,35 @@ def pending_kind(instance: RemoteInstance) -> str | None:
     return None
 
 
+def is_space_seat(instance: RemoteInstance | None) -> bool:
+    """Whether *instance* is a live space seat: a confirmed
+    :data:`InstanceSource.SPACE_SESSION` row. Pure, no I/O.
+
+    A seat is NOT a pairing. Two households that share a space hold one
+    for each other so the space's own events flow; it says nothing about
+    the people having chosen each other. Every pairing check asks this
+    (or :func:`is_paired`) instead of reading ``status`` alone — a bare
+    ``status is CONFIRMED`` took a seat for "already paired" and made
+    pairing over a shared space impossible.
+    """
+    return (
+        instance is not None
+        and instance.status is PairingStatus.CONFIRMED
+        and instance.source is InstanceSource.SPACE_SESSION
+    )
+
+
+def is_paired(instance: RemoteInstance | None) -> bool:
+    """Whether *instance* is a confirmed pairing the people approved (QR
+    or trust relay) — a confirmed row that is not a space seat
+    (:func:`is_space_seat`). Pure, no I/O."""
+    return (
+        instance is not None
+        and instance.status is PairingStatus.CONFIRMED
+        and instance.source is not InstanceSource.SPACE_SESSION
+    )
+
+
 @dataclass(slots=True, frozen=True)
 class BroadcastResult:
     """Aggregate result of fan-out to many peers."""

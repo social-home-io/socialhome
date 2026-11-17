@@ -1479,3 +1479,140 @@ async def test_cancel_pending_instance_of_a_keyless_row_takes_no_keyed_session(e
     assert await env.fed_repo.cancel_pending_instance("peer-ap") == []
     assert await env.fed_repo.get_pairing("tok-x") is not None
     assert await env.fed_repo.get_pairing("tok-y") is not None
+
+
+# ── A confirmed pairing replaces a space seat (pair-over-seat) ─────────────
+
+
+def _seat_row(iid: str, inbox: str = "seat-inbox") -> RemoteInstance:
+    """A directory seat: confirmed, ``space_session``, no address."""
+    return replace(
+        _tomb_inst(iid, inbox),
+        remote_inbox_url="",
+        source=InstanceSource.SPACE_SESSION,
+        key_self_to_remote="seat-k1",
+        key_remote_to_self="seat-k2",
+        remote_keywrap_pk="cd" * 32,
+        proto_version=94,
+    )
+
+
+def _pair_row(iid: str, inbox: str = "pair-inbox") -> RemoteInstance:
+    return replace(
+        _tomb_inst(iid, inbox),
+        key_self_to_remote="pair-k1",
+        key_remote_to_self="pair-k2",
+        share_home=True,
+        gfs_relay=True,
+        relay_via="friend",
+        proto_version=1,
+    )
+
+
+async def test_upgrade_seat_instance_replaces_the_seat_with_the_pairing(env):
+    await env.fed_repo.save_instance(replace(_seat_row("peer-s"), share_home=False))
+    await env.fed_repo.create_pairing(_session("tok-a", "pair-inbox"))
+    await _seed_side_rows(env.db, "peer-s")
+
+    assert await env.fed_repo.upgrade_seat_instance(_pair_row("peer-s"), token="tok-a")
+
+    got = await env.fed_repo.get_instance("peer-s")
+    assert got.source is InstanceSource.MANUAL
+    assert got.status is PairingStatus.CONFIRMED
+    assert (got.key_self_to_remote, got.key_remote_to_self) == ("pair-k1", "pair-k2")
+    assert got.remote_inbox_url == "https://peer-s/wh"
+    # The pairing's own inbox id and opt-ins — never the seat's.
+    assert got.local_inbox_id == "pair-inbox"
+    assert got.share_home is True and got.gfs_relay is True
+    assert got.relay_via == "friend"
+    # What the seat already knew of the household survives.
+    assert got.proto_version == 94
+    assert got.remote_keywrap_pk == "cd" * 32
+    assert await env.fed_repo.get_pairing("tok-a") is None
+    # Envelopes queued for the seat still go out — to the pair now.
+    assert (await _side_row_counts(env.db, "peer-s"))[0] == 1
+
+
+async def test_upgrade_seat_instance_writes_a_fresh_row_when_the_seat_ended(env):
+    """The shared space ended while the people were pairing: the pairing
+    stands on its own."""
+    assert await env.fed_repo.upgrade_seat_instance(_pair_row("peer-s"))
+    got = await env.fed_repo.get_instance("peer-s")
+    assert got.source is InstanceSource.MANUAL and got.local_inbox_id == "pair-inbox"
+
+
+async def test_upgrade_seat_instance_never_replaces_a_pairing(env):
+    """Paired meanwhile by another handshake: its keys are never swapped."""
+    await env.fed_repo.save_instance(_tomb_inst("peer-s", "own-live"))
+    assert not await env.fed_repo.upgrade_seat_instance(_pair_row("peer-s"))
+    got = await env.fed_repo.get_instance("peer-s")
+    assert got.key_self_to_remote == "k1" and got.local_inbox_id == "own-live"
+
+
+@pytest.mark.parametrize(
+    "status", [PairingStatus.PENDING_SENT, PairingStatus.PENDING_RECEIVED]
+)
+async def test_upgrade_seat_instance_never_replaces_a_pending_row(env, status):
+    await env.fed_repo.save_instance(_half("peer-s", "own-h", status))
+    assert not await env.fed_repo.upgrade_seat_instance(_pair_row("peer-s"))
+    assert (await env.fed_repo.get_instance("peer-s")).status is status
+
+
+async def test_upgrade_seat_instance_never_replaces_a_tombstone(env):
+    await env.fed_repo.save_instance(_tomb_inst("peer-s", "wh-t"))
+    await env.fed_repo.mark_unpairing("peer-s")
+    assert not await env.fed_repo.upgrade_seat_instance(_pair_row("peer-s"))
+    tomb = await env.fed_repo.get_instance("peer-s", include_unpairing=True)
+    assert tomb.status is PairingStatus.UNPAIRING
+
+
+async def test_upgrade_seat_instance_without_its_session_changes_nothing(env):
+    await env.fed_repo.save_instance(_seat_row("peer-s"))
+    assert not await env.fed_repo.upgrade_seat_instance(
+        _pair_row("peer-s"), token="gone"
+    )
+    assert (await env.fed_repo.get_instance("peer-s")).source is (
+        InstanceSource.SPACE_SESSION
+    )
+
+
+async def test_upgrade_seat_instance_refused_keeps_the_session(env):
+    """Rolled back as one, like ``promote_pending_instance``."""
+    await env.fed_repo.save_instance(_tomb_inst("peer-s", "own-live"))
+    await env.fed_repo.create_pairing(_session("tok-a", "pair-inbox"))
+    assert not await env.fed_repo.upgrade_seat_instance(
+        _pair_row("peer-s"), token="tok-a"
+    )
+    assert await env.fed_repo.get_pairing("tok-a") is not None
+
+
+async def test_cancel_pairing_sessions_takes_the_sessions_and_no_row(env):
+    """The sessions behind a pending pairing kept beside a seat: by its
+    inbox id and by the peer identity they name — the seat row stays."""
+    await env.fed_repo.save_instance(_seat_row("peer-s"))
+    await env.fed_repo.create_pairing(_session("tok-a", "pair-inbox"))
+    await env.fed_repo.create_pairing(
+        _session("tok-b", "older-inbox", peer_pk=("ab" * 32).upper())
+    )
+    await env.fed_repo.create_pairing(_session("tok-other", "inbox-other"))
+
+    tokens = await env.fed_repo.cancel_pairing_sessions(
+        local_inbox_id="pair-inbox", peer_identity_pk="ab" * 32
+    )
+
+    assert sorted(tokens) == ["tok-a", "tok-b"]
+    assert await env.fed_repo.get_pairing("tok-a") is None
+    assert await env.fed_repo.get_pairing("tok-b") is None
+    assert await env.fed_repo.get_pairing("tok-other") is not None
+    assert (await env.fed_repo.get_instance("peer-s")).source is (
+        InstanceSource.SPACE_SESSION
+    )
+
+
+async def test_cancel_pairing_sessions_without_a_key_matches_the_inbox_only(env):
+    await env.fed_repo.create_pairing(_session("tok-a", "pair-inbox"))
+    await env.fed_repo.create_pairing(_session("tok-b", "x", peer_pk="ab" * 32))
+    assert await env.fed_repo.cancel_pairing_sessions(
+        local_inbox_id="pair-inbox", peer_identity_pk=""
+    ) == ["tok-a"]
+    assert await env.fed_repo.get_pairing("tok-b") is not None
