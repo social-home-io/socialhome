@@ -508,7 +508,7 @@ def _issued(pk: bytes = OWN_PK, **over) -> dict:
 async def test_an_unanswered_ask_is_retried_with_a_bounded_backoff(monkeypatch):
     """B2 (#1375 review): ``want`` said "ask" once and cleared only on
     store, so an ask that went unanswered was never repeated until a
-    restart. It is due again after 10 min, then 20, 40 … up to 6 h; the
+    restart. It is due again after 15 min, then 30, 60 … up to 6 h; the
     credential's arrival clears it (and the backoff)."""
     now = [1000.0]
     monkeypatch.setattr(wcs_mod.time, "monotonic", lambda: now[0])
@@ -517,7 +517,7 @@ async def test_an_unanswered_ask_is_retried_with_a_bounded_backoff(monkeypatch):
     assert svc.want("sp-1", cert=True) is True
     assert svc.want("sp-1", cert=True) is False
     asked = []
-    for _ in range(8):
+    for _ in range(14):
         now[0] += 60
         if svc.want("sp-1", cert=True):
             asked.append(now[0])
@@ -529,7 +529,9 @@ async def test_an_unanswered_ask_is_retried_with_a_bounded_backoff(monkeypatch):
         if svc.want("sp-1", cert=True):
             gaps.append(round((now[0] - last) / 60))
             last = now[0]
-    assert gaps[:5] == [10, 20, 40, 80, 160]
+    # First retry a little after the host's 10 min answer interval, so a
+    # retry never lands a moment too early and waits out a doubled gap.
+    assert gaps[:5] == [15, 30, 60, 120, 240]
     assert max(gaps) == 360
     assert svc.want("sp-1", key=True) is False  # one ask carries both
     assert svc.wanted("sp-1") == (True, True)
@@ -695,6 +697,21 @@ def test_scope_weakened():
     assert not scope_weakened("comment", "write")
     assert not scope_weakened(None, "comment")
     assert not scope_weakened("write", "write")
+
+
+async def test_a_same_second_cert_wins_by_rank_follower_scopes_included():
+    """#1375 adversarial review: the tie-break asked ``scope_permits(new,
+    held)`` — a follower scope is no action, so a same-second ``write`` cert
+    did not replace a held follower cert (a promotion), and a ``follower``
+    cert replaced a held ``comment`` one. Ties go by scope rank."""
+    svc, _keys = _svc(seed=None)
+    assert await svc.accept("sp-1", _issued(issued_at=200, scope="follower_comment"))
+    assert await svc.accept("sp-1", _issued(issued_at=200, scope="follower"))
+    assert not await svc.accept("sp-1", _issued(issued_at=200, scope="follower_react"))
+    assert await svc.accept("sp-1", _issued(issued_at=200, scope="comment"))
+    assert not await svc.accept("sp-1", _issued(issued_at=200, scope="follower"))
+    assert await svc.accept("sp-1", _issued(issued_at=200))
+    assert (await svc.own_cert("sp-1", 2)).scope == "write"  # type: ignore[union-attr]
 
 
 async def test_accept_keeps_a_newer_or_stronger_cert():

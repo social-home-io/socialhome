@@ -534,8 +534,10 @@ class GfsMemberPublishService:
     async def _ask(
         self, space: Space, *, cert: bool = False, key: bool = False
     ) -> None:
-        """Note what we want and, the first time, have the sync scheduler
-        BEGIN to the host now (one request; later writes ask nothing)."""
+        """Note what we want and, when an ask is due
+        (:meth:`SpaceWriterCertService.want` — the first time, then with a
+        bounded backoff while it stays unanswered), have the space service
+        send the host one ``SPACE_CREDENTIALS_WANTED`` — never a sync."""
         host = space.owner_instance_id
         if not host or host == self._own_instance_id:
             return

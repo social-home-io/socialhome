@@ -140,9 +140,10 @@ PeerPayloadHook = Callable[[str, dict], Awaitable[dict]]
 WRITER_CERT_EPOCH_GRACE_S: int = 600
 
 #: Member side: an ask for our credentials that went unanswered is repeated
-#: after this (the host answers at most once per 10 min), doubling up to
+#: after this (a margin over the host's one answer per 10 min, so a retry
+#: never arrives a moment early and waits out a doubled gap), doubling up to
 #: :data:`CREDENTIALS_RETRY_MAX_S` — and only while someone still writes.
-CREDENTIALS_RETRY_S: float = 10 * 60
+CREDENTIALS_RETRY_S: float = 15 * 60
 CREDENTIALS_RETRY_MAX_S: float = 6 * 60 * 60
 
 #: Ordering of scopes for "did this household's rights get weaker?".
@@ -1007,7 +1008,8 @@ def writer_key_min_version(space: Space | None) -> int | None:
 
 def _supersedes(new: WriterCert, held: WriterCert) -> bool:
     """A received cert replaces the one we hold only when it is newer, or as
-    new and at least as strong (``write`` wins a tie)."""
+    new and at least as strong (by scope rank: ``write`` wins a tie, a
+    member scope beats a follower scope; an unknown scope never wins)."""
     if new.issued_at != held.issued_at:
         return new.issued_at > held.issued_at
-    return scope_permits(new.scope, held.scope)
+    return _SCOPE_RANK.get(new.scope, -1) >= _SCOPE_RANK.get(held.scope, 0)

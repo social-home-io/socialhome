@@ -2216,15 +2216,18 @@ class SpaceService(
         if payloads is None:
             return False
         # Supersede the whole older snapshot still queued for this household
-        # (every part — the new one may have fewer).
-        try:
-            await self._federation.drop_queued_with_key_prefix(
-                to_instance_id, roster_snapshot_key_prefix(space.id)
-            )
-        except Exception:
-            log.exception(
-                "roster-snapshot: dropping queued parts for %s failed", space.id
-            )
+        # (every part — the new one may have fewer). A credentials-only one
+        # carries no roster: it leaves a queued roster snapshot alone (and
+        # has its own outbox slot, ``supersede_key``).
+        if not credentials_only:
+            try:
+                await self._federation.drop_queued_with_key_prefix(
+                    to_instance_id, roster_snapshot_key_prefix(space.id)
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: dropping queued parts for %s failed", space.id
+                )
         ok = True
         for payload in payloads:
             try:
@@ -2762,9 +2765,11 @@ class SpaceService(
         The asker must hold a live seat here (the §24.11-authenticated
         sender); what it gets is re-derived from our roster and the space's
         switches, so a follower that may not write, or a household asking for
-        a key we would not give, gets nothing. At most one answer per (space,
-        household) per :data:`CREDENTIALS_ANSWER_INTERVAL_S`, no doubling, and
-        outside the roster repair's budget."""
+        a key we would not give, gets nothing. At most one ask is looked at
+        (and answered) per (space, household) per
+        :data:`CREDENTIALS_ANSWER_INTERVAL_S`, no doubling, and outside the
+        roster repair's budget; the answer never touches a queued roster
+        snapshot."""
         p = event.payload if isinstance(event.payload, dict) else {}
         space_id = str(event.space_id or p.get("space_id") or "")
         sender = event.from_instance
@@ -2785,6 +2790,9 @@ class SpaceService(
         last = book.get(sender)
         if last is not None and now - last < CREDENTIALS_ANSWER_INTERVAL_S:
             return
+        # Counted before we look: an ask we have nothing for costs the same
+        # reads, so it is limited like an answered one.
+        book[sender] = now
         has = (
             cert_wanted and await self._cert_epoch_for(space_id, sender) is not None
         ) or (key_wanted and await self._writer_key_for(space_id, sender))
@@ -2795,7 +2803,6 @@ class SpaceService(
                 space_id,
             )
             return
-        book[sender] = now
         try:
             await self.send_roster_snapshot(
                 space_id, to_instance_id=sender, credentials_only=True
@@ -9245,12 +9252,14 @@ class SpaceService(
             raise NotFoundError("post disappeared")
         space_id, _post = got
         await self._require_writable_space(space_id)
+        member = await self._spaces.get_member(space_id, editor_user_id)
         if comment.author != editor_user_id:
-            member = await self._spaces.get_member(space_id, editor_user_id)
             if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
                 raise PermissionError(
                     "only the author or a space moderator can edit this comment",
                 )
+        elif member is not None:
+            await self._follower_may_change_comment(space_id, member)
         _validate_text_length(new_content, limit=MAX_COMMENT_LENGTH)
         if not new_content.strip():
             raise ValueError("comment body cannot be empty")
@@ -9289,12 +9298,14 @@ class SpaceService(
         if got is None:
             raise NotFoundError("post disappeared")
         space_id, _post = got
+        member = await self._spaces.get_member(space_id, actor_user_id)
         if comment.author != actor_user_id:
-            member = await self._spaces.get_member(space_id, actor_user_id)
             if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
                 raise PermissionError(
                     "only the author or a space moderator can delete this comment"
                 )
+        elif member is not None:
+            await self._follower_may_change_comment(space_id, member)
         await self._posts.soft_delete_comment(comment_id, space_id=space_id)
         await self._posts.decrement_comment_count(comment.post_id, space_id=space_id)
         await self._bus.publish(
@@ -9305,6 +9316,20 @@ class SpaceService(
                 actor_user_id=actor_user_id,
                 author_user_id=comment.author,
             ),
+        )
+
+    async def _follower_may_change_comment(
+        self, space_id: str, member: SpaceMember
+    ) -> None:
+        """A follower's edit / delete of its OWN comment follows the comment
+        switch, like the comment itself: with the switch off every other
+        household refuses the change (the §24.11 writer gate, the
+        ``space_item`` handlers), so applying it here would only make this
+        copy differ. A moderator still removes the comment."""
+        if member.role != SpaceRole.SUBSCRIBER:
+            return
+        self._assert_writable_member(
+            member, action="comment", space=await self._require_space(space_id)
         )
 
     async def set_my_location_sharing(

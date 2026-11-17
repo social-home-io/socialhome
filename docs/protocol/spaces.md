@@ -1693,12 +1693,15 @@ a ~5.5 MB roster snapshot each) and no rotation:
   sender holds a live seat, re-derives what it may hold from its roster and
   the switches (nothing → no answer), and answers with a
   `SPACE_ROSTER_SNAPSHOT` holding no roster entry, only the asker's own
-  credentials. Its own limiter: at most one answer per (space, household)
-  per 10 min (`CREDENTIALS_ANSWER_INTERVAL_S`), no doubling, outside the
-  roster repair's budget — a renewal a day, a re-ask after a switch change,
-  and many followers asking at once are all answered. The asker repeats an
-  unanswered ask after 10 min, doubling to 6 h
-  (`CREDENTIALS_RETRY_S` / `_MAX_S`), and only while someone writes. It asks
+  credentials. Its own limiter: at most one ask looked at (and answered)
+  per (space, household) per 10 min (`CREDENTIALS_ANSWER_INTERVAL_S`), no
+  doubling, outside the roster repair's budget — a renewal a day, a re-ask
+  after a switch change, and many followers asking at once are all
+  answered. The answer has its own outbox slot (`roster-credentials:<space>`)
+  and never replaces or drops a queued roster snapshot. The asker repeats
+  an unanswered ask after 15 min, doubling to 6 h
+  (`CREDENTIALS_RETRY_S` / `_MAX_S`), and only while someone writes; queued
+  asks are latest-only (`credentials-wanted:<space>`). It asks
   again when its cert is within an hour of its end, or lacks the right the
   write needs. The same request brings any household its writer group key
   (`key_wanted`) when it first publishes over a GFS and holds none — the
@@ -1716,7 +1719,8 @@ publicly readable space the same four channels also carry `writer_key` —
 the epoch's writer group key (`{writer_key_suite, space_id, epoch,
 writer_seed, writer_key_cert}`, derived from the space seed per epoch) —
 next to the cert, only to a v_90 household holding a publishing scope
-(`write` and `comment` get the same key). The receiver verifies it against
+(`write`, `comment` and the follower scopes get the same key — see "The
+writer group key outlives a follower cert" above). The receiver verifies it against
 the pinned space key and keeps it KEK-wrapped on `space_keys.writer_key`; it
 signs the household's anonymous publishes to the connection server (see
 [`discovery.md`](./discovery.md#the-writer-group-key-v_50-every-publicly-readable-space-since-v_90)). It

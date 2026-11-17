@@ -328,7 +328,7 @@ def test_a_roster_snapshot_supersedes_per_space_and_part():
         return supersede_key(
             FederationEventType.SPACE_ROSTER_SNAPSHOT,
             space_id=space,
-            payload={"space_id": space, "entries": [], **payload},
+            payload={"space_id": space, "entries": [{"seat": 1}], **payload},
         )
 
     assert key() == "roster-snapshot:s1:0"
@@ -339,3 +339,34 @@ def test_a_roster_snapshot_supersedes_per_space_and_part():
     assert key(part="x") is None
     assert key().startswith(roster_snapshot_key_prefix("s1"))
     assert not key(space="s10").startswith(roster_snapshot_key_prefix("s1"))
+
+
+def test_a_credentials_only_snapshot_has_its_own_key():
+    """#1375 adversarial review: a credentials-only snapshot (``entries:
+    []``) shared part 0's key with a full roster snapshot and replaced it in
+    the outbox. It has its own latest-only key, outside the roster prefix."""
+    key = supersede_key(
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
+        space_id="s1",
+        payload={"space_id": "s1", "entries": [], "writer_cert": {}},
+    )
+    assert key == "roster-credentials:s1"
+    assert not key.startswith(roster_snapshot_key_prefix("s1"))
+    assert (
+        supersede_key(
+            FederationEventType.SPACE_ROSTER_SNAPSHOT,
+            space_id=None,
+            payload={"entries": []},
+        )
+        is None
+    )
+
+
+def test_a_credentials_ask_is_latest_only():
+    """Asks queued for an offline host do not pile up: one per space."""
+    t = FederationEventType.SPACE_CREDENTIALS_WANTED
+    a = supersede_key(t, space_id="s1", payload={"cert_wanted": True})
+    assert a == "credentials-wanted:s1"
+    assert a == supersede_key(t, space_id="s1", payload={"key_wanted": True})
+    assert a != supersede_key(t, space_id="s2", payload={})
+    assert supersede_key(t, space_id=None, payload={}) is None

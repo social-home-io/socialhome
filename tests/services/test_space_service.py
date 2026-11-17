@@ -2455,6 +2455,61 @@ async def test_space_delete_comment_non_admin_rejected(stack):
         await stack.space_svc.delete_comment(c.id, actor_user_id=carl.user_id)
 
 
+async def _follower_with_a_comment(stack):
+    """A local follower of a space whose comment switch is on, their own
+    comment, and the switch turned off again."""
+    anna = await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (s.id,)
+    )
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=s.id,
+            user_id=fan.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-11-17T00:00:00+00:00",
+        )
+    )
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=fan.user_id, content="hi"
+    )
+    return s, anna, fan, c
+
+
+async def test_a_follower_edits_or_deletes_its_comment_only_under_the_switch(stack):
+    """S2 (#1375 adversarial review): the local path let a follower edit or
+    delete its own comment with the comment switch off — every other
+    household refuses that change, so the copies diverged (and on the host
+    it went out as the host's). It follows the switch like a create; a
+    moderator's delete does not."""
+    s, anna, fan, c = await _follower_with_a_comment(stack)
+    # Switch on: both work for the follower's own comment.
+    edited = await stack.space_svc.edit_comment(
+        c.id, editor_user_id=fan.user_id, new_content="hello"
+    )
+    assert edited.content == "hello"
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=0 WHERE id=?", (s.id,)
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.edit_comment(
+            c.id, editor_user_id=fan.user_id, new_content="again"
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.delete_comment(c.id, actor_user_id=fan.user_id)
+    held = await stack.space_post_repo.get_comment(c.id)
+    assert held is not None and not held.deleted and held.content == "hello"
+    # The owner still removes it.
+    await stack.space_svc.delete_comment(c.id, actor_user_id=anna.user_id)
+    held = await stack.space_post_repo.get_comment(c.id)
+    assert held is not None and held.deleted
+
+
 async def test_space_list_feed(stack):
     """list_feed returns posts scoped to the space."""
     anna = await stack.provision_user("anna")
@@ -12076,6 +12131,44 @@ async def test_a_switch_change_is_answered_after_ten_minutes(stack, monkeypatch)
     await _ask(stack, _wanting(space, "peer-a", cert=True))
     [sent] = _payloads(fed)
     assert _cert_of(sent["payload"]).scope == "follower"
+
+
+async def test_a_credentials_answer_leaves_a_queued_roster_snapshot_alone(
+    stack, monkeypatch
+):
+    """#1375 adversarial review: the credentials-only answer dropped every
+    queued part of a full roster snapshot to that household (same outbox key
+    prefix) — a slow household's repair was replaced by ``entries: []`` and
+    its roster stayed wrong for the repair's cooldown."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _pks = await _follower_space(stack)
+    fed.drop_queued_with_key_prefix = AsyncMock(return_value=0)
+    await _ask(stack, _wanting(space, "peer-a", cert=True))
+    assert len(_payloads(fed)) == 1
+    fed.drop_queued_with_key_prefix.assert_not_awaited()
+
+
+async def test_an_ask_with_nothing_to_give_is_limited_too(stack, monkeypatch):
+    """#1375 adversarial review: an ask the host had nothing for was not
+    counted, so a seated household could make it re-derive the entitlement
+    as often as it liked. One look per (space, household) per 10 min."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _pks = await _follower_space(stack, comment=False)
+    looked: list[str] = []
+    real = type(stack.space_svc)._cert_epoch_for
+
+    async def _counting(self, space_id, instance_id):
+        looked.append(instance_id)
+        return await real(self, space_id, instance_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "_cert_epoch_for", _counting)
+    for _ in range(5):
+        await _ask(stack, _wanting(space, "peer-a", cert=True))
+    assert looked == ["peer-a"]
+    assert _payloads(fed) == []
+    clock.advance(ss_mod.CREDENTIALS_ANSWER_INTERVAL_S)
+    await _ask(stack, _wanting(space, "peer-a", cert=True))
+    assert looked == ["peer-a"] * 2
 
 
 async def test_many_followers_asking_at_once_are_all_answered(stack, monkeypatch):
