@@ -88,12 +88,15 @@ GENERIC_ITEM_TYPES: frozenset[str] = frozenset(
 )
 SUPPORTED_ITEM_TYPES: frozenset[str] = POST_SHAPED_ITEM_TYPES | GENERIC_ITEM_TYPES
 
-#: The writer-cert scope each type needs at the receivers. Post edits and
+#: The right each type needs from a writer cert at the receivers
+#: (:func:`~socialhome.domain.writer_cert.scope_permits`). Post edits and
 #: deletes need ``write`` — the same right as the post itself — so a
 #: comment-only household (a follower, or a plain member under a
 #: ``MODERATED`` / ``ADMIN_ONLY`` posts level) edits or deletes its post on
-#: the host path, never over the relay. Reactions need ``comment`` plus the
-#: per-receiver rules in ``space_item_inbound`` (followers ask for more).
+#: the host path, never over the relay. Comments need ``comment``,
+#: reactions ``react`` (a follower scope grants each only under its
+#: switch), an author profile ``profile`` (every scope); a config holder
+#: also checks the follower switch (``space_item_inbound``).
 _REQUIRED_SCOPE: dict[str, str] = {
     ITEM_TYPE_POST: WRITER_SCOPE_WRITE,
     ITEM_TYPE_POST_EDIT: WRITER_SCOPE_WRITE,

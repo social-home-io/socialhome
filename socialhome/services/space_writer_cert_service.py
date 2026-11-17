@@ -1,14 +1,18 @@
 """Issue, deliver, store and check space writer certificates (v_49).
 
 A writer cert (:mod:`socialhome.writer_cert`) is the space AUTHORITY key's
-per-epoch statement that one household may write (or only comment). This
-service is the one place that
+per-epoch statement that one household may write, only comment and
+react, or — a follower household — what the space's follower switches
+allow. This service is the one place that
 
 * **derives** what a household is entitled to from the roster the issuer
-  already holds — owner / admin / moderator / member seats → ``write``; a
-  follower (subscriber) seat → ``comment`` only while the space has
-  ``allow_subscriber_comment`` on; several seats → ONE cert at the
-  strongest scope. Nothing about issued certs is stored: a seed holder
+  already holds — owner / admin / moderator / member seats → ``write``
+  (where the ``posts`` level lets them post) or ``comment``; a follower
+  (``subscriber``) seat → ``follower`` / ``follower_comment`` /
+  ``follower_react`` after ``allow_subscriber_comment`` /
+  ``allow_subscriber_react`` (nothing with both off; it lives 24 h and is
+  asked for on demand, ``SPACE_CREDENTIALS_WANTED``); several seats → ONE
+  cert at the strongest scope. Nothing about issued certs is stored: a seed holder
   re-derives them from the roster at every epoch rotation;
 * **issues** them — only a household holding the space seed (the owner, or a
   delegated admin), and only while that seed still matches the pinned space
@@ -568,8 +572,10 @@ class SpaceWriterCertService:
         ``epoch`` (default: our current content epoch), or ``None``.
 
         Only from a seed holder whose seed matches the pin, only to a peer
-        that holds a publishing scope (``write`` or ``comment`` alike) — never
-        to a non-publisher — and only where the peer can use it: in a
+        that holds a publishing scope (``write``, ``comment`` or a follower
+        scope alike — the key outlives a follower cert, so the follower's
+        own publisher checks the switch) — never to a non-publisher — and
+        only where the peer can use it: in a
         publicly readable space (the key is how a member publishes, always
         anonymously, to every server on the owner's list) to a v_90 peer. An
         older household gets no key: its items take the host path."""
