@@ -147,6 +147,39 @@ describe('PairingFlow — socialhome://pair code round-trip', () => {
   })
 })
 
+describe('PairingFlow — entering the code for a household we share a space with', () => {
+  async function enterCode(confirmResult: Record<string, unknown>) {
+    apiPost.mockResolvedValueOnce({
+      token: 'tok-xyz', identity_pk: 'ed25519:bb', dh_pk: 'x25519:cc',
+      inbox_url: 'https://h.example/inbox/abc', expires_at: '2026-05-18T10:05:00Z',
+    })
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')
+    await screen.findByText('pairing.role_show')
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await screen.findByText('pairing.copy_code')
+    fireWs('pairing.accept_received', { token: 'tok-xyz', verification_code: '123456' })
+    apiPost.mockResolvedValueOnce(confirmResult)
+    fireEvent.click(await screen.findByText('pairing.verify'))
+    await new Promise(r => setTimeout(r, 0))
+  }
+
+  it('still pending after the code: closes and says it waits for them — no "paired", no sharing step', async () => {
+    await enterCode({ instance_id: 'peer-d', display_name: 'Delta House', status: 'pending_sent' })
+    expect(apiPost).toHaveBeenLastCalledWith('/api/pairing/confirm', { token: 'tok-xyz', verification_code: '123456' })
+    expect(showToastSpy).toHaveBeenCalledWith('connections.meta.waiting_approval Delta House', 'info')
+    expect(screen.queryByText('pairing.success')).toBeNull()
+    expect(screen.queryByText('pairing.verify')).toBeNull()
+  })
+
+  it('confirmed at once (no shared space): the success step, as before', async () => {
+    await enterCode({ instance_id: 'peer-d', display_name: 'Delta House', status: 'confirmed' })
+    await screen.findByText('pairing.success')
+    expect(showToastSpy).not.toHaveBeenCalledWith('connections.meta.waiting_approval Delta House', 'info')
+  })
+})
+
 describe('PairingFlow — scanner paste decoding', () => {
   it('decodes a socialhome://pair# code paste and POSTs to /api/pairing/accept', async () => {
     const payload = {
