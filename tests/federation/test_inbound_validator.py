@@ -42,6 +42,7 @@ from socialhome.federation.inbound_validator import (
     make_check_replay,
     make_check_space_archived,
     make_check_space_writer,
+    make_check_staged_half,
     make_check_timestamp,
     make_check_unpairing,
     make_confirm_relay_approval,
@@ -1914,6 +1915,85 @@ class _StagedApproval(_KeyedStatusInstance):
     """An approval kept beside a space seat (``_InboxInstance.staged``)."""
 
     staged = True
+
+
+class _StagedHalf:
+    """What ``_lookup_inbox`` resolves a staged half to."""
+
+    staged = True
+
+    def __init__(self, kind) -> None:
+        self.pending_kind = kind
+
+
+async def _staged_gate(kind, event_type) -> None:
+    await make_check_staged_half()(
+        InboundContext(
+            envelope=_minimal_envelope(event_type=event_type.value),
+            inbox_id="pair-inbox",
+            instance=_StagedHalf(kind),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.PAIRING_ABORT,
+    ],
+)
+async def test_a_staged_approval_takes_the_requesters_envelope(event_type):
+    await _staged_gate("approval", event_type)
+
+
+async def test_a_staged_pairing_code_takes_the_peers_abort():
+    await _staged_gate("code", FederationEventType.PAIRING_ABORT)
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        FederationEventType.UNPAIR,
+        FederationEventType.PAIRING_CONFIRM,
+        FederationEventType.PAIRING_INTRO_AUTO,
+    ],
+)
+async def test_a_staged_pairing_code_takes_nothing_else(event_type):
+    """Nobody verified the code yet, and the household's row says
+    "confirmed" (its seat): nothing under the code's keys is dispatched."""
+    with pytest.raises(ValueError, match="No instance found"):
+        await _staged_gate("code", event_type)
+
+
+@pytest.mark.parametrize("kind", ["request", None, "something-new"])
+async def test_any_other_staged_half_takes_nothing(kind):
+    """Fail closed for a kind this gate does not know."""
+    with pytest.raises(ValueError, match="No instance found"):
+        await _staged_gate(kind, FederationEventType.PAIRING_ABORT)
+
+
+async def test_the_staged_gate_leaves_every_row_alone():
+    for status in PairingStatus:
+        await make_check_staged_half()(
+            InboundContext(
+                envelope=_minimal_envelope(),
+                instance=_KeyedStatusInstance(status),
+            )
+        )
+
+
+async def test_the_staged_gate_runs_before_any_crypto():
+    steps = FederationService._common_pipeline_steps(
+        _StubPipelineOwner(),  # type: ignore[arg-type]
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert names.index("check_staged_half") < names.index("verify_signature")
+    assert names.index("check_staged_half") < names.index("decrypt_and_parse")
 
 
 async def test_a_staged_approval_that_confirms_lets_the_envelope_through():

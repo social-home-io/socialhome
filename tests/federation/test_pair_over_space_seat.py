@@ -448,10 +448,89 @@ async def test_a_cancelled_pairing_code_keeps_the_seat(world):
     # A second cancel finds no pending pairing — the seat is not one.
     with pytest.raises(PendingPairingNotFoundError):
         await c.cancel.cancel_pending(a.h.instance_id)
-    # The code owner can no longer finish it into a one-sided pairing
-    # that c would refuse: c's confirm session is gone.
-    await a.cancel.cancel_pending(c.h.instance_id)
+    # The code owner heard the cancel: its half went too, so it has nothing
+    # left to cancel (or to confirm into a one-sided pairing).
+    with pytest.raises(PendingPairingNotFoundError):
+        await a.cancel.cancel_pending(c.h.instance_id)
     await _assert_space_over_the_seat(world, "both-cancelled")
+
+
+async def test_a_cancel_is_heard_by_the_household_that_showed_the_code(world):
+    """c scanned a's code and then cancelled. Its ``PAIRING_ABORT`` is
+    sealed with the keys of the half and goes to the inbox the code gave
+    out — which, over a seat, no row holds. a must hear it all the same:
+    otherwise a's admin enters the code a minute later, a replaces its
+    seat with a pairing c refused, and the space between the two is dead
+    (review finding; without a seat the abort always arrived)."""
+    a, c = world.a, world.c
+    seats = (await _seat_keys(a, c), await _seat_keys(c, a))
+    code, accepted = await _scan(world)
+
+    assert await c.cancel.cancel_pending(a.h.instance_id) is True
+
+    assert a.refused == []
+    assert a.h.federation.pending_pairings.staged(c.h.instance_id) is None
+    assert await a.h.federation_repo.get_pairing(code["token"]) is None
+    with pytest.raises(ValueError, match="No pending pairing"):
+        await a.h.federation.confirm_pairing(
+            code["token"], accepted["verification_code"]
+        )
+    assert a.confirmed == [] and c.confirmed == []
+    assert (await _seat_keys(a, c), await _seat_keys(c, a)) == seats
+    await _assert_space_over_the_seat(world, "c-cancelled")
+
+
+async def test_a_pairing_code_never_confirms_a_trust_relay_approval(world):
+    """a compares a pairing code with c. Meanwhile an introduction "from
+    c" arrives through a household a trusts and a's admin approves it —
+    the two are pairing, after all. The approval carries the keys and the
+    address the INTRODUCER vouched for, which the code never covered:
+    entering the code must not confirm it (review finding — the half was
+    replaced in place and promoted with the introducer's keys)."""
+    a, c, m = world.a, world.c, world.m
+    code, accepted = await _scan(world)
+    await c.auto.request_via(
+        via_instance_id=m.h.instance_id,
+        target_instance_id=a.h.instance_id,
+        target_display_name="A",
+        own_inbox_base_url=c.base,
+    )
+    [request] = a.auto_inbox.list_pending()
+    approval = await a.auto.finalize_pending(
+        request.request_id, own_inbox_base_url=a.base
+    )
+    # A handshake of its own: never the inbox the code gave out.
+    assert not code["inbox_url"].endswith("/" + approval.local_inbox_id)
+
+    with pytest.raises(ValueError, match="No pending pairing"):
+        await a.h.federation.confirm_pairing(
+            code["token"], accepted["verification_code"]
+        )
+
+    assert is_space_seat(await _row(a, c)) and a.confirmed == []
+
+
+async def test_a_pairing_code_never_confirms_our_own_keyless_request(world):
+    """a holds c's code half and also asks m to introduce it to c: the
+    request (no key at all) took the half's place. Entering the code must
+    not turn the seat into a confirmed row nobody can talk to."""
+    a, c, m = world.a, world.c, world.m
+    seat = await _seat_keys(a, c)
+    code, accepted = await _scan(world)
+    await a.auto.request_via(
+        via_instance_id=m.h.instance_id,
+        target_instance_id=c.h.instance_id,
+        target_display_name="C",
+        own_inbox_base_url=a.base,
+    )
+
+    with pytest.raises(ValueError, match="No pending pairing"):
+        await a.h.federation.confirm_pairing(
+            code["token"], accepted["verification_code"]
+        )
+
+    assert await _seat_keys(a, c) == seat and a.confirmed == []
+    await _assert_space_over_the_seat(world, "still-a-seat")
 
 
 async def test_a_confirmed_pairing_code_replaces_the_seat_on_both_sides(world):

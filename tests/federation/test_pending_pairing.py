@@ -173,11 +173,11 @@ async def test_a_staged_half_expires_with_its_ttl(pending, repo, clock):
     await pending.save(_inst(PairingStatus.PENDING_SENT, inbox="appr"), ttl_s=300)
     clock.now += 299
     assert pending.staged(PEER) is not None
-    assert pending.approval_for_inbox("appr") is not None
+    assert pending.keyed_for_inbox("appr") is not None
     clock.now += 2
     assert pending.staged(PEER) is None
     assert pending.list_staged() == []
-    assert pending.approval_for_inbox("appr") is None
+    assert pending.keyed_for_inbox("appr") is None
 
 
 async def test_a_new_handshake_replaces_the_staged_one(pending, repo):
@@ -292,31 +292,31 @@ async def test_promote_must_carry_the_staged_handshake(pending, repo):
     assert repo.calls == []
 
 
-# ── the approver's first-envelope lookup ────────────────────────────────
-
-
-async def test_only_a_staged_approval_resolves_by_inbox_id(pending, repo):
-    repo.rows[PEER] = _seat()
-    approval = _inst(PairingStatus.PENDING_SENT, inbox="appr")
-    await pending.save(approval, ttl_s=300)
-    assert pending.approval_for_inbox("appr") is approval
-    assert pending.approval_for_inbox("") is None
-    assert pending.approval_for_inbox("other") is None
+# ── the inbox lookup ─────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    "half",
-    [
-        # A pairing code nobody verified yet.
-        _inst(PairingStatus.PENDING_RECEIVED, inbox="code"),
-        # Our own request: no key to check anything against.
-        _inst(PairingStatus.PENDING_SENT, inbox="code", keyed=False),
-    ],
+    "status", [PairingStatus.PENDING_SENT, PairingStatus.PENDING_RECEIVED]
 )
-async def test_no_other_staged_half_resolves_by_inbox_id(pending, repo, half):
+async def test_a_keyed_staged_half_resolves_by_its_inbox_id(pending, repo, status):
+    """An approval and a pairing code's half both resolve; what either may
+    then be sent is the pipeline's staged-half gate."""
     repo.rows[PEER] = _seat()
+    half = _inst(status, inbox="pair")
     await pending.save(half, ttl_s=300)
-    assert pending.approval_for_inbox("code") is None
+    assert pending.keyed_for_inbox("pair") is half
+    assert pending.keyed_for_inbox("") is None
+    assert pending.keyed_for_inbox("other") is None
+    # Never by the seat's own inbox id.
+    assert pending.keyed_for_inbox("seat-inbox") is None
+
+
+async def test_our_own_keyless_request_never_resolves_by_inbox_id(pending, repo):
+    repo.rows[PEER] = _seat()
+    await pending.save(
+        _inst(PairingStatus.PENDING_SENT, inbox="req", keyed=False), ttl_s=300
+    )
+    assert pending.keyed_for_inbox("req") is None
 
 
 # ── cancel ──────────────────────────────────────────────────────────────
@@ -338,8 +338,61 @@ async def test_cancel_without_a_staged_half_is_none(pending, repo):
     assert repo.calls == []
 
 
-async def test_discard_forgets_a_staged_half(pending, repo):
+async def test_a_failed_session_delete_keeps_the_half_for_a_retry(pending, repo):
     repo.rows[PEER] = _seat()
-    await pending.save(_inst(PairingStatus.PENDING_RECEIVED), ttl_s=300)
-    assert pending.discard(PEER) is True
-    assert pending.discard(PEER) is False
+    half = _inst(PairingStatus.PENDING_RECEIVED)
+    await pending.save(half, ttl_s=300)
+
+    async def _boom(**_kw):
+        raise RuntimeError("db down")
+
+    repo.cancel_pairing_sessions = _boom
+    with pytest.raises(RuntimeError):
+        await pending.cancel(PEER)
+    assert pending.staged(PEER) is half
+
+
+# ── promote: what never confirms, and what an error leaves behind ────────
+
+
+@pytest.mark.parametrize("staged", [True, False])
+async def test_a_pairing_without_keys_is_never_confirmed(pending, repo, staged):
+    """Our own keyless request, promoted as if it were the handshake the
+    admin just verified, would leave a confirmed row nobody can talk to —
+    over a seat, in place of the seat."""
+    request = _inst(PairingStatus.PENDING_SENT, keyed=False)
+    if staged:
+        seat = repo.rows[PEER] = _seat()
+        await pending.save(request, ttl_s=300)
+    else:
+        seat = repo.rows[PEER] = request
+    assert not await pending.promote(replace(request, status=PairingStatus.CONFIRMED))
+    assert repo.rows[PEER] is seat and repo.calls == []
+
+
+async def test_a_failed_upgrade_write_keeps_the_half_for_a_retry(pending, repo):
+    repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_SENT)
+    await pending.save(half, ttl_s=300)
+
+    async def _boom(inst, *, token=None):
+        raise RuntimeError("db down")
+
+    repo.upgrade_seat_instance = _boom
+    with pytest.raises(RuntimeError):
+        await pending.promote(replace(half, status=PairingStatus.CONFIRMED))
+    assert pending.staged(PEER) is half
+
+
+async def test_a_failed_route_seed_never_fails_the_confirmation(pending, repo):
+    repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_RECEIVED)
+    await pending.save(half, ttl_s=300, gfs_route="gfs-1")
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("db down")
+
+    repo.upsert_gfs_route = _boom
+    confirmed = replace(half, status=PairingStatus.CONFIRMED)
+    assert await pending.promote(confirmed)
+    assert repo.rows[PEER] is confirmed and pending.staged(PEER) is None

@@ -60,6 +60,8 @@ from ..domain.errors import WrongTypeError
 from ..domain.federation import (
     ARCHIVED_ALLOWED_REMOVAL_TYPES,
     MULTI_EVENT_TYPES,
+    PENDING_KIND_APPROVAL,
+    PENDING_KIND_CODE,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     SPACE_WRITE_EVENT_TYPES,
     FederationEvent,
@@ -67,6 +69,7 @@ from ..domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    pending_kind,
 )
 from ..domain.space import WRITER_ROLES, SpaceRole
 from .host_equivalence import acts_as_host
@@ -254,12 +257,20 @@ class _InboxInstance:
 
     @property
     def staged(self) -> bool:
-        """Whether this is an approved trust-relay pairing kept BESIDE the
-        household's space seat (:class:`~socialhome.federation
-        .pending_pairing.PendingPairings`) instead of in its row. The row
-        still says "confirmed seat", so the envelope may go on only once
-        it has confirmed the pairing (:func:`make_confirm_relay_approval`)."""
+        """Whether this is a pending pairing kept BESIDE the household's
+        space seat (:class:`~socialhome.federation.pending_pairing
+        .PendingPairings`) instead of in its row. The row still says
+        "confirmed seat", so what may arrive under the half's keys is held
+        to :func:`make_check_staged_half`, and an approval's envelope goes
+        on only once it has confirmed the pairing
+        (:func:`make_confirm_relay_approval`)."""
         return self._staged
+
+    @property
+    def pending_kind(self) -> str | None:
+        """Which handshake a pending half is (``code`` / ``request`` /
+        ``approval``) — read by :func:`make_check_staged_half`."""
+        return pending_kind(self._inst)
 
     @property
     def from_instance(self) -> str:
@@ -526,6 +537,49 @@ def make_check_peer_class() -> InboundStep:
         )
 
     return check_peer_class
+
+
+def make_check_staged_half() -> InboundStep:
+    """Step 2b': what a pending pairing kept beside a space seat may be
+    sent under its keys.
+
+    The household's row is still its seat — "confirmed" to every handler —
+    so the half's keys must not open the door a row's ``pending_*`` status
+    keeps shut. By the half's kind
+    (:func:`~socialhome.domain.federation.pending_kind`):
+
+    * an **approval** (our admin approved the introduction): anything —
+      the requester's first envelope confirms the pair before dispatch, or
+      is refused (:func:`make_confirm_relay_approval`);
+    * a **pairing code** nobody verified yet: only the peer's
+      ``PAIRING_ABORT`` (it cancelled; our half and session go too);
+    * anything else: nothing.
+
+    Refused like an unknown inbox (the sender's outbox retries that; by
+    then the pair has confirmed, or the half is gone). Runs straight after
+    the lookup, before any crypto. A no-op for every row.
+    """
+
+    async def check_staged_half(ctx: InboundContext) -> None:
+        inst = ctx.instance
+        if getattr(inst, "staged", False) is not True:
+            return
+        kind = getattr(inst, "pending_kind", None)
+        if kind == PENDING_KIND_APPROVAL:
+            return
+        if (
+            kind == PENDING_KIND_CODE
+            and ctx.envelope.get("event_type")
+            == FederationEventType.PAIRING_ABORT.value
+        ):
+            return
+        log.info(
+            "inbound: refusing %r under the keys of an unconfirmed pairing",
+            ctx.envelope.get("event_type"),
+        )
+        raise ValueError(f"No instance found for inbox_id={ctx.inbox_id!r}")
+
+    return check_staged_half
 
 
 def make_check_relay_opt_in() -> InboundStep:

@@ -1452,11 +1452,72 @@ async def test_an_ack_after_the_staged_request_is_gone_never_replaces_the_seat(
     """The in-memory session survived but the staged half did not (cancelled
     between the two reads): a seat is never taken for our pending request."""
     c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity, seat=True)
-    coord.pending_pairings.discard(c_id)
+    await coord.pending_pairings.cancel(c_id)
 
     await coord.on_ack_at_originator(_evt("b", ack))
 
     assert is_space_seat(fed_repo.instances[c_id])
+
+
+@pytest.mark.parametrize("seat", [True, False])
+async def test_an_ack_never_confirms_a_half_that_is_not_our_request(
+    coord, fed_repo, identity, bus, seat
+):
+    """Our half for C stopped being the request (a pairing code was scanned
+    meanwhile, or we approved C's own introduction): the ack belongs to
+    no handshake we still hold and must not write its keys anywhere."""
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity, seat=seat)
+    code_half = replace(
+        _make_peer_remote_instance(ack["c_pk"], status=PairingStatus.PENDING_RECEIVED),
+        key_self_to_remote="code-out",
+    )
+    await coord.pending_pairings.save(code_half, ttl_s=300)
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    assert confirmed == []
+    assert (await coord.pending_pairings.get(c_id)) == code_half
+    if seat:
+        assert is_space_seat(fed_repo.instances[c_id])
+
+
+async def test_an_approval_never_reuses_the_inbox_a_pairing_code_gave_out(
+    coord, inbox, fed_repo, fed_service
+):
+    """A code half and an approval are different handshakes with different
+    keys; sharing one inbox id is what let a confirm of the first promote
+    the second."""
+    req = _queued_request(inbox)
+    code_half = replace(
+        _make_peer_remote_instance(
+            req.from_a_pk, status=PairingStatus.PENDING_RECEIVED
+        ),
+        local_inbox_id="code-inbox",
+    )
+    fed_repo.instances[req.from_a_id] = code_half
+
+    inst = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+
+    assert inst.local_inbox_id != "code-inbox"
+    ack = fed_service.send_event.await_args.kwargs["payload"]
+    assert ack["c_inbox_url"].endswith("/" + inst.local_inbox_id)
+
+
+async def test_a_repeated_approval_keeps_its_inbox(coord, inbox, fed_repo):
+    first = await coord.finalize_pending(
+        _queued_request(inbox).request_id,
+        own_inbox_base_url="https://c.example/federation/inbox",
+    )
+    req = _queued_request(inbox)
+    fed_repo.instances[req.from_a_id] = replace(first, id=req.from_a_id)
+    again = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+    assert again.local_inbox_id == first.local_inbox_id
 
 
 async def test_an_introduction_from_a_household_we_share_a_space_with_is_queued(
@@ -1518,7 +1579,7 @@ async def test_approval_over_a_space_seat_keeps_the_seat_until_the_requester_con
         "token",
         "to_a_id",
     }
-    assert coord.pending_pairings.approval_for_inbox(inst.local_inbox_id) == inst
+    assert coord.pending_pairings.keyed_for_inbox(inst.local_inbox_id) == inst
 
 
 @pytest.mark.parametrize("seated", ["sender", "target"])

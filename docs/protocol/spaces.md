@@ -330,8 +330,10 @@ their mirror. The receiver re-derives the answer from its own
 used to tear down a seat that is still carrying another shared space. See
 [`invites.md`](./invites.md). A seat that the two households upgraded to a
 pairing is no seat any more and is never torn down this way; when that
-pairing ends, the seat is made again from the member card
-([pairing](./pairing.md#pairing-with-a-household-you-share-a-space-with)).
+pairing ends, a directory seat is made again from the household's member
+card, where we hold one our roster lets us use
+([pairing](./pairing.md#pairing-with-a-household-you-share-a-space-with),
+with the limits for a link-joined household and its host).
 
 **Cross-household admin**
 

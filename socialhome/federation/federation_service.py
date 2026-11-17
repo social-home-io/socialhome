@@ -137,6 +137,7 @@ from .inbound_validator import (
     make_check_replay,
     make_check_space_archived,
     make_check_space_writer,
+    make_check_staged_half,
     make_check_timestamp,
     make_check_unpairing,
     make_confirm_relay_approval,
@@ -763,17 +764,17 @@ class FederationService:
         self, repo: AbstractFederationRepo, inbox_id: str
     ) -> _InboxInstance | None:
         """Who an envelope on *inbox_id* is from: the household whose row
-        holds that inbox id — or, first, the one whose introduction our
-        admin approved while we held a space seat for it. That approval is
-        kept beside the seat with an inbox id of its own
-        (:meth:`PendingPairings.approval_for_inbox`); the requester's first
-        envelope under the approved keys arrives there, verifies and
-        decrypts against the approval, and confirms the pair
-        (:func:`make_confirm_relay_approval` — fail closed for it). Nothing
-        else staged beside a seat is ever resolved here."""
-        approval = self._pending_pairings.approval_for_inbox(inbox_id)
-        if approval is not None:
-            return _InboxInstance(approval, staged=True)
+        holds that inbox id — or, first, one we hold a space seat for and
+        are pairing with. That pending half is kept beside the seat with
+        an inbox id of its own (:meth:`PendingPairings.keyed_for_inbox`),
+        and what it may be sent is narrow (:func:`make_check_staged_half`):
+        an approval takes the requester's first envelope under the
+        approved keys, which confirms the pair
+        (:func:`make_confirm_relay_approval` — fail closed for it); a
+        pairing code's half takes the peer's ``PAIRING_ABORT`` only."""
+        half = self._pending_pairings.keyed_for_inbox(inbox_id)
+        if half is not None:
+            return _InboxInstance(half, staged=True)
         return await _lookup_by_inbox_id(repo, inbox_id)
 
     def _build_media_https_pipeline(self):
@@ -884,6 +885,10 @@ class FederationService:
             # seat) is taken only from a sender whose member card we hold
             # for its space. No-op elsewhere.
             make_check_mailbox_sender(lambda: self._mailbox_sender_check),
+            # A pending pairing kept beside a space seat: its keys open
+            # only what its kind allows (an approval's first envelope, a
+            # pairing code's abort). No-op for every row.
+            make_check_staged_half(),
             # §D2b peer-class gate: a household seated from an invite link
             # may only speak the space vocabulary. Straight after the
             # lookup (the first step that knows WHO the sender is) and

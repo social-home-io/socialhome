@@ -1365,8 +1365,8 @@ member's card and no host hop.
   pairing code or a trust-relay introduction): the pending handshake waits
   beside the seat, which keeps carrying the space, and the confirmed pair
   replaces the seat — from then on the two talk directly, for the space
-  too. An unpair seats the household again from its card
-  (`SpaceMemberDirectory.reseat`). See
+  too. An unpair seats the household again from its card, as a directory
+  seat (`SpaceMemberDirectory.reseat`). See
   [pairing](./pairing.md#pairing-with-a-household-you-share-a-space-with).
 - A household the directory drops loses its card AND its `space_instances`
   row on every member, so no member's fan-out of that space reaches it, and

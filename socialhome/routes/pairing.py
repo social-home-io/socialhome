@@ -55,6 +55,7 @@ from ..domain.federation import (
     RemoteInstance,
     gfs_relay_available,
     is_relay_only,
+    is_space_seat,
     pending_kind,
 )
 from ..federation.pairing_gfs_reach import parse_reach
@@ -713,6 +714,11 @@ class PairingConnectionDetailView(BaseView):
                 pass
             else:
                 return web.json_response({"ok": True, "peer_notified": notified})
+        if is_space_seat(inst):
+            # A household we only share a space with is no pairing to end
+            # (a stale pending card whose handshake expired lands here):
+            # the seat goes when the shared space does, never by an UNPAIR.
+            return error_response(404, "NOT_FOUND", "Instance not found.")
         notified_or_none = await self.svc(peer_unpair_service_key).unpair(instance_id)
         if notified_or_none is None:
             return error_response(404, "NOT_FOUND", "Instance not found.")

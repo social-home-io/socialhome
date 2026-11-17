@@ -180,6 +180,11 @@ class PairingInboundHandlers:
                         event.from_instance,
                         token[:8],
                     )
+        if self._federation is not None:
+            # Our half of a pairing with a household we share a space
+            # with waits beside its seat: it and its sessions go; the
+            # seat (the row below, "confirmed") is never touched.
+            await self._federation.pending_pairings.cancel(event.from_instance)
         instance = await self._repo.get_instance(event.from_instance)
         if instance is not None and instance.status is not PairingStatus.CONFIRMED:
             # Through the shared purge: whatever was queued for the

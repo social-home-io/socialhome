@@ -53,6 +53,7 @@ from ..domain.events import (
 from ..domain.federation import (
     PAIRING_REACH_GFS,
     PAIRING_REACH_URL,
+    PENDING_KIND_CODE,
     FederationEventType,
     GfsNotConnectedError,
     GfsNotSharedError,
@@ -60,6 +61,7 @@ from ..domain.federation import (
     PairingSession,
     PairingStatus,
     RemoteInstance,
+    pending_kind,
 )
 from ..domain.federation_capabilities import OURS
 from ..infrastructure.event_bus import EventBus
@@ -1128,6 +1130,12 @@ class PairingCoordinator:
             # don't re-write the row. Safe replay.
             return {"ok": True, "instance_id": claimed_instance_id, "replay": True}
 
+        if pending_kind(instance) != PENDING_KIND_CODE:
+            # Our half for this household is no longer the pairing code's
+            # (a trust-relay request or approval took its place): the
+            # code never vouched for THOSE keys.
+            raise ValueError("No pending pairing for this token")
+
         # One transaction: consume the session and flip the row (or
         # replace the space seat our half waited beside), only while it is
         # still pending. A cancel that committed first leaves neither — the
@@ -1178,6 +1186,12 @@ class PairingCoordinator:
             raise ValueError(
                 f"RemoteInstance not found for peer_instance_id={peer_instance_id!r}"
             )
+
+        if pending_kind(instance) != PENDING_KIND_CODE:
+            # The code the admin compared covers the half the code made —
+            # never a trust-relay request or approval that replaced it
+            # meanwhile (other keys, another address).
+            raise ValueError("No pending pairing for this token")
 
         # Flip the row and consume the session in ONE transaction, only
         # while the row is still pending: a cancel that committed first

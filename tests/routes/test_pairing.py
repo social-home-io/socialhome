@@ -2741,3 +2741,21 @@ async def test_removing_a_pending_card_over_a_seat_never_unpairs_the_seat(client
     assert seat is not None and seat.source is InstanceSource.SPACE_SESSION
     pending = client.app[federation_service_key].pending_pairings
     assert pending.staged("peer-seat") is None
+
+
+async def test_a_space_seat_is_never_unpaired_from_the_connections_endpoint(client):
+    """A stale pending card (its handshake expired) must not turn a click
+    into an ``UNPAIR`` over the seat: the household is no pairing to end."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_seat_instance("peer-seat"))
+    events: list[PeerUnpaired] = []
+    client.app[event_bus_key].subscribe(PeerUnpaired, events.append)
+
+    r = await client.delete(
+        "/api/pairing/connections/peer-seat", headers=_auth(client._tok)
+    )
+
+    assert r.status == 404
+    seat = await fed_repo.get_instance("peer-seat")
+    assert seat is not None and seat.status is PairingStatus.CONFIRMED
+    assert events == []

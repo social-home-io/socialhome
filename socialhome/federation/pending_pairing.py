@@ -31,28 +31,33 @@ In memory, bounded twice: each half for the lifetime of its handshake
 forgets a trust-relay request — the people start again; no migration, and
 no key of an unconfirmed handshake at rest.
 
-Only one kind of staged half is ever read by the inbound pipeline:
-an **approval** (our admin approved a household's introduction), which the
-requester's first envelope under the new keys confirms
-(:meth:`PendingPairings.approval_for_inbox`). A pairing code nobody
-verified yet opens nothing.
+What the inbound pipeline reads of a staged half
+(:meth:`PendingPairings.keyed_for_inbox`, gated by
+``make_check_staged_half``):
+
+* an **approval** (our admin approved a household's introduction) takes
+  the requester's first envelope under the new keys, which confirms it;
+* a **pairing code**'s half, which nobody verified yet, takes exactly one
+  thing: the peer's ``PAIRING_ABORT`` — so a cancel on the other side is
+  heard here too, and our half goes with it. Nothing else.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ..domain.federation import (
-    PENDING_KIND_APPROVAL,
     PairingStatus,
     RemoteInstance,
     is_space_seat,
-    pending_kind,
 )
 from ..repositories.federation_repo import AbstractFederationRepo
+
+log = logging.getLogger(__name__)
 
 #: Most pending halves kept beside seats at once. A household runs a
 #: handful of handshakes at a time; the cap only stops unbounded growth.
@@ -161,12 +166,12 @@ class PendingPairings:
         row = await self._repo.get_instance(instance_id)
         return None if is_space_seat(row) else row
 
-    def approval_for_inbox(self, inbox_id: str) -> RemoteInstance | None:
-        """The staged **approval** whose inbox id is *inbox_id* — what the
-        inbound pipeline resolves an envelope on that inbox to, so the
-        requester's first envelope under the approved keys can confirm
-        the pair. Never a pairing code's half (nobody verified it yet) and
-        never our own keyless request."""
+    def keyed_for_inbox(self, inbox_id: str) -> RemoteInstance | None:
+        """The staged half whose inbox id is *inbox_id*, when it holds the
+        peer's identity key and session keys — what the inbound pipeline
+        resolves an envelope on that inbox to. Never our own keyless
+        request. What such an envelope may then BE is decided by the
+        pipeline's staged-half gate, by the half's kind."""
         if not inbox_id:
             return None
         self._prune()
@@ -174,7 +179,8 @@ class PendingPairings:
             inst = entry.instance
             if (
                 inst.local_inbox_id == inbox_id
-                and pending_kind(inst) == PENDING_KIND_APPROVAL
+                and inst.remote_identity_pk
+                and inst.key_remote_to_self
             ):
                 return inst
         return None
@@ -188,23 +194,46 @@ class PendingPairings:
         ``pending_pairings`` session *token* in the same transaction.
         Returns whether it happened; a refusal changes nothing.
 
-        A staged half confirms only as itself: *confirmed* must carry its
-        inbox id (the handshake it belongs to).
+        A pairing without the peer's identity key or session keys is never
+        confirmed, and a staged half confirms only as itself: *confirmed*
+        must carry its inbox id (the handshake it belongs to). Callers
+        check the half's KIND before they build *confirmed* — a pairing
+        code confirms a ``code`` half, an ack a ``request``, the first
+        envelope an ``approval``.
         """
+        if not (
+            confirmed.remote_identity_pk
+            and confirmed.key_self_to_remote
+            and confirmed.key_remote_to_self
+        ):
+            return False
         entry = self._live(confirmed.id)
         if entry is None:
             return await self._repo.promote_pending_instance(confirmed, token=token)
         if confirmed.local_inbox_id != entry.instance.local_inbox_id:
             return False
-        del self._staged[confirmed.id]
-        if not await self._repo.upgrade_seat_instance(confirmed, token=token):
+        # The half goes only once the database has answered: an error in
+        # the write leaves it in place for the retry (the peer's next
+        # envelope, the admin's next click).
+        ok = await self._repo.upgrade_seat_instance(confirmed, token=token)
+        self._staged.pop(confirmed.id, None)
+        if not ok:
             return False
         if entry.gfs_route is not None:
-            await self._repo.upsert_gfs_route(
-                confirmed.id,
-                entry.gfs_route,
-                now=datetime.now(UTC).isoformat(),
-            )
+            try:
+                await self._repo.upsert_gfs_route(
+                    confirmed.id,
+                    entry.gfs_route,
+                    now=datetime.now(UTC).isoformat(),
+                )
+            except Exception:
+                # The pair IS confirmed; route discovery finds the shared
+                # GFS again. Never fail the confirmation over it.
+                log.warning(
+                    "pairing: could not seed the relay route for %s",
+                    confirmed.id,
+                    exc_info=True,
+                )
         return True
 
     async def cancel(self, instance_id: str) -> tuple[RemoteInstance, list[str]] | None:
@@ -215,19 +244,15 @@ class PendingPairings:
         entry = self._live(instance_id)
         if entry is None:
             return None
-        del self._staged[instance_id]
         inst = entry.instance
+        # Sessions first: if that write fails the half is still here and
+        # the cancel can be tried again.
         tokens = await self._repo.cancel_pairing_sessions(
             local_inbox_id=inst.local_inbox_id,
             peer_identity_pk=inst.remote_identity_pk,
         )
+        self._staged.pop(instance_id, None)
         return inst, tokens
-
-    def discard(self, instance_id: str) -> bool:
-        """Forget the pending half kept beside *instance_id*'s seat (the
-        peer aborted, or the pair confirmed another way). Returns whether
-        there was one."""
-        return self._staged.pop(instance_id, None) is not None
 
 
 __all__ = [

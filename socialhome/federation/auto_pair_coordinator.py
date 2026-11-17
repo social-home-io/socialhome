@@ -89,6 +89,8 @@ from ..domain.events import (
     PairingConfirmed,
 )
 from ..domain.federation import (
+    PENDING_KIND_APPROVAL,
+    PENDING_KIND_REQUEST,
     AutoPairRequestExpiredError,
     FederationEventType,
     InstanceSource,
@@ -96,6 +98,7 @@ from ..domain.federation import (
     PairingStatus,
     RemoteInstance,
     is_paired,
+    pending_kind,
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
@@ -667,10 +670,15 @@ class AutoPairCoordinator:
             is_initiator=False,
         )
         now = datetime.now(UTC).isoformat()
-        # ``existing`` is a pending half of ours, never a seat: the pairing
-        # gets an inbox of its own, which is how the inbound pipeline tells
-        # A's first envelope under the new keys from the seat's traffic.
-        inbox_id = existing.local_inbox_id if existing else secrets.token_urlsafe(24)
+        # An approval has an inbox of its own — never a seat's (that is how
+        # the inbound pipeline tells A's first envelope under the new keys
+        # from the seat's traffic) and never the one a pairing code or a
+        # request of ours gave out: only a repeated approval keeps its id.
+        inbox_id = (
+            existing.local_inbox_id
+            if existing is not None and pending_kind(existing) == PENDING_KIND_APPROVAL
+            else secrets.token_urlsafe(24)
+        )
         # Pending, not confirmed: A may have cancelled its request meanwhile,
         # and a one-sided confirmed row would be a pairing A never agreed
         # to. A confirms when our ack reaches it and then talks to us; its
@@ -892,7 +900,7 @@ class AutoPairCoordinator:
             is_initiator=True,
         )
         existing = await self._pending_pairings.get(c_id)
-        if existing is None or existing.status is not PairingStatus.PENDING_SENT:
+        if existing is None or pending_kind(existing) != PENDING_KIND_REQUEST:
             # Our provisional half is gone — the request was cancelled after
             # this ack had already taken the in-memory session.
             log.info("auto-pair ack: request to %s was cancelled — ignored", c_id)
