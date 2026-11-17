@@ -4115,20 +4115,12 @@ class SpaceService(
     async def _send_credentials(self, space_id: str, instance_id: str) -> None:
         """Hand one household its own writer cert / writer group key /
         channel grant after they changed without a roster change: a snapshot
-        with no roster entry (~1–2 KB). A household below the roster-digest
-        line does not know that shape and gets the full roster snapshot, as
-        before."""
-        credentials_only = (
-            self._federation is not None
-            and await self._federation.space_member_supports(
-                instance_id, min_version=FederationCapability.MIN_FOR_ROSTER_DIGEST
-            )
-        )
+        with no roster entry (~1–2 KB). Every receiver since the snapshot
+        line (v_32) applies the credentials before it looks at the entries,
+        the released v_80 included."""
         try:
             await self.send_roster_snapshot(
-                space_id,
-                to_instance_id=instance_id,
-                credentials_only=credentials_only,
+                space_id, to_instance_id=instance_id, credentials_only=True
             )
         except Exception:
             log.exception(
@@ -5758,8 +5750,8 @@ class SpaceService(
         # Weaker (write → comment, any → none): rotate the content key, so
         # the cert it already holds dies with the epoch and every household
         # gets a fresh one at its current scope. Stronger (a follower made a
-        # member): re-deliver its cert at the new scope, in a roster snapshot
-        # addressed to that household alone. No rotation for a promotion.
+        # member): re-deliver its cert at the new scope, alone, to that one
+        # household (:meth:`_send_credentials`). No rotation for a promotion.
         # An admin seat that ended where the v_44 authority rotation will run
         # (delegation on, or a seed shared at the current key epoch) — that
         # rotation rotates the content key itself, so the scope rotation is
@@ -5784,7 +5776,7 @@ class SpaceService(
                 != scope_before
             )
         ):
-            await self.send_roster_snapshot(space_id, to_instance_id=instance_id)
+            await self._send_credentials(space_id, instance_id)
         # Delegated-admin authority (v_22): when the owner has opted in and
         # this newly-promoted remote member is an ADMIN, ship the space's
         # Ed25519 signing seed to that admin's household so it can sign

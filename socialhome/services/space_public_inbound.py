@@ -702,7 +702,7 @@ class SpacePublicInbound:
         )
         if verified is None:
             return
-        inner_cert, item_id, author_user_id, origin_instance_id = verified
+        _cert, item_id, author_user_id, origin_instance_id = verified
         post_shaped = item_type in POST_SHAPED_ITEM_TYPES
         member_household = await self._holds_writer_seat(item.space_id)
         if not post_shaped:
@@ -712,7 +712,6 @@ class SpacePublicInbound:
                     item_type=item_type,
                     inner=inner,
                     origin_instance_id=origin_instance_id,
-                    cert_scope=inner_cert.scope,
                     member_household=member_household,
                     authorship=self._authorship,
                     epoch=item.epoch,
@@ -925,13 +924,12 @@ class SpacePublicInbound:
                 )
                 if verified is None:
                     continue
-                inner_cert, _id, _author, origin = verified
+                _cert, _id, _author, origin = verified
                 if await self._items.apply(
                     space=space,
                     item_type=ITEM_TYPE_AUTHOR_PROFILE,
                     inner=raw,
                     origin_instance_id=origin,
-                    cert_scope=inner_cert.scope,
                     member_household=await self._holds_writer_seat(space_id),
                     authorship=self._authorship,
                     epoch=epoch,

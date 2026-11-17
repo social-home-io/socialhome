@@ -169,7 +169,6 @@ async def _apply(
     item_type: str,
     inner: dict,
     *,
-    cert_scope="write",
     member=False,
     authorship=None,
 ) -> bool:
@@ -179,7 +178,6 @@ async def _apply(
         item_type=item_type,
         inner=inner,
         origin_instance_id=ORIGIN,
-        cert_scope=cert_scope,
         member_household=member,
         authorship=authorship,
     )
@@ -517,7 +515,7 @@ async def test_a_comment_only_members_reaction_is_kept_at_a_gfs_subscriber(env):
     alike) and carries reactions — it used to be dropped there as "maybe a
     follower's"."""
     inner = _react(env, "reaction_add", "👍", 1)
-    assert await _apply(env, "reaction_add", inner, cert_scope="comment")
+    assert await _apply(env, "reaction_add", inner)
 
 
 async def test_a_member_household_checks_the_reactor_seat(env):
@@ -527,7 +525,6 @@ async def test_a_member_household_checks_the_reactor_seat(env):
         env,
         "reaction_add",
         inner,
-        cert_scope="comment",
         member=True,
         authorship=seats,
     )
@@ -885,13 +882,9 @@ async def test_a_member_household_refuses_a_follower_write_once_its_switch_is_of
         else _react(env, "reaction_add", "👍", 1)
     )
     await _switches(env, comment=False, react=False)
-    assert not await _apply(
-        env, kind, inner, cert_scope="comment", member=True, authorship=_FollowerSeat()
-    )
+    assert not await _apply(env, kind, inner, member=True, authorship=_FollowerSeat())
     await _switches(env, comment=True, react=True)
-    assert await _apply(
-        env, kind, inner, cert_scope="comment", member=True, authorship=_FollowerSeat()
-    )
+    assert await _apply(env, kind, inner, member=True, authorship=_FollowerSeat())
 
 
 # ── one name on every path: a relayed comment's picture by content ───────
@@ -962,14 +955,11 @@ async def test_a_follower_edit_or_delete_over_the_gfs_follows_the_comment_switch
         env,
         "comment",
         _comment(env, cid),
-        cert_scope="comment",
         member=True,
         authorship=_FollowerSeat(),
     )
     await _switches(env, comment=False, react=False)
     seats = _FollowerSeat()
     change = _inner(kind, cid, env["post_id"], content="rewritten", created_at=_ts(5))
-    assert not await _apply(
-        env, kind, change, cert_scope="comment", member=True, authorship=seats
-    )
+    assert not await _apply(env, kind, change, member=True, authorship=seats)
     assert seats.calls and all(not kw["subscriber_ok"] for _k, kw in seats.calls)

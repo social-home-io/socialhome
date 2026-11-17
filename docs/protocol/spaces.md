@@ -1658,15 +1658,16 @@ role's. There is no follower cert, scope, lifetime or request of its own:
   epoch; otherwise each household that gained gets its credentials alone —
   the `entries: []` snapshot above, ~1–2 KB to that one household. No roster
   goes out (it used to be the whole roster to every follower household:
-  ~5.5 MB each at 11 000 seats). A household below the roster-digest line
-  (v_81) does not know the credentials-only shape and gets the full
-  snapshot as before. The same credentials-only message hands out the
+  ~5.5 MB each at 11 000 seats). Every receiver applies the credentials
+  before it looks at the entries, a released v_80 household included. The
+  same message re-delivers a cert after a promotion and hands out the
   writer group key when a space first becomes publicly readable.
 - **Cost of a comment-switch toggle,** for F seated follower households and
   H households in all: ON = the config event + F × ~1–2 KB (≤ 3 signatures
-  each at the host); OFF with at least one follower seat = the config event
-  + one rotation (a sealed rekey of ~1–2 KB to each of the H households);
-  OFF with no follower = the config event. One rotation per toggle, never
+  each at the host); OFF where it takes a household's comment right away (a
+  household whose only seats are follower seats) = the config event + one
+  rotation (a sealed rekey of ~1–2 KB to each of the H households); OFF
+  where no household loses a right = the config event. One rotation per toggle, never
   per follower. The react switch changes no cert (a `comment` cert carries
   reactions): toggling it sends the config event only.
 - **A follower leaving or being removed** is a member leaving: a rotation

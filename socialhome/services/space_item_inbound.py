@@ -17,12 +17,12 @@ with the same rules as the federated ``SPACE_COMMENT_*`` /
   and space; so must the id of a delete for a row not held yet.
 * **Member households also check the roster** — the author's live seat on
   the origin household (:meth:`SpaceAuthorship.item_seat_admits`; a
-  follower seat only where the space lets followers comment / react, or for
-  a change to its own row); a post delete runs the ``posts`` access level
+  follower seat only where the space lets followers comment / react — an
+  edit or delete of its own comment needs the comment right like the
+  comment itself); a post delete runs the ``posts`` access level
   (:meth:`SpaceAuthorship.item_access_admits`), matching the ``write`` scope
-  the cert already proves. Followers hold no roster and rely on the cert
-  scope plus the user binding — and accept a ``comment``-scope reaction only
-  while their copy of the space lets followers react.
+  the cert already proves. A household without the roster (a GFS
+  subscriber) relies on the cert scope plus the user binding.
 
 **Ordering independence** (hard requirement 5 of the member-publish docs):
 the GFS delivers one space's items in order, but the host relay, the
@@ -145,7 +145,6 @@ class _Item:
     __slots__ = (
         "author",
         "authorship",
-        "cert_scope",
         "epoch",
         "inner",
         "member",
@@ -163,7 +162,6 @@ class _Item:
         inner: dict[str, Any],
         origin: str,
         stamp: datetime,
-        cert_scope: str,
         member: bool,
         authorship: SpaceAuthorship | None,
         epoch: int | None = None,
@@ -176,7 +174,6 @@ class _Item:
         self.target = str(inner.get("item_target") or "")
         self.post_id = str(inner.get("post_id") or "")
         self.stamp = stamp
-        self.cert_scope = cert_scope
         self.member = member
         self.authorship = authorship
 
@@ -212,7 +209,6 @@ class SpaceItemInbound:
         item_type: str,
         inner: dict[str, Any],
         origin_instance_id: str,
-        cert_scope: str,
         member_household: bool,
         authorship: SpaceAuthorship | None,
         epoch: int | None = None,
@@ -235,7 +231,6 @@ class SpaceItemInbound:
             inner=inner,
             origin=origin_instance_id,
             stamp=stamp,
-            cert_scope=cert_scope,
             member=member_household,
             authorship=authorship,
             epoch=epoch,

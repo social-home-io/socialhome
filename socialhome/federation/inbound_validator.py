@@ -1261,9 +1261,11 @@ def make_check_space_writer(
     bytes, is a refusal. Tombstones are still read, so a household we
     KICKED is refused, never held.
 
-    The two exceptions (:data:`_SUBSCRIBER_OPT_INS`) are
-    ``SPACE_COMMENT_CREATED`` when the space has ``allow_subscriber_comment``
-    on, and (v_93) ``SPACE_POST_REACTION`` when it has
+    The exceptions (:data:`_SUBSCRIBER_OPT_INS`) are
+    ``SPACE_COMMENT_CREATED`` — and the author's own
+    ``SPACE_COMMENT_UPDATED`` / ``SPACE_COMMENT_DELETED`` — when the space
+    has ``allow_subscriber_comment`` on, and (v_93) ``SPACE_POST_REACTION``
+    when it has
     ``allow_subscriber_react`` on — each only when the payload's acting
     user names a LIVE ``subscriber`` seat of that same household: the user
     is bound to a real row, so a flag cannot be used to smuggle the spoof

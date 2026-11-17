@@ -2510,6 +2510,28 @@ async def test_a_follower_edits_or_deletes_its_comment_only_under_the_switch(sta
     assert held is not None and held.deleted
 
 
+async def test_an_author_without_a_seat_cannot_change_their_comment(stack):
+    """The same rule as writing one: no seat, no comment right — every
+    other household would refuse the change anyway."""
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=bob.user_id, content="hi"
+    )
+    await stack.space_repo.delete_member(s.id, bob.user_id)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.edit_comment(
+            c.id, editor_user_id=bob.user_id, new_content="again"
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.delete_comment(c.id, actor_user_id=bob.user_id)
+
+
 async def test_space_list_feed(stack):
     """list_feed returns posts scoped to the space."""
     anna = await stack.provision_user("anna")
@@ -11980,6 +12002,58 @@ async def test_comment_rights_on_sends_followers_their_credentials_alone(stack):
     assert sent[0]["payload"]["entries"] == []
     assert _cert_of(sent[0]["payload"]).scope == "comment"
     fed.drop_queued_with_key_prefix.assert_not_awaited()
+
+
+async def test_a_gain_and_a_loss_in_one_change_rotate_once(stack, monkeypatch):
+    """One rule for every role: a change that takes a right from one
+    household and gives one to another rotates ONCE — the rekey carries
+    every household its new cert — and sends no separate credentials."""
+    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    # The access-level change consults the space's peer versions.
+    stack.space_svc._federation_repo.list_instances_in_space = AsyncMock(
+        return_value=[]
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(
+            allow_subscriber_comment=True,
+            posts_access=SpaceFeatureAccess.ADMIN_ONLY,
+        ),
+    )
+    assert rekeys == [space.id]
+    assert [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ] == []
+
+
+async def test_comment_rights_off_rotates_only_if_a_household_loses_a_right(
+    stack, monkeypatch
+):
+    """A household with a member seat next to its follower seat keeps its
+    cert when "followers may comment" goes off: nobody's entitlement
+    shrinks, so nothing rotates."""
+    space, _fed, remote, _pks = await _cert_space(stack, version=94)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-a", "u-a2", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == []
 
 
 async def test_the_react_switch_changes_no_cert_and_sends_only_the_config(

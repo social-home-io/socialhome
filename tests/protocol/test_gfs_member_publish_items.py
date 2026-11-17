@@ -732,7 +732,6 @@ async def test_a_followers_cert_works_end_to_end(env):
         item_type="comment",
         inner={**member_inner, "writer_cert": held},
         origin_instance_id=EVE.origin,
-        cert_scope=held["scope"],
         member_household=True,
         authorship=authorship,
     )
