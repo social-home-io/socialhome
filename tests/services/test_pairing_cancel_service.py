@@ -33,6 +33,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.pairing_coordinator import PairingCoordinator
 from socialhome.federation.peer_pairing_client import sign_peer_body
+from socialhome.federation.pending_pairing import PendingPairings
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.federation_repo import SqliteFederationRepo
@@ -459,3 +460,115 @@ async def test_withdrawing_an_approval_sends_unpair_not_abort(env):
         {"to": "peer-ap", "event_type": FederationEventType.UNPAIR, "payload": {}}
     ]
     assert "peer-ap" not in env.repo.instances
+
+
+# ── A pending pairing kept beside a space seat ────────────────────────────
+
+
+def _seat(iid: str = "peer-s") -> RemoteInstance:
+    return replace(
+        _qr_pending(iid),
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+        remote_inbox_url="",
+        local_inbox_id="seat-inbox",
+    )
+
+
+class _StagedRepo(_Repo):
+    async def save_instance(self, inst):
+        self.instances[inst.id] = inst
+        return inst
+
+    async def cancel_pairing_sessions(self, *, local_inbox_id, peer_identity_pk):
+        self._log.append(("cancel_sessions", local_inbox_id))
+        tokens = [t for t, i in self.sessions.items() if i == local_inbox_id]
+        for t in tokens:
+            del self.sessions[t]
+        return tokens
+
+
+@pytest.fixture
+def staged_env():
+    log: list = []
+    repo = _StagedRepo(log)
+    fed = _Federation(log)
+    bus = EventBus()
+    published: list[PeerUnpaired] = []
+    bus.subscribe(PeerUnpaired, published.append)
+    pending = PendingPairings(repo)
+    svc = PairingCancelService(
+        bus=bus,
+        federation=fed,
+        federation_repo=repo,
+        auto_pair=_AutoPair(log),
+        pending_pairings=pending,
+        notify_timeout_s=0.05,
+    )
+
+    class Env:
+        pass
+
+    e = Env()
+    e.log, e.repo, e.fed, e.svc, e.published = log, repo, fed, svc, published
+    e.pending = pending
+    return e
+
+
+async def test_a_pairing_code_beside_a_seat_is_cancelled_and_the_seat_stays(
+    staged_env,
+):
+    env = staged_env
+    seat = env.repo.instances["peer-s"] = _seat()
+    half = _qr_pending("peer-s")
+    assert await env.pending.save(half, ttl_s=300)
+    env.repo.sessions["tok-s"] = half.local_inbox_id
+    env.repo.sessions["tok-other"] = "wh-other"
+
+    assert await env.svc.cancel_pending("peer-s") is True
+
+    # The sessions and the half go first; only then is the peer told —
+    # with the HALF's keys and inbox, never the seat's.
+    assert env.log == [
+        ("cancel_sessions", half.local_inbox_id),
+        ("forget_auto_pair", "peer-s"),
+        ("send", "peer-s"),
+    ]
+    assert env.fed.sent == [
+        {
+            "to": "peer-s",
+            "event_type": FederationEventType.PAIRING_ABORT,
+            "payload": {"token": "tok-s", "reason": PAIRING_CANCEL_REASON},
+        }
+    ]
+    assert env.repo.sessions == {"tok-other": "wh-other"}
+    assert env.pending.staged("peer-s") is None
+    # The row transaction that deletes a pending ROW never ran.
+    assert env.repo.instances["peer-s"] is seat
+    assert [e.instance_id for e in env.published] == ["peer-s"]
+
+
+async def test_a_request_beside_a_seat_is_cancelled_without_telling_anybody(
+    staged_env,
+):
+    env = staged_env
+    seat = env.repo.instances["peer-s"] = _seat()
+    await env.pending.save(_auto_pending("peer-s"), ttl_s=300)
+
+    assert await env.svc.cancel_pending("peer-s") is False
+
+    assert env.fed.sent == []
+    assert ("forget_auto_pair", "peer-s") in env.log
+    assert env.repo.instances["peer-s"] is seat
+
+
+async def test_a_space_seat_alone_is_not_a_pending_pairing(staged_env):
+    """Not "already confirmed" (409) either: there is no pairing at all, so
+    a stale pending card gets the same 404 as a second cancel."""
+    env = staged_env
+    seat = env.repo.instances["peer-s"] = _seat()
+    with pytest.raises(PendingPairingNotFoundError):
+        await env.svc.cancel_pending("peer-s")
+    assert env.repo.instances["peer-s"] is seat
+    assert env.fed.sent == [] and env.published == []
+    assert ("cancel_txn", "peer-s") not in env.log

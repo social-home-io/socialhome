@@ -62,6 +62,7 @@ from ..domain.federation import (
     FederationEventType,
     InstanceSource,
     PairingStatus,
+    is_space_seat,
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
 from ..domain.member_card import InvalidMemberCard, MemberCard, parse_card
@@ -1138,6 +1139,39 @@ class SpaceMemberDirectory:
             await self._seater(card)
         except Exception:
             log.warning("directory: seating a member household failed", exc_info=True)
+
+    async def reseat(self, instance_id: str) -> bool:
+        """*instance_id*'s row is gone — a pairing with it ended (unpair,
+        either side) — but we may still share a space with it. Seat it
+        again from a card we may use NOW (:meth:`_usable`: our roster
+        decides, exactly as for any send), in a space our people are still
+        in: the plain lazy seat both households held before they paired,
+        with the same static-static keys, so the space is as it was.
+        Returns whether a seat exists afterwards.
+
+        Never over a row (:meth:`_seat` leaves a confirmed one alone, and
+        an unpair tombstone still waiting to deliver its ``UNPAIR`` is not
+        purged yet — its hook has not run)."""
+        for (space_id, inst), doc in sorted((await self._rows()).items()):
+            if inst != instance_id:
+                continue
+            card = _card(doc)
+            if card is None or card.instance_id != instance_id:
+                continue
+            if not await self._in_use(space_id):
+                continue
+            hosts = await self.hosts_of(space_id)
+            if not await self._usable(space_id, instance_id, doc, hosts):
+                continue
+            await self._seat(card)
+            if is_space_seat(await self._federation_repo.get_instance(instance_id)):
+                log.info(
+                    "directory: %s is seated again from its member card — "
+                    "the pairing ended, the shared space did not",
+                    instance_id,
+                )
+                return True
+        return False
 
     # ── Host: take cards, keep the directory ─────────────────────────────
 

@@ -246,10 +246,20 @@ class _InboxInstance:
     inbound pipeline while also providing a ``from_instance`` attribute
     for cross-checking the ``from_instance`` field in the envelope."""
 
-    __slots__ = ("_inst",)
+    __slots__ = ("_inst", "_staged")
 
-    def __init__(self, inst: RemoteInstance) -> None:
+    def __init__(self, inst: RemoteInstance, *, staged: bool = False) -> None:
         self._inst = inst
+        self._staged = staged
+
+    @property
+    def staged(self) -> bool:
+        """Whether this is an approved trust-relay pairing kept BESIDE the
+        household's space seat (:class:`~socialhome.federation
+        .pending_pairing.PendingPairings`) instead of in its row. The row
+        still says "confirmed seat", so the envelope may go on only once
+        it has confirmed the pairing (:func:`make_confirm_relay_approval`)."""
+        return self._staged
 
     @property
     def from_instance(self) -> str:
@@ -741,7 +751,7 @@ def make_check_unpairing(
 
 def make_confirm_relay_approval(
     *,
-    on_contact: Callable[[str], Awaitable[None]],
+    on_contact: Callable[[str], Awaitable[object]],
 ) -> InboundStep:
     """Step 6b: an approved trust-relay pair confirms on the requester's
     first authenticated envelope.
@@ -761,7 +771,15 @@ def make_confirm_relay_approval(
     (:func:`~socialhome.domain.federation.pending_kind`); a pairing-code
     half-pair (``pending_received``) is confirmed only by this household's
     own verification step, never by anything the pending peer sends.
-    Fail-soft: a promotion error is logged and the envelope proceeds.
+    ``on_contact`` returns whether the pair is confirmed now.
+
+    An approval in the row is fail-soft: a promotion error is logged and
+    the envelope proceeds (the row says ``pending_sent`` to every handler).
+    An approval kept beside a space seat (``ctx.instance.staged``) fails
+    CLOSED: the row for that household is still its seat, so every handler
+    would take the sender for a confirmed household — unless the pair
+    confirmed, the envelope is refused exactly like one on an unknown
+    inbox (the sender's outbox retries that).
     """
 
     async def confirm_relay_approval(ctx: InboundContext) -> None:
@@ -771,14 +789,22 @@ def make_confirm_relay_approval(
         if not getattr(inst, "remote_identity_pk", ""):
             return
         sender = getattr(inst, "from_instance", "")
+        confirmed: object = False
         try:
-            await on_contact(sender)
+            confirmed = await on_contact(sender)
         except Exception:
             log.warning(
                 "inbound: could not confirm the approved pairing with %s",
                 sender,
                 exc_info=True,
             )
+        if getattr(inst, "staged", False) is True and confirmed is not True:
+            log.info(
+                "inbound: refusing %r from %s — its approved pairing did not confirm",
+                ctx.envelope.get("event_type"),
+                sender,
+            )
+            raise ValueError(f"No instance found for inbox_id={ctx.inbox_id!r}")
 
     return confirm_relay_approval
 

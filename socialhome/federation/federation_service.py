@@ -181,6 +181,7 @@ from .multi_recipient import (
 from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
+from .pending_pairing import PendingPairings
 from .pq_signer import PqSigner
 from .relay_event_body import (
     EVENT_BODY_SUITE_FIELD,
@@ -480,6 +481,7 @@ class FederationService:
         "_own_pq_pk",
         "_own_pq_seed",
         "_pairing",
+        "_pending_pairings",
         "_pending_seat_buffer",
         "_presence_service",
         "_relay_accepted_at",
@@ -658,6 +660,10 @@ class FederationService:
         # §11 QR-code pairing handshake delegate. The peer-pairing
         # client (plaintext Ed25519-signed bootstrap transport) is
         # attached right after construction — circular-free.
+        #: Where a pairing handshake keeps its pending half: the row, or
+        #: beside a space seat. ONE instance for the QR handshake, the
+        #: trust relay, the cancel path and the inbound pipeline.
+        self._pending_pairings = PendingPairings(federation_repo)
         self._pairing = PairingCoordinator(
             federation_repo,
             key_manager,
@@ -665,6 +671,7 @@ class FederationService:
             own_pq_pk=own_pq_pk,
             own_sig_suite=sig_suite,
             bus=bus,
+            pending_pairings=self._pending_pairings,
         )
         self._pairing.attach_peer_pairing_client(
             PeerPairingClient(
@@ -747,10 +754,27 @@ class FederationService:
             self._common_pipeline_steps(
                 lookup_step=make_lookup_instance(
                     repo=self._federation_repo,
-                    lookup_fn=_lookup_by_inbox_id,
+                    lookup_fn=self._lookup_inbox,
                 ),
             )
         )
+
+    async def _lookup_inbox(
+        self, repo: AbstractFederationRepo, inbox_id: str
+    ) -> _InboxInstance | None:
+        """Who an envelope on *inbox_id* is from: the household whose row
+        holds that inbox id — or, first, the one whose introduction our
+        admin approved while we held a space seat for it. That approval is
+        kept beside the seat with an inbox id of its own
+        (:meth:`PendingPairings.approval_for_inbox`); the requester's first
+        envelope under the approved keys arrives there, verifies and
+        decrypts against the approval, and confirms the pair
+        (:func:`make_confirm_relay_approval` — fail closed for it). Nothing
+        else staged beside a seat is ever resolved here."""
+        approval = self._pending_pairings.approval_for_inbox(inbox_id)
+        if approval is not None:
+            return _InboxInstance(approval, staged=True)
+        return await _lookup_by_inbox_id(repo, inbox_id)
 
     def _build_media_https_pipeline(self):
         """The §24.11 inbox pipeline for a binary media body on the inbox.
@@ -903,20 +927,28 @@ class FederationService:
         steps.extend(self.post_decrypt_gate_steps())
         return steps
 
-    async def _on_relay_approval_contact(self, instance_id: str) -> None:
+    @property
+    def pending_pairings(self) -> PendingPairings:
+        """Where this household's pending pairing halves live."""
+        return self._pending_pairings
+
+    async def _on_relay_approval_contact(self, instance_id: str) -> bool:
         """The household whose introduction our admin approved just sent its
         first authenticated envelope — confirm the pair (§11 simple
-        pairing). Atomic and only while the row is still an approval
-        (:func:`~socialhome.domain.federation.pending_kind`): a cancel that
-        committed first leaves nothing to confirm."""
-        inst = await self._federation_repo.get_instance(instance_id)
+        pairing). Atomic and only while our half is still an approval
+        (:func:`~socialhome.domain.federation.pending_kind`) — in the row,
+        or beside the household's space seat, which the confirmed pair then
+        replaces: a cancel that committed first leaves nothing to confirm.
+        Returns whether the pair is confirmed now."""
+        inst = await self._pending_pairings.get(instance_id)
         if inst is None or pending_kind(inst) != PENDING_KIND_APPROVAL:
-            return
+            return False
         confirmed = replace(inst, status=PairingStatus.CONFIRMED)
-        if not await self._federation_repo.promote_pending_instance(confirmed):
-            return
+        if not await self._pending_pairings.promote(confirmed):
+            return False
         log.info("auto-pair: %s confirmed the approved pairing", instance_id)
         await self._bus.publish(PairingConfirmed(instance_id=instance_id))
+        return True
 
     async def drop_queued(
         self,

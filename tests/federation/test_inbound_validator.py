@@ -1910,6 +1910,74 @@ async def test_relay_approval_step_never_rejects_the_envelope():
     assert ctx.early_response is None
 
 
+class _StagedApproval(_KeyedStatusInstance):
+    """An approval kept beside a space seat (``_InboxInstance.staged``)."""
+
+    staged = True
+
+
+async def test_a_staged_approval_that_confirms_lets_the_envelope_through():
+    async def _confirm(iid: str) -> bool:
+        return True
+
+    step = make_confirm_relay_approval(on_contact=_confirm)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        instance=_StagedApproval(PairingStatus.PENDING_SENT),
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_a_staged_approval_that_does_not_confirm_refuses_the_envelope():
+    """Fail closed. The row for this household is still its space seat, so
+    a handler would take the sender for a confirmed household and its
+    envelope — sealed under keys of a pairing that did not happen — for
+    trusted. It is refused like an unknown inbox; the sender retries."""
+
+    async def _refuse(iid: str) -> bool:
+        return False
+
+    step = make_confirm_relay_approval(on_contact=_refuse)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        inbox_id="appr-inbox",
+        instance=_StagedApproval(PairingStatus.PENDING_SENT),
+    )
+    with pytest.raises(ValueError, match="No instance found"):
+        await step(ctx)
+
+
+async def test_a_staged_approval_whose_promotion_fails_refuses_the_envelope():
+    async def _boom(iid: str) -> bool:
+        raise RuntimeError("db down")
+
+    step = make_confirm_relay_approval(on_contact=_boom)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        inbox_id="appr-inbox",
+        instance=_StagedApproval(PairingStatus.PENDING_SENT),
+    )
+    with pytest.raises(ValueError, match="No instance found"):
+        await step(ctx)
+
+
+async def test_a_row_approval_that_does_not_confirm_still_proceeds():
+    """Unchanged for an approval stored in the row (no seat): the row
+    itself says ``pending_sent`` to every handler."""
+
+    async def _refuse(iid: str) -> bool:
+        return False
+
+    step = make_confirm_relay_approval(on_contact=_refuse)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        instance=_KeyedStatusInstance(PairingStatus.PENDING_SENT),
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
 async def test_relay_approval_step_runs_after_decrypt_and_before_dispatch():
     """Mutation guard: only an envelope that verified AND decrypted under
     the session key may confirm an approval."""

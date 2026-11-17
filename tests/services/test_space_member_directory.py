@@ -2709,3 +2709,69 @@ async def test_a_waiting_passed_on_card_is_taken_only_from_a_delegated_admin():
     o.spaces.delegated.clear()  # delegation went off meanwhile
     await _seat_live(o, m)
     assert "card" not in o.spaces.doc(SPACE, m["id"])
+
+
+# ── A pairing ended: the household is seated again from its card ──────────
+
+
+def _reseat_world() -> tuple[World, dict]:
+    """A member's view with household ``a``'s card stored — and a seater
+    that, like the real one, leaves a ``space_session`` row behind."""
+    w, _host = _member_world()
+    a = _hh()
+    w.member(a)
+    w.spaces.put_card(SPACE, _card(a, gfs=GFS))
+
+    async def seater(card):
+        w.seated.append(card.instance_id)
+        w.fed_repo.instances[card.instance_id] = SimpleNamespace(
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.SPACE_SESSION,
+            relay_via=None,
+        )
+
+    w.dir.attach_seater(seater)
+    return w, a
+
+
+async def test_reseat_seats_a_household_whose_card_we_may_use():
+    """The pairing with ``a`` ended and its row went with it; we still
+    share a space, so its plain seat is made again from its card."""
+    w, a = _reseat_world()
+    assert await w.dir.reseat(a["id"]) is True
+    assert w.seated == [a["id"]]
+
+
+async def test_reseat_without_a_card_seats_nobody():
+    w, _a = _reseat_world()
+    stranger = _hh()
+    w.member(stranger)
+    assert await w.dir.reseat(stranger["id"]) is False
+    assert w.seated == []
+
+
+async def test_reseat_asks_the_roster_not_the_card():
+    """A card is keys and an address, never membership: a household our
+    roster holds no member's seat for is not seated again."""
+    w, a = _reseat_world()
+    w.writers.everyone = False
+    assert await w.dir.reseat(a["id"]) is False
+    assert w.seated == []
+
+
+async def test_reseat_needs_a_space_our_people_are_still_in():
+    w, a = _reseat_world()
+    w.spaces.local[SPACE] = []
+    assert await w.dir.reseat(a["id"]) is False
+    assert w.seated == []
+
+
+async def test_reseat_never_touches_a_household_we_are_still_paired_with():
+    w, a = _reseat_world()
+    w.fed_repo.instances[a["id"]] = SimpleNamespace(
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+        relay_via=None,
+    )
+    assert await w.dir.reseat(a["id"]) is False
+    assert w.seated == []

@@ -80,6 +80,21 @@ class _FakeRepo:
     async def get_local_identity(self):
         return self._local_identity
 
+    async def promote_pending_instance(self, inst, *, token=None):
+        row = self.instances.get(inst.id)
+        if row is None or row.status is PairingStatus.CONFIRMED:
+            return False
+        self.pairings.pop(token, None)
+        self.instances[inst.id] = inst
+        return True
+
+    async def upgrade_seat_instance(self, inst, *, token=None):
+        """Mirrors the SQLite repo: the pairing's own opt-ins replace the
+        seat's."""
+        self.pairings.pop(token, None)
+        self.instances[inst.id] = inst
+        return True
+
 
 class _RecordingClient:
     def __init__(self) -> None:
@@ -208,9 +223,8 @@ async def test_a_share_home_key_planted_in_the_code_is_ignored():
 
 
 async def test_scanning_over_an_existing_row_applies_the_choice():
-    """A household met through an invite link already has a row
-    (``share_home`` off); pairing for real applies the admin's choice
-    although the upsert keeps local opt-ins."""
+    """A re-scan over a pending row of ours (``share_home`` off) applies
+    the admin's new choice although the upsert keeps local opt-ins."""
     repo = _FakeRepo(_HOME)
     coord, _ = _coordinator(repo)
     qr = _qr("tok-existing")
@@ -223,13 +237,46 @@ async def test_scanning_over_an_existing_row_applies_the_choice():
         key_remote_to_self="",
         remote_inbox_url="",
         local_inbox_id="x",
-        status=PairingStatus.CONFIRMED,
-        source=InstanceSource.SPACE_SESSION,
+        status=PairingStatus.PENDING_RECEIVED,
         share_home=False,
     )
     await coord.accept(qr, "https://beta.example/inbox", share_home=True)
     assert repo.instances[iid].share_home is True
     assert repo.share_home_writes == [(iid, True)]
+
+
+async def test_scanning_over_a_space_seat_applies_the_choice_only_on_confirm():
+    """A household we share a space with has a seat row (``share_home``
+    off). The scan must not touch it — the people have not paired yet —
+    and the confirmed pairing then carries the admin's choice."""
+    repo = _FakeRepo(_HOME)
+    coord, _ = _coordinator(repo)
+    qr = _qr("tok-seat")
+    iid = qr["instance_id"]
+    seat = repo.instances[iid] = RemoteInstance(
+        id=iid,
+        display_name="",
+        remote_identity_pk=qr["identity_pk"],
+        key_self_to_remote="seat-out",
+        key_remote_to_self="seat-in",
+        remote_inbox_url="",
+        local_inbox_id="x",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+        share_home=False,
+    )
+
+    accepted = await coord.accept(qr, "https://beta.example/inbox", share_home=True)
+
+    assert repo.instances[iid] is seat
+    assert repo.share_home_writes == []
+
+    confirmed = await coord.confirm("tok-seat", accepted["verification_code"])
+
+    assert confirmed.share_home is True
+    row = repo.instances[iid]
+    assert row.source is InstanceSource.MANUAL and row.share_home is True
+    assert row.local_inbox_id == accepted["local_inbox_id"]
 
 
 # ── The initiator's row (peer-accept received) ────────────────────────

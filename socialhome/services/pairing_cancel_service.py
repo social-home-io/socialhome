@@ -48,6 +48,13 @@ which expires by itself after five minutes.)
    already see is sent.
 3. **Announce** :class:`PeerUnpaired` (``connection.removed``) — once: a
    second cancel finds nothing and is a 404.
+
+**A pending pairing with a household we share a space with** has no row
+of its own: the row is the space seat, and our half waits beside it
+(:class:`~socialhome.federation.pending_pairing.PendingPairings`). Its
+cancel is the same three steps on that half — the sessions go, the half
+is forgotten, the peer is told with the half's keys — and the seat is not
+touched: the space keeps working as if nobody had tried to pair.
 """
 
 from __future__ import annotations
@@ -64,12 +71,14 @@ from ..domain.federation import (
     PairingStatus,
     PendingPairingNotFoundError,
     RemoteInstance,
+    is_space_seat,
     pending_kind,
 )
 from ..infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from ..federation.pending_pairing import PendingPairings
     from ..repositories.federation_repo import AbstractFederationRepo
 
 log = logging.getLogger(__name__)
@@ -102,6 +111,7 @@ class PairingCancelService:
         "_federation",
         "_federation_repo",
         "_notify_timeout_s",
+        "_pending_pairings",
     )
 
     def __init__(
@@ -111,12 +121,15 @@ class PairingCancelService:
         federation: FederationService,
         federation_repo: AbstractFederationRepo,
         auto_pair: PendingAutoPairRequests | None = None,
+        pending_pairings: PendingPairings | None = None,
         notify_timeout_s: float = PAIRING_CANCEL_NOTIFY_TIMEOUT_S,
     ) -> None:
         self._bus = bus
         self._federation = federation
         self._federation_repo = federation_repo
         self._auto_pair = auto_pair
+        #: Pending halves kept beside a space seat (module docstring).
+        self._pending_pairings = pending_pairings
         self._notify_timeout_s = notify_timeout_s
 
     async def cancel_pending(self, instance_id: str) -> bool:
@@ -131,26 +144,26 @@ class PairingCancelService:
         confirmed: then nothing was removed and nothing was sent. Callers
         check the caller is an admin.
         """
-        inst = await self._federation_repo.get_instance(instance_id)
-        if inst is None:
-            raise PendingPairingNotFoundError()
-        if inst.status not in _PENDING:
-            raise PairingAlreadyConfirmedError()
-
-        # One transaction: the sessions (the only right to finish the
-        # handshake) and the row go together, and only while the row is
-        # still pending. A confirm that commits first wins; ours then finds
-        # nothing to cancel.
-        tokens = await self._federation_repo.cancel_pending_instance(instance_id)
-        if tokens is None:
-            current = await self._federation_repo.get_instance(instance_id)
-            if current is not None and current.status not in _PENDING:
-                log.info(
-                    "pairing cancel: %s was confirmed meanwhile — kept",
-                    instance_id,
-                )
+        staged = (
+            await self._pending_pairings.cancel(instance_id)
+            if self._pending_pairings is not None
+            else None
+        )
+        if staged is not None:
+            # Our half waited beside the household's space seat: it and its
+            # sessions are gone now, and the seat row was never touched. A
+            # confirm that took the half first left nothing here to cancel
+            # (the row is then a pairing — refused below, as ever).
+            inst, tokens = staged
+        else:
+            row = await self._federation_repo.get_instance(instance_id)
+            if row is None or is_space_seat(row):
+                # A seat is no pairing, pending or otherwise.
+                raise PendingPairingNotFoundError()
+            if row.status not in _PENDING:
                 raise PairingAlreadyConfirmedError()
-            raise PendingPairingNotFoundError()
+            inst = row
+            tokens = await self._cancel_row(instance_id)
         if self._auto_pair is not None:
             self._auto_pair.forget_requests_to(instance_id)
 
@@ -166,6 +179,23 @@ class PairingCancelService:
         )
         await self._bus.publish(PeerUnpaired(instance_id=instance_id))
         return notified
+
+    async def _cancel_row(self, instance_id: str) -> list[str]:
+        """One transaction: the sessions (the only right to finish the
+        handshake) and the row go together, and only while the row is
+        still pending. A confirm that commits first wins; ours then finds
+        nothing to cancel."""
+        tokens = await self._federation_repo.cancel_pending_instance(instance_id)
+        if tokens is None:
+            current = await self._federation_repo.get_instance(instance_id)
+            if current is not None and current.status not in _PENDING:
+                log.info(
+                    "pairing cancel: %s was confirmed meanwhile — kept",
+                    instance_id,
+                )
+                raise PairingAlreadyConfirmedError()
+            raise PendingPairingNotFoundError()
+        return tokens
 
     async def _notify_peer(self, inst: RemoteInstance, tokens: list[str]) -> bool:
         event_type, payload = _cancel_message(inst, tokens)

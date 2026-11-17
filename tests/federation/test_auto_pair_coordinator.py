@@ -1386,6 +1386,16 @@ async def test_request_via_over_a_space_seat_is_not_already_paired(
     kwargs = fed_service.send_event.await_args.kwargs
     assert kwargs["event_type"] == FederationEventType.PAIRING_INTRO_AUTO
     assert kwargs["payload"]["target_id"] == c_id
+    # The same wire body as without a seat — nothing an older introducer
+    # or target (v_80) would not know.
+    assert set(kwargs["payload"]) == {
+        "target_id",
+        "a_dh_pk",
+        "a_inbox_url",
+        "ts",
+        "nonce",
+        "token",
+    }
     # …and the seat is exactly as it was: still carrying the space.
     seat = fed_repo.instances[c_id]
     assert is_space_seat(seat)
@@ -1494,6 +1504,20 @@ async def test_approval_over_a_space_seat_keeps_the_seat_until_the_requester_con
     assert inst.local_inbox_id != "seat-inbox"
     ack = fed_service.send_event.await_args.kwargs["payload"]
     assert ack["c_inbox_url"].endswith("/" + inst.local_inbox_id)
+    assert set(ack) == {
+        "a_id",
+        "c_id",
+        "c_pk",
+        "c_inbox_url",
+        "c_dh_pk",
+        "via_b_id",
+        "vouch_sig",
+        "ack_sig",
+        "ts",
+        "nonce",
+        "token",
+        "to_a_id",
+    }
     assert coord.pending_pairings.approval_for_inbox(inst.local_inbox_id) == inst
 
 
