@@ -839,14 +839,16 @@ def keep_newer_edit(incoming: Post, held: Post) -> Post:
     writes (the words, the link card, the stamp) taken from whichever copy
     was edited last. Last writer wins on ``edited_at``:
 
-    * the held row was edited and *incoming* is not newer (it was never
+    * the held row was edited and *incoming* is older (it was never
       edited, or earlier): the held words stay — a provider that missed
       the edit cannot bring the old ones back;
-    * otherwise *incoming* as it is: the same words, or an edit this
-      household missed, with its stamp."""
+    * otherwise *incoming* as it is: an edit this household missed, with
+      its stamp — or the same edit (an equal stamp), whose words are the
+      same unless this household's copy was damaged (a restore), which
+      the copy then repairs."""
     if held.edited_at is None:
         return incoming
-    if incoming.edited_at is not None and _as_utc(incoming.edited_at) > _as_utc(
+    if incoming.edited_at is not None and _as_utc(incoming.edited_at) >= _as_utc(
         held.edited_at
     ):
         return incoming

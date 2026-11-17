@@ -398,10 +398,14 @@ def test_keep_newer_edit_is_last_writer_wins_on_the_edit_stamp():
     assert keep_newer_edit(_words("new", ten), _words("old")).content == "new"
     assert keep_newer_edit(_words("copy"), _words("held")).content == "copy"
     # Held edited, the copy older or never edited: the held words stay.
-    for stale in (_words("stale"), _words("stale", nine_naive), _words("stale", ten)):
+    for stale in (_words("stale"), _words("stale", nine_naive)):
         kept = keep_newer_edit(stale, _words("held", ten))
         assert (kept.content, kept.edited_at) == ("held", ten)
         assert kept.link_preview.url == "https://example.com/held"
+    # The same edit (an equal stamp): the copy — it repairs a damaged row.
+    assert (
+        keep_newer_edit(_words("same", ten), _words("damaged", ten)).content == "same"
+    )
     # Held edited, the copy newer: the copy.
     newer = keep_newer_edit(_words("new", ten), _words("held", nine_naive))
     assert (newer.content, newer.edited_at) == ("new", ten)

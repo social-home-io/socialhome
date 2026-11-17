@@ -152,7 +152,9 @@ a post held here — `keep_newer_edit`):
 - **Last writer wins on `edited_at`.** A copy that was never edited, or
   edited earlier than the row held, keeps the held words, link card and
   stamp: a provider that missed an edit cannot bring the old words back.
-  A copy edited later brings its words and stamp. Either way the author's
+  A copy edited later — or carrying the same edit (an equal stamp: the
+  same words, unless the row here was damaged) — brings its words and
+  stamp. Either way the author's
   next edit still lands. `edited_at` has ONE stored shape (`stamp_to_db`,
   `YYYY-MM-DD HH:MM:SS.ffffff`, naive UTC) whoever writes it, because the
   stamped edit compares it as a string; a row an older build stamped in
