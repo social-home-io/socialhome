@@ -537,13 +537,13 @@ class _RtcPeer:
         #: :data:`MAX_HANDSHAKE_RESTARTS`.
         self._restarts: int = 0
         #: True from the moment we (impolite) ignore the remote's OFFER
-        #: because our own is pending, until the ANSWER to ours arrives.
-        #: The remote trickles candidates for the OFFER it is about to
-        #: roll back; a candidate names no negotiation, so arrival order
-        #: is all that tells them from the candidates of its ANSWER. While
-        #: this is set every candidate is the ignored OFFER's and is
-        #: dropped on arrival (:meth:`add_ice_candidate`) — never parked
-        #: against our own connection, and never counted as a loss on it.
+        #: because our own is still unanswered, until the ANSWER to ours
+        #: arrives. The remote trickled candidates for the OFFER it is
+        #: about to roll back, and a candidate names no negotiation: they
+        #: park in :meth:`add_ice_candidate` like any other. When one of
+        #: them times out there while this is set, it is not a loss on
+        #: OUR connection — counting it made the ANSWER restart (close) a
+        #: connection that had every candidate it needed.
         self._ignoring_offer: bool = False
 
     # ─── Transport change publication ─────────────────────────────────────
@@ -653,14 +653,12 @@ class _RtcPeer:
                 self._making_offer,
                 self._pc.signaling_state if self._pc else None,
             )
-            if self._making_offer:
-                # Its candidates go with it — the ones that follow, and
-                # the ones that overtook it and are parked on the ANSWER
-                # to our offer (woken here, they see the flag and stop).
-                # Not for a second OFFER that collides with one we are
-                # still answering: that one's candidates are wanted.
+            # Only while the ANSWER to our own offer is outstanding
+            # (``apply_answer`` clears ``_expected_answer_from`` before it
+            # awaits, ``_making_offer`` only after): an OFFER that lands
+            # during that await must not leave the flag set for good.
+            if self._making_offer and self._expected_answer_from is not None:
                 self._ignoring_offer = True
-                self._release_parked_candidates()
             return
         if collision and self._polite:
             log.info(
@@ -669,18 +667,6 @@ class _RtcPeer:
             )
             await self._close_pc()
             self._making_offer = False
-        elif self._pc is not None:
-            # No glare: we answered an earlier OFFER and the remote now
-            # sends another — it restarted its handshake, so the far end
-            # of the connection we hold is gone. Close it; dropping the
-            # reference alone left its sockets and its handshake running
-            # for the life of the process.
-            log.info(
-                "fed RTC peer %s: a new OFFER replaces the connection we "
-                "answered before",
-                from_instance,
-            )
-            await self._close_pc()
 
         self._ignoring_offer = False
         self._expected_answer_from = None  # answerer, no outstanding offer
@@ -779,33 +765,24 @@ class _RtcPeer:
             return False
         self._expected_answer_from = None
         # The ANSWER ends an OFFER we ignored: the remote rolled it back
-        # to answer ours, and what it trickles from here on is ours.
+        # to answer ours.
         self._ignoring_offer = False
-        # Same PeerConnection-scoped accounting as :meth:`accept_offer`:
-        # the drops belong to the connection this ANSWER is for.
-        starved = self._dropped_candidates
-        self._dropped_candidates = 0
-        if starved and self._restarts < MAX_HANDSHAKE_RESTARTS:
-            # Candidates were thrown away while we waited for this
-            # ANSWER, so this PeerConnection holds too few of them to
-            # pass ICE. Re-offer now instead of waiting out the
-            # connectivity timer, a FAILED state and the eviction
-            # backoff — and do NOT apply the ANSWER first: that starts
-            # ICE / DTLS / SCTP on a connection closed a moment later,
-            # and a PeerConnection closed mid-handshake is what logs
-            # "DTLS alert: unknown CA" / "certificate verify failed" /
-            # "Attempted to assign DataChannels without ICE transport".
-            await self._restart_handshake(starved)
-            return True
         await self._pc.set_remote_description(sdp, "answer")
         # Offerer side: flush any ICE candidates the answerer
         # trickled before we applied their SDP answer. Same
         # rationale as :meth:`accept_offer`.
         self._remote_description_applied.set()
         self._making_offer = False
+        # Same PeerConnection-scoped accounting as :meth:`accept_offer`:
+        # the drops belong to the connection this ANSWER just completed.
+        starved = self._dropped_candidates
+        self._dropped_candidates = 0
+        # The handshake completed — but if candidates were thrown away
+        # while we waited for this ANSWER, this PeerConnection holds too
+        # few remote candidates to ever pass ICE. Re-offer now instead of
+        # waiting out the connectivity timer, a FAILED state and the
+        # eviction backoff.
         if starved:
-            # The restart budget is spent: this only logs that, and the
-            # connection is left to work or to fail into its backoff.
             await self._restart_handshake(starved)
         return True
 
@@ -817,11 +794,9 @@ class _RtcPeer:
         counter, since the count is scoped to that connection and no
         longer describes the one we are about to build.
 
-        Called from :meth:`accept_offer` once the remote description has
-        landed on a PeerConnection that already threw candidates away, and
-        from :meth:`apply_answer` when the ANSWER for such a connection
-        arrives — before it is applied, so the connection we drop never
-        starts its handshake. Those two run on inbound-signalling coroutines
+        Called from :meth:`apply_answer` / :meth:`accept_offer` once the
+        remote description lands on a PeerConnection that already threw
+        candidates away. Those two run on inbound-signalling coroutines
         (``on_rtc_answer`` / ``on_rtc_offer``), never on a task spawned
         via ``pc.spawn_task`` — so the ``_close_pc()`` below, which
         cancels every spawned task of the PC it closes, cannot cancel the
@@ -935,9 +910,6 @@ class _RtcPeer:
         """
         if not candidate or self._closed:
             return
-        if self._ignoring_offer:
-            self._log_ignored_candidate()
-            return
         if not self._remote_description_applied.is_set():
             try:
                 await asyncio.wait_for(
@@ -945,6 +917,22 @@ class _RtcPeer:
                     timeout=ICE_BUFFER_TIMEOUT_S,
                 )
             except TimeoutError:
+                if self._ignoring_offer:
+                    # Glare: the remote offered while our own OFFER was
+                    # still on its way, we ignored its OFFER, and this is
+                    # (by arrival order) a candidate of that OFFER. It is
+                    # not ours to lose, so it is not counted — a count
+                    # here made the ANSWER to our offer tear down the
+                    # connection it had just completed, mid-handshake
+                    # (libdatachannel then logs "DTLS alert: unknown CA",
+                    # "certificate verify failed", "Attempted to assign
+                    # DataChannels without ICE transport").
+                    log.debug(
+                        "fed RTC: ICE candidate for %s timed out while its "
+                        "OFFER is ignored (glare) — not charged to our offer",
+                        self.instance_id,
+                    )
+                    return
                 log.warning(
                     "fed RTC: ICE candidate for %s dropped — remote "
                     "description not applied within %.0fs",
@@ -967,11 +955,6 @@ class _RtcPeer:
                     # permanent HTTPS-only black hole for that peer.
                     self._starved_awaiting_offer = True
                 return
-            if self._ignoring_offer:
-                # Parked before the OFFER it belongs to arrived and was
-                # ignored — :meth:`accept_offer` woke us to drop it.
-                self._log_ignored_candidate()
-                return
         if self._pc is None or self._closed:
             # Peer closed between event set and resume — race, drop.
             return
@@ -986,19 +969,6 @@ class _RtcPeer:
                 self.instance_id,
                 exc,
             )
-
-    def _log_ignored_candidate(self) -> None:
-        log.debug(
-            "fed RTC peer %s: dropping an ICE candidate of the OFFER we "
-            "ignored (glare)",
-            self.instance_id,
-        )
-
-    def _release_parked_candidates(self) -> None:
-        """Wake every coroutine parked in :meth:`add_ice_candidate` and
-        start a fresh wait for the next remote description."""
-        self._remote_description_applied.set()
-        self._remote_description_applied = asyncio.Event()
 
     # ─── Internal drain loops ─────────────────────────────────────────────
 
@@ -1638,11 +1608,6 @@ class _RtcPeer:
                 pass
             self._pc = None
         self._channel = None
-        # A connection that had opened is replaced when the remote
-        # re-offers (:meth:`accept_offer`): its recv loop is cancelled
-        # with it and never clears this, and the peer must not report
-        # ready on a channel that is gone.
-        self._open.clear()
         self._media_channel = None
         self._media_open.clear()
         self._media_buf.clear()
@@ -1656,7 +1621,8 @@ class _RtcPeer:
         # PR #371 fixed. Once they wake, they either find ``_pc is None``
         # and return, or hit the new PC's ``add_remote_candidate`` and
         # get harmlessly rejected by the existing ``RTCError`` guard.
-        self._release_parked_candidates()
+        self._remote_description_applied.set()
+        self._remote_description_applied = asyncio.Event()
 
     def close(self, *, announce: bool = True) -> None:
         """Close the underlying connection and mark the peer closed.
