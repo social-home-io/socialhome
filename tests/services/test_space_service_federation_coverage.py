@@ -391,6 +391,40 @@ async def test_remove_remote_member_happy(stack):
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
 
 
+async def test_remove_remote_member_reaches_the_household_at_its_space_mailbox(stack):
+    """A household seated from the host's directory is reached at its GFS
+    mailbox, and a mailbox is found per space: from the member card kept on
+    its ``space_instances`` row. So the removal notice names its space and
+    goes out while that row still exists. Without both, an admin that reaches
+    members only through a GFS answered 403 "no path to invitee household"
+    after it had already dropped the seat — no gossip, no rekey."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    await stack.space_repo.add_space_instance(space.id, "peer")
+    seen: list[tuple[str | None, bool]] = []
+
+    async def _send(**kw):
+        held = await stack.db.fetchone(
+            "SELECT 1 FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space.id, "peer"),
+        )
+        seen.append((kw.get("space_id"), held is not None))
+        return DeliveryResult(instance_id="peer", ok=True)
+
+    stack.fed_svc.send_with_mesh_fallback.side_effect = _send
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert seen == [(space.id, True)]
+    assert (
+        await stack.db.fetchone(
+            "SELECT 1 FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space.id, "peer"),
+        )
+        is None
+    )
+
+
 async def test_remove_remote_member_announces_the_seat_ended(stack):
     """v_77: the game tables this household hosts take the player out."""
     await _user(stack, "alicehost")

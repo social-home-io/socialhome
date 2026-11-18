@@ -7059,6 +7059,7 @@ class SpaceService(
         to_instance_id: str,
         event_type: FederationEventType,
         payload: dict,
+        space_id: str | None = None,
     ) -> None:
         """Ship a private-invite-family envelope to a remote instance.
 
@@ -7067,6 +7068,12 @@ class SpaceService(
         for unpaired / unreachable ones, failure otherwise. Raises
         :class:`SpacePermissionError` when neither path is available
         so the route handler returns 4xx instead of 200.
+
+        ``space_id`` — for an event to a household that already is a
+        member: a household seated from the host's directory is reached at
+        its GFS mailbox (or through the host), and both are found per
+        space. An invite stays without it (the invitee is no member yet,
+        and its envelope must not name the space, §25.8.21).
         """
         if self._federation is None or self._federation_repo is None:
             raise RuntimeError("federation not attached")
@@ -7074,6 +7081,7 @@ class SpaceService(
             to_instance_id=to_instance_id,
             event_type=event_type,
             payload=payload,
+            space_id=space_id,
         )
         if not result.ok:
             raise SpacePermissionError("no path to invitee household")
@@ -7778,13 +7786,20 @@ class SpaceService(
         # activity to the no-longer-member relay.
         rows = await self._remote_members.list_for_space(space_id)
         still_present = any(r.instance_id == instance_id for r in rows)
-        if not still_present:
-            await self._spaces.remove_space_instance(space_id, instance_id)
+        # Told BEFORE its ``space_instances`` row goes, and naming the space:
+        # a household seated from the host's directory is reached at its GFS
+        # mailbox, found on the member card that row keeps. Without both an
+        # admin that reaches the members only through a GFS (a GFS-only
+        # delegated admin acting while the owner is away) got "no path"
+        # here — after the seat was dropped, before the gossip and the rekey.
         await self._send_invite_envelope(
             to_instance_id=instance_id,
             event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
             payload={"space_id": space_id, "user_id": user_id},
+            space_id=space_id,
         )
+        if not still_present:
+            await self._spaces.remove_space_instance(space_id, instance_id)
         # v_23 — peer-replicate the kick so every member household tombstones
         # this user in their roster.
         await self._emit_member_roster_gossip(

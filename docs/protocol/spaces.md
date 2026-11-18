@@ -3172,6 +3172,15 @@ sequenceDiagram
     H->>A: SPACE_KEY_EXCHANGE_REKEY (epoch=N+1)
 ```
 
+`SPACE_REMOTE_MEMBER_REMOVED` names its space on the envelope (`space_id`,
+a routing field) and is sent before the removed household's
+`space_instances` row is dropped: a household seated from the host's
+directory is reached at its GFS mailbox — or through the host — and both are
+found per space, from the member card on that row. This is what lets a
+delegated admin that is itself reached only through a GFS remove a member
+while the owner is offline (before, its removal stopped at "no path" after
+the seat was dropped locally, with no gossip and no rekey).
+
 Owner cannot be kicked through this path — same invariant as
 `remove_member`. Self-leaves on a remote space run the local path (the
 user drops their own stub membership) and then tell the host — see
