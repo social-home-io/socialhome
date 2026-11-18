@@ -27,6 +27,7 @@ from socialhome.domain.events import (
     RemoteSpaceMemberRemoved,
     SpaceRemoteSeatEnded,
 )
+from socialhome.domain.federation import FederationEventType
 from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES
 from socialhome.domain.space import (
     JoinMode,
@@ -630,6 +631,110 @@ async def test_out_of_vocabulary_gossip_role_keeps_the_mutation(handler):
     kwargs = handler.remote_members.apply_member_event.await_args.kwargs
     assert kwargs["role"] == "member"
     assert kwargs["tombstoned"] is True
+
+
+def _hosting(handler, *, applied: bool = True):
+    """The handler as the HOST of ``sp-gossip``, with a federation service."""
+    handler.h._own_instance_id = "inst-host"
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(
+            id="sp-gossip", owner_instance_id="inst-host", authority_key_epoch=0
+        )
+    )
+    handler.remote_members.get_including_tombstones = AsyncMock(
+        return_value=SimpleNamespace(role="member", tombstoned=False)
+    )
+    handler.remote_members.apply_member_event = AsyncMock(return_value=applied)
+    handler.remote_members.list_for_instance = AsyncMock(return_value=[])
+    fed = SimpleNamespace(
+        send_with_mesh_fallback=AsyncMock(return_value=SimpleNamespace(ok=True))
+    )
+    handler.h._federation = fed
+    return fed
+
+
+_LEFT = {
+    "space_id": "sp-gossip",
+    "user_id": "u-gone",
+    "instance_id": "inst-gone",
+    "role": "member",
+    "member_version": 9,
+}
+
+
+async def test_the_host_tells_a_household_an_admin_removed_while_it_was_away(handler):
+    """A household drops its copy of a space only on its host's word. A
+    removal a delegated admin made while the host was offline reaches the
+    host as roster gossip — the host then says it to the removed household
+    itself, before it stops treating that household as a member. Without it
+    the household kept its copy, kept syncing, and was only told by the
+    reconnect backstop (its next sync BEGIN to the host, up to 30 minutes)."""
+    fed = _hosting(handler)
+    order: list[str] = []
+    fed.send_with_mesh_fallback.side_effect = lambda **kw: (
+        order.append("told") or SimpleNamespace(ok=True)
+    )
+    handler.space_repo.remove_space_instance = AsyncMock(
+        side_effect=lambda *a: order.append("instance row dropped")
+    )
+    await handler.h._merge_roster_entry(
+        "SPACE_MEMBER_LEFT",
+        "sp-gossip",
+        dict(_LEFT),
+        tombstoned=True,
+        verified_epoch=0,
+        sender="inst-admin",
+    )
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "inst-gone"
+    assert kw["event_type"] is FederationEventType.SPACE_REMOTE_MEMBER_REMOVED
+    assert kw["payload"] == {"space_id": "sp-gossip", "user_id": "u-gone"}
+    assert kw["space_id"] == "sp-gossip"
+    assert order == ["told", "instance row dropped"]
+
+
+@pytest.mark.parametrize(
+    ("sender", "applied", "hosted"),
+    [
+        ("inst-gone", True, True),  # the household left by itself: it knows
+        ("inst-admin", False, True),  # a stale removal changed nothing
+        ("inst-admin", True, False),  # we are a member: not ours to say
+        (None, True, True),  # an entry of a snapshot, not live gossip
+    ],
+)
+async def test_only_the_host_tells_and_only_for_a_removal_it_applied(
+    handler, sender, applied, hosted
+):
+    fed = _hosting(handler, applied=applied)
+    if not hosted:
+        handler.h._own_instance_id = "inst-member"
+    await handler.h._merge_roster_entry(
+        "SPACE_MEMBER_LEFT",
+        "sp-gossip",
+        dict(_LEFT),
+        tombstoned=True,
+        verified_epoch=0,
+        sender=sender,
+    )
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_a_removed_household_that_cannot_be_told_is_still_removed(handler):
+    """Telling it is best effort (the reconnect backstop remains): a failed
+    send never undoes or blocks the removal."""
+    fed = _hosting(handler)
+    fed.send_with_mesh_fallback.side_effect = RuntimeError("no transport")
+    await handler.h._merge_roster_entry(
+        "SPACE_MEMBER_LEFT",
+        "sp-gossip",
+        dict(_LEFT),
+        tombstoned=True,
+        verified_epoch=0,
+        sender="inst-admin",
+    )
+    handler.space_repo.remove_space_instance.assert_awaited_once_with(
+        "sp-gossip", "inst-gone"
+    )
 
 
 async def test_invite_with_roster_seats_remote_members_for_each_peer(handler):

@@ -3190,8 +3190,13 @@ while the owner is offline (before, its removal stopped at "no path" after
 the seat was dropped locally, with no gossip and no rekey). A household that
 cannot be reached at all is refused (403) before anything changed. The
 removed household drops its own copy only on the word of its host (the owner,
-or the admin that invited it); told by another admin it keeps the stub until
-the host's roster reaches it.
+or the admin that invited it). A removal another delegated admin made while
+the owner was offline reaches the owner as roster gossip; when the owner
+applies it, it sends that household its own `SPACE_REMOTE_MEMBER_REMOVED`
+(one frame, one recipient, best effort — the `SPACE_SYNC_REJECTED` reconnect
+backstop remains for a household it cannot reach then). Before, such a
+household kept its copy and kept syncing until that backstop, up to 30
+minutes later.
 
 Owner cannot be kicked through this path — same invariant as
 `remove_member`. Self-leaves on a remote space run the local path (the

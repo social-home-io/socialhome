@@ -26149,7 +26149,8 @@ def cmd_gfs_admin_seed() -> None:
        ``POST /gfs/publish`` at all (a delegated admin is a writer to the
        GFS). e renames the space (executed on e, signed with the seed):
        b and d show the new name. e removes b's person: d drops b's
-       seat. A request signed with e's seed is taken by
+       seat (b itself drops its copy only on its host's word: a tells it
+       once it is back). A request signed with e's seed is taken by
        every GFS that pins the space (the positive control for step 3).
        a comes back and holds e's post, the new name and b's removal.
     3. **Removed by the owner.** a removes e. a rotates the space key; d
@@ -26163,8 +26164,9 @@ def cmd_gfs_admin_seed() -> None:
     4. **Removed by another admin while the owner is away.** e joins again
        (admin link, approval) and holds the NEW seed; a makes d's person an
        admin too (d holds it as well). a is stopped; d removes e (executed
-       on d; e drops its own copy only on its host's word, so that is
-       reported, not asserted). a comes back, learns of the removal — from d's roster gossip
+       on d; e drops its own copy only on its host's word — a tells it
+       once it is back). a comes back, learns of the removal — from d's
+       roster gossip
        or from d re-stating it against a's roster snapshot, whichever
        arrives first (reported) — and rotates again. d, the remaining
        admin, holds the newest seed; both GFS pin the newest key; both of
@@ -26476,9 +26478,9 @@ def cmd_gfs_admin_seed() -> None:
             f"{step}: a rotated the space key although no admin was removed"
         )
     print("  a back: it holds e's post, the new name and b's removal ✓")
-    # Secondary, as in ``owner-offline-ban``: a household drops its own copy
-    # of a space only on its host's word (b was invited by a, not by e), so
-    # b keeps its stub until a's roster reaches it. Reported, not fatal.
+    # A household drops its own copy of a space only on its host's word (b
+    # was invited by a, not by e): a, back and holding e's removal of b,
+    # tells b itself.
     b_gone = _parity_wait(
         lambda: (
             not _rows(
@@ -26487,17 +26489,14 @@ def cmd_gfs_admin_seed() -> None:
                 (space_id, b["user_id"]),
             )
         ),
-        timeout=60.0,
+        timeout=120.0,
     )
-    print(
-        "  b "
-        + (
-            "lost the space once its host a was back ✓ [secondary]"
-            if b_gone
-            else "still holds its stub of the space (its host a has not told "
-            "it yet) [secondary, non-fatal]"
+    if not b_gone:
+        raise SystemExit(
+            f"{step}: b still holds its seat in the space 120 s after its host "
+            "a came back holding e's removal of it — the host never told it"
         )
-    )
+    print("  b lost the space once its host a was back and told it ✓")
 
     # 3. Removed by the owner.
     epoch1 = _space_col("a", space_id, "authority_key_epoch") or 0
@@ -26619,9 +26618,9 @@ def cmd_gfs_admin_seed() -> None:
     )
     seed3 = _admin_seed_await_seed("d", space_id, k3, step)
     print(f"  d, the remaining admin, holds the K3={k3[:12]}… seed ✓")
-    # Secondary, as for b above: e drops its own copy only on its host's
-    # word, and d is not e's host. Whatever e still holds is the K2 seed —
-    # refused below.
+    # As for b above: e drops its own copy only on its host's word, and d
+    # is not e's host — a tells it once it applied d's removal. Whatever
+    # seed e still has on disk is K2, refused below.
     e_gone = _parity_wait(
         lambda: (
             not _rows(
@@ -26630,17 +26629,14 @@ def cmd_gfs_admin_seed() -> None:
                 (space_id, e["user_id"]),
             )
         ),
-        timeout=60.0,
+        timeout=120.0,
     )
-    print(
-        "  e "
-        + (
-            "lost the space once its host a was back ✓ [secondary]"
-            if e_gone
-            else "still holds its stub of the space (its host a has not told "
-            "it yet) [secondary, non-fatal]"
+    if not e_gone:
+        raise SystemExit(
+            f"{step}: e still holds its seat in the space 120 s after its host "
+            "a came back and applied d's removal of it — the host never told it"
         )
-    )
+    print("  e lost the space once its host a was back and told it ✓")
     for seed, whose in ((seed1, "e's first seed (K1)"), (seed2, "e's second seed (K2)")):
         _admin_seed_probe(state, space_id, seed, want=403, whose=whose, step=step)
     _admin_seed_probe(

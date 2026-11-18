@@ -1786,6 +1786,43 @@ class PrivateSpaceInviteHandler:
             sender=event.from_instance,
         )
 
+    async def _tell_removed_household(
+        self, space_id: str, instance_id: str, user_id: str
+    ) -> None:
+        """The host's ``SPACE_REMOTE_MEMBER_REMOVED`` for a seat that ended
+        through a delegated admin's gossip — one frame to the one household,
+        what the host's own ``remove_remote_member`` sends. Best effort: a
+        household it does not reach now is told by the reconnect backstop
+        (``SPACE_SYNC_REJECTED`` on its next sync BEGIN)."""
+        if self._federation is None:
+            return
+        try:
+            result = await self._federation.send_with_mesh_fallback(
+                to_instance_id=instance_id,
+                event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+                payload={"space_id": space_id, "user_id": user_id},
+                space_id=space_id,
+            )
+        except Exception:
+            log.info(
+                "roster-gossip: telling %s that %s left space %s failed — its "
+                "next sync is answered instead",
+                instance_id,
+                user_id,
+                space_id,
+                exc_info=True,
+            )
+            return
+        if not result.ok:
+            log.info(
+                "roster-gossip: %s could not be told that %s left space %s (%s) "
+                "— its next sync is answered instead",
+                instance_id,
+                user_id,
+                space_id,
+                getattr(result, "error", None),
+            )
+
     async def _merge_roster_entry(
         self,
         event_type: object,
@@ -1962,6 +1999,19 @@ class PrivateSpaceInviteHandler:
                     space_id=space_id, instance_id=instance_id, user_id=user_id
                 )
             )
+        if (
+            applied
+            and tombstoned
+            and hosted
+            and sender is not None
+            and sender != instance_id
+        ):
+            # On the space we host, another household's gossip just ended
+            # this seat: a delegated admin removed the member while we were
+            # offline. A household drops its copy of a space only on its
+            # HOST's word, so say it — before its ``space_instances`` row
+            # goes below. (Its own LEFT needs no answer.)
+            await self._tell_removed_household(space_id, instance_id, user_id)
         if (
             applied
             and tombstoned

@@ -1269,10 +1269,9 @@ and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
    the GFS log shows an anonymous ``/gfs/member-publish-anon`` and **no**
    ``POST /gfs/publish`` (a delegated admin is a writer to the GFS). e
    renames the space (HTTP 200: executed on e, signed with the seed) — b
-   and d show the name. e removes b's person — d drops the seat (b drops
-   its own copy only on its host's word, so that is reported once a is
-   back, not asserted). a comes back and holds all three; its key did not
-   move.
+   and d show the name. e removes b's person — d drops the seat. a comes
+   back and holds all three; its key did not move; and it tells b, which
+   drops its own copy only on its host's word.
 3. **Removed by the owner.** a removes e and rotates the key (K1 → K2). d
    pins K2; GFS A re-pins from the owner's cert; GFS B re-pins from the
    pin-only publish and stays withdrawn; a records K2 as what B confirmed.
@@ -1282,11 +1281,11 @@ and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
    with K1, and d must log a refusal of that frame and keep the name.
 4. **Removed by another admin, owner away.** e joins again (admin link,
    approval) and holds the K2 seed; a makes d's person an admin too. a is
-   killed; d removes e (HTTP 200: executed on d; e drops its own copy only
-   on its host's word — reported, not asserted). a comes back, learns of
+   killed; d removes e (HTTP 200: executed on d). a comes back, learns of
    it — from d's roster gossip or from d re-stating the removal against a's
    roster snapshot (#1380), whichever arrives first; the step prints which
-   — and rotates again (K2 → K3). d holds the K3 seed; both GFS pin K3.
+   — and rotates again (K2 → K3). d holds the K3 seed; both GFS pin K3;
+   a tells e, which drops its copy.
 
 **The pin probe.** "The old seed works on no GFS" is asked of each GFS
 directly: ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh
