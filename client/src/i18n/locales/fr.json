@@ -6557,5 +6557,9 @@
   "error.album_audience.unknown_person": "Une personne choisie ne fait plus partie du foyer.",
   "error.album_audience.too_many": "Un album privé peut compter au plus {max} personnes.",
   "error.child_upload_off": "L'ajout de photos est désactivé pour les enfants en ce moment. Demandez à un adulte.",
-  "gallery.locked.delete_confirm": "Mettre à la corbeille"
+  "gallery.locked.delete_confirm": "Mettre à la corbeille",
+  "admin_grant.warning": "En tant qu'admin, ce foyer peut agir au nom de l'espace pendant que vous êtes hors ligne.",
+  "admin_grant.check": "Vérifiez d'abord l'ID du foyer avec eux : il apparaît sur leur page « Connexions ».",
+  "connections.own_id.title": "ID de votre foyer",
+  "connections.own_id.desc": "Un autre foyer peut vous le demander pour vérifier qu'il s'agit bien de vous, par exemple avant de vous nommer admin de son espace."
 }

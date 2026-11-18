@@ -6584,5 +6584,9 @@
   "error.album_audience.unknown_person": "Alguien que elegiste ya no forma parte del hogar.",
   "error.album_audience.too_many": "Un álbum privado puede tener como máximo {max} personas.",
   "error.child_upload_off": "Añadir fotos está desactivado para los niños ahora mismo. Pídeselo a un adulto.",
-  "gallery.locked.delete_confirm": "Mover a la papelera"
+  "gallery.locked.delete_confirm": "Mover a la papelera",
+  "admin_grant.warning": "Como admin, este hogar puede actuar en nombre del espacio mientras estás sin conexión.",
+  "admin_grant.check": "Comprueba antes el ID del hogar con ellos: aparece en su página «Conexiones».",
+  "connections.own_id.title": "El ID de tu hogar",
+  "connections.own_id.desc": "Otro hogar puede pedírtelo para comprobar que de verdad eres tú; por ejemplo, antes de hacerte admin de su espacio."
 }

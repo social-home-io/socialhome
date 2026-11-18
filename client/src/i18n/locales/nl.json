@@ -6557,5 +6557,9 @@
   "error.album_audience.unknown_person": "Iemand die je hebt gekozen, hoort niet meer bij het huishouden.",
   "error.album_audience.too_many": "Een privéalbum kan hoogstens {max} mensen hebben.",
   "error.child_upload_off": "Foto's toevoegen staat voor kinderen nu uit. Vraag een volwassene.",
-  "gallery.locked.delete_confirm": "Naar de prullenbak"
+  "gallery.locked.delete_confirm": "Naar de prullenbak",
+  "admin_grant.warning": "Als beheerder kan dit huishouden namens de space handelen terwijl jij offline bent.",
+  "admin_grant.check": "Vergelijk eerst het huishoud-ID met hen – het staat op hun pagina \"Verbindingen\".",
+  "connections.own_id.title": "Je huishoud-ID",
+  "connections.own_id.desc": "Een ander huishouden kan hierom vragen om te controleren dat jij het echt bent – bijvoorbeeld voordat het je beheerder van zijn space maakt."
 }

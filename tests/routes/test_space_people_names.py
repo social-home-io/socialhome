@@ -235,6 +235,34 @@ async def test_join_requests_name_remote_applicants(client):
     assert rows["uid-kid"]["picture_url"] is None
 
 
+async def test_admin_grant_request_names_the_asking_household(client):
+    """The owner checks WHO asks before an admin grant (the grant hands that
+    household the space's signing seed): the row carries the household's ID
+    — the fingerprint of its identity key — and ``null`` for someone at
+    home."""
+    sid = await _space(client)
+    household = "ab2cd3ef4gh5ij6kl7mn2op3qr4st5uv"
+    await client._db.enqueue(
+        "INSERT INTO space_join_requests(id, space_id, remote_applicant_instance_id,"
+        " user_id, requested_role, expires_at)"
+        " VALUES(?,?,?,?,'admin', datetime('now', '+7 days'))",
+        ("jr-adm", sid, household, "ru-eve"),
+    )
+    await _local_user(client, "uid-kim", "kim")
+    await client._db.enqueue(
+        "INSERT INTO space_join_requests(id, space_id, user_id, requested_role,"
+        " expires_at) VALUES(?,?,?,'admin', datetime('now', '+7 days'))",
+        ("jr-loc", sid, "uid-kim"),
+    )
+
+    r = await client.get(f"/api/spaces/{sid}/join-requests", headers=_auth(client._tok))
+    assert r.status == 200
+    rows = {row["id"]: row for row in await r.json()}
+    assert rows["jr-adm"]["requested_role"] == "admin"
+    assert rows["jr-adm"]["remote_applicant_instance_id"] == household
+    assert rows["jr-loc"]["remote_applicant_instance_id"] is None
+
+
 # ── GET /api/spaces/{id}/invite-tokens ────────────────────────────────
 
 

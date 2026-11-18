@@ -126,9 +126,15 @@ interface Props {
   /** Pending join requests (owners / admins): a "N join requests ·
    *  Review" row leads to Moderation, where they are decided. */
   joinRequests?: number
+  /** The space's "Let admins act for me" switch
+   *  (``features.delegated_admin_authority``), for the member sheet's
+   *  note before an admin grant to another household. */
+  adminsActForOwner?: boolean
 }
 
-export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props) {
+export function SpaceMemberList({
+  spaceId, viewerRole, joinRequests = 0, adminsActForOwner = false,
+}: Props) {
   const follower = isFollower(viewerRole)
   const reload = () => {
     loading.value = true
@@ -416,7 +422,7 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
                   aria-label={t('space.members.manage_aria', { name: r.name })}
                   onClick={() => openMemberActions(
                     spaceId, m.user_id, m.is_owner ? 'owner' : m.role,
-                    m.instance_id ?? null, viewerRole,
+                    m.instance_id ?? null, viewerRole, adminsActForOwner,
                   )}
                 >
                   ···

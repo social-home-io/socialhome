@@ -26,6 +26,7 @@ import { Avatar } from './Avatar'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Spinner } from './Spinner'
 import { showToast } from './Toast'
+import { HouseholdId } from './HouseholdId'
 import { ShareHomeToggle } from './ShareHomeToggle'
 import { GfsFallbackToggle } from './GfsFallbackToggle'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
@@ -547,11 +548,7 @@ export function ConnectionDetail({ conn, compat, ours = 0, relayGfs = false, onC
           <div>
             <dt>{t('connections.detail.household_id')}</dt>
             <dd>
-              <code>{conn.instance_id}</code>
-              <button type="button" class="sh-conn-copy" aria-label={t('connections.manage.copy_id')}
-                onClick={() => void copyText(conn.instance_id)}>
-                <ConnIcon name="copy" />
-              </button>
+              <HouseholdId id={conn.instance_id} />
             </dd>
           </div>
           {inboxUrl && (
