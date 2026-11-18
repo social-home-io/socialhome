@@ -1249,9 +1249,9 @@ routing body shows the GFS its instance id (`to_instance`) — as every frame
 to such a seat does; what only the seed can sign (the notice of a
 rotation the admin runs, a removal made on its household)
 still goes out, anonymously, so the GFS can learn that some household
-besides the owner holds the seed, not which; and on a private space's
-opaque channel a delegated admin's seat can still be told apart after a
-rotation it runs (open follow-up). See
+besides the owner holds the seed, not which. (On a private space's opaque
+channel a delegated admin renews its own grant after a rotation it runs,
+like every other member's.) See
 [gfs-relay.md](./gfs-relay.md#residuals). With delegation
 off, no admin holds the seed on any path, and a link-joined admin acts
 through the host (`SPACE_REMOTE_ADMIN_ACTION`) like a paired one.
@@ -1267,7 +1267,12 @@ The two old reasons no longer hold:
   owner household carrying an owner-household cert with a higher epoch, so a
   revoked admin can neither re-pin nor rotate. The owner shares no seed with
   any admin while a GFS that lists the space has not proved
-  `authority_rotation`.
+  `authority_rotation`, while a GFS has not confirmed pinning the current
+  key — one the space was withdrawn from included — or while a GFS still
+  owes a retired channel's unregister; each of those is re-sent until the
+  server confirms ([spaces.md](./spaces.md), "Durable re-pin"). A kick made
+  by another admin while the owner was away reaches the owner on that
+  admin's next sync, and a removed household cannot gossip itself back in.
 - **A link is not an acquaintance, but the owner's click is.** The seed goes
   only to a household the owner itself approved as admin. On the space it
   hosts, the owner refuses seed-signed gossip that keeps or sets an admin

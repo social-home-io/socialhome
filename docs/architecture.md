@@ -1048,7 +1048,9 @@ same lifecycle: `_stop: asyncio.Event` set in `stop()`, drained in
 `start()`, body is `while not self._stop.is_set()`. Reference
 template: `replay_cache_scheduler.py`. Schedulers cover replay-cache
 eviction, shared-GFS relay route discovery and expiry
-(`gfs_route_discovery_scheduler.py`), outbox processing, calendar reminders, page-lock expiry,
+(`gfs_route_discovery_scheduler.py`), the retry of space key re-pins and
+channel unregisters a GFS still owes after a key rotation
+(`gfs_cleanup_scheduler.py`), outbox processing, calendar reminders, page-lock expiry,
 post-draft GC, pairing-relay flush, post-rotation tasks, space
 retention, task deadlines, recurring-task spawning, password-reset-token
 GC, auth-audit-log pruning (`auth_audit_cleanup_scheduler.py` drops

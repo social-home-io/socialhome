@@ -99,7 +99,17 @@ The Social Home ↔ GFS link is split by direction:
     older household, kept working on purpose so an upgraded GFS doesn't 403
     the whole fleet) still refreshes metadata but leaves `withdrawn` as-is —
     otherwise one captured publish body would re-list a delisted space forever.
-    Once every household ships `ts` it becomes mandatory. Withdrawal affects **discoverability only** — the space drops
+    Once every household ships `ts` it becomes mandatory. A publish answers
+    `{status, space_id, identity_public_key}` — the authority key the GFS
+    pins after the request, which is how the owner checks that a re-pin
+    took. A publish carrying `withdrawn: true` (inside the signed bytes,
+    `ts` mandatory; capability `withdrawn_repin`) is a **pin-only** publish
+    for a listing the owner withdrew: the pin moves under the usual cert
+    rule, no metadata is stored, `status` is untouched, the listing stays
+    withdrawn (the flag is set if it was not), and no row is ever created —
+    an unknown space answers `404`, only after the signature verified. The
+    owner sends it after a key rotation so a withdrawn listing does not keep
+    the retired key ([spaces.md](./spaces.md), "Durable re-pin"). Withdrawal affects **discoverability only** — the space drops
     off `GET /gfs/spaces`, `GET /gfs/spaces/{id}` and the public pages, while
     the relay (`publish`) and existing subscribers are untouched. Withdrawal
     also **deletes every invite link** minted for the space
@@ -3174,8 +3184,12 @@ servers the owner's list names; no list (or an empty one) means no channel.
   recorded in `gfs_channel_withdrawals` (migration 0095) BEFORE the new
   list is stored; each row goes once the server confirmed (or can never
   confirm), and is retried on every reconnect of that server — a
-  suspended connection when it comes back
-  (`GfsChannelService.withdraw_pending`).
+  suspended connection when it comes back — and by the 5-minute retry pass
+  (`GfsChannelService.withdraw_pending`). A channel retired because the
+  space key rotated (or the option went off) is recorded the same way
+  first, each row with the channel's signing seed wrapped under the
+  household KEK (migration 0147), so the unregister can still be signed
+  after the key it derived from is gone.
 
 **Members send to every chosen server.** The members get the list in the
 encrypted `space_meta` like any owner list. A member holding the channel

@@ -20649,7 +20649,8 @@ def cmd_gfs_authority_rotate() -> None:
     1. a turns ``delegated_admin_authority`` on, then off — the off-flip
        rotates the space authority key unconditionally.
     2. Assert the GFS re-pinned: ``global_spaces.identity_public_key`` is a's
-       new key and ``authority_cert`` is stored.
+       new key and ``authority_cert`` is stored — and that a took the GFS's
+       publish answer as the confirmation (no re-pin left owed).
     3. a posts; d (still pinned to the old key) must heal its pin from the
        GFS listing's cert and read the post.
     """
@@ -20692,6 +20693,19 @@ def cmd_gfs_authority_rotate() -> None:
         timeout=30.0,
     )
     print(f"  GFS re-pinned {space_id} to K2={k2[:12]}… from the owner cert ✓")
+    # Durable re-pin: the owner counts the re-pin only because the GFS
+    # ANSWERED the new key to the publish. Had it named another key or
+    # none, a would have logged the re-pin as owed (and kept retrying).
+    if _log_contains("a", f"did not confirm the space key for {space_id}"):
+        raise SystemExit(
+            "gfs-authority-rotate: a logged that the GFS did not confirm the "
+            "re-pin — the publish answer no longer names the pinned key"
+        )
+    if _log_contains("a", "still pin the retired key of space " + space_id):
+        raise SystemExit(
+            "gfs-authority-rotate: a's rotation ended with a re-pin still owed"
+        )
+    print("  the GFS confirmed the new pin in its publish answer; nothing owed ✓")
     time.sleep(8)  # the K2-signed subscriber key re-seal reaches d
     content = f"Post after the authority rotation — {time.time_ns()}"
     s, post = _request(

@@ -2415,17 +2415,24 @@ routing body shows the GFS its instance id (`to_instance`) — as every frame
 to such a seat does; what only the seed can sign (the notice of a
 rotation the admin runs, a removal made on its household)
 still goes out, anonymously, so the GFS can learn that some household
-besides the owner holds the seed, not which; and on a private space's
-opaque channel a delegated admin's seat can still be told apart after a
-rotation it runs (open follow-up). See
+besides the owner holds the seed, not which. (On a private space's opaque
+channel a delegated admin renews its own grant after a rotation it runs,
+like every other member's — its seat is not the odd one out.) See
 [gfs-relay.md](./gfs-relay.md#residuals). Gated on
 `MIN_FOR_RELAY_ADMIN_KEY_SHARE` (94): an older link-seated admin is skipped
-at WARNING and acts through the host. The seed goes to nobody while a GFS
-that lists the space has not proved `authority_rotation` (the owner could
-not retire the key there) — probed again at most every 30 s while it is
-unreachable, and the owner is told (notification `space_delegation_blocked`,
-at most once a day per space) — and such a space is never listed on such a
-GFS in the first place (`409 GFS_KEY_ROTATION_UNSUPPORTED`). An admin also only takes it while one of its
+at WARNING and acts through the host. The seed goes to nobody while any GFS
+state tied to the space key is not provably current
+(`GfsConnectionService.authority_key_revocable`, D1): a GFS that lists the
+space has not proved `authority_rotation` (the owner could not retire the
+key there — probed again at most every 30 s while it is unreachable); a
+**re-pin is owed** — a GFS that lists the space, or one the space was
+withdrawn from, has not CONFIRMED pinning the current key (see "Durable
+re-pin" below; the gate asks once more before it answers no); or a GFS still
+owes the unregister of a private channel the space no longer uses. The owner
+is told (notification `space_delegation_blocked`, at most once a day per
+space), and a space whose admins may hold the key is never listed on a GFS
+without `authority_rotation` in the first place
+(`409 GFS_KEY_ROTATION_UNSUPPORTED`). An admin also only takes it while one of its
 own people holds a live admin seat, and only when the payload's space is
 the envelope's. A share that is definitively not sent (no seat, no route,
 no host hop) is not counted as shared; a queued one is. An admin household
@@ -2722,11 +2729,14 @@ no revoked household.
 **Steps on the owner.** (1) mint a fresh keypair at
 `authority_key_epoch + 1` in one compare-and-set write; (2) sign the cert;
 (3) rotate the content key, the rekey signed with the NEW key; (3a)
-re-publish a public / global space to every GFS that already lists it — each
+move the pin on every GFS that holds one for the space
+(`GfsConnectionService.repin_owed`): re-publish to every GFS that lists it,
+and send the pin-only publish to every GFS it was **withdrawn** from — each
 re-pins from the cert, so from here on no GFS takes the retired key's relays,
 epoch notices or media uploads (this runs BEFORE the per-member sends, which
-can take minutes in a large space; a rotation never tells a new GFS the space
-exists) and re-announce its epoch; (3b) drop every `SPACE_ADMIN_KEY_SHARE`
+can take minutes in a large space; a rotation never tells a GFS that never
+held the space that it exists) and re-announce the epoch of a public / global
+space; (3b) drop every `SPACE_ADMIN_KEY_SHARE`
 of the space still queued in the owner's outbox — to each member household
 and to the revoked one, which may hold no seat any more (a seed share also
 supersedes per space there). A frame a GFS already accepted is out of reach:
@@ -2747,6 +2757,106 @@ legacy rekey go only to households that still hold a live seat — a
 household whose last seat was just tombstoned (also through gossip, which
 now drops it from `space_instances` like the owner's own removal path does)
 gets neither the new content key nor the config or roster.
+
+**Durable re-pin (owner decisions D2 / D4, 2026-11-15).** A re-pin is one
+request that can fail, and until it lands the retired key still works on
+that server. So the owner tracks what each GFS holds and re-sends until it
+is current:
+
+- **Confirmed, not claimed.** `POST /gfs/spaces/{id}/publish` answers
+  `identity_public_key`, the key the server pins after the request. The
+  owner counts a re-pin only when that is exactly the key it offered
+  (`_pin_confirmed`, per space and connection, in memory). A server that
+  names another key (it refused or could not apply the cert), or none (an
+  older build), **owes** the re-pin — its signed `authority_rotation`
+  capability is a claim, the answered pin is what its relay checks against.
+  A lying server can still answer one key and honour another; that is the
+  malicious-GFS limit below, not something a household can test.
+- **Retried until it lands.** What is owed is re-sent by the rotation, on
+  every reconnect of that GFS (`heal_space_pins`), by a retry pass every
+  5 minutes (`infrastructure/gfs_cleanup_scheduler.py` — it reads what is
+  owed and sends only that; nothing owed, nothing sent), and once more by
+  the seed-share gate itself. A listing publish the server accepted without
+  confirming is not re-sent for the same key on every pass (same body, same
+  answer): a reconnect or a newer key asks again.
+- **Withdrawn listings (D2).** Withdrawing a listing hides it from
+  discovery; the GFS keeps the row, the pinned key and the followers seated
+  there. The owner records each one (`gfs_withdrawn_listings`, migration
+  0147, with the key the server last confirmed) and a rotation sends that
+  GFS a **pin-only publish**: the publish body with `withdrawn: true` inside
+  the owner-signed bytes, a fresh `ts`, the owner's cert, the new key and
+  **no metadata** (blank name, description, images — the space may be
+  private by now). The GFS moves the pin under the usual cert rule, stores
+  nothing else, leaves `status` alone and keeps the listing withdrawn; a
+  space it holds no row for answers `404` (after the signature verified) and
+  the owner forgets the row. Sent only to a server that proved the signed
+  `withdrawn_repin` capability — an older one would refuse the field, and a
+  plain publish would list the space again — so on such a server the re-pin
+  stays owed (WARNING, seed shares blocked) until its operator upgrades or
+  the owner disconnects that GFS. A listing left over from before the space
+  left the global tier (its withdrawal has not landed yet) gets the same
+  pin-only publish instead of a re-publish.
+- **Private channels (D4).** A private space's opaque channel key derives
+  from the authority seed, so the old channel is unregistered before the
+  seed is swapped. Each server the channel lives on is first recorded as
+  owing that unregister together with the channel's signing seed, wrapped
+  under the household KEK and bound to its row
+  (`gfs_channel_withdrawals.channel_seed`, migration 0147), then asked; a
+  server that was down keeps its row and is asked again on its reconnect
+  and by the retry pass — after the rotation too. The seed goes with the
+  row once the server confirmed.
+- **Cost.** Per rotation: one publish per listing GFS (as before) plus one
+  ~1 KB pin-only publish per GFS the space was withdrawn from (typically
+  0–2). Per retry pass: one request per (space, GFS) still owed, 12 per hour
+  at most, zero in steady state. No fan-out to members.
+- **What is left.** Listings withdrawn before this release left no row, so a
+  rotation cannot reach them (re-list and withdraw again to record one). A
+  dissolved space is never rotated, so the pin a GFS keeps for it is never
+  moved. A GFS that is gone for good, or never upgrades, blocks new seed
+  shares for that space until the owner disconnects it — the rows go with
+  the connection, and the old pin there is then out of the owner's reach. A
+  malicious GFS that keeps honouring an old key towards the followers it
+  alone serves cannot be stopped by any household (it controls their only
+  path).
+
+**The owner hears of a kick made while it was away.** A delegated admin's
+removal reaches the owner only as roster gossip (`SPACE_MEMBER_LEFT`), which
+is droppable: about 10 hours of outbox retries, 24 hours in a GFS mailbox.
+One that never arrived left the kicked household an admin on the owner —
+which re-shared every new seed with it. Now a seed-holding admin household
+answers the owner's own statement: when a roster snapshot from the owner
+(sent on a `roster_digest` mismatch after the member's sync BEGIN) names a
+seat live that this household holds a removal for at the same or a higher
+`member_version`, it re-states that removal to the owner alone — one
+`SPACE_MEMBER_LEFT` per seat, signed with the space key, at the removal's
+own version (`PrivateSpaceInviteHandler._restate_removals`). The owner
+applies it like any gossip (a removal wins a version tie) and rotates when
+it ends an admin seat. Bounded: at most 16 per snapshot part, each removal
+at most once an hour per admin household, ~0.5 KB each, one recipient; zero
+in the normal case. Only removals written under the current key epoch are
+re-stated (an older one may be a since-revoked holder's), never the owner
+household's seats or the sender's own.
+
+**A removed household does not seat itself.** Live `SPACE_MEMBER_JOINED`
+gossip whose envelope sender is the very household it seats is refused when
+the receiver holds a removal (any tombstoned seat) of that household and no
+live admin seat of it: a kicked admin that still holds the current seed can
+no longer sign itself — or a fresh user id — back in. A household comes back
+through the host (its gossip or snapshot) or the admin household that
+invites it. Residuals, stated plainly: until the owner hears of the kick
+(an admin's sync BEGIN with a differing roster digest, answered by the
+owner's snapshot — the owner sends one per household at most every 30
+minutes, backing off up to a day) the
+kicked household still holds the current seed and gets any new one; a
+household that has not seen the removal yet (the owner included) still takes
+that household's self-signed JOINED — as a plain member at most on the owner
+(D5), where it ends the admin seat and rotates the key, but the person is
+seated again and must be removed once more; the same forged JOINED relayed
+by an accomplice household is not caught; and a rotation the owner runs
+before it heard of the kick resets every member to the owner's roster, so
+the kicked admin is back until removed again. Any seed holder can still
+sign a removal of another admin (a delegated admin is trusted with exactly
+that); the owner sees it and re-promotes.
 
 **Receiver rules** (`services/space_authority_pin.py`, one function every
 path uses):
