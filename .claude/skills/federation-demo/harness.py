@@ -14925,6 +14925,19 @@ def cmd_verify() -> None:
     else:
         print("  (members-parity check skipped — run 'members-parity')")
 
+    # 13z. gfs-admin-seed: the pins every GFS holds, and the removed
+    #     admin's seeds still refused.
+    if state.get("gfs_admin_seed"):
+        before = len(failures)
+        _check_gfs_admin_seed(state, failures)
+        if len(failures) == before:
+            print(
+                "  gfs-admin-seed: every GFS pins the owner's key; the removed "
+                "admin's seeds are refused ✓"
+            )
+    else:
+        print("  (gfs-admin-seed check skipped — run 'gfs-admin-seed')")
+
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
     #    Anything we can't account for (i.e. doesn't match the
@@ -24489,8 +24502,48 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
         return
     results.append(("admin's invitee: the owner lists it", "PASS", ""))
     print(f"  owner a back: it lists {guest}, e holds {guest}'s card ✓")
+
+    # 2b. e is made an admin as well: an admin reached only through the
+    #     GFS holds the signing seed exactly like the paired one (v_94).
+    e_role_url = (
+        f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    )
+    s, body = _inst_request(state, "a", "PATCH", e_role_url, {"role": "admin"})
+    pin = _space_col("a", space_id, "identity_public_key")
+    both = s == 200 and _parity_wait(
+        lambda: all(_seed_pin(_space_seed(x, space_id)) == pin for x in (admin, "e")),
+        timeout=120.0,
+    )
+    results.append(
+        (
+            f"admin: the signing seed — {admin} (paired) and e (GFS only)",
+            "PASS" if both else "DIFF",
+            ""
+            if both
+            else f"a's PATCH → HTTP {s} {body!r}; a pins {str(pin)[:12]}…, "
+            + ", ".join(
+                f"{x} holds {(_seed_pin(_space_seed(x, space_id)) or 'no seed')[:12]}"
+                for x in (admin, "e")
+            ),
+        )
+    )
+    print(
+        f"  {admin} (paired) and e (GFS only) are admins: "
+        + ("both hold the signing seed ✓" if both else "the seeds DIFFER ✗")
+    )
+    # Both edit on a synced view (an edit from a stale ``config_sequence``
+    # loses last-writer-wins against the owner's own).
+    _parity_wait(
+        lambda: all(
+            (_space_col(x, space_id, "config_sequence") or 0)
+            >= (_space_col("a", space_id, "config_sequence") or 0)
+            for x in (admin, "e")
+        ),
+        timeout=60.0,
+    )
     guest_mailbox = on_e["mailbox"]["mailbox_id"]
     e_mailbox = on_guest["mailbox"]["mailbox_id"]
+    last_name = ""
 
     # 3. Owner offline again: the guest and e exchange a post. The GFS log
     #    is read from AFTER the owner stopped: while a is up (it just came
@@ -24512,6 +24565,35 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
                 ref=author,
                 want={"exists": True, "content": text},
                 members=(reader,),
+                timeout=120.0,
+            )
+        # 3b. Each admin acts for the owner: a rename, executed on its own
+        #     household and signed with the seed. The paired admin b, the
+        #     mesh member d and the GFS-only e must all show it.
+        for acting in (admin, "e"):
+            name = f"Renamed by {acting}, owner offline {tag}"
+            last_name = name
+            s, body = _inst_request(
+                state, acting, "PATCH", f"/api/spaces/{space_id}", {"name": name}
+            )
+            if s != 200:
+                results.append(
+                    (
+                        f"admin, owner offline: {acting} renames the space",
+                        "DIFF",
+                        f"{acting}'s PATCH → HTTP {s} {body!r} (200 = executed "
+                        "on its own household)",
+                    )
+                )
+                continue
+            _parity_compare(
+                state,
+                results,
+                f"admin, owner offline: {acting} renames the space",
+                lambda label, cache: _parity_space_name(state, label, space_id),
+                ref=acting,
+                want={"name": name},
+                members=tuple(x for x in (admin, guest, "e") if x != acting),
                 timeout=120.0,
             )
         # 4. What the GFS saw.
@@ -24541,6 +24623,83 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
         )
     finally:
         _respawn(state, "a")
+
+    # 5. The owner is back: it holds what the admins did while it was away.
+    if last_name:
+        _parity_compare(
+            state,
+            results,
+            "admin: the owner holds the last rename when it is back",
+            lambda label, cache: _parity_space_name(state, label, space_id),
+            ref="e",
+            want={"name": last_name},
+            members=("a",),
+            timeout=180.0,
+        )
+
+    # 6. a takes e's admin seat away: the space key rotates like for any
+    #    admin — the remaining admin b holds the new seed, e none, and
+    #    every member pins the new key.
+    epoch = _space_col("a", space_id, "authority_key_epoch") or 0
+    s, body = _inst_request(state, "a", "PATCH", e_role_url, {"role": "member"})
+
+    def _rotated() -> bool:
+        new_pin = _space_col("a", space_id, "identity_public_key")
+        return (
+            (_space_col("a", space_id, "authority_key_epoch") or 0) > epoch
+            and new_pin != pin
+            and _seed_pin(_space_seed(admin, space_id)) == new_pin
+            and _space_seed("e", space_id) is None
+            and all(
+                _space_col(x, space_id, "identity_public_key") == new_pin
+                for x in (admin, guest, "e")
+            )
+        )
+
+    rotated = s == 200 and _parity_wait(_rotated, timeout=180.0)
+    results.append(
+        (
+            "admin removed: the key rotates, the removed admin's seed is gone",
+            "PASS" if rotated else "DIFF",
+            ""
+            if rotated
+            else f"a's PATCH → HTTP {s} {body!r}; a pins "
+            f"{str(_space_col('a', space_id, 'identity_public_key'))[:12]}… at "
+            f"epoch {_space_col('a', space_id, 'authority_key_epoch')} (was "
+            f"{str(pin)[:12]}… at {epoch}); "
+            + ", ".join(
+                f"{x} pins "
+                f"{str(_space_col(x, space_id, 'identity_public_key'))[:12]}… and "
+                f"holds {(_seed_pin(_space_seed(x, space_id)) or 'no seed')[:12]}"
+                for x in (admin, guest, "e")
+            ),
+        )
+    )
+    print(
+        "  a took e's admin seat away: "
+        + (
+            f"the key rotated, {admin} holds the new seed, e none ✓"
+            if rotated
+            else "the rotation did NOT converge ✗"
+        )
+    )
+
+
+def _parity_wait(check, *, timeout: float, interval: float = 2.0) -> bool:
+    """Poll ``check()`` until it is truthy; ``False`` after ``timeout`` —
+    never raises, so the action lands in the results table."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if check():
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(interval)
+
+
+def _parity_space_name(state: dict, label: str, space_id: str) -> dict:
+    s, got = _parity_get(state, label, f"/api/spaces/{space_id}")
+    return {"name": (got or {}).get("name")} if s == 200 else {"error": f"HTTP {s}"}
 
 
 #: How long ``gfs-moderator-parity`` waits for the large item on e after
@@ -25288,64 +25447,90 @@ def cmd_members_parity() -> None:
             timeout=180.0,
         )
 
-    # 13. Admin rights: a promotes e's person; e deletes d's post.
-    role_url = (
-        f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
-    )
-    s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "admin"})
-    _must("members-parity: a promotes e's person to admin", s, body, ok=(200,))
-    try:
-        _parity_compare(
-            state,
-            results,
-            "admin: promotion",
-            lambda label, cache: _parity_role(
-                state, label, space_id, e["user_id"], cache
-            ),
-            ref="a",
-            want={"role": "admin"},
+    # 13. Admin rights, the same for an admin on either path: a promotes
+    #     the person (e — GFS only; then d — paired / mesh) and that admin
+    #     deletes the OTHER member's post.
+    for adm, other in (("e", "d"), ("d", "e")):
+        adm_inst = state["instances"][adm]
+        role_url = (
+            f"/api/spaces/{space_id}/remote-members/"
+            f"{adm_inst['instance_id']}/{adm_inst['user_id']}"
         )
-        victim_text = f"Parity post for the admin to remove {tag}"
-        victim = _parity_post_text(state, "d", space_id, victim_text)
-        # The host a and e must hold d's post BEFORE e deletes it: d reaches
-        # a over the mesh, which re-routes after a restart, so e's delete
-        # could otherwise reach a first — a holds it and re-runs every gate
-        # on replay (``test_direct_the_replay_runs_every_gate_again``), by
-        # which time e would no longer be an admin.
-        held = _parity_compare(
-            state,
-            results,
-            "admin: d's post",
-            post_view(victim),
-            ref="d",
-            want={"exists": True, "content": victim_text},
-            members=("a", "e"),
-            timeout=120.0,
-        )
-        s, body = (
-            _inst_request(state, "e", "DELETE", f"/api/spaces/{space_id}/posts/{victim}")
-            if held
-            else (0, "not sent: d's post never reached a and e")
-        )
-        if s not in (200, 202, 204):
+
+        def role_view(label, cache, user_id=adm_inst["user_id"]):
+            return _parity_role(state, label, space_id, user_id, cache)
+
+        s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "admin"})
+        if s != 200:
             results.append(
-                ("admin: e deletes d's post", "DIFF", f"e's DELETE → HTTP {s} {body!r}")
+                (f"admin ({adm}): promotion", "DIFF", f"a's PATCH → HTTP {s} {body!r}")
             )
-        else:
+            continue
+        try:
             _parity_compare(
                 state,
                 results,
-                "admin: e deletes d's post",
-                post_view(victim),
+                f"admin ({adm}): promotion",
+                role_view,
                 ref="a",
-                want={"exists": False},
+                want={"role": "admin"},
+            )
+            victim_text = f"Parity post for admin {adm} to remove {tag}"
+            victim = _parity_post_text(state, other, space_id, victim_text)
+            # The host a and the admin must hold the post BEFORE the admin
+            # deletes it: d reaches a over the mesh, which re-routes after
+            # a restart, so a delete could otherwise reach a first — a
+            # holds it and re-runs every gate on replay
+            # (``test_direct_the_replay_runs_every_gate_again``), by which
+            # time the person would no longer be an admin.
+            held = _parity_compare(
+                state,
+                results,
+                f"admin ({adm}): {other}'s post",
+                post_view(victim),
+                ref=other,
+                want={"exists": True, "content": victim_text},
+                members=("a", adm),
                 timeout=120.0,
             )
-    finally:
-        # Only now — the delete has landed on a, d and e (or timed out) —
-        # is e's person put back to member.
-        s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
-        print(f"  e's person back to member: HTTP {s}")
+            s, body = (
+                _inst_request(
+                    state, adm, "DELETE", f"/api/spaces/{space_id}/posts/{victim}"
+                )
+                if held
+                else (0, f"not sent: {other}'s post never reached a and {adm}")
+            )
+            if s not in (200, 202, 204):
+                results.append(
+                    (
+                        f"admin ({adm}): deletes {other}'s post",
+                        "DIFF",
+                        f"{adm}'s DELETE → HTTP {s} {body!r}",
+                    )
+                )
+            else:
+                _parity_compare(
+                    state,
+                    results,
+                    f"admin ({adm}): deletes {other}'s post",
+                    post_view(victim),
+                    ref="a",
+                    want={"exists": False},
+                    timeout=120.0,
+                )
+        finally:
+            # Only now — the delete has landed on a, d and e (or timed out)
+            # — is the person put back to member.
+            s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
+            print(f"  {adm}'s person back to member: HTTP {s}")
+        _parity_compare(
+            state,
+            results,
+            f"admin ({adm}): back to member",
+            role_view,
+            ref="a",
+            want={"role": "member"},
+        )
 
     # 14. "Host" = the owner or the delegated admin that invited us: d,
     #     seated by admin b in a fresh space while a is offline.
@@ -25495,6 +25680,761 @@ def cmd_members_mesh_restart() -> None:
         f"  a retransmitted the page to d after d's nack ✓ ({resent[0].strip()[:120]})"
     )
     print(f"{step}: ok")
+
+
+# ─── Step: gfs-admin-seed (v_94) ───────────────────────────────────────────
+
+
+def _space_seed(label: str, space_id: str) -> bytes | None:
+    """The space signing seed ``label`` holds for ``space_id``, unwrapped
+    with that household's own KEK (``<data_dir>/.kek_salt``, bound to the
+    space id) — or ``None``. Read-only: the harness plays the household
+    reading its own disk, which is exactly what a removed admin that
+    refuses to forget can do."""
+    from socialhome.infrastructure.key_manager import KeyManager
+
+    rows = _rows(
+        label, "SELECT identity_private_key FROM spaces WHERE id=?", (space_id,)
+    )
+    if not rows or not rows[0][0]:
+        return None
+    kek = KeyManager.from_data_dir(_instance_dir(label))
+    return kek.decrypt(rows[0][0], associated_data=space_id.encode("utf-8"))
+
+
+def _seed_pin(seed: bytes | None) -> str | None:
+    """The authority key (hex) a seed signs for."""
+    from socialhome.crypto import ed25519_public_key
+
+    return ed25519_public_key(seed).hex() if seed else None
+
+
+def _authority_probe(gfs_url: str, space_id: str, seed: bytes) -> int:
+    """Ask the GFS at ``gfs_url`` something only the space key may ask:
+    ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh authority
+    signature made with ``seed``. 200 — that GFS takes this key as the
+    space authority (the same pin its relay, epoch notices and media
+    uploads are checked against); 403 — it does not. Read-only: nothing is
+    relayed to anybody."""
+    from socialhome.authority_sig import (
+        AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
+        sign_authority_event,
+    )
+
+    ts = datetime.now(timezone.utc).isoformat()
+    sig = sign_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
+        space_id=space_id,
+        payload={"space_id": space_id, "ts": ts},
+        space_seed=seed,
+    )
+    query = urllib.parse.urlencode({"ts": ts, "summary": "1", **sig})
+    status, _body = _request(f"{gfs_url}/gfs/spaces/{space_id}/subscribers?{query}")
+    return status
+
+
+def _gfs_pin(rows_of: Any, space_id: str) -> tuple[str, bool, bool] | None:
+    """``(pinned key, holds a cert, withdrawn)`` of ``space_id`` on a GFS
+    (``rows_of``: :func:`_gfs_rows` or :func:`_gfs_b_rows`)."""
+    rows = rows_of(
+        "SELECT identity_public_key, authority_cert IS NOT NULL, withdrawn"
+        " FROM global_spaces WHERE space_id=?",
+        (space_id,),
+    )
+    return (rows[0][0], bool(rows[0][1]), bool(rows[0][2])) if rows else None
+
+
+def _admin_seed_servers(state: dict) -> list[tuple[str, str, Any]]:
+    """``(name, base url, rows reader)`` of every GFS the step checks: A,
+    and B (which the space is withdrawn from) while ``gfs-b-up`` runs."""
+    servers: list[tuple[str, str, Any]] = [
+        ("A", f"http://127.0.0.1:{GFS_PORT}", _gfs_rows)
+    ]
+    if _gfs_b_alive(state):
+        servers.append(("B (withdrawn)", state["gfs_b"]["base_url"], _gfs_b_rows))
+    return servers
+
+
+def _admin_seed_join_as_admin(state: dict, space_id: str, step: str) -> None:
+    """e redeems a published ADMIN link of a's and a approves the elevation
+    (an admin link seats a member; the owner's approval makes the admin —
+    and, with "Let admins act for me" on, hands e the signing seed)."""
+    e = state["instances"]["e"]
+    s, link = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/invite-tokens",
+        {
+            "role": "admin",
+            "uses": 1,
+            "publish_to_gfs": state["gfs"]["pairings"]["a"]["id"],
+        },
+    )
+    link = _must(f"{step}: a mints an admin link", s, link, ok=(201,))
+    s, joined = _request(
+        f"http://127.0.0.1:{e['port']}/api/spaces/join",
+        token=e["token"],
+        method="POST",
+        body=_join_body_from_blob(_decode_invite_blob(link["code"])),
+        timeout=40.0,
+    )
+    joined = _must(f"{step}: e redeems the admin link", s, joined, ok=(200, 201))
+    if joined.get("role") != "member" or joined.get("pending_role") != "admin":
+        raise SystemExit(
+            f"{step}: e's admin redeem answered {joined!r} — expected a member "
+            "seat with the admin role pending the owner's approval"
+        )
+
+    def _elevation() -> str | None:
+        st, pending = _inst_request(
+            state, "a", "GET", f"/api/spaces/{space_id}/join-requests"
+        )
+        if st != 200:
+            return None
+        ids = [r["id"] for r in pending if r.get("requested_role") == "admin"]
+        return ids[0] if ids else None
+
+    elevation = _poll("a to list e's admin request", _elevation, timeout=30.0)
+    s, body = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/join-requests/{elevation}/approve",
+        {},
+    )
+    _must(f"{step}: a approves e as an admin", s, body, ok=(200, 201))
+    _poll(
+        "e's person to hold the admin seat",
+        lambda: (
+            _rows(
+                "e",
+                "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, e["user_id"]),
+            )
+            == [("admin",)]
+        ),
+        timeout=90.0,
+        interval=2.0,
+    )
+
+
+def _admin_seed_await_seed(label: str, space_id: str, pin: str, step: str) -> bytes:
+    """Wait until ``label`` holds the seed of the key ``pin``; returns it."""
+
+    def _held() -> bytes | None:
+        seed = _space_seed(label, space_id)
+        return seed if _seed_pin(seed) == pin else None
+
+    try:
+        return _poll(f"{label} to hold the seed of {pin[:12]}…", _held, timeout=120.0)
+    except SystemExit:
+        raise SystemExit(
+            f"{step}: {label} never held the signing seed of the key the owner "
+            f"pins ({pin[:12]}…): it holds "
+            f"{(_seed_pin(_space_seed(label, space_id)) or 'none')[:12]}. Check "
+            f"{_log_path('a')} for 'delegated-admin:' and {_log_path(label)} for "
+            "'SPACE_ADMIN_KEY_SHARE'."
+        ) from None
+
+
+def _admin_seed_await_rotation(
+    state: dict,
+    space_id: str,
+    *,
+    old_pin: str,
+    old_epoch: int,
+    members: tuple[str, ...],
+    step: str,
+    timeout: float = 120.0,
+) -> tuple[str, int]:
+    """The owner a moved the space key off ``old_pin``; every one of
+    ``members`` pins the new key at a's epoch, and so does every GFS —
+    the one that lists the space and the one it was withdrawn from.
+    Returns ``(new pin, epoch)``."""
+    new_pin = _poll(
+        "a to rotate the space authority key",
+        lambda: (
+            _space_col("a", space_id, "identity_public_key")
+            if (_space_col("a", space_id, "authority_key_epoch") or 0) > old_epoch
+            else None
+        ),
+        timeout=timeout,
+        interval=2.0,
+    )
+    if new_pin == old_pin:
+        raise SystemExit(f"{step}: a's epoch rose but its pin did not move")
+    epoch = _space_col("a", space_id, "authority_key_epoch")
+    for label in members:
+        _poll(
+            f"{label} to pin {new_pin[:12]}… at epoch {epoch}",
+            lambda label=label: (
+                _space_col(label, space_id, "identity_public_key") == new_pin
+                and _space_col(label, space_id, "authority_key_epoch") == epoch
+            ),
+            timeout=120.0,
+            interval=2.0,
+        )
+    for name, _url, rows_of in _admin_seed_servers(state):
+        try:
+            _poll(
+                f"GFS {name} to pin {new_pin[:12]}…",
+                lambda rows_of=rows_of: (
+                    (pin := _gfs_pin(rows_of, space_id)) is not None
+                    and pin[0] == new_pin
+                    and pin[1]
+                ),
+                timeout=60.0,
+                interval=2.0,
+            )
+        except SystemExit:
+            raise SystemExit(
+                f"{step}: GFS {name} still pins {_gfs_pin(rows_of, space_id)!r} "
+                f"for the space after a rotated to {new_pin[:12]}… — the removed "
+                f"admin's key still works there. Check {_log_path('a')} for "
+                "'re-pin' / 'pin-only'."
+            ) from None
+    if _gfs_b_alive(state):
+        pin = _gfs_pin(_gfs_b_rows, space_id)
+        if pin is None or not pin[2]:
+            raise SystemExit(
+                f"{step}: the re-pin listed the space on GFS B again ({pin!r}) — "
+                "a withdrawn listing must stay withdrawn"
+            )
+        owed = _rows(
+            "a",
+            "SELECT pinned_key FROM gfs_withdrawn_listings WHERE space_id=?",
+            (space_id,),
+        )
+        if owed != [(new_pin,)]:
+            raise SystemExit(
+                f"{step}: a records {owed!r} as what GFS B confirmed, not the "
+                f"new key {new_pin[:12]}…"
+            )
+    if _log_contains("a", "still pin the retired key of space " + space_id):
+        raise SystemExit(f"{step}: a's rotation ended with a re-pin still owed")
+    print(
+        f"  a rotated to {new_pin[:12]}… (epoch {epoch}); "
+        f"{', '.join(members)} and GFS "
+        f"{' + '.join(n for n, _u, _r in _admin_seed_servers(state))} pin it ✓"
+    )
+    return new_pin, epoch
+
+
+def _admin_seed_probe(
+    state: dict, space_id: str, seed: bytes, *, want: int, whose: str, step: str
+) -> None:
+    """``seed`` is taken (``want`` 200) or refused (403) as the space
+    authority by every GFS that holds a pin for the space."""
+    for name, url, _rows_of in _admin_seed_servers(state):
+        got = _authority_probe(url, space_id, seed)
+        if got != want:
+            raise SystemExit(
+                f"{step}: GFS {name} answered HTTP {got} to a request signed "
+                f"with {whose} (expected {want})"
+            )
+    names = " + ".join(n for n, _u, _r in _admin_seed_servers(state))
+    verdict = "takes" if want == 200 else "refuses"
+    print(f"  GFS {names} {verdict} a request signed with {whose} ✓")
+
+
+def _admin_seed_seat_gone(state: dict, space_id: str, step: str) -> None:
+    """e's household learned of its removal: none of its people holds a
+    seat in the space any more."""
+    e = state["instances"]["e"]
+    _poll(
+        "e to drop its seat in the space",
+        lambda: (
+            not _rows(
+                "e",
+                "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, e["user_id"]),
+            )
+        ),
+        timeout=120.0,
+        interval=2.0,
+    )
+    s, _body = _inst_request(
+        state, "e", "PATCH", f"/api/spaces/{space_id}", {"name": "Taken over"}
+    )
+    if s in (200, 202):
+        raise SystemExit(
+            f"{step}: e, removed from the space, still got HTTP {s} for a rename"
+        )
+
+
+@_offline_step
+def cmd_gfs_admin_seed() -> None:
+    """An admin reached ONLY through a GFS acts for the owner like a paired
+    one — and stops being able to the moment it is removed (v_94; owner
+    rule: admins reached only through a GFS have the same rights).
+
+    Prereqs: the gfs chain (a, d, e on GFS A; e paired with nobody) and
+    ``relay-pair`` (a ↔ d). With ``gfs-b-up`` it also covers a GFS the space
+    was WITHDRAWN from. Runs last, before ``verify`` (it restarts a and e).
+
+    Setup. a creates a global, publicly readable space with "Let admins act
+    for me" on (``delegated_admin_authority``), listed on GFS A — and, when
+    GFS B runs, listed there too and withdrawn again, so B keeps a pin for a
+    space it no longer lists. b and d (paired with a) join by invitation.
+
+    1. **The seed reaches e.** e redeems a published admin link (a member
+       seat, admin pending) and a approves. e holds the signing seed of the
+       key a pins; a logged the share and e the receipt. The GFS log carries
+       no ``space_admin_key_share``. e keeps its fan-out seat on the GFS
+       (``space_subscribers``) — also after it restarts and reconnects.
+    2. **e acts for the owner.** a is stopped. e posts: b and d hold it, and
+       the GFS got an anonymous member publish and no authority-signed
+       ``POST /gfs/publish`` at all (a delegated admin is a writer to the
+       GFS). e renames the space (executed on e, signed with the seed):
+       b and d show the new name. e removes b's person: d drops b's seat
+       and b loses the space. A request signed with e's seed is taken by
+       every GFS that pins the space (the positive control for step 3).
+       a comes back and holds e's post, the new name and b's removal.
+    3. **Removed by the owner.** a removes e. a rotates the space key; d
+       pins the new key; GFS A re-pins from the owner's cert and so does
+       GFS B, which stays withdrawn. e holds no seat, and a request signed
+       with the seed e was handed is refused (403) by both servers.
+    4. **Removed by another admin while the owner is away.** e joins again
+       (admin link, approval) and holds the NEW seed; a makes d's person an
+       admin too (d holds it as well). a is stopped; d removes e (executed
+       on d). a comes back, learns of the removal — from d's roster gossip
+       or from d re-stating it against a's roster snapshot, whichever
+       arrives first (reported) — and rotates again. d, the remaining
+       admin, holds the newest seed; both GFS pin the newest key; both of
+       e's old seeds are refused by both, d's is taken.
+
+    ``verify`` (gated on the ``gfs_admin_seed`` state key) re-checks the
+    pins and that both retired seeds are still refused.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    step = "gfs-admin-seed"
+    a, b, d, e = (state["instances"][x] for x in ("a", "b", "d", "e"))
+    if d["instance_id"] not in _peer_ids(a, confirmed_only=True):
+        raise SystemExit(f"{step}: a and d are not paired — run 'relay-pair' first")
+    # b reads its GFS mailbox like d and e: with the owner offline that is
+    # the only way e (paired with nobody) reaches it.
+    _ensure_gfs_client(state, "b")
+    for inst in (a, d, e):
+        _wait_for_gfs_ws(inst["instance_id"], timeout=90.0)
+    tag = time.time_ns()
+    a_a_id = state["gfs"]["pairings"]["a"]["id"]
+
+    # Setup: the space, listed on A (and withdrawn from B).
+    s, space = _inst_request(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Admin seed lab {tag}",
+            "description": "v_94: an admin reached only through a GFS",
+            "space_type": "global",
+            "gfs_ids": [a_a_id],
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must(f"{step}: a creates the space", s, space, ok=(201,))["id"]
+    s, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True, "delegated_admin_authority": True}},
+    )
+    _must(f"{step}: a lets admins act for it, publicly readable", s, body, ok=(200,))
+    k1 = _space_col("a", space_id, "identity_public_key")
+    _poll(
+        "GFS A to list the space",
+        lambda: (pin := _gfs_pin(_gfs_rows, space_id)) is not None and pin[0] == k1,
+        timeout=60.0,
+        interval=2.0,
+    )
+    if _gfs_b_alive(state):
+        a_b = _gfs_connection_to(state, "a", state["gfs_b"]["base_url"])
+        _wait_gfs_connected(state, "a", state["gfs_b"]["base_url"])
+        for wanted, listed_on_b in (([a_a_id, a_b["id"]], True), ([a_a_id], False)):
+            s, body = _inst_request(
+                state,
+                "a",
+                "PUT",
+                f"/api/spaces/{space_id}/gfs-servers",
+                {"gfs_ids": wanted},
+            )
+            _must(f"{step}: a lists the space on {len(wanted)} GFS", s, body)
+            _poll(
+                "GFS B to " + ("list the space" if listed_on_b else "hide it"),
+                lambda listed_on_b=listed_on_b: (
+                    (pin := _gfs_pin(_gfs_b_rows, space_id)) is not None
+                    and pin[0] == k1
+                    and pin[2] is not listed_on_b
+                ),
+                timeout=60.0,
+                interval=2.0,
+            )
+        _poll(
+            "a to record the withdrawn listing with the key GFS B confirmed",
+            lambda: (
+                _rows(
+                    "a",
+                    "SELECT pinned_key FROM gfs_withdrawn_listings WHERE space_id=?",
+                    (space_id,),
+                )
+                == [(k1,)]
+            ),
+            timeout=30.0,
+        )
+        print(
+            f"  space {space_id[:8]}… listed on GFS A, withdrawn from GFS B "
+            f"(both pin K1={k1[:12]}…) ✓"
+        )
+    else:
+        print(
+            f"  space {space_id[:8]}… listed on GFS A (K1={k1[:12]}…); GFS B is "
+            "not running — the withdrawn-listing checks are skipped"
+        )
+    for label, inst in (("b", b), ("d", d)):
+        s, inv = _inst_request(
+            state,
+            "a",
+            "POST",
+            f"/api/spaces/{space_id}/remote-invites",
+            {
+                "invitee_instance_id": inst["instance_id"],
+                "invitee_user_id": inst["user_id"],
+            },
+        )
+        _must(f"{step}: a invites {label}", s, inv, ok=(201,))
+    time.sleep(4)
+    for label in ("b", "d"):
+        _accept_remote_invite(state, label, space_id)
+
+    # 1. The seed reaches e.
+    a_off = _log_size("a")
+    e_off = _log_size("e")
+    gfs_off = _gfs_log_size()
+    _admin_seed_join_as_admin(state, space_id, step)
+    seed1 = _admin_seed_await_seed("e", space_id, k1, step)
+    shared = f"sharing space signing seed for {space_id} to admin household "
+    if not _log_contains("a", shared + e["instance_id"], offset=a_off):
+        raise SystemExit(f"{step}: a never logged the seed share to e")
+    stored = f"stored delegated-admin signing seed for {space_id}"
+    if not _log_contains("e", stored, offset=e_off):
+        raise SystemExit(f"{step}: e never logged the receipt of the seed")
+    print(f"  e (GFS only) holds the signing seed of K1={k1[:12]}… ✓")
+    leaked = [
+        line
+        for line in _gfs_log_lines_matching("", offset=gfs_off)
+        if "admin_key_share" in line.lower()
+        or base64.urlsafe_b64encode(seed1).decode().rstrip("=") in line
+        or seed1.hex() in line
+    ]
+    if leaked:
+        raise SystemExit(f"{step}: the GFS log names the seed share: {leaked[:2]!r}")
+    seat_sql = "SELECT 1 FROM space_subscribers WHERE space_id=? AND instance_id=?"
+    seat_of_e = (space_id, e["instance_id"])
+    text0 = f"From the new admin {tag}"
+    s, post = _inst_request(
+        state,
+        "e",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": text0},
+    )
+    _must(f"{step}: e posts", s, post, ok=(201,))
+    try:
+        _poll_gfs_rows(
+            seat_sql, seat_of_e, bool, what="e holds no fan-out seat on the GFS"
+        )
+        _kill_household("e", e)
+        _respawn(state, "e")
+        _poll_gfs_rows(
+            seat_sql,
+            seat_of_e,
+            bool,
+            what="e did not keep its fan-out seat after its reconnect",
+        )
+    except SystemExit as exc:
+        raise SystemExit(
+            f"{step}: a household that holds the seed must keep its fan-out "
+            f"seat on the GFS like any writer — {exc}"
+        ) from None
+    if _seed_pin(_space_seed("e", space_id)) != k1:
+        raise SystemExit(f"{step}: e lost the seed over its restart")
+    print(
+        "  the GFS log names no seed share; e keeps its fan-out seat, also "
+        "after it reconnects ✓"
+    )
+    for label in ("b", "d"):
+        _poll(
+            f"{label} to hold e's card and e's first post",
+            lambda label=label: (
+                (card := _card_on(label, space_id, e["instance_id"])) is not None
+                and card.get("mailbox")
+                and _rows(
+                    label,
+                    "SELECT 1 FROM space_posts WHERE id=? AND deleted=0",
+                    (post["id"],),
+                )
+            ),
+            timeout=120.0,
+            interval=2.0,
+        )
+    # e edits on a synced view (an edit made from a stale ``config_sequence``
+    # loses last-writer-wins against the owner's own).
+    _poll(
+        "e to hold a's config",
+        lambda: (
+            (_space_col("e", space_id, "config_sequence") or 0)
+            >= (_space_col("a", space_id, "config_sequence") or 0)
+        ),
+        timeout=60.0,
+    )
+
+    # 2. e acts for the owner, a offline.
+    new_name = f"Renamed by the GFS-only admin {tag}"
+    text1 = f"While the owner is away {tag}"
+    _kill_household("a", a)
+    try:
+        gfs_off = _gfs_log_size()
+        s, post1 = _inst_request(
+            state,
+            "e",
+            "POST",
+            f"/api/spaces/{space_id}/posts",
+            {"type": "text", "content": text1},
+        )
+        post1 = _must(f"{step}: e posts with a offline", s, post1, ok=(201,))
+        for label in ("b", "d"):
+            _poll(
+                f"{label} to hold e's post (a offline)",
+                lambda label=label: (
+                    _rows(
+                        label,
+                        "SELECT content FROM space_posts WHERE id=? AND deleted=0",
+                        (post1["id"],),
+                    )
+                    == [(text1,)]
+                ),
+                timeout=120.0,
+                interval=2.0,
+            )
+        gfs_lines = _gfs_log_lines_matching("POST /gfs/", offset=gfs_off)
+        if not any("/gfs/member-publish-anon" in line for line in gfs_lines):
+            raise SystemExit(
+                f"{step}: e's post never reached the GFS as an anonymous "
+                "member publish"
+            )
+        signed = [line for line in gfs_lines if "POST /gfs/publish " in line]
+        if signed:
+            raise SystemExit(
+                f"{step}: with the owner offline the GFS got an authority-signed "
+                f"relay for a post — only a seed holder sends one: {signed[:2]!r}"
+            )
+        print(
+            "  a offline: e's post reached b and d; the GFS saw an anonymous "
+            "member publish and no authority-signed relay ✓"
+        )
+        s, body = _inst_request(
+            state, "e", "PATCH", f"/api/spaces/{space_id}", {"name": new_name}
+        )
+        if s != 200 or _space_col("e", space_id, "name") != new_name:
+            raise SystemExit(
+                f"{step}: e's rename with the owner offline → HTTP {s} {body!r} "
+                "(expected 200: executed on e and signed with the seed)"
+            )
+        for label in ("b", "d"):
+            _poll(
+                f"{label} to show e's rename (a offline)",
+                lambda label=label: _space_col(label, space_id, "name") == new_name,
+                timeout=120.0,
+                interval=2.0,
+            )
+        print("  a offline: e renamed the space; b and d show the new name ✓")
+        s, body = _inst_request(
+            state,
+            "e",
+            "DELETE",
+            f"/api/spaces/{space_id}/remote-members/{b['instance_id']}/{b['user_id']}",
+        )
+        _must(f"{step}: e removes b's person with a offline", s, body, ok=(200,))
+        _poll(
+            "d to drop b's seat (a offline)",
+            lambda: (
+                (row := _remote_member_row("d", space_id, b["user_id"])) is not None
+                and int(row.get("tombstoned") or 0) == 1
+            ),
+            timeout=120.0,
+            interval=2.0,
+        )
+        _poll(
+            "b to lose the space (a offline)",
+            lambda: (
+                not _rows(
+                    "b",
+                    "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+                    (space_id, b["user_id"]),
+                )
+            ),
+            timeout=120.0,
+            interval=2.0,
+        )
+        print("  a offline: e removed b's person; d dropped the seat, b lost the space ✓")
+        _admin_seed_probe(
+            state, space_id, seed1, want=200, whose="e's seed (K1)", step=step
+        )
+    finally:
+        _respawn(state, "a")
+    _poll(
+        "a to hold e's post, rename and removal of b",
+        lambda: (
+            _space_col("a", space_id, "name") == new_name
+            and _rows("a", "SELECT 1 FROM space_posts WHERE id=?", (post1["id"],))
+            and (row := _remote_member_row("a", space_id, b["user_id"])) is not None
+            and int(row.get("tombstoned") or 0) == 1
+        ),
+        timeout=180.0,
+        interval=3.0,
+    )
+    if _space_col("a", space_id, "identity_public_key") != k1:
+        raise SystemExit(
+            f"{step}: a rotated the space key although no admin was removed"
+        )
+    print("  a back: it holds e's post, the new name and b's removal ✓")
+
+    # 3. Removed by the owner.
+    epoch1 = _space_col("a", space_id, "authority_key_epoch") or 0
+    e_url = f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    s, body = _inst_request(state, "a", "DELETE", e_url)
+    _must(f"{step}: a removes e", s, body, ok=(200,))
+    k2, epoch2 = _admin_seed_await_rotation(
+        state, space_id, old_pin=k1, old_epoch=epoch1, members=("d",), step=step
+    )
+    _admin_seed_seat_gone(state, space_id, step)
+    _admin_seed_probe(
+        state, space_id, seed1, want=403, whose="e's old seed (K1)", step=step
+    )
+    kept = _seed_pin(_space_seed("e", space_id))
+    print(
+        "  e holds no seat"
+        + (
+            "; the retired K1 seed is still on its disk, worth nothing ✓"
+            if kept == k1
+            else " and no seed ✓"
+        )
+    )
+
+    # 4. Removed by another admin while the owner is away.
+    _admin_seed_join_as_admin(state, space_id, step)
+    seed2 = _admin_seed_await_seed("e", space_id, k2, step)
+    s, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}/remote-members/{d['instance_id']}/{d['user_id']}",
+        {"role": "admin"},
+    )
+    _must(f"{step}: a makes d's person an admin", s, body, ok=(200,))
+    _admin_seed_await_seed("d", space_id, k2, step)
+    _poll(
+        "d to hold e's admin seat and card",
+        lambda: (
+            (row := _remote_member_row("d", space_id, e["user_id"])) is not None
+            and int(row.get("tombstoned") or 0) == 0
+            and row.get("role") == "admin"
+            and (card := _card_on("d", space_id, e["instance_id"])) is not None
+            and card.get("mailbox")
+        ),
+        timeout=120.0,
+        interval=2.0,
+    )
+    print(f"  e is an admin again and holds the K2={k2[:12]}… seed; so does d ✓")
+    _kill_household("a", a)
+    try:
+        d_off = _log_size("d")
+        s, body = _inst_request(state, "d", "DELETE", e_url)
+        _must(f"{step}: d removes e with a offline", s, body, ok=(200,))
+        _admin_seed_seat_gone(state, space_id, step)
+        print("  a offline: d (admin) removed e; e holds no seat ✓")
+    finally:
+        _respawn(state, "a")
+    k3, _epoch3 = _admin_seed_await_rotation(
+        state,
+        space_id,
+        old_pin=k2,
+        old_epoch=epoch2,
+        members=("d",),
+        step=step,
+        timeout=300.0,
+    )
+    row = _remote_member_row("a", space_id, e["user_id"])
+    if row is None or int(row.get("tombstoned") or 0) != 1:
+        raise SystemExit(f"{step}: a rotated but still seats e: {row!r}")
+    restated = _log_contains(
+        "d", f"re-stating the removal of {e['user_id']}@", offset=d_off
+    )
+    print(
+        "  a back: it learned of d's removal of e — "
+        + (
+            "d re-stated it against a's roster snapshot"
+            if restated
+            else "from d's roster gossip"
+        )
+        + " — and rotated ✓"
+    )
+    seed3 = _admin_seed_await_seed("d", space_id, k3, step)
+    print(f"  d, the remaining admin, holds the K3={k3[:12]}… seed ✓")
+    for seed, whose in ((seed1, "e's first seed (K1)"), (seed2, "e's second seed (K2)")):
+        _admin_seed_probe(state, space_id, seed, want=403, whose=whose, step=step)
+    _admin_seed_probe(
+        state, space_id, seed3, want=200, whose="d's seed (K3)", step=step
+    )
+
+    state = _load()
+    state["gfs_admin_seed"] = {
+        "space_id": space_id,
+        "name": new_name,
+        "retired_seeds": [seed1.hex(), seed2.hex()],
+    }
+    _save(state)
+    print(
+        f"{step}: ok (a GFS-only admin acted for the owner; removed, its seed "
+        "works on no GFS)"
+    )
+
+
+def _check_gfs_admin_seed(state: dict, failures: list[str]) -> None:
+    """``verify`` hook for ``gfs-admin-seed``: every GFS still pins the key
+    the owner pins, d (the remaining admin) holds its seed, e holds no seat
+    and both seeds e was handed are still refused."""
+    info = state["gfs_admin_seed"]
+    space_id = info["space_id"]
+    pin = _space_col("a", space_id, "identity_public_key")
+    if _seed_pin(_space_seed("d", space_id)) != pin:
+        failures.append("gfs-admin-seed: d no longer holds the seed of a's key")
+    if _space_col("d", space_id, "name") != info["name"]:
+        failures.append("gfs-admin-seed: d lost the name the GFS-only admin set")
+    if _rows(
+        "e",
+        "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+        (space_id, state["instances"]["e"]["user_id"]),
+    ):
+        failures.append("gfs-admin-seed: e holds a seat in the space again")
+    for name, url, rows_of in _admin_seed_servers(state):
+        held = _gfs_pin(rows_of, space_id)
+        if held is None or held[0] != pin:
+            failures.append(
+                f"gfs-admin-seed: GFS {name} pins {held!r}, a pins {str(pin)[:12]}…"
+            )
+        for seed_hex in info["retired_seeds"]:
+            got = _authority_probe(url, space_id, bytes.fromhex(seed_hex))
+            if got != 403:
+                failures.append(
+                    f"gfs-admin-seed: GFS {name} answered HTTP {got} to a "
+                    "request signed with a seed of the removed admin"
+                )
 
 
 def main() -> None:
