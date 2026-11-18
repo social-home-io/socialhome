@@ -40,6 +40,7 @@ import { t } from '@/i18n/i18n'
 import { isSupervisorAddon } from '@/platform'
 import { AdminContactNote } from './AdminContactNote'
 import { AdvancedSection } from './AdvancedSection'
+import { OwnHouseholdId } from './OwnHouseholdId'
 import { revealAdvancedRow } from './AdvancedRow'
 import { CancelPairingDialog } from './CancelPairingDialog'
 import { cardDomId } from './ConnCard'
@@ -331,6 +332,8 @@ export default function ConnectionsPage() {
         onCopy={(g) => void copyGfsAddress(g)}
         onDisconnect={setDisconnectTarget}
       />
+
+      <OwnHouseholdId />
 
       {isAdmin && <AdvancedSection showExternalAddress={extRowShown} />}
 

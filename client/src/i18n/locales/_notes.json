@@ -902,5 +902,9 @@
   "gallery.search.placeholder": "Placeholder of the gallery's search field. The examples must work as typed in your language: the 'added by' word the search understands is by / von / door / par / por (and from), and the month name is your language's full month name. Keep it short enough for a phone (about 45 characters).",
   "gallery.search.empty_body": "Shown when a gallery search finds nothing. The quoted examples must work as typed in your language (see gallery.search.placeholder). Search never looks at faces, objects or places — say that plainly.",
   "search.in_gallery": "A link under the global search's filter chips: the gallery's own search found {n} photos and videos for the same words. Opens the gallery's search.",
-  "poll.followers_read_only": "Under a space poll a follower (read-only subscriber) sees; the result rows are not pressable. Use the glossary word for 'follower'."
+  "poll.followers_read_only": "Under a space poll a follower (read-only subscriber) sees; the result rows are not pressable. Use the glossary word for 'follower'.",
+  "admin_grant.warning": "Shown to a space's owner right before they make a person from ANOTHER household an admin of the space. 'act for the space' = that household may then sign the space's changes itself. Calm, one sentence, no alarm words.",
+  "admin_grant.check": "Follows admin_grant.warning, under the other household's ID. 'them' = the people of that household. 'Connections' is the page name (nav.connections) — use the same word.",
+  "connections.own_id.title": "Heading on the Connections page above this household's own ID (same term as connections.detail.household_id).",
+  "connections.own_id.desc": "Under connections.own_id.title. 'this' = the household ID. 'space' as in the glossary."
 }

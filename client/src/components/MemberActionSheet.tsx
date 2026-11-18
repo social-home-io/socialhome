@@ -16,6 +16,7 @@
 import { signal } from '@preact/signals'
 import { api, ApiError } from '@/api'
 import { parseSpaceRole, roleChangeOptions, type SpaceRole } from '@/features/spaces/spaceRoles'
+import { AdminGrantCheck } from './AdminGrantCheck'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -154,6 +155,11 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
                   {t(ROLE_OPTION_KEY[r])}
                 </Button>
               ))}
+              {/* Admin on offer for another household's member: who it
+                  is (household ID) and what the role gives. */}
+              {memberInstanceId.value && roleOptions.includes('admin') && (
+                <AdminGrantCheck householdId={memberInstanceId.value} />
+              )}
               {roleError.value && (
                 <p class="sh-member-actions-error" role="alert">{roleError.value}</p>
               )}

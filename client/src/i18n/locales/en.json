@@ -6593,5 +6593,9 @@
   "error.album_audience.unknown_person": "Someone you picked isn't part of your home any more.",
   "error.album_audience.too_many": "A private album can have at most {max} people.",
   "error.child_upload_off": "Adding photos is turned off for children right now. Ask a grown-up.",
-  "gallery.locked.delete_confirm": "Move to trash"
+  "gallery.locked.delete_confirm": "Move to trash",
+  "admin_grant.warning": "As an admin, this household can act for the space while you're offline.",
+  "admin_grant.check": "Check the household ID with them first — they find it on their Connections page.",
+  "connections.own_id.title": "Your household ID",
+  "connections.own_id.desc": "Another household may ask for this to check it's really you — for example before making you an admin of their space."
 }

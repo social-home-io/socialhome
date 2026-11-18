@@ -127,3 +127,46 @@ describe('JoinRequestList — declining a flood from the GFS', () => {
     expect(one.container.querySelector('.sh-join-requests__bulk')).toBeNull()
   })
 })
+
+describe('JoinRequestList — admin grants', () => {
+  const HOUSEHOLD = 'ab2cd3ef4gh5ij6kl7mn2op3qr4st5uv'
+
+  it('shows the asking household\'s ID and what approving gives, on the admin row only', async () => {
+    householdUsers.value = new Map() as never
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests')
+      ? [
+        {
+          id: 'a1', space_id: 's8', user_id: 'u-eve', display_name: 'Eve', requested_at: '',
+          requested_role: 'admin', remote_applicant_instance_id: HOUSEHOLD,
+        },
+        {
+          id: 'a2', space_id: 's8', user_id: 'u-joe', display_name: 'Joe', requested_at: '',
+          remote_applicant_instance_id: 'zz2cd3ef4gh5ij6kl7mn2op3qr4st5uv',
+        },
+      ]
+      : []))
+    const view = render(<JoinRequestList spaceId="s8" />)
+    await waitFor(() => expect(view.getByText('Eve')).toBeTruthy())
+    const checks = view.getAllByTestId('admin-grant-check')
+    expect(checks).toHaveLength(1)
+    expect(checks[0].closest('.sh-join-request')?.textContent).toContain('Eve')
+    expect(view.getByTestId('household-id').textContent).toBe(HOUSEHOLD)
+    expect(checks[0].textContent).toContain(
+      "As an admin, this household can act for the space while you're offline.",
+    )
+  })
+
+  it('a member of this household asking for admin shows no household ID', async () => {
+    householdUsers.value = new Map() as never
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests')
+      ? [{
+        id: 'a3', space_id: 's9', user_id: 'u-kim', display_name: 'Kim', requested_at: '',
+        requested_role: 'admin', remote_applicant_instance_id: null,
+      }]
+      : []))
+    const view = render(<JoinRequestList spaceId="s9" />)
+    await waitFor(() => expect(view.getByText('Kim')).toBeTruthy())
+    expect(view.queryByTestId('admin-grant-check')).toBeNull()
+    expect(view.getByRole('button', { name: 'Make admin' })).toBeTruthy()
+  })
+})

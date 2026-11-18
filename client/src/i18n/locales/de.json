@@ -6557,5 +6557,9 @@
   "error.album_audience.unknown_person": "Jemand, den du ausgewählt hast, gehört nicht mehr zum Haushalt.",
   "error.album_audience.too_many": "Ein privates Album kann höchstens {max} Personen haben.",
   "error.child_upload_off": "Fotos hinzufügen ist für Kinder gerade aus. Frag eine erwachsene Person.",
-  "gallery.locked.delete_confirm": "In den Papierkorb legen"
+  "gallery.locked.delete_confirm": "In den Papierkorb legen",
+  "admin_grant.warning": "Als Admin kann dieser Haushalt für den Space handeln, während du offline bist.",
+  "admin_grant.check": "Gleiche vorher die Haushalts-ID mit ihnen ab – sie steht auf ihrer Seite „Verbindungen“.",
+  "connections.own_id.title": "Deine Haushalts-ID",
+  "connections.own_id.desc": "Ein anderer Haushalt kann danach fragen, um zu prüfen, dass wirklich du es bist – zum Beispiel, bevor er dich zum Admin seines Space macht."
 }
