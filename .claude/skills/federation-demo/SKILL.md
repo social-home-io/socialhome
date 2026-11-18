@@ -1269,8 +1269,10 @@ and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
    the GFS log shows an anonymous ``/gfs/member-publish-anon`` and **no**
    ``POST /gfs/publish`` (a delegated admin is a writer to the GFS). e
    renames the space (HTTP 200: executed on e, signed with the seed) — b
-   and d show the name. e removes b's person — d drops the seat, b loses
-   the space. a comes back and holds all three; its key did not move.
+   and d show the name. e removes b's person — d drops the seat (b drops
+   its own copy only on its host's word, so that is reported once a is
+   back, not asserted). a comes back and holds all three; its key did not
+   move.
 3. **Removed by the owner.** a removes e and rotates the key (K1 → K2). d
    pins K2; GFS A re-pins from the owner's cert; GFS B re-pins from the
    pin-only publish and stays withdrawn; a records K2 as what B confirmed.

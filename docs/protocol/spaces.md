@@ -3173,13 +3173,18 @@ sequenceDiagram
 ```
 
 `SPACE_REMOTE_MEMBER_REMOVED` names its space on the envelope (`space_id`,
-a routing field) and is sent before the removed household's
-`space_instances` row is dropped: a household seated from the host's
-directory is reached at its GFS mailbox — or through the host — and both are
-found per space, from the member card on that row. This is what lets a
-delegated admin that is itself reached only through a GFS remove a member
+a routing field) and is sent FIRST — before the seat is tombstoned and the
+removed household's `space_instances` row is dropped: a household seated
+from the host's directory is reached at its GFS mailbox — or through the
+host — and both are found per space, from the member card on that row and
+only while the roster holds a live seat of that household. This is what lets
+a delegated admin that is itself reached only through a GFS remove a member
 while the owner is offline (before, its removal stopped at "no path" after
-the seat was dropped locally, with no gossip and no rekey).
+the seat was dropped locally, with no gossip and no rekey). A household that
+cannot be reached at all is refused (403) before anything changed. The
+removed household drops its own copy only on the word of its host (the owner,
+or the admin that invited it); told by another admin it keeps the stub until
+the host's roster reaches it.
 
 Owner cannot be kicked through this path — same invariant as
 `remove_member`. Self-leaves on a remote space run the local path (the

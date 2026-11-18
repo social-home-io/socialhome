@@ -7768,6 +7768,22 @@ class SpaceService(
         last = removed or await self._remote_members.get_including_tombstones(
             space_id, instance_id, user_id
         )
+        # The household is told FIRST, naming the space: one seated from the
+        # host's directory is reached at its GFS mailbox, and that is found
+        # per space — on the member card its ``space_instances`` row keeps,
+        # and only while our roster still holds a live seat of it
+        # (``SpaceMemberDirectory.target_for``). Sent after the seat was
+        # dropped and without the space, an admin that reaches the members
+        # only through a GFS (a GFS-only delegated admin acting while the
+        # owner is away) got "no path" here: the seat gone on its own
+        # household, no gossip, no rekey. A household we cannot reach at all
+        # is refused before anything changed.
+        await self._send_invite_envelope(
+            to_instance_id=instance_id,
+            event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+            payload={"space_id": space_id, "user_id": user_id},
+            space_id=space_id,
+        )
         await self._remote_members.remove(space_id, instance_id, user_id)
         await self._bus.publish(
             SpaceRemoteSeatEnded(
@@ -7786,18 +7802,6 @@ class SpaceService(
         # activity to the no-longer-member relay.
         rows = await self._remote_members.list_for_space(space_id)
         still_present = any(r.instance_id == instance_id for r in rows)
-        # Told BEFORE its ``space_instances`` row goes, and naming the space:
-        # a household seated from the host's directory is reached at its GFS
-        # mailbox, found on the member card that row keeps. Without both an
-        # admin that reaches the members only through a GFS (a GFS-only
-        # delegated admin acting while the owner is away) got "no path"
-        # here — after the seat was dropped, before the gossip and the rekey.
-        await self._send_invite_envelope(
-            to_instance_id=instance_id,
-            event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
-            payload={"space_id": space_id, "user_id": user_id},
-            space_id=space_id,
-        )
         if not still_present:
             await self._spaces.remove_space_instance(space_id, instance_id)
         # v_23 — peer-replicate the kick so every member household tombstones
