@@ -10999,6 +10999,14 @@ hr {
   padding-top: 2px;
   color: var(--sh-text);
 }
+@media (max-width: 640px) {
+  /* A phone can't fit all eight groups on a line: two tidy rows of four
+     instead of a stray last group. */
+  .sh-household-id__code {
+    display: grid;
+    grid-template-columns: repeat(4, max-content);
+  }
+}
 .sh-conn-own-id {
   display: flex;
   padding: var(--sh-space-md);
