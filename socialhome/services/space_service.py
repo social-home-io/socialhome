@@ -585,6 +585,53 @@ def _removed_since(removed_at: str | None, horizon: datetime) -> bool:
     return at >= horizon
 
 
+def signed_roster_event(
+    space_id: str,
+    *,
+    user_id: str,
+    instance_id: str,
+    display_name: str | None,
+    user_pk: str | None,
+    role: str,
+    member_version: int,
+    tombstoned: bool,
+    seed: bytes,
+) -> tuple[FederationEventType, dict]:
+    """One roster-gossip event, authority-signed with *seed*: the event
+    type (``SPACE_MEMBER_LEFT`` for a removal, else ``SPACE_MEMBER_JOINED``)
+    and its payload. The one place the live-gossip shape is spelled, for the
+    emitter (:meth:`SpaceService._emit_member_roster_gossip`) and for a
+    seed holder re-stating a removal to the host
+    (``PrivateSpaceInviteHandler``). Changes no state."""
+    event_type = (
+        FederationEventType.SPACE_MEMBER_LEFT
+        if tombstoned
+        else FederationEventType.SPACE_MEMBER_JOINED
+    )
+    payload: dict = {
+        "space_id": space_id,
+        "user_id": user_id,
+        "instance_id": instance_id,
+        "display_name": display_name,
+        "user_pk": user_pk,
+        "role": role,
+        "member_version": member_version,
+        "roster_version": member_version,
+    }
+    # Sign over the bare payload (no sig fields), then merge the two sig
+    # fields in. strip_authority_sig_fields is used identically on the
+    # verify side so the canonical bytes match.
+    payload.update(
+        sign_authority_event(
+            event_type=event_type.value,
+            space_id=space_id,
+            payload=strip_authority_sig_fields(payload),
+            space_seed=seed,
+        )
+    )
+    return event_type, payload
+
+
 def _roster_parts(entries: list[dict]) -> list[list[dict]]:
     """*entries* cut into parts of at most
     :data:`ROSTER_SNAPSHOT_PART_BYTES` (at least one entry each), in order.
@@ -2966,31 +3013,17 @@ class SpaceService(
                     "roster-gossip: local mirror version update failed for %s",
                     space.id,
                 )
-        event_type = (
-            FederationEventType.SPACE_MEMBER_LEFT
-            if tombstoned
-            else FederationEventType.SPACE_MEMBER_JOINED
+        event_type, payload = signed_roster_event(
+            space.id,
+            user_id=user_id,
+            instance_id=instance_id,
+            display_name=display_name,
+            user_pk=user_pk,
+            role=role,
+            member_version=version,
+            tombstoned=tombstoned,
+            seed=seed,
         )
-        payload: dict = {
-            "space_id": space.id,
-            "user_id": user_id,
-            "instance_id": instance_id,
-            "display_name": display_name,
-            "user_pk": user_pk,
-            "role": role,
-            "member_version": version,
-            "roster_version": version,
-        }
-        # Sign over the bare payload (no sig fields), then merge the two sig
-        # fields in. strip_authority_sig_fields is used identically on the
-        # verify side so the canonical bytes match.
-        signed = sign_authority_event(
-            event_type=event_type.value,
-            space_id=space.id,
-            payload=strip_authority_sig_fields(payload),
-            space_seed=seed,
-        )
-        payload.update(signed)
         # v_30 — a ``subscriber`` role is not storable below v_30: the
         # receiver's ``space_remote_members.role`` CHECK rejects it (migration
         # 0054 widened it) and ``apply_member_event`` then raises out of the

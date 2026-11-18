@@ -19,6 +19,7 @@ guard), so out-of-order delivery converges deterministically.
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -1362,3 +1363,430 @@ async def test_a_host_snapshot_in_parts_ends_a_host_seat_once_complete(tmp_dir):
     live = await _r5_live(remote)
     assert (OWNER, "x-gone") not in live and (OWNER, "u-host") in live
     await db.shutdown()
+
+
+# ── A removal the host has not seen is re-stated to it ─────────────────
+#
+# A delegated admin removed a seat while the owner was unreachable and the
+# LEFT gossip never arrived there. The owner's next snapshot still names the
+# seat live; the seed-holding receiver answers with that one removal.
+
+ME = "me-instance"
+KICKED = "p-kicked"
+KICKED_USER = "x-kicked"
+
+
+class _Outbox:
+    """Records single-recipient sends; a broadcast is recorded apart."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.sent: list[tuple[str, object, dict, str | None]] = []
+        self.broadcast_to_space_members = AsyncMock()
+        self.fail = fail
+
+    async def send_with_mesh_fallback(
+        self, *, to_instance_id, event_type, payload, space_id=None
+    ):
+        if self.fail:
+            raise RuntimeError("transport down")
+        self.sent.append((to_instance_id, event_type, payload, space_id))
+        return SimpleNamespace(ok=True, error=None)
+
+
+async def _restating_handler(tmp_dir, *, delegated=True, hold_seed=True, fail=False):
+    """A member household of a delegated-admin space that holds the seed."""
+    h, spaces, remote, db, seed = await _r5_handler(tmp_dir)
+    if delegated:
+        space = await spaces.get(SPACE_ID)
+        await spaces.save(
+            dataclasses.replace(
+                space, features=SpaceFeatures(delegated_admin_authority=True)
+            )
+        )
+    if hold_seed:
+        await spaces.set_space_seed(SPACE_ID, seed)
+    h._federation = _Outbox(fail=fail)
+    return h, spaces, remote, db, seed
+
+
+async def _kicked_tombstone(remote, version=7, *, instance_id=KICKED, user=KICKED_USER):
+    await remote.apply_member_event(
+        space_id=SPACE_ID,
+        user_id=user,
+        instance_id=instance_id,
+        display_name="Kim",
+        user_pk="aa" * 32,
+        role="admin",
+        member_version=version,
+        tombstoned=True,
+    )
+
+
+def _host_names_live(seed, version=7, *, instance_id=KICKED, user=KICKED_USER):
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    return _entry(
+        j,
+        _signed_payload(
+            j,
+            seed=seed,
+            member_version=version,
+            role="admin",
+            user_id=user,
+            instance_id=instance_id,
+        ),
+    )
+
+
+async def test_a_removal_the_host_names_live_is_restated_to_the_host_only(tmp_dir):
+    h, spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    await _kicked_tombstone(remote, 7)
+    await h._on_space_roster_snapshot(
+        _r5_snapshot([_host_names_live(seed, 7)], version=9)
+    )
+    out = h._federation
+    assert len(out.sent) == 1
+    to, event_type, payload, space_id = out.sent[0]
+    assert to == OWNER
+    assert event_type is FederationEventType.SPACE_MEMBER_LEFT
+    assert space_id == SPACE_ID
+    assert payload["member_version"] == 7
+    assert (payload["instance_id"], payload["user_id"]) == (KICKED, KICKED_USER)
+    assert (payload["role"], payload["display_name"]) == ("admin", "Kim")
+    assert payload["user_pk"] == "aa" * 32
+    space = await spaces.get(SPACE_ID)
+    assert (
+        handler_module._check_roster_sig(
+            FederationEventType.SPACE_MEMBER_LEFT.value,
+            SPACE_ID,
+            payload,
+            space.identity_public_key,
+        )
+        is None
+    )
+    out.broadcast_to_space_members.assert_not_called()
+    # Nothing local moved: same tombstone, same version, no new sequence.
+    row = await remote.get_including_tombstones(SPACE_ID, KICKED, KICKED_USER)
+    assert row.tombstoned and row.member_version == 7
+    assert space.roster_sequence == 0
+    await db.shutdown()
+
+
+async def test_a_lower_version_live_entry_is_restated_at_the_tombstones_version(
+    tmp_dir,
+):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    await _kicked_tombstone(remote, 7)
+    await h._on_space_roster_snapshot(
+        _r5_snapshot([_host_names_live(seed, 3)], version=9)
+    )
+    assert [p["member_version"] for _to, _et, p, _s in h._federation.sent] == [7]
+    await db.shutdown()
+
+
+async def test_no_restatement_without_the_seed_of_the_pinned_key(tmp_dir):
+    h, spaces, remote, db, seed = await _restating_handler(tmp_dir, hold_seed=False)
+    await _kicked_tombstone(remote, 7)
+    snap = _r5_snapshot([_host_names_live(seed, 7)], version=9)
+    await h._on_space_roster_snapshot(snap)
+    assert h._federation.sent == []
+    # A seed of another key (a stale one) signs nothing the host would take.
+    await spaces.set_space_seed(SPACE_ID, generate_space_keypair().private_key)
+    await h._on_space_roster_snapshot(snap)
+    assert h._federation.sent == []
+    await db.shutdown()
+
+
+async def test_no_restatement_while_delegation_is_off(tmp_dir):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir, delegated=False)
+    await _kicked_tombstone(remote, 7)
+    await h._on_space_roster_snapshot(
+        _r5_snapshot([_host_names_live(seed, 7)], version=9)
+    )
+    assert h._federation.sent == []
+    await db.shutdown()
+
+
+async def test_no_restatement_for_a_snapshot_that_is_not_the_hosts(tmp_dir):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    await _kicked_tombstone(remote, 7)
+    await h._on_space_roster_snapshot(
+        _snapshot([_host_names_live(seed, 7)], from_instance=RELAY)
+    )
+    assert h._federation.sent == []
+    await db.shutdown()
+
+
+async def test_no_restatement_on_the_host_itself(tmp_dir):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    h._own_instance_id = OWNER
+    await _kicked_tombstone(remote, 7)
+    await h._on_space_roster_snapshot(
+        _r5_snapshot([_host_names_live(seed, 7)], version=9)
+    )
+    assert h._federation.sent == []
+    await db.shutdown()
+
+
+async def test_a_newer_live_entry_applies_and_is_not_restated(tmp_dir):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    await _kicked_tombstone(remote, 7)
+    await h._on_space_roster_snapshot(
+        _r5_snapshot([_host_names_live(seed, 8)], version=9)
+    )
+    assert h._federation.sent == []
+    assert (KICKED, KICKED_USER) in await _r5_live(remote)
+    await db.shutdown()
+
+
+async def test_no_restatement_for_the_hosts_or_our_own_seats(tmp_dir):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    await _kicked_tombstone(remote, 7, instance_id=OWNER, user="x-owner2")
+    await _kicked_tombstone(remote, 7, instance_id=ME, user="x-mine")
+    await h._on_space_roster_snapshot(
+        _r5_snapshot(
+            [
+                _host_names_live(seed, 7, instance_id=OWNER, user="x-owner2"),
+                _host_names_live(seed, 7, instance_id=ME, user="x-mine"),
+            ],
+            version=9,
+        )
+    )
+    assert h._federation.sent == []
+    await db.shutdown()
+
+
+async def test_no_restatement_of_a_removal_written_under_an_older_key(tmp_dir):
+    """A tombstone from before the last rotation may be a revoked seed
+    holder's: it is never signed again with the current key."""
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    await _kicked_tombstone(remote, 7)
+    await db.enqueue(
+        "UPDATE spaces SET authority_key_epoch = 1 WHERE id = ?", (SPACE_ID,)
+    )
+    await h._on_space_roster_snapshot(
+        _r5_snapshot([_host_names_live(seed, 7)], version=9)
+    )
+    assert h._federation.sent == []
+    await db.shutdown()
+
+
+async def test_the_same_removal_is_restated_once_per_interval(tmp_dir, monkeypatch):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    await _kicked_tombstone(remote, 7)
+    clock = [1000.0]
+    monkeypatch.setattr(handler_module, "_monotonic", lambda: clock[0])
+    snap = _r5_snapshot([_host_names_live(seed, 7)], version=9)
+    await h._on_space_roster_snapshot(snap)
+    clock[0] += handler_module.ROSTER_REMOVAL_RESTATE_INTERVAL_S - 1
+    await h._on_space_roster_snapshot(snap)
+    assert len(h._federation.sent) == 1
+    clock[0] += 2
+    await h._on_space_roster_snapshot(snap)
+    assert len(h._federation.sent) == 2
+    await db.shutdown()
+
+
+async def test_restatements_are_capped_per_snapshot(tmp_dir):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir)
+    cap = handler_module.ROSTER_REMOVAL_RESTATE_MAX
+    assert cap == 16
+    entries = []
+    for i in range(cap + 4):
+        await _kicked_tombstone(remote, 7, user=f"x-{i}")
+        entries.append(_host_names_live(seed, 7, user=f"x-{i}"))
+    await h._on_space_roster_snapshot(_r5_snapshot(entries, version=9))
+    assert len(h._federation.sent) == cap
+    # The rest go with the next snapshot — none of them twice.
+    await h._on_space_roster_snapshot(_r5_snapshot(entries, version=9))
+    assert len(h._federation.sent) == cap + 4
+    assert len({p["user_id"] for _to, _et, p, _s in h._federation.sent}) == cap + 4
+    await db.shutdown()
+
+
+async def test_a_failing_restatement_never_breaks_the_snapshot(tmp_dir, caplog):
+    h, _spaces, remote, db, seed = await _restating_handler(tmp_dir, fail=True)
+    h._space_service = _NotingSpaceService()
+    await _kicked_tombstone(remote, 7)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    other = _signed_payload(
+        j, seed=seed, member_version=4, user_id="x-new", instance_id="p-new"
+    )
+    with caplog.at_level("WARNING"):
+        await h._on_space_roster_snapshot(
+            _r5_snapshot([_host_names_live(seed, 7), _entry(j, other)], version=9)
+        )
+    assert ("p-new", "x-new") in await _r5_live(remote)
+    assert (KICKED, KICKED_USER) not in await _r5_live(remote)
+    assert h._space_service.applied == [(SPACE_ID, OWNER, 9)]
+    assert "re-stating the removal" in caplog.text
+    # A send that failed is tried again with the next snapshot.
+    h._federation.fail = False
+    await h._on_space_roster_snapshot(
+        _r5_snapshot([_host_names_live(seed, 7)], version=9)
+    )
+    assert len(h._federation.sent) == 1
+    await db.shutdown()
+
+
+async def test_the_host_takes_a_restated_removal_and_revokes_the_admin(tmp_dir):
+    """Host side, unchanged: the re-stated LEFT at the version the host
+    itself holds wins the tie as a removal and the admin seat is revoked."""
+    from socialhome.domain.events import SpaceAdminAuthorityRevoked
+
+    h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
+    try:
+        await rm.apply_member_event(
+            space_id=SPACE_ID,
+            user_id=MEMBER_USER,
+            instance_id=MEMBER_INSTANCE,
+            display_name="R",
+            user_pk=None,
+            role="admin",
+            member_version=7,
+            tombstoned=False,
+        )
+        await _gossip(h, seed, tombstoned=True, member_version=7, role="admin")
+        row = await rm.get_including_tombstones(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)
+        assert row.tombstoned
+        assert [
+            e.instance_id
+            for e in published
+            if isinstance(e, SpaceAdminAuthorityRevoked)
+        ] == [MEMBER_INSTANCE]
+    finally:
+        await db.shutdown()
+
+
+# ── A removed household cannot gossip itself back in ─────────────────
+
+
+async def _seat_then_kick(h, seed, *, role="admin"):
+    await _gossip(h, seed, member_version=5, role=role)
+    await _gossip(h, seed, tombstoned=True, member_version=6, role=role)
+
+
+async def _joined_from(h, seed, sender, *, version=50, role="member", **kw):
+    et = FederationEventType.SPACE_MEMBER_JOINED
+    await h._on_space_member_joined(
+        _event(
+            et,
+            _signed_payload(et, seed=seed, member_version=version, role=role, **kw),
+            from_instance=sender,
+        )
+    )
+
+
+async def test_a_removed_household_cannot_reseat_itself_on_a_member(tmp_dir, caplog):
+    h, _sr, rm, db, seed = await _r5_handler(tmp_dir)
+    try:
+        await _seat_then_kick(h, seed)
+        with caplog.at_level("WARNING"):
+            await _joined_from(h, seed, MEMBER_INSTANCE)
+        row = await rm.get_including_tombstones(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)
+        assert row.tombstoned and row.member_version == 6
+        assert "a removed household cannot re-seat itself" in caplog.text
+    finally:
+        await db.shutdown()
+
+
+async def test_a_removed_household_cannot_reseat_itself_on_the_host(tmp_dir):
+    h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
+    try:
+        await _seat_then_kick(h, seed, role="member")
+        published.clear()
+        await _joined_from(h, seed, MEMBER_INSTANCE)
+        row = await rm.get_including_tombstones(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)
+        assert row.tombstoned and row.member_version == 6
+        assert published == []
+    finally:
+        await db.shutdown()
+
+
+async def test_the_host_or_another_household_still_reseats_a_removed_seat(tmp_dir):
+    for sender in (OWNER, RELAY):
+        (tmp_dir / sender).mkdir()
+        h, _sr, rm, db, seed = await _r5_handler(tmp_dir / sender)
+        try:
+            await _seat_then_kick(h, seed)
+            await _joined_from(h, seed, sender)
+            row = await rm.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)
+            assert row is not None and row.member_version == 50
+        finally:
+            await db.shutdown()
+
+
+async def test_the_hosts_snapshot_still_reseats_a_removed_seat(tmp_dir):
+    """A snapshot is the host's statement, whoever the entry seats."""
+    h, _sr, rm, db, seed = await _r5_handler(tmp_dir)
+    try:
+        await _seat_then_kick(h, seed)
+        j = FederationEventType.SPACE_MEMBER_JOINED
+        await h._on_space_roster_snapshot(
+            _r5_snapshot(
+                [_entry(j, _signed_payload(j, seed=seed, member_version=50))],
+                version=50,
+            )
+        )
+        assert await rm.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER) is not None
+    finally:
+        await db.shutdown()
+
+
+async def test_an_admin_household_reseats_its_own_person_who_left(tmp_dir):
+    """A household that still holds a live admin seat here is a seed
+    holder by right: it seats its own people, one who left included."""
+    h, _sr, rm, db, seed = await _r5_handler(tmp_dir)
+    try:
+        await _gossip(h, seed, member_version=4, role="admin", user_id="ru-admin")
+        await _seat_then_kick(h, seed, role="member")
+        await _joined_from(h, seed, MEMBER_INSTANCE)
+        assert await rm.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER) is not None
+    finally:
+        await db.shutdown()
+
+
+async def test_the_host_reseats_its_own_person_who_left(tmp_dir):
+    h, _sr, rm, db, seed = await _r5_handler(tmp_dir)
+    try:
+        await _gossip(h, seed, member_version=5, instance_id=OWNER, user_id="x-o2")
+        await _gossip(
+            h,
+            seed,
+            tombstoned=True,
+            member_version=6,
+            instance_id=OWNER,
+            user_id="x-o2",
+        )
+        await _joined_from(h, seed, OWNER, instance_id=OWNER, user_id="x-o2")
+        assert await rm.get(SPACE_ID, OWNER, "x-o2") is not None
+    finally:
+        await db.shutdown()
+
+
+async def test_a_self_joined_for_a_seat_never_removed_is_taken_as_before(tmp_dir):
+    h, _sr, rm, db, seed = await _r5_handler(tmp_dir)
+    try:
+        await _joined_from(h, seed, MEMBER_INSTANCE, version=3)
+        await _joined_from(h, seed, MEMBER_INSTANCE, version=4, role="admin")
+        row = await rm.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)
+        assert row.member_version == 4 and row.role == "admin"
+    finally:
+        await db.shutdown()
+
+
+async def test_a_removed_household_cannot_seat_a_fresh_person_either(tmp_dir, caplog):
+    """The kicked household, still holding the seed, signs a JOINED for a
+    user id nobody removed: there is no tombstone for THAT seat, but the
+    household was removed here and holds no admin seat — it seats nobody."""
+    h, _sr, rm, db, seed = await _r5_handler(tmp_dir)
+    try:
+        await _seat_then_kick(h, seed)
+        with caplog.at_level("WARNING"):
+            await _joined_from(h, seed, MEMBER_INSTANCE, user_id="uid-fresh")
+        assert (
+            await rm.get_including_tombstones(SPACE_ID, MEMBER_INSTANCE, "uid-fresh")
+            is None
+        )
+        assert "a removed household cannot re-seat itself" in caplog.text
+    finally:
+        await db.shutdown()

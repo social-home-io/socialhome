@@ -2362,3 +2362,93 @@ async def test_the_new_seed_survives_either_order_of_share_and_bundle(
         await deliver_share()
     k2 = await w.o_app[space_repo_key].get_space_seed(w.space_id)
     assert await w.m_app[space_repo_key].get_space_seed(w.space_id) == k2
+
+
+# ── A kick the owner never heard of ──────────────────────────────────────
+
+
+async def _m_kicks_admin_a_unheard(w: World) -> int:
+    """Household M — a delegated admin holding K1 — removes admin household
+    A while the owner is unreachable: nothing M sends is delivered to O.
+    Returns the version of M's tombstone."""
+    await _m_plays_an_admin(w)
+    await w.m_app[space_repo_key].set_space_seed(w.space_id, w.k1_seed)
+    await w.m_app[space_service_key].remove_remote_member(
+        w.space_id, actor_username="mia", instance_id=A_ID, user_id="ua"
+    )
+    gone = await w.m_app[space_remote_member_repo_key].get_including_tombstones(
+        w.space_id, A_ID, "ua"
+    )
+    assert gone.tombstoned
+    w.sent.clear()
+    return gone.member_version
+
+
+async def _owner_repairs_ms_roster(w: World) -> None:
+    """What the owner does on M's next sync when the roster digests differ:
+    one snapshot to M, delivered."""
+    assert await w.o_app[space_service_key].send_roster_snapshot(
+        w.space_id, to_instance_id=w.m_id
+    )
+    for payload in w.outbound(to=w.m_id, event_type=FET.SPACE_ROSTER_SNAPSHOT):
+        await _deliver(
+            w.m_app,
+            sender=w.o_id,
+            event_type=FET.SPACE_ROSTER_SNAPSHOT,
+            payload=payload,
+        )
+
+
+async def test_a_kick_the_owner_never_heard_of_reaches_it_on_the_next_sync(world):
+    """A delegated admin removed another admin household while the owner was
+    unreachable and the LEFT gossip was lost. The owner's next snapshot to
+    the admin still names the seat live; the admin answers with the removal
+    — to the owner only — and the owner retires the key the removed
+    household holds, sharing the new one with everybody but it."""
+    w = world
+    version = await _m_kicks_admin_a_unheard(w)
+    o_rm = w.o_app[space_remote_member_repo_key]
+    assert (await o_rm.get(w.space_id, A_ID, "ua")).role == "admin"
+
+    await _owner_repairs_ms_roster(w)
+
+    # M kept its removal, and told the owner — nobody else.
+    m_row = await w.m_app[space_remote_member_repo_key].get_including_tombstones(
+        w.space_id, A_ID, "ua"
+    )
+    assert m_row.tombstoned and m_row.member_version == version
+    from_m = [(to, et, p) for s, to, et, p in w.sent if s == w.m_id]
+    assert [(to, et) for to, et, _p in from_m] == [(w.o_id, FET.SPACE_MEMBER_LEFT)]
+    restated = from_m[0][2]
+    assert (restated["instance_id"], restated["user_id"]) == (A_ID, "ua")
+    assert restated["member_version"] == version
+
+    await _deliver(
+        w.o_app, sender=w.m_id, event_type=FET.SPACE_MEMBER_LEFT, payload=restated
+    )
+    o_row = await o_rm.get_including_tombstones(w.space_id, A_ID, "ua")
+    assert o_row.tombstoned
+    o = await w.o_space()
+    assert o.authority_key_epoch > 0 and o.identity_public_key != w.k1_pk
+    assert not w.outbound(to=A_ID, event_type=FET.SPACE_ADMIN_KEY_SHARE)
+    assert not w.outbound(to=A_ID, event_type=FET.SPACE_AUTHORITY_ROTATED)
+    assert w.outbound(to=B_ID, event_type=FET.SPACE_ADMIN_KEY_SHARE)
+
+
+async def test_a_kicked_admin_cannot_gossip_itself_back_in(world):
+    """The removed household still holds K1 until the owner rotates: its
+    own JOINED for its own seat, at any version, seats nobody on a
+    household that applied the kick — while the same statement from the
+    owner (a re-invite) does."""
+    w = world
+    version = await _m_kicks_admin_a_unheard(w)
+    m_rm = w.m_app[space_remote_member_repo_key]
+    et, p = _roster(w, w.k1_seed, user="ua", inst=A_ID, role="member", version=10**6)
+    await _deliver(w.m_app, sender=A_ID, event_type=et, payload=p)
+    row = await m_rm.get_including_tombstones(w.space_id, A_ID, "ua")
+    assert row.tombstoned and row.member_version == version
+    members = await w.m_app[federation_repo_key].list_member_instance_ids(w.space_id)
+    assert A_ID not in members
+
+    await _deliver(w.m_app, sender=w.o_id, event_type=et, payload=p)
+    assert (await m_rm.get(w.space_id, A_ID, "ua")).member_version == 10**6
