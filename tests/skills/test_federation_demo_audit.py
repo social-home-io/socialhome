@@ -200,6 +200,30 @@ def test_a_delivered_message_dropped_as_rejected_is_a_finding(
     assert found == [f"a: log audit — {line}"]
 
 
+def test_the_gfs_log_format_is_audited_too(harness, tmp_path, monkeypatch):
+    """The GFS logs ``asctime LEVEL    name: msg``; its WARNING / ERROR
+    lines are findings like a household's (they used to match no marker),
+    its one start-up advisory is not."""
+    monkeypatch.setattr(harness, "ROOT", tmp_path)
+    monkeypatch.setattr(harness, "GFS_DIR", tmp_path / "gfs")
+    monkeypatch.setattr(harness, "NOISE_WINDOWS_PATH", tmp_path / "noise.json")
+    monkeypatch.setattr(harness, "LOG_GENERATIONS_PATH", tmp_path / "gens.json")
+    (tmp_path / "gfs").mkdir()
+    warn = (
+        "2026-11-18 21:06:46,774 WARNING  socialhome.global_server.federation: "
+        "GFS: space sp-1 published a join contact that does not verify; dropped"
+    )
+    err = "2026-11-18 21:06:47,001 ERROR    socialhome.global_server.x: boom"
+    (tmp_path / "gfs" / "log.txt").write_text(
+        "2026-11-18 20:48:42,933 INFO     socialhome.global_server.server: up\n"
+        "2026-11-18 20:48:42,933 WARNING  socialhome.global_server.server: GFS: "
+        "minted a new random identity key and stored it at /x (mode 0600).\n"
+        f"{warn}\n{err}\n"
+    )
+    found = harness._audit_logs({"instances": {}, "gfs": {"pid": 1}})
+    assert found == [f"gfs: log audit — {warn}", f"gfs: log audit — {err}"]
+
+
 def test_dtls_block_is_correctly_classified_as_benign(harness):
     """End-to-end: a single-line DTLS error block flows through the
     splitter + audit suppression filter cleanly, even though the

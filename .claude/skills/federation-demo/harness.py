@@ -15047,6 +15047,9 @@ _LOG_BENIGN: tuple[str, ...] = (
     # harness audit. A different webrtc_ice WARNING (e.g. ICE
     # gathering failure, bad TURN credentials) would still surface.
     "WebRTC: no TURN server configured",
+    # The demo GFS starts on an empty data dir, so it mints its identity key
+    # and says where it stored it — operator advice, once per ``gfs-up``.
+    "GFS: minted a new random identity key",
     # Earlier entries removed because the underlying conditions
     # were fixed upstream (instead of permanently allowlisted):
     # * ``OutboxProcessor: peer permanently rejected`` /
@@ -15091,6 +15094,11 @@ _LOG_INTERESTING: tuple[str, ...] = (
     "ERROR:",
     "WARNING:",
     "Exception:",
+    # The GFS process logs ``%(asctime)s %(levelname)-8s %(name)s: …``
+    # (:func:`cmd_gfs_up`), not the households' ``LEVEL:logger:`` — without
+    # these two its WARNING and ERROR lines were never looked at.
+    " WARNING  socialhome.",
+    " ERROR    socialhome.",
 )
 
 
@@ -25997,6 +26005,34 @@ def _admin_seed_seat_gone(state: dict, space_id: str, step: str) -> None:
         )
 
 
+def _admin_seed_respawn_owner() -> None:
+    """Bring the owner a back — once the GFS's channel-register budget has
+    room again. A reconnecting owner re-registers its private-space
+    channels, and the GFS takes 10 registers a minute per address
+    (``CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP``); every demo household is
+    127.0.0.1, and this step restarts a twice in quick succession after the
+    steps before it created several channels — the second reconnect would
+    be answered 429 (a WARNING on a; the next heal registers them). So wait
+    out the minute since the last register the GFS logged."""
+    stamps = [
+        line.split(" ", 2)[1].split(",", 1)[0]
+        for line in _gfs_log_lines_matching("POST /gfs/channels/register")
+    ]
+    if stamps:
+        now = datetime.now()
+        try:
+            last = datetime.strptime(stamps[-1], "%H:%M:%S").replace(
+                year=now.year, month=now.month, day=now.day
+            )
+        except ValueError:
+            last = now
+        wait = 62.0 - (now - last).total_seconds()
+        if 0.0 < wait <= 62.0:
+            print(f"  waiting {wait:.0f} s for the GFS's channel-register budget")
+            time.sleep(wait)
+    _respawn(_load(), "a")
+
+
 def _admin_seed_refuses_to_forget(
     state: dict, space_id: str, kept: dict, members: tuple[str, ...], step: str
 ) -> None:
@@ -26461,7 +26497,7 @@ def cmd_gfs_admin_seed() -> None:
             state, space_id, seed1, want=200, whose="e's seed (K1)", step=step
         )
     finally:
-        _respawn(_load(), "a")
+        _admin_seed_respawn_owner()
     _poll(
         "a to hold e's post, rename and removal of b",
         lambda: (
@@ -26578,7 +26614,7 @@ def cmd_gfs_admin_seed() -> None:
         )
         print("  a offline: d (admin) removed e on its own household ✓")
     finally:
-        _respawn(_load(), "a")
+        _admin_seed_respawn_owner()
     # d rekeyed the content when it removed e, signed with K2. a first hears
     # of the removal and retires K2 — so d's rekey, when it reaches a after
     # that, is refused there (the stated residual of a rotation: an old-key

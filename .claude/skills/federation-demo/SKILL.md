@@ -350,6 +350,13 @@ That single command runs the full sequence:
      that answer counts as delivered, so either line is a finding
      again — a message really was refused for good.
 
+     The GFS process's own log is audited the same way. It logs
+     ``asctime LEVEL    logger: message`` rather than the households'
+     ``LEVEL:logger:message``, so until the ``gfs-admin-seed`` work its
+     WARNING / ERROR lines matched no marker and were never looked at;
+     the only accepted GFS line is its start-up "minted a new random
+     identity key" advisory. (GFS B's log is not audited.)
+
      **Expected-noise windows** (no blanket ignores). A step that
      takes a household offline, or runs a negative control, records
      a *window* per witness household in

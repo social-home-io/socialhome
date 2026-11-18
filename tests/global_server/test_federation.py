@@ -3126,10 +3126,20 @@ async def test_the_owners_same_cert_again_is_a_quiet_no_op(svc, caplog):
     cert still is."""
     seed, pk, owner_id, _k1s, _k1_pk = await _rotation_world(svc)
     _k2_seed, k2_pk = _make_keypair()
-    cert = _rot_cert(
-        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=5
-    )
-    for _ in range(2):
+    certs = [
+        _rot_cert(
+            seed,
+            pk,
+            owner_id,
+            space_id="sp-rot",
+            authority_pk_hex=k2_pk.hex(),
+            epoch=5,
+        )
+        for _ in range(3)
+    ]
+    # The same cert twice, then one the owner signed again for the same key
+    # and epoch (another ``issued_at``).
+    for cert in (certs[0], certs[0], certs[2]):
         with caplog.at_level(logging.WARNING):
             await _publish_with_cert(
                 svc,
@@ -3140,7 +3150,7 @@ async def test_the_owners_same_cert_again_is_a_quiet_no_op(svc, caplog):
                 authority_cert=cert,
             )
     row = await svc.get_space("sp-rot")
-    assert (row.identity_public_key, row.authority_cert) == (k2_pk.hex(), cert)
+    assert (row.identity_public_key, row.authority_cert) == (k2_pk.hex(), certs[0])
     assert row.authority_rotation_seq == 1
     assert "not newer" not in caplog.text
     _k0_seed, k0_pk = _make_keypair()

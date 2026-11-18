@@ -334,10 +334,16 @@ def certified_authority_repin(
             space_id,
         )
         return False
-    if stored_cert is not None and cert == stored_cert:
-        # The cert of the key already pinned, sent again: the owner
-        # re-publishes with it on every reconnect and metadata change until
-        # this server confirmed the pin. Nothing to move, nothing refused.
+    if (
+        stored_cert is not None
+        and verified.key_epoch == authority_cert_epoch(stored_cert)
+        and str(stored_cert.get("authority_pk") or "").lower()
+        == verified.authority_pk_hex
+    ):
+        # The key already pinned at the epoch already stored, sent again:
+        # the owner re-publishes with its cert on every reconnect and
+        # metadata change until this server confirmed the pin. Nothing to
+        # move, nothing refused.
         return False
     if verified.key_epoch <= authority_cert_epoch(stored_cert):
         log.warning(
