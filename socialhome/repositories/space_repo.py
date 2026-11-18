@@ -1706,11 +1706,24 @@ class SqliteSpaceRepo:
         counter, so roster gossip versions advance independently of config-LWW
         versions. Same ``BEGIN IMMEDIATE`` UPDATE+SELECT so concurrent callers
         always see strictly increasing values.
+
+        The new value is also above every seat version this household holds
+        for the space. On the host that is always so. A member household's
+        counter moves only with the config it is sent, while the seats it
+        mirrors arrive at the HOST's versions (gossip, a snapshot, a rotation
+        baseline) — so a delegated admin's removal, signed at its own lagging
+        counter + 1, was BELOW the seat's version and every household dropped
+        it as stale: the owner never heard of it and never retired the
+        removed admin's key. (Capped one below the widest counter, so a
+        forged huge version cannot overflow the next one.)
         """
 
         def _run(conn):
             cur = conn.execute(
-                "UPDATE spaces SET roster_sequence = roster_sequence + 1 WHERE id=?",
+                "UPDATE spaces SET roster_sequence = MIN(MAX(roster_sequence,"
+                " COALESCE((SELECT MAX(member_version) FROM space_remote_members"
+                " WHERE space_id = spaces.id), 0)), 9223372036854775806) + 1"
+                " WHERE id=?",
                 (space_id,),
             )
             if cur.rowcount == 0:

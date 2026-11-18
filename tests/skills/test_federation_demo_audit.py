@@ -263,9 +263,13 @@ def test_admin_seed_check_flags_a_stale_pin_and_a_working_old_seed(
     }
     cols = {"identity_public_key": "k3", "name": "Lab"}
     monkeypatch.setattr(harness, "_space_col", lambda label, sid, col: cols[col])
-    monkeypatch.setattr(harness, "_space_seed", lambda label, sid: b"s" * 32)
-    monkeypatch.setattr(harness, "_seed_pin", lambda seed: "k3")
-    monkeypatch.setattr(harness, "_rows", lambda label, sql, params=(): [])
+    monkeypatch.setattr(harness, "_space_seed", lambda label, sid: label.encode() * 32)
+    monkeypatch.setattr(
+        harness, "_seed_pin", lambda seed: "k3" if seed == b"d" * 32 else "k2"
+    )
+    monkeypatch.setattr(
+        harness, "_remote_member_row", lambda label, sid, uid: {"tombstoned": 1}
+    )
     pins = {"A": ("k3", True, False), "B (withdrawn)": ("k2", True, True)}
     monkeypatch.setattr(
         harness,

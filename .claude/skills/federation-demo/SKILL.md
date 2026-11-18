@@ -1282,7 +1282,8 @@ and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
    with K1, and d must log a refusal of that frame and keep the name.
 4. **Removed by another admin, owner away.** e joins again (admin link,
    approval) and holds the K2 seed; a makes d's person an admin too. a is
-   killed; d removes e (HTTP 200: executed on d). a comes back, learns of
+   killed; d removes e (HTTP 200: executed on d; e drops its own copy only
+   on its host's word — reported, not asserted). a comes back, learns of
    it — from d's roster gossip or from d re-stating the removal against a's
    roster snapshot (#1380), whichever arrives first; the step prints which
    — and rotates again (K2 → K3). d holds the K3 seed; both GFS pin K3.
@@ -1297,8 +1298,9 @@ after step 3; after step 4 K1 and K2 answer 403 on both and d's K3 seed
 200.
 
 ``verify`` (gated on the ``gfs_admin_seed`` state key) re-checks that every
-GFS pins the key a pins, that d holds its seed and the name e set, that e
-holds no seat, and that both retired seeds are still refused.
+GFS pins the key a pins, that d holds its seed and the name e set, that
+the host seats e no more and e does not hold the current seed, and that both
+retired seeds are still refused.
 
 ```bash
 python .claude/skills/federation-demo/harness.py gfs-admin-seed

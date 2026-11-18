@@ -1885,6 +1885,13 @@ are both sourced from the space's dedicated atomic `roster_sequence`
 mutation no longer bumps the config-LWW version (and a delegated admin's
 offline config edit can't lag behind the owner at an equal sequence).
 `roster_sequence` is backfilled from `config_sequence` once for continuity.
+A household that signs a roster event (the host, or a delegated admin
+acting while the owner is away) takes the next version above its counter
+**and above every seat version it holds for the space**: a member
+household's counter only moves with the config it is sent, while the seats
+it mirrors carry the host's versions, so its own counter + 1 could be below
+the seat it removes — and that removal was dropped as stale everywhere,
+the owner included (which then never rotated the removed admin's key).
 The receiver's
 version-guarded CRDT merge (`apply_member_event`) converges regardless of
 delivery order: a strictly-greater version wins, removal wins an

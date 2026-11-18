@@ -26126,7 +26126,8 @@ def cmd_gfs_admin_seed() -> None:
     4. **Removed by another admin while the owner is away.** e joins again
        (admin link, approval) and holds the NEW seed; a makes d's person an
        admin too (d holds it as well). a is stopped; d removes e (executed
-       on d). a comes back, learns of the removal — from d's roster gossip
+       on d; e drops its own copy only on its host's word, so that is
+       reported, not asserted). a comes back, learns of the removal — from d's roster gossip
        or from d re-stating it against a's roster snapshot, whichever
        arrives first (reported) — and rotates again. d, the remaining
        admin, holds the newest seed; both GFS pin the newest key; both of
@@ -26161,7 +26162,12 @@ def cmd_gfs_admin_seed() -> None:
             "description": "v_94: an admin reached only through a GFS",
             "space_type": "global",
             "gfs_ids": [a_a_id],
-            "join_mode": "invite_only",
+            # "Ask to join": the listing then carries the owner's signed join
+            # contact, so a household that saw the listing pins the owner key
+            # and follows the rotations below along the owner's cert chain
+            # (``federation/join_contact_pin.py``). A listing without a
+            # contact pins no owner, and a later rotation reads as a conflict.
+            "join_mode": "request",
         },
     )
     space_id = _must(f"{step}: a creates the space", s, space, ok=(201,))["id"]
@@ -26338,7 +26344,7 @@ def cmd_gfs_admin_seed() -> None:
     # 2. e acts for the owner, a offline.
     new_name = f"Renamed by the GFS-only admin {tag}"
     text1 = f"While the owner is away {tag}"
-    _kill_household("a", a)
+    _kill_household("a", _load()["instances"]["a"])
     try:
         gfs_off = _gfs_log_size()
         s, post1 = _inst_request(
@@ -26416,7 +26422,7 @@ def cmd_gfs_admin_seed() -> None:
             state, space_id, seed1, want=200, whose="e's seed (K1)", step=step
         )
     finally:
-        _respawn(state, "a")
+        _respawn(_load(), "a")
     _poll(
         "a to hold e's post, rename and removal of b",
         lambda: (
@@ -26521,15 +26527,22 @@ def cmd_gfs_admin_seed() -> None:
         interval=2.0,
     )
     print(f"  e is an admin again and holds the K2={k2[:12]}… seed; so does d ✓")
-    _kill_household("a", a)
+    _kill_household("a", _load()["instances"]["a"])
     try:
         d_off = _log_size("d")
         s, body = _inst_request(state, "d", "DELETE", e_url)
         _must(f"{step}: d removes e with a offline", s, body, ok=(200,))
-        _admin_seed_seat_gone(state, space_id, step)
-        print("  a offline: d (admin) removed e; e holds no seat ✓")
+        _poll(
+            "d to drop e's seat",
+            lambda: (
+                (row := _remote_member_row("d", space_id, e["user_id"])) is not None
+                and int(row.get("tombstoned") or 0) == 1
+            ),
+            timeout=30.0,
+        )
+        print("  a offline: d (admin) removed e on its own household ✓")
     finally:
-        _respawn(state, "a")
+        _respawn(_load(), "a")
     k3, _epoch3 = _admin_seed_await_rotation(
         state,
         space_id,
@@ -26556,6 +26569,28 @@ def cmd_gfs_admin_seed() -> None:
     )
     seed3 = _admin_seed_await_seed("d", space_id, k3, step)
     print(f"  d, the remaining admin, holds the K3={k3[:12]}… seed ✓")
+    # Secondary, as for b above: e drops its own copy only on its host's
+    # word, and d is not e's host. Whatever e still holds is the K2 seed —
+    # refused below.
+    e_gone = _parity_wait(
+        lambda: (
+            not _rows(
+                "e",
+                "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, e["user_id"]),
+            )
+        ),
+        timeout=60.0,
+    )
+    print(
+        "  e "
+        + (
+            "lost the space once its host a was back ✓ [secondary]"
+            if e_gone
+            else "still holds its stub of the space (its host a has not told "
+            "it yet) [secondary, non-fatal]"
+        )
+    )
     for seed, whose in ((seed1, "e's first seed (K1)"), (seed2, "e's second seed (K2)")):
         _admin_seed_probe(state, space_id, seed, want=403, whose=whose, step=step)
     _admin_seed_probe(
@@ -26582,16 +26617,15 @@ def _check_gfs_admin_seed(state: dict, failures: list[str]) -> None:
     info = state["gfs_admin_seed"]
     space_id = info["space_id"]
     pin = _space_col("a", space_id, "identity_public_key")
+    if _seed_pin(_space_seed("e", space_id)) == pin:
+        failures.append("gfs-admin-seed: e, removed, holds the seed of a's key")
     if _seed_pin(_space_seed("d", space_id)) != pin:
         failures.append("gfs-admin-seed: d no longer holds the seed of a's key")
     if _space_col("d", space_id, "name") != info["name"]:
         failures.append("gfs-admin-seed: d lost the name the GFS-only admin set")
-    if _rows(
-        "e",
-        "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
-        (space_id, state["instances"]["e"]["user_id"]),
-    ):
-        failures.append("gfs-admin-seed: e holds a seat in the space again")
+    seat = _remote_member_row("a", space_id, state["instances"]["e"]["user_id"])
+    if seat is None or int(seat.get("tombstoned") or 0) != 1:
+        failures.append(f"gfs-admin-seed: the host a seats e again: {seat!r}")
     for name, url, rows_of in _admin_seed_servers(state):
         held = _gfs_pin(rows_of, space_id)
         if held is None or held[0] != pin:
