@@ -11062,7 +11062,7 @@ hr {
 }
 .sh-admin-authority-confirm:focus { outline: none; }
 .sh-admin-authority-confirm:focus-visible {
-  outline: 2px solid var(--sh-primary);
+  outline: 2px solid var(--sh-focus-ring);
   outline-offset: 2px;
 }
 .sh-admin-authority-confirm__list {
