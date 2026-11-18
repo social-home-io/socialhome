@@ -2648,8 +2648,19 @@ class GfsConnectionService:
         ) and await self._signed_capability_supported(
             conn, "join_contact", self._join_contact
         )
+        # The server this listing is for, inside the signed bytes: without
+        # it the server that received the body could replay it, within the
+        # ``ts`` window, to another GFS this household is registered on and
+        # list the space there. Only to a server that proved it folds the
+        # field in (``withdrawn_repin``; an older one would fail the
+        # signature) — that one gets today's body. Read from the cache each
+        # connect's ``/gfs/info`` fetch warms: no extra round-trip.
+        gfs_key = self._listing_addressee_key(conn)
         body = await self._build_publish_body(
-            space_id, with_place=with_place, with_contact=with_contact
+            space_id,
+            with_place=with_place,
+            with_contact=with_contact,
+            gfs_key=gfs_key,
         )
         if "authority_cert" in body and not await self._signed_capability_supported(
             conn, "authority_rotation", self._authority_rotation
@@ -2664,6 +2675,7 @@ class GfsConnectionService:
                 with_cert=False,
                 with_place=with_place,
                 with_contact=with_contact,
+                gfs_key=gfs_key,
             )
         client = self._client()
         publish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/publish"
@@ -2751,8 +2763,12 @@ class GfsConnectionService:
         with_cert: bool = True,
         with_place: bool = False,
         with_contact: bool = False,
+        gfs_key: str | None = None,
     ) -> dict:
         """Compose + sign the publish body.
+
+        ``gfs_key`` — the addressed server's identity key, folded into the
+        signed bytes when given (see :meth:`publish_space`).
 
         Fail-closed: the GFS now mandates an Ed25519 signature on every
         publish, so an instance with no signing key (publish context not
@@ -2853,6 +2869,8 @@ class GfsConnectionService:
         contact = await self._join_contact_for(space) if with_contact else None
         if contact is not None:
             body["join_contact"] = contact
+        if gfs_key is not None:
+            body["gfs_key"] = gfs_key
         canonical = canonical_bytes(body)
         body["signature"] = b64url_encode(
             sign_ed25519(self._own_signing_key, canonical),
@@ -3438,8 +3456,8 @@ class GfsConnectionService:
         return (space_id, gfs_id) in self._pin_confirmed
 
     def _listing_addressee_key(self, conn: GfsConnection) -> str | None:
-        """*conn*'s pinned server key to bind into a withdrawal (``gfs_key``,
-        signed), or ``None`` while its server has not proved
+        """*conn*'s pinned server key to bind into a listing publish or a
+        withdrawal (``gfs_key``, signed), or ``None`` while its server has not proved
         ``withdrawn_repin`` — the capability that says it folds the field
         into the signed bytes — or we pinned no key for it. Read from the
         cache every ``/gfs/info`` fetch warms (each connect does one): a
