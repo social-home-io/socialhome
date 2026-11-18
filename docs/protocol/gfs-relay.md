@@ -1833,12 +1833,32 @@ household migration 0145.
   someone else holds the seed. It names nobody; linking it to a household
   takes the sender's address (the IP limit below). The owner household is
   known to the GFS by design: it signs the listing.
-- **A delegated admin's seat on a private space's channel (open
-  follow-up).** On an opaque channel (`private_gfs`) a delegated admin
-  issues no grant to itself, so after a rotation it runs itself its seat is
-  the one not renewed for the new epoch until the owner's next grant. The
-  GFS knows neither the space nor its owner there, but can tell that seat
-  apart. To be fixed, not accepted.
+- **A delegated admin's seat on a private space's channel — reduced,
+  not fixed.** On an opaque channel (`private_gfs`) a delegated admin used
+  to issue no grant to itself, so after a rotation it ran its seat was the
+  one never renewed for the new epoch. It now renews its own grant
+  (`GfsChannelService._renew_own_grant`: same channel and servers, a seat
+  pass and writer key only if it held them) — but not at once: right after
+  its own anonymous epoch notice it would be the FIRST identified subscribe
+  on the new epoch, before any member could hold the rekey, which marks it
+  just the same. It renews on one of two events, no timer and no random
+  delay: the first item of the new epoch that reaches its old seat (open
+  for the server's grace period; a member already applied the rekey), or
+  its next reconnect to a channel server (when every household re-takes
+  its seats). What a GFS can still see: one seat that renews later than the
+  others — after the first new-epoch item instead of before it, or, when
+  no member posts within the grace period, only at its next reconnect
+  (once the grace period is over that seat receives nothing over the
+  channel until then). A server that orders subscribes against
+  the epoch notice can single that seat out. Hiding it fully needs every
+  member to renew on the same event (for example all on the first item),
+  which changes when members start receiving — an owner decision, not
+  taken here. The GFS knows neither the space nor its owner on a channel.
+- **Followers after a delegated admin's rotation.** A content-key rotation
+  a delegated admin runs while the owner is away re-seals the key to
+  members; the GFS followers' key handoff is re-sealed when the owner is
+  back. Followers read nothing new until then (they may get a subset by
+  rule; no member is affected).
 - **An instance-addressed frame shows its recipient.** A seat without a
   mailbox (an older sealed-redeem seat) is reached by `{to_instance,
   sealed}`: the GFS sees the recipient's instance id on every frame to it,

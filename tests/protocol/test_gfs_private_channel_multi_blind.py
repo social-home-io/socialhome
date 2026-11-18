@@ -271,6 +271,20 @@ class _Conns:
     async def list_active(self):
         return list(self.conns)
 
+    async def list_all(self):
+        return list(self.conns)
+
+    async def add_channel_withdrawals(
+        self, space_id, channel_id, gfs_ids, *, channel_seed=None
+    ):
+        for gfs_id in gfs_ids:
+            row = (space_id, gfs_id, channel_id)
+            if row not in self.withdrawals:
+                self.withdrawals.append(row)
+
+    async def get_channel_withdrawal_seed(self, space_id, gfs_id, channel_id):
+        return None
+
     async def get(self, gfs_id):
         return next((c for c in self.conns if c.id == gfs_id), None)
 

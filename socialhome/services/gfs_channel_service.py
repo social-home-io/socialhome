@@ -146,6 +146,7 @@ from ..gfs_channel import (
     sign_unregister,
     verify_grant,
 )
+from ..infrastructure.key_manager import KeyManagerError
 from ..outbound_fetch import OutboundFetchRefused
 from ..task_drain import wait_tasks_done
 from .gfs_connection_service import GfsConnectionService
@@ -188,6 +189,17 @@ class _SyncScheduler(Protocol):
 
 
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+#: First wait before a pending unregister is sent again to a server that
+#: just failed it — unreachable or refusing alike; doubles per failure up to
+#: the ceiling (the re-pin's schedule, ``GFS_REPIN_RETRY_*``). A reconnect
+#: of that server asks at once. There is NO give-up: a refusal is not a
+#: confirmation (clock skew or a stale server key answers 403 and heals),
+#: the channel may still be open there, and its row keeps blocking new
+#: signing-key shares for the space until the server confirms or the owner
+#: disconnects it — the owner is told through ``space_delegation_blocked``.
+RETIRE_RETRY_MIN_S: float = 240.0
+RETIRE_RETRY_MAX_S: float = 6 * 3600.0
 
 #: Queue-item kinds of the channel retry queue.
 _KIND_ANON = "channel_item_anon"
@@ -264,6 +276,7 @@ class GfsChannelService:
         "_own_seed",
         "_registered",
         "_remote_members",
+        "_retire_tried",
         "_retry",
         "_space_service",
         "_spaces",
@@ -310,6 +323,10 @@ class GfsChannelService:
         #: channel id → ``gfs_instance_id``s that confirmed our registration
         #: in this process (the owner's grants name only these).
         self._registered: dict[str, set[str]] = {}
+        #: ``(space, connection, channel)`` → ``(not before, wait)`` of a
+        #: pending unregister's last failed attempt (monotonic seconds) —
+        #: see :data:`RETIRE_RETRY_MIN_S`. In memory: a restart asks again.
+        self._retire_tried: dict[tuple[str, str, str], tuple[float, float]] = {}
         #: Spaces with a take-over replacement in flight (the persisted
         #: per-space cooldown bounds them across restarts).
         self._healing: set[str] = set()
@@ -642,32 +659,73 @@ class GfsChannelService:
         return True
 
     async def _retire(self, space: Space, channel_id: str) -> None:
-        """Unregister the channel everywhere we can sign for it, and forget
-        it. Members get no grant for the next epoch."""
-        # The servers the owner's list already dropped (recorded durably).
-        await self.withdraw_pending(space_id=space.id)
-        seed = await self._matching_seed(space)
-        if seed is not None:
-            # Only where the channel lives: the chosen servers and any it was
-            # registered on in this process — never a server the owner did
-            # not choose.
+        """Unregister the channel everywhere it lives, and forget it.
+        Members get no grant for the next epoch.
+
+        Durable (migration 0147, owner decision D4): every server the
+        channel lives on is first RECORDED as owing the unregister, together
+        with the channel's signing seed — then asked. A server that does not
+        confirm (down, suspended, a 5xx) keeps its row and is asked again on
+        its reconnect and by the periodic retry, even after the space key
+        this channel derives from was rotated away. Without that a server
+        that missed the one request kept the old channel open for whoever
+        still holds the retired key."""
+        # The seed is recorded only when it is THE channel's: it derives the
+        # stored channel key (as every other signer checks). Anything else
+        # would sign nothing there.
+        found = await self._channel_seed(space)
+        if found is not None and found[0] == channel_id:
+            channel_seed = found[1]
+            # Only where the channel lives: the chosen servers (reachable
+            # right now or not), any it was registered on in this process,
+            # and those a list change already dropped (their pending rows
+            # gain the seed) — never a server the owner did not choose.
             registered = self._registered.get(channel_id, set())
+            connections = await self._conn_repo.list_all()
             # A space that left the private tier keeps a listing list, not a
             # channel list: never read it as where the channel lives.
             chosen = (
-                {c.id for c in await self._chosen_capable(space)}
+                {
+                    c.id
+                    for c in connections_on_list(
+                        space.gfs_servers, connections, include_inactive=True
+                    )
+                }
                 if space.space_type is SpaceType.PRIVATE
+                and space.gfs_servers is not None
                 else set()
             )
-            await self._unregister_on(
-                channel_id,
-                derive_channel_seed(seed, space.id, channel_id),
-                [
-                    c
-                    for c in await self._capable()
+            pending = {
+                conn_id
+                for _s, conn_id, ch in await self._conn_repo.list_channel_withdrawals(
+                    space_id=space.id
+                )
+                if ch == channel_id
+            }
+            owing = sorted(
+                {
+                    c.id
+                    for c in connections
                     if c.id in chosen or c.gfs_instance_id in registered
-                ],
+                }
+                | pending
             )
+            try:
+                await self._conn_repo.add_channel_withdrawals(
+                    space.id, channel_id, owing, channel_seed=channel_seed
+                )
+            except Exception:
+                # No KEK wired / a write failure: still try each once below
+                # from the rows that exist (derived from the live seed).
+                log.exception(
+                    "gfs.channel: recording the retire of channel %s failed",
+                    channel_id,
+                )
+                await self._conn_repo.add_channel_withdrawals(
+                    space.id, channel_id, owing
+                )
+        # Every pending row of the space, the ones just recorded included.
+        await self.withdraw_pending(space_id=space.id, force=True)
         self._registered.pop(channel_id, None)
         await self._spaces.set_gfs_channel(space.id, None, None)
         log.info(
@@ -677,41 +735,22 @@ class GfsChannelService:
             space.id,
         )
 
-    async def _unregister_on(
-        self, channel_id: str, channel_seed: bytes, conns: list[GfsConnection]
-    ) -> None:
-        """Unregister the channel on *conns* (anonymous, channel-key signed)."""
-        client = self._gfs.publish_client()
-        if client is None:
-            return
-        for conn in conns:
-
-            async def _unregister(conn: GfsConnection = conn) -> PublishOutcome:
-                body = sign_unregister(
-                    channel_seed=channel_seed,
-                    channel_id=channel_id,
-                    gfs_instance_id=conn.gfs_instance_id,
-                    gfs_key=self._gfs.addressee_key_for(conn),
-                    ts=_anon_ts(),
-                ).to_wire()
-                return await self._post(
-                    client,
-                    f"{conn.inbox_url}{CHANNEL_UNREGISTER_ROUTE}",
-                    body,
-                    conn,
-                )
-
-            await self._keyed(conn, _unregister)
-
     async def withdraw_pending(
-        self, *, space_id: str | None = None, gfs_id: str | None = None
+        self,
+        *,
+        space_id: str | None = None,
+        gfs_id: str | None = None,
+        force: bool = False,
     ) -> int:
         """Send the pending channel withdrawals (migration 0095, recorded by
         the owner's list change BEFORE it was stored), optionally for one
         space / one connection: an anonymous, channel-key-signed unregister
         each. A row is forgotten once the server confirmed, or can never
-        confirm (the space or its seed is gone — a new authority seed can't
-        sign for the old channel; a permanent refusal). A connection that is
+        confirm (no seed was recorded with it and the space or its seed is
+        gone — said at WARNING). Anything else keeps its row for good:
+        unreachable or refused, the next attempt waits
+        (:data:`RETIRE_RETRY_MIN_S`, doubling), unless *force* (a reconnect).
+        A connection that is
         not active right now keeps its rows: retried when it reconnects
         (:meth:`heal`). Returns how many were confirmed. Never raises."""
         try:
@@ -722,18 +761,43 @@ class GfsChannelService:
             log.exception("gfs.channel: pending withdrawals unreadable")
             return 0
         done = 0
+        now = _monotonic()
         for row_space, conn_id, channel_id in rows:
+            row = (row_space, conn_id, channel_id)
             try:
                 conn = await self._conn_repo.get(conn_id)
                 if conn is not None and conn.status != "active":
                     continue
+                tried = self._retire_tried.get(row)
+                if not force and tried is not None and now < tried[0]:
+                    continue  # its wait is not over
                 outcome = (
                     await self._unregister_one(row_space, channel_id, conn)
                     if conn is not None
                     else None
                 )
-                if outcome is not None and outcome.kind == "transient":
+                if outcome is not None and outcome.kind != "delivered":
+                    # Unreachable or refused — not confirmed either way:
+                    # the channel may still be open there. The row stays
+                    # (a retired channel's blocks new seed shares) and the
+                    # next attempt waits, twice as long each time.
+                    wait = (
+                        min(tried[1] * 2, RETIRE_RETRY_MAX_S)
+                        if tried is not None
+                        else RETIRE_RETRY_MIN_S
+                    )
+                    self._retire_tried[row] = (now + wait, wait)
                     continue
+                if outcome is None and conn is not None:
+                    log.warning(
+                        "gfs.channel: the unregister of channel %s on GFS %s "
+                        "can never be signed (no seed was recorded with it and "
+                        "the space key changed) — forgotten; it stays open "
+                        "there until that server's idle sweep",
+                        channel_id,
+                        conn_id,
+                    )
+                self._retire_tried.pop(row, None)
                 await self._conn_repo.delete_channel_withdrawal(
                     row_space, conn_id, channel_id
                 )
@@ -747,17 +811,39 @@ class GfsChannelService:
         self, space_id: str, channel_id: str, conn: GfsConnection
     ) -> PublishOutcome | None:
         """One anonymous unregister of *channel_id* at *conn*; ``None`` when
-        it can never be signed (space gone, seed not ours or changed)."""
-        space = await self._spaces.get(space_id)
-        if space is None:
-            return None
-        seed = await self._matching_seed(space)
-        if seed is None:
-            return None
+        it can never be signed (no seed recorded with the row, and the space
+        is gone or its seed is not ours or changed)."""
+        # The seed recorded with the row (a retire, 0147) signs even after
+        # the space key it derived from is gone; a row without one (a
+        # dropped server) is derived from the live seed.
+        try:
+            channel_seed = await self._conn_repo.get_channel_withdrawal_seed(
+                space_id, conn.id, channel_id
+            )
+        except KeyManagerError:
+            # A seed WAS recorded and cannot be read (another KEK, a damaged
+            # row). Not "can never confirm": the channel may still be open,
+            # so the row stays owed.
+            log.warning(
+                "gfs.channel: the signing seed recorded for the unregister of "
+                "channel %s on GFS %s cannot be read — kept, and it keeps "
+                "blocking new signing-key shares for space %s",
+                channel_id,
+                conn.id,
+                space_id,
+            )
+            return PublishOutcome.transient()
+        if channel_seed is None:
+            space = await self._spaces.get(space_id)
+            if space is None:
+                return None
+            seed = await self._matching_seed(space)
+            if seed is None:
+                return None
+            channel_seed = derive_channel_seed(seed, space_id, channel_id)
         client = self._gfs.publish_client()
         if client is None:
             return PublishOutcome.transient()
-        channel_seed = derive_channel_seed(seed, space_id, channel_id)
 
         async def _unregister() -> PublishOutcome:
             body = sign_unregister(
@@ -1063,10 +1149,97 @@ class GfsChannelService:
         the new epoch. Never raises."""
         try:
             await self.reconcile(space_id)
+            # A delegated admin does NOT renew its own seat here: right
+            # after its own (anonymous) notice it would be the first
+            # identified subscribe on the new epoch — see
+            # :meth:`_renew_own_grant` for when it does.
             return await self.announce_epoch(space_id)
         except Exception:
             log.exception("gfs.channel: rotation hook failed")
             return 0
+
+    async def _renew_own_grant(
+        self, space_id: str, *, proven_epoch: int | None = None
+    ) -> bool:
+        """A delegated admin that rotated the content key renews its OWN
+        grant for the new epoch, as the rekey renews every other member's:
+        same channel and servers, a seat pass if it held one, the writer
+        key if it held one. ``True`` when a grant was stored.
+
+        PRIVACY: nobody else can issue it — the rekey comes from us — and
+        without it our seat was the one seat on the channel left on the old
+        epoch's pass after that rotation: the connection server could tell
+        which household holds the signing key. WHEN matters as much: right
+        after our own notice we would be the first identified subscribe on
+        the new epoch, before any member could hold the rekey — the same
+        tell. So it happens on one of two events, never on a timer and
+        never with a random delay:
+
+        * the first item of the new epoch reaches our old seat (still open
+          for the server's grace period) — *proven_epoch* is that frame's
+          channel epoch, proof that a member already applied the rekey;
+        * our next reconnect to a channel server, when every household
+          re-takes its seats anyway (:meth:`heal`).
+
+        Only a renewal: a seed holder that holds no grant (never seated)
+        takes none, and the OWNER never holds one at all (it would
+        subscribe and name itself)."""
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or space.owner_instance_id == self._own_instance_id
+        ):
+            return False
+        found = await self._channel_seed(space)
+        seed = await self._matching_seed(space)
+        epoch = await self._crypto.get_current_epoch(space_id)
+        if found is None or seed is None or epoch is None:
+            return False
+        if await self.own_grant(space_id, epoch) is not None:
+            return False
+        held = await self._delegate_grant(space_id)
+        if held is None or held.epoch >= epoch:
+            return False
+        channel_id, channel_seed = found
+        offset = derive_channel_epoch_offset(seed, space_id, channel_id)
+        wire_epoch = int(epoch) + offset
+        if proven_epoch is not None and proven_epoch != wire_epoch:
+            return False
+        grant = GfsChannelGrant(
+            channel_suite="ed25519",
+            space_id=space_id,
+            channel_id=channel_id,
+            channel_pk=channel_pk_of(channel_seed),
+            epoch=int(epoch),
+            epoch_offset=offset,
+            gfs_ids=held.gfs_ids,
+            binding_sig_suite="ed25519",
+            binding_sig="",
+            channel_pass=(
+                issue_channel_pass(
+                    channel_seed=channel_seed,
+                    channel_id=channel_id,
+                    epoch=wire_epoch,
+                    instance_pk=self._own_pk,
+                )
+                if held.channel_pass is not None
+                else None
+            ),
+            writer_key=(
+                issue_channel_writer_key(
+                    space_seed=seed,
+                    space_id=space_id,
+                    channel_id=channel_id,
+                    epoch=wire_epoch,
+                )
+                if held.writer_key is not None
+                else None
+            ),
+        )
+        return await self.accept_grant(
+            space_id, bind_grant(grant, space_seed=seed).to_wire()
+        )
 
     async def heal(self, gfs_id: str) -> int:
         """On a GFS (re)connect: the owner reconciles every private space it
@@ -1080,7 +1253,7 @@ class GfsChannelService:
         # answers before we caught up is never evidence.
         self._connected_at[conn.id] = _monotonic()
         # Withdrawals this server still owes us (it was down, or suspended).
-        await self.withdraw_pending(gfs_id=conn.id)
+        await self.withdraw_pending(gfs_id=conn.id, force=True)
         supported = await self._gfs.private_channels_supported(conn)
         if self._capability_hook is not None and (
             supported or not self._gfs.capability_unknown(conn)
@@ -1103,8 +1276,12 @@ class GfsChannelService:
                         done += 1
                     if result == "created":
                         await self.distribute(space.id)
-                elif await self.subscribe(space.id, only=gfs_id):
-                    done += 1
+                else:
+                    # A delegated admin that rotated since: its own seat is
+                    # renewed with everyone's re-take (no-op for others).
+                    await self._renew_own_grant(space.id)
+                    if await self.subscribe(space.id, only=gfs_id):
+                        done += 1
             except Exception:
                 log.exception("gfs.channel: heal failed for a private space")
         return done
@@ -1158,10 +1335,10 @@ class GfsChannelService:
 
     async def _delegate_grant(self, space_id: str) -> GfsChannelGrant | None:
         """A delegated admin's newest grant for the space's channel: the one
-        for our latest epoch, else the newest stored below it — a seed
-        holder never grants itself, so right after its OWN rotation it holds
-        no grant for the new epoch, yet must still announce it to the
-        channel's servers."""
+        for our latest epoch, else the newest stored below it — right after
+        its OWN rotation it holds no grant for the new epoch yet (it renews
+        its own later, :meth:`_renew_own_grant`), and
+        must still announce that epoch to the channel's servers."""
         latest = await self._keys.get_latest(space_id)
         if latest is None:
             return None
@@ -1838,6 +2015,12 @@ class GfsChannelService:
             # The frame carries the channel epoch: shift it back by this
             # space's channel offset (from our current grant).
             grant = await self.current_grant(space_id)
+            if grant is None and await self._renew_own_grant(
+                space_id, proven_epoch=item.epoch
+            ):
+                # We rotated this space's key ourselves and this is the
+                # first item of the new epoch: our seat is renewed now.
+                grant = await self.current_grant(space_id)
             if grant is None or grant.channel_id != item.channel_id:
                 continue
             content_epoch = item.epoch - grant.epoch_offset

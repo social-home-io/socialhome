@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import aiohttp
@@ -15,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from socialhome.domain.space_item import PayloadSuiteRefused, UnsupportedPayloadSuite
 from socialhome.global_server import federation as federation_mod
+from socialhome.global_server.addressee import GfsAddressee
 from socialhome.global_server.domain import GfsSubscriber
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
@@ -51,6 +53,11 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+#: The identity key of the GFS under test — what a household binds into a
+#: request as ``gfs_key`` — and another server's.
+_GFS_KEY = "5a" * 32
+_OTHER_GFS_KEY = "6b" * 32
+
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
 
@@ -58,7 +65,11 @@ def _now_iso() -> str:
 async def svc(gfs_db):
     """A GfsFederationService backed by the shared GFS database fixture."""
     repo = SqliteGfsFederationRepo(gfs_db)
-    return GfsFederationService(repo)
+    service = GfsFederationService(repo)
+    service.attach_addressee(
+        GfsAddressee("gfs-test", (), public_key_hex=_GFS_KEY, node_id="n1")
+    )
+    return service
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -4059,3 +4070,441 @@ async def test_an_unknown_relay_suite_is_refused(gfs_db):
     seed = await _zlib_space(svc, "sp-z-bad", accepts=("payload_zlib1",))
     with pytest.raises(UnsupportedPayloadSuite):
         await _relay_with_suite(svc, seed, "sp-z-bad", "zlib9")
+
+
+# ─── ``withdrawn: true`` — a pin-only re-pin of a withdrawn listing ───────
+
+
+async def _withdrawn_repin(
+    svc,
+    seed: bytes,
+    *,
+    owning_instance: str,
+    space_id: str,
+    identity_public_key: str,
+    authority_cert: dict | None,
+    ts: str | None = None,
+    sign_withdrawn: bool = True,
+    gfs_key: str | None = _GFS_KEY,
+    sign_gfs_key: bool = True,
+):
+    """A ``withdrawn: true`` publish as a household sends it: BLANK metadata
+    (a space that left the public tier must not leak its new name) plus the
+    new key and its owner cert."""
+    body = _publish_space_args(
+        owning_instance, space_id, identity_public_key=identity_public_key
+    )
+    body["name"] = ""
+    ts = _now_iso() if ts is None else ts
+    if ts:
+        body["ts"] = ts
+    if authority_cert is not None:
+        body["authority_cert"] = authority_cert
+    if sign_withdrawn:
+        body["withdrawn"] = True
+    if gfs_key is not None and sign_gfs_key:
+        body["gfs_key"] = gfs_key
+    return await svc.publish_space(
+        space_id=space_id,
+        owning_instance=owning_instance,
+        name="",
+        signature=_sign(seed, body),
+        identity_public_key=identity_public_key,
+        authority_cert=authority_cert,
+        ts=ts,
+        withdrawn=True,
+        gfs_key=gfs_key,
+    )
+
+
+async def _withdrawn_rotation_world(svc, space_id: str = "sp-rot"):
+    """``_rotation_world`` whose owner then withdrew the listing."""
+    seed, pk, owner_id, k1_seed, k1_pk = await _rotation_world(svc, space_id)
+    await svc._repo.set_space_withdrawn(space_id, True)
+    return seed, pk, owner_id, k1_seed, k1_pk
+
+
+@pytest.mark.security
+async def test_withdrawn_repin_moves_the_pin_and_keeps_the_listing_withdrawn(svc):
+    seed, pk, owner_id, _k1s, _k1 = await _withdrawn_rotation_world(svc)
+    before = await svc.get_space("sp-rot")
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    returned = await _withdrawn_repin(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k2_pk.hex(),
+        authority_cert=cert,
+    )
+    row = await svc.get_space("sp-rot")
+    assert returned == row
+    assert row.identity_public_key == k2_pk.hex()
+    assert row.authority_cert == cert
+    assert row.withdrawn is True
+    # The blank metadata the household sent on purpose is never stored.
+    assert row.name == before.name == "My Space"
+    # The same follow-up as a normal re-pin: this server's own counter moves.
+    assert row.authority_rotation_seq == before.authority_rotation_seq + 1
+    # ... and nothing else on the row does.
+    assert row == replace(
+        before,
+        identity_public_key=k2_pk.hex(),
+        authority_cert=cert,
+        authority_rotation_seq=row.authority_rotation_seq,
+    )
+
+
+@pytest.mark.security
+async def test_old_key_relay_is_refused_after_a_withdrawn_repin(svc):
+    """The point of the re-pin: the revoked seed holder's old-key items stop
+    reaching the followers still subscribed to the withdrawn listing."""
+    seed, pk, owner_id, k1_seed, _k1 = await _withdrawn_rotation_world(svc)
+    k2_seed, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    await _withdrawn_repin(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k2_pk.hex(),
+        authority_cert=cert,
+    )
+    payload = {"ciphertext": "x"}
+    payload.update(_sign_authority(k1_seed, space_id="sp-rot", payload=payload))
+    with pytest.raises(PermissionError):
+        await svc.publish_event("sp-rot", "space_post_public", payload)
+    fresh = {"ciphertext": "y"}
+    fresh.update(_sign_authority(k2_seed, space_id="sp-rot", payload=fresh))
+    assert await svc.publish_event("sp-rot", "space_post_public", fresh) == []
+
+
+@pytest.mark.security
+async def test_withdrawn_publish_for_an_unknown_space_creates_no_row(svc):
+    seed, pk, owner_id = _owner_identity()
+    await svc.register_instance(owner_id, pk.hex(), auto_accept=True)
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-none", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    with pytest.raises(federation_mod.SpaceNotListedError):
+        await _withdrawn_repin(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-none",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+        )
+    assert await svc.get_space("sp-none") is None
+
+
+@pytest.mark.security
+async def test_withdrawn_publish_with_a_bad_signature_never_leaks_existence(svc):
+    """An unsigned caller learns nothing: an unknown space answers the same
+    PermissionError as a known one."""
+    _seed, pk, owner_id = _owner_identity()
+    evil_seed, _evil_pk = _make_keypair()
+    await svc.register_instance(owner_id, pk.hex(), auto_accept=True)
+    with pytest.raises(PermissionError) as exc:
+        await _withdrawn_repin(
+            svc,
+            evil_seed,
+            owning_instance=owner_id,
+            space_id="sp-none",
+            identity_public_key="",
+            authority_cert=None,
+        )
+    assert not isinstance(exc.value, LookupError)
+    assert await svc.get_space("sp-none") is None
+
+
+@pytest.mark.security
+async def test_withdrawn_publish_requires_a_signed_ts(svc):
+    seed, _pk, owner_id, _k1s, k1_pk = await _withdrawn_rotation_world(svc)
+    with pytest.raises(PermissionError, match="withdrawn requires a signed ts"):
+        await _withdrawn_repin(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k1_pk.hex(),
+            authority_cert=None,
+            ts="",
+        )
+    stale = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    with pytest.raises(PermissionError, match="(?i)stale|fresh|timestamp|ts"):
+        await _withdrawn_repin(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k1_pk.hex(),
+            authority_cert=None,
+            ts=stale,
+        )
+
+
+@pytest.mark.security
+async def test_withdrawn_publish_by_a_registered_non_owner_changes_nothing(svc):
+    _seed, _pk, _owner_id, _k1s, _k1 = await _rotation_world(svc)
+    before = await svc.get_space("sp-rot")
+    evil_seed, evil_pk, evil_id = _owner_identity()
+    await svc.register_instance(evil_id, evil_pk.hex(), auto_accept=True)
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        evil_seed,
+        evil_pk,
+        evil_id,
+        space_id="sp-rot",
+        authority_pk_hex=k2_pk.hex(),
+        epoch=1,
+    )
+    with pytest.raises(PermissionError, match="owned by another instance"):
+        await _withdrawn_repin(
+            svc,
+            evil_seed,
+            owning_instance=evil_id,
+            space_id="sp-rot",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+        )
+    assert await svc.get_space("sp-rot") == before
+
+
+class _RecordingInviteRepo:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    async def delete_for_space(self, space_id: str) -> int:
+        self.deleted.append(space_id)
+        return 0
+
+
+async def test_withdrawn_publish_withdraws_a_listed_space_and_a_fresh_one_relists(
+    gfs_db,
+):
+    invites = _RecordingInviteRepo()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), invite_repo=invites)
+    svc.attach_addressee(
+        GfsAddressee("gfs-test", (), public_key_hex=_GFS_KEY, node_id="n1")
+    )
+    seed, _pk, owner_id, _k1s, k1_pk = await _rotation_world(svc)
+    assert (await svc.get_space("sp-rot")).withdrawn is False
+    row = await _withdrawn_repin(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k1_pk.hex(),
+        authority_cert=None,
+    )
+    assert row.withdrawn is True
+    assert (await svc.get_space("sp-rot")).withdrawn is True
+    assert row.name == "My Space"
+    # Exactly like an unpublish: the standing invite pages go down with it.
+    assert invites.deleted == ["sp-rot"]
+    # A second one never re-lists, and has no invite pages left to delete.
+    await _withdrawn_repin(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k1_pk.hex(),
+        authority_cert=None,
+    )
+    assert (await svc.get_space("sp-rot")).withdrawn is True
+    assert invites.deleted == ["sp-rot"]
+    # Unchanged: a normal fresh publish is still the way back.
+    await _publish_with_cert(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k1_pk.hex(),
+        authority_cert=None,
+    )
+    assert (await svc.get_space("sp-rot")).withdrawn is False
+
+
+@pytest.mark.security
+async def test_withdrawn_is_inside_the_signed_publish_body(svc):
+    """A relay cannot turn an owner's normal publish into a pin-only one
+    (nor the reverse): the flag is part of the signed bytes."""
+    seed, pk, owner_id, _k1s, k1_pk = await _withdrawn_rotation_world(svc)
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
+        await _withdrawn_repin(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+            sign_withdrawn=False,
+        )
+    assert (await svc.get_space("sp-rot")).identity_public_key == k1_pk.hex()
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("flaw", ["stale_epoch", "wrong_signer", "no_cert"])
+async def test_withdrawn_repin_with_an_unusable_cert_keeps_the_pin(svc, flaw):
+    seed, pk, owner_id, _k1s, _k1 = await _withdrawn_rotation_world(svc)
+    _k2s, k2_pk = _make_keypair()
+    _k3s, k3_pk = _make_keypair()
+    c2 = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=2
+    )
+    await _withdrawn_repin(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k2_pk.hex(),
+        authority_cert=c2,
+    )
+    before = await svc.get_space("sp-rot")
+    assert before.identity_public_key == k2_pk.hex()
+    cert: dict | None
+    if flaw == "stale_epoch":
+        cert = _rot_cert(
+            seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k3_pk.hex(), epoch=1
+        )
+    elif flaw == "wrong_signer":
+        evil_seed, evil_pk = _make_keypair()
+        cert = _rot_cert(
+            evil_seed,
+            evil_pk,
+            owner_id,
+            space_id="sp-rot",
+            authority_pk_hex=k3_pk.hex(),
+            epoch=3,
+        )
+    else:
+        cert = None
+    # Not an error: the publish is accepted and simply moves nothing.
+    await _withdrawn_repin(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k3_pk.hex(),
+        authority_cert=cert,
+    )
+    assert await svc.get_space("sp-rot") == before
+
+
+async def test_withdrawn_repin_never_lifts_a_ban(svc):
+    seed, pk, owner_id, _k1s, _k1 = await _withdrawn_rotation_world(svc)
+    await svc._repo.set_space_status("sp-rot", "banned")
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    row = await _withdrawn_repin(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k2_pk.hex(),
+        authority_cert=cert,
+    )
+    assert (row.status, row.identity_public_key) == ("banned", k2_pk.hex())
+
+
+# ── The addressed server is inside the signed bytes ──────────────────────
+
+
+async def _repin_args(svc):
+    seed, pk, owner_id, _k1s, k1_pk = await _withdrawn_rotation_world(svc)
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    return seed, owner_id, k1_pk, k2_pk, cert
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("gfs_key", [None, _OTHER_GFS_KEY])
+async def test_a_withdrawn_publish_for_another_server_is_refused(svc, gfs_key):
+    """A pin-only publish also withdraws a listing. One the owner sent to
+    ANOTHER server (where the space is withdrawn) must not be replayable
+    here, where the space may be listed: the addressed server's key is
+    inside the signed bytes, and mandatory."""
+    seed, owner_id, k1_pk, k2_pk, cert = await _repin_args(svc)
+    await svc._repo.set_space_withdrawn("sp-rot", False)  # live here
+    with pytest.raises(PermissionError):
+        await _withdrawn_repin(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+            gfs_key=gfs_key,
+        )
+    row = await svc.get_space("sp-rot")
+    assert row.withdrawn is False
+    assert row.identity_public_key == k1_pk.hex()
+
+
+@pytest.mark.security
+async def test_the_addressed_server_is_inside_the_signed_publish_body(svc):
+    seed, owner_id, _k1, k2_pk, cert = await _repin_args(svc)
+    with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
+        await _withdrawn_repin(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+            sign_gfs_key=False,
+        )
+
+
+@pytest.mark.security
+async def test_a_withdrawal_addressed_to_another_server_is_refused(svc):
+    """The same replay at withdrawal time: an unpublish the owner sent to
+    one server must not delist the space on another."""
+    seed, pk = _make_keypair()
+    await svc.register_instance("inst-ha", pk.hex(), auto_accept=True)
+    await _publish_known_space(svc, seed, owning_instance="inst-ha", space_id="sp-ha")
+    ts = _now_iso()
+    signed = {
+        "action": "unpublish",
+        "owning_instance": "inst-ha",
+        "space_id": "sp-ha",
+        "ts": ts,
+    }
+    with pytest.raises(PermissionError):
+        await svc.hide_space(
+            "sp-ha",
+            "inst-ha",
+            ts,
+            _sign(seed, {**signed, "gfs_key": _OTHER_GFS_KEY}),
+            gfs_key=_OTHER_GFS_KEY,
+        )
+    # The key is inside the signed bytes: bolting ours onto a body signed
+    # without it fails the signature.
+    with pytest.raises(PermissionError):
+        await svc.hide_space(
+            "sp-ha", "inst-ha", ts, _sign(seed, signed), gfs_key=_GFS_KEY
+        )
+    assert (await svc.get_space("sp-ha")).withdrawn is False
+    await svc.hide_space(
+        "sp-ha",
+        "inst-ha",
+        ts,
+        _sign(seed, {**signed, "gfs_key": _GFS_KEY}),
+        gfs_key=_GFS_KEY,
+    )
+    assert (await svc.get_space("sp-ha")).withdrawn is True

@@ -99,7 +99,21 @@ The Social Home ↔ GFS link is split by direction:
     older household, kept working on purpose so an upgraded GFS doesn't 403
     the whole fleet) still refreshes metadata but leaves `withdrawn` as-is —
     otherwise one captured publish body would re-list a delisted space forever.
-    Once every household ships `ts` it becomes mandatory. Withdrawal affects **discoverability only** — the space drops
+    Once every household ships `ts` it becomes mandatory. A publish answers
+    `{status, space_id, identity_public_key}` — the authority key the GFS
+    pins after the request, which is how the owner checks that a re-pin
+    took. A publish or a withdrawal may name the server it is for —
+    `gfs_key`, that server's identity key, inside the signed bytes; one
+    naming another server is refused, so a body sent to one GFS cannot be
+    replayed to another. A publish carrying `withdrawn: true` (inside the
+    signed bytes, `ts` and `gfs_key` mandatory; capability
+    `withdrawn_repin`) is a **pin-only** publish
+    for a listing the owner withdrew: the pin moves under the usual cert
+    rule, no metadata is stored, `status` is untouched, the listing stays
+    withdrawn (the flag is set if it was not), and no row is ever created —
+    an unknown space answers `404`, only after the signature verified. The
+    owner sends it after a key rotation so a withdrawn listing does not keep
+    the retired key ([spaces.md](./spaces.md), "Durable re-pin"). Withdrawal affects **discoverability only** — the space drops
     off `GET /gfs/spaces`, `GET /gfs/spaces/{id}` and the public pages, while
     the relay (`publish`) and existing subscribers are untouched. Withdrawal
     also **deletes every invite link** minted for the space
@@ -3174,8 +3188,15 @@ servers the owner's list names; no list (or an empty one) means no channel.
   recorded in `gfs_channel_withdrawals` (migration 0095) BEFORE the new
   list is stored; each row goes once the server confirmed (or can never
   confirm), and is retried on every reconnect of that server — a
-  suspended connection when it comes back
-  (`GfsChannelService.withdraw_pending`).
+  suspended connection when it comes back — and by the retry pass
+  (`GfsChannelService.withdraw_pending`; after a failed attempt the next
+  one waits, 4 minutes doubling to 6 hours). A refusal is not a
+  confirmation and the row is never given up: while it stands, a retired
+  channel's row blocks new signing-key shares for the space. A channel retired because the
+  space key rotated (or the option went off) is recorded the same way
+  first, each row with the channel's signing seed wrapped under the
+  household KEK (migration 0147), so the unregister can still be signed
+  after the key it derived from is gone.
 
 **Members send to every chosen server.** The members get the list in the
 encrypted `space_meta` like any owner list. A member holding the channel
@@ -3196,8 +3217,14 @@ epoch notice is channel-key signed and names no household, so (v_57) it goes
 to every chosen channel server its grant names — its own connections and,
 over the same proof-checked pinned session, the ones it never connected to —
 so a rotation it makes while the owner is offline reaches a server it never
-joined. Right after its own rotation it holds no grant for the new epoch (a
-seed holder never grants itself) and uses its newest stored grant. The
+joined. Right after its own rotation it holds no grant for the new epoch
+yet: it announces with its newest stored grant. Its own grant for the new
+epoch (same channel and servers; a seat pass and writer key only if it
+held them) is renewed later, on the first item of the new epoch that
+reaches its old seat or on its next reconnect — never right after the
+notice, where it would be the first seat on the new epoch
+(`GfsChannelService._renew_own_grant`; what remains visible is in
+[gfs-relay.md](./gfs-relay.md#residuals)). The
 owner's notices stay on its own registered connections.
 
 **Liveness limit.** A delegated admin knows the channel's servers only from

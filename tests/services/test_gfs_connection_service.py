@@ -20,6 +20,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
+from socialhome.authority_cert import verify_authority_cert
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     sign_authority_event,
@@ -5358,12 +5359,7 @@ async def test_authority_key_revocable_with_no_listing(env):
 
 
 async def test_authority_key_revocable_when_every_listing_rotates(env):
-    session = _AnonSession(
-        info=_signed_info(
-            gfs_instance_id="inst-g1",
-            capabilities={"anonymous_publish": True, "authority_rotation": True},
-        )
-    )
+    session = _PinSession()
     svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
     await svc.publish_space("sp-rot", "g1")
     assert await svc.authority_key_revocable("sp-rot") is True
@@ -5455,3 +5451,413 @@ async def test_a_space_without_delegation_still_lists_on_an_older_gfs(env):
     svc = await _delegating_publish_svc(env, session, delegated=False)
     await svc.publish_space("sp-del", "g1")
     assert len(session.posts) == 1
+
+
+# ── A rotated key reaches every GFS that still pins the old one ──────────
+# (durable re-pin, withdrawn listings; owner decisions D2 / D4, 2026-11-15)
+
+_REPIN_CAPS = {
+    "anonymous_publish": True,
+    "authority_rotation": True,
+    "withdrawn_repin": True,
+}
+
+
+class _PinSession(_AnonSession):
+    """A GFS that answers every publish with the key it pins.
+
+    ``pins`` scripts what it claims per call (``"echo"`` — the offered key,
+    i.e. the re-pin took; a hex string — that key, i.e. it kept another
+    pin; ``None`` — no ``identity_public_key`` at all, an older server; an
+    ``int`` — that HTTP status). The last entry repeats."""
+
+    def __init__(self, *, pins=("echo",), caps=None, unpublish_status=200):
+        super().__init__(
+            info=_signed_info(
+                gfs_instance_id="inst-g1",
+                capabilities=_REPIN_CAPS if caps is None else caps,
+            )
+        )
+        self._pins = list(pins)
+        self._unpublish_status = unpublish_status
+
+    def post(self, url, *, json=None, **_kw):
+        self.posts.append((url, json or {}))
+        if url.endswith("/unpublish"):
+            return _StubResp(self._unpublish_status, {})
+        pin = self._pins.pop(0) if len(self._pins) > 1 else self._pins[0]
+        if isinstance(pin, int):
+            return _StubResp(pin, {"error": "not listed" if pin == 404 else "nope"})
+        if pin == "proxy-404":
+            return _StubResp(404, {"message": "no route"})
+        body = {"status": "active", "space_id": "sp-rot"}
+        if pin == "echo":
+            body["identity_public_key"] = (json or {}).get("identity_public_key", "")
+        elif pin is not None:
+            body["identity_public_key"] = pin
+        return _StubResp(200, body)
+
+    def publishes(self) -> list[dict]:
+        return [b for u, b in self.posts if u.endswith("/publish")]
+
+
+async def test_publish_records_the_pin_the_gfs_confirmed(env):
+    session = _PinSession()
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    assert svc.pin_confirmed("sp-rot", "g1") is False
+    await svc.publish_space("sp-rot", "g1")
+    assert svc.pin_confirmed("sp-rot", "g1") is True
+    assert await svc.repin_owed("sp-rot") == 0
+    # Nothing is owed, so nothing more was sent.
+    assert len(session.publishes()) == 1
+
+
+async def test_a_gfs_that_kept_another_pin_is_owed_a_repin(env, caplog):
+    """NOTE 8: the signed capability is a claim; what counts is the key the
+    server says it pins after our publish."""
+    session = _PinSession(pins=("aa" * 32,))
+    svc, *_ = await _rotated_publish_svc(env, session)
+    with caplog.at_level(logging.WARNING):
+        await svc.publish_space("sp-rot", "g1")
+    assert svc.pin_confirmed("sp-rot", "g1") is False
+    assert any("did not confirm" in m for m in _warnings(caplog))
+    assert await svc.authority_key_revocable("sp-rot") is False
+
+
+async def test_a_gfs_that_confirms_nothing_is_owed_a_repin(env):
+    """An older server answers without the pinned key: never read as yes."""
+    session = _PinSession(pins=(None,))
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    assert svc.pin_confirmed("sp-rot", "g1") is False
+    assert await svc.authority_key_revocable("sp-rot") is False
+
+
+async def test_repin_owed_retries_until_the_gfs_takes_the_key(env, monkeypatch):
+    """R5: a 5xx on the re-publish leaves the re-pin owed; a later pass
+    sends it again, and only a confirmed pin ends it."""
+    clock = [1000.0]
+    _freeze_clock(monkeypatch, clock)
+    session = _PinSession(pins=("echo", 503, 503, "echo"))
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    k3 = generate_identity_keypair()
+    await svc._space_repo.rotate_authority_key(
+        "sp-rot", public_key_hex=k3.public_key.hex(), seed=k3.private_key, key_epoch=2
+    )
+    # The confirmed pin is the OLD key now.
+    assert await svc.repin_owed("sp-rot") == 1
+    clock[0] += 3600
+    assert await svc.authority_key_revocable("sp-rot") is False  # 503 again
+    clock[0] += 3600
+    assert await svc.repin_owed() == 0
+    assert svc.pin_confirmed("sp-rot", "g1") is True
+    assert session.publishes()[-1]["identity_public_key"] == k3.public_key.hex()
+    assert await svc.authority_key_revocable("sp-rot") is True
+
+
+async def test_a_cold_listing_is_confirmed_before_a_seed_goes_out(env):
+    """After a restart nothing is confirmed: the gate asks the GFS once
+    instead of trusting the cached capability."""
+    session = _PinSession()
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc._repo.publish_space("sp-rot", "g1")
+    assert await svc.authority_key_revocable("sp-rot") is True
+    assert len(session.publishes()) == 1
+    assert await svc.authority_key_revocable("sp-rot") is True
+    assert len(session.publishes()) == 1
+
+
+async def test_unpublish_remembers_the_pin_the_gfs_keeps(env):
+    session = _PinSession()
+    svc, _owner, _owner_id, k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    await svc.unpublish_space("sp-rot", "g1")
+    assert await svc._repo.list_withdrawn_listings() == [
+        ("sp-rot", "g1", k2.public_key.hex())
+    ]
+    assert svc.pin_confirmed("sp-rot", "g1") is False
+    # Still on the current key: nothing owed, nothing sent.
+    assert await svc.repin_owed("sp-rot") == 0
+    assert len(session.publishes()) == 1
+
+
+async def test_unpublish_answered_404_still_records_the_withdrawn_listing(env):
+    """A bare 404 to the withdrawal proves nothing (a proxy answers it
+    too): the row is recorded, and goes only when the server itself says
+    "not listed" to the pin-only publish."""
+    session = _PinSession(unpublish_status=404)
+    svc, _owner, _owner_id, k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    await svc.unpublish_space("sp-rot", "g1")
+    assert await svc._repo.list_withdrawn_listings() == [
+        ("sp-rot", "g1", k2.public_key.hex())
+    ]
+
+
+async def test_a_404_that_is_not_the_servers_own_keeps_the_row_owed(env):
+    session = _PinSession(pins=("echo", "proxy-404"))
+    svc, *_ = await _withdrawn_then_rotated(env, session)
+    assert await svc.repin_owed("sp-rot") == 1
+    assert len(await svc._repo.list_withdrawn_listings()) == 1
+
+
+async def test_the_pinned_key_is_compared_case_insensitively(env):
+    """A server that answers the key in upper case confirmed it all the
+    same, and what is stored is lower case (the column's CHECK)."""
+    session = _PinSession()
+    svc, _owner, _owner_id, k2 = await _rotated_publish_svc(env, session)
+    real_post = session.post
+
+    def upper(url, *, json=None, **kw):
+        resp = real_post(url, json=json, **kw)
+        if "identity_public_key" in resp._body:
+            resp._body["identity_public_key"] = resp._body[
+                "identity_public_key"
+            ].upper()
+        return resp
+
+    session.post = upper
+    await svc.publish_space("sp-rot", "g1")
+    assert await svc.repin_owed("sp-rot") == 0
+    await svc.unpublish_space("sp-rot", "g1")
+    assert await svc._repo.list_withdrawn_listings() == [
+        ("sp-rot", "g1", k2.public_key.hex())
+    ]
+
+
+async def _withdrawn_then_rotated(env, session):
+    svc, owner, owner_id, _k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    await svc.unpublish_space("sp-rot", "g1")
+    k3 = generate_identity_keypair()
+    await svc._space_repo.rotate_authority_key(
+        "sp-rot", public_key_hex=k3.public_key.hex(), seed=k3.private_key, key_epoch=2
+    )
+    return svc, owner, owner_id, k3
+
+
+async def test_a_rotation_repins_a_withdrawn_listing_without_relisting_it(env):
+    """D2: the GFS the space was withdrawn from gets a pin-only publish —
+    ``withdrawn: true`` inside the signed bytes, the owner's cert for the
+    new key, and none of the space's metadata."""
+    session = _PinSession()
+    svc, owner, owner_id, k3 = await _withdrawn_then_rotated(env, session)
+    assert await svc.authority_key_revocable("sp-rot") is True  # re-pins now
+    body = dict(session.publishes()[-1])
+    assert body["withdrawn"] is True
+    # It names the server it is for (signed): another GFS cannot be made
+    # to take it.
+    assert body["gfs_key"] == _GFS_KP.public_key.hex()
+    assert body["identity_public_key"] == k3.public_key.hex()
+    assert (body["name"], body["description"], body["about_markdown"]) == ("", "", "")
+    assert (body["cover_url"], body["icon_url"]) == ("", "")
+    assert "join_mode" not in body and "allow_subscribers" not in body
+    assert "place" not in body and "join_contact" not in body
+    cert = verify_authority_cert(
+        body["authority_cert"], space_id="sp-rot", owner_instance_id=owner_id
+    )
+    assert (cert.authority_pk_hex, cert.key_epoch) == (k3.public_key.hex(), 2)
+    sig = body.pop("signature")
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    assert verify_ed25519(owner.public_key, canonical, b64url_decode(sig))
+    assert await svc._repo.list_withdrawn_listings() == [
+        ("sp-rot", "g1", k3.public_key.hex())
+    ]
+    # Not listed again locally either.
+    assert await svc._repo.list_publications_for_space("sp-rot") == []
+
+
+async def test_a_withdrawn_listing_stays_owed_until_the_gfs_confirms(env, monkeypatch):
+    clock = [1000.0]
+    _freeze_clock(monkeypatch, clock)
+    session = _PinSession(pins=("echo", 503, "aa" * 32, "echo"))
+    svc, _owner, _owner_id, k3 = await _withdrawn_then_rotated(env, session)
+    assert await svc.repin_owed("sp-rot") == 1  # 503
+    clock[0] += 3600
+    assert await svc.authority_key_revocable("sp-rot") is False  # kept another pin
+    clock[0] += 3600
+    assert await svc.repin_owed() == 0
+    assert await svc._repo.list_withdrawn_listings() == [
+        ("sp-rot", "g1", k3.public_key.hex())
+    ]
+
+
+async def test_a_withdrawn_listing_the_gfs_forgot_is_dropped(env):
+    session = _PinSession(pins=("echo", 404))
+    svc, *_ = await _withdrawn_then_rotated(env, session)
+    assert await svc.repin_owed("sp-rot") == 0
+    assert await svc._repo.list_withdrawn_listings() == []
+
+
+async def test_no_withdrawn_repin_to_a_gfs_that_never_proved_it(env, caplog):
+    """An older server would not fold ``withdrawn`` into the signed bytes
+    (403) — and a plain publish would list the space again. So nothing is
+    sent, the re-pin stays owed and no seed goes out."""
+    session = _PinSession(caps={"anonymous_publish": True, "authority_rotation": True})
+    svc, *_ = await _withdrawn_then_rotated(env, session)
+    before = len(session.publishes())
+    with caplog.at_level(logging.WARNING):
+        assert await svc.repin_owed("sp-rot") == 1
+        assert await svc.repin_owed("sp-rot") == 1
+    assert len(session.publishes()) == before
+    assert sum("withdrawn_repin" in m for m in _warnings(caplog)) == 1
+    assert await svc.authority_key_revocable("sp-rot") is False
+
+
+async def test_repin_owed_forgets_withdrawn_rows_of_a_space_we_no_longer_own(env):
+    session = _PinSession()
+    svc, *_ = await _withdrawn_then_rotated(env, session)
+    await svc._repo.mark_listing_withdrawn("sp-gone", "g1", None)
+    before = len(session.publishes())
+    assert await svc.repin_owed() == 0
+    assert [r[0] for r in await svc._repo.list_withdrawn_listings()] == ["sp-rot"]
+    # One pin-only publish, for the space we own; none names ``sp-gone``.
+    assert len(session.publishes()) == before + 1
+    assert not any("sp-gone" in u for u, _b in session.posts)
+
+
+async def test_the_reconnect_heal_repins_withdrawn_listings_there(env):
+    session = _PinSession(pins=("echo", 503, "echo"))
+    svc, _owner, _owner_id, k3 = await _withdrawn_then_rotated(env, session)
+    assert await svc.repin_owed("sp-rot") == 1
+    await svc.heal_space_pins("g1")
+    assert await svc._repo.list_withdrawn_listings() == [
+        ("sp-rot", "g1", k3.public_key.hex())
+    ]
+
+
+async def test_a_pending_channel_retire_blocks_a_new_seed(env):
+    """D4/D1: while a GFS still owes the unregister of a retired channel,
+    no new signing seed goes out."""
+    session = _PinSession()
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc._repo.add_channel_withdrawals("sp-rot", "ab" * 16, ["g1"])
+    assert await svc.authority_key_revocable("sp-rot") is False
+    await svc._repo.delete_channel_withdrawal("sp-rot", "g1", "ab" * 16)
+    assert await svc.authority_key_revocable("sp-rot") is True
+
+
+async def test_an_answered_but_unconfirmed_publish_is_not_resent_every_pass(env):
+    """A server that took the publish and named no (or another) key answers
+    the same to the same body: it stays owed, but the listing — cover and
+    icon included — is not re-sent on every retry pass. A reconnect heal,
+    or a new key, asks again."""
+    session = _PinSession(pins=(None,))
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    assert await svc.repin_owed() == 1
+    assert await svc.repin_owed() == 1
+    assert len(session.publishes()) == 1
+    k3 = generate_identity_keypair()
+    await svc._space_repo.rotate_authority_key(
+        "sp-rot", public_key_hex=k3.public_key.hex(), seed=k3.private_key, key_epoch=2
+    )
+    assert await svc.repin_owed() == 1
+    assert len(session.publishes()) == 2
+
+
+# ── Adversarial review fixes ─────────────────────────────────────────────
+
+
+async def test_a_refused_republish_of_a_global_space_never_withdraws_it(
+    env, monkeypatch
+):
+    """The pin-only publish also WITHDRAWS a listing at the GFS (and takes
+    its invite pages down). A global space whose re-publish is refused —
+    here because the key-rotation capability could not be read — must stay
+    owed, never fall back to it."""
+    session = _PinSession()
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc._repo.publish_space("sp-rot", "g1")
+
+    async def refused(space_id, gfs_id):
+        raise GfsKeyRotationUnsupportedError()
+
+    monkeypatch.setattr(svc.__class__, "_relist", lambda self, s, g: refused(s, g))
+    assert await svc.repin_owed("sp-rot") == 1
+    assert session.publishes() == []
+
+
+async def test_a_stale_withdrawn_row_of_a_listed_space_sends_no_pin_only_publish(env):
+    """Re-listed since the row was read: the pin-only publish would withdraw
+    the live listing. The row is dropped under the change lock instead."""
+    session = _PinSession()
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    await svc._repo.mark_listing_withdrawn("sp-rot", "g1", "11" * 32)
+    assert await svc.repin_owed("sp-rot") == 0
+    assert not any(b.get("withdrawn") for b in session.publishes())
+    assert await svc._repo.list_withdrawn_listings() == []
+
+
+async def test_a_failed_repin_backs_off_instead_of_hammering_the_gfs(env, monkeypatch):
+    """The seed-share gate and the retry pass both call ``repin_owed``; a
+    server that keeps failing is asked again only after a growing wait —
+    a reconnect heal (``force``) or a newer key asks at once."""
+    clock = [1000.0]
+    _freeze_clock(monkeypatch, clock)
+    session = _PinSession(pins=(503,))
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc._repo.publish_space("sp-rot", "g1")
+    assert await svc.repin_owed("sp-rot") == 1
+    assert len(session.publishes()) == 1
+    for _ in range(5):  # e.g. five admin echoes hitting the gate
+        assert await svc.authority_key_revocable("sp-rot") is False
+    assert len(session.publishes()) == 1
+    clock[0] += gfs_connection_service.GFS_REPIN_RETRY_MIN_S
+    assert await svc.repin_owed() == 1
+    assert len(session.publishes()) == 2
+    clock[0] += gfs_connection_service.GFS_REPIN_RETRY_MIN_S
+    assert await svc.repin_owed() == 1  # the wait doubled
+    assert len(session.publishes()) == 2
+    assert await svc.repin_owed(force=True) == 1
+    assert len(session.publishes()) == 3
+
+
+async def test_a_withdrawn_listing_with_no_pin_at_all_owes_nothing(env):
+    """The server answers that it pins NO key for the space: no key at all
+    authorizes a relay there, so there is nothing to revoke."""
+    session = _PinSession(pins=("echo", ""))
+    svc, *_ = await _withdrawn_then_rotated(env, session)
+    assert await svc.repin_owed("sp-rot") == 0
+    assert await svc._repo.list_withdrawn_listings() == []
+
+
+async def test_removing_a_connection_forgets_what_it_confirmed(env):
+    session = _PinSession()
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    assert svc.pin_confirmed("sp-rot", "g1")
+    svc._forget_connection_pins("g1")
+    assert not svc.pin_confirmed("sp-rot", "g1")
+
+
+async def test_unpublish_names_the_server_it_is_for(env):
+    """The withdrawal is signed for ONE server (``gfs_key`` inside the
+    signed bytes), so that server cannot replay it to another GFS the space
+    is listed on. An older server gets today's body."""
+    for caps, bound in ((_REPIN_CAPS, True), ({"anonymous_publish": True}, False)):
+        session = _PinSession(caps=caps)
+        svc, owner, owner_id, _k2 = await _rotated_publish_svc(env, session)
+        await svc._repo.publish_space("sp-rot", "g1")
+        # What the connect-time ``/gfs/info`` fetch leaves in the cache.
+        svc._record_capabilities(await svc._repo.get("g1"), session.info)
+        await svc.unpublish_space("sp-rot", "g1")
+        url, body = session.posts[-1]
+        assert url.endswith("/unpublish")
+        signed = {
+            "action": "unpublish",
+            "owning_instance": owner_id,
+            "space_id": "sp-rot",
+            "ts": body["ts"],
+        }
+        if bound:
+            assert body["gfs_key"] == _GFS_KP.public_key.hex()
+            signed["gfs_key"] = body["gfs_key"]
+        else:
+            assert "gfs_key" not in body
+        canonical = json.dumps(signed, separators=(",", ":"), sort_keys=True).encode()
+        assert verify_ed25519(
+            owner.public_key, canonical, b64url_decode(body["signature"])
+        )

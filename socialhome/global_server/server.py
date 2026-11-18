@@ -537,6 +537,8 @@ class GfsApp:
             public_key_hex=own_pk_hex,
             node_id=config.cluster_node_id or config.instance_id,
         )
+        # Listing requests that name their server are checked against it.
+        federation.attach_addressee(addressee)
         member_publish = GfsMemberPublishService(
             federation=federation,
             fed_repo=repos.federation,

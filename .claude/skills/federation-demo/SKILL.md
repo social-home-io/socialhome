@@ -1656,7 +1656,10 @@ Prereqs: ``gfs-space-post``. **a** turns ``delegated_admin_authority`` on
 and off on its global space — the off-flip rotates the space AUTHORITY key
 unconditionally. Asserts the GFS re-pinned from the owner's cert
 (``global_spaces.identity_public_key`` is **a**'s new key and
-``authority_cert`` is stored), then **a** posts and **d** — a subscriber
+``authority_cert`` is stored) and that **a** took the GFS's publish answer
+as the confirmation (no "did not confirm the space key" / "still pin the
+retired key" line in **a**'s log — the durable re-pin left nothing owed),
+then **a** posts and **d** — a subscriber
 still pinned to the old key — heals its pin from the GFS listing's cert and
 reads the post.
 
