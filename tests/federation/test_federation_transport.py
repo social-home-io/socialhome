@@ -701,6 +701,7 @@ async def test_on_rtc_ice_unknown_peer_creates_buffering_stub(monkeypatch):
     )
     # The stub peer is registered so a follow-up OFFER will reuse it.
     assert "ghost" in t._peers
+    await t.close_all()
 
 
 async def test_on_rtc_ice_accepts_trickled_candidate():
@@ -1639,6 +1640,12 @@ def _stub_peer(t: FederationTransport, iid: str) -> _RtcPeer:
     return peer
 
 
+async def _settle_parked_candidates(t: FederationTransport) -> None:
+    """Wait until every candidate ``on_rtc_ice`` parked off its caller has
+    been applied or dropped."""
+    await asyncio.gather(*list(t._inbound_tasks), return_exceptions=True)
+
+
 def _offers(signal: _FakeSignaler) -> list:
     return [
         ev for ev in signal.events if ev[1] is FederationEventType.FEDERATION_RTC_OFFER
@@ -2313,6 +2320,7 @@ async def test_send_rebuilds_a_starved_stub_peer(monkeypatch):
         from_instance=inst.id,
         payload={"candidate": "candidate:1 udp", "sdp_mid": "0"},
     )
+    await _settle_parked_candidates(t)
     stub = t._peers[inst.id]
     assert stub._dropped_candidates == 1
     assert stub._starved_awaiting_offer is True
@@ -2622,6 +2630,7 @@ async def test_torn_down_answerer_rebuilds_as_offerer_on_next_send(monkeypatch):
         from_instance=inst.id,
         payload={"candidate": "candidate:1 udp", "sdp_mid": "0"},
     )
+    await _settle_parked_candidates(t)
     peer = t._peers[inst.id]
     await t.on_rtc_offer(
         from_instance=inst.id,
@@ -2639,6 +2648,307 @@ async def test_torn_down_answerer_rebuilds_as_offerer_on_next_send(monkeypatch):
     assert rebuilt is not peer
     assert rebuilt._starved_awaiting_offer is False
     await t.close_all()
+
+
+# ─── Candidates of an OFFER we ignored (glare after a restart) ────────────
+#
+# REGRESSION (federation-demo log audit, household b): a peer came back
+# from a restart and offered while our own OFFER to it still sat in the
+# outbox. We (impolite) ignored its OFFER — but the candidates it trickled
+# for that OFFER parked against OUR pending offer, timed out 30 s later
+# and were charged to our PeerConnection. When the peer's ANSWER landed,
+# the "starved" restart closed a PeerConnection that had every candidate
+# it needed, in the very instant its ICE / DTLS / SCTP handshake began —
+# libdatachannel logged "DTLS alert: unknown CA", "certificate verify
+# failed" and "Attempted to assign DataChannels without ICE transport"
+# from the dying connection.
+
+
+def _record_candidates(pc) -> list[str]:
+    """Record every candidate handed to *pc* (the stub's own
+    ``add_remote_candidate`` is a no-op)."""
+    seen: list[str] = []
+
+    async def _add(candidate: str, mid: str = "") -> None:
+        seen.append(candidate)
+
+    pc.add_remote_candidate = _add
+    return seen
+
+
+async def test_candidates_of_an_ignored_offer_do_not_restart_the_handshake(
+    monkeypatch,
+):
+    """The demo's sequence: our OFFER is pending, the peer's OFFER is
+    ignored, its candidates arrive and time out, its ANSWER to OUR offer
+    lands only afterwards. The connection that ANSWER completes lost
+    nothing of its own — it must be kept, not restarted."""
+    monkeypatch.setattr(transport_mod, "ICE_BUFFER_TIMEOUT_S", 0.01)
+
+    signal = _FakeSignaler()
+    peer, _ = await _make_peer("aaaa", "bbbb", signal=signal)  # impolite
+    await peer.start_offer()
+    first_pc = peer._pc
+
+    await peer.accept_offer(sdp=_STUB_SDP, from_instance="bbbb")  # ignored
+    await peer.add_ice_candidate(candidate="candidate:theirs udp", sdp_mid="0")
+
+    assert peer._dropped_candidates == 0, (
+        "a candidate of the OFFER we ignored is not ours to lose"
+    )
+
+    ok = await peer.apply_answer(sdp=_STUB_SDP, from_instance="bbbb")
+
+    assert ok is True
+    assert peer._pc is first_pc, "the answered connection must be kept"
+    assert first_pc.closed is False
+    assert peer._restarts == 0
+    assert len(_offers(signal)) == 1, "no second OFFER"
+    peer.close()
+
+
+async def test_candidate_that_overtook_an_offer_we_then_ignore_is_not_charged(
+    monkeypatch,
+):
+    """A candidate can reach us before the OFFER it belongs to. Once that
+    OFFER is ignored, the parked candidate's timeout is not a loss on our
+    own connection either."""
+    monkeypatch.setattr(transport_mod, "ICE_BUFFER_TIMEOUT_S", 0.05)
+
+    signal = _FakeSignaler()
+    peer, _ = await _make_peer("aaaa", "bbbb", signal=signal)  # impolite
+    await peer.start_offer()
+    first_pc = peer._pc
+
+    parked = asyncio.create_task(
+        peer.add_ice_candidate(candidate="candidate:theirs udp", sdp_mid="0")
+    )
+    await asyncio.sleep(0)  # parked on the remote description
+    await peer.accept_offer(sdp=_STUB_SDP, from_instance="bbbb")  # ignored
+    await parked
+
+    assert peer._dropped_candidates == 0
+    assert await peer.apply_answer(sdp=_STUB_SDP, from_instance="bbbb") is True
+    assert peer._pc is first_pc
+    assert len(_offers(signal)) == 1
+    peer.close()
+
+
+async def test_candidates_parked_during_an_ignored_offer_reach_the_pc_on_answer(
+    monkeypatch,
+):
+    """Nothing is thrown away early: a candidate cannot say which
+    negotiation it belongs to, and the ANSWER's own candidates may
+    overtake it. Whatever is parked when the ANSWER lands is applied."""
+    monkeypatch.setattr(transport_mod, "ICE_BUFFER_TIMEOUT_S", 5.0)
+
+    peer, _ = await _make_peer("aaaa", "bbbb")  # impolite
+    await peer.start_offer()
+    seen = _record_candidates(peer._pc)
+    await peer.accept_offer(sdp=_STUB_SDP, from_instance="bbbb")  # ignored
+
+    parked = asyncio.create_task(
+        peer.add_ice_candidate(candidate="candidate:early udp", sdp_mid="0")
+    )
+    await asyncio.sleep(0)
+    assert not parked.done()
+    assert await peer.apply_answer(sdp=_STUB_SDP, from_instance="bbbb") is True
+    await parked
+
+    assert seen == ["candidate:early udp"]
+    peer.close()
+
+
+async def test_the_answer_ends_the_ignored_offer(monkeypatch):
+    """After the ANSWER the exemption is over: a candidate lost on the
+    NEXT negotiation counts again."""
+    monkeypatch.setattr(transport_mod, "ICE_BUFFER_TIMEOUT_S", 0.01)
+
+    peer, _ = await _make_peer("aaaa", "bbbb")  # impolite
+    await peer.start_offer()
+    await peer.accept_offer(sdp=_STUB_SDP, from_instance="bbbb")  # ignored
+    assert peer._ignoring_offer is True
+
+    assert await peer.apply_answer(sdp=_STUB_SDP, from_instance="bbbb") is True
+    assert peer._ignoring_offer is False
+
+    await peer._close_pc()  # a later negotiation, remote description pending
+    await peer.add_ice_candidate(candidate="candidate:1 udp", sdp_mid="0")
+    assert peer._dropped_candidates == 1
+    peer.close()
+
+
+async def test_offer_arriving_while_the_answer_is_applied_does_not_stick():
+    """The peer's ANSWER and its (late) glare OFFER can cross: the OFFER
+    lands while ``apply_answer`` awaits the native call, ``_making_offer``
+    still set. It is ignored, but must not leave the exemption on for the
+    connection the ANSWER just completed."""
+    peer, _ = await _make_peer("aaaa", "bbbb")  # impolite
+    await peer.start_offer()
+    pc = peer._pc
+    gate = asyncio.Event()
+    applying = asyncio.Event()
+
+    async def _slow_set_remote(sdp: str, type_: str) -> None:
+        applying.set()
+        await gate.wait()
+        pc._remote_type = type_
+
+    pc.set_remote_description = _slow_set_remote
+    answer = asyncio.create_task(peer.apply_answer(sdp=_STUB_SDP, from_instance="bbbb"))
+    await applying.wait()
+
+    await peer.accept_offer(sdp=_STUB_SDP, from_instance="bbbb")  # ignored
+    gate.set()
+
+    assert await answer is True
+    assert peer._pc is pc
+    assert peer._ignoring_offer is False
+    peer.close()
+
+
+async def test_accepting_an_offer_ends_the_ignored_offer():
+    """Polite or not, once we answer an OFFER no ignored one is pending."""
+    peer, _ = await _make_peer("aaaa", "bbbb")  # impolite
+    peer._ignoring_offer = True
+
+    await peer.accept_offer(sdp=_STUB_SDP, from_instance="bbbb")
+
+    assert peer._ignoring_offer is False
+    peer.close()
+
+
+# ─── A parked candidate must not hold the request that carried it ─────────
+#
+# REGRESSION (same log, live timeline): after an outage our outbox held an
+# OFFER and its candidates for the peer. The candidate rows went out
+# first; the peer parked each one for up to 30 s INSIDE the inbox request,
+# our POST timed out after 10 s and the outbox stalled that peer for the
+# pass — so the OFFER the candidates were waiting for arrived 30 s late,
+# just after they had been dropped. Signalling was not slow: the parked
+# candidate was blocking its own OFFER.
+
+
+async def test_candidate_ahead_of_its_offer_does_not_hold_the_request(monkeypatch):
+    """``on_rtc_ice`` returns at once while the candidate waits for the
+    remote description, and the candidate is applied when the OFFER
+    lands. The real 30 s buffer timeout is in force."""
+    seen: list[str] = []
+
+    async def _add(self, candidate: str, mid: str = "") -> None:
+        seen.append(candidate)
+
+    monkeypatch.setattr(rtc.PeerConnection, "add_remote_candidate", _add)
+    signal = _FakeSignaler()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=signal,
+    )
+    t.mark_ice_primed()
+
+    await asyncio.wait_for(
+        t.on_rtc_ice(
+            from_instance="peer-early",
+            payload={"candidate": "candidate:early udp", "sdp_mid": "0"},
+        ),
+        timeout=1.0,
+    )
+    assert seen == []
+
+    await t.on_rtc_offer(
+        from_instance="peer-early",
+        payload={"sdp": _STUB_SDP, "sdp_type": "offer"},
+    )
+    await _settle_parked_candidates(t)
+
+    assert seen == ["candidate:early udp"]
+    assert t._peers["peer-early"]._dropped_candidates == 0
+    await t.close_all()
+
+
+async def test_candidate_after_the_description_is_applied_inline(monkeypatch):
+    """Nothing to wait for: the candidate is on the PeerConnection when
+    ``on_rtc_ice`` returns (backpressure and order as before)."""
+    seen: list[str] = []
+
+    async def _add(self, candidate: str, mid: str = "") -> None:
+        seen.append(candidate)
+
+    monkeypatch.setattr(rtc.PeerConnection, "add_remote_candidate", _add)
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=_FakeSignaler(),
+    )
+    t.mark_ice_primed()
+    await t.on_rtc_offer(
+        from_instance="peer-1",
+        payload={"sdp": _STUB_SDP, "sdp_type": "offer"},
+    )
+
+    await t.on_rtc_ice(
+        from_instance="peer-1",
+        payload={"candidate": "candidate:late udp", "sdp_mid": "0"},
+    )
+
+    assert seen == ["candidate:late udp"]
+    await t.close_all()
+
+
+async def test_close_all_ends_parked_candidates():
+    """A parked candidate does not outlive the transport."""
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=_FakeSignaler(),
+    )
+    await t.on_rtc_ice(
+        from_instance="peer-early",
+        payload={"candidate": "candidate:early udp", "sdp_mid": "0"},
+    )
+    parked = list(t._inbound_tasks)
+    assert len(parked) == 1 and not parked[0].done()
+
+    await t.close_all()
+
+    assert parked[0].done()
+    assert not t._inbound_tasks
+
+    # And none is parked afterwards (an envelope still in flight at
+    # shutdown): nothing would ever cancel it.
+    await t.on_rtc_ice(
+        from_instance="peer-late",
+        payload={"candidate": "candidate:late udp", "sdp_mid": "0"},
+    )
+    assert not t._inbound_tasks
+    assert "peer-late" not in t._peers
+
+
+async def test_parked_candidates_are_bounded_per_peer(monkeypatch, caplog):
+    """They no longer hold the sender's request, so the count is what
+    stops a peer that keeps sending candidates and never an OFFER."""
+    monkeypatch.setattr(transport_mod, "MAX_PARKED_ICE_CANDIDATES", 2)
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=_FakeSignaler(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="socialhome.federation.transport"):
+        for n in range(3):
+            await t.on_rtc_ice(
+                from_instance="peer-early",
+                payload={"candidate": f"candidate:{n} udp", "sdp_mid": "0"},
+            )
+
+    peer = t._peers["peer-early"]
+    assert len(t._inbound_tasks) == 2
+    assert peer.parked_candidates == 2
+    assert "2 already wait" in caplog.text
+
+    await t.close_all()
+    assert peer.parked_candidates == 0
 
 
 # ─── Retire rate floor ────────────────────────────────────────────────────

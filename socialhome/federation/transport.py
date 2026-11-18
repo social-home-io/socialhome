@@ -33,6 +33,7 @@ Security invariants:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import random
 import time
@@ -369,6 +370,14 @@ MAX_HANDSHAKE_RESTARTS: int = 2
 ICE_PRIME_TIMEOUT_S: float = 15.0
 
 
+#: How many early candidates of one peer may wait for their OFFER / ANSWER
+#: at once (:meth:`FederationTransport.on_rtc_ice`). They wait off the
+#: request that carried them, so nothing else slows a peer that keeps
+#: sending them. A handshake trickles a handful (host, server-reflexive
+#: and relay candidates per interface); past this the candidate is dropped.
+MAX_PARKED_ICE_CANDIDATES: int = 64
+
+
 class _RtcPeer:
     """One DataChannel session for one paired peer."""
 
@@ -384,6 +393,7 @@ class _RtcPeer:
         "_expected_answer_from",
         "_failed",
         "_ice_provider",
+        "_ignoring_offer",
         "_inbound",
         "_is_offerer",
         "_loop",
@@ -406,6 +416,7 @@ class _RtcPeer:
         "_teardown_task",
         "ice_generation",
         "instance_id",
+        "parked_candidates",
     )
 
     def __init__(
@@ -535,6 +546,19 @@ class _RtcPeer:
         #: Handshake restarts already spent, bounded by
         #: :data:`MAX_HANDSHAKE_RESTARTS`.
         self._restarts: int = 0
+        #: True from the moment we (impolite) ignore the remote's OFFER
+        #: because our own is still unanswered, until the ANSWER to ours
+        #: arrives. The remote trickled candidates for the OFFER it is
+        #: about to roll back, and a candidate names no negotiation: they
+        #: park in :meth:`add_ice_candidate` like any other. When one of
+        #: them times out there while this is set, it is not a loss on
+        #: OUR connection — counting it made the ANSWER restart (close) a
+        #: connection that had every candidate it needed.
+        self._ignoring_offer: bool = False
+        #: Candidates of this peer that :meth:`FederationTransport.on_rtc_ice`
+        #: has waiting on tasks of their own, bounded by
+        #: :data:`MAX_PARKED_ICE_CANDIDATES`. Kept by the transport.
+        self.parked_candidates: int = 0
 
     # ─── Transport change publication ─────────────────────────────────────
 
@@ -643,6 +667,12 @@ class _RtcPeer:
                 self._making_offer,
                 self._pc.signaling_state if self._pc else None,
             )
+            # Only while the ANSWER to our own offer is outstanding
+            # (``apply_answer`` clears ``_expected_answer_from`` before it
+            # awaits, ``_making_offer`` only after): an OFFER that lands
+            # during that await must not leave the flag set for good.
+            if self._making_offer and self._expected_answer_from is not None:
+                self._ignoring_offer = True
             return
         if collision and self._polite:
             log.info(
@@ -652,6 +682,7 @@ class _RtcPeer:
             await self._close_pc()
             self._making_offer = False
 
+        self._ignoring_offer = False
         self._expected_answer_from = None  # answerer, no outstanding offer
         # Set only once the incoming OFFER is actually accepted: the
         # impolite side returns above with its own offer still pending,
@@ -747,6 +778,9 @@ class _RtcPeer:
             )
             return False
         self._expected_answer_from = None
+        # The ANSWER ends an OFFER we ignored: the remote rolled it back
+        # to answer ours.
+        self._ignoring_offer = False
         await self._pc.set_remote_description(sdp, "answer")
         # Offerer side: flush any ICE candidates the answerer
         # trickled before we applied their SDP answer. Same
@@ -887,6 +921,14 @@ class _RtcPeer:
         (offerer); until then the candidate parks here. If the
         handshake never lands within :data:`ICE_BUFFER_TIMEOUT_S` we
         drop the candidate rather than pinning memory forever.
+
+        A drop is counted against our connection (and later restarts the
+        handshake) — except while we are ignoring the remote's glare
+        OFFER (:attr:`_ignoring_offer`): by arrival order that candidate
+        belongs to the ignored OFFER. The price: a candidate of the
+        remote's ANSWER that overtakes that ANSWER by more than the
+        timeout during glare is lost uncounted, and such a connection is
+        left to connect on what it has or to fail into its backoff.
         """
         if not candidate or self._closed:
             return
@@ -897,6 +939,22 @@ class _RtcPeer:
                     timeout=ICE_BUFFER_TIMEOUT_S,
                 )
             except TimeoutError:
+                if self._ignoring_offer:
+                    # Glare: the remote offered while our own OFFER was
+                    # still on its way, we ignored its OFFER, and this is
+                    # (by arrival order) a candidate of that OFFER. It is
+                    # not ours to lose, so it is not counted — a count
+                    # here made the ANSWER to our offer tear down the
+                    # connection it had just completed, mid-handshake
+                    # (libdatachannel then logs "DTLS alert: unknown CA",
+                    # "certificate verify failed", "Attempted to assign
+                    # DataChannels without ICE transport").
+                    log.debug(
+                        "fed RTC: ICE candidate for %s timed out while its "
+                        "OFFER is ignored (glare) — not charged to our offer",
+                        self.instance_id,
+                    )
+                    return
                 log.warning(
                     "fed RTC: ICE candidate for %s dropped — remote "
                     "description not applied within %.0fs",
@@ -1330,6 +1388,13 @@ class _RtcPeer:
         self._app_open.clear()
 
     # ─── Sending ──────────────────────────────────────────────────────────
+
+    @property
+    def awaits_remote_description(self) -> bool:
+        """Whether a candidate handed to :meth:`add_ice_candidate` now
+        would park (up to :data:`ICE_BUFFER_TIMEOUT_S`) instead of being
+        applied."""
+        return not self._remote_description_applied.is_set()
 
     @property
     def is_ready(self) -> bool:
@@ -1877,6 +1942,7 @@ class FederationTransport:
         #: Inbound DataChannel handlers in flight. Shielded from their
         #: receive task (see :meth:`_inbound_factory`), so this set is what
         #: holds them and lets :meth:`close_all` cancel and await them.
+        #: Also the candidates :meth:`on_rtc_ice` parked off its caller.
         self._inbound_tasks: set[asyncio.Task] = set()
         #: Set once by :meth:`close_all`. Checked by
         #: :meth:`_ensure_handshake` so a ``send()`` parked on the
@@ -2783,14 +2849,54 @@ class FederationTransport:
         in :meth:`_RtcPeer.add_ice_candidate`. The §24.11 pipeline has
         already authenticated the sender by signature, so the stub
         peer can't be a DoS vector against unpaired instance_ids.
+
+        Returns once the candidate is applied — or, when it has to wait
+        for its description, as soon as it is parked (at most
+        :data:`MAX_PARKED_ICE_CANDIDATES` per peer).
         """
+        if self._closing:
+            return
         peer = await self._answering_peer(from_instance)
         if peer is None:
             return
-        await peer.add_ice_candidate(
+        if (
+            peer.awaits_remote_description
+            and peer.parked_candidates >= MAX_PARKED_ICE_CANDIDATES
+        ):
+            log.warning(
+                "fed RTC: ICE candidate for %s dropped — %d already wait for "
+                "its OFFER / ANSWER",
+                from_instance,
+                peer.parked_candidates,
+            )
+            return
+        applying = peer.add_ice_candidate(
             candidate=str(payload.get("candidate") or ""),
             sdp_mid=str(payload.get("sdp_mid") or "0"),
         )
+        if not peer.awaits_remote_description:
+            await applying
+            return
+        # The candidate has to wait for its OFFER / ANSWER. It waits on a
+        # task of its own, never on the caller: the caller is the inbox
+        # request (or the DataChannel receive loop) that carried it, and
+        # holding that for up to ``ICE_BUFFER_TIMEOUT_S`` blocks the very
+        # description it waits for. The sender's POST times out after
+        # 10 s, its outbox stalls our rows for the pass, and an OFFER
+        # queued behind its candidates (the outbox orders by a jittered
+        # retry time, not by send order) arrives 30 s late — just after
+        # the candidates were dropped. That, not slow signalling, is what
+        # made handshakes after an outage lose candidates and restart.
+        task = asyncio.create_task(applying, name=f"fed-rtc-ice[{from_instance}]")
+        self._inbound_tasks.add(task)
+        peer.parked_candidates += 1
+        task.add_done_callback(functools.partial(self._parked_candidate_done, peer))
+
+    def _parked_candidate_done(self, peer: _RtcPeer, task: asyncio.Task) -> None:
+        self._inbound_tasks.discard(task)
+        peer.parked_candidates -= 1
+        if not task.cancelled() and task.exception() is not None:
+            log.warning("fed RTC: a parked ICE candidate failed: %r", task.exception())
 
     async def _answering_peer(self, from_instance: str) -> _RtcPeer | None:
         """The peer an inbound OFFER / ICE candidate from *from_instance*
