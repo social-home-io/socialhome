@@ -14995,16 +14995,6 @@ _LOG_BENIGN: tuple[str, ...] = (
     # close-only, close mid-gathering and double close give 0. Unchanged
     # upstream through libjuice 1.7.4. Narrow to this exact message.
     "juice: Invalid socket",
-    # Outbox terminal-drop on HTTP 410: by design when dual-transport
-    # delivery (perfect-negotiation RTC + HTTPS-inbox fallback)
-    # causes the second arrival to hit the receiver's replay cache.
-    # The outbox correctly gives up after the 410. A regression
-    # would look like the SAME ``msg_id`` being dropped without the
-    # receiver ever processing it — but the per-step content checks
-    # in ``cmd_verify`` (e.g. "c received a→c DM") catch that case,
-    # so this log line on its own is benign.
-    "OutboxProcessor: peer permanently rejected",
-    "returned terminal HTTP 410",
     # HTTPS-inbox transient failure during the inner-ring handshake
     # window. Pairs with the outbox-retry path above; the outbox
     # observes the error, reschedules, and the eventual delivery
@@ -15054,6 +15044,14 @@ _LOG_BENIGN: tuple[str, ...] = (
     "WebRTC: no TURN server configured",
     # Earlier entries removed because the underlying conditions
     # were fixed upstream (instead of permanently allowlisted):
+    # * ``OutboxProcessor: peer permanently rejected`` /
+    #   ``outbox: … returned terminal HTTP 410`` — the sender's two
+    #   WARNINGs for a message the receiver ALREADY HELD: its second copy
+    #   (the DataChannel failover, or a retry after the 10 s inbox timeout)
+    #   hit the replay cache and was answered with the generic 410. Since
+    #   #1384 that answer carries ``code: REPLAY`` and counts as delivered
+    #   (INFO). Either line now means a message really was refused for good
+    #   (see :data:`_LOG_NEVER_BENIGN` for the second one).
     # * ``SpaceFeedView: KeyError surfaced from handler`` /
     #   ``SpacePostItemView: KeyError surfaced from handler`` — a space or
     #   post that is not there (c asking for a space it does not hold, a
@@ -15073,6 +15071,12 @@ _LOG_BENIGN: tuple[str, ...] = (
     #   with the specific juice/STUN status entries above so a
     #   genuine libdatachannel failure still trips the audit.
 )
+
+#: Lines a fix made impossible in a clean run, but that a BROADER needle in
+#: :data:`_LOG_BENIGN` would still hide: ``outbox: `` (the retry warning)
+#: also matches the terminal drop. A block with one of these is never
+#: taken as benign noise (an expected-noise window can still name it).
+_LOG_NEVER_BENIGN: tuple[str, ...] = ("returned terminal HTTP 410",)
 
 #: Substrings that — when they appear — are real signal worth
 #: surfacing. These are the patterns an exception traceback or an
@@ -15117,7 +15121,9 @@ def _audit_logs(state: dict) -> list[str]:
         for lineno, header, block_text in _split_log_into_numbered_blocks(text):
             if not any(marker in header for marker in _LOG_INTERESTING):
                 continue
-            if any(needle in block_text for needle in _LOG_BENIGN):
+            if not any(n in block_text for n in _LOG_NEVER_BENIGN) and any(
+                needle in block_text for needle in _LOG_BENIGN
+            ):
                 continue
             if _expected_in_window(lineno, block_text, windows):
                 continue
@@ -25963,6 +25969,117 @@ def _admin_seed_seat_gone(state: dict, space_id: str, step: str) -> None:
         )
 
 
+def _admin_seed_refuses_to_forget(
+    state: dict, space_id: str, kept: dict, members: tuple[str, ...], step: str
+) -> None:
+    """e as a removed admin that refuses to forget. Its household dropped
+    the seat when it was told of the removal; the harness writes that seat
+    (and the wrapped seed, and the space as not-dissolved) back into e's
+    database — the one place this step writes app state, because a removed
+    household that keeps acting is exactly the threat the rotation answers.
+    e's rename is then executed on e and signed with the RETIRED key; none
+    of ``members`` may take it, and each must have refused e's frame (at
+    the mailbox gate — e's member card is gone with its seat — or at the
+    signature). e's database is put back afterwards."""
+    e = state["instances"]["e"]
+    names = {label: _space_col(label, space_id, "name") for label in ("e", *members)}
+    db = _instance_dir("e") / "socialhome.db"
+
+    def _write(statements: list[tuple[str, tuple]]) -> None:
+        conn = sqlite3.connect(db, timeout=10)
+        try:
+            for sql, params in statements:
+                conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    seat = kept["seat"]
+    _write(
+        [
+            (
+                f"INSERT OR REPLACE INTO space_members({', '.join(seat)})"
+                f" VALUES({', '.join('?' for _ in seat)})",
+                tuple(seat.values()),
+            ),
+            (
+                "UPDATE spaces SET dissolved=0, identity_private_key=? WHERE id=?",
+                (kept["wrapped_seed"], space_id),
+            ),
+        ]
+    )
+    offsets = {label: _log_size(label) for label in members}
+    forged = _open_noise_window(
+        about="e",
+        reason=f"{step}: the removed admin's old-key rename is refused",
+        witnesses=members,
+        named=("authority signature did not verify against the space key",),
+        names=[f"SPACE_CONFIG_CHANGED for {space_id} from {e['instance_id']}"],
+    )
+    try:
+        hijack = f"Taken over {time.time_ns()}"
+        s, body = _inst_request(
+            state, "e", "PATCH", f"/api/spaces/{space_id}", {"name": hijack}
+        )
+        if s != 200 or _space_col("e", space_id, "name") != hijack:
+            raise SystemExit(
+                f"{step}: e (seat and retired seed written back) did not execute "
+                f"its rename (HTTP {s} {body!r}) — the refusals below would "
+                "prove nothing"
+            )
+        refusals = (
+            "on a mailbox from a sender with no card for its space",
+            f"SPACE_CONFIG_CHANGED for {space_id} from {e['instance_id']}: "
+            "authority signature did not verify",
+        )
+        how: dict[str, str] = {}
+
+        def _refused() -> bool:
+            for label in members:
+                for needle, name in zip(
+                    refusals, ("no member card", "signature"), strict=True
+                ):
+                    if _log_contains(label, needle, offset=offsets[label]):
+                        how[label] = name
+            return len(how) == len(members)
+
+        try:
+            _poll("the members to refuse e's old-key rename", _refused, timeout=60.0)
+        except SystemExit:
+            raise SystemExit(
+                f"{step}: e signed a rename with its retired seed, but not every "
+                f"member logged a refusal of it (saw {how!r}, want {members!r}) — "
+                "nothing shows the frame arrived and was turned away"
+            ) from None
+        time.sleep(5.0)
+        for label in members:
+            got = _space_col(label, space_id, "name")
+            if got != names[label]:
+                raise SystemExit(
+                    f"{step}: {label} took the removed admin's old-key rename "
+                    f"({got!r})"
+                )
+        print(
+            "  e (seat + retired seed written back) signed a rename with K1: "
+            + ", ".join(f"{k} refused it ({v})" for k, v in sorted(how.items()))
+            + " ✓"
+        )
+    finally:
+        _close_noise_windows(forged)
+        _write(
+            [
+                (
+                    "DELETE FROM space_members WHERE space_id=? AND user_id=?",
+                    (space_id, e["user_id"]),
+                ),
+                (
+                    "UPDATE spaces SET dissolved=1, name=? WHERE id=?",
+                    (names["e"], space_id),
+                ),
+            ]
+        )
+
+
 @_offline_step
 def cmd_gfs_admin_seed() -> None:
     """An admin reached ONLY through a GFS acts for the owner like a paired
@@ -25994,7 +26111,11 @@ def cmd_gfs_admin_seed() -> None:
     3. **Removed by the owner.** a removes e. a rotates the space key; d
        pins the new key; GFS A re-pins from the owner's cert and so does
        GFS B, which stays withdrawn. e holds no seat, and a request signed
-       with the seed e was handed is refused (403) by both servers.
+       with the seed e was handed is refused (403) by both servers. Then e
+       plays a removed admin that refuses to forget
+       (:func:`_admin_seed_refuses_to_forget`): with its seat and the
+       retired seed written back, it signs a rename with the old key — d
+       refuses the frame and keeps the name.
     4. **Removed by another admin while the owner is away.** e joins again
        (admin link, approval) and holds the NEW seed; a makes d's person an
        admin too (d holds it as well). a is stopped; d removes e (executed
@@ -26307,6 +26428,22 @@ def cmd_gfs_admin_seed() -> None:
     # 3. Removed by the owner.
     epoch1 = _space_col("a", space_id, "authority_key_epoch") or 0
     e_url = f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    conn = sqlite3.connect(_instance_dir("e") / "socialhome.db")
+    try:
+        conn.row_factory = sqlite3.Row
+        kept = {
+            "seat": dict(
+                conn.execute(
+                    "SELECT * FROM space_members WHERE space_id=? AND user_id=?",
+                    (space_id, e["user_id"]),
+                ).fetchone()
+            ),
+            "wrapped_seed": conn.execute(
+                "SELECT identity_private_key FROM spaces WHERE id=?", (space_id,)
+            ).fetchone()[0],
+        }
+    finally:
+        conn.close()
     s, body = _inst_request(state, "a", "DELETE", e_url)
     _must(f"{step}: a removes e", s, body, ok=(200,))
     k2, epoch2 = _admin_seed_await_rotation(
@@ -26316,15 +26453,17 @@ def cmd_gfs_admin_seed() -> None:
     _admin_seed_probe(
         state, space_id, seed1, want=403, whose="e's old seed (K1)", step=step
     )
-    kept = _seed_pin(_space_seed("e", space_id))
+    on_disk = _seed_pin(_space_seed("e", space_id))
     print(
         "  e holds no seat"
         + (
-            "; the retired K1 seed is still on its disk, worth nothing ✓"
-            if kept == k1
-            else " and no seed ✓"
+            "; the retired K1 seed is still on its disk"
+            if on_disk == k1
+            else " and no seed"
         )
+        + " ✓"
     )
+    _admin_seed_refuses_to_forget(state, space_id, kept, ("d",), step)
 
     # 4. Removed by another admin while the owner is away.
     _admin_seed_join_as_admin(state, space_id, step)
