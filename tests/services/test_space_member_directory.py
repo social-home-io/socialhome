@@ -2163,6 +2163,8 @@ async def test_a_seated_card_during_the_pass_on_to_the_owner_still_gets_its_snap
     hello = asyncio.create_task(a.card_from(m, card_m))
     for _ in range(50):  # until it waits for the space's reconcile
         await asyncio.sleep(0)
+    # The "seated" card did land inside the pass-on's send.
+    assert a.spaces.doc(SPACE, m["id"]).get("seated") is True
     owner_answered.set()
     await asyncio.gather(redeem, hello)
 
@@ -2197,11 +2199,66 @@ async def test_a_row_write_changes_only_what_its_writer_changed():
         "wait": {"x": {"n": 1}},
         "by": ["h"],
     }
+    # The same document written again carries only what changed since its
+    # last write — another writer's key in between holds.
+    other = await w.dir._doc(SPACE, m["id"])
+    other["seated"] = True
+    await w.dir._put(SPACE, m["id"], other)
+    one["fwd"] = 4
+    await w.dir._put(SPACE, m["id"], one)
+    assert w.spaces.doc(SPACE, m["id"]) == {
+        "fwd": 4,
+        "wait": {"x": {"n": 1}},
+        "by": ["h"],
+        "seated": True,
+    }
     # A row left with nothing is stored as NULL, as before.
     last = await w.dir._doc(SPACE, m["id"])
     last.clear()
     await w.dir._put(SPACE, m["id"], last)
     assert w.spaces.rows[SPACE][m["id"]] is None
+    # A row that is gone meanwhile is not brought back (UPDATE-only).
+    gone = await w.dir._doc(SPACE, m["id"])
+    gone["seated"] = True
+    del w.spaces.rows[SPACE][m["id"]]
+    await w.dir._put(SPACE, m["id"], gone)
+    assert m["id"] not in w.spaces.rows[SPACE]
+
+
+async def test_two_handlers_changing_the_waiting_cards_both_hold():
+    """``wait`` holds one entry per waiting household; a directory frame
+    adds one while a seat event takes another out (changed in place). Each
+    wrote the whole object from its own read, and the later write undid
+    the other."""
+    w = World()
+    h = _hh()
+    w.member(h)
+    first = await w.dir._doc(SPACE, h["id"])
+    first["wait"] = {"x": {"card": 1}, "z": {"card": 3}}
+    first["n"] = 1
+    await w.dir._put(SPACE, h["id"], first)
+    frame, seat = await w.dir._doc(SPACE, h["id"]), await w.dir._doc(SPACE, h["id"])
+    frame["wait"] = {**frame["wait"], "y": {"card": 2}}
+    seat["wait"].pop("x")
+    seat["n"] = True  # not "unchanged" because 1 == True
+    await w.dir._put(SPACE, h["id"], frame)
+    await w.dir._put(SPACE, h["id"], seat)
+    assert w.spaces.doc(SPACE, h["id"]) == {
+        "wait": {"y": {"card": 2}, "z": {"card": 3}},
+        "n": True,
+    }
+    assert w.spaces.doc(SPACE, h["id"])["n"] is True
+    # The last waiting card taken (the key dropped) while another arrives.
+    frame, seat = await w.dir._doc(SPACE, h["id"]), await w.dir._doc(SPACE, h["id"])
+    frame["wait"] = {**frame["wait"], "q": {"card": 4}}
+    seat.pop("wait")
+    await w.dir._put(SPACE, h["id"], frame)
+    await w.dir._put(SPACE, h["id"], seat)
+    assert w.spaces.doc(SPACE, h["id"]) == {"wait": {"q": {"card": 4}}, "n": True}
+    rest = await w.dir._doc(SPACE, h["id"])
+    rest.pop("wait")
+    await w.dir._put(SPACE, h["id"], rest)
+    assert w.spaces.doc(SPACE, h["id"]) == {"n": True}
 
 
 async def test_what_the_owner_tells_the_admin_goes_on_to_its_invitees():
