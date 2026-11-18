@@ -1078,10 +1078,79 @@ class GfsChannelService:
         the new epoch. Never raises."""
         try:
             await self.reconcile(space_id)
-            return await self.announce_epoch(space_id)
+            announced = await self.announce_epoch(space_id)
+            await self._renew_own_grant(space_id)
+            return announced
         except Exception:
             log.exception("gfs.channel: rotation hook failed")
             return 0
+
+    async def _renew_own_grant(self, space_id: str) -> bool:
+        """A delegated admin that just rotated the content key renews its
+        OWN grant for the new epoch, exactly as the rekey renews every other
+        member's: same channel and servers, a seat pass if it held one, the
+        writer key if it held one. ``True`` when a grant was stored.
+
+        PRIVACY: nobody else can issue it — the rekey comes from us — and
+        without it our seat was the one seat on the channel left on the old
+        epoch's pass after that rotation: the connection server could tell
+        which household holds the signing key. Only a renewal: a seed holder
+        that holds no grant (never seated) takes none, and the OWNER never
+        holds one at all (it would subscribe and name itself)."""
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or space.owner_instance_id == self._own_instance_id
+        ):
+            return False
+        found = await self._channel_seed(space)
+        seed = await self._matching_seed(space)
+        epoch = await self._crypto.get_current_epoch(space_id)
+        if found is None or seed is None or epoch is None:
+            return False
+        if await self.own_grant(space_id, epoch) is not None:
+            return False
+        held = await self._delegate_grant(space_id)
+        if held is None or held.epoch >= epoch:
+            return False
+        channel_id, channel_seed = found
+        offset = derive_channel_epoch_offset(seed, space_id, channel_id)
+        wire_epoch = int(epoch) + offset
+        grant = GfsChannelGrant(
+            channel_suite="ed25519",
+            space_id=space_id,
+            channel_id=channel_id,
+            channel_pk=channel_pk_of(channel_seed),
+            epoch=int(epoch),
+            epoch_offset=offset,
+            gfs_ids=held.gfs_ids,
+            binding_sig_suite="ed25519",
+            binding_sig="",
+            channel_pass=(
+                issue_channel_pass(
+                    channel_seed=channel_seed,
+                    channel_id=channel_id,
+                    epoch=wire_epoch,
+                    instance_pk=self._own_pk,
+                )
+                if held.channel_pass is not None
+                else None
+            ),
+            writer_key=(
+                issue_channel_writer_key(
+                    space_seed=seed,
+                    space_id=space_id,
+                    channel_id=channel_id,
+                    epoch=wire_epoch,
+                )
+                if held.writer_key is not None
+                else None
+            ),
+        )
+        return await self.accept_grant(
+            space_id, bind_grant(grant, space_seed=seed).to_wire()
+        )
 
     async def heal(self, gfs_id: str) -> int:
         """On a GFS (re)connect: the owner reconciles every private space it
@@ -1173,10 +1242,10 @@ class GfsChannelService:
 
     async def _delegate_grant(self, space_id: str) -> GfsChannelGrant | None:
         """A delegated admin's newest grant for the space's channel: the one
-        for our latest epoch, else the newest stored below it — a seed
-        holder never grants itself, so right after its OWN rotation it holds
-        no grant for the new epoch, yet must still announce it to the
-        channel's servers."""
+        for our latest epoch, else the newest stored below it — right after
+        its OWN rotation it holds no grant for the new epoch yet (it renews
+        its own once the epoch is announced, :meth:`_renew_own_grant`), and
+        must still announce that epoch to the channel's servers."""
         latest = await self._keys.get_latest(space_id)
         if latest is None:
             return None

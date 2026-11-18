@@ -1976,3 +1976,61 @@ async def test_a_retire_with_an_unreachable_chosen_server_is_recorded(env):
     conns.conn = replace(conns.conn, status="active")
     assert await env.owner.svc.withdraw_pending() == 1
     assert conns.withdrawals == []
+
+
+# ── A delegated admin's own seat is renewed like any member's ────────────
+
+
+@pytest.mark.security
+async def test_a_delegated_admin_renews_its_own_seat_after_its_own_rotation(
+    env, monkeypatch
+):
+    """A seed holder that rotates the content key hands every member a grant
+    for the new epoch — and takes one itself. Without it, its seat was the
+    one seat on the channel that was not renewed after that rotation, which
+    told the connection server which household holds the signing key."""
+    await _delegated_admin(env)
+    assert await env.other.svc.subscribe(SPACE_ID) == 1
+    env.other.keys.epoch = 4
+    subscribed: list[int] = []
+    real = GfsChannelService.subscribe
+
+    async def spy(self, space_id, **kw):
+        if self is env.other.svc:
+            grant = await self.current_grant(space_id)
+            subscribed.append(grant.epoch if grant is not None else -1)
+        return await real(self, space_id, **kw)
+
+    monkeypatch.setattr(GfsChannelService, "subscribe", spy)
+    await env.other.svc.on_rotation(SPACE_ID)
+    await env.other.svc.wait_idle()
+    grant = await env.other.svc.current_grant(SPACE_ID)
+    assert grant is not None and grant.epoch == 4
+    # Same shape as the grant the owner gave it: a seat pass, bound to its
+    # own key, for the same servers.
+    before = await env.other.svc.own_grant(SPACE_ID, 3)
+    assert before is not None
+    assert grant.channel_pass is not None
+    assert (grant.channel_id, grant.gfs_ids) == (before.channel_id, before.gfs_ids)
+    assert (grant.writer_key is None) == (before.writer_key is None)
+    assert subscribed == [4]
+
+
+async def test_no_self_grant_for_the_owner_or_a_member_without_the_seed(env):
+    await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    env.owner.keys.epoch = 4
+    env.member.keys.epoch = 4
+    await env.owner.svc.on_rotation(SPACE_ID)
+    await env.member.svc.on_rotation(SPACE_ID)
+    assert env.owner.keys.grants == {}
+    assert await env.member.svc.current_grant(SPACE_ID) is None
+
+
+async def test_a_seed_holder_that_was_never_seated_grants_itself_nothing(env):
+    """It renews what it holds; it never takes a seat nobody gave it."""
+    await _channel_ready(env)
+    env.other.spaces.seeds[SPACE_ID] = env.space_seed
+    env.other.keys.epoch = 4
+    await env.other.svc.on_rotation(SPACE_ID)
+    assert env.other.keys.grants == {}
