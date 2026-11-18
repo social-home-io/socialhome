@@ -145,7 +145,7 @@ describe('JoinRequestList — admin grants', () => {
         },
       ]
       : []))
-    const view = render(<JoinRequestList spaceId="s8" />)
+    const view = render(<JoinRequestList spaceId="s8" adminsActForOwner />)
     await waitFor(() => expect(view.getByText('Eve')).toBeTruthy())
     const checks = view.getAllByTestId('admin-grant-check')
     expect(checks).toHaveLength(1)
@@ -154,6 +154,19 @@ describe('JoinRequestList — admin grants', () => {
     expect(checks[0].textContent).toContain(
       "As an admin, this household can act for the space while you're offline.",
     )
+  })
+
+  it('without "Let admins act for me" the row still shows whose household asks, without that line', async () => {
+    householdUsers.value = new Map() as never
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests')
+      ? [{
+        id: 'a4', space_id: 's10', user_id: 'u-eve', display_name: 'Eve', requested_at: '',
+        requested_role: 'admin', remote_applicant_instance_id: HOUSEHOLD,
+      }]
+      : []))
+    const view = render(<JoinRequestList spaceId="s10" />)
+    await waitFor(() => expect(view.getByTestId('household-id').textContent).toBe(HOUSEHOLD))
+    expect(view.getByTestId('admin-grant-check').textContent).not.toContain('act for the space')
   })
 
   it('a member of this household asking for admin shows no household ID', async () => {

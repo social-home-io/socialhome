@@ -160,7 +160,7 @@ describe('MemberActionSheet — making another household an admin', () => {
   const HOUSEHOLD = 'ab2cd3ef4gh5ij6kl7mn2op3qr4st5uv'
 
   it('the owner sees the household ID and what an admin can do', () => {
-    openMemberActions('sp-1', 'u-eve', 'member', HOUSEHOLD, 'owner')
+    openMemberActions('sp-1', 'u-eve', 'member', HOUSEHOLD, 'owner', true)
     const r = render(<MemberActionSheet onUpdate={() => {}} />)
     expect(roleButtons(r.baseElement)).toEqual(['admin', 'moderator'])
     const check = r.baseElement.querySelector('[data-testid="admin-grant-check"]')
@@ -168,6 +168,14 @@ describe('MemberActionSheet — making another household an admin', () => {
     expect(check?.textContent).toContain(
       "As an admin, this household can act for the space while you're offline.",
     )
+  })
+
+  it('without "Let admins act for me" only the household ID shows', () => {
+    openMemberActions('sp-1', 'u-eve', 'member', HOUSEHOLD, 'owner')
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    const check = r.baseElement.querySelector('[data-testid="admin-grant-check"]')
+    expect(check?.textContent).toContain(HOUSEHOLD)
+    expect(check?.textContent).not.toContain('act for the space')
   })
 
   it('not shown for a member of this household', () => {

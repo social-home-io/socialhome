@@ -10990,21 +10990,23 @@ hr {
 .sh-household-id__code {
   flex: 1 1 auto;
   min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 0.6em;
   font-family: var(--sh-font-family-mono);
   font-size: 0.82rem;
-  line-height: 1.5;
+  line-height: 1.6;
   padding-top: 2px;
   color: var(--sh-text);
+}
+/* Inline groups (not flex / grid items): a selection made by hand copies
+   the ID in one piece, like the copy button. */
+.sh-household-id__code > span {
+  display: inline-block;
+  margin-inline-end: 0.6em;
 }
 @media (max-width: 640px) {
   /* A phone can't fit all eight groups on a line: two tidy rows of four
      instead of a stray last group. */
   .sh-household-id__code {
-    display: grid;
-    grid-template-columns: repeat(4, max-content);
+    max-width: calc(4 * (4ch + 0.6em));
   }
 }
 .sh-conn-own-id {

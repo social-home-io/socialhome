@@ -70,7 +70,13 @@ async function loadRequests(spaceId: string): Promise<void> {
   }
 }
 
-export function JoinRequestList({ spaceId }: { spaceId: string }) {
+export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
+  spaceId: string
+  /** The space's "Let admins act for me" switch
+   *  (``features.delegated_admin_authority``): an admin grant to another
+   *  household then hands it the signing seed, and the row says so. */
+  adminsActForOwner?: boolean
+}) {
   useEffect(() => {
     // Load the household user roster so each request renders the
     // applicant's display name + avatar instead of the raw user_id
@@ -181,7 +187,8 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
                     {t('join_requests.wants_admin')}
                   </p>
                   {r.remote_applicant_instance_id && (
-                    <AdminGrantCheck householdId={r.remote_applicant_instance_id} />
+                    <AdminGrantCheck householdId={r.remote_applicant_instance_id}
+                                     actsForSpace={adminsActForOwner} />
                   )}
                 </>
               ) : (
