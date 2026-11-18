@@ -20,6 +20,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
+from socialhome.authority_cert import verify_authority_cert
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     sign_authority_event,
@@ -5486,7 +5487,9 @@ class _PinSession(_AnonSession):
             return _StubResp(self._unpublish_status, {})
         pin = self._pins.pop(0) if len(self._pins) > 1 else self._pins[0]
         if isinstance(pin, int):
-            return _StubResp(pin, {"error": "nope"})
+            return _StubResp(pin, {"error": "not listed" if pin == 404 else "nope"})
+        if pin == "proxy-404":
+            return _StubResp(404, {"message": "no route"})
         body = {"status": "active", "space_id": "sp-rot"}
         if pin == "echo":
             body["identity_public_key"] = (json or {}).get("identity_public_key", "")
@@ -5579,13 +5582,48 @@ async def test_unpublish_remembers_the_pin_the_gfs_keeps(env):
     assert len(session.publishes()) == 1
 
 
-async def test_unpublish_answered_404_leaves_no_withdrawn_row(env):
-    """The server holds no row for the space: it pins nothing."""
+async def test_unpublish_answered_404_still_records_the_withdrawn_listing(env):
+    """A bare 404 to the withdrawal proves nothing (a proxy answers it
+    too): the row is recorded, and goes only when the server itself says
+    "not listed" to the pin-only publish."""
     session = _PinSession(unpublish_status=404)
-    svc, *_ = await _rotated_publish_svc(env, session)
+    svc, _owner, _owner_id, k2 = await _rotated_publish_svc(env, session)
     await svc.publish_space("sp-rot", "g1")
     await svc.unpublish_space("sp-rot", "g1")
-    assert await svc._repo.list_withdrawn_listings() == []
+    assert await svc._repo.list_withdrawn_listings() == [
+        ("sp-rot", "g1", k2.public_key.hex())
+    ]
+
+
+async def test_a_404_that_is_not_the_servers_own_keeps_the_row_owed(env):
+    session = _PinSession(pins=("echo", "proxy-404"))
+    svc, *_ = await _withdrawn_then_rotated(env, session)
+    assert await svc.repin_owed("sp-rot") == 1
+    assert len(await svc._repo.list_withdrawn_listings()) == 1
+
+
+async def test_the_pinned_key_is_compared_case_insensitively(env):
+    """A server that answers the key in upper case confirmed it all the
+    same, and what is stored is lower case (the column's CHECK)."""
+    session = _PinSession()
+    svc, _owner, _owner_id, k2 = await _rotated_publish_svc(env, session)
+    real_post = session.post
+
+    def upper(url, *, json=None, **kw):
+        resp = real_post(url, json=json, **kw)
+        if "identity_public_key" in resp._body:
+            resp._body["identity_public_key"] = resp._body[
+                "identity_public_key"
+            ].upper()
+        return resp
+
+    session.post = upper
+    await svc.publish_space("sp-rot", "g1")
+    assert await svc.repin_owed("sp-rot") == 0
+    await svc.unpublish_space("sp-rot", "g1")
+    assert await svc._repo.list_withdrawn_listings() == [
+        ("sp-rot", "g1", k2.public_key.hex())
+    ]
 
 
 async def _withdrawn_then_rotated(env, session):
@@ -5603,8 +5641,6 @@ async def test_a_rotation_repins_a_withdrawn_listing_without_relisting_it(env):
     """D2: the GFS the space was withdrawn from gets a pin-only publish —
     ``withdrawn: true`` inside the signed bytes, the owner's cert for the
     new key, and none of the space's metadata."""
-    from socialhome.authority_cert import verify_authority_cert
-
     session = _PinSession()
     svc, owner, owner_id, k3 = await _withdrawn_then_rotated(env, session)
     assert await svc.authority_key_revocable("sp-rot") is True  # re-pins now

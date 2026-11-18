@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from socialhome.crypto import generate_space_keypair
+from socialhome.domain.events import SpaceAdminAuthorityRevoked
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.space import (
     JoinMode,
@@ -830,8 +831,6 @@ async def test_member_household_still_mirrors_the_hosts_role(tmp_dir):
 async def test_host_publishes_revocation_when_an_admin_seat_is_tombstoned(tmp_dir):
     """A delegated admin removed another admin while the owner was offline:
     the host learns from the LEFT gossip and must rotate."""
-    from socialhome.domain.events import SpaceAdminAuthorityRevoked
-
     h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
     try:
         await rm.add(
@@ -863,8 +862,6 @@ async def test_host_publishes_revocation_when_an_admin_seat_is_tombstoned(tmp_di
 async def test_host_publishes_revocation_when_gossip_lowers_an_admin(tmp_dir):
     """Lowering is allowed (it only takes privilege away) — and it ends an
     admin seat, so it is a revocation."""
-    from socialhome.domain.events import SpaceAdminAuthorityRevoked
-
     h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
     try:
         await rm.add(
@@ -885,8 +882,6 @@ async def test_host_publishes_revocation_when_gossip_lowers_an_admin(tmp_dir):
 
 
 async def test_no_revocation_for_a_non_admin_seat_or_a_mirror(tmp_dir):
-    from socialhome.domain.events import SpaceAdminAuthorityRevoked
-
     h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
     try:
         await rm.add(
@@ -1631,8 +1626,6 @@ async def test_a_failing_restatement_never_breaks_the_snapshot(tmp_dir, caplog):
 async def test_the_host_takes_a_restated_removal_and_revokes_the_admin(tmp_dir):
     """Host side, unchanged: the re-stated LEFT at the version the host
     itself holds wins the tie as a removal and the admin seat is revoked."""
-    from socialhome.domain.events import SpaceAdminAuthorityRevoked
-
     h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
     try:
         await rm.apply_member_event(
@@ -1788,5 +1781,27 @@ async def test_a_removed_household_cannot_seat_a_fresh_person_either(tmp_dir, ca
             is None
         )
         assert "a removed household cannot re-seat itself" in caplog.text
+    finally:
+        await db.shutdown()
+
+
+async def test_a_removed_household_cannot_seat_another_household(tmp_dir, caplog):
+    """The kicked household, still holding the seed, signs a JOINED that
+    seats a SECOND household it controls and sends it itself: a household
+    we hold a removal for, with no admin seat, seats nobody at all. The
+    same entry from a household in good standing still lands."""
+    h, _sr, rm, db, seed = await _r5_handler(tmp_dir)
+    try:
+        await _seat_then_kick(h, seed)
+        with caplog.at_level("WARNING"):
+            await _joined_from(
+                h, seed, MEMBER_INSTANCE, instance_id="peer-second", user_id="uid-2"
+            )
+        assert (
+            await rm.get_including_tombstones(SPACE_ID, "peer-second", "uid-2") is None
+        )
+        assert "a removed household seats nobody" in caplog.text
+        await _joined_from(h, seed, OWNER, instance_id="peer-second", user_id="uid-2")
+        assert await rm.get(SPACE_ID, "peer-second", "uid-2") is not None
     finally:
         await db.shutdown()

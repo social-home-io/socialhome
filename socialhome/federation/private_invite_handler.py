@@ -125,7 +125,7 @@ ROSTER_REMOVAL_RESTATE_MAX = 16
 ROSTER_REMOVAL_RESTATE_INTERVAL_S = 3600
 
 #: Past this many remembered re-statements the expired ones are dropped
-#: (and, still over it, all of them — the per-snapshot cap still holds).
+#: (and, still over it, the oldest).
 _MAX_REMEMBERED_RESTATEMENTS = 512
 
 #: Receive-side caps on pending private invitations holding a join snapshot
@@ -1843,13 +1843,12 @@ class PrivateSpaceInviteHandler:
             and bool(self._own_instance_id)
             and space.owner_instance_id == self._own_instance_id
         )
-        # The household seats itself — any but the host, which is the
-        # authority on its own space. (No space row: the versioned write
-        # below stores nothing either way.)
-        self_seated = (
+        # Live gossip that seats somebody, from any household but the host
+        # (the authority on its own space). (No space row: the versioned
+        # write below stores nothing either way.)
+        seats_by_gossip = (
             sender is not None
             and not tombstoned
-            and sender == instance_id
             and space is not None
             and sender != space.owner_instance_id
         )
@@ -1860,29 +1859,35 @@ class PrivateSpaceInviteHandler:
             if hosted
             else None
         )
-        if self_seated and await self._removed_without_admin_seat(
-            space_id, instance_id
+        if (
+            seats_by_gossip
+            and sender is not None
+            and await self._removed_without_admin_seat(space_id, sender)
         ):
             # SECURITY: a removed household that still holds the seed (the
             # key is rotated only once the owner hears of the removal) could
             # sign a JOINED for its own seat at a higher version — or for a
             # user id nobody ever removed — and the version guard alone
-            # would take it. A household we hold a removal for seats nobody
-            # itself: its people come (back) through somebody else — the
-            # host (its gossip or its snapshot) or the admin household that
-            # invites them. Only a household that still holds a live admin
-            # seat here — a seed holder by right — seats its own people.
+            # would take it. Or it seats a SECOND household it controls. So a
+            # household we hold a removal for, with no live admin seat,
+            # seats nobody by gossip — not itself, not anyone else: only a
+            # seed holder by right sends a JOINED at all, and people come
+            # (back) through the host (its gossip or its snapshot) or an
+            # admin household in good standing.
             # (The sender is all this can judge: the same signed entry
-            # carried by an accomplice household still lands. What ends
-            # that is the rotation, once the owner hears of the removal.)
+            # carried by an accomplice household that was never removed
+            # still lands. What ends that is the rotation, once the owner
+            # hears of the removal.)
             log.warning(
-                "roster-gossip %s for %s: %s seats %s@%s, a seat removed "
-                "here — refused (a removed household cannot re-seat itself)",
+                "roster-gossip %s for %s: %s seats %s@%s — refused (%s)",
                 event_type,
                 space_id,
                 sender,
                 user_id,
                 instance_id,
+                "a removed household cannot re-seat itself"
+                if sender == instance_id
+                else "a removed household seats nobody",
             )
             return
         if hosted and not tombstoned:
@@ -2293,8 +2298,11 @@ class PrivateSpaceInviteHandler:
                 if now - at >= ROSTER_REMOVAL_RESTATE_INTERVAL_S
             ]:
                 del told[key]
-            if len(told) > _MAX_REMEMBERED_RESTATEMENTS:
-                told.clear()
+            # Still over: drop the oldest (insertion order), never all of
+            # them — clearing would let every recent removal be re-stated
+            # again at once.
+            for key in list(told)[: len(told) - _MAX_REMEMBERED_RESTATEMENTS]:
+                del told[key]
         attempts = 0
         for seat in removals:
             key = (space.id, seat.instance_id, seat.user_id, seat.member_version)

@@ -2691,7 +2691,9 @@ class GfsConnectionService:
         status = data.get("status") or "active"
         publication = await self._repo.publish_space(space_id, gfs_id, status=status)
         if self._pin_answered(space_id, conn, body, data):
-            self._pin_confirmed[(space_id, gfs_id)] = body["identity_public_key"]
+            self._pin_confirmed[(space_id, gfs_id)] = body[
+                "identity_public_key"
+            ].lower()
             self._repin_tried.pop((space_id, gfs_id), None)
         else:
             # Accepted, not confirmed: the same body gets the same answer,
@@ -3005,18 +3007,19 @@ class GfsConnectionService:
                     raise GfsConnectionError(
                         f"GFS rejected unpublish (HTTP {resp.status}): {detail}",
                     )
-                row_kept = resp.status != 404
         except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         # A withdrawal hides the listing only: the GFS keeps its row, the
         # pinned space key and the followers seated there. Remember that
         # (migration 0147) so a later key rotation moves that pin too
-        # (:meth:`repin_owed`) — unless the server holds no row (404), or
-        # the space is not ours to rotate (gone, dissolved).
+        # (:meth:`repin_owed`) — unless the space is not ours to rotate
+        # (gone, dissolved). Also after a 404: a proxy answers one too, so
+        # it proves nothing; the row goes when the server itself says "not
+        # listed" to the pin-only publish.
         confirmed = self._pin_confirmed.pop((space_id, gfs_id), None)
         self._repin_tried.pop((space_id, gfs_id), None)
-        if row_kept and await self._owns(space_id):
+        if await self._owns(space_id):
             await self._repo.mark_listing_withdrawn(
                 space_id, gfs_id, confirmed.lower() if confirmed else None
             )
@@ -3452,9 +3455,9 @@ class GfsConnectionService:
         pin: only when the server names exactly the key we offered. Anything else — another key (it refused or could not apply
         the re-pin), or no ``identity_public_key`` at all (an older server)
         — leaves the re-pin owed."""
-        offered = body.get("identity_public_key") or ""
+        offered = str(body.get("identity_public_key") or "").lower()
         pinned = answer.get("identity_public_key")
-        if offered and isinstance(pinned, str) and pinned == offered:
+        if offered and isinstance(pinned, str) and pinned.lower() == offered:
             return True
         log.warning(
             "GFS %r (%s) did not confirm the space key for %s — it %s. The "
@@ -3526,7 +3529,8 @@ class GfsConnectionService:
             space = await self._space_repo.get(sid)
             if space is None or not space.identity_public_key:
                 continue
-            key = space.identity_public_key
+            # Lower case throughout: what we compare and what we store.
+            key = space.identity_public_key.lower()
             for conn in await self._repo.list_gfs_for_space(sid) if listings else ():
                 if gfs_id is not None and conn.id != gfs_id:
                     continue
@@ -3540,7 +3544,7 @@ class GfsConnectionService:
                     self._repin_failed(sid, conn.id, key)
                     owed += 1
             for _s, cid, pinned in rows:
-                if pinned == key:
+                if pinned is not None and pinned.lower() == key:
                     continue
                 held_by = await self._repo.get(cid)
                 if held_by is None:
@@ -3550,7 +3554,7 @@ class GfsConnectionService:
                 if held_by.status == "active" and self._repin_due(sid, cid, key, force):
                     outcome = await self._repin_withdrawn_row(space, held_by)
                 if outcome == "confirmed":
-                    await self._repo.set_withdrawn_listing_pin(sid, cid, key.lower())
+                    await self._repo.set_withdrawn_listing_pin(sid, cid, key)
                     self._repin_tried.pop((sid, cid), None)
                 elif outcome in ("gone", "listed"):
                     await self._repo.delete_withdrawn_listing(sid, cid)
@@ -3618,7 +3622,7 @@ class GfsConnectionService:
                     return
                 if await self._repin_withdrawn(current, conn) == "confirmed":
                     self._pin_confirmed[(space.id, conn.id)] = (
-                        current.identity_public_key
+                        current.identity_public_key.lower()
                     )
         except (GfsConnectionError, SpaceNotPublishableError) as exc:
             log.warning(
@@ -3730,7 +3734,15 @@ class GfsConnectionService:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status == 404:
-                    return "gone"
+                    # Only the server's own "not listed" (sent after it
+                    # verified our signature) forgets the row; any other
+                    # 404 (a proxy, a wrong path) leaves it owed.
+                    try:
+                        gone = await resp.json() == {"error": "not listed"}
+                    except aiohttp.ClientError, ValueError:
+                        gone = False
+                    if gone:
+                        return "gone"
                 if resp.status not in (200, 201):
                     log.warning(
                         "gfs: GFS %s answered HTTP %d to the pin-only publish "
