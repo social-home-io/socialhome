@@ -12,6 +12,7 @@ from dataclasses import replace
 import pytest
 
 from socialhome.domain.federation import GfsConnection
+from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
 pytestmark = pytest.mark.asyncio
@@ -228,3 +229,97 @@ async def test_channel_withdrawals_round_trip(repo):
     # Disconnecting a GFS drops its pending withdrawals.
     await repo.delete("gfs-2")
     assert await repo.list_channel_withdrawals() == []
+
+
+# ── Withdrawn listings that still hold a pin (migration 0147) ────────────
+
+_KEY_1 = "11" * 32
+_KEY_2 = "22" * 32
+
+
+async def test_withdrawn_listings_round_trip(repo):
+    await repo.save(_conn("gfs-1"))
+    await repo.save(_conn("gfs-2"))
+    await repo.mark_listing_withdrawn("sp", "gfs-1", _KEY_1)
+    await repo.mark_listing_withdrawn("sp", "gfs-2", None)
+    await repo.mark_listing_withdrawn("sp-2", "gfs-2", _KEY_2)
+    # A connection that is gone records nothing.
+    await repo.mark_listing_withdrawn("sp", "nope", _KEY_1)
+    assert await repo.list_withdrawn_listings(space_id="sp") == [
+        ("sp", "gfs-1", _KEY_1),
+        ("sp", "gfs-2", None),
+    ]
+    assert await repo.list_withdrawn_listings(gfs_id="gfs-2") == [
+        ("sp", "gfs-2", None),
+        ("sp-2", "gfs-2", _KEY_2),
+    ]
+    await repo.set_withdrawn_listing_pin("sp", "gfs-2", _KEY_2)
+    assert await repo.list_withdrawn_listings(space_id="sp", gfs_id="gfs-2") == [
+        ("sp", "gfs-2", _KEY_2)
+    ]
+    await repo.delete_withdrawn_listing("sp", "gfs-1")
+    assert len(await repo.list_withdrawn_listings()) == 2
+    # Disconnecting a GFS drops what it still held.
+    await repo.delete("gfs-2")
+    assert await repo.list_withdrawn_listings() == []
+
+
+async def test_marking_a_withdrawn_listing_again_keeps_a_known_pin(repo):
+    await repo.save(_conn("gfs-1"))
+    await repo.mark_listing_withdrawn("sp", "gfs-1", _KEY_1)
+    # A second withdrawal that knows nothing must not forget the pin.
+    await repo.mark_listing_withdrawn("sp", "gfs-1", None)
+    assert await repo.list_withdrawn_listings() == [("sp", "gfs-1", _KEY_1)]
+    await repo.mark_listing_withdrawn("sp", "gfs-1", _KEY_2)
+    assert await repo.list_withdrawn_listings() == [("sp", "gfs-1", _KEY_2)]
+
+
+async def test_listing_a_space_again_ends_its_withdrawn_row(repo):
+    await repo.save(_conn("gfs-1"))
+    await repo.mark_listing_withdrawn("sp", "gfs-1", _KEY_1)
+    await repo.publish_space("sp", "gfs-1")
+    assert await repo.list_withdrawn_listings() == []
+
+
+# ── A retired channel's wrapped signing seed (migration 0147) ────────────
+
+
+async def test_channel_withdrawal_keeps_its_seed_wrapped(db):
+    repo = SqliteGfsConnectionRepo(db, key_manager=KeyManager(b"\x07" * 32))
+    await repo.save(_conn("gfs-1"))
+    await repo.save(_conn("gfs-2"))
+    ch = "ab" * 16
+    seed = b"\x05" * 32
+    await repo.add_channel_withdrawals("sp", ch, ["gfs-1"])
+    assert await repo.get_channel_withdrawal_seed("sp", "gfs-1", ch) is None
+    # Recorded again WITH the seed: new rows carry it, and the row that
+    # had none gains it.
+    await repo.add_channel_withdrawals("sp", ch, ["gfs-1", "gfs-2"], channel_seed=seed)
+    assert await repo.get_channel_withdrawal_seed("sp", "gfs-1", ch) == seed
+    assert await repo.get_channel_withdrawal_seed("sp", "gfs-2", ch) == seed
+    assert await repo.list_channel_withdrawals(space_id="sp") == [
+        ("sp", "gfs-1", ch),
+        ("sp", "gfs-2", ch),
+    ]
+    # At rest it is ciphertext, bound to its row.
+    row = await db.fetchone(
+        "SELECT channel_seed FROM gfs_channel_withdrawals WHERE gfs_connection_id='gfs-1'"
+    )
+    assert seed.hex() not in row["channel_seed"]
+    await db.enqueue(
+        "UPDATE gfs_channel_withdrawals SET channel_seed=("
+        " SELECT channel_seed FROM gfs_channel_withdrawals"
+        " WHERE gfs_connection_id='gfs-1') WHERE gfs_connection_id='gfs-2'"
+    )
+    assert await repo.get_channel_withdrawal_seed("sp", "gfs-2", ch) is None
+    assert await repo.get_channel_withdrawal_seed("sp", "nope", ch) is None
+
+
+async def test_channel_seed_needs_the_kek(repo):
+    await repo.save(_conn("gfs-1"))
+    with pytest.raises(RuntimeError):
+        await repo.add_channel_withdrawals(
+            "sp", "ab" * 16, ["gfs-1"], channel_seed=b"\x05" * 32
+        )
+    await repo.add_channel_withdrawals("sp", "ab" * 16, ["gfs-1"])
+    assert await repo.get_channel_withdrawal_seed("sp", "gfs-1", "ab" * 16) is None

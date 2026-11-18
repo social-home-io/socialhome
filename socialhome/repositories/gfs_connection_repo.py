@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.federation import GfsConnection, GfsSpacePublication
+from ..infrastructure.key_manager import KeyManagerError
 from .base import rows_to_dicts
+
+log = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -40,23 +44,52 @@ class AbstractGfsConnectionRepo(Protocol):
     async def count_published_spaces(self, gfs_id: str) -> int: ...
     async def list_publications_all(self) -> list[dict]: ...
     async def add_channel_withdrawals(
-        self, space_id: str, channel_id: str, gfs_ids: list[str]
+        self,
+        space_id: str,
+        channel_id: str,
+        gfs_ids: list[str],
+        *,
+        channel_seed: bytes | None = None,
     ) -> None: ...
+    async def get_channel_withdrawal_seed(
+        self, space_id: str, gfs_id: str, channel_id: str
+    ) -> bytes | None: ...
     async def list_channel_withdrawals(
         self, *, space_id: str | None = None, gfs_id: str | None = None
     ) -> list[tuple[str, str, str]]: ...
     async def delete_channel_withdrawal(
         self, space_id: str, gfs_id: str, channel_id: str
     ) -> None: ...
+    async def mark_listing_withdrawn(
+        self, space_id: str, gfs_id: str, pinned_key: str | None
+    ) -> None: ...
+    async def list_withdrawn_listings(
+        self, *, space_id: str | None = None, gfs_id: str | None = None
+    ) -> list[tuple[str, str, str | None]]: ...
+    async def set_withdrawn_listing_pin(
+        self, space_id: str, gfs_id: str, pinned_key: str
+    ) -> None: ...
+    async def delete_withdrawn_listing(self, space_id: str, gfs_id: str) -> None: ...
 
 
 class SqliteGfsConnectionRepo:
-    """SQLite-backed :class:`AbstractGfsConnectionRepo`."""
+    """SQLite-backed :class:`AbstractGfsConnectionRepo`.
 
-    __slots__ = ("_db",)
+    ``key_manager`` is the household KEK that wraps a retired channel's
+    signing seed at rest (``gfs_channel_withdrawals.channel_seed``). Like
+    the space repo's, it is loaded after the repos are built and wired with
+    :meth:`attach_key_manager`; only the seed accessors need it.
+    """
 
-    def __init__(self, db: AsyncDatabase) -> None:
+    __slots__ = ("_db", "_kek")
+
+    def __init__(self, db: AsyncDatabase, *, key_manager=None) -> None:
         self._db = db
+        self._kek = key_manager
+
+    def attach_key_manager(self, key_manager) -> None:
+        """Wire the household KEK after construction (see class docstring)."""
+        self._kek = key_manager
 
     async def save(self, conn: GfsConnection) -> None:
         await self._db.enqueue(
@@ -173,6 +206,10 @@ class SqliteGfsConnectionRepo:
             (gfs_id,),
         )
         await self._db.enqueue(
+            "DELETE FROM gfs_withdrawn_listings WHERE gfs_connection_id=?",
+            (gfs_id,),
+        )
+        await self._db.enqueue(
             "DELETE FROM gfs_connections WHERE id=?",
             (gfs_id,),
         )
@@ -188,6 +225,12 @@ class SqliteGfsConnectionRepo:
             " ON CONFLICT(space_id, gfs_connection_id) DO UPDATE SET"
             " status=excluded.status",
             (space_id, gfs_id, status),
+        )
+        # Listed there again: it is no longer a withdrawn listing (0147).
+        await self._db.enqueue(
+            "DELETE FROM gfs_withdrawn_listings"
+            " WHERE space_id=? AND gfs_connection_id=?",
+            (space_id, gfs_id),
         )
         # Fetch the row back so ``published_at`` (DB ``datetime('now')``
         # default) is authoritative rather than synthesised. ``enqueue``
@@ -287,19 +330,77 @@ class SqliteGfsConnectionRepo:
 
     # ── Pending channel withdrawals (migration 0095) ─────────────────────
 
+    @staticmethod
+    def _channel_aad(space_id: str, gfs_id: str, channel_id: str) -> bytes:
+        return f"gfs-channel-withdrawal:{space_id}:{gfs_id}:{channel_id}".encode()
+
     async def add_channel_withdrawals(
-        self, space_id: str, channel_id: str, gfs_ids: list[str]
+        self,
+        space_id: str,
+        channel_id: str,
+        gfs_ids: list[str],
+        *,
+        channel_seed: bytes | None = None,
     ) -> None:
         """Record that *channel_id* of *space_id* must still be unregistered
         on each connection in *gfs_ids* (idempotent; an id that is no
-        connection any more is skipped)."""
+        connection any more is skipped).
+
+        *channel_seed* (migration 0147) is the channel's 32-byte signing
+        seed, stored KEK-wrapped and bound to its row, so the unregister can
+        still be signed after the space key it derives from is rotated away.
+        A row already recorded without one gains it."""
+        if channel_seed is not None:
+            if self._kek is None:
+                raise RuntimeError("channel seed persistence requires a key_manager")
+            if len(channel_seed) != 32:
+                raise ValueError("channel seed must be 32 bytes")
         for gfs_id in dict.fromkeys(gfs_ids):
-            await self._db.enqueue(
-                "INSERT OR IGNORE INTO gfs_channel_withdrawals"
-                "(space_id, gfs_connection_id, channel_id)"
-                " SELECT ?, id, ? FROM gfs_connections WHERE id=?",
-                (space_id, channel_id, gfs_id),
+            wrapped = (
+                self._kek.encrypt(
+                    channel_seed,
+                    associated_data=self._channel_aad(space_id, gfs_id, channel_id),
+                )
+                if channel_seed is not None and self._kek is not None
+                else None
             )
+            await self._db.enqueue(
+                "INSERT INTO gfs_channel_withdrawals"
+                "(space_id, gfs_connection_id, channel_id, channel_seed)"
+                " SELECT ?, id, ?, ? FROM gfs_connections WHERE id=?"
+                " ON CONFLICT(space_id, gfs_connection_id, channel_id)"
+                " DO UPDATE SET channel_seed="
+                "   COALESCE(excluded.channel_seed, channel_seed)",
+                (space_id, channel_id, wrapped, gfs_id),
+            )
+
+    async def get_channel_withdrawal_seed(
+        self, space_id: str, gfs_id: str, channel_id: str
+    ) -> bytes | None:
+        """The stored signing seed of a pending channel withdrawal, or
+        ``None`` (no row, none stored, no KEK wired, or a value that does
+        not unwrap for this row)."""
+        if self._kek is None:
+            return None
+        row = await self._db.fetchone(
+            "SELECT channel_seed FROM gfs_channel_withdrawals"
+            " WHERE space_id=? AND gfs_connection_id=? AND channel_id=?",
+            (space_id, gfs_id, channel_id),
+        )
+        if row is None or row["channel_seed"] is None:
+            return None
+        try:
+            return self._kek.decrypt(
+                row["channel_seed"],
+                associated_data=self._channel_aad(space_id, gfs_id, channel_id),
+            )
+        except KeyManagerError:
+            log.warning(
+                "gfs: the stored channel seed for space %s on %s does not unwrap",
+                space_id,
+                gfs_id,
+            )
+            return None
 
     async def list_channel_withdrawals(
         self, *, space_id: str | None = None, gfs_id: str | None = None
@@ -332,6 +433,64 @@ class SqliteGfsConnectionRepo:
             "DELETE FROM gfs_channel_withdrawals"
             " WHERE space_id=? AND gfs_connection_id=? AND channel_id=?",
             (space_id, gfs_id, channel_id),
+        )
+
+    # ── Withdrawn listings a GFS still pins a key for (migration 0147) ───
+
+    async def mark_listing_withdrawn(
+        self, space_id: str, gfs_id: str, pinned_key: str | None
+    ) -> None:
+        """Record that *space_id*'s listing on *gfs_id* was withdrawn while
+        the server keeps its row — *pinned_key* is the authority key it last
+        confirmed (``None`` = unknown; a known one is never forgotten). An
+        id that is no connection any more records nothing."""
+        await self._db.enqueue(
+            "INSERT INTO gfs_withdrawn_listings"
+            "(space_id, gfs_connection_id, pinned_key)"
+            " SELECT ?, id, ? FROM gfs_connections WHERE id=?"
+            " ON CONFLICT(space_id, gfs_connection_id) DO UPDATE SET"
+            " pinned_key=COALESCE(excluded.pinned_key, pinned_key)",
+            (space_id, pinned_key, gfs_id),
+        )
+
+    async def list_withdrawn_listings(
+        self, *, space_id: str | None = None, gfs_id: str | None = None
+    ) -> list[tuple[str, str, str | None]]:
+        """``(space_id, gfs_connection_id, pinned_key)`` of every withdrawn
+        listing, oldest first, optionally for one space and / or one
+        connection."""
+        where: list[str] = []
+        params: list[str] = []
+        if space_id is not None:
+            where.append("space_id=?")
+            params.append(space_id)
+        if gfs_id is not None:
+            where.append("gfs_connection_id=?")
+            params.append(gfs_id)
+        sql = (
+            "SELECT space_id, gfs_connection_id, pinned_key FROM gfs_withdrawn_listings"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        rows = await self._db.fetchall(
+            sql + " ORDER BY created_at, rowid", tuple(params)
+        )
+        return [(r["space_id"], r["gfs_connection_id"], r["pinned_key"]) for r in rows]
+
+    async def set_withdrawn_listing_pin(
+        self, space_id: str, gfs_id: str, pinned_key: str
+    ) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_withdrawn_listings SET pinned_key=?"
+            " WHERE space_id=? AND gfs_connection_id=?",
+            (pinned_key, space_id, gfs_id),
+        )
+
+    async def delete_withdrawn_listing(self, space_id: str, gfs_id: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM gfs_withdrawn_listings"
+            " WHERE space_id=? AND gfs_connection_id=?",
+            (space_id, gfs_id),
         )
 
 

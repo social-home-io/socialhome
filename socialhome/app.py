@@ -4475,6 +4475,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # The user repo unwraps each user's Ed25519 identity seed under the
         # same KEK (proto-v_25 per-user identity binding) — same late-wiring.
         user_repo.attach_key_manager(key_manager)
+        # A retired private channel's signing seed waits wrapped under it
+        # until every GFS confirmed the unregister (migration 0147).
+        repos.gfs_connection.attach_key_manager(key_manager)
         # The dashboard's tablet-cookie key is stored wrapped under it too.
         dashboard.settings.attach_key_manager(key_manager)
 
