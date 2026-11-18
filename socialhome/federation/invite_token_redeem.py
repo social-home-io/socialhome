@@ -49,10 +49,13 @@ from typing import TYPE_CHECKING, Any
 
 from ..domain.events import SpaceRemoteSeatLive
 from ..domain.federation import (
+    PENDING_KIND_CODE,
+    PENDING_KIND_REQUEST,
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    pending_kind,
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
 from ..domain.local_community import Eligibility, parse_join_location
@@ -71,6 +74,7 @@ from ..domain.space import (
     SpaceRole,
     SpaceType,
 )
+from ..services.auto_pair_inbox import AUTO_PAIR_REQUEST_TTL_SECONDS
 from ..services.local_community import (
     APPROVAL_HONOURED_DAYS,
     LocalAreaBudget,
@@ -104,6 +108,7 @@ from .invite_bootstrap import (
     verify_peer_keywrap,
 )
 from .mesh_member_claim import mesh_member_claim, parse_mesh_member_claim
+from .pairing_coordinator import PAIRING_TTL_SECONDS
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
@@ -489,7 +494,7 @@ class SpaceInviteTokenRedeemCoordinator:
         paths, and seat directory members through :meth:`seat_directory_member`."""
         self._mailboxes = mailboxes
         self._directory = directory
-        directory.attach_seater(self.seat_directory_member)
+        directory.attach_seater(self.seat_directory_member, self.seat_redeemed_member)
 
     async def _ensure_mailbox(self, gfs_url: str, *, timeout: float) -> None:
         """Our ONE mailbox at *gfs_url*, minted if missing — bounded by
@@ -527,6 +532,25 @@ class SpaceInviteTokenRedeemCoordinator:
             keywrap_sig=card.keywrap_sig,
             proto_version=card.proto_version,
             is_redeemer=self._federation.own_instance_id < card.instance_id,
+        )
+
+    async def seat_redeemed_member(
+        self, card: MemberCard, gfs_url: str, is_redeemer: bool
+    ) -> None:
+        """Re-make the sealed-redeem seat with *card*'s household — the
+        seat a link-joined household and its host held until they paired —
+        after that pairing ended: the same static-static keys (each side's
+        role in the redeem, *is_redeemer*) and the GFS of that redeem as
+        the relay again. Never replaces a confirmed row."""
+        await self._seat_space_session_instance(
+            instance_id=card.instance_id,
+            display_name="",
+            identity_pk=card.identity_pk,
+            keywrap_pk=card.keywrap_pk,
+            keywrap_sig=card.keywrap_sig,
+            proto_version=card.proto_version,
+            is_redeemer=is_redeemer,
+            gfs_url=gfs_url,
         )
 
     def _redeem_lock(self, instance_id: str) -> asyncio.Lock:
@@ -1046,8 +1070,9 @@ class SpaceInviteTokenRedeemCoordinator:
                 bootstrap.proto_version if bootstrap is not None else 1,
                 _int_or_one(result.get("proto_version")),
             )
+            made_seat = False
             if bootstrap is not None:
-                await self._seat_space_session_instance(
+                made_seat = await self._seat_space_session_instance(
                     instance_id=issuer_instance_id,
                     display_name=(bootstrap.display_hint or issuer_instance_id[:8]),
                     identity_pk=bootstrap.identity_pk,
@@ -1138,7 +1163,12 @@ class SpaceInviteTokenRedeemCoordinator:
                     gfs_url=bootstrap.gfs_url,
                 )
                 if host_card is not None:
-                    await self._directory.store_seat_card(space_id, host_card)
+                    await self._directory.store_seat_card(
+                        space_id,
+                        host_card,
+                        # This redeem made the seat: its GFS, our role.
+                        redeem=(bootstrap.gfs_url, True) if made_seat else None,
+                    )
         if self._directory is not None:
             # v_89 — every redeem path: our card to the host, which doubles
             # as "seated, send my directory" (a snapshot that raced the
@@ -2306,7 +2336,7 @@ class SpaceInviteTokenRedeemCoordinator:
         # joiner's first envelopes after it applies the ACK find a row;
         # a rollback drops it again.
         try:
-            await self._seat_space_session_instance(
+            made_seat = await self._seat_space_session_instance(
                 instance_id=redeemer_instance_id,
                 display_name=str(body.get("display_name") or redeemer_instance_id[:8]),
                 identity_pk=str(body["identity_pk"]),
@@ -2362,7 +2392,11 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._commit_redeem(reservation)
         # After the commit: its ``space_instances`` row now exists.
         if joiner_card is not None and self._directory is not None:
-            await self._directory.store_seat_card(space_id, joiner_card)
+            await self._directory.store_seat_card(
+                space_id,
+                joiner_card,
+                redeem=(gfs_url, False) if made_seat else None,
+            )
         if reservation is None:
             return {"ok": True, "space_id": ack_body["space_id"]}
         # The ONE operator-visible record that a stranger joined through a
@@ -2607,8 +2641,10 @@ class SpaceInviteTokenRedeemCoordinator:
         proto_version: int,
         is_redeemer: bool,
         gfs_url: str = "",
-    ) -> None:
+    ) -> bool:
         """Persist the counterpart as a **space-scoped** instance row.
+        Returns whether a seat row was written (``False``: an existing
+        relationship was kept).
 
         :data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`
         is what makes this row space-scoped rather than a full social
@@ -2664,24 +2700,28 @@ class SpaceInviteTokenRedeemCoordinator:
             # Never downgrade or re-key an existing RELATIONSHIP (a real
             # pairing, or a second space joined with the same household)
             # off the back of an invite link.
-            return
-        if existing is not None:
-            # …but a row is not a relationship. A ``pending_sent`` /
-            # ``pending_received`` row is an abandoned or half-finished
-            # handshake, and bailing out on it left this
-            # seat with no session keys, no ``relay_via`` and no key-wrap
-            # key — so the redeem ACKed, both households believed they
-            # were seated, and then every envelope failed silently
-            # because the relay transport had nothing to seal to. There
-            # is no trust here to preserve (an unfinished pairing granted
-            # nothing), so the seat replaces it. The local inbox id is
-            # carried over: it is the URL the other side may already
-            # hold, and there is no reason to invalidate it.
+            return False
+        pending = (
+            existing
+            if existing is not None and existing.status is not PairingStatus.CONFIRMED
+            else None
+        )
+        if pending is not None:
+            # …but a pending row is not a relationship: it is a pairing
+            # handshake in flight, and bailing out on it left this seat
+            # with no session keys, no ``relay_via`` and no key-wrap key —
+            # so the redeem ACKed, both households believed they were
+            # seated, and then every envelope failed silently because the
+            # relay transport had nothing to seal to. The seat takes the
+            # row. The handshake is not thrown away for it: its half is
+            # kept beside the new seat (below), exactly where it would be
+            # had the seat been there first — a seat and a pending pairing
+            # never overwrite each other, whichever comes first.
             log.info(
-                "invite bootstrap: replacing a stale %s row for %s with a "
-                "space-session seat",
-                existing.status.value,
+                "invite bootstrap: seating %s over its pending pairing (%s) "
+                "— the handshake goes on beside the seat",
                 instance_id,
+                pending.status.value,
             )
         now = datetime.now(UTC).isoformat()
         await self._federation_repo.save_instance(
@@ -2724,6 +2764,45 @@ class SpaceInviteTokenRedeemCoordinator:
                 paired_at=now,
             )
         )
+        if pending is not None:
+            await self._keep_pending_beside_seat(pending)
+        return True
+
+    async def _keep_pending_beside_seat(self, pending: RemoteInstance) -> None:
+        """The seat just took the row of a pairing handshake in flight:
+        keep that handshake's half beside the seat
+        (:class:`~socialhome.federation.pending_pairing.PendingPairings`)
+        for as long as it could still complete, and hand the seat row back
+        the opt-ins the handshake had set on it. Fail-soft: the seat is
+        what the space needs; a handshake that cannot be kept is started
+        again by the people."""
+        try:
+            # A pairing code's half for the code's lifetime, a request for
+            # the introduction's, an approval until it confirms.
+            ttl_s: float | None = {
+                PENDING_KIND_CODE: float(PAIRING_TTL_SECONDS),
+                PENDING_KIND_REQUEST: float(AUTO_PAIR_REQUEST_TTL_SECONDS),
+            }.get(pending_kind(pending) or "")
+            if pending.gfs_relay:
+                # The relay opt-in of a GFS-reach code is the pairing's,
+                # not the seat's (the half carries it to the confirmation).
+                await self._federation_repo.set_gfs_relay(pending.id, enabled=False)
+            await self._federation.pending_pairings.save(
+                pending,
+                ttl_s=ttl_s,
+                # Still the half of its pairing code: the peer's cancel
+                # over the seat names that token.
+                token=await self._federation_repo.pairing_token_for_inbox(
+                    pending.local_inbox_id
+                ),
+            )
+        except Exception:
+            log.warning(
+                "invite bootstrap: could not keep the pending pairing with "
+                "%s beside its new seat",
+                pending.id,
+                exc_info=True,
+            )
 
     # ── Internal helpers ───────────────────────────────────────────────
 

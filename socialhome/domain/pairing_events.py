@@ -1,0 +1,263 @@
+"""Which federation events confirm, end, or say nothing about a pairing
+that waits for the other household (§11).
+
+An approved pairing — a trust-relay approval, or a pairing code our admin
+entered for a household we share a space with — is confirmed by the other
+household's first envelope under the pairing's keys: proof that it holds
+the keys and confirmed on its side
+(``federation.inbound_validator.make_confirm_relay_approval``). Not every
+event is that proof, so every :class:`FederationEventType` is in exactly
+one of the three sets below, and the confirm step **fails closed**: only
+:data:`CONFIRMS_PAIRING_EVENT_TYPES` promotes.
+
+A new event type belongs to none of them until somebody decides — the
+tripwire in ``tests/domain/test_pairing_events.py`` fails until it is
+classified, and until then it confirms nothing.
+
+Pure constants, no I/O.
+"""
+
+from __future__ import annotations
+
+from .federation import FederationEventType
+
+#: What a household sends to END a handshake or a pairing. Read under a
+#: waiting pairing's keys they prove the opposite of "it confirmed": the
+#: waiting half is cancelled, never promoted.
+ENDS_PAIRING_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.PAIRING_ABORT,
+        FederationEventType.UNPAIR,
+    }
+)
+
+#: The handshake's own messages. A household sends these BEFORE or WHILE it
+#: pairs (or on somebody else's behalf, as an introducer), so they say
+#: nothing about whether its own side is confirmed: never a confirmation.
+PAIRING_HANDSHAKE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.PAIRING_INTRO,
+        FederationEventType.PAIRING_INTRO_RELAY,
+        FederationEventType.PAIRING_INTRO_AUTO,
+        FederationEventType.PAIRING_INTRO_AUTO_ACK,
+        FederationEventType.PAIRING_INTRO_AUTO_ACK_VIA,
+        FederationEventType.PAIRING_ACCEPT,
+        FederationEventType.PAIRING_CONFIRM,
+        FederationEventType.PAIRING_PEER_ACCEPT,
+        FederationEventType.PAIRING_PEER_CONFIRM,
+    }
+)
+
+#: Ordinary traffic between two households: the post-pair announcements
+#: (``INSTANCE_CAPABILITIES_UPDATED``, ``USERS_SYNC``, the peer directory),
+#: and everything a household's outbox or a space fan-out may deliver
+#: first. A household seals these under a pairing's keys only once ITS row
+#: for the peer holds them — once its own side is confirmed. The first of
+#: them to arrive confirms the waiting half.
+CONFIRMS_PAIRING_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        FederationEventType.INSTANCE_RESYNC_REQUEST,
+        FederationEventType.URL_UPDATED,
+        FederationEventType.GFS_RELAY_PROBE,
+        FederationEventType.GFS_RELAY_PROBE_ACK,
+        FederationEventType.LOCAL_HOME_LOCATION_CHANGED,
+        FederationEventType.USERS_SYNC,
+        FederationEventType.USER_UPDATED,
+        FederationEventType.USER_REMOVED,
+        FederationEventType.USER_STATUS_UPDATED,
+        FederationEventType.USER_MOVED,
+        FederationEventType.USER_IDENTITY_RESOLVE,
+        FederationEventType.SPACE_CREATED,
+        FederationEventType.SPACE_AGE_GATE_UPDATED,
+        FederationEventType.SPACE_CONFIG_CHANGED,
+        FederationEventType.SPACE_CONFIG_CATCH_UP,
+        FederationEventType.SPACE_DISSOLVED,
+        FederationEventType.SPACE_INSTANCE_LEFT,
+        FederationEventType.SPACE_MEMBER_JOINED,
+        FederationEventType.SPACE_MEMBER_LEFT,
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
+        FederationEventType.SPACE_MEMBER_BANNED,
+        FederationEventType.SPACE_MEMBER_UNBANNED,
+        FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+        FederationEventType.SPACE_REMOTE_ADMIN_KICK,
+        FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
+        FederationEventType.SPACE_INVITE_LINK_FORWARD_RESULT,
+        FederationEventType.SPACE_ADMIN_PROPOSAL_UPDATED,
+        FederationEventType.SPACE_INVITE,
+        FederationEventType.SPACE_INVITE_VIA,
+        FederationEventType.SPACE_ACCEPT,
+        FederationEventType.SPACE_JOIN_REQUEST,
+        FederationEventType.SPACE_JOIN_REQUEST_VIA,
+        FederationEventType.SPACE_JOIN_REQUEST_REPLY_VIA,
+        FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+        FederationEventType.SPACE_JOIN_REQUEST_DENIED,
+        FederationEventType.SPACE_JOIN_REQUEST_EXPIRED,
+        FederationEventType.SPACE_JOIN_REQUEST_WITHDRAWN,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY,
+        FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM,
+        FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM_ACK,
+        FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM_DENY,
+        FederationEventType.SPACE_JOIN_REQUEST_BOOTSTRAP,
+        FederationEventType.SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER,
+        FederationEventType.SPACE_ROUTED,
+        FederationEventType.SPACE_FIND_ROUTE,
+        FederationEventType.SPACE_ROUTE_FOUND,
+        FederationEventType.SPACE_ROUTE_STALE,
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_POST_UPDATED,
+        FederationEventType.SPACE_POST_DELETED,
+        FederationEventType.SPACE_MEDIA_BLOB,
+        FederationEventType.SPACE_MEDIA_WANTED,
+        FederationEventType.SPACE_POST_REACTION,
+        FederationEventType.SPACE_COMMENT_CREATED,
+        FederationEventType.SPACE_COMMENT_UPDATED,
+        FederationEventType.SPACE_COMMENT_DELETED,
+        FederationEventType.SPACE_MEMBER_PROFILE_UPDATED,
+        FederationEventType.SPACE_PAGE_CREATED,
+        FederationEventType.SPACE_PAGE_UPDATED,
+        FederationEventType.SPACE_PAGE_DELETED,
+        FederationEventType.SPACE_TASK_CREATED,
+        FederationEventType.SPACE_TASK_UPDATED,
+        FederationEventType.SPACE_TASK_DELETED,
+        FederationEventType.SPACE_TASK_LIST_CREATED,
+        FederationEventType.SPACE_TASK_LIST_UPDATED,
+        FederationEventType.SPACE_TASK_LIST_DELETED,
+        FederationEventType.SPACE_POLL_CREATED,
+        FederationEventType.SPACE_POLL_VOTE_CAST,
+        FederationEventType.SPACE_POLL_CLOSED,
+        FederationEventType.SPACE_STICKY_CREATED,
+        FederationEventType.SPACE_STICKY_UPDATED,
+        FederationEventType.SPACE_STICKY_DELETED,
+        FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+        FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+        FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+        FederationEventType.SPACE_RSVP_UPDATED,
+        FederationEventType.SPACE_RSVP_DELETED,
+        FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
+        FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED,
+        FederationEventType.PERSONAL_CALENDAR_EVENT_DELETED,
+        FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED,
+        FederationEventType.PERSONAL_CALENDAR_RSVP_DELETED,
+        FederationEventType.SPACE_SCHEDULE_CREATED,
+        FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
+        FederationEventType.SPACE_SCHEDULE_FINALIZED,
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        FederationEventType.SPACE_ZONE_UPSERTED,
+        FederationEventType.SPACE_ZONE_DELETED,
+        FederationEventType.SPACE_TIMETABLE_UPSERTED,
+        FederationEventType.SPACE_TIMETABLE_DELETED,
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_UPDATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_DELETED,
+        FederationEventType.SPACE_CHAT_REACTION,
+        FederationEventType.SPACE_MODERATION_SUBMITTED,
+        FederationEventType.SPACE_MODERATION_DECIDED,
+        FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+        FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+        FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+        FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+        FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+        FederationEventType.SPACE_GALLERY_ITEM_UPDATED,
+        FederationEventType.BAZAAR_LISTING_CREATED,
+        FederationEventType.BAZAAR_LISTING_UPDATED,
+        FederationEventType.BAZAAR_BID_PLACED,
+        FederationEventType.BAZAAR_OFFER_ACCEPTED,
+        FederationEventType.BAZAAR_OFFER_MADE,
+        FederationEventType.BAZAAR_OFFER_UPDATED,
+        FederationEventType.BAZAAR_THREAD_MESSAGE,
+        FederationEventType.BAZAAR_LISTING_FAQ_UPDATED,
+        FederationEventType.SPACE_APP_TABLE,
+        FederationEventType.SPACE_APP_SESSION,
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_KEY_EXCHANGE_ACK,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        FederationEventType.SPACE_AUTHORITY_ROTATED,
+        FederationEventType.SPACE_SESSION_CLEANUP,
+        FederationEventType.SPACE_MEMBER_CARD,
+        FederationEventType.SPACE_MAILBOX_DIRECTORY,
+        FederationEventType.SPACE_SYNC_BEGIN,
+        FederationEventType.SPACE_SYNC_CHUNK,
+        FederationEventType.SPACE_SYNC_CHUNK_ACK,
+        FederationEventType.SPACE_SYNC_RESUME,
+        FederationEventType.SPACE_SYNC_COMPLETE,
+        FederationEventType.SPACE_SYNC_OFFER,
+        FederationEventType.SPACE_SYNC_ANSWER,
+        FederationEventType.SPACE_SYNC_ICE,
+        FederationEventType.SPACE_SYNC_DIRECT_READY,
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+        FederationEventType.SPACE_SYNC_REQUEST_MORE,
+        FederationEventType.SPACE_SYNC_REJECTED,
+        FederationEventType.INSTANCE_SYNC_STATUS,
+        FederationEventType.SPACE_PARTITION_GAP,
+        FederationEventType.NODE_PARTITION_CATCHUP,
+        FederationEventType.NODE_PARTITION_GAP,
+        FederationEventType.DM_USER_TYPING,
+        FederationEventType.DM_RELAY,
+        FederationEventType.DM_MESSAGE,
+        FederationEventType.DM_MEDIA_BLOB,
+        FederationEventType.DM_MESSAGE_DELETED,
+        FederationEventType.DM_MESSAGE_REACTION,
+        FederationEventType.DM_MEMBER_ADDED,
+        FederationEventType.DM_GROUP_ROSTER,
+        FederationEventType.DM_GROUP_LEAVE,
+        FederationEventType.DM_HISTORY_REQUEST,
+        FederationEventType.DM_HISTORY_CHUNK,
+        FederationEventType.DM_HISTORY_CHUNK_ACK,
+        FederationEventType.DM_HISTORY_COMPLETE,
+        FederationEventType.PUBLIC_SPACE_ADVERTISE,
+        FederationEventType.PUBLIC_SPACE_WITHDRAWN,
+        FederationEventType.SPACE_DIRECTORY_SYNC,
+        FederationEventType.SPACE_PRIVATE_INVITE,
+        FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
+        FederationEventType.SPACE_PRIVATE_INVITE_DECLINE,
+        FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+        FederationEventType.SPACE_SUBSCRIBER_KEY_HANDOFF,
+        FederationEventType.SPACE_REPORT,
+        FederationEventType.SPACE_REPORT_DECIDED,
+        FederationEventType.SPACE_REPORT_ANSWERED,
+        FederationEventType.PRESENCE_UPDATED,
+        FederationEventType.USER_ONLINE,
+        FederationEventType.USER_IDLE,
+        FederationEventType.USER_OFFLINE,
+        FederationEventType.CALL_OFFER,
+        FederationEventType.CALL_ANSWER,
+        FederationEventType.CALL_DECLINE,
+        FederationEventType.CALL_BUSY,
+        FederationEventType.CALL_HANGUP,
+        FederationEventType.CALL_END,
+        FederationEventType.CALL_ICE,
+        FederationEventType.CALL_ICE_CANDIDATE,
+        FederationEventType.CALL_QUALITY,
+        FederationEventType.HIGHLIGHT_CREATED,
+        FederationEventType.HIGHLIGHT_FRAME_APPENDED,
+        FederationEventType.HIGHLIGHT_FRAME_DELETED,
+        FederationEventType.HIGHLIGHT_DELETED,
+        FederationEventType.HIGHLIGHT_FRAME_VIEWED,
+        FederationEventType.HIGHLIGHT_FRAME_REACTED,
+        FederationEventType.HIGHLIGHT_FRAME_REACTION_REMOVED,
+        FederationEventType.MOMENT_CREATED,
+        FederationEventType.MOMENT_DELETED,
+        FederationEventType.MOMENT_REACTED,
+        FederationEventType.MOMENT_REACTION_REMOVED,
+        FederationEventType.MOMENT_REACTION_ROUTED,
+        FederationEventType.MOMENT_REACTIONS_COUNTED,
+        FederationEventType.MOMENT_PUBLIC_FOLLOW,
+        FederationEventType.MOMENT_PUBLIC_UNFOLLOW,
+        FederationEventType.NETWORK_SYNC,
+        FederationEventType.FEDERATION_RTC_OFFER,
+        FederationEventType.FEDERATION_RTC_ANSWER,
+        FederationEventType.FEDERATION_RTC_ICE,
+        FederationEventType.APP_SESSION,
+        FederationEventType.APP_MESSAGE,
+    }
+)
+
+__all__ = [
+    "CONFIRMS_PAIRING_EVENT_TYPES",
+    "ENDS_PAIRING_EVENT_TYPES",
+    "PAIRING_HANDSHAKE_EVENT_TYPES",
+]

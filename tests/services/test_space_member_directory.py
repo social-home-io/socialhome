@@ -196,8 +196,15 @@ class FakeFederationRepo:
         self.instances: dict[str, SimpleNamespace] = {}
         self.proto_set: list[tuple[str, int]] = []
 
-    async def get_instance(self, instance_id):
-        return self.instances.get(instance_id)
+    async def get_instance(self, instance_id, *, include_unpairing=False):
+        row = self.instances.get(instance_id)
+        if (
+            row is not None
+            and getattr(row, "status", None) is PairingStatus.UNPAIRING
+            and not include_unpairing
+        ):
+            return None
+        return row
 
     async def set_proto_version(self, instance_id, version):
         self.proto_set.append((instance_id, version))
@@ -2709,3 +2716,143 @@ async def test_a_waiting_passed_on_card_is_taken_only_from_a_delegated_admin():
     o.spaces.delegated.clear()  # delegation went off meanwhile
     await _seat_live(o, m)
     assert "card" not in o.spaces.doc(SPACE, m["id"])
+
+
+# ── A pairing ended: the household is seated again from its card ──────────
+
+
+def _reseat_world() -> tuple[World, dict]:
+    """A member's view with household ``a``'s card stored — and a seater
+    that, like the real one, leaves a ``space_session`` row behind."""
+    w, _host = _member_world()
+    a = _hh()
+    w.member(a)
+    w.spaces.put_card(SPACE, _card(a, gfs=GFS))
+
+    async def seater(card):
+        w.seated.append(card.instance_id)
+        w.fed_repo.instances[card.instance_id] = SimpleNamespace(
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.SPACE_SESSION,
+            relay_via=None,
+        )
+
+    w.dir.attach_seater(seater)
+    return w, a
+
+
+async def test_reseat_seats_a_household_whose_card_we_may_use():
+    """The pairing with ``a`` ended and its row went with it; we still
+    share a space, so its plain seat is made again from its card."""
+    w, a = _reseat_world()
+    assert await w.dir.reseat(a["id"]) is True
+    assert w.seated == [a["id"]]
+
+
+async def test_reseat_without_a_card_seats_nobody():
+    w, _a = _reseat_world()
+    stranger = _hh()
+    w.member(stranger)
+    assert await w.dir.reseat(stranger["id"]) is False
+    assert w.seated == []
+
+
+async def test_reseat_asks_the_roster_not_the_card():
+    """A card is keys and an address, never membership: a household our
+    roster holds no member's seat for is not seated again."""
+    w, a = _reseat_world()
+    w.writers.everyone = False
+    assert await w.dir.reseat(a["id"]) is False
+    assert w.seated == []
+
+
+async def test_reseat_needs_a_space_our_people_are_still_in():
+    w, a = _reseat_world()
+    w.spaces.local[SPACE] = []
+    assert await w.dir.reseat(a["id"]) is False
+    assert w.seated == []
+
+
+async def test_reseat_never_touches_a_household_we_are_still_paired_with():
+    w, a = _reseat_world()
+    w.fed_repo.instances[a["id"]] = SimpleNamespace(
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+        relay_via=None,
+    )
+    assert await w.dir.reseat(a["id"]) is False
+    assert w.seated == []
+
+
+async def test_a_directory_card_never_seats_over_an_unpair_tombstone():
+    """The row still has an ``UNPAIR`` to deliver to a household that was
+    offline; a seat written over it would cancel that. The seat is made
+    when the tombstone is purged (:meth:`reseat`)."""
+    w, _a = _reseat_world()
+    b = _hh()
+    w.member(b)
+    w.fed_repo.instances[b["id"]] = SimpleNamespace(
+        status=PairingStatus.UNPAIRING,
+        source=InstanceSource.MANUAL,
+        relay_via=None,
+    )
+    await w.dir._seat(_card(b, gfs=GFS))
+    assert w.seated == []
+
+
+# ── The sealed redeem that seated a pair: recorded once, never guessed ────
+
+
+async def test_the_redeem_role_is_recorded_once_and_survives_everything():
+    """Two shared spaces, in which the "host" differs, and an ownership
+    transfer later: the pair has ONE seat, made by ONE redeem with one
+    role each. That role is recorded from the redeem itself, on its space
+    only, and nothing rewrites it (review finding: it was guessed per
+    space row from who hosts the space, and the first row won — a re-made
+    seat then derived the wrong keys)."""
+    w, a = _reseat_world()
+    card = _card(a, gfs=GFS)
+    # We redeemed a's link for SPACE (role: redeemer).
+    await w.dir.store_seat_card(SPACE, card, redeem=(GFS, True))
+    assert await w.dir._gfs_seat(a["id"]) == (GFS, True)
+
+    # A second shared space that WE host (a would look like "the issuer's
+    # joiner" there), joined over the existing seat: no new redeem seat.
+    w.spaces.rows[SPACE_2] = {w.me["id"]: None, a["id"]: None}
+    w.spaces.owner[SPACE_2] = w.me["id"]
+    w.spaces.local[SPACE_2] = ["u-local"]
+    await w.dir.store_seat_card(SPACE_2, card)
+    assert "gfs" not in w.spaces.doc(SPACE_2, a["id"])
+    # A later redeem in the other direction over that same seat (the seat
+    # writer made no new row) records nothing either.
+    await w.dir.store_seat_card(SPACE_2, card, redeem=(GFS, False))
+    assert await w.dir._gfs_seat(a["id"]) == (GFS, True)
+
+    # SPACE changes hands: a becomes its owner.
+    w.spaces.owner[SPACE] = a["id"]
+    await w.dir.sweep_once()
+    assert await w.dir._gfs_seat(a["id"]) == (GFS, True)
+
+    # The pairing with a ended: the seat is re-made with the redeem's role.
+    remade: list[tuple[str, str, bool]] = []
+
+    async def relay_seater(c, gfs_url, is_redeemer):
+        remade.append((c.instance_id, gfs_url, is_redeemer))
+        w.fed_repo.instances[c.instance_id] = SimpleNamespace(
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.SPACE_SESSION,
+            relay_via=gfs_url,
+        )
+
+    w.dir.attach_seater(w.dir._seater, relay_seater)
+    await w.dir.reseat(a["id"])
+    assert remade == [(a["id"], GFS, True)]
+
+
+async def test_a_dropped_card_takes_its_redeem_note_with_it():
+    w, a = _reseat_world()
+    await w.dir.store_seat_card(SPACE, _card(a, gfs=GFS), redeem=(GFS, False))
+    await w.dir._clear(SPACE, a["id"])
+    assert await w.dir._gfs_seat(a["id"]) is None
+    doc = w.spaces.doc(SPACE, a["id"])
+    assert "gfs" not in doc and "gfs_role" not in doc

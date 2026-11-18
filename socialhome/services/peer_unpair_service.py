@@ -31,7 +31,13 @@ the author's delete can reach the copy, and an unpaired household's can't.
 Deliberately **not** touched: space membership (``space_instances`` /
 remote members). A space is shared by its members, not by the pairing —
 two households can stay co-members of a space and keep receiving its
-content over the mesh after they stop being direct connections.
+content over the mesh after they stop being direct connections. Where
+the two reached each other through a GFS before they paired, the row a
+purge removed was also what carried that space: the ``after_purge`` hook
+(:meth:`PeerUnpairService.attach_after_purge`, the member directory's
+``reseat``) seats the household again as a plain space seat from its
+member card, so ending the pairing leaves the space as it was before the
+people paired.
 
 **A peer that is offline at unpair time.** The first notify is bounded by
 :data:`UNPAIR_NOTIFY_TIMEOUT_S` so an unreachable peer never blocks the
@@ -63,6 +69,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -121,6 +128,7 @@ class PeerUnpairService:
     forget step."""
 
     __slots__ = (
+        "_after_purge",
         "_bus",
         "_dm_media_outbox_repo",
         "_federation",
@@ -161,6 +169,14 @@ class PeerUnpairService:
         #: and the unpair run in this one process, and a crash mid-build
         #: leaves exactly the orphan the sweep exists to collect.
         self._in_progress: set[str] = set()
+        self._after_purge: Callable[[str], Awaitable[object]] | None = None
+
+    def attach_after_purge(self, hook: Callable[[str], Awaitable[object]]) -> None:
+        """What runs once a household's row and everything queued for it
+        are gone (:meth:`purge`): the member directory seats the household
+        again when a space we still share with it calls for a seat
+        (``SpaceMemberDirectory.reseat``). Fail-soft."""
+        self._after_purge = hook
 
     async def unpair(self, instance_id: str) -> bool | None:
         """Tell the peer, then forget it.
@@ -316,6 +332,17 @@ class PeerUnpairService:
         await self._routing_repo.forget_discovered_via(instance_id)
         await self._drop_saved_moments(instance_id)
         await self._federation.close_rtc_peer(instance_id)
+        if self._after_purge is not None:
+            # Last: the old row's queue is swept, so nothing sealed for the
+            # ended pairing can ride a seat made now.
+            try:
+                await self._after_purge(instance_id)
+            except Exception:
+                log.warning(
+                    "unpair: the after-purge hook failed for %s",
+                    instance_id,
+                    exc_info=True,
+                )
 
     async def _drop_saved_moments(self, instance_id: str) -> None:
         """Drop the saves of moments that came from *instance_id* (sign-off

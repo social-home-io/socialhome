@@ -53,8 +53,8 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
     # ``InstanceSource.SPACE_SESSION`` — the seat row's source.
     "SPACE_SESSION": {
         "socialhome/domain/federation.py": (
-            "validator",
-            "defines InstanceSource and the seat's event vocabulary",
+            "non-space exclusion",
+            "InstanceSource, the seat vocabulary, is_space_seat / is_paired",
         ),
         "socialhome/repositories/federation_repo.py": (
             "non-space exclusion",
@@ -79,10 +79,6 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
         "socialhome/federation/routed_envelope.py": (
             "transport",
             "mesh routing never hops through a seat",
-        ),
-        "socialhome/federation/auto_pair_coordinator.py": (
-            "non-space exclusion",
-            "a seat never vouches for a pairing",
         ),
         "socialhome/federation/sync/space/scheduler.py": (
             "transport",
@@ -230,6 +226,10 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "transport",
             "the v_91 ordering gate for rows a multi upload can carry",
         ),
+        "socialhome/repositories/federation_repo.py": (
+            "seat",
+            "upgrade_seat_instance: a confirmed pairing replaces a seat",
+        ),
     },
     "relay_media_ok": {
         "socialhome/federation/federation_service.py": (
@@ -335,15 +335,14 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
 _COUNTS: dict[str, dict[str, int]] = {
     "SPACE_SESSION": {
         "socialhome/app.py": 1,
-        "socialhome/domain/federation.py": 1,
-        "socialhome/federation/auto_pair_coordinator.py": 1,
+        "socialhome/domain/federation.py": 3,
         "socialhome/federation/federation_service.py": 16,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
         "socialhome/federation/routed_envelope.py": 1,
         "socialhome/federation/sync/space/scheduler.py": 1,
         "socialhome/federation/transport.py": 6,
-        "socialhome/repositories/federation_repo.py": 1,
+        "socialhome/repositories/federation_repo.py": 2,
         "socialhome/routes/pairing.py": 1,
         "socialhome/routes/public_spaces.py": 1,
         "socialhome/services/bazaar_thread_service.py": 1,
@@ -357,7 +356,7 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/services/peer_directory_service.py": 1,
         "socialhome/services/space_media_gfs_fetcher.py": 1,
         "socialhome/services/space_media_gfs_uploader.py": 1,
-        "socialhome/services/space_member_directory.py": 4,
+        "socialhome/services/space_member_directory.py": 3,
         "socialhome/services/space_service.py": 4,
         "socialhome/services/url_update_outbound.py": 1,
     },
@@ -382,6 +381,7 @@ _COUNTS: dict[str, dict[str, int]] = {
     "space_session": {
         "socialhome/domain/federation.py": 1,
         "socialhome/federation/invite_token_redeem.py": 4,
+        "socialhome/repositories/federation_repo.py": 1,
         "socialhome/repositories/outbox_repo.py": 1,
         "socialhome/services/dm_service.py": 2,
     },

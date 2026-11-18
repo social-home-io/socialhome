@@ -2642,3 +2642,127 @@ async def test_approving_stores_a_pending_row_until_the_requester_confirms(
     assert [s["type"] for s in rec.sent] == [
         FederationEventType.PAIRING_INTRO_AUTO_ACK_VIA
     ]
+
+
+# ── A pending pairing with a household we share a space with ──────────────
+
+
+def _seat_instance(iid: str) -> RemoteInstance:
+    return dataclasses.replace(
+        _fake_instance(iid),
+        source=InstanceSource.SPACE_SESSION,
+        remote_inbox_url="",
+        local_inbox_id=f"seat-{iid}",
+    )
+
+
+async def _stage_pending_over_a_seat(client, iid: str) -> RemoteInstance:
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_seat_instance(iid))
+    half = dataclasses.replace(
+        _fake_instance(iid),
+        status=PairingStatus.PENDING_RECEIVED,
+        local_inbox_id=f"pair-{iid}",
+        display_name="Delta House",
+    )
+    pending = client.app[federation_service_key].pending_pairings
+    assert await pending.save(half, ttl_s=300)
+    return half
+
+
+async def test_a_pending_pairing_over_a_seat_is_listed_as_pending(client):
+    """The connections list reads rows; this pending pairing has none (the
+    row is the space seat). It is listed in the seat's place — once — as
+    the pending pairing it is, flagged so the SPA can say the shared space
+    keeps working."""
+    await _stage_pending_over_a_seat(client, "peer-seat")
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_seat_instance("peer-only-seat"))
+    await fed_repo.save_instance(_fake_instance("peer-paired"))
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    rows = {row["instance_id"]: row for row in await r.json()}
+
+    assert len(rows) == 3
+    staged = rows["peer-seat"]
+    assert staged["status"] == "pending_received"
+    assert staged["pending_kind"] == "code"
+    assert staged["source"] == "manual"
+    assert staged["shares_space"] is True
+    assert staged["display_name"] == "Delta House"
+    assert staged["transport"] is None
+    # Everybody else is as before.
+    assert rows["peer-only-seat"]["status"] == "confirmed"
+    assert rows["peer-only-seat"]["source"] == "space_session"
+    assert rows["peer-only-seat"]["shares_space"] is False
+    assert rows["peer-only-seat"]["pending_kind"] is None
+    assert rows["peer-paired"]["shares_space"] is False
+    # No key of the unconfirmed handshake, and no inbox id, is in the row.
+    assert not {
+        "key_self_to_remote",
+        "key_remote_to_self",
+        "remote_identity_pk",
+        "local_inbox_id",
+        "remote_inbox_url",
+    } & set(staged)
+    assert "pair-peer-seat" not in (await r.text())
+
+
+async def test_cancelling_a_pending_pairing_over_a_seat_keeps_the_seat(client):
+    await _stage_pending_over_a_seat(client, "peer-seat")
+    events: list[PeerUnpaired] = []
+    client.app[event_bus_key].subscribe(PeerUnpaired, events.append)
+
+    r = await client.delete(
+        "/api/pairing/pending/peer-seat", headers=_auth(client._tok)
+    )
+
+    assert r.status == 200
+    fed_repo = client.app[federation_repo_key]
+    seat = await fed_repo.get_instance("peer-seat")
+    assert seat.source is InstanceSource.SPACE_SESSION
+    assert seat.status is PairingStatus.CONFIRMED
+    assert [e.instance_id for e in events] == ["peer-seat"]
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    [row] = await r.json()
+    assert (row["status"], row["source"]) == ("confirmed", "space_session")
+    # A second cancel: nothing pending — and still never the seat.
+    r = await client.delete(
+        "/api/pairing/pending/peer-seat", headers=_auth(client._tok)
+    )
+    assert r.status == 404
+    assert await fed_repo.get_instance("peer-seat") is not None
+
+
+async def test_removing_a_pending_card_over_a_seat_never_unpairs_the_seat(client):
+    """``DELETE /connections/{id}`` on the pending card: the handshake is
+    what goes, as for any pending row — never the seat under it."""
+    await _stage_pending_over_a_seat(client, "peer-seat")
+
+    r = await client.delete(
+        "/api/pairing/connections/peer-seat", headers=_auth(client._tok)
+    )
+
+    assert r.status == 200
+    seat = await client.app[federation_repo_key].get_instance("peer-seat")
+    assert seat is not None and seat.source is InstanceSource.SPACE_SESSION
+    pending = client.app[federation_service_key].pending_pairings
+    assert pending.staged("peer-seat") is None
+
+
+async def test_a_space_seat_is_never_unpaired_from_the_connections_endpoint(client):
+    """A stale pending card (its handshake expired) must not turn a click
+    into an ``UNPAIR`` over the seat: the household is no pairing to end."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_seat_instance("peer-seat"))
+    events: list[PeerUnpaired] = []
+    client.app[event_bus_key].subscribe(PeerUnpaired, events.append)
+
+    r = await client.delete(
+        "/api/pairing/connections/peer-seat", headers=_auth(client._tok)
+    )
+
+    assert r.status == 404
+    seat = await fed_repo.get_instance("peer-seat")
+    assert seat is not None and seat.status is PairingStatus.CONFIRMED
+    assert events == []

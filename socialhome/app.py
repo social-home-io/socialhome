@@ -1779,6 +1779,8 @@ def _wire_federation_stack(
         own_identity_pk=identity.identity_public_key,
         inbox=auto_pair_inbox,
         preferences_repo=preferences_repo,
+        # One store for every handshake and the inbound pipeline.
+        pending_pairings=federation_service.pending_pairings,
     )
     federation_service._event_registry.register(
         FederationEventType.PAIRING_INTRO_AUTO,
@@ -1804,6 +1806,7 @@ def _wire_federation_stack(
         federation=federation_service,
         federation_repo=federation_repo,
         auto_pair=auto_pair_coordinator,
+        pending_pairings=federation_service.pending_pairings,
     )
     space_membership_handlers = SpaceMembershipInboundHandlers(
         bus=bus,
@@ -5310,6 +5313,10 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         member_directory.attach_to(federation_service)
         member_directory.wire(bus)
+        # A pairing that ends leaves the space the two households share as
+        # it was before they paired: the household is seated again from
+        # its member card.
+        app[K.peer_unpair_service_key].attach_after_purge(member_directory.reseat)
         if gfs_channels is not None:
             # A joiner's "seated" card re-sends its private-channel grant:
             # the one sent when its seat went live can beat its seat.

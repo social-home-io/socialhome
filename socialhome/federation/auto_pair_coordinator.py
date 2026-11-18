@@ -50,6 +50,17 @@ Both sides verify every signature against identity public keys they
 already trust (via their own direct pairing with B). Session keys are
 derived from ephemeral X25519 ECDH — B sees the public halves but
 cannot derive the secret.
+
+**A space seat is not a pairing.** A household we merely share a space
+with (a confirmed ``space_session`` row) is not "already paired" — A may
+ask for it and C may approve it — and is nobody B vouches for or to
+(:func:`~socialhome.domain.federation.is_paired`). Both pending halves (A's
+request, C's approval) are then kept beside the seat instead of over it
+(:class:`~socialhome.federation.pending_pairing.PendingPairings`), so the
+space keeps flowing under the seat's keys until the pair confirms: on A
+when the ack verifies, on C when A's first envelope under the new keys
+does. Each half lives for
+:data:`~socialhome.services.auto_pair_inbox.AUTO_PAIR_REQUEST_TTL_SECONDS`.
 """
 
 from __future__ import annotations
@@ -78,20 +89,28 @@ from ..domain.events import (
     PairingConfirmed,
 )
 from ..domain.federation import (
+    PENDING_KIND_REQUEST,
     AutoPairRequestExpiredError,
     FederationEventType,
     InstanceSource,
     PairingAlreadyConfirmedError,
     PairingStatus,
     RemoteInstance,
+    is_paired,
+    pending_kind,
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.preferences_repo import AbstractPreferencesRepo
-from ..services.auto_pair_inbox import AutoPairInbox, auto_pair_request_expired
+from ..services.auto_pair_inbox import (
+    AUTO_PAIR_REQUEST_TTL_SECONDS,
+    AutoPairInbox,
+    auto_pair_request_expired,
+)
 from .inbound_validator import TIMESTAMP_SKEW_SECONDS
+from .pending_pairing import PendingPairings
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
@@ -222,6 +241,7 @@ class AutoPairCoordinator:
         "_own_identity_pk",
         "_own_identity_seed",
         "_pending",
+        "_pending_pairings",
         "_preferences",
         "_repo",
     )
@@ -237,8 +257,12 @@ class AutoPairCoordinator:
         own_identity_pk: bytes,
         inbox: AutoPairInbox,
         preferences_repo: AbstractPreferencesRepo | None = None,
+        pending_pairings: PendingPairings | None = None,
     ) -> None:
         self._repo = federation_repo
+        #: Where our pending half lives (the row, or beside a space seat) —
+        #: the one the QR handshake and the inbound pipeline share.
+        self._pending_pairings = pending_pairings or PendingPairings(federation_repo)
         #: The household's ``share_home_default``: a pair made through an
         #: introducer has no dialog switch, so its row takes the default.
         self._preferences = preferences_repo
@@ -249,6 +273,10 @@ class AutoPairCoordinator:
         self._own_identity_pk = own_identity_pk
         self._pending: dict[str, _PendingAutoSession] = {}
         self._inbox = inbox
+
+    @property
+    def pending_pairings(self) -> PendingPairings:
+        return self._pending_pairings
 
     async def _share_home_default(self) -> bool:
         """The household's "share our home with households we pair with"
@@ -268,14 +296,10 @@ class AutoPairCoordinator:
         own_inbox_base_url: str,
     ) -> dict:
         via = await self._repo.get_instance(via_instance_id)
-        if via is None or via.status is not PairingStatus.CONFIRMED:
-            raise ValueError(
-                "vouching peer must be a confirmed paired instance",
-            )
-        # §D2b: a ``space_session`` household reached us through an
-        # invite link, not a QR handshake — there is no vouching to
-        # inherit, so it can never introduce us to a third household.
-        if via.source is InstanceSource.SPACE_SESSION:
+        # §D2b: a ``space_session`` household reached us through a space,
+        # not a handshake — there is no vouching to inherit, so it can
+        # never introduce us to a third household.
+        if not is_paired(via):
             raise ValueError(
                 "vouching peer must be a confirmed paired instance",
             )
@@ -290,8 +314,9 @@ class AutoPairCoordinator:
                 "own_inbox_base_url required — set [standalone].external_url"
                 " (or HA's external URL) before auto-pairing",
             )
-        existing = await self._repo.get_instance(target_instance_id)
-        if existing is not None and existing.status is PairingStatus.CONFIRMED:
+        # A space seat for the target is not a pairing: the request goes
+        # out, and its pending half waits beside the seat.
+        if is_paired(await self._repo.get_instance(target_instance_id)):
             raise ValueError("already paired with this instance")
 
         self._prune_pending()
@@ -306,17 +331,6 @@ class AutoPairCoordinator:
         # pairing.
         own_local_inbox_id = secrets.token_urlsafe(24)
         a_inbox_url = f"{own_inbox_base_url.rstrip('/')}/{own_local_inbox_id}"
-        self._pending[token] = _PendingAutoSession(
-            token=token,
-            target_instance_id=target_instance_id,
-            via_instance_id=via_instance_id,
-            dh_sk=dh_kp.private_key,
-            dh_pk_hex=dh_kp.public_key.hex(),
-            ts=ts,
-            nonce=nonce,
-            a_inbox_url=a_inbox_url,
-        )
-
         provisional = RemoteInstance(
             id=target_instance_id,
             display_name=target_display_name or target_instance_id[:8],
@@ -331,7 +345,21 @@ class AutoPairCoordinator:
             paired_at=ts,
             share_home=await self._share_home_default(),
         )
-        await self._repo.save_instance(provisional)
+        await self._pending_pairings.save(
+            provisional, ttl_s=AUTO_PAIR_REQUEST_TTL_SECONDS
+        )
+        # Only once the half is stored (it can be refused): an ack is
+        # accepted against this session alone.
+        self._pending[token] = _PendingAutoSession(
+            token=token,
+            target_instance_id=target_instance_id,
+            via_instance_id=via_instance_id,
+            dh_sk=dh_kp.private_key,
+            dh_pk_hex=dh_kp.public_key.hex(),
+            ts=ts,
+            nonce=nonce,
+            a_inbox_url=a_inbox_url,
+        )
 
         payload = {
             "target_id": target_instance_id,
@@ -417,8 +445,10 @@ class AutoPairCoordinator:
         except ValueError:
             log.warning("auto-pair (vouch): invalid ts=%s", ts)
             return
+        # Paired, both of them: a household we only share a space with is
+        # nobody we vouch for, or to.
         a = await self._repo.get_instance(event.from_instance)
-        if a is None or a.status is not PairingStatus.CONFIRMED:
+        if a is None or not is_paired(a):
             log.warning(
                 "auto-pair (vouch): refusing — sender=%s status=%s",
                 event.from_instance,
@@ -426,7 +456,7 @@ class AutoPairCoordinator:
             )
             return
         c = await self._repo.get_instance(target_id)
-        if c is None or c.status is not PairingStatus.CONFIRMED:
+        if c is None or not is_paired(c):
             log.warning(
                 "auto-pair (vouch): refusing — target=%s status=%s (must be a"
                 " confirmed paired peer of B)",
@@ -537,7 +567,7 @@ class AutoPairCoordinator:
             return
 
         b = await self._repo.get_instance(via_b_id)
-        if b is None or b.status is not PairingStatus.CONFIRMED:
+        if b is None or not is_paired(b):
             log.info(
                 "auto-pair: refusing intro via unknown vouching peer=%s",
                 via_b_id,
@@ -569,9 +599,8 @@ class AutoPairCoordinator:
             )
             return
 
-        # Don't duplicate pending entries for the same sender.
-        existing = await self._repo.get_instance(a_id)
-        if existing is not None and existing.status is PairingStatus.CONFIRMED:
+        # Paired already — a space seat for A is not that.
+        if is_paired(await self._repo.get_instance(a_id)):
             log.info("auto-pair: already paired with %s", a_id)
             return
 
@@ -620,8 +649,8 @@ class AutoPairCoordinator:
         if auto_pair_request_expired(req.ts):
             # Measured from A's own signed timestamp: A has stopped waiting.
             raise AutoPairRequestExpiredError()
-        existing = await self._repo.get_instance(req.from_a_id)
-        if existing is not None and existing.status is PairingStatus.CONFIRMED:
+        existing = await self._pending_pairings.get(req.from_a_id)
+        if is_paired(existing):
             # Paired meanwhile (e.g. by a pairing code): never overwrite a
             # live pairing's keys with this request's.
             raise PairingAlreadyConfirmedError("Already paired with this household.")
@@ -641,12 +670,19 @@ class AutoPairCoordinator:
             is_initiator=False,
         )
         now = datetime.now(UTC).isoformat()
-        inbox_id = existing.local_inbox_id if existing else secrets.token_urlsafe(24)
+        # An approval has an inbox of its own, always a fresh one — never
+        # a seat's (that is how the inbound pipeline tells A's first
+        # envelope under the new keys from the seat's traffic) and never
+        # one another handshake gave out (a pairing code's, also once its
+        # admin entered it; a request's; an earlier approval's).
+        inbox_id = secrets.token_urlsafe(24)
         # Pending, not confirmed: A may have cancelled its request meanwhile,
         # and a one-sided confirmed row would be a pairing A never agreed
         # to. A confirms when our ack reaches it and then talks to us; its
         # first envelope that verifies and decrypts under these keys
-        # confirms the row here (``make_confirm_relay_approval``).
+        # confirms the row here (``make_confirm_relay_approval``). Over a
+        # space seat the half waits beside it — the seat keeps carrying
+        # the space meanwhile.
         approved = RemoteInstance(
             id=req.from_a_id,
             display_name=req.from_a_display or req.from_a_id[:8],
@@ -661,7 +697,9 @@ class AutoPairCoordinator:
             paired_at=now,
             share_home=await self._share_home_default(),
         )
-        await self._repo.save_instance(approved)
+        # No expiry, as for an approval stored in the row: it waits for
+        # the requester's first envelope or our admin's cancel.
+        await self._pending_pairings.save(approved, ttl_s=None)
 
         # Sign ack and send back to A.
         c_id = derive_instance_id(self._own_identity_pk)
@@ -751,7 +789,7 @@ class AutoPairCoordinator:
             log.warning("auto-pair (relay): missing to_a_id / a_id")
             return
         a = await self._repo.get_instance(to_a_id)
-        if a is None or a.status is not PairingStatus.CONFIRMED:
+        if a is None or not is_paired(a):
             log.warning(
                 "auto-pair (relay): refusing — a_id=%s not a confirmed peer of B",
                 to_a_id,
@@ -812,7 +850,7 @@ class AutoPairCoordinator:
         a_id = derive_instance_id(self._own_identity_pk)
         a_inbox_url = session.a_inbox_url
         b = await self._repo.get_instance(via_b_id)
-        if b is None:
+        if b is None or not is_paired(b):
             log.warning("auto-pair ack: via-peer %s unknown", via_b_id)
             return
         try:
@@ -860,9 +898,9 @@ class AutoPairCoordinator:
             c_dh_pk_hex,
             is_initiator=True,
         )
-        existing = await self._repo.get_instance(c_id)
-        if existing is None:
-            # Our provisional row is gone — the request was cancelled after
+        existing = await self._pending_pairings.get(c_id)
+        if existing is None or pending_kind(existing) != PENDING_KIND_REQUEST:
+            # Our provisional half is gone — the request was cancelled after
             # this ack had already taken the in-memory session.
             log.info("auto-pair ack: request to %s was cancelled — ignored", c_id)
             return
@@ -878,10 +916,13 @@ class AutoPairCoordinator:
             source=InstanceSource.MANUAL,
             relay_via=via_b_id,
             paired_at=datetime.now(UTC).isoformat(),
+            # The request's own choice: a row keeps it by itself, the seat
+            # a staged request replaces holds another.
+            share_home=existing.share_home,
         )
-        # Only over our still-pending provisional row, in one transaction:
+        # Only over our still-pending provisional half, in one transaction:
         # a cancel that committed first leaves nothing to confirm.
-        if not await self._repo.promote_pending_instance(confirmed):
+        if not await self._pending_pairings.promote(confirmed):
             log.info("auto-pair ack: request to %s was cancelled — ignored", c_id)
             return
         await self._bus.publish(PairingConfirmed(instance_id=c_id))

@@ -2217,6 +2217,7 @@
   "connections.meta.waiting_code": "Esperando a que se use el código de vinculación",
   "connections.meta.waiting_request": "Esperando a que {name} acepte tu solicitud",
   "connections.meta.waiting_approval": "Esperando a que {name} confirme",
+  "connections.meta.pending_shares_space": "Vuestro espacio compartido sigue funcionando mientras tanto",
   "connections.pending.request_title": "¿Cancelar tu solicitud de vinculación con {name}?",
   "connections.pending.request_body": "{name} ya no podrá aceptarla.",
   "connections.pending.request_ok": "Cancelar solicitud",
