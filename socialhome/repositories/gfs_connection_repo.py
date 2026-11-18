@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import sqlite3
 from typing import Protocol, runtime_checkable
 
@@ -10,8 +9,6 @@ from ..db import AsyncDatabase
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..infrastructure.key_manager import KeyManagerError
 from .base import rows_to_dicts
-
-log = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -378,10 +375,12 @@ class SqliteGfsConnectionRepo:
         self, space_id: str, gfs_id: str, channel_id: str
     ) -> bytes | None:
         """The stored signing seed of a pending channel withdrawal, or
-        ``None`` (no row, none stored, no KEK wired, or a value that does
-        not unwrap for this row)."""
-        if self._kek is None:
-            return None
+        ``None`` when there is no row or none was recorded with it.
+
+        A seed that WAS recorded and cannot be read — no KEK wired, or a
+        value that does not unwrap for this row — raises
+        :class:`KeyManagerError`: "unreadable" must never be mistaken for
+        "none", or the caller would give the unregister up."""
         row = await self._db.fetchone(
             "SELECT channel_seed FROM gfs_channel_withdrawals"
             " WHERE space_id=? AND gfs_connection_id=? AND channel_id=?",
@@ -389,18 +388,12 @@ class SqliteGfsConnectionRepo:
         )
         if row is None or row["channel_seed"] is None:
             return None
-        try:
-            return self._kek.decrypt(
-                row["channel_seed"],
-                associated_data=self._channel_aad(space_id, gfs_id, channel_id),
-            )
-        except KeyManagerError:
-            log.warning(
-                "gfs: the stored channel seed for space %s on %s does not unwrap",
-                space_id,
-                gfs_id,
-            )
-            return None
+        if self._kek is None:
+            raise KeyManagerError("a channel seed is stored but no KEK is wired")
+        return self._kek.decrypt(
+            row["channel_seed"],
+            associated_data=self._channel_aad(space_id, gfs_id, channel_id),
+        )
 
     async def list_channel_withdrawals(
         self, *, space_id: str | None = None, gfs_id: str | None = None

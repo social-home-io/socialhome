@@ -146,6 +146,7 @@ from ..gfs_channel import (
     sign_unregister,
     verify_grant,
 )
+from ..infrastructure.key_manager import KeyManagerError
 from ..outbound_fetch import OutboundFetchRefused
 from ..task_drain import wait_tasks_done
 from .gfs_connection_service import GfsConnectionService
@@ -189,12 +190,16 @@ class _SyncScheduler(Protocol):
 
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
-#: How many refusals in a row (a non-retryable 4xx) a pending unregister
-#: survives before it is given up. A refusal is not a confirmation — clock
-#: skew or a stale addressee key answers 403 and heals — but a channel a
-#: server pinned to ANOTHER key (it was never ours there) refuses for good,
-#: and its row must not block new signing-key shares forever.
-RETIRE_REFUSALS_MAX: int = 12
+#: First wait before a pending unregister is sent again to a server that
+#: just failed it — unreachable or refusing alike; doubles per failure up to
+#: the ceiling (the re-pin's schedule, ``GFS_REPIN_RETRY_*``). A reconnect
+#: of that server asks at once. There is NO give-up: a refusal is not a
+#: confirmation (clock skew or a stale server key answers 403 and heals),
+#: the channel may still be open there, and its row keeps blocking new
+#: signing-key shares for the space until the server confirms or the owner
+#: disconnects it — the owner is told through ``space_delegation_blocked``.
+RETIRE_RETRY_MIN_S: float = 240.0
+RETIRE_RETRY_MAX_S: float = 6 * 3600.0
 
 #: Queue-item kinds of the channel retry queue.
 _KIND_ANON = "channel_item_anon"
@@ -271,7 +276,7 @@ class GfsChannelService:
         "_own_seed",
         "_registered",
         "_remote_members",
-        "_retire_refused",
+        "_retire_tried",
         "_retry",
         "_space_service",
         "_spaces",
@@ -318,10 +323,10 @@ class GfsChannelService:
         #: channel id → ``gfs_instance_id``s that confirmed our registration
         #: in this process (the owner's grants name only these).
         self._registered: dict[str, set[str]] = {}
-        #: Refusals in a row per pending unregister ``(space, connection,
-        #: channel)`` — see :data:`RETIRE_REFUSALS_MAX`. In memory: a
-        #: restart starts the count over.
-        self._retire_refused: dict[tuple[str, str, str], int] = {}
+        #: ``(space, connection, channel)`` → ``(not before, wait)`` of a
+        #: pending unregister's last failed attempt (monotonic seconds) —
+        #: see :data:`RETIRE_RETRY_MIN_S`. In memory: a restart asks again.
+        self._retire_tried: dict[tuple[str, str, str], tuple[float, float]] = {}
         #: Spaces with a take-over replacement in flight (the persisted
         #: per-space cooldown bounds them across restarts).
         self._healing: set[str] = set()
@@ -665,9 +670,12 @@ class GfsChannelService:
         this channel derives from was rotated away. Without that a server
         that missed the one request kept the old channel open for whoever
         still holds the retired key."""
-        seed = await self._matching_seed(space)
-        if seed is not None:
-            channel_seed = derive_channel_seed(seed, space.id, channel_id)
+        # The seed is recorded only when it is THE channel's: it derives the
+        # stored channel key (as every other signer checks). Anything else
+        # would sign nothing there.
+        found = await self._channel_seed(space)
+        if found is not None and found[0] == channel_id:
+            channel_seed = found[1]
             # Only where the channel lives: the chosen servers (reachable
             # right now or not), any it was registered on in this process,
             # and those a list change already dropped (their pending rows
@@ -717,7 +725,7 @@ class GfsChannelService:
                     space.id, channel_id, owing
                 )
         # Every pending row of the space, the ones just recorded included.
-        await self.withdraw_pending(space_id=space.id)
+        await self.withdraw_pending(space_id=space.id, force=True)
         self._registered.pop(channel_id, None)
         await self._spaces.set_gfs_channel(space.id, None, None)
         log.info(
@@ -728,15 +736,21 @@ class GfsChannelService:
         )
 
     async def withdraw_pending(
-        self, *, space_id: str | None = None, gfs_id: str | None = None
+        self,
+        *,
+        space_id: str | None = None,
+        gfs_id: str | None = None,
+        force: bool = False,
     ) -> int:
         """Send the pending channel withdrawals (migration 0095, recorded by
         the owner's list change BEFORE it was stored), optionally for one
         space / one connection: an anonymous, channel-key-signed unregister
         each. A row is forgotten once the server confirmed, or can never
         confirm (no seed was recorded with it and the space or its seed is
-        gone), or the server refused it :data:`RETIRE_REFUSALS_MAX` times in
-        a row. A connection that is
+        gone — said at WARNING). Anything else keeps its row for good:
+        unreachable or refused, the next attempt waits
+        (:data:`RETIRE_RETRY_MIN_S`, doubling), unless *force* (a reconnect).
+        A connection that is
         not active right now keeps its rows: retried when it reconnects
         (:meth:`heal`). Returns how many were confirmed. Never raises."""
         try:
@@ -747,36 +761,43 @@ class GfsChannelService:
             log.exception("gfs.channel: pending withdrawals unreadable")
             return 0
         done = 0
+        now = _monotonic()
         for row_space, conn_id, channel_id in rows:
+            row = (row_space, conn_id, channel_id)
             try:
                 conn = await self._conn_repo.get(conn_id)
                 if conn is not None and conn.status != "active":
                     continue
+                tried = self._retire_tried.get(row)
+                if not force and tried is not None and now < tried[0]:
+                    continue  # its wait is not over
                 outcome = (
                     await self._unregister_one(row_space, channel_id, conn)
                     if conn is not None
                     else None
                 )
-                if outcome is not None and outcome.kind == "transient":
-                    continue
-                row = (row_space, conn_id, channel_id)
                 if outcome is not None and outcome.kind != "delivered":
-                    refused = self._retire_refused.get(row, 0) + 1
-                    if refused < RETIRE_REFUSALS_MAX:
-                        # Refused, not confirmed: the channel may still be
-                        # open there. Kept (it blocks new seed shares) and
-                        # asked again.
-                        self._retire_refused[row] = refused
-                        continue
+                    # Unreachable or refused — not confirmed either way:
+                    # the channel may still be open there. The row stays
+                    # (a retired channel's blocks new seed shares) and the
+                    # next attempt waits, twice as long each time.
+                    wait = (
+                        min(tried[1] * 2, RETIRE_RETRY_MAX_S)
+                        if tried is not None
+                        else RETIRE_RETRY_MIN_S
+                    )
+                    self._retire_tried[row] = (now + wait, wait)
+                    continue
+                if outcome is None and conn is not None:
                     log.warning(
-                        "gfs.channel: giving up on unregistering channel %s "
-                        "on GFS %s after %d refusals — it may stay open there "
-                        "until that server's idle sweep",
+                        "gfs.channel: the unregister of channel %s on GFS %s "
+                        "can never be signed (no seed was recorded with it and "
+                        "the space key changed) — forgotten; it stays open "
+                        "there until that server's idle sweep",
                         channel_id,
                         conn_id,
-                        refused,
                     )
-                self._retire_refused.pop(row, None)
+                self._retire_tried.pop(row, None)
                 await self._conn_repo.delete_channel_withdrawal(
                     row_space, conn_id, channel_id
                 )
@@ -795,9 +816,23 @@ class GfsChannelService:
         # The seed recorded with the row (a retire, 0147) signs even after
         # the space key it derived from is gone; a row without one (a
         # dropped server) is derived from the live seed.
-        channel_seed = await self._conn_repo.get_channel_withdrawal_seed(
-            space_id, conn.id, channel_id
-        )
+        try:
+            channel_seed = await self._conn_repo.get_channel_withdrawal_seed(
+                space_id, conn.id, channel_id
+            )
+        except KeyManagerError:
+            # A seed WAS recorded and cannot be read (another KEK, a damaged
+            # row). Not "can never confirm": the channel may still be open,
+            # so the row stays owed.
+            log.warning(
+                "gfs.channel: the signing seed recorded for the unregister of "
+                "channel %s on GFS %s cannot be read — kept, and it keeps "
+                "blocking new signing-key shares for space %s",
+                channel_id,
+                conn.id,
+                space_id,
+            )
+            return PublishOutcome.transient()
         if channel_seed is None:
             space = await self._spaces.get(space_id)
             if space is None:
@@ -1200,7 +1235,7 @@ class GfsChannelService:
         # answers before we caught up is never evidence.
         self._connected_at[conn.id] = _monotonic()
         # Withdrawals this server still owes us (it was down, or suspended).
-        await self.withdraw_pending(gfs_id=conn.id)
+        await self.withdraw_pending(gfs_id=conn.id, force=True)
         supported = await self._gfs.private_channels_supported(conn)
         if self._capability_hook is not None and (
             supported or not self._gfs.capability_unknown(conn)

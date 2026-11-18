@@ -12,7 +12,7 @@ from dataclasses import replace
 import pytest
 
 from socialhome.domain.federation import GfsConnection
-from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.infrastructure.key_manager import KeyManager, KeyManagerError
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
 pytestmark = pytest.mark.asyncio
@@ -311,7 +311,9 @@ async def test_channel_withdrawal_keeps_its_seed_wrapped(db):
         " SELECT channel_seed FROM gfs_channel_withdrawals"
         " WHERE gfs_connection_id='gfs-1') WHERE gfs_connection_id='gfs-2'"
     )
-    assert await repo.get_channel_withdrawal_seed("sp", "gfs-2", ch) is None
+    # A value that does not unwrap for its row is an error, never "no seed".
+    with pytest.raises(KeyManagerError):
+        await repo.get_channel_withdrawal_seed("sp", "gfs-2", ch)
     assert await repo.get_channel_withdrawal_seed("sp", "nope", ch) is None
 
 
@@ -323,3 +325,7 @@ async def test_channel_seed_needs_the_kek(repo):
         )
     await repo.add_channel_withdrawals("sp", "ab" * 16, ["gfs-1"])
     assert await repo.get_channel_withdrawal_seed("sp", "gfs-1", "ab" * 16) is None
+    # A stored seed with no KEK to read it is an error too.
+    await repo._db.enqueue("UPDATE gfs_channel_withdrawals SET channel_seed='x'")
+    with pytest.raises(KeyManagerError):
+        await repo.get_channel_withdrawal_seed("sp", "gfs-1", "ab" * 16)

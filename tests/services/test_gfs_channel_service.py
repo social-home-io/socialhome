@@ -50,7 +50,7 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.infrastructure.key_manager import KeyManager, KeyManagerError
 from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.services import gfs_channel_service as chan_mod
 from socialhome.services.gfs_channel_service import GfsChannelService
@@ -283,6 +283,8 @@ class _Conns:
                 self.seeds[row] = channel_seed
 
     async def get_channel_withdrawal_seed(self, space_id, gfs_id, channel_id):
+        if getattr(self, "unreadable", False):
+            raise KeyManagerError("KEK decrypt failed")
         return self.seeds.get((space_id, gfs_id, channel_id))
 
 
@@ -1936,7 +1938,8 @@ async def test_a_retire_the_server_missed_is_retried_after_the_seed_changed(
     assert await env.owner.svc.withdraw_pending() == 0
     assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
     monkeypatch.undo()
-    assert await env.owner.svc.withdraw_pending() == 1
+    # The server is back (its reconnect asks at once).
+    assert await env.owner.svc.withdraw_pending(force=True) == 1
     assert await repo.get(channel_id) is None
     assert conns.withdrawals == []
     assert conns.seeds == {}
@@ -1959,7 +1962,7 @@ async def test_a_retire_keeps_an_earlier_pending_withdrawal_signable(env, monkey
     assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
     _swap_authority_seed(env.owner)
     monkeypatch.undo()
-    assert await env.owner.svc.withdraw_pending() == 1
+    assert await env.owner.svc.withdraw_pending(force=True) == 1
     assert await env.app[gfs_channel_repo_key].get(channel_id) is None
 
 
@@ -2050,42 +2053,76 @@ async def test_a_retire_records_a_suspended_server_a_restart_forgot(env):
     assert (SPACE_ID, "conn-1", channel_id) in conns.seeds
 
 
-async def test_a_refused_retire_is_kept_and_asked_again(env, monkeypatch):
-    """A 403 (clock skew, a stale addressee key) is not a confirmation: the
-    row and its seed stay for the next passes. Only after many refusals in
-    a row is it given up, loudly."""
+async def test_a_refused_retire_is_never_given_up_and_backs_off(env, monkeypatch):
+    """A 403 (clock skew, a stale server key) is not a confirmation, and a
+    channel that may still be open must keep blocking new seed shares: the
+    row and its seed stay for good. Each failed attempt — refused or
+    unreachable alike — doubles the wait before the next, so a server that
+    never confirms costs a few requests a day; a reconnect asks at once."""
+    clock = [1000.0]
+    monkeypatch.setattr(chan_mod, "_monotonic", lambda: clock[0])
     _choose(env, env.owner, _own(env, env.owner))
     channel_id = await _channel_ready(env)
     conns = env.owner.svc._conn_repo
     repo = env.app[gfs_channel_repo_key]
+    asked: list[float] = []
+    outcome = [chan_mod.PublishOutcome.permanent()]
 
-    async def refused(*_a, **_k):
-        return chan_mod.PublishOutcome.permanent()
+    async def answer(*_a, **_k):
+        asked.append(clock[0])
+        return outcome[0]
 
-    monkeypatch.setattr(GfsChannelService, "_post", refused)
+    monkeypatch.setattr(GfsChannelService, "_post", answer)
     assert await env.owner.svc.retire(SPACE_ID)
-    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
-    for _ in range(chan_mod.RETIRE_REFUSALS_MAX - 2):
+    row = (SPACE_ID, "conn-1", channel_id)
+    assert conns.withdrawals == [row] and row in conns.seeds
+    assert len(asked) == 1
+    for _ in range(20):  # twenty retry passes inside the first wait
         assert await env.owner.svc.withdraw_pending() == 0
-    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    assert len(asked) == 1
+    clock[0] += chan_mod.RETIRE_RETRY_MIN_S
+    outcome[0] = chan_mod.PublishOutcome.transient()
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert len(asked) == 2
+    clock[0] += chan_mod.RETIRE_RETRY_MIN_S  # the wait doubled
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert len(asked) == 2
+    clock[0] += 400 * 24 * 3600.0  # over a year later: still owed
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert len(asked) == 3
+    assert conns.withdrawals == [row] and row in conns.seeds
+    # The reconnect heal does not wait.
     monkeypatch.undo()
-    assert await env.owner.svc.withdraw_pending() == 1
+    await env.owner.svc.heal("conn-1")
     assert await repo.get(channel_id) is None
     assert conns.withdrawals == []
 
 
-async def test_a_retire_refused_for_good_is_given_up(env, monkeypatch, caplog):
+async def test_a_seed_that_does_not_unwrap_keeps_the_row_owed(env, caplog):
+    """The stored channel seed is unreadable (another KEK, a damaged row):
+    the unregister cannot be signed, but the channel may still be open —
+    the row stays, loudly, instead of being forgotten."""
     _choose(env, env.owner, _own(env, env.owner))
     channel_id = await _channel_ready(env)
     conns = env.owner.svc._conn_repo
-
-    async def refused(*_a, **_k):
-        return chan_mod.PublishOutcome.permanent()
-
-    monkeypatch.setattr(GfsChannelService, "_post", refused)
+    conns.conn = replace(conns.conn, status="suspended")
     assert await env.owner.svc.retire(SPACE_ID)
+    _swap_authority_seed(env.owner)
+    conns.conn = replace(conns.conn, status="active")
+    conns.unreadable = True
     with caplog.at_level("WARNING"):
-        for _ in range(chan_mod.RETIRE_REFUSALS_MAX):
-            await env.owner.svc.withdraw_pending()
-    assert conns.withdrawals == []
-    assert f"giving up on unregistering channel {channel_id}" in caplog.text
+        assert await env.owner.svc.withdraw_pending() == 0
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    assert "cannot be read" in caplog.text
+
+
+async def test_a_retire_records_no_seed_that_is_not_the_channels(env):
+    """The stored channel key is not the one our seed derives (the seed
+    changed under us): a derived seed would sign nothing there, so none is
+    recorded."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    env.owner.spaces.channels[SPACE_ID] = (channel_id, "00" * 32)
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.seeds == {}
