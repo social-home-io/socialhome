@@ -7822,8 +7822,10 @@ class SpaceService(
             # elevation; tell the SPA so it can say "you're in as a member,
             # an admin must approve your admin role".
             for r in await self._spaces.list_pending_join_requests(member.space_id):
-                if r["user_id"] == user_id and (
-                    r.get("requested_role") == SpaceRole.ADMIN.value
+                if (
+                    r["user_id"] == user_id
+                    and not r.get("remote_applicant_instance_id")
+                    and r.get("requested_role") == SpaceRole.ADMIN.value
                 ):
                     result["pending_role"] = SpaceRole.ADMIN.value
                     break

@@ -65,6 +65,7 @@ from socialhome.domain.events import (
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
     SpaceDelegationBlocked,
+    SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
     SpaceLocationFeatureEnabled,
@@ -3936,6 +3937,55 @@ async def test_join_denied_bell_opens_the_space_landing(stack):
         )
     )
     assert await _links(stack, b, "space_join_denied") == ["/spaces/sp-x/about"]
+
+
+async def test_another_households_request_under_a_local_user_id_is_not_that_user(stack):
+    """A remote ``user_id`` is whatever the other household sends. A request
+    another household filed under a LOCAL person's user id (a leaked admin
+    link redeemed under it) is not that person's: the admins' bell does not
+    name them, and the answer to it is not sent to them."""
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    repo = _space_repo(stack.db)
+    space_svc = SpaceService(
+        repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Club")
+    for rid in ("jr-a", "jr-b"):
+        await repo.save_join_request(
+            space.id,
+            bob.user_id,
+            request_id=rid,
+            requested_role="admin",
+            remote_applicant_instance_id="peer-far",
+        )
+    await stack.bus.publish(
+        SpaceJoinRequested(space_id=space.id, user_id=bob.user_id, request_id="jr-a")
+    )
+    asked = [
+        n
+        for n in await stack.notif_repo.list(anna.user_id, limit=10)
+        if n.type == "space_join_requested"
+    ]
+    assert len(asked) == 1
+    assert "bob" not in asked[0].title.lower()
+
+    await stack.bus.publish(
+        SpaceJoinDenied(
+            space_id=space.id, user_id=bob.user_id, request_id="jr-a", denied_by="x"
+        )
+    )
+    await stack.bus.publish(
+        SpaceJoinApproved(
+            space_id=space.id, user_id=bob.user_id, request_id="jr-b", approved_by="x"
+        )
+    )
+    mine = {n.type for n in await stack.notif_repo.list(bob.user_id, limit=10)}
+    assert not mine & {"space_join_denied", "space_join_approved"}
 
 
 async def test_invite_declined_bell_opens_the_members_settings(stack):

@@ -1674,7 +1674,7 @@
   "space.admin_authority.toggle": "Admins dürfen für mich handeln",
   "space.admin_authority.hint": "Admins des Space können moderieren, einladen und veröffentlichen, während du offline bist.",
   "space.admin_authority.confirm.title": "Wer für den Space handeln kann",
-  "space.admin_authority.confirm.body": "Deine Admins aus anderen Haushalten. Gleiche vorher jede Haushalts-ID mit dem Haushalt ab – sie steht dort auf der Seite „Verbindungen“.",
+  "space.admin_authority.confirm.body": "Deine Admins aus anderen Haushalten. Gleiche vorher jede Haushalts-ID mit dem jeweiligen Haushalt ab – sie steht dort auf der Seite „Verbindungen“.",
   "space.admin_authority.confirm.turn_on": "Einschalten",
   "space.admin_authority.confirm.load_failed": "Deine Admins konnten nicht geprüft werden, deshalb wurde nichts geändert. Versuch es noch einmal.",
   "space.tier.changed": "Sichtbarkeit geändert.",

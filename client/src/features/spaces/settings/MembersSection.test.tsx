@@ -143,12 +143,17 @@ describe('MembersSection', () => {
       const onUpdate = vi.fn()
       const view = render(<MembersSection space={space()} isRemoteSpace={false} members={null} onUpdate={onUpdate} />)
       fireEvent.click(actSwitch(view))
-      fireEvent.click(await view.findByRole('button', { name: 'Turn on' }))
+      const turnOn = await view.findByRole('button', { name: 'Turn on' })
+      fireEvent.click(turnOn)
+      fireEvent.click(turnOn)
       await waitFor(() => expect(patch).toHaveBeenCalledWith('/api/spaces/s1', {
         features: { delegated_admin_authority: true },
       }))
       await waitFor(() => expect(view.queryByTestId('admin-authority-confirm')).toBeNull())
       expect(actSwitch(view).checked).toBe(true)
+      // The note took the focus with it: it is back on the switch.
+      expect(document.activeElement).toBe(actSwitch(view))
+      expect(patch).toHaveBeenCalledTimes(1)
     })
 
     it('Cancel leaves it off and sends nothing', async () => {

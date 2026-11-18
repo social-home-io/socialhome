@@ -134,7 +134,9 @@ export function MembersSection({ space, isRemoteSpace, members, onUpdate }: Prop
   // Turning "Let admins act for me" on: the households to confirm, and
   // whether they are being looked up.
   const [toConfirm, setToConfirm] = useState<AdminHousehold[] | null>(null)
-  const [checking, setChecking] = useState(false)
+  // One lookup / one save at a time, however fast the clicks come.
+  const busy = useRef(false)
+  const focusDelegated = () => document.getElementById(`delegated-${space.id}`)?.focus()
   const [levels, setLevels] = useServerValue<Record<AccessFeature, SpaceAccessLevel>>(
     Object.fromEntries(ACCESS_FEATURES.map(x => [x, accessLevel(f, x)])) as Record<
       AccessFeature, SpaceAccessLevel>,
@@ -159,18 +161,26 @@ export function MembersSection({ space, isRemoteSpace, members, onUpdate }: Prop
     if (outcome !== 'saved') setLevels(before)
   }
 
-  const saveDelegated = (v: boolean) => {
+  const saveDelegated = async (v: boolean) => {
+    if (busy.current) return
+    busy.current = true
     setToConfirm(null)
-    void save(setDelegated, v, delegated, { features: { delegated_admin_authority: v } })
+    // The note (and the focus inside it) is gone: back to the switch.
+    focusDelegated()
+    try {
+      await save(setDelegated, v, delegated, { features: { delegated_admin_authority: v } })
+    } finally {
+      busy.current = false
+    }
   }
 
   /** Off saves at once. On first asks who the admins are — read now, not
    *  from the page's copy — and shows every other household among them;
    *  unknown means no change (never hand the right over unseen). */
   const flipDelegated = async (v: boolean) => {
-    if (!v) { saveDelegated(false); return }
-    if (toConfirm) return
-    setChecking(true)
+    if (!v) { void saveDelegated(false); return }
+    if (toConfirm || busy.current) return
+    busy.current = true
     let households: AdminHousehold[]
     try {
       const rows = await api.get<RosterRow[]>(`/api/spaces/${space.id}/members`)
@@ -181,9 +191,9 @@ export function MembersSection({ space, isRemoteSpace, members, onUpdate }: Prop
       showToast(t('space.admin_authority.confirm.load_failed'), 'error')
       return
     } finally {
-      setChecking(false)
+      busy.current = false
     }
-    if (households.length === 0) saveDelegated(true)
+    if (households.length === 0) void saveDelegated(true)
     else setToConfirm(households)
   }
 
@@ -277,15 +287,11 @@ export function MembersSection({ space, isRemoteSpace, members, onUpdate }: Prop
           <p class="sh-ss-hint">{t('space.admin_authority.intro')}</p>
           <SwitchRow id={`delegated-${space.id}`} label={t('space.admin_authority.toggle')}
                      hint={t('space.admin_authority.hint')} checked={delegated}
-                     disabled={checking}
                      onChange={(v) => void flipDelegated(v)} />
           {toConfirm && (
             <AdminAuthorityConfirm households={toConfirm}
-                                   onConfirm={() => saveDelegated(true)}
-                                   onCancel={() => {
-                                     setToConfirm(null)
-                                     document.getElementById(`delegated-${space.id}`)?.focus()
-                                   }} />
+                                   onConfirm={() => void saveDelegated(true)}
+                                   onCancel={() => { setToConfirm(null); focusDelegated() }} />
           )}
         </fieldset>
       )}
