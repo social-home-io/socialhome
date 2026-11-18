@@ -4077,7 +4077,15 @@ it:
    space and serves as `identity_public_key`. Only for a space in `request`
    / `open` mode, only to a GFS whose signed capabilities prove
    `join_contact` (GFS migration 0027). The GFS serves it only when it
-   verifies against its pin and names the owning instance. **Nobody looks
+   verifies against its pin and names the owning instance — the pin this
+   publish LEAVES: a publish that re-pins the space (the owner's cert for a
+   new key) carries a contact signed with that new key, and is judged
+   against it. (It used to be judged against the key pinned before the
+   re-pin and dropped, so after every rotation the listing lost its contact
+   and the cert with it, and households that had pinned the space refused
+   the GFS route for good.) The cert of the key already pinned, sent again
+   by the owner's routine re-publish, moves nothing and is not logged as a
+   refusal. **Nobody looks
    anything up**: the household reads the contact from the directory it
    already polls, so the GFS keeps no record of who wants which space.
 2. **Checked and pinned on the reader's side**

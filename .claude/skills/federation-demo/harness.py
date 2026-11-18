@@ -245,10 +245,13 @@ def _open_noise_window(
     names: list[str],
     native: tuple[str, ...] = (),
     offline: bool = False,
+    from_start: bool = False,
 ) -> list[int]:
     """Open one window per witness household (never ``about`` itself),
-    starting at the witness's current log line. Returns the window ids for
-    :func:`_close_noise_windows`.
+    starting at the witness's current log line — or, with ``from_start``, at
+    the top of its current ``log.txt`` (a witness that was just respawned
+    may have logged the expected line before the step could open the
+    window). Returns the window ids for :func:`_close_noise_windows`.
 
     ``offline`` marks a window opened because ``about`` was killed: the
     step's end closes it only once ``about`` has been respawned — a
@@ -263,6 +266,7 @@ def _open_noise_window(
             names=names,
             native=native,
             offline=offline,
+            from_start=from_start,
         )
 
 
@@ -275,6 +279,7 @@ def _open_noise_window_locked(
     names: list[str],
     native: tuple[str, ...],
     offline: bool,
+    from_start: bool = False,
 ) -> list[int]:
     windows = _load_noise_windows()
     gens = _log_generations()
@@ -292,7 +297,7 @@ def _open_noise_window_locked(
                 "offline": offline,
                 "witness": witness,
                 "generation": gens.get(witness, 0),
-                "start": _log_line_count(witness),
+                "start": 0 if from_start else _log_line_count(witness),
                 "end": None,
                 "named": list(named),
                 "names": list(names),
@@ -26557,6 +26562,19 @@ def cmd_gfs_admin_seed() -> None:
         print("  a offline: d (admin) removed e on its own household ✓")
     finally:
         _respawn(_load(), "a")
+    # d rekeyed the content when it removed e, signed with K2. a first hears
+    # of the removal and retires K2 — so d's rekey, when it reaches a after
+    # that, is refused there (the stated residual of a rotation: an old-key
+    # rekey still in flight is refused and not retried; a's own rotation
+    # brings the next content key). Expected on a, for exactly that rekey.
+    late = _open_noise_window(
+        about="d",
+        reason=f"{step}: d's old-key rekey reaches the owner after its rotation",
+        witnesses=("a",),
+        named=("authority signature did not verify against the space key",),
+        names=[f"SPACE_KEY_EXCHANGE_REKEY for {space_id} from {d['instance_id']}"],
+        from_start=True,
+    )
     k3, _epoch3 = _admin_seed_await_rotation(
         state,
         space_id,
@@ -26610,6 +26628,7 @@ def cmd_gfs_admin_seed() -> None:
     _admin_seed_probe(
         state, space_id, seed3, want=200, whose="d's seed (K3)", step=step
     )
+    _close_noise_windows(late)
 
     state = _load()
     state["gfs_admin_seed"] = {

@@ -334,6 +334,11 @@ def certified_authority_repin(
             space_id,
         )
         return False
+    if stored_cert is not None and cert == stored_cert:
+        # The cert of the key already pinned, sent again: the owner
+        # re-publishes with it on every reconnect and metadata change until
+        # this server confirmed the pin. Nothing to move, nothing refused.
+        return False
     if verified.key_epoch <= authority_cert_epoch(stored_cert):
         log.warning(
             "GFS: authority cert for space %s is not newer than the stored "
@@ -2143,12 +2148,19 @@ class GfsFederationService:
         pin = parse_place_pin_wire(place)
         if place is not None and pin is None:
             log.warning("GFS: space %s published a malformed place; ignored", space_id)
+        # The contact is judged against the key this publish leaves pinned:
+        # a re-pinning publish carries one signed with the NEW key (the old
+        # seed is retired). Judged against the key pinned BEFORE the re-pin
+        # it was dropped, and the listing lost the contact and with it the
+        # owner's cert — a household that had pinned the space then saw a
+        # new key without a chain and refused the GFS route for good.
+        repinning = bool(certified and authority_cert is not None)
         contact = _served_join_contact(
             join_contact,
             space_id=space_id,
             owning_instance=owning_instance,
             join_mode=normalized_join_mode,
-            space_public_key_hex=pinned_pubkey,
+            space_public_key_hex=identity_public_key if repinning else pinned_pubkey,
         )
         space = GlobalSpace(
             space_id=space_id,
@@ -2191,18 +2203,21 @@ class GfsFederationService:
                 space_id,
             )
         await self._repo.upsert_space(space)
-        if (
-            certified
-            and authority_cert is not None
-            and await self._apply_certified_repin(
+        if repinning and authority_cert is not None:
+            if await self._apply_certified_repin(
                 space_id, new_pk=identity_public_key, cert=authority_cert
-            )
-        ):
-            space = replace(
-                space,
-                identity_public_key=identity_public_key,
-                authority_cert=authority_cert,
-            )
+            ):
+                space = replace(
+                    space,
+                    identity_public_key=identity_public_key,
+                    authority_cert=authority_cert,
+                )
+            elif contact is not None:
+                # The pin did not move after all (a concurrent publish won
+                # the compare-and-set): the contact was judged against a key
+                # this row does not pin, so it is not served.
+                space = replace(space, join_contact=None)
+                await self._repo.upsert_space(space)
         # Data repair, at the moment the truth arrives: a space whose owner
         # EXPLICITLY withdrew readability has no public readership, so every
         # seat in ``space_subscribers`` is meaningless and would otherwise keep
