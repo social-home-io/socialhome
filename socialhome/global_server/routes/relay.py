@@ -917,8 +917,10 @@ class SpacePublishView(GfsBaseView):
                 status=403,
             )
         except SpaceNotListedError:
-            # Raised only after the signature verified, so this is the
-            # owner's own answer, never an existence probe.
+            # Raised only after the signature verified: an unsigned caller
+            # learns nothing. (A REGISTERED household already tells a space
+            # another one owns from an unknown one by publishing its id —
+            # 403 "already owned" — so this answer adds no new probe.)
             return web.json_response({"error": "not listed"}, status=404)
         return web.json_response(
             {

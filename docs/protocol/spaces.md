@@ -2776,9 +2776,11 @@ is current:
   every reconnect of that GFS (`heal_space_pins`), by a retry pass every
   5 minutes (`infrastructure/gfs_cleanup_scheduler.py` — it reads what is
   owed and sends only that; nothing owed, nothing sent), and once more by
-  the seed-share gate itself. A listing publish the server accepted without
-  confirming is not re-sent for the same key on every pass (same body, same
-  answer): a reconnect or a newer key asks again.
+  the seed-share gate itself. After an attempt that was not confirmed (the
+  server down, a refusal, an answer naming another key) the next one for the
+  same key waits — 4 minutes, doubling up to 6 hours per (space, GFS) — so
+  neither the pass nor the gate (which an admin's sync can trigger) hammers
+  a dead or old server; a reconnect or a newer key asks at once.
 - **Withdrawn listings (D2).** Withdrawing a listing hides it from
   discovery; the GFS keeps the row, the pinned key and the followers seated
   there. The owner records each one (`gfs_withdrawn_listings`, migration
@@ -2794,8 +2796,13 @@ is current:
   plain publish would list the space again — so on such a server the re-pin
   stays owed (WARNING, seed shares blocked) until its operator upgrades or
   the owner disconnects that GFS. A listing left over from before the space
-  left the global tier (its withdrawal has not landed yet) gets the same
-  pin-only publish instead of a re-publish.
+  left the public tiers (its withdrawal has not landed yet) gets the same
+  pin-only publish instead of a re-publish. A global space never does — the
+  pin-only publish withdraws the listing and takes its invite pages down —
+  and a withdrawn row is re-checked under the space's listing lock right
+  before the send, so a space listed there again meanwhile is left alone. A
+  server that answers that it pins no key at all owes nothing (no key
+  authorizes a relay there).
 - **Private channels (D4).** A private space's opaque channel key derives
   from the authority seed, so the old channel is unregistered before the
   seed is swapped. Each server the channel lives on is first recorded as
@@ -2803,12 +2810,17 @@ is current:
   under the household KEK and bound to its row
   (`gfs_channel_withdrawals.channel_seed`, migration 0147), then asked; a
   server that was down keeps its row and is asked again on its reconnect
-  and by the retry pass — after the rotation too. The seed goes with the
-  row once the server confirmed.
+  and by the retry pass — after the rotation too. A chosen server whose
+  connection is suspended is recorded as well. The seed goes with the row
+  once the server confirmed; a refusal (a 403 from clock skew or a stale
+  server key) is not a confirmation — the row stays and is asked again, and
+  is given up, at WARNING, only after 12 refusals in a row (a channel that
+  server pinned to another key was never ours there).
 - **Cost.** Per rotation: one publish per listing GFS (as before) plus one
   ~1 KB pin-only publish per GFS the space was withdrawn from (typically
-  0–2). Per retry pass: one request per (space, GFS) still owed, 12 per hour
-  at most, zero in steady state. No fan-out to members.
+  0–2). Per retry pass: one request per (space, GFS) still owed and due
+  (4 minutes doubling to 6 hours: a few a day for a dead server), zero in
+  steady state. No fan-out to members.
 - **What is left.** Listings withdrawn before this release left no row, so a
   rotation cannot reach them (re-list and withdraw again to record one). A
   dissolved space is never rotated, so the pin a GFS keeps for it is never

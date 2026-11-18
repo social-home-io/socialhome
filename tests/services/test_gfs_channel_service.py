@@ -1637,8 +1637,8 @@ async def test_a_delegated_admins_notice_reaches_unconnected_channel_servers(env
 
 
 async def test_a_delegated_admin_announces_after_its_own_rotation(env):
-    """A seed holder never grants itself: right after its own rotation it
-    holds no grant for the new epoch, and still announces it — using the
+    """Right after its own rotation a seed holder holds no grant for the
+    new epoch yet (it renews its own after the notice), and still announces it — using the
     channel servers its newest grant names."""
     await _delegated_admin(env)
     env.other.keys.epoch = 4
@@ -2034,3 +2034,58 @@ async def test_a_seed_holder_that_was_never_seated_grants_itself_nothing(env):
     env.other.keys.epoch = 4
     await env.other.svc.on_rotation(SPACE_ID)
     assert env.other.keys.grants == {}
+
+
+async def test_a_retire_records_a_suspended_server_a_restart_forgot(env):
+    """Nothing in memory says the channel lives there (a restart), and the
+    connection is suspended: the owner's list still names it, so the retire
+    is recorded — or the gate on new seed shares would see nothing owed."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    env.owner.svc._registered.clear()
+    conns = env.owner.svc._conn_repo
+    conns.conn = replace(conns.conn, status="suspended")
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    assert (SPACE_ID, "conn-1", channel_id) in conns.seeds
+
+
+async def test_a_refused_retire_is_kept_and_asked_again(env, monkeypatch):
+    """A 403 (clock skew, a stale addressee key) is not a confirmation: the
+    row and its seed stay for the next passes. Only after many refusals in
+    a row is it given up, loudly."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    repo = env.app[gfs_channel_repo_key]
+
+    async def refused(*_a, **_k):
+        return chan_mod.PublishOutcome.permanent()
+
+    monkeypatch.setattr(GfsChannelService, "_post", refused)
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    for _ in range(chan_mod.RETIRE_REFUSALS_MAX - 2):
+        assert await env.owner.svc.withdraw_pending() == 0
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    monkeypatch.undo()
+    assert await env.owner.svc.withdraw_pending() == 1
+    assert await repo.get(channel_id) is None
+    assert conns.withdrawals == []
+
+
+async def test_a_retire_refused_for_good_is_given_up(env, monkeypatch, caplog):
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+
+    async def refused(*_a, **_k):
+        return chan_mod.PublishOutcome.permanent()
+
+    monkeypatch.setattr(GfsChannelService, "_post", refused)
+    assert await env.owner.svc.retire(SPACE_ID)
+    with caplog.at_level("WARNING"):
+        for _ in range(chan_mod.RETIRE_REFUSALS_MAX):
+            await env.owner.svc.withdraw_pending()
+    assert conns.withdrawals == []
+    assert f"giving up on unregistering channel {channel_id}" in caplog.text

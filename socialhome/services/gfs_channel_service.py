@@ -189,6 +189,13 @@ class _SyncScheduler(Protocol):
 
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
+#: How many refusals in a row (a non-retryable 4xx) a pending unregister
+#: survives before it is given up. A refusal is not a confirmation — clock
+#: skew or a stale addressee key answers 403 and heals — but a channel a
+#: server pinned to ANOTHER key (it was never ours there) refuses for good,
+#: and its row must not block new signing-key shares forever.
+RETIRE_REFUSALS_MAX: int = 12
+
 #: Queue-item kinds of the channel retry queue.
 _KIND_ANON = "channel_item_anon"
 _KIND_NOTICE = "channel_epoch_notice"
@@ -264,6 +271,7 @@ class GfsChannelService:
         "_own_seed",
         "_registered",
         "_remote_members",
+        "_retire_refused",
         "_retry",
         "_space_service",
         "_spaces",
@@ -310,6 +318,10 @@ class GfsChannelService:
         #: channel id → ``gfs_instance_id``s that confirmed our registration
         #: in this process (the owner's grants name only these).
         self._registered: dict[str, set[str]] = {}
+        #: Refusals in a row per pending unregister ``(space, connection,
+        #: channel)`` — see :data:`RETIRE_REFUSALS_MAX`. In memory: a
+        #: restart starts the count over.
+        self._retire_refused: dict[tuple[str, str, str], int] = {}
         #: Spaces with a take-over replacement in flight (the persisted
         #: per-space cooldown bounds them across restarts).
         self._healing: set[str] = set()
@@ -665,7 +677,12 @@ class GfsChannelService:
             # A space that left the private tier keeps a listing list, not a
             # channel list: never read it as where the channel lives.
             chosen = (
-                {c.id for c in connections_on_list(space.gfs_servers, connections)}
+                {
+                    c.id
+                    for c in connections_on_list(
+                        space.gfs_servers, connections, include_inactive=True
+                    )
+                }
                 if space.space_type is SpaceType.PRIVATE
                 and space.gfs_servers is not None
                 else set()
@@ -717,8 +734,9 @@ class GfsChannelService:
         the owner's list change BEFORE it was stored), optionally for one
         space / one connection: an anonymous, channel-key-signed unregister
         each. A row is forgotten once the server confirmed, or can never
-        confirm (the space or its seed is gone — a new authority seed can't
-        sign for the old channel; a permanent refusal). A connection that is
+        confirm (no seed was recorded with it and the space or its seed is
+        gone), or the server refused it :data:`RETIRE_REFUSALS_MAX` times in
+        a row. A connection that is
         not active right now keeps its rows: retried when it reconnects
         (:meth:`heal`). Returns how many were confirmed. Never raises."""
         try:
@@ -741,6 +759,24 @@ class GfsChannelService:
                 )
                 if outcome is not None and outcome.kind == "transient":
                     continue
+                row = (row_space, conn_id, channel_id)
+                if outcome is not None and outcome.kind != "delivered":
+                    refused = self._retire_refused.get(row, 0) + 1
+                    if refused < RETIRE_REFUSALS_MAX:
+                        # Refused, not confirmed: the channel may still be
+                        # open there. Kept (it blocks new seed shares) and
+                        # asked again.
+                        self._retire_refused[row] = refused
+                        continue
+                    log.warning(
+                        "gfs.channel: giving up on unregistering channel %s "
+                        "on GFS %s after %d refusals — it may stay open there "
+                        "until that server's idle sweep",
+                        channel_id,
+                        conn_id,
+                        refused,
+                    )
+                self._retire_refused.pop(row, None)
                 await self._conn_repo.delete_channel_withdrawal(
                     row_space, conn_id, channel_id
                 )

@@ -5530,9 +5530,11 @@ async def test_a_gfs_that_confirms_nothing_is_owed_a_repin(env):
     assert await svc.authority_key_revocable("sp-rot") is False
 
 
-async def test_repin_owed_retries_until_the_gfs_takes_the_key(env):
-    """R5: a 5xx on the re-publish leaves the re-pin owed; the next pass
+async def test_repin_owed_retries_until_the_gfs_takes_the_key(env, monkeypatch):
+    """R5: a 5xx on the re-publish leaves the re-pin owed; a later pass
     sends it again, and only a confirmed pin ends it."""
+    clock = [1000.0]
+    _freeze_clock(monkeypatch, clock)
     session = _PinSession(pins=("echo", 503, 503, "echo"))
     svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
     await svc.publish_space("sp-rot", "g1")
@@ -5542,7 +5544,9 @@ async def test_repin_owed_retries_until_the_gfs_takes_the_key(env):
     )
     # The confirmed pin is the OLD key now.
     assert await svc.repin_owed("sp-rot") == 1
+    clock[0] += 3600
     assert await svc.authority_key_revocable("sp-rot") is False  # 503 again
+    clock[0] += 3600
     assert await svc.repin_owed() == 0
     assert svc.pin_confirmed("sp-rot", "g1") is True
     assert session.publishes()[-1]["identity_public_key"] == k3.public_key.hex()
@@ -5625,11 +5629,15 @@ async def test_a_rotation_repins_a_withdrawn_listing_without_relisting_it(env):
     assert await svc._repo.list_publications_for_space("sp-rot") == []
 
 
-async def test_a_withdrawn_listing_stays_owed_until_the_gfs_confirms(env):
+async def test_a_withdrawn_listing_stays_owed_until_the_gfs_confirms(env, monkeypatch):
+    clock = [1000.0]
+    _freeze_clock(monkeypatch, clock)
     session = _PinSession(pins=("echo", 503, "aa" * 32, "echo"))
     svc, _owner, _owner_id, k3 = await _withdrawn_then_rotated(env, session)
     assert await svc.repin_owed("sp-rot") == 1  # 503
+    clock[0] += 3600
     assert await svc.authority_key_revocable("sp-rot") is False  # kept another pin
+    clock[0] += 3600
     assert await svc.repin_owed() == 0
     assert await svc._repo.list_withdrawn_listings() == [
         ("sp-rot", "g1", k3.public_key.hex())
@@ -5708,3 +5716,79 @@ async def test_an_answered_but_unconfirmed_publish_is_not_resent_every_pass(env)
     )
     assert await svc.repin_owed() == 1
     assert len(session.publishes()) == 2
+
+
+# ── Adversarial review fixes ─────────────────────────────────────────────
+
+
+async def test_a_refused_republish_of_a_global_space_never_withdraws_it(
+    env, monkeypatch
+):
+    """The pin-only publish also WITHDRAWS a listing at the GFS (and takes
+    its invite pages down). A global space whose re-publish is refused —
+    here because the key-rotation capability could not be read — must stay
+    owed, never fall back to it."""
+    session = _PinSession()
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc._repo.publish_space("sp-rot", "g1")
+
+    async def refused(space_id, gfs_id):
+        raise GfsKeyRotationUnsupportedError()
+
+    monkeypatch.setattr(svc.__class__, "_relist", lambda self, s, g: refused(s, g))
+    assert await svc.repin_owed("sp-rot") == 1
+    assert session.publishes() == []
+
+
+async def test_a_stale_withdrawn_row_of_a_listed_space_sends_no_pin_only_publish(env):
+    """Re-listed since the row was read: the pin-only publish would withdraw
+    the live listing. The row is dropped under the change lock instead."""
+    session = _PinSession()
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    await svc._repo.mark_listing_withdrawn("sp-rot", "g1", "11" * 32)
+    assert await svc.repin_owed("sp-rot") == 0
+    assert not any(b.get("withdrawn") for b in session.publishes())
+    assert await svc._repo.list_withdrawn_listings() == []
+
+
+async def test_a_failed_repin_backs_off_instead_of_hammering_the_gfs(env, monkeypatch):
+    """The seed-share gate and the retry pass both call ``repin_owed``; a
+    server that keeps failing is asked again only after a growing wait —
+    a reconnect heal (``force``) or a newer key asks at once."""
+    clock = [1000.0]
+    _freeze_clock(monkeypatch, clock)
+    session = _PinSession(pins=(503,))
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc._repo.publish_space("sp-rot", "g1")
+    assert await svc.repin_owed("sp-rot") == 1
+    assert len(session.publishes()) == 1
+    for _ in range(5):  # e.g. five admin echoes hitting the gate
+        assert await svc.authority_key_revocable("sp-rot") is False
+    assert len(session.publishes()) == 1
+    clock[0] += gfs_connection_service.GFS_REPIN_RETRY_MIN_S
+    assert await svc.repin_owed() == 1
+    assert len(session.publishes()) == 2
+    clock[0] += gfs_connection_service.GFS_REPIN_RETRY_MIN_S
+    assert await svc.repin_owed() == 1  # the wait doubled
+    assert len(session.publishes()) == 2
+    assert await svc.repin_owed(force=True) == 1
+    assert len(session.publishes()) == 3
+
+
+async def test_a_withdrawn_listing_with_no_pin_at_all_owes_nothing(env):
+    """The server answers that it pins NO key for the space: no key at all
+    authorizes a relay there, so there is nothing to revoke."""
+    session = _PinSession(pins=("echo", ""))
+    svc, *_ = await _withdrawn_then_rotated(env, session)
+    assert await svc.repin_owed("sp-rot") == 0
+    assert await svc._repo.list_withdrawn_listings() == []
+
+
+async def test_removing_a_connection_forgets_what_it_confirmed(env):
+    session = _PinSession()
+    svc, *_ = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    assert svc.pin_confirmed("sp-rot", "g1")
+    svc._forget_connection_pins("g1")
+    assert not svc.pin_confirmed("sp-rot", "g1")

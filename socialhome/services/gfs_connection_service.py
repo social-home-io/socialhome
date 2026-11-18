@@ -109,6 +109,7 @@ from ..domain.media_constraints import (
 from ..domain.moment_public import is_path_safe_id
 from ..domain.relay_media_frame import ENVELOPE_MEDIA_CAPABILITY
 from ..domain.space import (
+    PUBLIC_SPACE_TIERS,
     Space,
     SpaceType,
     normalize_category,
@@ -210,6 +211,13 @@ MAX_REMOTE_DETAIL_CHARS = 200
 #: Bytes read from a remote error body at all. Beyond this even the log
 #: line is not worth the memory.
 _REMOTE_DETAIL_READ_BYTES = 8192
+
+#: First wait before an owed re-pin is tried again on a server that just
+#: failed or did not confirm it; doubles per failure up to the ceiling. The
+#: retry pass and the seed-share gate both go through it, so neither can
+#: hammer a dead or old server; a reconnect heal and a newer key ask at once.
+GFS_REPIN_RETRY_MIN_S: float = 240.0
+GFS_REPIN_RETRY_MAX_S: float = 6 * 3600.0
 
 #: What the GFS publish route reads a missing colour as — the value a
 #: metadata-free (pin-only) publish signs, so its signature verifies there.
@@ -476,7 +484,6 @@ class GfsConnectionService:
         "_payload_zlib1",
         "_payload_zlib1_dict1",
         "_pin_confirmed",
-        "_pin_unanswered",
         "_place_pin",
         "_possession",
         "_private_channels",
@@ -486,6 +493,7 @@ class GfsConnectionService:
         "_publish_retry",
         "_rebind_warned",
         "_refreshed_at",
+        "_repin_tried",
         "_replaces",
         "_repo",
         "_rotation_warned",
@@ -676,12 +684,11 @@ class GfsConnectionService:
         #: (:meth:`authority_key_revocable`). A listing is "owed a re-pin"
         #: while this differs from the space's current key.
         self._pin_confirmed: dict[tuple[str, str], str] = {}
-        #: ``(space_id, connection id)`` → the key of a publish that server
-        #: ACCEPTED without confirming the pin (it named another key or
-        #: none). The identical publish would get the identical answer, so
-        #: the retry pass does not re-send the listing for that key; the
-        #: re-pin stays owed until a reconnect heal or a newer key asks again.
-        self._pin_unanswered: dict[tuple[str, str], str] = {}
+        #: ``(space_id, connection id)`` → ``(key, not before, wait)`` of
+        #: the last re-pin attempt there that was not confirmed: the next
+        #: one for the SAME key waits (:data:`GFS_REPIN_RETRY_MIN_S`,
+        #: doubling). The re-pin stays owed meanwhile.
+        self._repin_tried: dict[tuple[str, str], tuple[str, float, float]] = {}
         # Failed ``POST /gfs/publish`` calls wait here for a retry —
         # identity-free bodies only, in memory, bounded (see the module).
         self._publish_retry = GfsPublishRetryQueue(self._retry_publish)
@@ -2556,6 +2563,7 @@ class GfsConnectionService:
                 await hook(conn)
             except Exception:
                 log.exception("gfs: on-disconnect hook failed for %s", gfs_id)
+        self._forget_connection_pins(gfs_id)
         # ``repo.delete`` removes this connection's publication rows itself,
         # without passing through :meth:`unpublish_space`, so note the spaces
         # first.
@@ -2682,12 +2690,12 @@ class GfsConnectionService:
         publication = await self._repo.publish_space(space_id, gfs_id, status=status)
         if self._pin_answered(space_id, conn, body, data):
             self._pin_confirmed[(space_id, gfs_id)] = body["identity_public_key"]
-            self._pin_unanswered.pop((space_id, gfs_id), None)
+            self._repin_tried.pop((space_id, gfs_id), None)
         else:
+            # Accepted, not confirmed: the same body gets the same answer,
+            # so the retry waits like after any failed attempt.
             self._pin_confirmed.pop((space_id, gfs_id), None)
-            self._pin_unanswered[(space_id, gfs_id)] = (
-                body.get("identity_public_key") or ""
-            )
+            self._repin_failed(space_id, gfs_id, body.get("identity_public_key") or "")
         if self._on_repinned is not None and (
             "authority_cert" in body or not listed_before
         ):
@@ -3000,9 +3008,11 @@ class GfsConnectionService:
         # (:meth:`repin_owed`) — unless the server holds no row (404), or
         # the space is not ours to rotate (gone, dissolved).
         confirmed = self._pin_confirmed.pop((space_id, gfs_id), None)
-        self._pin_unanswered.pop((space_id, gfs_id), None)
+        self._repin_tried.pop((space_id, gfs_id), None)
         if row_kept and await self._owns(space_id):
-            await self._repo.mark_listing_withdrawn(space_id, gfs_id, confirmed)
+            await self._repo.mark_listing_withdrawn(
+                space_id, gfs_id, confirmed.lower() if confirmed else None
+            )
         await self._repo.unpublish_space(space_id, gfs_id)
         if announce:
             await self._listings_changed(space_id)
@@ -3447,13 +3457,17 @@ class GfsConnectionService:
         *,
         gfs_id: str | None = None,
         listings: bool = True,
+        force: bool = False,
     ) -> int:
         """Bring every GFS that pins a key for a space we own onto the
         space's CURRENT authority key, and return how many still are not.
 
-        Two kinds of pin, each tried once per call and only where it is not
-        already confirmed current — so a pass with nothing owed sends
-        nothing:
+        Two kinds of pin, each tried at most once per call, only where it
+        is not already confirmed current, and — after an attempt that was
+        not confirmed — only once its wait is over (it doubles from
+        :data:`GFS_REPIN_RETRY_MIN_S`; ``force``, a reconnect, skips the
+        wait, and a newer key starts over). So a pass with nothing owed
+        sends nothing, and a dead or old server costs a few requests a day:
 
         * a **listing** (``gfs_space_publications``): re-published with the
           owner's cert (:meth:`_relist`);
@@ -3500,12 +3514,12 @@ class GfsConnectionService:
                     continue
                 if self._pin_confirmed.get((sid, conn.id)) == key:
                     continue
-                if (
-                    conn.status == "active"
-                    and self._pin_unanswered.get((sid, conn.id)) != key
+                if conn.status == "active" and self._repin_due(
+                    sid, conn.id, key, force
                 ):
                     await self._repin_listing(space, conn)
                 if self._pin_confirmed.get((sid, conn.id)) != key:
+                    self._repin_failed(sid, conn.id, key)
                     owed += 1
             for _s, cid, pinned in rows:
                 if pinned == key:
@@ -3514,30 +3528,81 @@ class GfsConnectionService:
                 if held_by is None:
                     await self._repo.delete_withdrawn_listing(sid, cid)
                     continue
-                outcome = (
-                    await self._repin_withdrawn(space, held_by)
-                    if held_by.status == "active"
-                    else "owed"
-                )
+                outcome: str = "owed"
+                if held_by.status == "active" and self._repin_due(sid, cid, key, force):
+                    outcome = await self._repin_withdrawn_row(space, held_by)
                 if outcome == "confirmed":
-                    await self._repo.set_withdrawn_listing_pin(sid, cid, key)
-                elif outcome == "gone":
+                    await self._repo.set_withdrawn_listing_pin(sid, cid, key.lower())
+                    self._repin_tried.pop((sid, cid), None)
+                elif outcome in ("gone", "listed"):
                     await self._repo.delete_withdrawn_listing(sid, cid)
+                    self._repin_tried.pop((sid, cid), None)
                 else:
+                    self._repin_failed(sid, cid, key)
                     owed += 1
         return owed
 
+    def _repin_due(self, space_id: str, gfs_id: str, key: str, force: bool) -> bool:
+        """Whether a re-pin of *space_id* on *gfs_id* may be sent now: no
+        unconfirmed attempt for this key yet, its wait is over, or *force*."""
+        tried = self._repin_tried.get((space_id, gfs_id))
+        return force or tried is None or tried[0] != key or time.monotonic() >= tried[1]
+
+    def _repin_failed(self, space_id: str, gfs_id: str, key: str) -> None:
+        """Note an owed re-pin that is still owed: start its wait, or — when
+        the wait was over and it was tried again — double it."""
+        now = time.monotonic()
+        tried = self._repin_tried.get((space_id, gfs_id))
+        if tried is not None and tried[0] == key:
+            if now < tried[1]:
+                return  # still waiting; nothing was sent
+            wait = min(tried[2] * 2, GFS_REPIN_RETRY_MAX_S)
+        else:
+            wait = GFS_REPIN_RETRY_MIN_S
+        self._repin_tried[(space_id, gfs_id)] = (key, now + wait, wait)
+
+    def _forget_connection_pins(self, gfs_id: str) -> None:
+        """Drop what a removed connection confirmed or was asked."""
+        for pins in (self._pin_confirmed, self._repin_tried):
+            for entry in [e for e in pins if e[1] == gfs_id]:
+                del pins[entry]
+        self._withdrawn_repin_warned.discard(gfs_id)
+
     async def _repin_listing(self, space: Space, conn: GfsConnection) -> None:
-        """One re-publish of a listing whose pin is not confirmed current.
-        A listing left over from before the space left the global tier (its
-        withdrawal has not landed yet) cannot be re-published — it gets the
-        pin-only publish instead, which also withdraws it there."""
+        """One re-pin of a listing whose pin is not confirmed current.
+
+        A GLOBAL space is re-published; a refusal of any kind (the server
+        unreachable, the publish rejected, a capability that could not be
+        read) leaves the re-pin owed. Only a listing left over from before
+        the space left the public tiers (its withdrawal has not landed yet)
+        gets the pin-only publish instead — which also withdraws it there,
+        exactly what its owner asked for. Never a global space: that
+        publish would take a live listing and its invite pages down."""
         try:
-            await self._relist(space.id, conn.id)
-        except SpaceNotPublishableError:
-            if await self._repin_withdrawn(space, conn) == "confirmed":
-                self._pin_confirmed[(space.id, conn.id)] = space.identity_public_key
-        except GfsConnectionError as exc:
+            if space.space_type in PUBLIC_SPACE_TIERS:
+                await self._relist(space.id, conn.id)
+                return
+            async with self._change_lock(space.id):
+                current = (
+                    await self._space_repo.get(space.id)
+                    if self._space_repo is not None
+                    else None
+                )
+                if (
+                    current is None
+                    or current.space_type in PUBLIC_SPACE_TIERS
+                    or conn.id
+                    not in {
+                        p.gfs_connection_id
+                        for p in await self._repo.list_publications_for_space(space.id)
+                    }
+                ):
+                    return
+                if await self._repin_withdrawn(current, conn) == "confirmed":
+                    self._pin_confirmed[(space.id, conn.id)] = (
+                        current.identity_public_key
+                    )
+        except (GfsConnectionError, SpaceNotPublishableError) as exc:
             log.warning(
                 "gfs: re-pinning space %s on gfs %s failed: %s", space.id, conn.id, exc
             )
@@ -3545,6 +3610,32 @@ class GfsConnectionService:
             log.exception(
                 "gfs: re-pinning space %s on gfs %s failed", space.id, conn.id
             )
+
+    async def _repin_withdrawn_row(
+        self, space: Space, conn: GfsConnection
+    ) -> Literal["confirmed", "gone", "owed", "listed"]:
+        """The pin-only publish for a withdrawn-listing row, under the
+        space's change lock and only while the row still stands: the owner
+        may have listed the space there again since the rows were read, and
+        the pin-only publish would withdraw that live listing (``listed`` —
+        the row is stale and goes)."""
+        try:
+            async with self._change_lock(space.id):
+                if not await self._repo.list_withdrawn_listings(
+                    space_id=space.id, gfs_id=conn.id
+                ) or conn.id in {
+                    p.gfs_connection_id
+                    for p in await self._repo.list_publications_for_space(space.id)
+                }:
+                    return "listed"
+                return await self._repin_withdrawn(space, conn)
+        except Exception:
+            log.exception(
+                "gfs: the pin-only publish of space %s on gfs %s failed",
+                space.id,
+                conn.id,
+            )
+            return "owed"
 
     async def _repin_withdrawn(
         self, space: Space, conn: GfsConnection
@@ -3556,7 +3647,8 @@ class GfsConnectionService:
         listing stays withdrawn there.
 
         ``confirmed`` — the server answered that it pins the current key;
-        ``gone`` — it holds no row for the space (nothing pinned);
+        ``gone`` — it holds no row for the space, or a row with NO pinned
+        key (no key at all authorizes a relay there: nothing to revoke);
         ``owed`` — anything else, including a server that never proved
         ``withdrawn_repin`` (nothing is sent to it: it would refuse the
         field, and a plain publish would list the space again)."""
@@ -3639,6 +3731,8 @@ class GfsConnectionService:
             return "owed"
         if not isinstance(data, dict):
             data = {}
+        if data.get("identity_public_key") == "":
+            return "gone"
         return "confirmed" if self._pin_answered(space.id, conn, body, data) else "owed"
 
     async def republish_space(self, space_id: str) -> int:
@@ -4564,7 +4658,7 @@ class GfsConnectionService:
         # And every pin this server still owes us a move for — above all a
         # listing we withdrew from it (it has no publication row any more).
         try:
-            await self.repin_owed(gfs_id=gfs_id, listings=False)
+            await self.repin_owed(gfs_id=gfs_id, listings=False, force=True)
         except Exception:
             log.exception("gfs.heal_space_pins: owed re-pins failed for %s", gfs_id)
         return healed

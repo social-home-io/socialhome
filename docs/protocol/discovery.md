@@ -3210,8 +3210,12 @@ epoch notice is channel-key signed and names no household, so (v_57) it goes
 to every chosen channel server its grant names — its own connections and,
 over the same proof-checked pinned session, the ones it never connected to —
 so a rotation it makes while the owner is offline reaches a server it never
-joined. Right after its own rotation it holds no grant for the new epoch (a
-seed holder never grants itself) and uses its newest stored grant. The
+joined. Right after its own rotation it holds no grant for the new epoch
+yet: it announces with its newest stored grant, then renews its own grant
+for the new epoch (same channel and servers; a seat pass and writer key
+only if it held them) and re-subscribes — like every member that gets the
+rekey, so its seat is not the one left on the old pass
+(`GfsChannelService._renew_own_grant`). The
 owner's notices stay on its own registered connections.
 
 **Liveness limit.** A delegated admin knows the channel's servers only from

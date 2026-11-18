@@ -1872,6 +1872,9 @@ class PrivateSpaceInviteHandler:
             # host (its gossip or its snapshot) or the admin household that
             # invites them. Only a household that still holds a live admin
             # seat here — a seed holder by right — seats its own people.
+            # (The sender is all this can judge: the same signed entry
+            # carried by an accomplice household still lands. What ends
+            # that is the rotation, once the owner hears of the removal.)
             log.warning(
                 "roster-gossip %s for %s: %s seats %s@%s, a seat removed "
                 "here — refused (a removed household cannot re-seat itself)",
