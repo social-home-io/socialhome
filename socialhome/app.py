@@ -167,6 +167,7 @@ from .infrastructure.dm_gc_scheduler import DmGcScheduler
 from .infrastructure.dm_relay_seen_scheduler import DmRelaySeenPruneScheduler
 from .infrastructure.gallery_trash_purge_scheduler import GalleryTrashPurgeScheduler
 from .infrastructure.gfs_capability_warmup import GfsCapabilityWarmup
+from .infrastructure.gfs_cleanup_scheduler import GfsCleanupScheduler
 from .infrastructure.gfs_info_refresh_scheduler import GfsInfoRefreshScheduler
 from .infrastructure.gfs_reconcile_retry import GfsReconcileRetry
 from .infrastructure.gfs_route_discovery_scheduler import GfsRouteDiscoveryScheduler
@@ -1206,6 +1207,22 @@ def _build_peer_gfs_relay(
     )
     service.wire()
     return service
+
+
+def _build_gfs_cleanup_scheduler(
+    gfs_connection_service: GfsConnectionService,
+    gfs_channels: GfsChannelService | None,
+) -> GfsCleanupScheduler:
+    """The periodic retry of what a GFS still owes after a space key
+    rotation: space key re-pins (listings and withdrawn listings) and a
+    private space's channel unregisters. Each step sends only what is still
+    owed."""
+    steps: list[tuple[str, Callable[[], Awaitable[int]]]] = [
+        ("space key re-pins still owed", gfs_connection_service.repin_owed)
+    ]
+    if gfs_channels is not None:
+        steps.append(("channel unregisters confirmed", gfs_channels.withdraw_pending))
+    return GfsCleanupScheduler(steps)
 
 
 def _wire_space_authority_rotation(
@@ -4218,6 +4235,7 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_reconcile_retry: GfsReconcileRetry | None = None
     routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
+    gfs_cleanup_scheduler: GfsCleanupScheduler | None = None
     gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
     moderation_expiry_scheduler: ModerationExpiryScheduler | None = None
     join_request_expiry_scheduler: JoinRequestExpiryScheduler | None = None
@@ -6002,6 +6020,13 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo, window=REPLAY_CACHE_WINDOW
         )
         await replay_cache_scheduler.start()
+        # What a GFS still owes after a space key rotation is re-sent until
+        # it confirms (durable re-pin / channel retire).
+        nonlocal gfs_cleanup_scheduler
+        gfs_cleanup_scheduler = _build_gfs_cleanup_scheduler(
+            gfs_connection_service, gfs_channels
+        )
+        await gfs_cleanup_scheduler.start()
         await push_withdraw_service.start()
         if gfs_route_discovery_scheduler is not None:
             await gfs_route_discovery_scheduler.start()
@@ -6382,6 +6407,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await highlight_signaling_handler.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        if gfs_cleanup_scheduler is not None:
+            await gfs_cleanup_scheduler.stop()
         # Before the shared HTTP session closes: pending withdraws go out.
         await push_withdraw_service.stop()
         if gfs_route_discovery_scheduler is not None:

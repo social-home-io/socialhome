@@ -16,7 +16,11 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from socialhome.crypto import derive_instance_id, ed25519_public_key
+from socialhome.crypto import (
+    derive_instance_id,
+    ed25519_public_key,
+    generate_identity_keypair,
+)
 from socialhome.domain.events import (
     PeerCapabilitiesAdvertised,
     PeerTransportChanged,
@@ -244,9 +248,14 @@ class _Conns:
         self.conn = conn
         #: Pending channel withdrawals (migration 0095).
         self.withdrawals: list[tuple[str, str, str]] = []
+        #: Their wrapped signing seeds (migration 0147), by row.
+        self.seeds: dict[tuple[str, str, str], bytes] = {}
 
     async def list_active(self):
         return [self.conn] if self.conn.status == "active" else []
+
+    async def list_all(self):
+        return [self.conn]
 
     async def get(self, gfs_id):
         return self.conn if gfs_id == self.conn.id else None
@@ -261,6 +270,20 @@ class _Conns:
 
     async def delete_channel_withdrawal(self, space_id, gfs_id, channel_id):
         self.withdrawals.remove((space_id, gfs_id, channel_id))
+        self.seeds.pop((space_id, gfs_id, channel_id), None)
+
+    async def add_channel_withdrawals(
+        self, space_id, channel_id, gfs_ids, *, channel_seed=None
+    ):
+        for gfs_id in gfs_ids:
+            row = (space_id, gfs_id, channel_id)
+            if row not in self.withdrawals:
+                self.withdrawals.append(row)
+            if channel_seed is not None:
+                self.seeds[row] = channel_seed
+
+    async def get_channel_withdrawal_seed(self, space_id, gfs_id, channel_id):
+        return self.seeds.get((space_id, gfs_id, channel_id))
 
 
 class _Inbound:
@@ -1801,18 +1824,19 @@ async def test_retire_of_a_non_private_space_ignores_its_list(env, monkeypatch):
     env.owner.spaces.spaces[SPACE_ID] = replace(
         env.owner.spaces.spaces[SPACE_ID], space_type=SpaceType.GLOBAL
     )
-    asked: list[list[str]] = []
-    real = GfsChannelService._unregister_on
+    asked: list[str] = []
+    real = GfsChannelService._unregister_one
 
-    async def spy(self, cid, seed, conns):
-        asked.append([c.id for c in conns])
-        return await real(self, cid, seed, conns)
+    async def spy(self, space_id, cid, conn):
+        asked.append(conn.id)
+        return await real(self, space_id, cid, conn)
 
-    monkeypatch.setattr(GfsChannelService, "_unregister_on", spy)
+    monkeypatch.setattr(GfsChannelService, "_unregister_one", spy)
     assert await env.owner.svc.retire(SPACE_ID) is True
     # The list still names conn-1, but a global space's list is no channel
     # list: nothing to unregister on beyond the (empty) registrations.
-    assert asked == [[]]
+    assert asked == []
+    assert env.owner.svc._conn_repo.withdrawals == []
     assert await env.app[gfs_channel_repo_key].get(channel_id) is not None
 
 
@@ -1866,3 +1890,89 @@ async def test_the_disconnect_unregister_retries_a_transient_failure(env, monkey
     await env.owner.svc.wait_idle()
     assert answers == []
     assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+# ── D4: a retire a server missed survives the key rotation ───────────────
+
+
+def _swap_authority_seed(node: _Node) -> None:
+    """What an authority rotation does to the owner's row: a new seed and
+    pin — the old channel key can no longer be derived."""
+    kp = generate_identity_keypair()
+    node.spaces.seeds[SPACE_ID] = kp.private_key
+    node.spaces.spaces[SPACE_ID] = replace(
+        node.spaces.spaces[SPACE_ID], identity_public_key=kp.public_key.hex()
+    )
+
+
+async def test_a_confirmed_retire_leaves_nothing_pending(env):
+    await _channel_ready(env)
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert env.owner.svc._conn_repo.withdrawals == []
+
+
+async def test_a_retire_the_server_missed_is_retried_after_the_seed_changed(
+    env, monkeypatch
+):
+    """The server was down when the rotation retired the channel. The
+    withdrawal is recorded WITH the channel's signing seed before the space
+    seed is swapped, so the unregister still lands afterwards — instead of
+    the old channel living on for whoever holds the retired key."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    repo = env.app[gfs_channel_repo_key]
+
+    async def down(*_a, **_k):
+        return chan_mod.PublishOutcome.transient()
+
+    monkeypatch.setattr(GfsChannelService, "_post", down)
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert SPACE_ID not in env.owner.spaces.channels
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    assert await repo.get(channel_id) is not None
+    _swap_authority_seed(env.owner)
+    # Still down: the row stays, whatever the seed is now.
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    monkeypatch.undo()
+    assert await env.owner.svc.withdraw_pending() == 1
+    assert await repo.get(channel_id) is None
+    assert conns.withdrawals == []
+    assert conns.seeds == {}
+
+
+async def test_a_retire_keeps_an_earlier_pending_withdrawal_signable(env, monkeypatch):
+    """A server the owner had already dropped still owes its unregister when
+    the key rotates: the retire stamps that row with the channel seed too."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    conns.withdrawals.append((SPACE_ID, "conn-1", channel_id))
+
+    async def down(*_a, **_k):
+        return chan_mod.PublishOutcome.transient()
+
+    monkeypatch.setattr(GfsChannelService, "_post", down)
+    _choose(env, env.owner)  # the owner's list no longer names the server
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    _swap_authority_seed(env.owner)
+    monkeypatch.undo()
+    assert await env.owner.svc.withdraw_pending() == 1
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+async def test_a_retire_with_an_unreachable_chosen_server_is_recorded(env):
+    """The chosen server cannot even be probed right now (suspended): the
+    retire still records what it owes."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    conns.conn = replace(conns.conn, status="suspended")
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    _swap_authority_seed(env.owner)
+    conns.conn = replace(conns.conn, status="active")
+    assert await env.owner.svc.withdraw_pending() == 1
+    assert conns.withdrawals == []

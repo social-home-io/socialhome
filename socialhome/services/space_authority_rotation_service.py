@@ -857,21 +857,43 @@ class SpaceAuthorityRotationService:
             )
 
     async def _repin_gfs(self, space: Space) -> None:
-        """Re-publish a public/global space to every GFS that already lists
-        it: each re-pins from the owner's cert, which retires the old key
-        there (relays, epoch notices, writer-key pins, media auth). The
-        re-pin cleared each GFS's epoch state, so the current epoch is
+        """Move the space key pin on every GFS that holds one for the space:
+        each GFS that lists it is re-published to and re-pins from the
+        owner's cert, which retires the old key there (relays, epoch
+        notices, writer-key pins, media auth) — and so is each GFS the space
+        was WITHDRAWN from, which keeps its pin and its followers (a
+        pin-only publish; the listing stays withdrawn). That is why this
+        runs for a space of any tier: one that left the public tiers may
+        still be pinned somewhere.
+
+        A GFS that does not confirm the new key (down, a 5xx, an older
+        build) leaves the re-pin OWED: retried on every reconnect and by the
+        periodic retry until it does, and no signing seed is shared with an
+        admin meanwhile (D1, :meth:`GfsConnectionService
+        .authority_key_revocable`).
+
+        The re-pin cleared each GFS's epoch state, so the current epoch is
         re-announced right away (v_49, the owner's household-signed form) —
         members' anonymous publishes are taken again before the bundles."""
-        if space.space_type not in PUBLIC_SPACE_TIERS:
-            return
         if self._gfs is not None:
             try:
-                await self._gfs.republish_space(space.id)
+                owed = await self._gfs.repin_owed(space.id)
             except Exception:
                 log.exception(
                     "authority rotation: GFS re-publish failed for %s", space.id
                 )
+            else:
+                if owed:
+                    log.warning(
+                        "authority rotation: %d connection server(s) still pin "
+                        "the retired key of space %s — the re-pin is retried "
+                        "until each takes the new key, and no signing key is "
+                        "shared with admins meanwhile",
+                        owed,
+                        space.id,
+                    )
+        if space.space_type not in PUBLIC_SPACE_TIERS:
+            return
         if self._member_gfs is not None:
             try:
                 await self._member_gfs.announce_epoch(space.id)

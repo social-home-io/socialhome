@@ -8,6 +8,7 @@ service's own branches with real repos and a recording federation double.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import replace
@@ -358,13 +359,14 @@ async def test_bundle_parts_not_signed_by_the_new_key_are_ignored(env):
 async def test_public_space_republishes_then_reseals(env):
     """A public / global space: every GFS that lists it re-pins (republish)
     BEFORE the K2-signed subscriber re-seal, which a GFS only accepts once
-    it re-pinned. A private space touches no GFS at all."""
+    it re-pinned. A private space gets the re-pin pass too — a GFS it was
+    WITHDRAWN from may still pin the old key (D2) — but no re-seal."""
     calls: list[str] = []
 
     class _Gfs:
-        async def republish_space(self, space_id):
+        async def repin_owed(self, space_id):
             calls.append(f"republish:{space_id}")
-            return 1
+            return 0
 
     class _Keys:
         async def reconcile_space_everywhere(self, space_id):
@@ -373,7 +375,8 @@ async def test_public_space_republishes_then_reseals(env):
     env.svc.attach_gfs(_Gfs())
     env.svc.attach_subscriber_keys(_Keys())
     await env.svc.rotate(SPACE)  # private
-    assert calls == []
+    assert calls == [f"republish:{SPACE}"]
+    calls.clear()
     await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
     await env.svc.rotate(SPACE)
     assert calls == [f"republish:{SPACE}", f"reseal:{SPACE}"]
@@ -1156,9 +1159,9 @@ async def test_a_re_pin_re_announces_the_epoch_before_the_reseal(env):
     calls: list[str] = []
 
     class _Gfs:
-        async def republish_space(self, space_id):
+        async def repin_owed(self, space_id):
             calls.append("republish")
-            return 1
+            return 0
 
     class _Keys:
         async def reconcile_space_everywhere(self, space_id):
@@ -1317,14 +1320,14 @@ async def test_rotation_repins_every_gfs_before_the_bundles_go_out(env):
     epoch_before = await env.crypto.get_current_epoch(SPACE)
 
     class _Gfs:
-        async def republish_space(self, space_id):
+        async def repin_owed(self, space_id):
             assert await env.crypto.get_current_epoch(space_id) > epoch_before
             assert not any(
                 e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED
                 for e in env.fed.log
             )
             calls.append("republish")
-            return 1
+            return 0
 
     class _Keys:
         async def reconcile_space_everywhere(self, space_id):
@@ -1348,9 +1351,9 @@ async def test_rotation_reannounces_the_epoch_with_the_repin_before_the_bundles(
     order: list[str] = []
 
     class _Gfs:
-        async def republish_space(self, space_id):
+        async def repin_owed(self, space_id):
             order.append("republish")
-            return 1
+            return 0
 
     class _MemberGfs:
         async def retire_channel(self, space_id):
@@ -1496,3 +1499,20 @@ async def test_a_refused_reshare_costs_no_window(env):
     await _echo_reshare(env, svc)
     await env.svc.wait_idle()
     assert svc.sent == ["v44"]
+
+
+async def test_a_rotation_says_so_when_a_gfs_still_owes_the_repin(env, caplog):
+    """R5: a GFS that did not take the new key leaves the re-pin owed — the
+    rotation stands, says so, and the retry takes it from there."""
+
+    class _Gfs:
+        async def repin_owed(self, space_id):
+            return 2
+
+    env.svc.attach_gfs(_Gfs())
+    with caplog.at_level(logging.WARNING):
+        assert await env.svc.rotate(SPACE) is not None
+    assert any(
+        "2 connection server(s) still pin the retired key" in r.getMessage()
+        for r in caplog.records
+    )

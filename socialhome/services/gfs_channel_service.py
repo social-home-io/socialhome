@@ -642,32 +642,65 @@ class GfsChannelService:
         return True
 
     async def _retire(self, space: Space, channel_id: str) -> None:
-        """Unregister the channel everywhere we can sign for it, and forget
-        it. Members get no grant for the next epoch."""
-        # The servers the owner's list already dropped (recorded durably).
-        await self.withdraw_pending(space_id=space.id)
+        """Unregister the channel everywhere it lives, and forget it.
+        Members get no grant for the next epoch.
+
+        Durable (migration 0147, owner decision D4): every server the
+        channel lives on is first RECORDED as owing the unregister, together
+        with the channel's signing seed — then asked. A server that does not
+        confirm (down, suspended, a 5xx) keeps its row and is asked again on
+        its reconnect and by the periodic retry, even after the space key
+        this channel derives from was rotated away. Without that a server
+        that missed the one request kept the old channel open for whoever
+        still holds the retired key."""
         seed = await self._matching_seed(space)
         if seed is not None:
-            # Only where the channel lives: the chosen servers and any it was
-            # registered on in this process — never a server the owner did
-            # not choose.
+            channel_seed = derive_channel_seed(seed, space.id, channel_id)
+            # Only where the channel lives: the chosen servers (reachable
+            # right now or not), any it was registered on in this process,
+            # and those a list change already dropped (their pending rows
+            # gain the seed) — never a server the owner did not choose.
             registered = self._registered.get(channel_id, set())
+            connections = await self._conn_repo.list_all()
             # A space that left the private tier keeps a listing list, not a
             # channel list: never read it as where the channel lives.
             chosen = (
-                {c.id for c in await self._chosen_capable(space)}
+                {c.id for c in connections_on_list(space.gfs_servers, connections)}
                 if space.space_type is SpaceType.PRIVATE
+                and space.gfs_servers is not None
                 else set()
             )
-            await self._unregister_on(
-                channel_id,
-                derive_channel_seed(seed, space.id, channel_id),
-                [
-                    c
-                    for c in await self._capable()
+            pending = {
+                conn_id
+                for _s, conn_id, ch in await self._conn_repo.list_channel_withdrawals(
+                    space_id=space.id
+                )
+                if ch == channel_id
+            }
+            owing = sorted(
+                {
+                    c.id
+                    for c in connections
                     if c.id in chosen or c.gfs_instance_id in registered
-                ],
+                }
+                | pending
             )
+            try:
+                await self._conn_repo.add_channel_withdrawals(
+                    space.id, channel_id, owing, channel_seed=channel_seed
+                )
+            except Exception:
+                # No KEK wired / a write failure: still try each once below
+                # from the rows that exist (derived from the live seed).
+                log.exception(
+                    "gfs.channel: recording the retire of channel %s failed",
+                    channel_id,
+                )
+                await self._conn_repo.add_channel_withdrawals(
+                    space.id, channel_id, owing
+                )
+        # Every pending row of the space, the ones just recorded included.
+        await self.withdraw_pending(space_id=space.id)
         self._registered.pop(channel_id, None)
         await self._spaces.set_gfs_channel(space.id, None, None)
         log.info(
@@ -676,32 +709,6 @@ class GfsChannelService:
             channel_id,
             space.id,
         )
-
-    async def _unregister_on(
-        self, channel_id: str, channel_seed: bytes, conns: list[GfsConnection]
-    ) -> None:
-        """Unregister the channel on *conns* (anonymous, channel-key signed)."""
-        client = self._gfs.publish_client()
-        if client is None:
-            return
-        for conn in conns:
-
-            async def _unregister(conn: GfsConnection = conn) -> PublishOutcome:
-                body = sign_unregister(
-                    channel_seed=channel_seed,
-                    channel_id=channel_id,
-                    gfs_instance_id=conn.gfs_instance_id,
-                    gfs_key=self._gfs.addressee_key_for(conn),
-                    ts=_anon_ts(),
-                ).to_wire()
-                return await self._post(
-                    client,
-                    f"{conn.inbox_url}{CHANNEL_UNREGISTER_ROUTE}",
-                    body,
-                    conn,
-                )
-
-            await self._keyed(conn, _unregister)
 
     async def withdraw_pending(
         self, *, space_id: str | None = None, gfs_id: str | None = None
@@ -747,17 +754,25 @@ class GfsChannelService:
         self, space_id: str, channel_id: str, conn: GfsConnection
     ) -> PublishOutcome | None:
         """One anonymous unregister of *channel_id* at *conn*; ``None`` when
-        it can never be signed (space gone, seed not ours or changed)."""
-        space = await self._spaces.get(space_id)
-        if space is None:
-            return None
-        seed = await self._matching_seed(space)
-        if seed is None:
-            return None
+        it can never be signed (no seed recorded with the row, and the space
+        is gone or its seed is not ours or changed)."""
+        # The seed recorded with the row (a retire, 0147) signs even after
+        # the space key it derived from is gone; a row without one (a
+        # dropped server) is derived from the live seed.
+        channel_seed = await self._conn_repo.get_channel_withdrawal_seed(
+            space_id, conn.id, channel_id
+        )
+        if channel_seed is None:
+            space = await self._spaces.get(space_id)
+            if space is None:
+                return None
+            seed = await self._matching_seed(space)
+            if seed is None:
+                return None
+            channel_seed = derive_channel_seed(seed, space_id, channel_id)
         client = self._gfs.publish_client()
         if client is None:
             return PublishOutcome.transient()
-        channel_seed = derive_channel_seed(seed, space_id, channel_id)
 
         async def _unregister() -> PublishOutcome:
             body = sign_unregister(
