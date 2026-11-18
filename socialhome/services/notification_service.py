@@ -5701,9 +5701,7 @@ class NotificationService(ProtectionGateMixin):
                 continue
             # A remote applicant is named by the name this household holds,
             # never by their raw user id.
-            name = await self._person_name(
-                event.user_id, self._locale(recipient), space_id=event.space_id
-            )
+            name = await self._applicant_name(request, event, self._locale(recipient))
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -5789,6 +5787,35 @@ class NotificationService(ProtectionGateMixin):
             household_paired=bool(household) and await self._paired(str(household)),
         )
 
+    async def _applicant_name(
+        self, request: dict | None, event: SpaceJoinRequested, locale: str | None
+    ) -> str:
+        """Who asks, for the admins' bell: the name this household holds
+        for them (:meth:`_person_name`) — except that a request from
+        ANOTHER household never borrows the name of a person here. The
+        other household chooses the user id it sends; when that id is one
+        of ours, the request is named from that household's own seat in
+        the space, else "Someone"."""
+        household = (request or {}).get("remote_applicant_instance_id")
+        if not household or await self._local_user(event.user_id) is None:
+            return await self._person_name(
+                event.user_id, locale, space_id=event.space_id
+            )
+        seat = (
+            await self._remote_members.get(
+                event.space_id, str(household), event.user_id
+            )
+            if self._remote_members is not None
+            else None
+        )
+        return (seat.display_name if seat else None) or self._someone(locale)
+
+    async def _own_join_request(self, request_id: str) -> bool:
+        """Whether the request is one of this household's people — not one
+        another household filed (under whatever user id it sent)."""
+        request = await self._spaces.get_join_request(request_id)
+        return not (request or {}).get("remote_applicant_instance_id")
+
     async def _paired(self, instance_id: str) -> bool:
         """Is *instance_id* a household this one is paired with?"""
         if not instance_id or self._instances is None:
@@ -5805,7 +5832,7 @@ class NotificationService(ProtectionGateMixin):
         if space is None:
             return
         recipient = await self._local_user(event.user_id)
-        if recipient is None:
+        if recipient is None or not await self._own_join_request(event.request_id):
             # A §D2 cross-household applicant (or an admin/mod elevation of
             # one): the approved user lives on another household, so there
             # is no LOCAL user to notify — and a notification row for a
@@ -5883,9 +5910,11 @@ class NotificationService(ProtectionGateMixin):
         because the notification may surface on a lock screen.
         """
         recipient = await self._local_user(event.user_id)
-        if recipient is None:
+        if recipient is None or not await self._own_join_request(event.request_id):
             # Cross-household applicant — no local user to notify, and a row
-            # for a non-local user_id would fail the users FK.
+            # for a non-local user_id would fail the users FK. A request
+            # another household filed under a local person's user id is not
+            # that person's either.
             return
         await self._save_notif(
             new_notification(

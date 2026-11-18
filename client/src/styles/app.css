@@ -11053,6 +11053,44 @@ hr {
 .sh-admin-grant-check__hint {
   color: var(--sh-text-muted);
 }
+/* Space settings › "Let admins act for me" going on (MembersSection.tsx):
+   the same note, listing every other household with an admin, then
+   Cancel / Turn on. */
+.sh-admin-authority-confirm {
+  margin-top: var(--sh-space-sm);
+  gap: var(--sh-space-sm);
+}
+.sh-admin-authority-confirm:focus { outline: none; }
+.sh-admin-authority-confirm:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-admin-authority-confirm__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-admin-authority-confirm__list > li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding-top: var(--sh-space-sm);
+  border-top: 1px solid var(--sh-border);
+}
+.sh-admin-authority-confirm__who {
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-admin-authority-confirm__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sh-space-sm);
+}
 @media (max-width: 640px) {
   /* Stack the row on a phone: avatar + name on top, actions below. Two
      action buttons ("Make admin" / "Decline") beside the avatar leave the

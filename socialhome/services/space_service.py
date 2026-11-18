@@ -7822,8 +7822,10 @@ class SpaceService(
             # elevation; tell the SPA so it can say "you're in as a member,
             # an admin must approve your admin role".
             for r in await self._spaces.list_pending_join_requests(member.space_id):
-                if r["user_id"] == user_id and (
-                    r.get("requested_role") == SpaceRole.ADMIN.value
+                if (
+                    r["user_id"] == user_id
+                    and not r.get("remote_applicant_instance_id")
+                    and r.get("requested_role") == SpaceRole.ADMIN.value
                 ):
                     result["pending_role"] = SpaceRole.ADMIN.value
                     break
@@ -7959,6 +7961,14 @@ class SpaceService(
         runs the owner-only :meth:`set_role` / :meth:`set_remote_member_role`).
         Idempotent — a second admin-link redeem does not stack a second
         request — and a no-op when the user already holds admin/owner.
+
+        SECURITY: one request per (household, user id), never per user id
+        alone. A remote ``user_id`` is whatever the redeeming household
+        sends, so somebody holding a leaked admin link could redeem first
+        under a victim's user id and, with a user-id-only key, swallow the
+        victim's own request — leaving the owner one row, the wrong
+        household's. Each household's request is its own row, shown with
+        its own household ID.
         """
         if remote_instance_id is None:
             existing = await self._spaces.get_member(space_id, user_id)
@@ -7969,8 +7979,11 @@ class SpaceService(
                 return
         pending = await self._spaces.list_pending_join_requests(space_id)
         for r in pending:
-            if r["user_id"] == user_id and (
-                r.get("requested_role") == SpaceRole.ADMIN.value
+            if (
+                r["user_id"] == user_id
+                and (r.get("remote_applicant_instance_id") or None)
+                == (remote_instance_id or None)
+                and r.get("requested_role") == SpaceRole.ADMIN.value
             ):
                 return
         rid = await self._spaces.save_join_request(

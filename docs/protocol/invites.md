@@ -1222,6 +1222,15 @@ for a local member, `set_remote_member_role` for a remote one — so an
 admin who is not the owner cannot approve an admin grant either. Denying
 or letting it expire leaves the person a member.
 
+A pending elevation is one row per **(household, user id)**
+(`remote_applicant_instance_id`, `user_id`; a local member's row has no
+household). A remote `user_id` is whatever the redeeming household
+sends, so the user id alone is no key: somebody holding a leaked admin
+link who redeemed first under another person's user id would otherwise
+swallow that person's own request. Both are filed, each shown with its
+own household ID, and approving one neither approves nor removes the
+other. A repeat from the same household still files nothing new.
+
 #### An admin met through a link holds the signing seed like any admin
 
 Every space admin is equal, whichever way its household is reached (owner

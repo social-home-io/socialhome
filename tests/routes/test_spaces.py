@@ -1061,6 +1061,51 @@ async def test_list_members_includes_federated_remote_members(client):
     assert remote["location_share_enabled"] is False
 
 
+async def test_space_members_names_every_admin_household(client):
+    """What the owner is shown before turning "Let admins act for me" on
+    comes from this list: every other household with an admin seat is a
+    row with ``role: "admin"`` and its household ID (``instance_id``); the
+    owner's own household carries none, and a removed admin is not listed.
+    """
+    db = client.app[_db_key]
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "ActForMe"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    for instance_id, user_id, role, tombstoned in (
+        ("peer-one", "uid-a1", "admin", 0),
+        ("peer-one", "uid-a2", "admin", 0),
+        ("peer-two", "uid-b1", "admin", 0),
+        ("peer-two", "uid-b2", "member", 0),
+        ("peer-gone", "uid-c1", "admin", 1),
+    ):
+        await db.enqueue(
+            "INSERT INTO space_remote_members"
+            "(space_id, instance_id, user_id, display_name, role, tombstoned)"
+            " VALUES(?,?,?,?,?,?)",
+            (sid, instance_id, user_id, user_id, role, tombstoned),
+        )
+    resp = await client.get(
+        f"/api/spaces/{sid}/members", headers=_auth(client._admin_token)
+    )
+    assert resp.status == 200, await resp.text()
+    members = await resp.json()
+    admins = sorted(
+        (m["instance_id"], m["user_id"])
+        for m in members
+        if m["role"] == "admin" and m.get("instance_id")
+    )
+    assert admins == [
+        ("peer-one", "uid-a1"),
+        ("peer-one", "uid-a2"),
+        ("peer-two", "uid-b1"),
+    ]
+    own = [m for m in members if not m.get("instance_id")]
+    assert [m["role"] for m in own] == ["owner"]
+
+
 async def test_remote_member_display_name_prefers_fresh_users_table_row(client):
     """When the remote user renames themselves on their household, the
     USER_UPDATED federation event updates ``remote_users.display_name``
