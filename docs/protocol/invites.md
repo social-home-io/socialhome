@@ -1250,8 +1250,8 @@ to such a seat does; what only the seed can sign (the notice of a
 rotation the admin runs, a removal made on its household)
 still goes out, anonymously, so the GFS can learn that some household
 besides the owner holds the seed, not which. (On a private space's opaque
-channel a delegated admin renews its own grant after a rotation it runs,
-like every other member's.) See
+channel a delegated admin's own seat is renewed after a rotation it runs —
+a signal reduced, not removed.) See
 [gfs-relay.md](./gfs-relay.md#residuals). With delegation
 off, no admin holds the seed on any path, and a link-joined admin acts
 through the host (`SPACE_REMOTE_ADMIN_ACTION`) like a paired one.

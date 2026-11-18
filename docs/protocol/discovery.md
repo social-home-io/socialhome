@@ -102,8 +102,12 @@ The Social Home ↔ GFS link is split by direction:
     Once every household ships `ts` it becomes mandatory. A publish answers
     `{status, space_id, identity_public_key}` — the authority key the GFS
     pins after the request, which is how the owner checks that a re-pin
-    took. A publish carrying `withdrawn: true` (inside the signed bytes,
-    `ts` mandatory; capability `withdrawn_repin`) is a **pin-only** publish
+    took. A publish or a withdrawal may name the server it is for —
+    `gfs_key`, that server's identity key, inside the signed bytes; one
+    naming another server is refused, so a body sent to one GFS cannot be
+    replayed to another. A publish carrying `withdrawn: true` (inside the
+    signed bytes, `ts` and `gfs_key` mandatory; capability
+    `withdrawn_repin`) is a **pin-only** publish
     for a listing the owner withdrew: the pin moves under the usual cert
     rule, no metadata is stored, `status` is untouched, the listing stays
     withdrawn (the flag is set if it was not), and no row is ever created —
@@ -3184,8 +3188,11 @@ servers the owner's list names; no list (or an empty one) means no channel.
   recorded in `gfs_channel_withdrawals` (migration 0095) BEFORE the new
   list is stored; each row goes once the server confirmed (or can never
   confirm), and is retried on every reconnect of that server — a
-  suspended connection when it comes back — and by the 5-minute retry pass
-  (`GfsChannelService.withdraw_pending`). A channel retired because the
+  suspended connection when it comes back — and by the retry pass
+  (`GfsChannelService.withdraw_pending`; after a failed attempt the next
+  one waits, 4 minutes doubling to 6 hours). A refusal is not a
+  confirmation and the row is never given up: while it stands, a retired
+  channel's row blocks new signing-key shares for the space. A channel retired because the
   space key rotated (or the option went off) is recorded the same way
   first, each row with the channel's signing seed wrapped under the
   household KEK (migration 0147), so the unregister can still be signed
@@ -3211,11 +3218,13 @@ to every chosen channel server its grant names — its own connections and,
 over the same proof-checked pinned session, the ones it never connected to —
 so a rotation it makes while the owner is offline reaches a server it never
 joined. Right after its own rotation it holds no grant for the new epoch
-yet: it announces with its newest stored grant, then renews its own grant
-for the new epoch (same channel and servers; a seat pass and writer key
-only if it held them) and re-subscribes — like every member that gets the
-rekey, so its seat is not the one left on the old pass
-(`GfsChannelService._renew_own_grant`). The
+yet: it announces with its newest stored grant. Its own grant for the new
+epoch (same channel and servers; a seat pass and writer key only if it
+held them) is renewed later, on the first item of the new epoch that
+reaches its old seat or on its next reconnect — never right after the
+notice, where it would be the first seat on the new epoch
+(`GfsChannelService._renew_own_grant`; what remains visible is in
+[gfs-relay.md](./gfs-relay.md#residuals)). The
 owner's notices stay on its own registered connections.
 
 **Liveness limit.** A delegated admin knows the channel's servers only from

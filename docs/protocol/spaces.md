@@ -2416,8 +2416,8 @@ to such a seat does; what only the seed can sign (the notice of a
 rotation the admin runs, a removal made on its household)
 still goes out, anonymously, so the GFS can learn that some household
 besides the owner holds the seed, not which. (On a private space's opaque
-channel a delegated admin renews its own grant after a rotation it runs,
-like every other member's — its seat is not the odd one out.) See
+channel a delegated admin's own seat is renewed after a rotation it runs —
+a signal reduced, not removed, see the residuals.) See
 [gfs-relay.md](./gfs-relay.md#residuals). Gated on
 `MIN_FOR_RELAY_ADMIN_KEY_SHARE` (94): an older link-seated admin is skipped
 at WARNING and acts through the host. The seed goes to nobody while any GFS
@@ -2790,8 +2790,16 @@ is current:
   **no metadata** (blank name, description, images — the space may be
   private by now). The GFS moves the pin under the usual cert rule, stores
   nothing else, leaves `status` alone and keeps the listing withdrawn; a
-  space it holds no row for answers `404` (after the signature verified) and
-  the owner forgets the row. Sent only to a server that proved the signed
+  space it holds no row for answers `404 {"error": "not listed"}` (after the
+  signature verified) and the owner forgets the row — only on that exact
+  answer; any other 404 (a proxy) leaves it owed. Because this publish also
+  WITHDRAWS a listing, it names the one server it is for: `gfs_key`, that
+  server's identity key, is inside the signed bytes and mandatory, and a
+  server refuses one that is not its own — otherwise the GFS that received
+  it could replay it, within the `ts` window, to another GFS where the
+  space is listed and take that listing and its invite pages down. The
+  withdrawal itself (`unpublish`) carries the same field to a server that
+  proved the capability. Sent only to a server that proved the signed
   `withdrawn_repin` capability — an older one would refuse the field, and a
   plain publish would list the space again — so on such a server the re-pin
   stays owed (WARNING, seed shares blocked) until its operator upgrades or
@@ -2812,15 +2820,23 @@ is current:
   server that was down keeps its row and is asked again on its reconnect
   and by the retry pass — after the rotation too. A chosen server whose
   connection is suspended is recorded as well. The seed goes with the row
-  once the server confirmed; a refusal (a 403 from clock skew or a stale
-  server key) is not a confirmation — the row stays and is asked again, and
-  is given up, at WARNING, only after 12 refusals in a row (a channel that
-  server pinned to another key was never ours there).
+  once the server confirmed. Nothing else ends it: unreachable or refused
+  (a 403 from clock skew or a stale server key is not a confirmation), the
+  row and its seed stay, the next attempt waits (4 minutes doubling to 6
+  hours; a reconnect asks at once), and the row keeps blocking new seed
+  shares for the space — the owner is told through
+  `space_delegation_blocked` and decides (disconnecting that GFS drops its
+  rows). The seed recorded is the one that derives the stored channel key,
+  and one that can no longer be read (another KEK) keeps the row owed too.
 - **Cost.** Per rotation: one publish per listing GFS (as before) plus one
   ~1 KB pin-only publish per GFS the space was withdrawn from (typically
-  0–2). Per retry pass: one request per (space, GFS) still owed and due
+  0–2). Per retry: one request per (space, GFS) still owed and due
   (4 minutes doubling to 6 hours: a few a day for a dead server), zero in
-  steady state. No fan-out to members.
+  steady state. A LISTING retry is the full re-publish — metadata with the
+  embedded cover and icon, up to a few hundred KB — which is why it backs
+  off rather than going out every pass; a withdrawn-listing retry is the
+  ~1 KB pin-only body, a channel retry a few hundred bytes. No fan-out to
+  members.
 - **What is left.** Listings withdrawn before this release left no row, so a
   rotation cannot reach them (re-list and withdraw again to record one). A
   dissolved space is never rotated, so the pin a GFS keeps for it is never
@@ -2829,7 +2845,12 @@ is current:
   the connection, and the old pin there is then out of the owner's reach. A
   malicious GFS that keeps honouring an old key towards the followers it
   alone serves cannot be stopped by any household (it controls their only
-  path).
+  path). The pin-only publish is IDENTIFIED (owner-signed, naming the space
+  id): a GFS a space was withdrawn from keeps seeing, at each rotation,
+  that this household's space rotated its key — also after the space went
+  private. It learns no name, member or reason, and it already knew the
+  space and its owner from the listing; the alternative is leaving the old
+  key valid there.
 
 **The owner hears of a kick made while it was away.** A delegated admin's
 removal reaches the owner only as roster gossip (`SPACE_MEMBER_LEFT`), which
@@ -2849,11 +2870,12 @@ in the normal case. Only removals written under the current key epoch are
 re-stated (an older one may be a since-revoked holder's), never the owner
 household's seats or the sender's own.
 
-**A removed household does not seat itself.** Live `SPACE_MEMBER_JOINED`
-gossip whose envelope sender is the very household it seats is refused when
-the receiver holds a removal (any tombstoned seat) of that household and no
-live admin seat of it: a kicked admin that still holds the current seed can
-no longer sign itself — or a fresh user id — back in. A household comes back
+**A removed household seats nobody.** Live `SPACE_MEMBER_JOINED` gossip is
+refused when the receiver holds a removal (any tombstoned seat) of the
+household that SENT it and no live admin seat of it — whoever the entry
+seats: a kicked admin that still holds the current seed can no longer sign
+itself, a fresh user id or a second household it controls back in (only a
+seed holder by right sends a JOINED at all). A household comes back
 through the host (its gossip or snapshot) or the admin household that
 invites it. Residuals, stated plainly: until the owner hears of the kick
 (an admin's sync BEGIN with a differing roster digest, answered by the
