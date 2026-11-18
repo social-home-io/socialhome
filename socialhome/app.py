@@ -5835,9 +5835,9 @@ def create_app(config: Config | None = None) -> web.Application:
                 except Exception:
                     log.exception("gfs: member subscription list failed for %s", gfs_id)
             await gfs_space_mirror.resubscribe_all(gfs_id, also=member_ids)
-            # Re-announce the current epoch of every seed-held space (the
+            # Re-announce the current epoch of every space we OWN (the
             # owner's notice also confirms what a delegated admin rotated
-            # meanwhile). Fail-soft.
+            # meanwhile; a delegated admin sends nothing here). Fail-soft.
             if gfs_member_publish is not None:
                 try:
                     await gfs_member_publish.announce_held_epochs(gfs_id)
@@ -5871,9 +5871,9 @@ def create_app(config: Config | None = None) -> web.Application:
                     exc_info=True,
                 )
             # Phase 5b-c reconcile: pull this GFS's subscriber list for every
-            # seed-held public/global space and re-seal the content key to each
-            # — delivering keys missed while no seed-holder was online (works
-            # owner-offline via any delegated admin). Fail-soft (never raises).
+            # public/global space we own and listed there and re-seal the
+            # content key to each — delivering keys missed while we were
+            # offline. Fail-soft (never raises).
             if space_subscriber_key_outbound is not None:
                 await space_subscriber_key_outbound.reconcile(gfs_id)
 

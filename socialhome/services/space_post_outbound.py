@@ -432,8 +432,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 post.author if release is not None else event.approved_by or post.author
             ),
         }
-        # Attach a pre-signed relay hint so a seed-holding member can forward this
-        # public/global post to the GFS subscribers even when the owner is offline
+        # Attach a pre-signed relay hint so the space's owner can relay this
+        # public/global post to the GFS subscribers
         # (remote-author relay). Built only for a public/global space + a local
         # author we can sign for; private spaces never relay to the GFS. A
         # public/global space that allows no subscribers is listed for
@@ -485,7 +485,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 )
                 # v_49 — our household's writer cert, outside the author
                 # signature (it authenticates itself against the space key).
-                # Absent → a seed holder relays it on its own authority, as
+                # Absent → the owner relays it on its own authority, as
                 # for a pre-v_49 author.
                 if self._writer_certs is not None:
                     try:

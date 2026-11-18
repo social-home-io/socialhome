@@ -179,7 +179,7 @@ MAX_SUBSCRIPTIONS_PER_INSTANCE: int = 500
 #: rest (deduped by :data:`RECONNECT_NOTIFY_DEDUPE_S`). So a reconnect costs
 #: at most one key handoff per held seat
 #: (≤ :data:`MAX_SUBSCRIPTIONS_PER_INSTANCE`). The Phase-5b-c reconcile, which
-#: every seed holder runs on ITS own reconnect, still backstops an owner that
+#: the owner runs on ITS own reconnect, still backstops an owner that
 #: was offline.
 MAX_RECONNECT_NOTIFIES: int = 50
 

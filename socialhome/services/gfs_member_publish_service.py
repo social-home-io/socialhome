@@ -9,10 +9,11 @@ publish mode, always anonymous). Wire codec in
 :mod:`socialhome.global_server.member_publish`. It also:
 
 * sends the **content-epoch notice** a seed holder owes every GFS at each
-  rotation (:meth:`GfsMemberPublishService.announce_epoch`): the space OWNER
-  signs it with its household key (it may jump), a delegated admin signs it
-  with the space authority seed (the GFS takes it as +1 at most); both pin
-  the epoch's writer key (``writer_key_cert``);
+  rotation it runs (:meth:`GfsMemberPublishService.announce_epoch`): the
+  space OWNER signs it with its household key (it may jump) and repeats it on
+  every reconnect, a delegated admin signs it with the space authority seed
+  (the GFS takes it as +1 at most) and sends it for its own rotation only;
+  both pin the epoch's writer key (``writer_key_cert``);
 * **auto-subscribes** a member household to the GFS fan-out of the spaces it
   writes in (:meth:`member_subscription_ids`, merged into the shuffled
   reconnect batch), so it receives other members' items live;
@@ -44,9 +45,19 @@ deletes and reactions carry the generic inner of
 :mod:`socialhome.services.space_item_author`. Either way the real type and
 its target are bound inside the author signature, and never leave the
 ciphertext (the outer type is always ``space_item``). Which types exist and
-the scope each needs: :mod:`socialhome.domain.space_item`. A seed holder
+the scope each needs: :mod:`socialhome.domain.space_item`. The OWNER
 publishes no posts here (it relays them with the authority signature) but
 does publish its other items, which no other path carries to followers.
+
+**A delegated admin is a writer here.** A household that holds the space's
+signing seed without owning the space (an admin the owner lets act for it)
+sends a connection server what any writer household sends: its posts go out
+as anonymous items, it keeps its fan-out seat, and a reconnect re-takes that
+seat and announces nothing. So the server cannot tell which household was
+handed the seed. What only the seed can sign still goes out, anonymously,
+for something done on that household itself: the notice of a rotation it
+runs, and a removal made there
+(:mod:`socialhome.services.space_public_outbound`).
 
 **Every listed GFS (v_57).** Once the owner's signed GFS list is known
 (:meth:`GfsConnectionService.server_targets`), each item goes to every listed
@@ -58,12 +69,12 @@ its own connections. Retries re-resolve the list and drop an item whose
 server was delisted. Without a list (an older owner) the household's own
 connections that list the space are the targets.
 
-**Host dedupe (step 12).** Every seed holder also relays a member's post
+**Host dedupe (step 12).** The owner also relays a member's post
 (``space_post_public``), because a follower on an older build reads only
 that copy; a receiver that understands ``space_item`` gets it twice and
 drops the second copy by post id. Followers now say they read
-``space_item`` (subscribe ``accepts``, kept per seat by the GFS), and a seed
-holder skips its copy on a server where no follower lacks it, the author is
+``space_item`` (subscribe ``accepts``, kept per seat by the GFS), and the
+owner skips its copy on a server where no follower lacks it, the author is
 at v_90 or later and the server proved member publish
 (:mod:`socialhome.services.space_relay_coverage`). The member publish itself
 runs in the background (:meth:`GfsMemberPublishService.schedule_post`) —
@@ -371,6 +382,19 @@ class GfsMemberPublishService:
         except RuntimeError:
             return False
 
+    async def _relays_as_owner(self, space: Space) -> bool:
+        """Whether this household is *space*'s OWNER holding its seed — the
+        one household that relays posts under the authority signature, holds
+        no fan-out seat and re-announces epochs on a reconnect. The owner is
+        named on the listing anyway. A delegated admin (the seed, another
+        household's space) is NOT one: everything it sends a connection
+        server is what any writer household sends, so the server cannot
+        tell who was handed the seed."""
+        return (
+            space.owner_instance_id == self._own_instance_id
+            and await self._holds_seed(space.id)
+        )
+
     @staticmethod
     def _publicly_readable(space: Space | None) -> bool:
         return (
@@ -411,8 +435,8 @@ class GfsMemberPublishService:
     async def plan_post(
         self, space_id: str, author_user_id: str
     ) -> list[GfsConnection]:
-        """:meth:`plan_item` for a post. A seed holder publishes no posts
-        here — it relays them with the authority signature instead."""
+        """:meth:`plan_item` for a post. The owner publishes no posts here
+        — it relays them with the authority signature instead."""
         return await self.plan_item(space_id, author_user_id, ITEM_TYPE_POST)
 
     async def plan_item(
@@ -420,9 +444,10 @@ class GfsMemberPublishService:
     ) -> list[GfsConnection]:
         """The connection servers this household will publish
         ``author_user_id``'s ``item_type`` item in *space_id* to, or ``[]`` —
-        not public/readable; a POST from a seed holder (it relays posts with
-        the authority signature; nothing else reaches followers, so a seed
-        holder's comments, reactions and own edits / deletes do go here); or
+        not public/readable; a POST from the owner (it relays posts with
+        the authority signature; nothing else reaches followers, so its
+        comments, reactions and own edits / deletes do go here — a delegated
+        admin publishes its posts here like any writer); or
         our cert for the current epoch does not let THIS author publish THIS
         type (no cert, too weak a scope, or the v2 user binding does not name
         them — e.g. a plain member of a moderated space, whose post must
@@ -445,7 +470,7 @@ class GfsMemberPublishService:
         if not self._publicly_readable(space):
             return []
         assert space is not None
-        if item_type == ITEM_TYPE_POST and await self._holds_seed(space_id):
+        if item_type == ITEM_TYPE_POST and await self._relays_as_owner(space):
             return []
         cert = await self._writer_certs.current_own_cert_wire(space_id)
         if cert is None or not _cert_lets(cert, author_user_id, item_type):
@@ -721,7 +746,7 @@ class GfsMemberPublishService:
     async def announce_epoch(self, space_id: str, *, only: str | None = None) -> int:
         """Tell every capable GFS listing *space_id* its current content
         epoch — at every rotation (before the subscriber re-seal), after
-        every authority re-pin, and on every GFS (re)connect. The OWNER signs
+        every authority re-pin, and (the owner only) on every GFS (re)connect. The OWNER signs
         with its household key (the GFS confirms any jump); a delegated admin
         signs with the space seed (+1 at most). ``only`` limits it to one
         connection. No-op without the seed or for a space that is not
@@ -975,9 +1000,13 @@ class GfsMemberPublishService:
 
     async def ensure_subscribed(self, space_id: str) -> int:
         """Subscribe to *space_id*'s fan-out on every capable GFS listing it,
-        when this household is a local writer there without the seed."""
+        when this household is a local writer there and not its owner (a
+        delegated admin keeps its seat like any writer)."""
         space = await self._spaces.get(space_id)
-        if not self._publicly_readable(space) or await self._holds_seed(space_id):
+        if not self._publicly_readable(space):
+            return 0
+        assert space is not None
+        if await self._relays_as_owner(space):
             return 0
         if not await self._local_writer(space_id):
             return 0
@@ -1010,8 +1039,8 @@ class GfsMemberPublishService:
     async def member_subscription_ids(self, gfs_id: str) -> list[str]:
         """The spaces this household should hold a fan-out seat in on
         *gfs_id* because it writes there (publicly readable, a local writer
-        seat, no seed, listed there) — for the reconnect batch, which merges
-        them with the followed spaces and shuffles the lot
+        seat, not the owner, listed there) — for the reconnect batch, which
+        merges them with the followed spaces and shuffles the lot
         (:meth:`GfsSpaceMirrorService.resubscribe_all`). ``[]`` for an
         inactive or incapable connection."""
         conn = await self._conn_repo.get(gfs_id)
@@ -1023,7 +1052,7 @@ class GfsMemberPublishService:
         for space in await self._spaces.list_all():
             if not self._publicly_readable(space):
                 continue
-            if await self._holds_seed(space.id):
+            if await self._relays_as_owner(space):
                 continue
             if not await self._local_writer(space.id):
                 continue
@@ -1033,7 +1062,7 @@ class GfsMemberPublishService:
 
     async def subscribe_member_spaces(self, gfs_id: str) -> int:
         """Subscribe this household to *gfs_id*'s fan-out for every publicly
-        readable space it holds a writer seat in (and no seed — a seed holder
+        readable space it holds a writer seat in (the owner apart — it
         receives its members' posts over federation and relays them itself),
         so other members' items arrive live. The GFS subscribe is an upsert.
         Fail-soft per space. Returns how many were (re)subscribed. (The
@@ -1061,9 +1090,11 @@ class GfsMemberPublishService:
 
     async def announce_held_epochs(self, gfs_id: str) -> int:
         """On a GFS (re)connect: re-announce the current epoch of every space
-        this household holds the seed of and that GFS lists — the GFS forgets
-        on a re-pin, and an owner's notice confirms what a delegated admin
-        rotated meanwhile."""
+        this household OWNS and that GFS lists — the GFS forgets on a re-pin,
+        and the owner's notice confirms what a delegated admin rotated
+        meanwhile. A delegated admin sends nothing here (a notice on each of
+        its reconnects would tie the space to its socket); it announces only
+        the rotation it runs itself (:meth:`announce_epoch`)."""
         conn = await self._conn_repo.get(gfs_id)
         if conn is None or conn.status != "active":
             return 0
@@ -1076,9 +1107,9 @@ class GfsMemberPublishService:
             except Exception:
                 log.exception("gfs.member_publish: channel heal failed")
         for space in await self._spaces.list_all():
-            if not self._publicly_readable(space) or not await self._holds_seed(
-                space.id
-            ):
+            if not self._publicly_readable(space):
+                continue
+            if not await self._relays_as_owner(space):
                 continue
             try:
                 done += await self.announce_epoch(space.id, only=gfs_id)
