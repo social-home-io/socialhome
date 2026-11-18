@@ -25761,10 +25761,13 @@ def _admin_seed_servers(state: dict) -> list[tuple[str, str, Any]]:
     return servers
 
 
-def _admin_seed_join_as_admin(state: dict, space_id: str, step: str) -> None:
+def _admin_seed_join_as_admin(
+    state: dict, space_id: str, step: str, *, as_member: Any = None
+) -> None:
     """e redeems a published ADMIN link of a's and a approves the elevation
     (an admin link seats a member; the owner's approval makes the admin —
-    and, with "Let admins act for me" on, hands e the signing seed)."""
+    and, with "Let admins act for me" on, hands e the signing seed).
+    ``as_member`` runs in between, while e is still a plain member."""
     e = state["instances"]["e"]
     s, link = _inst_request(
         state,
@@ -25802,6 +25805,8 @@ def _admin_seed_join_as_admin(state: dict, space_id: str, step: str) -> None:
         return ids[0] if ids else None
 
     elevation = _poll("a to list e's admin request", _elevation, timeout=30.0)
+    if as_member is not None:
+        as_member()
     s, body = _inst_request(
         state,
         "a",
@@ -26098,8 +26103,10 @@ def cmd_gfs_admin_seed() -> None:
     1. **The seed reaches e.** e redeems a published admin link (a member
        seat, admin pending) and a approves. e holds the signing seed of the
        key a pins; a logged the share and e the receipt. The GFS log carries
-       no ``space_admin_key_share``. e keeps its fan-out seat on the GFS
-       (``space_subscribers``) — also after it restarts and reconnects.
+       no ``space_admin_key_share``. e keeps the fan-out seat on the GFS
+       (``space_subscribers``) it took as a plain member (a household takes
+       its seats when its GFS socket connects, so e is restarted once
+       before the approval) — also after it restarts and reconnects.
     2. **e acts for the owner.** a is stopped. e posts: b and d hold it, and
        the GFS got an anonymous member publish and no authority-signed
        ``POST /gfs/publish`` at all (a delegated admin is a writer to the
@@ -26234,15 +26241,37 @@ def cmd_gfs_admin_seed() -> None:
 
     # 1. The seed reaches e.
     a_off = _log_size("a")
-    e_off = _log_size("e")
     gfs_off = _gfs_log_size()
-    _admin_seed_join_as_admin(state, space_id, step)
+    seat_sql = "SELECT 1 FROM space_subscribers WHERE space_id=? AND instance_id=?"
+    seat_of_e = (space_id, e["instance_id"])
+
+    def _reconnect_and_check_seat(what: str) -> None:
+        """e restarts (a household takes its fan-out seats when its GFS
+        socket connects) and must then hold its seat for the space."""
+        now = _load()
+        _kill_household("e", now["instances"]["e"])
+        _respawn(now, "e")
+        try:
+            _poll_gfs_rows(seat_sql, seat_of_e, bool, what=what)
+        except SystemExit as exc:
+            raise SystemExit(f"{step}: {exc}") from None
+
+    _admin_seed_join_as_admin(
+        state,
+        space_id,
+        step,
+        as_member=lambda: _reconnect_and_check_seat(
+            "e, a plain member, holds no fan-out seat on the GFS"
+        ),
+    )
+    state = _load()
+    e = state["instances"]["e"]
     seed1 = _admin_seed_await_seed("e", space_id, k1, step)
     shared = f"sharing space signing seed for {space_id} to admin household "
     if not _log_contains("a", shared + e["instance_id"], offset=a_off):
         raise SystemExit(f"{step}: a never logged the seed share to e")
     stored = f"stored delegated-admin signing seed for {space_id}"
-    if not _log_contains("e", stored, offset=e_off):
+    if not _log_contains("e", stored):
         raise SystemExit(f"{step}: e never logged the receipt of the seed")
     print(f"  e (GFS only) holds the signing seed of K1={k1[:12]}… ✓")
     leaked = [
@@ -26254,8 +26283,6 @@ def cmd_gfs_admin_seed() -> None:
     ]
     if leaked:
         raise SystemExit(f"{step}: the GFS log names the seed share: {leaked[:2]!r}")
-    seat_sql = "SELECT 1 FROM space_subscribers WHERE space_id=? AND instance_id=?"
-    seat_of_e = (space_id, e["instance_id"])
     text0 = f"From the new admin {tag}"
     s, post = _inst_request(
         state,
@@ -26265,28 +26292,22 @@ def cmd_gfs_admin_seed() -> None:
         {"type": "text", "content": text0},
     )
     _must(f"{step}: e posts", s, post, ok=(201,))
-    try:
-        _poll_gfs_rows(
-            seat_sql, seat_of_e, bool, what="e holds no fan-out seat on the GFS"
-        )
-        _kill_household("e", e)
-        _respawn(state, "e")
-        _poll_gfs_rows(
-            seat_sql,
-            seat_of_e,
-            bool,
-            what="e did not keep its fan-out seat after its reconnect",
-        )
-    except SystemExit as exc:
+    if not _gfs_rows(seat_sql, seat_of_e):
         raise SystemExit(
-            f"{step}: a household that holds the seed must keep its fan-out "
-            f"seat on the GFS like any writer — {exc}"
-        ) from None
+            f"{step}: e lost its fan-out seat on the GFS when it was handed "
+            "the seed — the GFS can tell which household holds it"
+        )
+    _reconnect_and_check_seat(
+        "e, holding the seed, did not take its fan-out seat again on its "
+        "reconnect — the GFS can tell which household holds the seed"
+    )
+    state = _load()
+    e = state["instances"]["e"]
     if _seed_pin(_space_seed("e", space_id)) != k1:
         raise SystemExit(f"{step}: e lost the seed over its restart")
     print(
-        "  the GFS log names no seed share; e keeps its fan-out seat, also "
-        "after it reconnects ✓"
+        "  the GFS log names no seed share; e keeps the fan-out seat it held "
+        "as a plain member, also after it reconnects ✓"
     )
     for label in ("b", "d"):
         _poll(
