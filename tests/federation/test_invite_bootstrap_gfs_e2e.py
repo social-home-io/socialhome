@@ -72,6 +72,7 @@ from socialhome.federation.invite_token_redeem import (
     BOOTSTRAP_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_WINDOW_S,
     BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE,
+    REDEEM_TIMEOUT_SECONDS,
     SpaceInviteTokenRedeemCoordinator,
 )
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
@@ -869,7 +870,11 @@ async def test_a_reply_the_relay_refuses_is_logged_on_the_issuer(
     # The refused ACK rolled the redeem back on the host …
     await _assert_redeem_rolled_back(a, b, _space.id)
 
-    # … so once the relay carries replies again, the same link works.
+    # … so once the relay carries replies again, the same link works. The
+    # 0.5 s above was for the attempt that must time out; this one must
+    # succeed, however slow the runner — under load its round trip took
+    # longer than that and the test failed on its own deadline.
+    a.coordinator._timeout = REDEEM_TIMEOUT_SECONDS
     b.coordinator._relay_sender = SimpleNamespace(send_sealed_envelope=real_send)
     result = await a.space_service.redeem_invite_token(
         TOKEN_MARKER,
@@ -913,6 +918,9 @@ async def test_a_lost_ack_is_answered_again_when_the_joiner_retries(
     assert await b.space_repo.get_live_invite_token(TOKEN_MARKER) is None
 
     gfs.sockets[a.instance_id] = socket
+    # The retry must succeed however slow the runner: the short deadline
+    # was only for the attempt whose ACK is lost.
+    a.coordinator._timeout = REDEEM_TIMEOUT_SECONDS
     result = await a.space_service.redeem_invite_token(
         TOKEN_MARKER,
         user_id=a.user_id,

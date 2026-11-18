@@ -128,7 +128,7 @@ def _is_relay_seat(row: Any) -> bool:
     return row.source is InstanceSource.SPACE_SESSION and bool(row.relay_via)
 
 
-def _loads(raw: str | None) -> dict[str, Any]:
+def _parse(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {}
     try:
@@ -136,6 +136,64 @@ def _loads(raw: str | None) -> dict[str, Any]:
     except orjson.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+class _Doc(dict[str, Any]):
+    """One row's document as read, with the text it was read from.
+
+    Several handlers work on a household's row at once (its "seated" card
+    on the mailbox leg, the redeem that seats it, a reconcile passing its
+    card on to the owner — across a network send). Each reads the
+    document, changes a key or two and writes it back; written back whole,
+    the slower one wiped what the other had set in between (a joiner lost
+    its ``seated`` and never got its first snapshot). ``raw`` is what
+    :meth:`SpaceMemberDirectory._put` compares against, so a write carries
+    only the keys its writer changed."""
+
+    __slots__ = ("raw",)
+
+    def __init__(self, raw: str | None) -> None:
+        super().__init__(_parse(raw))
+        self.raw = raw
+
+
+def _loads(raw: str | None) -> _Doc:
+    return _Doc(raw)
+
+
+def _same(a: object, b: object) -> bool:
+    """JSON-equal (``1`` and ``True`` are not: ``==`` alone says they are)."""
+    return type(a) is type(b) and a == b
+
+
+def _apply_changes(
+    now: dict[str, Any], read: dict[str, Any], doc: dict[str, Any], *, deep: bool = True
+) -> None:
+    """Put onto *now* what changed from *read* to *doc*: removed keys go,
+    new or changed keys are set. With *deep*, a key holding an object in
+    all three is merged entry by entry instead of replaced (one level)."""
+    for key in read.keys() - doc.keys():
+        old, cur = read[key], now.get(key)
+        if deep and isinstance(old, dict) and isinstance(cur, dict):
+            # Emptied by its writer: only the entries it saw go.
+            for entry in old:
+                cur.pop(entry, None)
+            if cur:
+                continue
+        now.pop(key, None)
+    for key, value in doc.items():
+        if key in read and _same(read[key], value):
+            continue
+        old, cur = read.get(key), now.get(key)
+        if (
+            deep
+            and isinstance(value, dict)
+            and isinstance(old, dict)
+            and isinstance(cur, dict)
+        ):
+            _apply_changes(cur, old, value, deep=False)
+        else:
+            now[key] = value
 
 
 def _is_count(value: object) -> TypeGuard[int]:
@@ -200,6 +258,7 @@ class SpaceMemberDirectory:
         "_on_seated",
         "_reconciling",
         "_relay_seater",
+        "_row_write",
         "_seat_ender",
         "_seater",
         "_seats",
@@ -262,6 +321,9 @@ class SpaceMemberDirectory:
         #: space → held while :meth:`reconcile` versions and sends its
         #: directory, so the frames to a household go out in version order.
         self._reconciling: dict[str, asyncio.Lock] = {}
+        #: Held for one row write (:meth:`_put`): its read of the row as
+        #: it is now and its write are one step.
+        self._row_write = asyncio.Lock()
         mailboxes.attach_needed(self.needed_gfs)
         mailboxes.attach_after_sweep(self.sweep_once)
         mailboxes.attach_on_change(self.on_own_change)
@@ -357,19 +419,34 @@ class SpaceMemberDirectory:
 
     # ── Rows ─────────────────────────────────────────────────────────────
 
-    async def _doc(self, space_id: str, instance_id: str) -> dict[str, Any]:
+    async def _doc(self, space_id: str, instance_id: str) -> _Doc:
         return _loads(
             await self._spaces.get_space_instance_mailbox(space_id, instance_id)
         )
 
-    async def _put(self, space_id: str, instance_id: str, doc: dict[str, Any]) -> None:
-        """Write a row's document (``None`` when it holds nothing). The
-        write is UPDATE-only: it never creates membership."""
-        value = orjson.dumps(doc).decode() if doc else None
-        await self._spaces.set_space_instance_mailbox(space_id, instance_id, value)
+    async def _put(self, space_id: str, instance_id: str, doc: _Doc) -> None:
+        """Write what *doc*'s holder changed onto the row as it is now
+        (``None`` when it then holds nothing): the keys it set or removed
+        since it read the row (:class:`_Doc`), nothing else — another
+        handler's change to the same row in between is kept. A key whose
+        value is an object on every side (``wait``: one entry per waiting
+        household) is merged the same way one level down, so two handlers
+        adding and removing different entries both hold. One write at a
+        time, so the read and the write here are one step. The write is
+        UPDATE-only: it never creates membership."""
+        async with self._row_write:
+            now = _parse(
+                await self._spaces.get_space_instance_mailbox(space_id, instance_id)
+            )
+            _apply_changes(now, _parse(doc.raw), doc)
+            value = orjson.dumps(now).decode() if now else None
+            await self._spaces.set_space_instance_mailbox(space_id, instance_id, value)
+            # What it holds is written: a later write of the same document
+            # carries only what changed after this one.
+            doc.raw = orjson.dumps(doc).decode()
 
-    async def _rows(self) -> dict[tuple[str, str], dict[str, Any]]:
-        out: dict[tuple[str, str], dict[str, Any]] = {}
+    async def _rows(self) -> dict[tuple[str, str], _Doc]:
+        out: dict[tuple[str, str], _Doc] = {}
         for space, inst, raw in await self._spaces.list_space_instance_mailboxes():
             out[(space, inst)] = _loads(raw)
         return out

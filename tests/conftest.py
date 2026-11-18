@@ -370,6 +370,7 @@ import inspect
 
 import pytest
 
+from socialhome.app_keys import startup_announcer_key
 from socialhome.config import Config
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.dashboard import advertiser as _advertiser_module
@@ -494,6 +495,35 @@ def _fast_test_databases():
         yield cache
     cache.close()
     migration_chain.clear()
+
+
+@pytest.fixture
+async def aiohttp_client(aiohttp_client):
+    """``aiohttp_client`` that returns once the app's startup sends are done.
+
+    ``on_startup`` starts the peer-facing startup steps (the capabilities
+    announcement, the re-sync request after an upgrade) in a background
+    task, ``StartupAnnouncer``, so a household listens at once. A test that
+    seeds confirmed peers after ``await aiohttp_client(app)`` and records
+    ``FederationService.send_*`` raced that task: on a loaded runner it
+    listed the test's peers and its ``INSTANCE_CAPABILITIES_UPDATED`` /
+    ``INSTANCE_RESYNC_REQUEST`` landed in the recording. Three protocol
+    files hit it one after the other; waiting here closes it for every
+    test instead of per fixture (``tests/test_startup_settled.py``).
+
+    Apps without the announcer (a bare ``web.Application``, the GFS) are
+    handed through unchanged.
+    """
+
+    async def _client(app_or_server, *args, **kwargs):
+        client = await aiohttp_client(app_or_server, *args, **kwargs)
+        app = getattr(client.server, "app", None)
+        announcer = app.get(startup_announcer_key) if app is not None else None
+        if announcer is not None:
+            await announcer.wait()
+        return client
+
+    return _client
 
 
 @pytest.fixture
