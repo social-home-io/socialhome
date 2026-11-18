@@ -2128,6 +2128,82 @@ async def test_an_admin_answers_its_invitee_and_passes_its_card_to_the_owner():
     assert len(a.fed.cards) == 1
 
 
+async def test_a_seated_card_during_the_pass_on_to_the_owner_still_gets_its_snapshot():
+    """Two handlers work on the joiner's row at once: the redeem handler
+    (seat card stored, then passed on to the owner — a network send) and
+    the joiner's "seated" card on the mailbox leg. The pass-on used to
+    write back the row as it read it BEFORE the send, wiping the
+    ``seated`` the other handler had just set: the joiner was no directory
+    recipient, got no snapshot, and the once-per-:data:`HELLO_RESNAPSHOT_S`
+    answer was already spent (the load-dependent failure of the GFS e2e
+    "the admin's invitee still gets the directory")."""
+    a, owner = _admin_world()
+    m, e = _hh(), _hh()
+    a.member(m, e)
+    a.writers.writers[SPACE] = {m["id"], e["id"], owner["id"]}
+    a.mailboxes.add_box(GFS)
+    a.mailboxes.rev = 1
+    await a.directory({"cards": [_card(e).to_wire()], "gfs_reached": [e["id"]]})
+    a.fed_repo.instances[m["id"]] = SimpleNamespace(
+        source=InstanceSource.SPACE_SESSION, relay_via=GFS
+    )
+    card_m = _card(m)
+    passing_on, owner_answered = asyncio.Event(), asyncio.Event()
+    send = a.fed.send_with_mesh_fallback
+
+    async def _slow_owner(**kw):
+        if kw["payload"].get("forwarded"):
+            passing_on.set()
+            await owner_answered.wait()
+        return await send(**kw)
+
+    a.fed.send_with_mesh_fallback = _slow_owner
+    redeem = asyncio.create_task(a.dir.store_seat_card(SPACE, card_m))
+    await passing_on.wait()
+    hello = asyncio.create_task(a.card_from(m, card_m))
+    for _ in range(50):  # until it waits for the space's reconcile
+        await asyncio.sleep(0)
+    owner_answered.set()
+    await asyncio.gather(redeem, hello)
+
+    doc = a.spaces.doc(SPACE, m["id"])
+    assert doc.get("seated") is True
+    assert doc.get("fwd") == card_m.rev  # …and the pass-on's own note held
+    # (The redeem's own reconcile now sees m seated too and sends it a
+    # delta first, on the version m holds — then the snapshot.)
+    snap = a.fed.to(m["id"])[-1]
+    assert snap["payload"]["snapshot"] is True
+    assert _ids(snap) == {e["id"], a.me["id"]}
+
+
+async def test_a_row_write_changes_only_what_its_writer_changed():
+    """The rule behind it: a write puts back the keys its writer set or
+    removed, on the row as it is NOW — never the whole row as read."""
+    w = World()
+    m = _hh()
+    w.member(m)
+    first = await w.dir._doc(SPACE, m["id"])
+    first["seated"] = True
+    await w.dir._put(SPACE, m["id"], first)
+    one, two = await w.dir._doc(SPACE, m["id"]), await w.dir._doc(SPACE, m["id"])
+    one["fwd"] = 3
+    one["wait"] = {"x": {"n": 1}}
+    two.pop("seated")
+    two["by"] = ["h"]
+    await w.dir._put(SPACE, m["id"], one)
+    await w.dir._put(SPACE, m["id"], two)
+    assert w.spaces.doc(SPACE, m["id"]) == {
+        "fwd": 3,
+        "wait": {"x": {"n": 1}},
+        "by": ["h"],
+    }
+    # A row left with nothing is stored as NULL, as before.
+    last = await w.dir._doc(SPACE, m["id"])
+    last.clear()
+    await w.dir._put(SPACE, m["id"], last)
+    assert w.spaces.rows[SPACE][m["id"]] is None
+
+
 async def test_what_the_owner_tells_the_admin_goes_on_to_its_invitees():
     a, owner = _admin_world()
     m, e = _hh(), _hh()
