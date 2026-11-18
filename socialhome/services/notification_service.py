@@ -5790,12 +5790,14 @@ class NotificationService(ProtectionGateMixin):
     async def _applicant_name(
         self, request: dict | None, event: SpaceJoinRequested, locale: str | None
     ) -> str:
-        """Who asks, for the admins' bell. A request from another household
-        is named from THAT household's seat in the space, never by user id
-        alone: the other household chooses the id, and one that matches a
-        person here must not borrow their name."""
+        """Who asks, for the admins' bell: the name this household holds
+        for them (:meth:`_person_name`) — except that a request from
+        ANOTHER household never borrows the name of a person here. The
+        other household chooses the user id it sends; when that id is one
+        of ours, the request is named from that household's own seat in
+        the space, else "Someone"."""
         household = (request or {}).get("remote_applicant_instance_id")
-        if not household:
+        if not household or await self._local_user(event.user_id) is None:
             return await self._person_name(
                 event.user_id, locale, space_id=event.space_id
             )
