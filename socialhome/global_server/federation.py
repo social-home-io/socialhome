@@ -421,6 +421,10 @@ class SeenPayloadCache:
         return len(self._seen)
 
 
+class SpaceNotListedError(LookupError):
+    """A ``withdrawn`` (pin-only) publish named a space this GFS holds no row for."""
+
+
 class InstanceRegistrationRefused(Exception):
     """``/gfs/register`` refused: ``status`` + a stable ``error`` code."""
 
@@ -1768,6 +1772,15 @@ class GfsFederationService:
             return
         if existing.owning_instance != owning_instance:
             raise PermissionError("not the owner of this space")
+        await self._withdraw_listing(space_id)
+        log.info("GFS: owner %s withdrew space %s", owning_instance, space_id)
+
+    async def _withdraw_listing(self, space_id: str) -> None:
+        """Flag a listing ``withdrawn`` and take its invite pages down.
+
+        The one withdrawal step, shared by :meth:`hide_space` and a
+        ``withdrawn`` publish so the two cannot drift.
+        """
         await self._repo.set_space_withdrawn(space_id, True)
         # Take the space's public invite pages down with the listing. The
         # ``withdrawn`` flag itself is reversible, but an invite link is a
@@ -1777,7 +1790,34 @@ class GfsFederationService:
         # old links; the owner mints fresh ones.
         if self._invite_repo is not None:
             await self._invite_repo.delete_for_space(space_id)
-        log.info("GFS: owner %s withdrew space %s", owning_instance, space_id)
+
+    async def _apply_certified_repin(
+        self, space_id: str, *, new_pk: str, cert: dict
+    ) -> bool:
+        """Move a space's authority pin to ``new_pk`` under a cert the caller
+        already verified with :func:`certified_authority_repin`.
+
+        The one re-pin step, shared by a normal and a ``withdrawn`` publish
+        so the two cannot drift. Compare-and-set against the row as stored
+        right now; the repo forgets the old key's epoch state and writer-key
+        pins and bumps ``authority_rotation_seq`` in that same statement.
+        Returns whether the pin moved.
+        """
+        stored = await self._repo.get_space(space_id)
+        if stored is None or not await self._repo.set_space_authority(
+            space_id,
+            expected_pk=stored.identity_public_key,
+            expected_cert=stored.authority_cert,
+            new_pk=new_pk,
+            cert=cert,
+        ):
+            return False
+        log.info(
+            "GFS: space %s authority key re-pinned by its owner (epoch %d)",
+            space_id,
+            authority_cert_epoch(cert),
+        )
+        return True
 
     async def publish_space(
         self,
@@ -1801,6 +1841,7 @@ class GfsFederationService:
         authority_cert: dict | None = None,
         place: object = None,
         join_contact: object = None,
+        withdrawn: bool | None = None,
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -1839,6 +1880,20 @@ class GfsFederationService:
         ``owning_instance``), names exactly the offered key, and has a higher
         ``key_epoch`` than the cert stored here (0 for none) — see
         :func:`certified_authority_repin`. Anything else keeps the pin and logs.
+
+        ``withdrawn`` (advertised as the ``withdrawn_repin`` capability) makes
+        the publish a PIN-ONLY re-pin of a listing its owner withdrew. An
+        owner that rotated the authority key must be able to move the pin
+        here without re-listing the space — otherwise a withdrawn listing
+        keeps the old pin forever, and whoever still holds the old key's seed
+        keeps relaying to the followers seated here. Signed (folded in only
+        when true) and it requires a fresh signed ``ts``. Such a publish
+        stores NO metadata (the household sends it blank on purpose: a space
+        that left the public tier must not leak its new name), never touches
+        ``status``, never creates a row (:class:`SpaceNotListedError`, raised
+        only after the signature verified) and leaves the listing
+        ``withdrawn`` — setting the flag if it was not set yet. The pin moves
+        under exactly the cert rule above.
         """
         inst = await self._repo.get_instance(owning_instance)
         if inst is None:
@@ -1887,6 +1942,15 @@ class GfsFederationService:
             if not ts:
                 raise PermissionError("authority_cert requires a signed ts")
             signed["authority_cert"] = authority_cert
+        # The pin-only flag rides inside the signed bytes when the household
+        # sent it, so a relay can neither turn an owner's normal publish into
+        # one that withdraws the listing nor strip it and re-list the space
+        # under blank metadata. An older household sends none and signs a
+        # body without the key. It must be a FRESH statement, like a cert.
+        if withdrawn:
+            if not ts:
+                raise PermissionError("withdrawn requires a signed ts")
+            signed["withdrawn"] = True
         # The owner's optional place pin (``place: {lat, lon}``, advertised
         # as the ``place_pin`` capability) rides inside the signed bytes when
         # sent, so a relay can neither add, move nor strip one. Absent ⇒ the
@@ -1988,6 +2052,28 @@ class GfsFederationService:
                     pinned_pubkey[:8],
                 )
             pinned_pubkey = existing.identity_public_key
+        if withdrawn:
+            # Pin-only from here on: nothing of the (blank) metadata above is
+            # stored, the status is left alone and no seat is purged. Reached
+            # only after the signature, freshness and owner checks, so an
+            # unsigned caller never learns whether the space exists.
+            if existing is None:
+                raise SpaceNotListedError(space_id)
+            if certified and authority_cert is not None:
+                await self._apply_certified_repin(
+                    space_id, new_pk=identity_public_key, cert=authority_cert
+                )
+            if not existing.withdrawn:
+                await self._withdraw_listing(space_id)
+                log.info(
+                    "GFS: owner %s withdrew space %s with a pin-only publish",
+                    owning_instance,
+                    space_id,
+                )
+            repinned = await self._repo.get_space(space_id)
+            if repinned is None:
+                raise SpaceNotListedError(space_id)
+            return repinned
         # Preserve subscriber_count / posts_per_week / published_at from
         # the existing row — those are GFS-side bookkeeping, not the
         # owner's to declare. Only the owner's name / description /
@@ -2060,25 +2146,18 @@ class GfsFederationService:
                 space_id,
             )
         await self._repo.upsert_space(space)
-        if certified and authority_cert is not None:
-            stored = await self._repo.get_space(space_id)
-            if stored is not None and await self._repo.set_space_authority(
-                space_id,
-                expected_pk=stored.identity_public_key,
-                expected_cert=stored.authority_cert,
-                new_pk=identity_public_key,
-                cert=authority_cert,
-            ):
-                log.info(
-                    "GFS: space %s authority key re-pinned by its owner (epoch %d)",
-                    space_id,
-                    authority_cert_epoch(authority_cert),
-                )
-                space = replace(
-                    space,
-                    identity_public_key=identity_public_key,
-                    authority_cert=authority_cert,
-                )
+        if (
+            certified
+            and authority_cert is not None
+            and await self._apply_certified_repin(
+                space_id, new_pk=identity_public_key, cert=authority_cert
+            )
+        ):
+            space = replace(
+                space,
+                identity_public_key=identity_public_key,
+                authority_cert=authority_cert,
+            )
         # Data repair, at the moment the truth arrives: a space whose owner
         # EXPLICITLY withdrew readability has no public readership, so every
         # seat in ``space_subscribers`` is meaningless and would otherwise keep

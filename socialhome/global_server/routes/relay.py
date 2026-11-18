@@ -29,7 +29,7 @@ from ...domain.subscriber_accepts import parse_accepts
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
-from ..federation import InstanceRegistrationRefused
+from ..federation import InstanceRegistrationRefused, SpaceNotListedError
 from ..public import (
     PAIR_TOKEN_TTL_SECONDS,
     PUBLISH_MAX_BODY_BYTES,
@@ -142,6 +142,11 @@ class GfsInfoView(GfsBaseView):
         # key from an owner-signed cert on publish. Signed like its siblings:
         # a stripped flag only makes a household warn that a revoked admin's
         # old key may keep authorizing relays here.
+        # ``withdrawn_repin``: this GFS takes ``withdrawn: true`` on a publish
+        # — a pin-only re-pin of a listing its owner withdrew, which stays
+        # withdrawn — and answers every publish with the key it pins. Signed
+        # because a household only sends the field to a server that folds it
+        # into the signed bytes (an older one would 403).
         # ``member_publish_strict`` (v_50; the name is historical — since
         # v_90 it is the ONLY member publish): this GFS carries the anonymous
         # ``POST /gfs/member-publish-anon`` (writer-group-key-signed) and the
@@ -172,6 +177,7 @@ class GfsInfoView(GfsBaseView):
             "envelope_relay": True,
             "invite_links": True,
             "authority_rotation": True,
+            "withdrawn_repin": True,
             "member_publish_strict": True,
             "private_channels": True,
             "open_signup": bool(cfg.open_signup),
@@ -827,12 +833,20 @@ class SpacePublishView(GfsBaseView):
 
     Body: ``{owning_instance, name, description?, about_markdown?,
     cover_url?, min_age?, category?, join_mode?, allow_subscribers?,
-    accent_color?, ts?, signature}``.
+    accent_color?, ts?, withdrawn?, signature}``.
     The Ed25519 signature is verified against the registered
     ``ClientInstance.public_key`` (so a paired-but-malicious peer
     can't masquerade as another household's space owner). ``ts``, when
     present, is inside the signed bytes and replay-guarded (±300 s); only a
     publish carrying one can restore an owner-withdrawn listing.
+
+    ``withdrawn: true`` (signed, needs ``ts``) makes it a pin-only re-pin of
+    a listing the owner withdrew: no metadata is stored, the listing stays
+    withdrawn, and a space this GFS has no row for is a ``404``.
+
+    Answers ``{status, space_id, identity_public_key}`` — the authority key
+    this GFS pins for the space after the request ("" for none), which is
+    how a household checks that a re-pin took.
     """
 
     async def post(self) -> web.Response:
@@ -855,6 +869,11 @@ class SpacePublishView(GfsBaseView):
         authority_cert = body.get("authority_cert")
         if authority_cert is not None and not isinstance(authority_cert, dict):
             raise web.HTTPBadRequest(reason="authority_cert must be an object")
+        # Only a literal ``true`` or no key at all: the service folds the
+        # flag into the signed bytes as ``true``, so any other spelling could
+        # never verify — and a truthy one must not pass for the real thing.
+        if "withdrawn" in body and body["withdrawn"] is not True:
+            raise web.HTTPBadRequest(reason="withdrawn must be true when present")
         try:
             space = await svc.publish_space(
                 space_id=space_id,
@@ -890,14 +909,25 @@ class SpacePublishView(GfsBaseView):
                 # present; a malformed one is stored as no pin.
                 place=body.get("place"),
                 join_contact=body.get("join_contact"),
+                withdrawn=True if "withdrawn" in body else None,
             )
         except PermissionError as exc:
             return web.json_response(
                 {"error": str(exc)},
                 status=403,
             )
+        except SpaceNotListedError:
+            # Raised only after the signature verified, so this is the
+            # owner's own answer, never an existence probe.
+            return web.json_response({"error": "not listed"}, status=404)
         return web.json_response(
-            {"status": space.status, "space_id": space.space_id},
+            {
+                "status": space.status,
+                "space_id": space.space_id,
+                # The pin AFTER this request: the service returns the row as
+                # stored, so a refused re-pin shows the key that stayed.
+                "identity_public_key": space.identity_public_key or "",
+            },
         )
 
 

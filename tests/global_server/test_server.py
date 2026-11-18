@@ -299,6 +299,10 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # cert on publish. A household warns when its GFS lacks it: there,
         # a revoked admin's old key keeps authorizing relays.
         "authority_rotation": True,
+        # This GFS takes ``withdrawn: true`` on a publish (a pin-only re-pin
+        # of a withdrawn listing) and answers every publish with the key it
+        # pins. A household only sends the field to a server that signs this.
+        "withdrawn_repin": True,
         # v_50 (the only member publish since v_90) — this GFS carries the
         # anonymous, writer-group-key-signed ``POST /gfs/member-publish-anon``.
         # The identified ``member_publish_trusted`` is gone.
