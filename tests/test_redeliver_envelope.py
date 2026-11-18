@@ -1218,11 +1218,20 @@ async def test_redeliver_does_not_follow_a_redirect_to_another_host(env):
 # ─── Unpair tombstone ────────────────────────────────────────────────────
 
 
+class _StatusBody:
+    def __init__(self, body: str) -> None:
+        self._body = body.encode()
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+
 class _StatusResp:
     def __init__(self, status, body='{"error": "unknown_inbox"}', headers=None):
         self.status = status
         self.body = body
         self.headers = headers or {}
+        self.content = _StatusBody(body)
 
     async def text(self):
         return self.body

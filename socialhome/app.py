@@ -645,6 +645,11 @@ async def _redeliver_envelope(
       unrelated envelopes (an UNPAIR, a replayed highlight) to one echo
       storm. Bounded like any transient failure — :data:`MAX_ATTEMPTS`,
       the 7-day TTL and the per-peer pending cap.
+    * 410 ``{"code": "REPLAY"}`` → :attr:`DeliveryOutcome.SUCCESS`: the
+      peer says it already holds this envelope — a POST of ours that
+      timed out while it was still working on it, then this retry
+      (:mod:`socialhome.federation.inbox_reply`). Delivered, not
+      "permanently rejected".
     * other 4xx → :attr:`DeliveryOutcome.PERMANENT` (drop). The federation
       inbox returns 4xx for several distinct reasons — most are
       genuinely "the receiver has this state already" (success-
@@ -657,12 +662,6 @@ async def _redeliver_envelope(
       * **410 without the duplicate code** — a peer that predates the
         code and already saw this ``msg_id`` (their state is consistent
         with ours), or one whose answer was rewritten on the way.
-
-    * 410 ``{"code": "REPLAY"}`` → :attr:`DeliveryOutcome.SUCCESS`: the
-      peer says it already holds this envelope — a POST of ours that
-      timed out while it was still working on it, then this retry
-      (:mod:`socialhome.federation.inbox_reply`). Delivered, not
-      "permanently rejected".
       * **403 banned / signature invalid** — receiver refuses this
         sender. Dropping the entry is the right call: retrying gives
         the sender no path to recover, and the ban / key revocation

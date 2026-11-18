@@ -31,6 +31,7 @@ from socialhome.federation.inbound_validator import (
     TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
+    ReplayDetectedError,
     UnpairedPeerRefusedError,
     make_ban_check,
     make_check_deprovisioned_author,
@@ -257,8 +258,75 @@ async def test_replay_rejects_duplicate():
     step = make_check_replay(replay_cache=_FakeReplayCache(already_seen=True))
     ctx = InboundContext()
     ctx.envelope = _minimal_envelope()
-    with pytest.raises(ValueError, match="Replay detected"):
+    with pytest.raises(ReplayDetectedError, match="Replay detected"):
         await step(ctx)
+    assert ctx.replay_undo is None
+
+
+async def _replay_then(step_after, cache: ReplayCache) -> InboundContext:
+    ctx = InboundContext()
+    ctx.envelope = _minimal_envelope()
+    pipeline = InboundPipeline([make_check_replay(replay_cache=cache), step_after])
+    await pipeline.run(ctx)
+    return ctx
+
+
+async def test_an_internal_error_before_the_id_is_persisted_forgets_the_id():
+    """The sender is answered 5xx and retries the same ``msg_id``: that
+    retry must be taken, not refused as a replay of an envelope that was
+    never applied."""
+    cache = ReplayCache()
+
+    async def _db_down(ctx: InboundContext) -> None:
+        raise RuntimeError("database is locked")
+
+    with pytest.raises(RuntimeError):
+        await _replay_then(_db_down, cache)
+
+    async def _fine(ctx: InboundContext) -> None:
+        return None
+
+    ctx = await _replay_then(_fine, cache)  # the retry: no ReplayDetectedError
+    assert ctx.replay_undo is not None
+
+
+async def test_a_refusal_after_the_replay_step_keeps_the_id():
+    """A refusal is final for that envelope: its copy is a replay."""
+    cache = ReplayCache()
+
+    async def _refuse(ctx: InboundContext) -> None:
+        raise ValueError("Failed to decrypt payload")
+
+    with pytest.raises(ValueError, match="decrypt"):
+        await _replay_then(_refuse, cache)
+    with pytest.raises(ReplayDetectedError):
+        await _replay_then(_refuse, cache)
+
+
+async def test_a_persisted_id_is_never_forgotten():
+    class _Repo:
+        async def insert_replay_id(self, msg_id: str) -> None:
+            return None
+
+    cache = ReplayCache()
+    ctx = InboundContext()
+    ctx.envelope = _minimal_envelope()
+
+    async def _late_crash(ctx: InboundContext) -> None:
+        raise RuntimeError("after the id was persisted")
+
+    pipeline = InboundPipeline(
+        [
+            make_check_replay(replay_cache=cache),
+            make_persist_replay(federation_repo=_Repo()),
+            _late_crash,
+        ]
+    )
+    with pytest.raises(RuntimeError):
+        await pipeline.run(ctx)
+    assert ctx.replay_undo is None
+    with pytest.raises(ReplayDetectedError):
+        await _replay_then(_late_crash, cache)
 
 
 # ─── Step 8: idempotency ─────────────────────────────────────────────────

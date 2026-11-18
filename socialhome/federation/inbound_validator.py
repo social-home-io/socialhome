@@ -212,6 +212,11 @@ class InboundContext:
     #: :func:`drop`, so it is always :data:`ACCEPTED_RESPONSE`.
     early_response: dict | None = None
 
+    #: Takes this envelope's id back out of the replay cache. Set by the
+    #: replay step, cleared once the id is persisted; the pipeline calls it
+    #: when a step in between fails with an internal error.
+    replay_undo: Callable[[], None] | None = None
+
     #: Why a step dropped the event (see :func:`drop`). Server-side only —
     #: it is logged and read by tests, never put on the wire.
     drop_reason: str | None = None
@@ -1052,6 +1057,7 @@ def make_check_replay(*, replay_cache) -> InboundStep:
             raise ReplayDetectedError(
                 f"Replay detected: msg_id={msg_id!r} from={from_instance!r}",
             )
+        ctx.replay_undo = lambda: replay_cache.forget(msg_id)
 
     return check_replay
 
@@ -1197,6 +1203,7 @@ def make_persist_replay(*, federation_repo) -> InboundStep:
 
     async def persist_replay(ctx: InboundContext) -> None:
         await federation_repo.insert_replay_id(ctx.envelope["msg_id"])
+        ctx.replay_undo = None
 
     return persist_replay
 
@@ -1698,6 +1705,14 @@ class InboundPipeline:
     ``ValueError`` the pipeline aborts immediately (the caller converts
     the error into an HTTP 400/403). If a step sets
     ``ctx.early_response`` the remaining steps are skipped.
+
+    An **internal error** (anything but ``ValueError``) between the replay
+    step and the step that persists the id takes the id back out of the
+    replay cache: the sender is answered 5xx and retries the same
+    ``msg_id``, and that retry must be taken — not refused as a replay of
+    an envelope that was never applied (it used to be dropped by the
+    sender as permanently rejected). A refusal (``ValueError``) keeps the
+    id: it is final for that envelope.
     """
 
     __slots__ = ("_steps",)
@@ -1708,8 +1723,16 @@ class InboundPipeline:
     async def run(self, ctx: InboundContext) -> dict:
         """Execute every step. Returns ``{"status": "ok"}`` or the
         early-response dict set by a step."""
-        for step in self._steps:
-            await step(ctx)
-            if ctx.early_response is not None:
-                return ctx.early_response
+        try:
+            for step in self._steps:
+                await step(ctx)
+                if ctx.early_response is not None:
+                    return ctx.early_response
+        except ValueError:
+            raise
+        except BaseException:
+            if ctx.replay_undo is not None:
+                ctx.replay_undo()
+                ctx.replay_undo = None
+            raise
         return {"status": "ok"}

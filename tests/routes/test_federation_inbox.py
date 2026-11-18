@@ -181,7 +181,9 @@ async def test_inbound_old_timestamp_410(client, env):
     assert r.status == 410
     # Not a duplicate: nothing here tells a sender "you may stop".
     assert await r.json() == {"error": "gone"}
-    assert not await inbox_holds_envelope(r)
+    again = await client.post("/federation/inbox/wh-test", data=body)
+    assert again.status == 410
+    assert not await inbox_holds_envelope(again)
 
 
 async def test_inbound_bad_signature_403(client, env):
@@ -218,9 +220,67 @@ async def test_inbound_replay_410(client, env):
     # The sender reads the code: this household already holds the
     # envelope, so the sender's outbox counts it as delivered.
     assert await r2.json() == {"error": "gone", "code": "REPLAY"}
-    # Both ends of the wire shape: the sender's own reading of this answer.
-    assert await inbox_holds_envelope(r2)
+    # Both ends of the wire shape: the sender's own reading of this answer
+    # (a fresh response — it reads the body off the socket itself).
+    r3 = await client.post("/federation/inbox/wh-test", data=body)
+    assert await inbox_holds_envelope(r3)
     assert not await inbox_holds_envelope(r1)
+
+
+async def test_a_seen_msg_id_without_a_valid_signature_gets_no_duplicate_code(
+    client, env
+):
+    """No oracle: the code is only for an envelope the pinned key signed.
+    A tampered copy of an id this household holds is refused at the
+    signature step, like any other."""
+    body = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"x": 1},
+        msg_id="dup-forged-1",
+    )
+    r1 = await client.post("/federation/inbox/wh-test", data=body)
+    assert r1.status == 200
+    obj = json.loads(body)
+    obj["encrypted_payload"] = "AA" + obj["encrypted_payload"][2:]
+    r2 = await client.post("/federation/inbox/wh-test", data=json.dumps(obj).encode())
+    assert r2.status == 403
+    assert await r2.json() == {"error": "forbidden"}
+
+
+async def test_a_retry_after_an_internal_error_is_taken_not_called_a_duplicate(
+    client, env, monkeypatch
+):
+    """The first attempt dies inside this household before its id is
+    persisted (500 — the sender retries the same ``msg_id``). The retry is
+    processed: answering it "already held" would have the sender count an
+    envelope as delivered that was never applied."""
+    repo = env["fed_svc"]._federation_repo
+    real = repo.insert_replay_id
+    calls = []
+
+    async def _fails_once(msg_id):
+        calls.append(msg_id)
+        if len(calls) == 1:
+            raise RuntimeError("database is locked")
+        return await real(msg_id)
+
+    monkeypatch.setattr(repo, "insert_replay_id", _fails_once)
+    body = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"x": 1},
+        msg_id="retry-after-500",
+    )
+    r1 = await client.post("/federation/inbox/wh-test", data=body)
+    assert r1.status == 500
+    r2 = await client.post("/federation/inbox/wh-test", data=body)
+    assert r2.status == 200
+    # …and from then on it is held.
+    r3 = await client.post("/federation/inbox/wh-test", data=body)
+    assert await inbox_holds_envelope(r3)
 
 
 async def test_inbound_replay_logs_info_for_ephemeral_event(client, env, caplog):

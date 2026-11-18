@@ -16,6 +16,12 @@ The receiver now adds a fixed code to that one answer::
 
 and a sender that reads it counts the envelope as delivered.
 
+"Holds" means: the receiver recorded this ``msg_id`` and owns the envelope
+from there. A handler that fails afterwards is the receiver's to retry
+(``docs/protocol/README.md``); an internal error BEFORE the id is persisted
+takes the id back out (``InboundPipeline``), so the sender's retry after a
+5xx is processed, not answered with this code.
+
 * **Additive.** The status stays 410 and ``error`` stays ``gone``: a sender
   that predates the code drops the row as before, which loses nothing (the
   receiver holds the envelope).
@@ -44,8 +50,9 @@ INBOX_CODE_REPLAY: Final = "REPLAY"
 #: The status that answer is sent with (unchanged: "gone").
 INBOX_REPLAY_STATUS: Final = 410
 
-#: How much of an answer's body a sender reads to look for the code.
-_MAX_BODY_CHARS: Final = 200
+#: How much of an answer's body a sender reads to look for the code — the
+#: rest is never pulled off the socket, whatever answered.
+_MAX_BODY_BYTES: Final = 200
 
 
 async def inbox_holds_envelope(resp: Any) -> bool:
@@ -56,7 +63,7 @@ async def inbox_holds_envelope(resp: Any) -> bool:
     if resp.status != INBOX_REPLAY_STATUS:
         return False
     try:
-        body = orjson.loads((await resp.text())[:_MAX_BODY_CHARS])
+        body = orjson.loads(await resp.content.read(_MAX_BODY_BYTES))
     except Exception:
         log.debug("inbox answer: unreadable 410 body", exc_info=True)
         return False

@@ -1076,14 +1076,19 @@ async def test_https_inbox_transport_non_2xx_is_failure():
     assert ok is False and status == 503
 
 
+class _GoneBody:
+    def __init__(self, body: str) -> None:
+        self._body = body.encode()
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+
 class _GoneResp:
     status = 410
 
     def __init__(self, body: str) -> None:
-        self._body = body
-
-    async def text(self) -> str:
-        return self._body
+        self.content = _GoneBody(body)
 
     async def __aenter__(self):
         return self

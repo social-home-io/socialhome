@@ -49,7 +49,7 @@ from ..federation.inbound_validator import (
     ReplayDetectedError,
     UnpairedPeerRefusedError,
 )
-from ..federation.inbox_reply import INBOX_CODE_REPLAY
+from ..federation.inbox_reply import INBOX_CODE_REPLAY, INBOX_REPLAY_STATUS
 from ..federation.media_framing import (
     HTTPS_MEDIA_MAX_BODY_BYTES,
     MEDIA_BODY_MAGIC,
@@ -315,15 +315,15 @@ class FederationInboxView(BaseView):
                 log.info(
                     "federation inbox: duplicate inbox_id=%s status=%d reason=%s",
                     inbox_id,
-                    status,
+                    INBOX_REPLAY_STATUS,
                     exc,
                 )
                 return web.json_response(
                     {
-                        "error": _GENERIC_ERROR_BY_STATUS[status],
+                        "error": _GENERIC_ERROR_BY_STATUS[INBOX_REPLAY_STATUS],
                         "code": INBOX_CODE_REPLAY,
                     },
-                    status=status,
+                    status=INBOX_REPLAY_STATUS,
                 )
             if isinstance(exc, UnpairedPeerRefusedError):
                 # A household we unpaired while it was offline, still

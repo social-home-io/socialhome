@@ -1010,6 +1010,14 @@ signature step, so only an envelope signed by the paired household's
 pinned key can earn it, and a timestamp-skew 410 (decided before the
 signature) never carries it.
 
+"Already holds" means the receiver recorded the `msg_id` and owns the
+envelope from there (a handler that fails afterwards is the receiver's to
+retry). An **internal error** between the replay step and the step that
+persists the id takes the id back out of the cache: the sender is answered
+5xx, retries the same `msg_id`, and that retry is processed instead of
+being refused as a replay of an envelope that was never applied. A refusal
+(a 4xx) keeps the id — it is final for that envelope.
+
 That horizon (`crypto.REPLAY_CACHE_WINDOW`) is **25 h**, and it is set by
 the widest timestamp window any transport allows, not by the outbox's
 ~5.2 h redelivery cadence. A §D2b envelope carried by the connection
