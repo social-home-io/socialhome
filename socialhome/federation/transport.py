@@ -67,6 +67,7 @@ from .gfs_relay_transport import (
     RELAY_STATUS_TOO_LARGE,
 )
 from .inbound_validator import UnpairedPeerRefusedError
+from .inbox_reply import inbox_holds_envelope
 from .media_envelope import (
     MEDIA_HTTPS_CONTENT_TYPE,
     encode_media_body,
@@ -164,11 +165,16 @@ class HttpsInboxTransport:
         """POST the envelope to the remote inbox URL.
 
         Returns ``(ok, status_code)``. ``ok`` is true iff the peer
-        returned 2xx. Any network-level error returns
-        ``(False, None)`` so the caller can record a failure and
-        enqueue for retry.
+        returned 2xx — or answered that it already holds this envelope
+        (:func:`~socialhome.federation.inbox_reply.inbox_holds_envelope`:
+        a copy that went out on the DataChannel just before it closed and
+        this failover's copy of the same ``msg_id``). Any network-level
+        error returns ``(False, None)`` so the caller can record a failure
+        and enqueue for retry.
         """
-        ok, status, _retry_after = await self._post(instance, json=envelope_dict)
+        ok, status, _retry_after = await self._post(
+            instance, held_is_ok=True, json=envelope_dict
+        )
         return ok, status
 
     async def send_media(
@@ -197,10 +203,14 @@ class HttpsInboxTransport:
     async def _post(
         self,
         instance: RemoteInstance,
+        *,
+        held_is_ok: bool = False,
         **kwargs: Any,
     ) -> tuple[bool, int | None, str | None]:
         """``(ok, status, Retry-After header)``; ``(False, None, None)`` on
-        any error."""
+        any error. *held_is_ok*: the peer's "I already hold this envelope"
+        answer counts as ``ok`` (JSON envelopes only — a media body whose
+        chunk was refused has burnt its ``msg_id`` without being held)."""
         try:
             client = await self._client_once()
             async with post_to_peer(
@@ -211,7 +221,10 @@ class HttpsInboxTransport:
             ) as resp:
                 status = resp.status
                 retry_after = resp.headers.get("Retry-After") if status == 429 else None
-                return 200 <= status < 300, status, retry_after
+                ok = 200 <= status < 300 or (
+                    held_is_ok and await inbox_holds_envelope(resp)
+                )
+                return ok, status, retry_after
         except _PEER_UNREACHABLE_ERRORS as exc:
             # The peer is down, unreachable or slow — ordinary operation
             # for a household that is offline: the caller marks it

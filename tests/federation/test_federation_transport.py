@@ -1076,6 +1076,67 @@ async def test_https_inbox_transport_non_2xx_is_failure():
     assert ok is False and status == 503
 
 
+class _GoneBody:
+    def __init__(self, body: str) -> None:
+        self._body = body.encode()
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+
+class _GoneResp:
+    status = 410
+
+    def __init__(self, body: str) -> None:
+        self.content = _GoneBody(body)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _gone_transport(body: str) -> HttpsInboxTransport:
+    class _Client:
+        def post(self, url, **kw):
+            return _GoneResp(body)
+
+    async def _factory():
+        return _Client()
+
+    return HttpsInboxTransport(client_factory=_factory)
+
+
+async def test_https_inbox_an_envelope_the_peer_already_holds_is_delivered():
+    """The DataChannel → HTTPS failover's second copy of a ``msg_id`` the
+    peer took off the channel: its inbox answers 410 with the duplicate
+    code. That is a delivery — the send used to count as failed, flip the
+    peer to unreachable and queue the envelope for a retry that was then
+    dropped as "permanently rejected"."""
+    wt = _gone_transport('{"error": "gone", "code": "REPLAY"}')
+    ok, status = await wt.send(
+        instance=_fake_instance("peer"), envelope_dict={"msg_id": "x"}
+    )
+    assert ok is True and status == 410
+
+
+async def test_https_inbox_any_other_410_is_a_failure():
+    wt = _gone_transport('{"error": "gone"}')
+    ok, status = await wt.send(
+        instance=_fake_instance("peer"), envelope_dict={"msg_id": "x"}
+    )
+    assert ok is False and status == 410
+
+
+async def test_https_inbox_a_media_body_is_never_delivered_by_the_duplicate_code():
+    """A binary body whose chunk the peer refused has burnt its ``msg_id``
+    without being held: the code must not turn that into a delivery."""
+    wt = _gone_transport('{"error": "gone", "code": "REPLAY"}')
+    res = await wt.send_media(instance=_fake_instance("peer"), body=b"\x00SHM")
+    assert res.ok is False and res.status_code == 410
+
+
 async def test_https_inbox_transport_network_error_is_failure():
     class _RaisingClient:
         def post(self, *a, **kw):

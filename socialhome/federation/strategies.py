@@ -42,7 +42,8 @@ class TransportStrategy(Protocol):
     rewrite the body. Returns ``(ok, status_code)`` where:
 
     * ``ok=True`` iff the peer accepted the envelope (HTTP 2xx for
-      inboxes, channel write success for WebRTC).
+      inboxes — or its "already held" 410, ``federation/inbox_reply.py``
+      — channel write success for WebRTC).
     * ``status_code`` is the HTTP status when meaningful, or ``None``
       for non-HTTP transports.
 
