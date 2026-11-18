@@ -33,6 +33,7 @@ Security invariants:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import random
 import time
@@ -369,6 +370,14 @@ MAX_HANDSHAKE_RESTARTS: int = 2
 ICE_PRIME_TIMEOUT_S: float = 15.0
 
 
+#: How many early candidates of one peer may wait for their OFFER / ANSWER
+#: at once (:meth:`FederationTransport.on_rtc_ice`). They wait off the
+#: request that carried them, so nothing else slows a peer that keeps
+#: sending them. A handshake trickles a handful (host, server-reflexive
+#: and relay candidates per interface); past this the candidate is dropped.
+MAX_PARKED_ICE_CANDIDATES: int = 64
+
+
 class _RtcPeer:
     """One DataChannel session for one paired peer."""
 
@@ -407,6 +416,7 @@ class _RtcPeer:
         "_teardown_task",
         "ice_generation",
         "instance_id",
+        "parked_candidates",
     )
 
     def __init__(
@@ -545,6 +555,10 @@ class _RtcPeer:
         #: OUR connection — counting it made the ANSWER restart (close) a
         #: connection that had every candidate it needed.
         self._ignoring_offer: bool = False
+        #: Candidates of this peer that :meth:`FederationTransport.on_rtc_ice`
+        #: has waiting on tasks of their own, bounded by
+        #: :data:`MAX_PARKED_ICE_CANDIDATES`. Kept by the transport.
+        self.parked_candidates: int = 0
 
     # ─── Transport change publication ─────────────────────────────────────
 
@@ -907,6 +921,14 @@ class _RtcPeer:
         (offerer); until then the candidate parks here. If the
         handshake never lands within :data:`ICE_BUFFER_TIMEOUT_S` we
         drop the candidate rather than pinning memory forever.
+
+        A drop is counted against our connection (and later restarts the
+        handshake) — except while we are ignoring the remote's glare
+        OFFER (:attr:`_ignoring_offer`): by arrival order that candidate
+        belongs to the ignored OFFER. The price: a candidate of the
+        remote's ANSWER that overtakes that ANSWER by more than the
+        timeout during glare is lost uncounted, and such a connection is
+        left to connect on what it has or to fail into its backoff.
         """
         if not candidate or self._closed:
             return
@@ -2827,9 +2849,26 @@ class FederationTransport:
         in :meth:`_RtcPeer.add_ice_candidate`. The §24.11 pipeline has
         already authenticated the sender by signature, so the stub
         peer can't be a DoS vector against unpaired instance_ids.
+
+        Returns once the candidate is applied — or, when it has to wait
+        for its description, as soon as it is parked (at most
+        :data:`MAX_PARKED_ICE_CANDIDATES` per peer).
         """
+        if self._closing:
+            return
         peer = await self._answering_peer(from_instance)
         if peer is None:
+            return
+        if (
+            peer.awaits_remote_description
+            and peer.parked_candidates >= MAX_PARKED_ICE_CANDIDATES
+        ):
+            log.warning(
+                "fed RTC: ICE candidate for %s dropped — %d already wait for "
+                "its OFFER / ANSWER",
+                from_instance,
+                peer.parked_candidates,
+            )
             return
         applying = peer.add_ice_candidate(
             candidate=str(payload.get("candidate") or ""),
@@ -2850,10 +2889,12 @@ class FederationTransport:
         # made handshakes after an outage lose candidates and restart.
         task = asyncio.create_task(applying, name=f"fed-rtc-ice[{from_instance}]")
         self._inbound_tasks.add(task)
-        task.add_done_callback(self._parked_candidate_done)
+        peer.parked_candidates += 1
+        task.add_done_callback(functools.partial(self._parked_candidate_done, peer))
 
-    def _parked_candidate_done(self, task: asyncio.Task) -> None:
+    def _parked_candidate_done(self, peer: _RtcPeer, task: asyncio.Task) -> None:
         self._inbound_tasks.discard(task)
+        peer.parked_candidates -= 1
         if not task.cancelled() and task.exception() is not None:
             log.warning("fed RTC: a parked ICE candidate failed: %r", task.exception())
 

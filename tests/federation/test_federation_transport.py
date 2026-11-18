@@ -701,6 +701,7 @@ async def test_on_rtc_ice_unknown_peer_creates_buffering_stub(monkeypatch):
     )
     # The stub peer is registered so a follow-up OFFER will reuse it.
     assert "ghost" in t._peers
+    await t.close_all()
 
 
 async def test_on_rtc_ice_accepts_trickled_candidate():
@@ -2913,6 +2914,41 @@ async def test_close_all_ends_parked_candidates():
 
     assert parked[0].done()
     assert not t._inbound_tasks
+
+    # And none is parked afterwards (an envelope still in flight at
+    # shutdown): nothing would ever cancel it.
+    await t.on_rtc_ice(
+        from_instance="peer-late",
+        payload={"candidate": "candidate:late udp", "sdp_mid": "0"},
+    )
+    assert not t._inbound_tasks
+    assert "peer-late" not in t._peers
+
+
+async def test_parked_candidates_are_bounded_per_peer(monkeypatch, caplog):
+    """They no longer hold the sender's request, so the count is what
+    stops a peer that keeps sending candidates and never an OFFER."""
+    monkeypatch.setattr(transport_mod, "MAX_PARKED_ICE_CANDIDATES", 2)
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=_FakeSignaler(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="socialhome.federation.transport"):
+        for n in range(3):
+            await t.on_rtc_ice(
+                from_instance="peer-early",
+                payload={"candidate": f"candidate:{n} udp", "sdp_mid": "0"},
+            )
+
+    peer = t._peers["peer-early"]
+    assert len(t._inbound_tasks) == 2
+    assert peer.parked_candidates == 2
+    assert "2 already wait" in caplog.text
+
+    await t.close_all()
+    assert peer.parked_candidates == 0
 
 
 # ─── Retire rate floor ────────────────────────────────────────────────────

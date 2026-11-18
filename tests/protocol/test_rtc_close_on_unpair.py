@@ -261,8 +261,8 @@ async def test_ice_onto_a_spent_peer_gets_a_fresh_peer():
             break
         await asyncio.sleep(0)
 
-    # The candidate overtook the OFFER: the fresh stub parks it until the
-    # OFFER lands, so do not wait for that.
+    # The candidate overtook the OFFER: the fresh stub parks it (off this
+    # call) until the OFFER lands.
     parked = asyncio.create_task(
         t.on_rtc_ice(
             from_instance=PEER,
@@ -272,7 +272,7 @@ async def test_ice_onto_a_spent_peer_gets_a_fresh_peer():
     await asyncio.sleep(0.05)
 
     assert t._peers[PEER] is not peer
-    await t.close_all()  # wakes the parked candidate
+    await t.close_all()  # ends the parked candidate
     await asyncio.wait_for(parked, 2)
 
 
