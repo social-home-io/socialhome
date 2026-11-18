@@ -25984,8 +25984,9 @@ def _admin_seed_refuses_to_forget(
     household that keeps acting is exactly the threat the rotation answers.
     e's rename is then executed on e and signed with the RETIRED key; none
     of ``members`` may take it, and each must have refused e's frame (at
-    the mailbox gate — e's member card is gone with its seat — or at the
-    signature). e's database is put back afterwards."""
+    the mailbox gate — e's member card is gone with its seat — as a
+    household it no longer knows, or at the signature). e's database is put
+    back afterwards."""
     e = state["instances"]["e"]
     names = {label: _space_col(label, space_id, "name") for label in ("e", *members)}
     db = _instance_dir("e") / "socialhome.db"
@@ -26032,18 +26033,31 @@ def _admin_seed_refuses_to_forget(
                 f"its rename (HTTP {s} {body!r}) — the refusals below would "
                 "prove nothing"
             )
+        # Where the frame is turned away depends on what else the member
+        # shares with e: its card for the space is gone with its seat (the
+        # mailbox gate); with no other shared space the member dropped e's
+        # whole space-scoped seat (an unknown household); a frame that got
+        # past both fails the signature.
         refusals = (
-            "on a mailbox from a sender with no card for its space",
-            f"SPACE_CONFIG_CHANGED for {space_id} from {e['instance_id']}: "
-            "authority signature did not verify",
+            (
+                "on a mailbox from a sender with no card for its space",
+                "no member card",
+            ),
+            (
+                f"envelope from {e['instance_id']}: No instance found",
+                "a household it no longer knows",
+            ),
+            (
+                f"SPACE_CONFIG_CHANGED for {space_id} from {e['instance_id']}: "
+                "authority signature did not verify",
+                "signature",
+            ),
         )
         how: dict[str, str] = {}
 
         def _refused() -> bool:
             for label in members:
-                for needle, name in zip(
-                    refusals, ("no member card", "signature"), strict=True
-                ):
+                for needle, name in refusals:
                     if _log_contains(label, needle, offset=offsets[label]):
                         how[label] = name
             return len(how) == len(members)
