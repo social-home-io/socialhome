@@ -21,6 +21,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.federation.inbox_reply import inbox_holds_envelope
 
 
 def _build_envelope(
@@ -178,6 +179,9 @@ async def test_inbound_old_timestamp_410(client, env):
     )
     r = await client.post("/federation/inbox/wh-test", data=body)
     assert r.status == 410
+    # Not a duplicate: nothing here tells a sender "you may stop".
+    assert await r.json() == {"error": "gone"}
+    assert not await inbox_holds_envelope(r)
 
 
 async def test_inbound_bad_signature_403(client, env):
@@ -211,13 +215,19 @@ async def test_inbound_replay_410(client, env):
     assert r1.status == 200
     r2 = await client.post("/federation/inbox/wh-test", data=body)
     assert r2.status == 410
+    # The sender reads the code: this household already holds the
+    # envelope, so the sender's outbox counts it as delivered.
+    assert await r2.json() == {"error": "gone", "code": "REPLAY"}
+    # Both ends of the wire shape: the sender's own reading of this answer.
+    assert await inbox_holds_envelope(r2)
+    assert not await inbox_holds_envelope(r1)
 
 
 async def test_inbound_replay_logs_info_for_ephemeral_event(client, env, caplog):
     """A replayed ephemeral event (capabilities / presence / RTC
     signaling / …) is the DataChannel → HTTPS-inbox failover doing its
     job — log it at INFO so the noise doesn't crowd out real WARNING
-    signals. Content events stay WARNING; see the test below."""
+    signals. Content events too; see the test below."""
     import logging as _logging
 
     body = _build_envelope(
@@ -244,13 +254,13 @@ async def test_inbound_replay_logs_info_for_ephemeral_event(client, env, caplog)
         and rec.name == "socialhome.routes.federation"
     ]
     assert not warnings, [r.getMessage() for r in warnings]
-    # One INFO line at the demoted ``dedup`` level instead.
+    # One INFO line instead.
     infos = [
         rec
         for rec in caplog.records
         if rec.levelno == _logging.INFO
         and rec.name == "socialhome.routes.federation"
-        and "dedup" in rec.getMessage()
+        and "duplicate" in rec.getMessage()
     ]
     assert len(infos) == 1, [r.getMessage() for r in caplog.records]
 
@@ -314,11 +324,12 @@ async def test_inbound_unknown_inbox_still_logs_warning(client, env, caplog):
     )
 
 
-async def test_inbound_replay_logs_warning_for_content_event(client, env, caplog):
-    """A replayed content event (DM / post / moment / …) stays at
-    WARNING — operators care if their DM apparently round-tripped
-    twice, because that's a symptom of a real bug, not the routine
-    transport failover."""
+async def test_inbound_replay_of_a_content_event_is_not_a_warning(client, env, caplog):
+    """A duplicate of a content event (DM / post / moment / …) is refused
+    and logged at INFO, like any other. It is what a sender's retry looks
+    like after its POST timed out while this household was still working
+    on the envelope: nothing is wrong, and nothing is applied twice. (It
+    used to be a WARNING per retry.)"""
     import logging as _logging
 
     body = _build_envelope(
@@ -333,18 +344,16 @@ async def test_inbound_replay_logs_warning_for_content_event(client, env, caplog
     assert r1.status == 200
 
     caplog.clear()
-    with caplog.at_level(_logging.WARNING, logger="socialhome.routes.federation"):
+    with caplog.at_level(_logging.INFO, logger="socialhome.routes.federation"):
         r2 = await client.post("/federation/inbox/wh-test", data=body)
     assert r2.status == 410
+    assert await r2.json() == {"error": "gone", "code": "REPLAY"}
 
-    warnings = [
-        rec
-        for rec in caplog.records
-        if rec.levelno == _logging.WARNING
-        and rec.name == "socialhome.routes.federation"
-        and "rejected" in rec.getMessage()
+    records = [r for r in caplog.records if r.name == "socialhome.routes.federation"]
+    assert not [r for r in records if r.levelno >= _logging.WARNING], [
+        r.getMessage() for r in records
     ]
-    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert [r for r in records if "duplicate" in r.getMessage()]
 
 
 # ─── Public path / no auth required ─────────────────────────────────────
@@ -422,7 +431,9 @@ async def test_inbound_error_does_not_leak_exception_text(client, env):
     r2 = await client.post("/federation/inbox/wh-test", data=body)
     assert r2.status == 410
     body_json = await r2.json()
-    assert body_json == {"error": "gone"}
+    # The fixed code only — and only to a sender whose signature verified
+    # (the replay step runs after it), never to somebody probing inbox ids.
+    assert body_json == {"error": "gone", "code": "REPLAY"}
     assert "msg_id" not in str(body_json)
     assert "Replay" not in str(body_json)
 

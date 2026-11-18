@@ -778,8 +778,13 @@ then jittered upward by up to 30 % so a throttled burst does not come back on
 one tick). A 429 still costs an attempt, so a
 peer that throttles forever is bounded exactly like an offline one —
 `MAX_ATTEMPTS`, the 7-day TTL and the per-peer pending cap — and a 429 never
-paints the household unreachable. Every other 4xx (410 replay / skew, 403
-bad signature, 400 malformed) is permanent and dropped; 404 is
+paints the household unreachable. **A 410 with `{"code": "REPLAY"}` is a
+delivery**: the peer answers that it already holds this envelope (our
+earlier POST timed out on our side while the peer was still working on
+it), so the row is marked delivered — see
+[Replay cache](#replay-cache). Every other 4xx (any other 410 — timestamp
+skew, a peer that predates the code — 403 bad signature, 400 malformed) is
+permanent and dropped; 404 is
 retried briefly for the pair-window race (`PAIR_WINDOW_404_ATTEMPTS`).
 Treating 429 as permanent once turned a single echo storm into the silent
 loss of unrelated envelopes (an `UNPAIR`, a replayed highlight).
@@ -987,6 +992,23 @@ boundary). The
 `infrastructure/replay_cache_scheduler.py` evicts entries older than
 the §24.11 horizon on a slow cadence so the table doesn't grow
 unboundedly.
+
+**A duplicate is refused, and the sender is told it was one.** The HTTPS
+inbox answers a replay-cache hit with `410 {"error": "gone", "code":
+"REPLAY"}` (`federation/inbox_reply.py`) and logs it at INFO. The usual
+cause is benign: a sender's inbox POST is bounded at 10 s, so when the
+receiver is still working on the envelope the sender gives up and its
+outbox re-sends the same `msg_id` (re-signed); or the DataChannel → HTTPS
+failover delivers a second copy. A sender that reads the code counts the
+envelope as delivered (the outbox row is marked delivered, the first HTTPS
+send counts as `ok`) instead of dropping it as permanently rejected. The
+code is additive — status and `error` are unchanged, so a sender that
+predates it drops the row as before, which loses nothing — and fail-safe:
+only a 410 whose JSON body carries exactly that code counts (a binary
+media body never does). It is no oracle: the replay step runs after the
+signature step, so only an envelope signed by the paired household's
+pinned key can earn it, and a timestamp-skew 410 (decided before the
+signature) never carries it.
 
 That horizon (`crypto.REPLAY_CACHE_WINDOW`) is **25 h**, and it is set by
 the widest timestamp window any transport allows, not by the outbox's

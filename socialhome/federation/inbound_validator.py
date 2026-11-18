@@ -152,6 +152,21 @@ class UnpairedPeerRefusedError(ValueError):
     """
 
 
+class ReplayDetectedError(ValueError):
+    """An envelope whose ``msg_id`` the replay cache already holds.
+
+    Raised by :func:`make_check_replay`, which runs after the signature
+    step: the sender is a paired household whose key signed this envelope,
+    and we have seen that envelope before — a retry of a delivery whose
+    answer it never got (its POST timed out while we were still working on
+    it), or the DataChannel → HTTPS failover's second copy. Nothing is
+    applied twice. The type lets the inbox route answer it as "already
+    held" (:mod:`socialhome.federation.inbox_reply`) instead of as a
+    refusal; its text still starts ``Replay detected`` for every caller
+    that reads the message.
+    """
+
+
 # ─── Validation context ─────────────────────────────────────────────────
 
 
@@ -1034,7 +1049,7 @@ def make_check_replay(*, replay_cache) -> InboundStep:
             from_instance=from_instance,
             now=datetime.now(UTC),
         ):
-            raise ValueError(
+            raise ReplayDetectedError(
                 f"Replay detected: msg_id={msg_id!r} from={from_instance!r}",
             )
 

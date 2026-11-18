@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from datetime import UTC
 from typing import ClassVar
 
@@ -329,6 +330,64 @@ async def test_redeliver_4xx_is_permanent(env):
         )
         outcome = await _redeliver_envelope(svc, fed_repo, entry)
         assert outcome is DeliveryOutcome.PERMANENT, (status, outcome)
+
+
+async def test_redeliver_a_duplicate_is_delivered_without_a_warning(env, caplog):
+    """Our POST timed out while the peer was still working on the envelope;
+    the retry is answered 410 with ``{"code": "REPLAY"}``: the peer holds
+    it. That is a delivery — not a "permanently rejected" row with two
+    WARNINGs for a message that arrived."""
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, gfs_relay=False)
+    svc._http_client = _StatusClient(410, body='{"error": "gone", "code": "REPLAY"}')
+    entry = _OutboxEntry(
+        id="e-dup",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+    with caplog.at_level(logging.INFO):
+        outcome = await _redeliver_envelope(svc, fed_repo, entry)
+    assert outcome is DeliveryOutcome.SUCCESS
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [
+        r.getMessage() for r in caplog.records
+    ]
+    assert (await fed_repo.get_instance(peer.id)).unreachable_since is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error": "gone"}',  # timestamp skew, or a peer older than the code
+        '{"error": "gone", "code": "EXPIRED"}',
+        '{"code": ["REPLAY"]}',
+        '["REPLAY"]',
+        "REPLAY",
+        "",
+    ],
+)
+async def test_redeliver_any_other_410_stays_permanent(env, body):
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, gfs_relay=False)
+    svc._http_client = _StatusClient(410, body=body)
+    entry = _OutboxEntry(
+        id="e-gone",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.PERMANENT
+
+
+@pytest.mark.parametrize("status", [400, 403, 409, 422])
+async def test_redeliver_the_duplicate_code_counts_only_on_a_410(env, status):
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, gfs_relay=False)
+    svc._http_client = _StatusClient(status, body='{"code": "REPLAY"}')
+    entry = _OutboxEntry(
+        id="e-other",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.PERMANENT
 
 
 async def test_redeliver_404_is_transient(env):
@@ -912,15 +971,16 @@ class _StatusResp:
 
 
 class _StatusClient:
-    def __init__(self, status=None):
+    def __init__(self, status=None, *, body='{"error": "unknown_inbox"}'):
         self._status = status
+        self._body = body
         self.posts = 0
 
     def post(self, url, **kw):
         self.posts += 1
         if self._status is None:
             raise ConnectionError("boom")
-        return _StatusResp(self._status)
+        return _StatusResp(self._status, self._body)
 
 
 def _ok_relay():

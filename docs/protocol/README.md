@@ -72,6 +72,15 @@ Each step is an independently-testable async callable composed via
 steps are appended to the chain — `handle_inbound_envelope` is not
 edited. The same chain runs for RTC-delivered envelopes.
 
+**A duplicate is told apart from a refusal.** The replay step refuses an
+envelope whose `msg_id` it already holds; over the HTTPS inbox the answer
+is `410 {"error": "gone", "code": "REPLAY"}` — the one 4xx a sender counts
+as *delivered* (its earlier POST timed out while the receiver was still
+working, and this is the retry). Every other 410 (timestamp outside the
+window; a receiver that predates the code) carries no `code` and stays a
+permanent refusal. Details:
+[architecture → Replay cache](../architecture.md#replay-cache).
+
 **A gate that drops a valid envelope answers like a dispatch.** The
 post-signature gates (idempotent duplicate, space ban, deprovisioned author,
 archived space, reader / non-member write, write held for a seat) all

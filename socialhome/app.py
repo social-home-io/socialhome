@@ -75,6 +75,7 @@ from .federation.federation_service import FederationService
 from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
 from .federation.host_hop import HostHop
+from .federation.inbox_reply import inbox_holds_envelope
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
 from .federation.pairing_gfs_reach import PairingGfsReach
@@ -653,11 +654,15 @@ async def _redeliver_envelope(
       re-signed with a fresh timestamp on every attempt. The remaining
       terminal reasons are:
 
-      * **410 ``Replay detected``** — receiver already saw this
-        ``msg_id``; their state is consistent with ours. Most
-        commonly the residue of a previously-mangled response (e.g.
-        the HA integration's pre-2026.5.18 charset bug) that left
-        the row queued even though the peer processed it.
+      * **410 without the duplicate code** — a peer that predates the
+        code and already saw this ``msg_id`` (their state is consistent
+        with ours), or one whose answer was rewritten on the way.
+
+    * 410 ``{"code": "REPLAY"}`` → :attr:`DeliveryOutcome.SUCCESS`: the
+      peer says it already holds this envelope — a POST of ours that
+      timed out while it was still working on it, then this retry
+      (:mod:`socialhome.federation.inbox_reply`). Delivered, not
+      "permanently rejected".
       * **403 banned / signature invalid** — receiver refuses this
         sender. Dropping the entry is the right call: retrying gives
         the sender no path to recover, and the ban / key revocation
@@ -776,6 +781,16 @@ async def _redeliver_envelope(
                 await federation_repo.mark_reachable(entry.instance_id)
                 if resp.status == 429:
                     return _throttled_outcome(entry, resp)
+                if await inbox_holds_envelope(resp):
+                    # Our earlier POST reached the peer and timed out on
+                    # our side while it was still being worked on; this
+                    # retry is its duplicate. The peer holds the envelope.
+                    log.info(
+                        "outbox: %s already holds %s — delivered",
+                        entry.instance_id,
+                        entry.id,
+                    )
+                    return DeliveryOutcome.SUCCESS
                 # 404 ``No instance found`` is *transient*: the peer just
                 # hasn't installed its RemoteInstance row for us yet,
                 # which happens in the relay-pair handshake window where
@@ -783,8 +798,8 @@ async def _redeliver_envelope(
                 # synchronous ``PairingConfirmed`` bus subscriber) races
                 # ahead of the ack reaching the peer. Retry through the
                 # outbox so the envelope lands once the peer's mirror
-                # catches up. Other 4xx (410 ``Replay detected`` / ``Skew
-                # too old``, 422 ``Malformed`` etc.) stay PERMANENT —
+                # catches up. Other 4xx (a 410 without the duplicate code,
+                # 422 ``Malformed`` etc.) stay PERMANENT —
                 # those are genuinely "the peer will never accept this".
                 if resp.status == 404:
                     # WHO produced this 404 matters, and the status alone

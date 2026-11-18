@@ -483,11 +483,11 @@ class OutboxProcessor:
             self.wake()
             return
         if outcome is DeliveryOutcome.PERMANENT:
-            # 4xx — peer will never accept this envelope (replay cache
-            # hit, expired timestamp, banned sender, malformed body).
-            # Drop the row even for :data:`NEVER_DROP` events: a
-            # 410 ``Replay detected`` means the receiver already has
-            # the event, so the security invariant is satisfied.
+            # 4xx — peer will never accept this envelope (banned sender,
+            # malformed body, a 410 without the duplicate code). Drop the
+            # row even for :data:`NEVER_DROP` events. (An envelope the
+            # peer answers it already HOLDS — 410 ``{"code": "REPLAY"}``
+            # — never gets here: redelivery reports it as SUCCESS.)
             log.warning(
                 "OutboxProcessor: peer permanently rejected %s — dropping",
                 entry.id,
