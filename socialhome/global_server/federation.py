@@ -79,6 +79,7 @@ from .domain import (
 from .repositories import AbstractGfsFederationRepo
 
 if TYPE_CHECKING:
+    from .addressee import GfsAddressee
     from .cluster import ClusterService
     from .cluster_relay import ClusterRelayFanOut
     from .envelope_relay import GfsEnvelopeRelay
@@ -446,6 +447,7 @@ class GfsFederationService:
     """
 
     __slots__ = (
+        "_addressee",
         "_cluster",
         "_epoch_repo",
         "_fan_out_fwd",
@@ -478,6 +480,10 @@ class GfsFederationService:
         # tests / embedders that predate invite links; production always wires
         # it (``server.py``).
         self._invite_repo = invite_repo
+        # This server as an addressee (its identity key): a request that
+        # binds ``gfs_key`` into its signed bytes must name exactly it.
+        # Wired by ``server.py``; without it such a request is refused.
+        self._addressee: GfsAddressee | None = None
         self._seen_payloads = SeenPayloadCache()
         # ``(subscriber, space)`` pairs notified in the last
         # RECONNECT_NOTIFY_DEDUPE_S — a seat re-take skips its notify then.
@@ -1720,19 +1726,49 @@ class GfsFederationService:
         the space row locally before subscribing."""
         return await self._repo.get_space(space_id)
 
+    def attach_addressee(self, addressee: GfsAddressee) -> None:
+        """Wire this server's addressee (its identity key), built after the
+        service — see :meth:`_assert_addressed_here`."""
+        self._addressee = addressee
+
+    def _assert_addressed_here(self, gfs_key: str | None, *, required: bool) -> None:
+        """Refuse a signed request addressed to another server.
+
+        ``gfs_key`` is the server key a household bound into the signed
+        bytes of a listing request (capability ``withdrawn_repin``). The
+        owner-signed listing bodies otherwise name no server, so one sent to
+        GFS A could be replayed by A, inside the ``ts`` window, to any other
+        GFS the owner is registered on — and a withdrawal or a pin-only
+        publish replayed that way takes a LIVE listing and its invite pages
+        down there. A request that carries the field must name this
+        server's key; *required* makes the field mandatory (the pin-only
+        publish, which only households of this revision send). Absent and
+        not required: an older household, judged as before."""
+        if gfs_key is None:
+            if required:
+                raise PermissionError("gfs_key is required")
+            return
+        own = self._addressee
+        if own is None or not own.accepts(own.instance_id, gfs_key):
+            raise PermissionError("request is addressed to another server")
+
     async def hide_space(
         self,
         space_id: str,
         owning_instance: str,
         ts: str,
         signature: str,
+        *,
+        gfs_key: str | None = None,
     ) -> None:
         """Withdraw a space listing at its OWNER's signed request.
 
         Drives ``POST|DELETE /gfs/spaces/{id}/unpublish``. Authenticated
         exactly like :meth:`subscribe` / :meth:`unsubscribe`: an Ed25519
         signature over the canonical ``{action: "unpublish", owning_instance,
-        space_id, ts}`` JSON, verified against *owning_instance*'s registered
+        space_id, ts}`` JSON (plus ``gfs_key``, the addressed server's key,
+        when the household bound it — then it must be this server's, see
+        :meth:`_assert_addressed_here`), verified against *owning_instance*'s registered
         public key and replay-guarded (±300 s). The ``action`` is inside the
         signed bytes, so a captured subscribe/unsubscribe signature can never
         be replayed as a delisting.
@@ -1757,16 +1793,16 @@ class GfsFederationService:
         unpublish fan-out must be idempotent) — but only AFTER the signature
         verifies, so space existence is never leaked to an unsigned caller.
         """
-        await self._verify_signed_request(
-            owning_instance,
-            {
-                "action": "unpublish",
-                "owning_instance": owning_instance,
-                "space_id": space_id,
-                "ts": ts,
-            },
-            signature=signature,
-        )
+        signed: dict[str, object] = {
+            "action": "unpublish",
+            "owning_instance": owning_instance,
+            "space_id": space_id,
+            "ts": ts,
+        }
+        if gfs_key is not None:
+            signed["gfs_key"] = gfs_key
+        await self._verify_signed_request(owning_instance, signed, signature=signature)
+        self._assert_addressed_here(gfs_key, required=False)
         existing = await self._repo.get_space(space_id)
         if existing is None:
             return
@@ -1842,6 +1878,7 @@ class GfsFederationService:
         place: object = None,
         join_contact: object = None,
         withdrawn: bool | None = None,
+        gfs_key: str | None = None,
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -1893,7 +1930,10 @@ class GfsFederationService:
         ``status``, never creates a row (:class:`SpaceNotListedError`, raised
         only after the signature verified) and leaves the listing
         ``withdrawn`` — setting the flag if it was not set yet. The pin moves
-        under exactly the cert rule above.
+        under exactly the cert rule above. Because it withdraws, it MUST name
+        the server it is for: ``gfs_key`` (this server's identity key, inside
+        the signed bytes) is mandatory with ``withdrawn`` and optional
+        otherwise (:meth:`_assert_addressed_here`).
         """
         inst = await self._repo.get_instance(owning_instance)
         if inst is None:
@@ -1951,6 +1991,9 @@ class GfsFederationService:
             if not ts:
                 raise PermissionError("withdrawn requires a signed ts")
             signed["withdrawn"] = True
+        # The addressed server's key, inside the signed bytes when sent.
+        if gfs_key is not None:
+            signed["gfs_key"] = gfs_key
         # The owner's optional place pin (``place: {lat, lon}``, advertised
         # as the ``place_pin`` capability) rides inside the signed bytes when
         # sent, so a relay can neither add, move nor strip one. Absent ⇒ the
@@ -1994,6 +2037,8 @@ class GfsFederationService:
             # so a captured publish body can't be replayed to un-do the
             # owner's later withdrawal.
             self._assert_fresh_ts(ts)
+        # After the signature: only the owner's own statement is judged.
+        self._assert_addressed_here(gfs_key, required=bool(withdrawn))
         # Bound the stored ``about_markdown`` (verified above against the
         # full value, so the signature still holds). The public page caps
         # rendering too; capping at storage avoids DB bloat from a paired

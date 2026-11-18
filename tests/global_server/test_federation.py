@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from socialhome.domain.space_item import PayloadSuiteRefused, UnsupportedPayloadSuite
 from socialhome.global_server import federation as federation_mod
+from socialhome.global_server.addressee import GfsAddressee
 from socialhome.global_server.domain import GfsSubscriber
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
@@ -52,6 +53,11 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+#: The identity key of the GFS under test — what a household binds into a
+#: request as ``gfs_key`` — and another server's.
+_GFS_KEY = "5a" * 32
+_OTHER_GFS_KEY = "6b" * 32
+
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
 
@@ -59,7 +65,11 @@ def _now_iso() -> str:
 async def svc(gfs_db):
     """A GfsFederationService backed by the shared GFS database fixture."""
     repo = SqliteGfsFederationRepo(gfs_db)
-    return GfsFederationService(repo)
+    service = GfsFederationService(repo)
+    service.attach_addressee(
+        GfsAddressee("gfs-test", (), public_key_hex=_GFS_KEY, node_id="n1")
+    )
+    return service
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -4075,6 +4085,8 @@ async def _withdrawn_repin(
     authority_cert: dict | None,
     ts: str | None = None,
     sign_withdrawn: bool = True,
+    gfs_key: str | None = _GFS_KEY,
+    sign_gfs_key: bool = True,
 ):
     """A ``withdrawn: true`` publish as a household sends it: BLANK metadata
     (a space that left the public tier must not leak its new name) plus the
@@ -4090,6 +4102,8 @@ async def _withdrawn_repin(
         body["authority_cert"] = authority_cert
     if sign_withdrawn:
         body["withdrawn"] = True
+    if gfs_key is not None and sign_gfs_key:
+        body["gfs_key"] = gfs_key
     return await svc.publish_space(
         space_id=space_id,
         owning_instance=owning_instance,
@@ -4099,6 +4113,7 @@ async def _withdrawn_repin(
         authority_cert=authority_cert,
         ts=ts,
         withdrawn=True,
+        gfs_key=gfs_key,
     )
 
 
@@ -4276,6 +4291,9 @@ async def test_withdrawn_publish_withdraws_a_listed_space_and_a_fresh_one_relist
 ):
     invites = _RecordingInviteRepo()
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), invite_repo=invites)
+    svc.attach_addressee(
+        GfsAddressee("gfs-test", (), public_key_hex=_GFS_KEY, node_id="n1")
+    )
     seed, _pk, owner_id, _k1s, k1_pk = await _rotation_world(svc)
     assert (await svc.get_space("sp-rot")).withdrawn is False
     row = await _withdrawn_repin(
@@ -4400,3 +4418,93 @@ async def test_withdrawn_repin_never_lifts_a_ban(svc):
         authority_cert=cert,
     )
     assert (row.status, row.identity_public_key) == ("banned", k2_pk.hex())
+
+
+# ── The addressed server is inside the signed bytes ──────────────────────
+
+
+async def _repin_args(svc):
+    seed, pk, owner_id, _k1s, k1_pk = await _withdrawn_rotation_world(svc)
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    return seed, owner_id, k1_pk, k2_pk, cert
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("gfs_key", [None, _OTHER_GFS_KEY])
+async def test_a_withdrawn_publish_for_another_server_is_refused(svc, gfs_key):
+    """A pin-only publish also withdraws a listing. One the owner sent to
+    ANOTHER server (where the space is withdrawn) must not be replayable
+    here, where the space may be listed: the addressed server's key is
+    inside the signed bytes, and mandatory."""
+    seed, owner_id, k1_pk, k2_pk, cert = await _repin_args(svc)
+    await svc._repo.set_space_withdrawn("sp-rot", False)  # live here
+    with pytest.raises(PermissionError):
+        await _withdrawn_repin(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+            gfs_key=gfs_key,
+        )
+    row = await svc.get_space("sp-rot")
+    assert row.withdrawn is False
+    assert row.identity_public_key == k1_pk.hex()
+
+
+@pytest.mark.security
+async def test_the_addressed_server_is_inside_the_signed_publish_body(svc):
+    seed, owner_id, _k1, k2_pk, cert = await _repin_args(svc)
+    with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
+        await _withdrawn_repin(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+            sign_gfs_key=False,
+        )
+
+
+@pytest.mark.security
+async def test_a_withdrawal_addressed_to_another_server_is_refused(svc):
+    """The same replay at withdrawal time: an unpublish the owner sent to
+    one server must not delist the space on another."""
+    seed, pk = _make_keypair()
+    await svc.register_instance("inst-ha", pk.hex(), auto_accept=True)
+    await _publish_known_space(svc, seed, owning_instance="inst-ha", space_id="sp-ha")
+    ts = _now_iso()
+    signed = {
+        "action": "unpublish",
+        "owning_instance": "inst-ha",
+        "space_id": "sp-ha",
+        "ts": ts,
+    }
+    with pytest.raises(PermissionError):
+        await svc.hide_space(
+            "sp-ha",
+            "inst-ha",
+            ts,
+            _sign(seed, {**signed, "gfs_key": _OTHER_GFS_KEY}),
+            gfs_key=_OTHER_GFS_KEY,
+        )
+    # The key is inside the signed bytes: bolting ours onto a body signed
+    # without it fails the signature.
+    with pytest.raises(PermissionError):
+        await svc.hide_space(
+            "sp-ha", "inst-ha", ts, _sign(seed, signed), gfs_key=_GFS_KEY
+        )
+    assert (await svc.get_space("sp-ha")).withdrawn is False
+    await svc.hide_space(
+        "sp-ha",
+        "inst-ha",
+        ts,
+        _sign(seed, {**signed, "gfs_key": _GFS_KEY}),
+        gfs_key=_GFS_KEY,
+    )
+    assert (await svc.get_space("sp-ha")).withdrawn is True

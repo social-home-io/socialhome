@@ -5610,6 +5610,9 @@ async def test_a_rotation_repins_a_withdrawn_listing_without_relisting_it(env):
     assert await svc.authority_key_revocable("sp-rot") is True  # re-pins now
     body = dict(session.publishes()[-1])
     assert body["withdrawn"] is True
+    # It names the server it is for (signed): another GFS cannot be made
+    # to take it.
+    assert body["gfs_key"] == _GFS_KP.public_key.hex()
     assert body["identity_public_key"] == k3.public_key.hex()
     assert (body["name"], body["description"], body["about_markdown"]) == ("", "", "")
     assert (body["cover_url"], body["icon_url"]) == ("", "")
@@ -5792,3 +5795,33 @@ async def test_removing_a_connection_forgets_what_it_confirmed(env):
     assert svc.pin_confirmed("sp-rot", "g1")
     svc._forget_connection_pins("g1")
     assert not svc.pin_confirmed("sp-rot", "g1")
+
+
+async def test_unpublish_names_the_server_it_is_for(env):
+    """The withdrawal is signed for ONE server (``gfs_key`` inside the
+    signed bytes), so that server cannot replay it to another GFS the space
+    is listed on. An older server gets today's body."""
+    for caps, bound in ((_REPIN_CAPS, True), ({"anonymous_publish": True}, False)):
+        session = _PinSession(caps=caps)
+        svc, owner, owner_id, _k2 = await _rotated_publish_svc(env, session)
+        await svc._repo.publish_space("sp-rot", "g1")
+        # What the connect-time ``/gfs/info`` fetch leaves in the cache.
+        svc._record_capabilities(await svc._repo.get("g1"), session.info)
+        await svc.unpublish_space("sp-rot", "g1")
+        url, body = session.posts[-1]
+        assert url.endswith("/unpublish")
+        signed = {
+            "action": "unpublish",
+            "owning_instance": owner_id,
+            "space_id": "sp-rot",
+            "ts": body["ts"],
+        }
+        if bound:
+            assert body["gfs_key"] == _GFS_KP.public_key.hex()
+            signed["gfs_key"] = body["gfs_key"]
+        else:
+            assert "gfs_key" not in body
+        canonical = json.dumps(signed, separators=(",", ":"), sort_keys=True).encode()
+        assert verify_ed25519(
+            owner.public_key, canonical, b64url_decode(body["signature"])
+        )

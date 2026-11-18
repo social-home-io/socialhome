@@ -144,7 +144,9 @@ class GfsInfoView(GfsBaseView):
         # old key may keep authorizing relays here.
         # ``withdrawn_repin``: this GFS takes ``withdrawn: true`` on a publish
         # — a pin-only re-pin of a listing its owner withdrew, which stays
-        # withdrawn — and answers every publish with the key it pins. Signed
+        # withdrawn — answers every publish with the key it pins, and takes
+        # the signed ``gfs_key`` (the addressed server) on publish and
+        # unpublish, refusing one that is not its own. Signed
         # because a household only sends the field to a server that folds it
         # into the signed bytes (an older one would 403).
         # ``member_publish_strict`` (v_50; the name is historical — since
@@ -840,8 +842,11 @@ class SpacePublishView(GfsBaseView):
     present, is inside the signed bytes and replay-guarded (±300 s); only a
     publish carrying one can restore an owner-withdrawn listing.
 
-    ``withdrawn: true`` (signed, needs ``ts``) makes it a pin-only re-pin of
-    a listing the owner withdrew: no metadata is stored, the listing stays
+    ``gfs_key`` (signed, optional) is the key of the server the publish is
+    for; one naming another server is a ``403``.
+
+    ``withdrawn: true`` (signed, needs ``ts`` and ``gfs_key``) makes it a
+    pin-only re-pin of a listing the owner withdrew: no metadata is stored, the listing stays
     withdrawn, and a space this GFS has no row for is a ``404``.
 
     Answers ``{status, space_id, identity_public_key}`` — the authority key
@@ -874,6 +879,10 @@ class SpacePublishView(GfsBaseView):
         # never verify — and a truthy one must not pass for the real thing.
         if "withdrawn" in body and body["withdrawn"] is not True:
             raise web.HTTPBadRequest(reason="withdrawn must be true when present")
+        # The addressed server's key (signed): a string or absent.
+        gfs_key = body.get("gfs_key")
+        if gfs_key is not None and not isinstance(gfs_key, str):
+            raise web.HTTPBadRequest(reason="gfs_key must be a string")
         try:
             space = await svc.publish_space(
                 space_id=space_id,
@@ -910,6 +919,7 @@ class SpacePublishView(GfsBaseView):
                 place=body.get("place"),
                 join_contact=body.get("join_contact"),
                 withdrawn=True if "withdrawn" in body else None,
+                gfs_key=gfs_key,
             )
         except PermissionError as exc:
             return web.json_response(
@@ -968,12 +978,17 @@ class SpaceUnpublishView(GfsBaseView):
             signature = body["signature"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
+        # Optional: the addressed server's key, inside the signed bytes.
+        gfs_key = body.get("gfs_key")
+        if gfs_key is not None and not isinstance(gfs_key, str):
+            raise web.HTTPBadRequest(reason="gfs_key must be a string")
         try:
             await svc.hide_space(
                 space_id,
                 str(owning_instance),
                 str(ts),
                 str(signature),
+                gfs_key=gfs_key,
             )
         except PermissionError as exc:
             return web.json_response({"error": str(exc)}, status=403)

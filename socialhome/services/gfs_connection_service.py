@@ -2035,6 +2035,8 @@ class GfsConnectionService:
                 self._space_media.pop(conn.id, None)
         if caps is not None and caps.get("addressee_key") is True:
             self._addressee_key[conn.id] = True
+        if caps is not None and caps.get("withdrawn_repin") is True:
+            self._withdrawn_repin[conn.id] = True
         if caps is not None:
             self._proof_offered[conn.id] = caps.get(PROOF_CAPABILITY) is True
             limit = _space_media_limit(caps)
@@ -2967,19 +2969,24 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
         ts = datetime.now(UTC).isoformat()
-        canonical = canonical_bytes(
-            {
-                "action": "unpublish",
-                "owning_instance": self._own_instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            }
-        )
-        body = {
+        signed: dict[str, object] = {
+            "action": "unpublish",
             "owning_instance": self._own_instance_id,
+            "space_id": space_id,
             "ts": ts,
-            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
         }
+        body: dict[str, object] = {"owning_instance": self._own_instance_id, "ts": ts}
+        # Name the server the withdrawal is for, inside the signed bytes:
+        # without it this server could replay the body, within the ``ts``
+        # window, to another GFS the space is listed on and delist it
+        # there. Only to a server that proved it folds the field in (an
+        # older one would fail the signature); that one gets today's body.
+        gfs_key = self._listing_addressee_key(conn)
+        if gfs_key is not None:
+            signed["gfs_key"] = body["gfs_key"] = gfs_key
+        body["signature"] = b64url_encode(
+            sign_ed25519(self._own_signing_key, canonical_bytes(signed))
+        )
 
         client = self._client()
         unpublish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/unpublish"
@@ -3427,6 +3434,17 @@ class GfsConnectionService:
         process (which one is compared in :meth:`repin_owed`)."""
         return (space_id, gfs_id) in self._pin_confirmed
 
+    def _listing_addressee_key(self, conn: GfsConnection) -> str | None:
+        """*conn*'s pinned server key to bind into a withdrawal (``gfs_key``,
+        signed), or ``None`` while its server has not proved
+        ``withdrawn_repin`` — the capability that says it folds the field
+        into the signed bytes — or we pinned no key for it. Read from the
+        cache every ``/gfs/info`` fetch warms (each connect does one): a
+        withdrawal never waits on a probe."""
+        if not conn.public_key or not self._withdrawn_repin.get(conn.id):
+            return None
+        return conn.public_key.lower()
+
     def _pin_answered(
         self, space_id: str, conn: GfsConnection, body: dict, answer: dict
     ) -> bool:
@@ -3669,6 +3687,8 @@ class GfsConnectionService:
             return "owed"
         if not self._own_instance_id or not self._own_signing_key:
             return "owed"
+        if not conn.public_key:
+            return "owed"
         # Exactly the fields the GFS folds into the signed bytes, each at
         # the value its route defaults a missing one to.
         body: dict = {
@@ -3686,6 +3706,10 @@ class GfsConnectionService:
             "identity_public_key": space.identity_public_key,
             "ts": datetime.now(UTC).isoformat(),
             "withdrawn": True,
+            # The one server this is for (mandatory there): the pin-only
+            # publish also WITHDRAWS a listing, so replayed to another GFS
+            # it would take a live listing down.
+            "gfs_key": conn.public_key.lower(),
         }
         cert = owner_authority_cert(
             space,

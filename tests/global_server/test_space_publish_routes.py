@@ -1506,6 +1506,50 @@ async def test_publish_without_a_key_answers_an_empty_pin(gfs_client):
     assert (await resp.json())["identity_public_key"] == ""
 
 
+async def _gfs_key(gfs_client) -> str:
+    """The identity key this GFS serves — what a household pins and binds."""
+    return (await (await gfs_client.get("/gfs/info")).json())["public_key"]
+
+
+@pytest.mark.security
+async def test_unpublish_route_takes_the_addressed_server(gfs_client):
+    seed, _pk = await _register_owner(gfs_client.server.app)
+    first = _sign_publish_body(
+        _pin_body("sp-ua", "owner.home", name="UA", key_hex=""),
+        seed=seed,
+        ts=_now_iso(),
+    )
+    assert (
+        await gfs_client.post("/gfs/spaces/sp-ua/publish", json=first)
+    ).status == 200
+    fed_repo = gfs_client.server.app[gfs_fed_repo_key]
+    for key, status, withdrawn in (
+        ("6b" * 32, 403, False),
+        (await _gfs_key(gfs_client), 200, True),
+    ):
+        ts = _now_iso()
+        canonical = json.dumps(
+            {
+                "action": "unpublish",
+                "gfs_key": key,
+                "owning_instance": "owner.home",
+                "space_id": "sp-ua",
+                "ts": ts,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        body = {
+            "owning_instance": "owner.home",
+            "ts": ts,
+            "gfs_key": key,
+            "signature": b64url_encode(sign_ed25519(seed, canonical)),
+        }
+        resp = await gfs_client.post("/gfs/spaces/sp-ua/unpublish", json=body)
+        assert resp.status == status
+        assert (await fed_repo.get_space("sp-ua")).withdrawn is withdrawn
+
+
 @pytest.mark.security
 async def test_withdrawn_publish_route_repins_a_withdrawn_listing(gfs_client):
     app = gfs_client.server.app
@@ -1535,12 +1579,27 @@ async def test_withdrawn_publish_route_repins_a_withdrawn_listing(gfs_client):
             **_pin_body("sp-wd", owner_id, name="", key_hex=k2.public_key.hex()),
             "authority_cert": cert,
             "withdrawn": True,
+            "gfs_key": await _gfs_key(gfs_client),
         },
         seed=owner.private_key,
         ts=_now_iso(),
     )
     resp = await gfs_client.post("/gfs/spaces/sp-wd/publish", json=repin)
     assert resp.status == 200
+    # The same body minus the addressee, or for another server: refused.
+    for other in ({}, {"gfs_key": "6b" * 32}):
+        bad = _sign_publish_body(
+            {
+                **_pin_body("sp-wd", owner_id, name="", key_hex=k2.public_key.hex()),
+                "authority_cert": cert,
+                "withdrawn": True,
+                **other,
+            },
+            seed=owner.private_key,
+            ts=_now_iso(),
+        )
+        refused = await gfs_client.post("/gfs/spaces/sp-wd/publish", json=bad)
+        assert refused.status == 403
     assert await resp.json() == {
         "status": "active",
         "space_id": "sp-wd",
@@ -1560,6 +1619,7 @@ async def test_withdrawn_publish_route_unknown_space_is_404(gfs_client):
         {
             **_pin_body("sp-gone", "owner.home", name="", key_hex=""),
             "withdrawn": True,
+            "gfs_key": await _gfs_key(gfs_client),
         },
         seed=seed,
         ts=_now_iso(),
