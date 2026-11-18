@@ -1236,15 +1236,22 @@ then on it is an admin like a paired one. While the owner lets admins act for
 it (`delegated_admin_authority`), the owner hands it the seed with
 `SPACE_ADMIN_KEY_SHARE`, sealed under the seat's session key and carried by
 the GFS mailbox or relay as ciphertext. The share itself is one sealed frame
-for one mailbox: no space id, no event type, no key. Two
-residuals, stated plainly: an admin household without a mailbox (an older
+for one mailbox: no space id, no event type, no key. Afterwards
+the household sends the GFS what any writer household sends (anonymous
+items, the same fan-out seat, nothing on a reconnect beyond the seat
+re-take every writer sends) and answers nothing a GFS hands it differently,
+so in a publicly readable space the GFS cannot tell which household was
+handed the seed
+([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)).
+Residuals, stated plainly: an admin household without a mailbox (an older
 sealed-redeem seat) is reached by an instance-addressed relay frame, whose
 routing body shows the GFS its instance id (`to_instance`) — as every frame
-to such a seat does; and until the follow-up that keeps a seed holder's GFS
-behaviour identical to any writer's lands (same release), the GFS can infer
-which household became a seed holder from what that household does next — it
-stops its identified member publish and fan-out seat for the space and
-re-announces the space's epoch when its socket reconnects. See
+to such a seat does; what only the seed can sign (the notice of a
+rotation the admin runs, a removal made on its household)
+still goes out, anonymously, so the GFS can learn that some household
+besides the owner holds the seed, not which; and on a private space's
+opaque channel a delegated admin's seat can still be told apart after a
+rotation it runs (open follow-up). See
 [gfs-relay.md](./gfs-relay.md#residuals). With delegation
 off, no admin holds the seed on any path, and a link-joined admin acts
 through the host (`SPACE_REMOTE_ADMIN_ACTION`) like a paired one.

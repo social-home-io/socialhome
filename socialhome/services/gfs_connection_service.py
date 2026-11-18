@@ -3689,7 +3689,7 @@ class GfsConnectionService:
         :data:`PAYLOAD_SUITE_REFUSAL_TTL_S` (:meth:`payload_suite_for`).
 
         ``skip`` (step 12): a server it answers ``True`` for gets nothing —
-        a seed holder's copy of a member's post where every follower reads
+        the owner's copy of a member's post where every follower reads
         the member's own item (:mod:`socialhome.services.space_relay_coverage`).
 
         POSTs to ``POST /gfs/publish`` on every GFS on the owner's signed list

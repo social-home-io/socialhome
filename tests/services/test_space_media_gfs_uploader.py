@@ -161,9 +161,19 @@ class _Crypto:
 
 
 class _Spaces:
-    def __init__(self, seed=None, *, channel=None, private_gfs=False, owner=OWN):
+    def __init__(
+        self,
+        seed=None,
+        *,
+        channel=None,
+        private_gfs=False,
+        owner=OWN,
+        readable=True,
+    ):
         self.seed = seed
         self.owner = owner
+        #: Followers on (the space has a writer group key) or off.
+        self.readable = readable
         #: ``(channel_id, channel_pk)`` of a private space's opaque channel.
         self.channel = channel
         self.private_gfs = private_gfs
@@ -175,7 +185,9 @@ class _Spaces:
         if not self.private_gfs:
             return SimpleNamespace(
                 space_type=SpaceType.GLOBAL,
-                features=SimpleNamespace(private_gfs=False),
+                features=SimpleNamespace(
+                    private_gfs=False, allow_subscribers=self.readable
+                ),
                 owner_instance_id=self.owner,
             )
         return SimpleNamespace(
@@ -421,7 +433,7 @@ async def _upload(u, plan):
         await u.stop()
 
 
-async def test_seed_holder_uploads_with_the_space_authority(tmp_path):
+async def test_the_owner_uploads_with_the_space_authority(tmp_path):
     data = _write(tmp_path, "a.webp", 5000)
     kp = generate_identity_keypair()
     g1 = _Conn("g1", "https://g1.example")
@@ -432,6 +444,8 @@ async def test_seed_holder_uploads_with_the_space_authority(tmp_path):
         instances=[RELAY],
         versions={"e": V},
         seed=kp.private_key,
+        # The owner also holds the writer key; the authority still signs.
+        certs=_Certs(writer_key=generate_identity_keypair().private_key),
     )
     plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     await _upload(u, plan)
@@ -464,6 +478,60 @@ async def test_seed_holder_uploads_with_the_space_authority(tmp_path):
         authority_sig_suite=auth.sig_suite,
         space_public_key=kp.public_key,
     )
+
+
+@pytest.mark.security
+async def test_a_delegated_admin_uploads_with_the_writer_key_like_any_writer(
+    tmp_path,
+):
+    """It holds the seed, but an authority-signed upload from a household
+    that is not the owner would mark it as a seed holder: where the space
+    has a writer group key it signs with that, as every writer does."""
+    _write(tmp_path, "a.webp", 10)
+    kp = generate_identity_keypair()
+    wk = generate_identity_keypair()
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V},
+        spaces=_Spaces(kp.private_key, owner="owner.elsewhere"),
+        certs=_Certs(writer_key=wk.private_key),
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    )
+    auth = SpaceMediaUploadAuth.from_header(gfs.puts[0][4])
+    assert auth.kind == AUTH_WRITER_KEY and auth.epoch == 4
+
+
+@pytest.mark.parametrize("readable", [False, True])
+async def test_a_delegated_admin_signs_as_the_authority_only_without_a_writer_key(
+    tmp_path, readable
+):
+    """A space with no writer group key (nobody may follow it): the seed is
+    the one authorization there is, so members reading through a GFS still
+    get the picture. Where the space HAS a writer key and ours is just not
+    here yet, nothing goes out — never the authority-signed upload."""
+    _write(tmp_path, "a.webp", 10)
+    kp = generate_identity_keypair()
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V},
+        spaces=_Spaces(kp.private_key, owner="owner.elsewhere", readable=readable),
+        certs=_Certs(),
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    )
+    if readable:
+        assert gfs.puts == []
+    else:
+        assert SpaceMediaUploadAuth.from_header(gfs.puts[0][4]).kind == AUTH_AUTHORITY
 
 
 async def test_writer_key_holder_uploads_anonymously(tmp_path):
@@ -1127,8 +1195,8 @@ async def test_a_members_large_video_still_goes_eagerly(tmp_path):
         gfs=gfs,
         instances=[RELAY],
         versions={"e": V},
-        seed=generate_identity_keypair().private_key,
-        spaces=_Spaces(generate_identity_keypair().private_key, owner="host-inst"),
+        spaces=_Spaces(owner="host-inst"),
+        certs=_Certs(writer_key=generate_identity_keypair().private_key),
     )
     await _upload(
         u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
