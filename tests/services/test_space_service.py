@@ -8519,6 +8519,64 @@ async def _seat(remote, space_id, instance_id, user_id, role="member"):
     )
 
 
+async def test_an_admin_elevation_is_one_request_per_household_and_person(stack):
+    """A pending admin elevation is keyed on (household, user id), never
+    on the user id alone — the other household chooses that. Somebody
+    holding a leaked admin link who redeems first under a victim's user id
+    must not swallow the victim's own request: both are filed, each with
+    its household, a repeat from the same household still files nothing
+    new, and approving one leaves the other pending and its seat a member.
+    """
+    _owner, space, _fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-attacker", "u-victim")
+    await _seat(remote, space.id, "peer-victim", "u-victim")
+    for household in ("peer-attacker", "peer-victim", "peer-attacker"):
+        await stack.space_svc.file_admin_elevation_request(
+            space.id, "u-victim", remote_instance_id=household
+        )
+
+    rows = await stack.space_svc.list_pending_join_requests(
+        space.id, actor_username="hosty"
+    )
+    assert sorted(r["remote_applicant_instance_id"] for r in rows) == [
+        "peer-attacker",
+        "peer-victim",
+    ]
+    assert {r["requested_role"] for r in rows} == {SpaceRole.ADMIN.value}
+
+    mine = next(r for r in rows if r["remote_applicant_instance_id"] == "peer-victim")
+    await stack.space_svc.approve_join_request(mine["id"], actor_username="hosty")
+
+    assert (await remote.get(space.id, "peer-victim", "u-victim")).role == "admin"
+    assert (await remote.get(space.id, "peer-attacker", "u-victim")).role == "member"
+    left = await stack.space_svc.list_pending_join_requests(
+        space.id, actor_username="hosty"
+    )
+    assert [r["remote_applicant_instance_id"] for r in left] == ["peer-attacker"]
+
+
+async def test_a_local_admin_elevation_does_not_hide_a_remote_one(stack):
+    """A local member's pending elevation and another household's under
+    the same user id are two requests, whichever is filed first."""
+    owner, space, _fed, remote = await _hosted_space_with_seats(stack)
+    bob = await stack.provision_user("bob")
+    tok = await stack.space_repo.create_invite_token(
+        space.id, owner.user_id, uses=1, role=SpaceRole.ADMIN.value
+    )
+    await stack.space_svc.accept_invite_token(tok, user_id=bob.user_id)
+    await _seat(remote, space.id, "peer-far", bob.user_id)
+    await stack.space_svc.file_admin_elevation_request(
+        space.id, bob.user_id, remote_instance_id="peer-far"
+    )
+    await stack.space_svc.file_admin_elevation_request(space.id, bob.user_id)
+
+    rows = await stack.space_repo.list_pending_join_requests(space.id)
+    assert sorted(r["remote_applicant_instance_id"] or "" for r in rows) == [
+        "",
+        "peer-far",
+    ]
+
+
 async def test_a_new_member_household_is_sent_one_signed_roster_snapshot(stack):
     """After seating, the host sends the joiner its whole roster in ONE
     event — every seat but the joiner's own household's, local owner
