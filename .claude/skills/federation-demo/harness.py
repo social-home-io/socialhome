@@ -24579,8 +24579,11 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
                 timeout=120.0,
             )
         # 3b. Each admin acts for the owner: a rename, executed on its own
-        #     household and signed with the seed. The paired admin b, the
-        #     mesh member d and the GFS-only e must all show it.
+        #     household and signed with the seed. The member d (paired with
+        #     b, on the GFS with e) must show it. b and e have no path to
+        #     each other while the host is away — b is on no GFS at this
+        #     point of the chain and e is paired with nobody — so each
+        #     admin's view of the other's rename is compared once a is back.
         for acting in (admin, "e"):
             name = f"Renamed by {acting}, owner offline {tag}"
             last_name = name
@@ -24604,7 +24607,7 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
                 lambda label, cache: _parity_space_name(state, label, space_id),
                 ref=acting,
                 want={"name": name},
-                members=tuple(x for x in (admin, guest, "e") if x != acting),
+                members=(guest,),
                 timeout=120.0,
             )
         # 4. What the GFS saw.
@@ -24635,16 +24638,17 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
     finally:
         _respawn(state, "a")
 
-    # 5. The owner is back: it holds what the admins did while it was away.
+    # 5. The owner is back: it holds what the admins did while it was away,
+    #    and so does the admin that had no path to the other one.
     if last_name:
         _parity_compare(
             state,
             results,
-            "admin: the owner holds the last rename when it is back",
+            "admin: the owner and both admins hold the last rename when it is back",
             lambda label, cache: _parity_space_name(state, label, space_id),
             ref="e",
             want={"name": last_name},
-            members=("a",),
+            members=("a", admin, guest),
             timeout=180.0,
         )
 
@@ -24652,6 +24656,20 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
     #    admin — the remaining admin b holds the new seed, e none, and
     #    every member pins the new key.
     epoch = _space_col("a", space_id, "authority_key_epoch") or 0
+    # b's rename from the owner-offline window was signed with the key this
+    # rotation retires, and it reaches e only now, through the host (the two
+    # have no other path). Arriving after e adopted the new key it is
+    # refused there — the stated residual of a rotation (an old-key edit
+    # still in flight is refused and not retried); e's own later rename is
+    # the name everybody holds. Expected on e, for exactly that edit; the
+    # window closes with the step's tail.
+    _open_noise_window(
+        about=admin,
+        reason=f"{step}: {admin}'s old-key rename reaches e after the rotation",
+        witnesses=("e",),
+        named=("authority signature did not verify against the space key",),
+        names=[f"SPACE_CONFIG_CHANGED for {space_id} from {adm['instance_id']}"],
+    )
     s, body = _inst_request(state, "a", "PATCH", e_role_url, {"role": "member"})
 
     def _rotated() -> bool:

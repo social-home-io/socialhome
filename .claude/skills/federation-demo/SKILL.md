@@ -2075,7 +2075,7 @@ check polls (3 s, bounded timeout, 429-aware); no sleep is a check.
 | host offline | d and e, a killed | each one's picture post on the other |
 | admin rights | a promotes e's person (GFS only), then d's (paired / mesh); each admin deletes the other member's post | role on a, d and e; the post gone on all three; the person back to member |
 | the signing seed | in the fresh private space below, a makes e's person an admin next to b | b (paired) and e (GFS only) both hold the seed of the key a pins |
-| acting for the owner | a killed; b renames the space, then e does | the name on b, d (mesh) and e after each; on a when it is back |
+| acting for the owner | a killed; b renames the space, then e does | the name on d after each (b is on no GFS here and e is paired with nobody: no path between them without the host); on a, b and d when a is back |
 | admin removed | a takes e's admin seat away | a's key epoch rises; b holds the new seed, e none; b, d and e pin the new key |
 
 Every action is reported PASS / DIFF / SKIP in a table at the end; the step
@@ -2104,8 +2104,10 @@ seed like a paired one). a makes e's person an admin next to b: both must
 hold the seed of the key a pins (each household's own wrapped copy, read
 with its own KEK). In the owner-offline window b and then e rename the
 space — executed on the admin's own household (HTTP 200, never a forward)
-and signed with the seed — and b, d and e must show each name; a shows the
-last one once it is back. a then takes e's admin seat away: the key
+and signed with the seed — and d must show each name (b and e have no path
+to each other while the host is away: b is on no GFS at this point, e is
+paired with nobody); a, b and d show the last one once a is back. a then
+takes e's admin seat away: the key
 rotates as for any admin, b holds the new seed, e's is gone, and b, d and
 e pin the new key. ``gfs-admin-seed`` covers the removal in depth.
 
