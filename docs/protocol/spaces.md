@@ -2416,8 +2416,9 @@ to such a seat does; what only the seed can sign (the notice of a
 rotation the admin runs, a removal made on its household)
 still goes out, anonymously, so the GFS can learn that some household
 besides the owner holds the seed, not which. (On a private space's opaque
-channel a delegated admin's own seat is renewed after a rotation it runs —
-a signal reduced, not removed, see the residuals.) See
+channel a delegated admin's own seat is renewed on the rekey of a rotation
+it runs, like every member's; see the residuals for what timing still
+shows.) See
 [gfs-relay.md](./gfs-relay.md#residuals). Gated on
 `MIN_FOR_RELAY_ADMIN_KEY_SHARE` (94): an older link-seated admin is skipped
 at WARNING and acts through the host. The seed goes to nobody while any GFS
@@ -2798,8 +2799,9 @@ is current:
   server refuses one that is not its own — otherwise the GFS that received
   it could replay it, within the `ts` window, to another GFS where the
   space is listed and take that listing and its invite pages down. The
-  withdrawal itself (`unpublish`) carries the same field to a server that
-  proved the capability. Sent only to a server that proved the signed
+  withdrawal itself (`unpublish`) and every ordinary listing publish
+  carry the same field to a server that proved the capability (an ordinary
+  publish replayed to another GFS would list the space there). Sent only to a server that proved the signed
   `withdrawn_repin` capability — an older one would refuse the field, and a
   plain publish would list the space again — so on such a server the re-pin
   stays owed (WARNING, seed shares blocked) until its operator upgrades or

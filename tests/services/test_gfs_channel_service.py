@@ -40,6 +40,7 @@ from socialhome.gfs_channel import (
     derive_channel_seed,
 )
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
+from socialhome.global_server import domain as gfs_domain
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_envelope_queue_repo_key,
@@ -1981,29 +1982,59 @@ async def test_a_retire_with_an_unreachable_chosen_server_is_recorded(env):
     assert conns.withdrawals == []
 
 
-# ── A delegated admin's own seat is renewed like any member's ────────────
+# ── The rotating admin's seat is renewed on the member path ──────────────
 
 
-async def _rotated_delegated_admin(env, monkeypatch) -> tuple[str, list[int]]:
-    """``other`` is a seated delegated admin that just rotated the content
-    key to epoch 4. Returns the channel id and the epochs it subscribes
-    with from here on."""
-    await _delegated_admin(env)
-    assert await env.other.svc.subscribe(SPACE_ID) == 1
-    env.other.keys.epoch = 4
-    subscribed: list[int] = []
-    real = GfsChannelService.subscribe
+def _trace(monkeypatch, *nodes: _Node) -> dict[str, list[str]]:
+    """What each node's channel service does about its seat, in order:
+    every grant it accepts and every seat it takes (by content epoch)."""
+    seen: dict[str, list[str]] = {n.h.instance_id: [] for n in nodes}
+    by_svc = {id(n.svc): n.h.instance_id for n in nodes}
+    real_accept = GfsChannelService.accept_grant
+    real_subscribe = GfsChannelService.subscribe
 
-    async def spy(self, space_id, **kw):
-        if self is env.other.svc:
+    async def accept_spy(self, space_id, raw):
+        if id(self) in by_svc:
+            seen[by_svc[id(self)]].append(f"accept:{raw['epoch']}")
+        return await real_accept(self, space_id, raw)
+
+    async def subscribe_spy(self, space_id, **kw):
+        if id(self) in by_svc:
             grant = await self.current_grant(space_id)
-            subscribed.append(grant.epoch if grant is not None else -1)
-        return await real(self, space_id, **kw)
+            seen[by_svc[id(self)]].append(
+                f"subscribe:{grant.epoch if grant is not None else None}"
+            )
+        return await real_subscribe(self, space_id, **kw)
 
-    monkeypatch.setattr(GfsChannelService, "subscribe", spy)
+    monkeypatch.setattr(GfsChannelService, "accept_grant", accept_spy)
+    monkeypatch.setattr(GfsChannelService, "subscribe", subscribe_spy)
+    return seen
+
+
+async def _admin_rotates(env, monkeypatch) -> tuple[str, dict[str, list[str]]]:
+    """``other`` is a seated delegated admin, ``member`` a seated plain
+    member. ``other`` rotates the content key to epoch 4 and its notice
+    lands — the rekey has NOT gone out yet. Returns the channel id and the
+    seat trace of both from here on."""
+    monkeypatch.setattr(gfs_domain, "CHANNEL_EPOCH_STEP_INTERVAL_S", 0)
+    await _delegated_admin(env)
+    await _hand_grants(env, env.member)
+    env.other.remote.seats.add((SPACE_ID, env.member.h.instance_id))
+    env.other.certs.pks[env.member.h.instance_id] = env.member.h.pk
+    trace = _trace(monkeypatch, env.other, env.member)
+    env.other.keys.epoch = 4
     await env.other.svc.on_rotation(SPACE_ID)
     await env.other.svc.wait_idle()
-    return env.other.spaces.channels[SPACE_ID][0], subscribed
+    return env.other.spaces.channels[SPACE_ID][0], trace
+
+
+async def _seats_on(env, channel_id: str, epoch: int) -> list[str]:
+    """The households whose seat on the server carries a pass for *epoch*."""
+    return sorted(
+        await env.app[gfs_channel_repo_key].list_targets(
+            channel_id, {_wire(env, channel_id, epoch)}
+        )
+    )
 
 
 def _frame(env, channel_id: str, epoch: int) -> dict:
@@ -2017,51 +2048,62 @@ def _frame(env, channel_id: str, epoch: int) -> dict:
 
 
 @pytest.mark.security
-async def test_a_rotating_admin_is_not_the_first_seat_on_the_new_epoch(
+async def test_the_rotating_admin_renews_its_seat_on_the_rekey_like_a_member(
     env, monkeypatch
 ):
-    """Renewing right after its own epoch notice made the rotating admin
-    the FIRST identified subscribe on the new epoch — before any member
-    could hold the rekey — which marked it to the connection server. It
-    waits for proof that a member is already there: the first item of the
-    new epoch that reaches its (still open) old seat."""
-    channel_id, subscribed = await _rotated_delegated_admin(env, monkeypatch)
-    assert await env.other.svc.current_grant(SPACE_ID) is None
-    assert subscribed == []
-    # A member that has not applied the rekey yet still publishes under
-    # the old epoch: proof of nothing.
-    await env.other.svc.handle_frame(_frame(env, channel_id, 3))
-    await env.other.svc.wait_idle()
-    assert await env.other.svc.current_grant(SPACE_ID) is None
-    assert subscribed == []
-    # The first item of the new epoch: some member holds the rekey.
+    """A connection server must not tell the household that rotated the
+    content key by WHEN its seat is renewed. Every member renews when the
+    rekey reaches it (``accept_grant``); the rotating admin has no rekey to
+    receive, so it used to renew at a moment of its own. It now takes its
+    grant when its rekey went out — the same trigger — through the very
+    same ``accept_grant``: nothing after its own notice, nothing on a
+    frame, no path of its own."""
+    channel_id, trace = await _admin_rotates(env, monkeypatch)
+    admin, member = env.other.h.instance_id, env.member.h.instance_id
+    # The server holds the new epoch and nobody sits on it: the rotating
+    # admin did not renew after its own notice …
+    assert (await env.app[gfs_channel_repo_key].get(channel_id)).epoch == _wire(
+        env, channel_id, 4
+    )
+    assert await _seats_on(env, channel_id, 4) == []
+    assert trace[admin] == []
+    # … nor on an item that comes by.
     await env.other.svc.handle_frame(_frame(env, channel_id, 4))
     await env.other.svc.wait_idle()
-    grant = await env.other.svc.current_grant(SPACE_ID)
-    assert grant is not None and grant.epoch == 4
-    # Same shape as the grant the owner gave it: a seat pass, bound to its
-    # own key, for the same servers.
+    assert trace[admin] == []
+    # The rekey: the member applies its copy, the rotator the one it could
+    # not send itself.
+    env.member.keys.epoch = 4
+    grant = await env.other.svc.grant_for_peer(SPACE_ID, member, epoch=4)
+    assert await env.member.svc.accept_grant(SPACE_ID, grant)
+    await env.member.svc.wait_idle()
+    assert await env.other.svc.on_rekey_sent(SPACE_ID)
+    await env.other.svc.wait_idle()
+    # Same steps, same order, same code: accept the grant, take the seat.
+    assert trace[admin] == trace[member] == ["accept:4", "subscribe:4"]
+    assert await _seats_on(env, channel_id, 4) == sorted([admin, member])
+    # Same shape as the grant the owner gave it before.
     before = await env.other.svc.own_grant(SPACE_ID, 3)
-    assert before is not None
-    assert grant.channel_pass is not None
-    assert (grant.channel_id, grant.gfs_ids) == (before.channel_id, before.gfs_ids)
-    assert (grant.writer_key is None) == (before.writer_key is None)
-    assert subscribed == [4]
-    # And the item that proved it is not lost.
-    assert env.other.inbound.items[-1] == (SPACE_ID, 4, "eA")
+    now = await env.other.svc.current_grant(SPACE_ID)
+    assert before is not None and now is not None and now.channel_pass is not None
+    assert (now.channel_id, now.gfs_ids) == (before.channel_id, before.gfs_ids)
+    assert (now.writer_key is None) == (before.writer_key is None)
+    # Once: a second call renews nothing.
+    assert not await env.other.svc.on_rekey_sent(SPACE_ID)
+    assert trace[admin] == ["accept:4", "subscribe:4"]
 
 
 @pytest.mark.security
-async def test_a_rotating_admin_renews_its_seat_on_its_next_reconnect(env, monkeypatch):
-    """No member item came by: the seat is renewed when every household
-    re-takes its seat anyway — the next reconnect to that server."""
-    _channel_id, subscribed = await _rotated_delegated_admin(env, monkeypatch)
-    assert subscribed == []
+async def test_a_rotating_admin_that_missed_it_renews_on_its_next_reconnect(
+    env, monkeypatch
+):
+    """It stopped between its notice and its rekey: the seat is renewed
+    when every household re-takes its seats — the next reconnect."""
+    channel_id, trace = await _admin_rotates(env, monkeypatch)
     await env.other.svc.heal("conn-1")
     await env.other.svc.wait_idle()
-    grant = await env.other.svc.current_grant(SPACE_ID)
-    assert grant is not None and grant.epoch == 4
-    assert subscribed and set(subscribed) == {4}
+    assert await _seats_on(env, channel_id, 4) == [env.other.h.instance_id]
+    assert trace[env.other.h.instance_id][0] == "accept:4"
 
 
 async def test_no_self_grant_for_the_owner_or_a_member_without_the_seed(env):
@@ -2071,6 +2113,7 @@ async def test_no_self_grant_for_the_owner_or_a_member_without_the_seed(env):
     env.member.keys.epoch = 4
     for node in (env.owner, env.member):
         await node.svc.on_rotation(SPACE_ID)
+        assert not await node.svc.on_rekey_sent(SPACE_ID)
         await node.svc.handle_frame(_frame(env, channel_id, 4))
         await node.svc.heal("conn-1")
     assert env.owner.keys.grants == {}
@@ -2083,6 +2126,7 @@ async def test_a_seed_holder_that_was_never_seated_grants_itself_nothing(env):
     env.other.spaces.seeds[SPACE_ID] = env.space_seed
     env.other.keys.epoch = 4
     await env.other.svc.on_rotation(SPACE_ID)
+    assert not await env.other.svc.on_rekey_sent(SPACE_ID)
     await env.other.svc.handle_frame(_frame(env, channel_id, 4))
     await env.other.svc.heal("conn-1")
     assert env.other.keys.grants == {}

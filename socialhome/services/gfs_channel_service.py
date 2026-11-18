@@ -1151,35 +1151,44 @@ class GfsChannelService:
             await self.reconcile(space_id)
             # A delegated admin does NOT renew its own seat here: right
             # after its own (anonymous) notice it would be the first
-            # identified subscribe on the new epoch — see
-            # :meth:`_renew_own_grant` for when it does.
+            # identified subscribe on the new epoch. It renews when the
+            # members do — on the rekey (:meth:`on_rekey_sent`).
             return await self.announce_epoch(space_id)
         except Exception:
             log.exception("gfs.channel: rotation hook failed")
             return 0
 
-    async def _renew_own_grant(
-        self, space_id: str, *, proven_epoch: int | None = None
-    ) -> bool:
-        """A delegated admin that rotated the content key renews its OWN
-        grant for the new epoch, as the rekey renews every other member's:
+    async def on_rekey_sent(self, space_id: str) -> bool:
+        """The member rekey of a content-key rotation WE ran just went out.
+        Every member household renews its channel seat when that rekey
+        reaches it (:meth:`accept_grant`); the household that rotated has
+        no rekey to receive, so it takes its own copy of the grant here —
+        the same trigger, and through the same :meth:`accept_grant`. A
+        no-op for the owner and for a household without a seat to renew.
+        ``True`` when a grant was stored. Never raises."""
+        try:
+            return await self._renew_own_grant(space_id)
+        except Exception:
+            log.exception("gfs.channel: renewing our own seat failed")
+            return False
+
+    async def _renew_own_grant(self, space_id: str) -> bool:
+        """A delegated admin that rotated the content key issues its OWN
+        grant for the new epoch, as its rekey carries every other member's:
         same channel and servers, a seat pass if it held one, the writer
-        key if it held one. ``True`` when a grant was stored.
+        key if it held one — and applies it exactly as a member applies
+        the one a rekey brings (:meth:`accept_grant`: store, then take the
+        seat). ``True`` when a grant was stored.
 
         PRIVACY: nobody else can issue it — the rekey comes from us — and
         without it our seat was the one seat on the channel left on the old
         epoch's pass after that rotation: the connection server could tell
-        which household holds the signing key. WHEN matters as much: right
-        after our own notice we would be the first identified subscribe on
-        the new epoch, before any member could hold the rekey — the same
-        tell. So it happens on one of two events, never on a timer and
-        never with a random delay:
-
-        * the first item of the new epoch reaches our old seat (still open
-          for the server's grace period) — *proven_epoch* is that frame's
-          channel epoch, proof that a member already applied the rekey;
-        * our next reconnect to a channel server, when every household
-          re-takes its seats anyway (:meth:`heal`).
+        which household holds the signing key. WHEN matters as much, so
+        there is no moment of our own: it runs when our rekey went out
+        (:meth:`on_rekey_sent` — the members renew on that same rekey), or,
+        had we stopped before that, on our next reconnect to a channel
+        server, when every household re-takes its seats (:meth:`heal`).
+        Never on a timer and never with a random delay.
 
         Only a renewal: a seed holder that holds no grant (never seated)
         takes none, and the OWNER never holds one at all (it would
@@ -1204,8 +1213,6 @@ class GfsChannelService:
         channel_id, channel_seed = found
         offset = derive_channel_epoch_offset(seed, space_id, channel_id)
         wire_epoch = int(epoch) + offset
-        if proven_epoch is not None and proven_epoch != wire_epoch:
-            return False
         grant = GfsChannelGrant(
             channel_suite="ed25519",
             space_id=space_id,
@@ -1277,8 +1284,9 @@ class GfsChannelService:
                     if result == "created":
                         await self.distribute(space.id)
                 else:
-                    # A delegated admin that rotated since: its own seat is
-                    # renewed with everyone's re-take (no-op for others).
+                    # A delegated admin that rotated and stopped before
+                    # its rekey went out: its own seat is renewed with
+                    # everyone's re-take (no-op otherwise).
                     await self._renew_own_grant(space.id)
                     if await self.subscribe(space.id, only=gfs_id):
                         done += 1
@@ -1336,8 +1344,8 @@ class GfsChannelService:
     async def _delegate_grant(self, space_id: str) -> GfsChannelGrant | None:
         """A delegated admin's newest grant for the space's channel: the one
         for our latest epoch, else the newest stored below it — right after
-        its OWN rotation it holds no grant for the new epoch yet (it renews
-        its own later, :meth:`_renew_own_grant`), and
+        its OWN rotation it holds no grant for the new epoch yet (it takes
+        its own once its rekey went out, :meth:`on_rekey_sent`), and
         must still announce that epoch to the channel's servers."""
         latest = await self._keys.get_latest(space_id)
         if latest is None:
@@ -2015,12 +2023,6 @@ class GfsChannelService:
             # The frame carries the channel epoch: shift it back by this
             # space's channel offset (from our current grant).
             grant = await self.current_grant(space_id)
-            if grant is None and await self._renew_own_grant(
-                space_id, proven_epoch=item.epoch
-            ):
-                # We rotated this space's key ourselves and this is the
-                # first item of the new epoch: our seat is renewed now.
-                grant = await self.current_grant(space_id)
             if grant is None or grant.channel_id != item.channel_id:
                 continue
             content_epoch = item.epoch - grant.epoch_offset
