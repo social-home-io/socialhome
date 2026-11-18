@@ -2067,10 +2067,13 @@ async def test_the_rotating_admin_renews_its_seat_on_the_rekey_like_a_member(
     )
     assert await _seats_on(env, channel_id, 4) == []
     assert trace[admin] == []
-    # … nor on an item that comes by.
+    # … nor on an item that comes by while its rekey is still going out (a
+    # member that already holds it posts). The item itself is not lost: it
+    # is read with the grant the admin holds.
     await env.other.svc.handle_frame(_frame(env, channel_id, 4))
     await env.other.svc.wait_idle()
     assert trace[admin] == []
+    assert env.other.inbound.items[-1] == (SPACE_ID, 4, "eA")
     # The rekey: the member applies its copy, the rotator the one it could
     # not send itself.
     env.member.keys.epoch = 4

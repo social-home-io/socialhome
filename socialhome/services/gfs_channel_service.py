@@ -2021,8 +2021,11 @@ class GfsChannelService:
             if space is None or space.space_type is not SpaceType.PRIVATE:
                 continue
             # The frame carries the channel epoch: shift it back by this
-            # space's channel offset (from our current grant).
-            grant = await self.current_grant(space_id)
+            # space's channel offset — the same in every grant for one
+            # channel, so the newest grant we hold reads it: the current
+            # epoch's, or (a delegated admin whose own rekey is still going
+            # out) the one before. Reading only: no seat is taken here.
+            grant = await self._delegate_grant(space_id)
             if grant is None or grant.channel_id != item.channel_id:
                 continue
             content_epoch = item.epoch - grant.epoch_offset

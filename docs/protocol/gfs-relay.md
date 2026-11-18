@@ -1839,9 +1839,8 @@ household migration 0145.
   the grant, present the new pass). The household that ran the rotation
   has no rekey to receive, so it takes its own copy of the grant (same
   channel and servers, a seat pass and writer key only if it held them)
-  through that same `accept_grant`, on the same trigger: once its rekey
-  went out to the members (`GfsChannelService.on_rekey_sent`, called right
-  after the rekey fan-out). It has no moment of its own — not right after
+  through that same `accept_grant`, on the rekey too: once its rekey
+  fan-out to the members returned (`GfsChannelService.on_rekey_sent`). It has no moment of its own — not right after
   its anonymous epoch notice (where it would be the first seat on the new
   epoch, before any member could hold the rekey), not on a later item, no
   timer and no random delay. Had it stopped between its notice and its
@@ -1851,18 +1850,26 @@ household migration 0145.
   keeps a seat on the previous epoch's pass open for 10 minutes, and a
   seat receives every item whatever pass it carries, so nothing is missed
   while seats are renewed.
-  What a GFS still sees: the seats of one rotation are renewed within the
-  time the rekey takes to arrive — households reached directly within
-  their round trip, households reached through a mailbox when that frame
-  is delivered — and the rotating household's renewal falls inside that
-  spread, after its direct sends returned. It is not first and not last
-  by rule. Two cases still narrow it down, both by exclusion, not by a
-  seat that behaves differently: when no other member household is online
-  it is the only seat renewed (it is then also the only household that
-  could have sent the notice), and when EVERY other member is reached
-  only through that GFS's mailboxes, a server that matches each renewal to
-  a mailbox delivery just before it finds one renewal without one. The
-  GFS knows neither the space nor its owner on a channel.
+  What a GFS still sees — timing only, the seat itself behaves like any
+  other. The rekey is sent to one household after the other, and the
+  rotating household renews when the last send returned, sent or not. So
+  its renewal comes after those of the households it reached directly
+  (each renews on arrival), around those of households reached through a
+  mailbox (they renew when that frame is delivered), and later than both
+  — by that send's timeout — when a household could not be reached. A
+  server that orders the renewals of one rotation can therefore often
+  guess the rotating household as the last of the directly reached ones;
+  it is certain in three cases: no other member household is online (then
+  only one household could have sent the notice anyway), a send timed out
+  and it renews alone afterwards, or every other member is reached only
+  through that GFS's mailboxes and one renewal has no mailbox delivery
+  just before it. The anonymous epoch notice also leaves from the address
+  the household's own socket comes from (the IP limit below). Closing the
+  timing fully needs every household to renew on one frame the server
+  delivers to all seats (a marker item, waiting state on every member, a
+  version gate) — judged more than this signal is worth (owner guidance
+  2026-11-18: keep it simple). The GFS knows neither the space nor its
+  owner on a channel.
 - **Followers after a delegated admin's rotation.** A content-key rotation
   a delegated admin runs while the owner is away re-seals the key to
   members; the GFS followers' key handoff is re-sealed when the owner is

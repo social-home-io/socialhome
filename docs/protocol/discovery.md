@@ -108,8 +108,15 @@ The Social Home ↔ GFS link is split by direction:
     replayed to another (a listing publish replayed there would LIST the
     space on a server its owner did not choose). A household binds it on
     every listing publish and withdrawal to a server that proved
-    `withdrawn_repin`; an older server gets the body without it, and a
-    body without the field (an older household) is judged as before. The
+    `withdrawn_repin` (cached from the `/gfs/info` each connect fetches);
+    an older server gets the body without it, and a body without the
+    field (an older household) is judged as before. A server that does not
+    advertise the capability — or a publish sent before the first verified
+    `/gfs/info` after a restart — therefore still gets a body it could
+    replay elsewhere; the gate goes, and the field becomes mandatory, once
+    no GFS older than `withdrawn_repin` is in use. All nodes of one
+    cluster must run that revision before any advertises it (an older node
+    refuses a signed field it does not know). The
     binding is per server, not per request: the same body sent again to
     the SAME server inside the `ts` window is taken again (a withdrawal
     replayed after a re-list withdraws once more, a listing replayed after
