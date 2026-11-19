@@ -14929,6 +14929,13 @@ def cmd_verify() -> None:
             print("  members-parity: d and e still match the host on every post ✓")
     else:
         print("  (members-parity check skipped — run 'members-parity')")
+    if state.get("members_parity_apps"):
+        before = len(failures)
+        _check_members_parity_apps(state, failures)
+        if len(failures) == before:
+            print("  members-parity-apps: the tables stayed closed, the GFS saw none ✓")
+    else:
+        print("  (members-parity-apps check skipped — run 'members-parity-apps')")
 
     # 13z. gfs-admin-seed: the pins every GFS holds, and the removed
     #     admin's seeds still refused.
@@ -24404,6 +24411,10 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
         },
     )
     space_id = _must(f"{step}: a creates a private space", s, space, ok=(201,))["id"]
+    # ``members-parity-apps`` plays in this space: a global space (the one
+    # the content actions above use) never has game tables.
+    state["members_parity_private_space_id"] = space_id
+    _save(state)
     s, cur = _inst_request(state, "a", "GET", f"/api/spaces/{space_id}")
     feats = dict(_must(f"{step}: a reads the space", s, cur).get("features") or {})
     feats["private_gfs"] = True
@@ -25591,6 +25602,538 @@ def cmd_members_parity() -> None:
             + "; ".join(f"{a_} — {det}" for a_, _v, det in diffs)
         )
     print("members-parity: ok")
+
+
+# ─── Step: members-parity-apps ─────────────────────────────────────────────
+
+#: The stand-in apps ``members-parity-apps`` installs (the demo has no
+#: catalog; the table routes never load a bundle): a table of 3–6 and a
+#: two-player duel.
+_PARITY_APPS: dict[str, tuple[str, str]] = {
+    "demo-table": (
+        "Demo table",
+        '{"entry": "index.html", "icon": null, "capabilities":'
+        ' ["storage", "people", "federation"], "players": {"min": 3, "max": 6},'
+        ' "tables": true}',
+    ),
+    "demo-duel": (
+        "Demo duel",
+        '{"entry": "index.html", "icon": null, "capabilities":'
+        ' ["storage", "people", "federation"], "players": {"min": 2, "max": 2},'
+        ' "tables": true}',
+    ),
+}
+#: What of a table's card every household must agree on.
+_PARITY_CARD_KEYS = ("closed", "card", "app_id", "note", "host_name", "players")
+
+
+def _parity_games(state: dict, label: str, space_id: str) -> dict:
+    """``label``'s ``GET /api/spaces/{id}/games`` (``{"error"}`` when refused)."""
+    s, body = _parity_get(state, label, f"/api/spaces/{space_id}/games")
+    return body if s == 200 and isinstance(body, dict) else {"error": f"HTTP {s}"}
+
+
+def _parity_table(state: dict, label: str, space_id: str, sid: str) -> dict:
+    """One table of the space as ``label`` shows it, reduced to what every
+    household must agree on: the card (app, note, host's name, players
+    range, open / full / playing / closed) and — once ``label`` sits there —
+    the roster (seat, name, seated or not) and the game's state. A closed
+    table a household has nobody at is no longer listed: ``closed`` covers
+    both. Left out on purpose: ``host_is_local`` / ``is_local`` /
+    ``household`` (they differ by design) and the card's seat count (a
+    household with nobody at the table gets it at most every 10 minutes)."""
+    listing = _parity_games(state, label, space_id)
+    if "error" in listing:
+        return listing
+    card = next((t for t in listing.get("tables", []) if t["session_id"] == sid), None)
+    if card is None:
+        return {"closed": True}
+    group = card.get("group")
+    out: dict = {
+        "closed": card["state"] == "closed",
+        "card": card["state"],
+        "app_id": card["app_id"],
+        "note": card["note"],
+        "host_name": card["host_name"],
+        "players": (card["min"], card["max"]),
+    }
+    if group:
+        out["game"] = group["state"]
+        out["my_state"] = group["my_state"]
+        out["seats"] = sorted(
+            (p["seat"], p["name"], p["state"]) for p in group.get("players", [])
+        )
+    return out
+
+
+def _parity_lobby(state: dict, label: str, space_id: str) -> dict:
+    """What the space's "Open games" strip lists for ``label``: the games
+    list and every table that is not closed (id, app, note, card state)."""
+    listing = _parity_games(state, label, space_id)
+    if "error" in listing:
+        return listing
+    return {
+        "allowed_apps": sorted(listing.get("allowed_apps") or []),
+        "games_possible": listing.get("games_possible"),
+        "tables": sorted(
+            (t["session_id"], t["app_id"], t["note"], t["state"])
+            for t in listing.get("tables", [])
+            if t["state"] != "closed"
+        ),
+    }
+
+
+def _parity_show(
+    results: list[tuple[str, str, str]],
+    action: str,
+    snap,
+    want: dict,
+    *,
+    members: tuple[str, ...],
+    timeout: float = 90.0,
+) -> bool:
+    """Poll until every one of ``members`` shows ``want`` (a subset of its
+    ``snap(label)``). Records PASS or DIFF like :func:`_parity_compare` —
+    for the checks with no household to compare with (a message every
+    other seat must hold). Never raises."""
+    offsets = {m: _log_size(m) for m in members}
+    deadline = time.monotonic() + timeout
+    views: dict[str, dict] = {}
+
+    def ok(m: str) -> bool:
+        return all(views[m].get(k) == v for k, v in want.items())
+
+    while True:
+        views = {m: snap(m) for m in members}
+        if all(ok(m) for m in members):
+            results.append((action, "PASS", f"{', '.join(members)}: {want}"))
+            print(f"  {action}: {' and '.join(members)} ✓")
+            return True
+        if time.monotonic() > deadline:
+            break
+        time.sleep(3.0)
+    lines = [f"want {want}"]
+    for m in members:
+        if not ok(m):
+            lines.append(f"{m} shows {views[m]}")
+            warn = _log_lines_matching(m, "WARNING", offset=offsets[m])[-3:]
+            lines += [f"    {m} log: {w.strip()[:240]}" for w in warn]
+    detail = "\n    ".join(lines)
+    results.append((action, "DIFF", detail))
+    print(f"  {action}: DIFF after {timeout:.0f} s\n    {detail}")
+    return False
+
+
+def cmd_members_parity_apps() -> None:
+    """Owner acceptance gate, games: a space's game tables work the same
+    for every member, whichever way its household is reached (CLAUDE.md).
+
+    Prereqs: ``members-parity``. Runs in the private space its last action
+    left (``members_parity_private_space_id``: a hosts it, **d** is a member
+    over the paired / mesh path — seated by the admin b —, **e** only
+    through the GFS, joined by a ``gfs`` link) — the space the content
+    actions use is a global one, and a global space never has game tables.
+    Installs the stand-in apps ``demo-table``
+    (3–6 players) and ``demo-duel`` (two players) on a, d and e straight
+    into ``installed_apps``. Every check polls with a bounded timeout and
+    is reported PASS or DIFF (NOTE for what is by design); the step fails
+    at the end naming each difference.
+
+    1. **The games list.** a allows both apps; d's and e's Games section
+       must list what a's does.
+    2. **A table of three, hosted by a.** a opens a ``demo-table`` table:
+       d and e show the same card. Both join from the space's lobby: a, d
+       and e show the same three seats. a starts: all three show the game
+       playing. Each seat sends a message to everyone — the two others
+       hold it; d whispers to e's seat and e to d's (sealed to that seat,
+       relayed by the hub a): the receiver holds it, a holds no plaintext.
+       a closes the table: all three show it closed.
+    3. **A two-player game between the two members.** e opens a
+       ``demo-duel`` table — a and d show its card; d joins and the duel
+       starts on both; each sends the other a move; e closes it. Then the
+       same with d as the host and e joining. The hub is a member's
+       household: d and e talk over the space, paired with nobody.
+    4. **The lobby.** With a fresh open table of a's, the "Open games"
+       strip lists the same on d and e as on a.
+    5. **Inviting a person** (``GET /api/apps/{id}/invitable``) is not a
+       space surface: it offers the people of *paired* households only
+       (pairing is the consent; in a space pressing Join is — D7). The
+       step reports whom a is offered and never fails on it.
+    Nothing of a table is readable on the GFS (the notes and the message
+    markers are searched in its database files).
+    """
+    import sqlite3
+
+    state = _load()
+    space_id = (state or {}).get("members_parity_private_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'members-parity' first")
+    step = "members-parity-apps"
+    for label in _PARITY_MEMBERS:
+        s, _sp = _parity_get(state, label, f"/api/spaces/{space_id}")
+        if s != 200:
+            raise SystemExit(
+                f"{step}: {label} is not a member of {space_id} (HTTP {s}) — run "
+                "the gfs chain through 'members-parity' first"
+            )
+    inst = state["instances"]
+    everyone = ("a", *_PARITY_MEMBERS)
+    for label in everyone:
+        con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
+        try:
+            for app_id, (name, manifest) in _PARITY_APPS.items():
+                con.execute(
+                    "INSERT OR IGNORE INTO installed_apps(app_id, name, version,"
+                    " enabled, manifest_json, bundle_path, bundle_sha256,"
+                    " source_url, installed_at) VALUES(?, ?, '1', 1, ?, ?,"
+                    " 'demo', 'demo', '2026-10-31')",
+                    (app_id, name, manifest, f"apps/{app_id}/1"),
+                )
+            con.commit()
+        finally:
+            con.close()
+    results: list[tuple[str, str, str]] = []
+    tag = secrets.token_hex(5)
+    markers: list[str] = []
+    sealed: list[str] = []
+
+    def games(label: str, path: str = "", *, method: str = "POST", body=None):
+        return _inst_request(
+            state, label, method, f"/api/spaces/{space_id}/games{path}", body
+        )
+
+    def group_api(label: str, app_id: str, path: str, body=None):
+        node = inst[label]
+        return _request(
+            f"http://127.0.0.1:{node['port']}/api/apps/{app_id}{path}",
+            token=node["token"],
+            method="POST",
+            body=body,
+        )
+
+    def table(sid: str):
+        return lambda label, _cache=None: _parity_table(state, label, space_id, sid)
+
+    def card(sid: str):
+        return lambda label, _cache=None: {
+            k: v for k, v in table(sid)(label).items() if k in _PARITY_CARD_KEYS
+        }
+
+    def do(action: str, s: int, body, ok=(200, 201)) -> bool:
+        """An action's own answer: a refusal is a DIFF, not a crash."""
+        if s in ok:
+            return True
+        results.append((action, "DIFF", f"HTTP {s} {body!r}"))
+        print(f"  {action}: DIFF — HTTP {s} {body!r}")
+        return False
+
+    held: dict[str, list[dict]] = {m: [] for m in everyone}
+
+    def mailbox(label: str, app_id: str) -> list[dict]:
+        # The mailbox hands a message over once: keep what it gave.
+        s, body = group_api(label, app_id, "/held")
+        if s == 200:
+            held[label].extend((body or {}).get("group_messages", []))
+        return held[label]
+
+    def seat_of(label: str, sid: str) -> int:
+        listing = _parity_games(state, label, space_id)
+        mine = next(
+            (t for t in listing.get("tables", []) if t["session_id"] == sid), {}
+        )
+        return int((mine.get("group") or {}).get("me") or 0)
+
+    def message(
+        action: str,
+        sender: str,
+        app_id: str,
+        sid: str,
+        receivers: tuple[str, ...],
+        *,
+        to: str | None = None,
+    ) -> None:
+        """``sender`` sends a group message — to everyone, or sealed to
+        ``to``'s seat — and each of ``receivers`` must hold it."""
+        marker = f"PARITY-{sender}-{secrets.token_hex(6)}"
+        markers.append(marker)
+        body: dict = {"data": {"move": marker}}
+        if to is not None:
+            sealed.append(marker)
+            body["to"] = [seat_of(to, sid)]
+        s, sent = group_api(sender, app_id, f"/groups/{sid}/messages", body)
+        if not do(action, s, sent):
+            return
+
+        def snap(label: str) -> dict:
+            hit = next(
+                (m for m in mailbox(label, app_id) if m["data"] == {"move": marker}),
+                None,
+            )
+            return {
+                "got": hit is not None,
+                "direct": bool(hit and hit["direct"]),
+                "from_seat": hit["from_seat"] if hit else None,
+            }
+
+        _parity_show(
+            results,
+            action,
+            snap,
+            {"got": True, "direct": to is not None, "from_seat": seat_of(sender, sid)},
+            members=receivers,
+        )
+
+    # 1. The games list.
+    s, body = games(
+        "a", "/allowed", method="PUT", body={"allowed_apps": sorted(_PARITY_APPS)}
+    )
+    _must(f"{step}: a sets the games list", s, body)
+    _parity_compare(
+        state,
+        results,
+        "games list",
+        lambda label, _c: {
+            k: v
+            for k, v in _parity_lobby(state, label, space_id).items()
+            if k != "tables"
+        },
+        ref="a",
+        want={"allowed_apps": sorted(_PARITY_APPS), "games_possible": True},
+    )
+
+    # 2. A table of three, hosted by a.
+    note = f"Parity table {tag}"
+    markers.append(note)
+    s, opened = games("a", body={"app_id": "demo-table", "note": note})
+    opened = _must(f"{step}: a opens a table", s, opened, ok=(201,))
+    sid = opened["table"]["session_id"]
+    sessions = [sid]
+    _parity_compare(
+        state,
+        results,
+        "table card (hosted by a)",
+        card(sid),
+        ref="a",
+        want={"card": "open", "note": note, "players": (3, 6)},
+    )
+    for label in _PARITY_MEMBERS:
+        s, body = games(label, f"/{sid}/join")
+        do(f"{label} joins a's table", s, body)
+    _parity_compare(
+        state,
+        results,
+        "seats at a's table",
+        table(sid),
+        ref="a",
+        want={"game": "lobby", "my_state": "seated"},
+    )
+    seats = table(sid)("a").get("seats") or []
+    three = [(n, st) for n, _name, st in seats] == [
+        (n, "seated") for n in (1, 2, 3)
+    ]
+    results.append(
+        ("three seats at a's table", "PASS" if three else "DIFF", f"a shows {seats!r}")
+    )
+    s, body = group_api("a", "demo-table", f"/groups/{sid}/start")
+    if do("a starts the table", s, body):
+        _parity_compare(
+            state,
+            results,
+            "game started",
+            table(sid),
+            ref="a",
+            want={"game": "playing", "card": "playing"},
+        )
+        for sender in everyone:
+            message(
+                f"message to everyone from {sender}",
+                sender,
+                "demo-table",
+                sid,
+                tuple(m for m in everyone if m != sender),
+            )
+        for sender, to in (("d", "e"), ("e", "d")):
+            message(
+                f"sealed message {sender} → {to}",
+                sender,
+                "demo-table",
+                sid,
+                (to,),
+                to=to,
+            )
+        # The hub relayed the sealed messages as ciphertext.
+        mailbox("a", "demo-table")
+        a_bytes = b"".join(
+            p.read_bytes() for p in _instance_dir("a").glob("socialhome.db*")
+        )
+        leaked = [
+            m for m in sealed if m in json.dumps(held["a"]) or m.encode() in a_bytes
+        ]
+        results.append(
+            (
+                "the hub a holds no sealed message",
+                "DIFF" if leaked else "PASS",
+                f"readable on a: {leaked!r}",
+            )
+        )
+    s, body = games("a", f"/{sid}/close")
+    if do("a closes the table", s, body):
+        _parity_compare(
+            state,
+            results,
+            "table closed",
+            table(sid),
+            ref="a",
+            want={"closed": True, "game": "ended"},
+        )
+
+    # 3. A two-player game between the two members, each hosting once.
+    for host, guest in (("e", "d"), ("d", "e")):
+        who = f"{host}'s duel"
+        note = f"Parity duel {host} {tag}"
+        markers.append(note)
+        s, opened = games(host, body={"app_id": "demo-duel", "note": note})
+        if not do(f"{host} opens a duel", s, opened, ok=(201,)):
+            continue
+        duel = opened["table"]["session_id"]
+        sessions.append(duel)
+        _parity_compare(
+            state,
+            results,
+            f"table card ({who})",
+            card(duel),
+            ref=host,
+            want={"card": "open", "note": note, "players": (2, 2)},
+            members=tuple(m for m in everyone if m != host),
+        )
+        s, body = games(guest, f"/{duel}/join")
+        if do(f"{guest} joins {who}", s, body):
+            # Two seats: the duel starts at once (D11).
+            _parity_compare(
+                state,
+                results,
+                f"{who} is playing",
+                table(duel),
+                ref=host,
+                want={"game": "playing", "my_state": "seated"},
+                members=(guest,),
+            )
+            _parity_show(
+                results,
+                f"a's card of {who} reads playing",
+                table(duel),
+                {"card": "playing"},
+                members=("a",),
+            )
+            message(f"move {guest} → {host} ({who})", guest, "demo-duel", duel, (host,))
+            message(f"move {host} → {guest} ({who})", host, "demo-duel", duel, (guest,))
+        s, body = games(host, f"/{duel}/close")
+        if do(f"{host} closes {who}", s, body):
+            _parity_show(
+                results, f"{who} closed", table(duel), {"closed": True}, members=everyone
+            )
+
+    # 4. The lobby: one more open table of a's; the strip reads the same.
+    note = f"Parity lobby {tag}"
+    markers.append(note)
+    s, opened = games("a", body={"app_id": "demo-duel", "note": note})
+    if do("a opens a table for the lobby", s, opened, ok=(201,)):
+        lobby = opened["table"]["session_id"]
+        sessions.append(lobby)
+        _parity_compare(
+            state,
+            results,
+            "space game lobby",
+            lambda label, _c: _parity_lobby(state, label, space_id),
+            ref="a",
+            want={"allowed_apps": sorted(_PARITY_APPS)},
+        )
+        listed = _parity_lobby(state, "a", space_id).get("tables") or []
+        if not any(t[0] == lobby for t in listed):
+            results.append(
+                ("space game lobby", "DIFF", f"a's lobby lacks its own table: {listed!r}")
+            )
+        s, body = games("a", f"/{lobby}/close")
+        if do("a closes the lobby table", s, body):
+            _parity_show(
+                results,
+                "lobby table closed",
+                table(lobby),
+                {"closed": True},
+                members=everyone,
+            )
+
+    # 5. Inviting a person is a pairing surface, not a space one.
+    s, sheet = _parity_get(state, "a", "/api/apps/demo-duel/invitable")
+    people = (sheet or {}).get("people", []) if s == 200 else []
+    offered = {
+        m: any(p["instance_id"] == inst[m]["instance_id"] for p in people)
+        for m in _PARITY_MEMBERS
+    }
+    results.append(
+        (
+            "person invite (a's invite sheet)",
+            "NOTE",
+            f"HTTP {s}; offers d: {offered['d']}, e: {offered['e']} — the sheet "
+            "lists paired households' people only (pairing is the consent); "
+            "members who are not paired play at a space table",
+        )
+    )
+
+    # Nothing of a table is readable on the GFS.
+    gfs_bytes = b"".join(p.read_bytes() for p in GFS_DIR.glob("gfs.db*") if p.is_file())
+    on_gfs = [m for m in markers if m.encode() in gfs_bytes]
+    results.append(
+        (
+            "the GFS holds nothing of a table",
+            "DIFF" if on_gfs else "PASS",
+            f"{len(markers)} notes and messages searched; readable: {on_gfs!r}",
+        )
+    )
+
+    state = _load()
+    state["members_parity_apps"] = {
+        "space_id": space_id,
+        "sessions": sessions,
+        "markers": markers,
+    }
+    _save(state)
+
+    print(f"\n{step} results (d = paired/mesh member, e = GFS-only member):")
+    for action, verdict, detail in results:
+        print(f"  {verdict:5} {action}" + (f" — {detail}" if verdict == "NOTE" else ""))
+    diffs = [r for r in results if r[1] == "DIFF"]
+    if diffs:
+        raise SystemExit(
+            f"{step}: d and e differ on "
+            + "; ".join(f"{a_} — {det}" for a_, _v, det in diffs)
+        )
+    print(f"{step}: ok")
+
+
+def _check_members_parity_apps(state: dict, failures: list[str]) -> None:
+    """``verify`` hook: every table ``members-parity-apps`` closed is still
+    ended on a, d and e (where held), and no GFS database file holds a
+    table's note or a message."""
+    mpa = state["members_parity_apps"]
+    for sid in mpa["sessions"]:
+        for label in ("a", *_PARITY_MEMBERS):
+            rows = _rows(
+                label,
+                "SELECT state FROM app_group_sessions WHERE session_id = ?",
+                (sid,),
+            )
+            if rows and rows[0][0] != "ended":
+                failures.append(
+                    f"members-parity-apps: {label} shows closed table {sid} as "
+                    f"{rows[0][0]!r}"
+                )
+    gfs_bytes = b"".join(p.read_bytes() for p in GFS_DIR.glob("gfs.db*") if p.is_file())
+    for marker in mpa["markers"]:
+        if marker.encode() in gfs_bytes:
+            failures.append(
+                f"members-parity-apps: {marker!r} is readable in the GFS's database"
+            )
 
 
 def _check_members_parity(state: dict, failures: list[str]) -> None:
