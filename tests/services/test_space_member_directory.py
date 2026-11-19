@@ -2989,3 +2989,104 @@ async def test_a_dropped_card_takes_its_redeem_note_with_it():
     assert await w.dir._gfs_seat(a["id"]) is None
     doc = w.spaces.doc(SPACE, a["id"])
     assert "gfs" not in doc and "gfs_role" not in doc
+
+
+# ── A host that never answered our card is given it again ────────────────
+
+
+def _admin_snapshot(*cards, seq: int) -> dict:
+    return {
+        "cards": [c.to_wire() for c in cards],
+        "dir_seq": seq,
+        "snapshot": True,
+        "part": 0,
+        "parts": 1,
+    }
+
+
+async def test_an_owner_that_never_answered_our_card_is_given_it_again():
+    """The admin that invited us seated us while the owner was away: the
+    owner's gate refused our card (it knew no seat of ours yet) and it
+    never gave us its directory. Each directory frame of the admin while
+    the owner stays silent gives the owner our card again — at most once
+    per :data:`HELLO_RESNAPSHOT_S` — until its snapshot arrives."""
+    now = [1000.0]
+    m, owner, admin = _invitee_world()
+    m.dir._clock = lambda: now[0]
+    assert await m.dir.publish_cards() == 2  # the owner's copy is lost
+    m.fed.cards.clear()
+    e = _hh()
+    await m.directory(_admin_snapshot(_card(e), seq=40), sender=admin["id"])
+    assert [c["to"] for c in m.fed.cards] == [owner["id"]]
+    assert m.fed.cards[0]["type"] is FederationEventType.SPACE_MEMBER_CARD
+    await m.directory({"cards": [], "dir_seq": 41, "base_seq": 40}, sender=admin["id"])
+    assert len(m.fed.cards) == 1  # rate-limited
+    now[0] += HELLO_RESNAPSHOT_S
+    await m.directory({"cards": [], "dir_seq": 42, "base_seq": 41}, sender=admin["id"])
+    assert [c["to"] for c in m.fed.cards] == [owner["id"]] * 2
+    # The owner answers: it is asked no more.
+    await m.directory(_admin_snapshot(_card(e), seq=7), sender=owner["id"])
+    m.fed.cards.clear()
+    now[0] += HELLO_RESNAPSHOT_S
+    await m.directory({"cards": [], "dir_seq": 43, "base_seq": 42}, sender=admin["id"])
+    assert m.fed.cards == []
+
+
+async def test_a_first_card_to_the_owner_is_not_sent_twice_in_one_frame():
+    """The owner's card arrives in the admin's directory and gets ours for
+    the first time there: that send is not an unanswered one yet."""
+    m, owner, admin = _invitee_world()
+    await m.directory(
+        _admin_snapshot(_card(_hh()), _card(owner), seq=40), sender=admin["id"]
+    )
+    assert sorted(c["to"] for c in m.fed.cards) == sorted([admin["id"], owner["id"]])
+
+
+async def test_a_host_we_never_gave_our_card_is_not_asked():
+    """No card of ours went to the owner (it is below v_89): a frame of
+    the admin asks it for nothing."""
+    m, owner, admin = _invitee_world()
+    m.fed.unsupported.add(owner["id"])
+    await m.directory(_admin_snapshot(_card(_hh()), seq=40), sender=admin["id"])
+    await m.directory({"cards": [], "dir_seq": 41, "base_seq": 40}, sender=admin["id"])
+    assert {c["to"] for c in m.fed.cards} == {admin["id"]}
+
+
+async def test_the_owner_is_asked_when_the_inviting_admins_trust_ends():
+    """The admin's directory was the only one we held and its trust just
+    ended (a key rotation it has not re-proved, its seat gone): the
+    owner's directory is what counts again — and it never gave us one, so
+    it gets our card again."""
+    now = [1000.0]
+    m, owner, admin = _invitee_world()
+    m.dir._clock = lambda: now[0]
+    await m.dir.publish_cards()
+    await m.directory(_admin_snapshot(_card(_hh()), seq=40), sender=admin["id"])
+    now[0] += HELLO_RESNAPSHOT_S
+    m.fed.cards.clear()
+    m.seats.admins[SPACE].clear()
+    await m.dir.sweep_once()
+    assert "dir_seq" not in m.spaces.doc(SPACE, admin["id"])
+    assert [c["to"] for c in m.fed.cards] == [owner["id"]]
+    await m.dir.sweep_once()  # nothing lapses twice
+    assert len(m.fed.cards) == 1
+
+
+async def test_a_household_first_heard_of_through_its_admin_gets_a_snapshot():
+    """The owner holds m's card only because the admin passed it on; m's
+    own card then arrives NEWER (its mailbox moved meanwhile). It is m's
+    first "seated" here: a snapshot, not a delta on a version m never
+    held."""
+    o, admin, m = _owner_with_admin()
+    await o.card_from(admin, _card(admin))
+    await _forward(o, admin, _card(m))
+    assert "seated" not in o.spaces.doc(SPACE, m["id"])
+    o.fed.directories.clear()
+    await o.card_from(m, _card(m, rev=2))
+    (frame,) = o.fed.to(m["id"])
+    assert frame["payload"]["snapshot"] is True
+    assert _ids(frame) == {admin["id"], o.me["id"]}
+    # A later newer card of a seated household stays a delta.
+    o.fed.directories.clear()
+    await o.card_from(m, _card(m, rev=3))
+    assert all("snapshot" not in d["payload"] for d in o.fed.raw_to(m["id"]))

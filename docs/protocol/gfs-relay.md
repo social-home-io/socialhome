@@ -1188,8 +1188,14 @@ and from the sweep): it is the household's "seated". The host sends a
 household its first snapshot only after that card arrived (a snapshot sent
 when the seat went live could beat the seat at the receiver and be
 dropped); the same card again re-sends the snapshot at most every 10 min; a
-newer card is only a delta. A send queued in the outbox for an offline host
-counts as sent. The same "seated" (or a first sync) also re-sends a
+newer card is only a delta — except the first card a household gives the
+host itself when the host held its card only because a delegated admin
+passed it on: that is its "seated" too, and gets the snapshot. A send queued
+in the outbox for an offline host counts as sent — but sending is no proof
+the host took it: a host that knows no seat of the sender yet refuses the
+card (an admin seated the household while the owner was away), and nothing
+tells the sender. So a host that has our card and never gave us a directory
+is given the card again (see "Asking at once"). The same "seated" (or a first sync) also re-sends a
 private space's channel grant: the owner sends the household a roster
 snapshot carrying it (only when it has a grant for it). The snapshot that
 handed out the grants when the joiner's seat went live — the seat that
@@ -1358,6 +1364,18 @@ member's card and no host hop.
   ~0.7 KiB): the "seated" the host answers with one snapshot. At most once
   per 10 min a space on each side, so it costs one card and one snapshot
   per repair, never a loop.
+- **A host that never answered:** a household a delegated admin seated
+  holds that admin's directory, and may hold none of the owner's — its
+  card to the owner was refused or lost. Each directory frame of one host
+  while another household acting as host has our card and never sent a
+  directory gives that one our card again, and so does the moment a
+  host's directory stops counting here (its trust ended): same card, same
+  10 min limit, one card + one snapshot per repair. Only where a
+  directory exists (a frame of it just arrived), so a space with no
+  GFS-reached member never asks. Without it every card such a household
+  holds is listed by the admin alone, and a key rotation — which pauses
+  the admin's host role until it re-proves — would leave it unable to
+  reach, or hear, the members that have only a mailbox.
 - Triggers for deltas: a card received, a seat that goes live or ends in a
   space we host, our own card, and the ~10 min sweep (role changes).
 - Nothing is sent while no card of the space carries a mailbox.

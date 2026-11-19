@@ -50,6 +50,10 @@ Triggers:
    now, not at the next periodic tick, unless a stream from it already
    applied cleanly here. A host reachable only over the mesh is the
    accept's own ``begin_mesh_catchup_sync`` (trigger 4).
+11. **Inviter re-proof** — the space key rotated and this household was
+    invited by a delegated admin (:class:`SpaceInviterReproofDue`): that
+    admin gets the incremental BEGIN now; its sentinel's inviter proof for
+    the new key makes it count as host here again (migration 0093).
 10. **Host offline: trusted helpers** (v_92) — for every space this
     household holds a member seat in but does not host (nor hold its roster
     authority), a round's BEGIN to the household acting as host — from the
@@ -96,6 +100,7 @@ from ....domain.events import (
     PairingConfirmed,
     SpaceAuthorityEchoDue,
     SpaceInviteAnswered,
+    SpaceInviterReproofDue,
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
@@ -543,6 +548,7 @@ class SpaceSyncScheduler:
         self._bus.subscribe(SpaceAuthorityEchoDue, self._on_authority_echo_due)
         self._bus.subscribe(SpaceSyncDeferred, self._on_sync_deferred)
         self._bus.subscribe(SpaceInviteAnswered, self._on_invite_answered)
+        self._bus.subscribe(SpaceInviterReproofDue, self._on_inviter_reproof_due)
 
     async def begin_fields(
         self, *, space_id: str, peer_instance_id: str, sync_mode: str
@@ -621,6 +627,31 @@ class SpaceSyncScheduler:
             # it from this version asks for no roster repair.
             roster_digest=await self._roster_digest_for(event.space_id, owner),
         )
+
+    async def _on_inviter_reproof_due(self, event: SpaceInviterReproofDue) -> None:
+        """Trigger 11: ask the admin household that invited us for its
+        stream now — its sentinel carries the inviter proof for the key the
+        space just rotated to. The incremental BEGIN the periodic tick
+        would send it once it counts as host again (paired: trigger 2;
+        mesh-only: :meth:`_mesh_incremental`)."""
+        inviter = event.inviter_instance_id
+        space = await self._space_repo.get(event.space_id)
+        if (
+            space is None
+            or space.dissolved
+            or not inviter
+            or inviter in (self._own_instance_id, space.owner_instance_id)
+        ):
+            return
+        if await self._federation.is_confirmed_peer(inviter):
+            await self.enqueue_sync_for_space(
+                space_id=space.id,
+                peer_instance_id=inviter,
+                priority=P1_SECURITY,
+                sync_mode="incremental",
+            )
+            return
+        await self._mesh_incremental(space, inviter, periodic=True, done=True)
 
     async def _on_space_sync_complete(self, event: SpaceSyncComplete) -> None:
         """Record the end-of-stream sentinel as the catch-up watermark.
