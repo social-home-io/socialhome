@@ -135,7 +135,9 @@ export function readTokens(theme: AppTheme): AppTokens {
   document.body.appendChild(probe)
   try {
     for (const name of APP_TOKEN_NAMES) {
-      probe.style.color = `var(${TOKEN_SOURCES[name]})`
+      // The default as the var() fallback: a token the page does not
+      // define resolves to it, not to the inherited text colour.
+      probe.style.color = `var(${TOKEN_SOURCES[name]}, ${out[name]})`
       const v = toHexColor(String(window.getComputedStyle(probe).color ?? ''))
       if (v) out[name] = v
     }
