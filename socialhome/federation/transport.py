@@ -3181,10 +3181,15 @@ class FederationTransport:
         The latch is one-way: this runs on ``on_cleanup``, and a
         ``send()`` parked on the ICE-primed gate must not be able to
         rebuild a peer behind it — see :meth:`_ensure_handshake`.
+
+        Nothing is announced (``announce=False``): the household is going
+        down, its WebSockets are already closed, and the database closes
+        right after this returns — a ``PeerTransportChanged`` published
+        from here ran its subscribers against the closed database.
         """
         self._closing = True
         for peer in list(self._peers.values()):
-            peer.close()
+            peer.close(announce=False)
         self._peers.clear()
         tasks = list(self._inbound_tasks)
         for task in tasks:
