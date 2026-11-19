@@ -2149,7 +2149,7 @@
   "connections.detail.alias_saved": "Hernoemd naar \"{name}\". Alleen jouw huishouden ziet deze naam.",
   "connections.detail.alias_cleared": "Bijnaam verwijderd. De eigen naam van het huishouden wordt getoond.",
   "connections.detail.save_failed": "Opslaan is niet gelukt. Probeer het opnieuw.",
-  "connections.detail.household_id": "Huishouden-ID",
+  "connections.detail.household_id": "Huishoud-ID",
   "connections.detail.address": "Adres",
   "connections.detail.paired": "Gekoppeld",
   "connections.detail.app_version": "App-versie",
