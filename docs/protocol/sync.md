@@ -24,6 +24,9 @@ protocol**. Ongoing live updates afterwards are covered by
 release sends it: a stream is confirmed once, by the requester's
 `SPACE_SYNC_COMPLETE {clean}` after the sentinel (see "Backpressure").
 
+Healing one missing file on view, not a stream: `SPACE_MEDIA_WANTED`
+(v_92, [media.md](./media.md#older-files-on-view--space_media_wanted-v_92)).
+
 ## Tiered transport
 
 - **Tier 2 — HTTPS inbox.** The bootstrap path. Always available; used
@@ -41,7 +44,7 @@ sequenceDiagram
     autonumber
     participant R as Requester (HFS)
     participant P as Provider (HFS)
-    R->>P: SPACE_SYNC_BEGIN<br/>(space_id, sync_mode, have_seq,<br/>prefer_direct, quiet_relay)
+    R->>P: SPACE_SYNC_BEGIN<br/>(space_id, sync_mode, have_seq,<br/>prefer_direct, quiet_relay, roster_digest)
     P->>R: SPACE_SYNC_OFFER<br/>(SDP, ICE)
     R->>P: SPACE_SYNC_ANSWER<br/>(SDP, ICE)
     R-->>P: SPACE_SYNC_ICE (trickle)
@@ -104,15 +107,67 @@ incremental session with no confirmed watermark streams in full.
 apply by primary key (re-deliveries are idempotent). The full replay is
 reached through an operator's `INSTANCE_RESYNC_REQUEST` (scope `space` /
 `calendar`, from the admin federation route), whose handler runs
-`replay_space_to` / `replay_calendar_to`. Since v_87 one automatic sender
-exists: the relay media refill (`RelayMediaRefill`) sends it with an
-optional `refill: "posts" | "calendar" | "gallery"` field when a file pushed
-through the GFS relay never arrived; a v_87 provider then replays only that
-resource — ≤ 20 rows, ≤ 16 files / 16 MiB — under its own (household,
-space, resource) window, never the reconnect resume's (see
-[gfs-relay.md](./gfs-relay.md#binary-media-frames-v_87)). Every `since`
-comparison runs through `datetime()` on both sides, so a naive stored stamp
-and a tz-aware `since` compare as times.
+`replay_space_to` / `replay_calendar_to`. A single file that never
+arrived is not a replay's business: a member asks for it on view with
+`SPACE_MEDIA_WANTED` (v_92, see
+[media.md](./media.md#older-files-on-view--space_media_wanted-v_92)),
+which replaced the never-released v_87 `refill` field of this request.
+Every `since` comparison runs through `datetime()` on both sides, so a
+naive stored stamp and a tz-aware `since` compare as times.
+
+**A replayed row is its live event.** A receiver applies a create for a
+row it already holds as an upsert of that row, and reads an absent field
+by its default — so a replay carries what the live fan-out carries, built
+by the same function:
+
+- a post is `post_to_wire_dict`: every picture in `image_urls`,
+  `hidden_from_feed`, the file attachment (`file_meta`; a live receiver
+  stores it when it passes the §5.2 gate — WebP / WebM — and is a space
+  file with well-typed fields) and — on an edited post only — `edited_at`
+  (not taken when more than the live skew ahead of the receiver's clock);
+- a calendar event is `calendar_event_to_wire_dict`: `tz`, `location`,
+  `capacity`, `announce_in_feed` (absent reads as "announce");
+- a post, comment, calendar event or gallery item with files also names
+  their hashes: the v_85 `files` map, to a household at v_85 or later, as
+  `broadcast_to_space_members` sends it. The receiver stores the files
+  under their content names and the replaying household's
+  `SPACE_MEDIA_BLOB`s fill them.
+
+The rows go out the way the request came (`send_with_mesh_fallback`:
+direct to a paired household, over the mesh or to its GFS mailbox
+otherwise), so a member the provider is not paired with is served too.
+
+What a member healed by a helper's replay then holds, compared with one
+healed by the host's §25.6 stream: the same posts (their words, pictures,
+file attachment and feed flag), comments, calendar events, tasks, pages,
+stickies and gallery items of the HELPER'S OWN people, with the same
+content names for their hashed files — and nothing of other people's rows,
+which only the host (or a delegated admin) sends. Reactions, votes, RSVPs
+and an approved announce card heal on the host's stream alone.
+
+**A post that arrives again is merged, not laid over** (the re-sent
+`SPACE_POST_CREATED` of a replay, and the host's §25.6 `posts` record for
+a post held here — `keep_newer_edit`):
+
+- **Last writer wins on `edited_at`.** A copy that was never edited, or
+  edited earlier than the row held, keeps the held words, link card and
+  stamp: a provider that missed an edit cannot bring the old words back.
+  A copy edited later — or carrying the same edit (an equal stamp: the
+  same words, unless the row here was damaged) — brings its words and
+  stamp. Either way the author's
+  next edit still lands. `edited_at` has ONE stored shape (`stamp_to_db`,
+  `YYYY-MM-DD HH:MM:SS.ffffff`, naive UTC) whoever writes it, because the
+  stamped edit compares it as a string; a row an older build stamped in
+  ISO (`…T…`) is read as the same time.
+- **Fields the copy does not own stay**: the reactions and comment count
+  (as before), the event / highlight link, the bot and the "no link card"
+  choice; on a re-sent create also the pin, the moderation state, the
+  feed flag and — when the copy carries none — the file attachment.
+
+(Before these rules the replay had its own, shorter payloads: a post it
+touched lost its `image_urls` on the receiver, whose bytes were then
+refused as "not a file of the row as held here", and an unannounced event
+got a feed card there.)
 
 ```mermaid
 sequenceDiagram
@@ -128,9 +183,22 @@ sequenceDiagram
 ```
 
 Implemented by `socialhome/federation/sync/space/resume.py`
-(`SpaceSyncResumeProvider`). Today's cut replays:
+(`SpaceSyncResumeProvider`). Each replayed poll post is followed by its
+poll as `SPACE_POLL_CREATED` (created once on the receiver; votes and
+closure heal on the host's stream). Today's cut replays:
 
-- `SPACE_POST_CREATED` — posts (`space_post_repo.list_since`)
+- `SPACE_POST_CREATED` — posts (`space_post_repo.list_since`) — never a
+  calendar event's feed card (`linked_event_id`): as live, every
+  household's bridge mints its own from the replayed event. The §25.6
+  `posts` resource does carry the host's card, for a household whose
+  bridge never ran for the event (a calendar record mints none): its
+  receiver takes a card only from the host, only while it holds no card
+  for that event, only for an event of this space (held here in it, or —
+  `posts` streams before `calendar` — an id owner-bound to the card's
+  author in this space), and stores it
+  linked — so the bridge finds it when the event arrives live and mints
+  no second one (`receive_posts._feed_card_link`). A member household's
+  card in its own stream is dropped.
 - `SPACE_COMMENT_CREATED` — comments on those posts
   (`space_post_repo.list_comments_since`, JOIN through `space_posts`)
 - `SPACE_TASK_CREATED` — tasks (`space_task_repo.list_since`)
@@ -139,7 +207,12 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 - `SPACE_CALENDAR_EVENT_CREATED` — calendar events
   (`space_calendar_repo.list_events_since`, RRULEs included)
 - `SPACE_GALLERY_ITEM_CREATED` — gallery items, joined via
-  `gallery_items.album_id` → `gallery_albums.space_id`. The albums go
+  `gallery_items.album_id` → `gallery_albums.space_id` — never a mirror
+  of a post's media (`source_post_id`, the system "Posts" album): like
+  the live push and the §25.6 `gallery` resource, the replay leaves them
+  out, because every household rebuilds its own mirror from the post in
+  its OWN system album (a replayed one named an album the receiver does
+  not hold and was refused there). The albums go
   out first (v_33; never the system "Posts" album): the album deletes
   recorded since `since` as `SPACE_GALLERY_ALBUM_DELETED`, every album of
   the space as `SPACE_GALLERY_ALBUM_CREATED` (a no-op for one the receiver
@@ -162,7 +235,134 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 Each resource is capped at `MAX_PER_RESOURCE = 500` events per request.
 Nothing re-issues a request past that cap: a space with more than 500
 rows of one kind missed since `since` gets the 500 oldest; the rest
-arrives through the §25.6 sync.
+arrives through the §25.6 sync. Since v_92 a replay reaches back at most
+`RESUME_MAX_AGE_S` (30 days) whatever `since` asks — the catch-up is
+bounded on every path; an older file arrives on view
+(`SPACE_MEDIA_WANTED`). The replayed rows' files — posts, **comments**,
+covers, gallery items, the host's pages — ship from the replaying household
+within ONE budget per (requester, space) that `SPACE_MEDIA_WANTED` shares:
+50 files / 32 MiB per 30 minutes (`file_gate.SpaceFileBudget`). A household
+that is not the roster authority ships only the files of the rows it
+replays — its own people's.
+
+### Host offline: trusted helpers (v_92)
+
+Every member heals from its host first. While the host is offline nothing
+used to heal: the §25.6 sync and the resume both came from it. Now the
+periodic tick (`scheduler.SpaceSyncScheduler`, trigger 10) — which asks the
+host first every round, as before — notes when this round's BEGIN to the
+household acting as a space's host (the owner, or the delegated admin that
+invited us) actually goes out: not when it is queued, and never for a BEGIN
+that waits for a free slot (trigger 8) or is skipped because the host's row
+is gone — no answer is due for a BEGIN that was not sent. The receiver
+marks the space **heard** whenever that household answers: any signed
+chunk of the space it verifies from it, including the bare `__complete__`
+sentinel an up-to-date incremental session sends back (a quiet space must
+count, or it would always fall back), and the scheduler counts every
+signed refusal of our BEGIN by the host too (`SpaceSyncDeferred` with the
+host's `too_many_sessions`, `node_capacity` or `rate_limited`: it is
+online; only the capacity ones are asked again shortly, a rate-limited
+BEGIN waits for the next tick; an `interrupted` stream is noticed on our
+side and does not count) (`federation/sync/space/host_contact.py`, in
+memory). If `HOST_ANSWER_WAIT_S` (120 s, fixed — never random) after that
+BEGIN the host has not answered, the space is marked **silent** until the
+host is heard again (`HostContact.went_silent` / `is_silent` — what
+`SPACE_MEDIA_WANTED` reads before it asks a helper). "The host" is one
+notion everywhere: the households acting as host here, owner first, then
+the delegated admin that invited us
+(`federation/host_equivalence.py:acting_hosts`) — the ones the round
+BEGINs, waits on, and a `SPACE_MEDIA_WANTED` asks first. Any verified event
+one of them sends for the space (a post, a config change — not only a sync
+answer; `FederationService._dispatch_event` → `HostContact.heard_from`)
+clears the silence at once, so a host that comes back stops helper
+escalation without waiting for the next round. The member then sends
+`SPACE_SYNC_RESUME` to **one** trusted helper — a household holding a live
+`admin` or `moderator` seat in the roster mirror at v_92
+(`space_member_supports`: an older helper would replay everyone's rows),
+never us or the host, sorted (`federation/sync/space/trusted_helpers.py`,
+the one picker `SPACE_MEDIA_WANTED` uses too); each household starts at its
+own stable offset (`sha256(own instance id ‖ space id) mod k`, never random)
+so a space's members spread over its k helpers instead of all asking the
+first, then one step further each silent round — with `since` = the newest
+of: when the host was last heard; the newest post or comment this household
+**stored** in the space from **that helper's** people **before this process
+started** minus a fixed 5-minute overlap (`HELPER_OVERLAP_S`) — "stored
+before" by row id: the app reads `MAX(rowid)` of posts and comments right
+after the database opens, before any inbound path (GFS mailboxes, GFS
+websockets, RTC) can store anything (`space_post_repo.row_marks`, handed to
+the scheduler with `set_row_marks`; a failed read sets none, and then no
+helper is asked), and `newest_from_household(…, upto=)` counts only rows at
+or below it, so a live
+post or a late gap row with an older stamp that arrives after a restart
+never moves `since` past rows still missing; this process's last
+**successful** ask to that same helper minus the overlap (in memory, per
+(space, helper), only when `send_request` reported the send ok — so while
+the host stays silent each round asks only for what is new since the last
+one: delta per round); and 30 days ago — never later than now. A helper
+replays only its own people's rows, so its own newest row here is where its
+gap starts; the database point covers a restart, the last-ask point keeps
+later rounds small, and a rotation to another helper starts that helper at
+its own point. A file the
+member still lacks arrives when someone opens it (`SPACE_MEDIA_WANTED`).
+No helper at v_92 → nothing: the member waits for the host (logged once per
+round). A space we host, or hold the roster authority of, never falls back.
+
+Every member is equal here: a host reached only over the mesh gets the same
+small incremental BEGIN every periodic tick as a paired host (trigger 2) —
+once its full mesh catch-up completed, and also once that full catch-up hit
+its attempt cap (`MAX_MESH_CATCHUP_ATTEMPTS`, which bounds only the FULL
+catch-up). An up-to-date host answers it with only the signed sentinel; a
+BEGIN that found no route is never answered either, so the same 120 s wait
+reaches a helper. One incremental BEGIN per 30-min tick stays under the
+host's 5 / h per (household, space).
+
+Rights do not grow. A household that is not the space's roster authority
+answers only a household holding a writer (member) seat in its roster
+mirror (`SpaceWriterHouseholds.may_receive`, the §25.6 provider's gate for
+member-only data — a follower-only household gets nothing from a helper;
+the roster authority keeps its own gate, where a follower gets its subset),
+replays **only its own people's rows** (tombstones by its own people's
+deletes) — every receiver takes other people's rows only from the
+household acting as host (`_acts_as_host`) — and ships **only those rows'
+files**, within the shared (requester, space) budget. Other people's files
+come on view (`SPACE_MEDIA_WANTED`). Album deletes are replayed as before
+(they name no deleter; the receiver judges them by
+`may_mutate(settings=True)`). The request goes with
+`send_with_mesh_fallback`, so a helper reached by mesh or a GFS mailbox seat
+gets it: paired, mesh and GFS-only members fall back alike.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Member
+    participant H as Host (offline)
+    participant A as Helper (admin / moderator)
+    M->>H: SPACE_SYNC_BEGIN (periodic tick)
+    Note over M,H: no chunk, no sentinel, no refusal
+    Note over M: HOST_ANSWER_WAIT_S (120 s) after the BEGIN went out, host not heard → silent
+    M->>A: SPACE_SYNC_RESUME to helper (offset + round) mod k (since = max(host heard, A's people's newest row stored before boot − 5 min, last ok ask to A − 5 min, now − 30 d) ≤ now)
+    A->>M: SPACE_*_CREATED (its own people's rows only)
+    A->>M: SPACE_MEDIA_BLOB (the files of those rows, shared budget ≤ 50 / 32 MiB per 30 min)
+    Note over M: next round asks the host first again
+```
+
+**Cost.** Per silent space and round (the 30-minute tick): each of the M
+member households sends its host one BEGIN (as before) and, 120 s after it
+went out, one resume request (< 1 KiB) to ONE helper. The per-household
+offsets spread the M requests over the k helpers — about M/k each, never M
+on one. A helper serves at most one replay per (requester, space) per 30 min
+(`RESUME_COOLDOWN_S`), each ≤ 500 rows per resource **of its own people**
+plus the files of those rows — rows new to the requester (it lacks them
+since the helper's people's newest row it holds), so nothing it already has
+is re-sent beyond the 5-minute overlap. A helper round is therefore small
+requests plus its own people's new rows and their files, never other
+people's files. Global space, 200 member households, 2 helpers, host
+offline: ~100 requests per helper per round, each answered with only what
+that helper's people wrote since the requester last held one of their rows
+(a quiet helper's replays are near empty; at most 50 files / 32 MiB per
+requester per 30 min in all, `SPACE_MEDIA_WANTED` included) — 200 × 48 =
+9 600 small requests a day in all, ~4 800 per helper. Nothing fans out: one
+requester, one helper, one space per round.
 
 ## What a sync streams
 
@@ -175,8 +375,8 @@ live resource preceded by its tombstones:
 `pages_deleted`, `pages`, `stickies_deleted`, `stickies`,
 `calendar_deleted`, `calendar`, `gallery_albums_deleted`, `gallery`,
 `gallery_items_deleted`, `polls`, `schedules`, `space_zones_deleted`,
-`space_zones`, `bazaar`, `timetables`, `chat_messages_deleted`,
-`chat_messages`.
+`space_zones`, `bazaar`, `timetables_deleted` (v_92), `timetables`,
+`chat_messages_deleted`, `chat_messages`.
 
 (Comment tombstones follow the posts, and gallery-item tombstones the
 gallery, because a host stub for an id never held needs its parent — the
@@ -249,9 +449,26 @@ what the space's retention keeps (`federation/sync/space/window.py`):
 the page / task tombstones — so a page never repeats or skips a row, and
 `ChunkBuilder` turns each page into ≤ 8 KB chunks (halving a page until a
 chunk fits) before the next page is read. `seq_start` / `seq_end` run on
-across pages. The provider's catch-up media walks the same rows the same
-way. No export holds a whole resource in memory, however big the space,
-so there is no safety ceiling on the count.
+across pages. No export holds a whole resource in memory, however big the
+space, so there is no safety ceiling on the count of rows.
+
+**Catch-up media is bounded (v_92).** After a full (`initial`) stream the
+provider queues the files of the space's **recent** items only: the live
+posts (images, attachment, link-card thumbnail), **comments**, space-album
+items, bazaar listings and calendar covers created in the last
+`CATCHUP_MEDIA_MAX_AGE_S` (30 days), newest first across every kind, at most
+`CATCHUP_MEDIA_MAX_FILES` (200) files per stream after the v_86 file gate
+(`provider._enqueue_catchup_media`, one bounded read:
+`media_reference_repo.recent_item_files`). Only files the provider holds
+are queued or counted (`SpaceMediaSyncService.held_files`): a host can hold
+a member's row whose file never arrived, and asks its author for it (a
+few minutes after the row arrived, or on view). Page files follow the same
+rule. An older file arrives when a
+member opens it (`SPACE_MEDIA_WANTED`, [media.md](./media.md#older-files-on-view--space_media_wanted-v_92)).
+Page files keep their own bound (below). **Cost:** a newcomer's catch-up is
+≤ 200 files ≈ 60 MB at ~300 KB a picture, per (newcomer, space); for a
+member behind a GFS mostly served from its GFS cache while a file is ≤ 3
+days old (the outbox drops the push then).
 
 **Order is storage order.** Keyset paging orders by the row id: posts and
 the post tombstones newest-stored first; comments, their tombstones and
@@ -261,7 +478,12 @@ chat streamed by `created_at`, which can differ for a message relayed
 late).
 
 **Periodic re-syncs ship no media.** The scheduler re-syncs every
-(confirmed peer × shared space) every 30 minutes. Those BEGINs carry
+(confirmed peer × shared space) every 30 minutes — household, public,
+private and **global** spaces alike (a global space only where one of our
+own people holds a non-follower seat: a household that only follows it
+never contacts its host; before v_92's helpers it was left out entirely,
+so a global space's members never caught up and never fell back to a
+helper). Those BEGINs carry
 `sync_mode: "incremental"`; the provider then re-streams the rows but
 skips the catch-up media walk — the live media outbox already delivered
 every blob created since, and re-enqueueing every post / gallery /
@@ -273,11 +495,13 @@ treats `"incremental"` as it always did (a full stream with media).
 Periodic sessions also stream **only what changed** since the last sync
 the household confirmed — see [Incremental sessions](#incremental-sessions-change-stamps--per-household-watermark).
 
-**Members seated from an invite link get descriptors, not bytes (v_80).**
-A link-joined requester (`InstanceSource.SPACE_SESSION`) is reached only
-through the GFS envelope relay, which refuses `SPACE_MEDIA_BLOB` chunks: the
-catch-up media walk queues **nothing** for any link-joined requester (it only
-burned outbox rows and retries). Instead, toward a link-joined requester at
+**Members seated from an invite link get descriptors too (v_80).**
+A link-joined requester (`InstanceSource.SPACE_SESSION`) is reached through
+the GFS. Since v_92 it gets the same bounded catch-up pushes as a paired or
+mesh member (every member is equal on any path); whether a push goes is
+decided at send time — the media outbox drops it while the reader's GFS
+cache holds the file (`SpaceMediaGfsUploader.reads_from_gfs`). Toward a
+link-joined requester at
 v_80 (`FederationCapability.MIN_FOR_SPACE_MEDIA_REFS`), every `posts`,
 `calendar` and `gallery` record that shows files carries `media_refs` — the
 files' addresses in a GFS media cache, computed from the provider's own copy
@@ -289,10 +513,37 @@ newest first, the rest without). The receiver keeps them as
 (`SpaceSyncReceiver.attach_gfs_media`; [`media.md`](./media.md#space-media-via-the-gfs-cache-v_80)).
 It is a version gate in `_exporter_for`, so **sync line 80**
 (`SYNC_RECORD_LINES`): a household crossing v_80 gets one full stream, and
-with it the pictures of content it was sent while older. Paired and mesh
-requesters keep the catch-up push unchanged. Cost: ~150 B of descriptor per
+with it the pictures of content it was sent while older. Cost: ~150 B of descriptor per
 file per record; one upload per file to the requester's GFS (`200
 already_stored` when it is there already).
+
+**From v_92 the descriptor shrinks to what the GFS holds.** A link-joined
+requester at v_92 (`FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED`) whose
+relay takes binary media frames (v_87 `envelope_media`,
+`SpaceMediaGfsUploader.takes_relay_frames`) gets a
+catch-up's files like any member — the bounded catch-up push, then
+`SPACE_MEDIA_WANTED` for an older file it opens — so its records carry
+`media_refs` only for files the provider already uploaded to that
+requester's GFS, matched by blob address — file, epoch, item and origin (`SpaceMediaGfsUploader.stored_plan_for_reader`: looked up, never sealed; only a described record spends the 500-record budget; the ≤ 3-day
+cache memory); nothing new is sealed or uploaded for the stream. Its catch-up rows go as `push` rows (like `SPACE_MEDIA_WANTED`), which the outbox never skips for "reads from its GFS": that skip matches by file name, the descriptor by blob address, so a file held there under another item or epoch would otherwise get neither. A v_80
+requester keeps the full descriptor and the uploads (it can ask for
+nothing). Same sync line 92 (already in `SYNC_RECORD_LINES`). Cost toward
+a v_92 requester: no catch-up upload to its GFS; the catch-up push is the
+same bounded one every member gets (≤ 200 files / 30 days per stream).
+A v_92 requester whose relay takes **no** frames keeps the full descriptor
+and the uploads: its pushes would fall back to small JSON chunks
+(`RELAY_JSON_CHUNK_BYTES`), so the GFS cache stays its catch-up path.
+
+Per join, with pictures of ~300 KiB (illustrative, re-encoded WebP): the
+frame path sends the one joiner ≤ 200 files ≈ ≤ 60 MiB through its GFS
+relay, once, in 512 KiB frames (≈ 200–250 frames); the cache path uploads
+the same ≤ 60 MiB to the GFS once per GFS (a file another reader of that GFS
+already caused is `already_stored`) and the joiner fetches it from there.
+So for one joiner the GFS carries the same bytes either way; for k joiners
+on one GFS within the cache TTL the frame path is k × ≤ 60 MiB of relay
+ingress against ≤ 60 MiB of uploads + k fetches. Joins are one-off and
+bounded per stream, and a file already on its GFS is described, not pushed
+(the outbox skips that push), which recovers the shared case.
 
 **Page files come from the host (v_82).** A page keeps the names the host's
 version shows on every household (its hash is the version's identity); a
@@ -307,6 +558,239 @@ never rewritten. Both are version gates, so **sync line 82**
 with it the pictures of pages it was sent while older. The §4.4 resume /
 §319.6 resync replay of a page from the host ships its files too, within
 the replay's file and byte budget. See [`pages.md`](./pages.md#files-v_82).
+
+### Merge rule: one rule for a change to an existing item (v_94)
+
+An item is created once; what people do to it afterwards — react, vote,
+answer, RSVP, edit — reaches a household live, over several transports,
+from an outbox retry and from the host's stream, in any order and more
+than once. Every such per-author change merges the same way
+(`socialhome/domain/item_merge.py`):
+
+1. **A stamp per (item, author[, key]).** The author's household stamps
+   the change when it is made — its clock, never at or before the stamp it
+   replaces — and sends the stamp with it. A change from a household that
+   sends none (below v_94 for votes) is stamped with its envelope's signed
+   timestamp: ordered by when it was sent, never dropped.
+2. **The newest stamp wins.** A tie changes nothing, so a re-delivery is a
+   no-op and the result is the same in any arrival order.
+3. **A removal is a stamp too** — a tombstone, kept 30 days
+   (`TOMBSTONE_HORIZON_S`) — so a late copy of what was removed never
+   brings it back.
+4. **A stamp is bounded.** One more than 300 s ahead of the receiver's
+   clock is refused (`item_stamp`): it would win every later change.
+5. **An item that closes stops taking changes.** Once a household has
+   applied a poll's close (`SPACE_POLL_CLOSED`, or its deadline passed), no
+   vote and no retraction for that poll counts there any more, **whatever
+   its stamp** (owner decision 2026-11-12): a household cannot change a
+   closed poll's result by dating a vote before the close. The close
+   itself carries no stamp and only ever turns on, so a second close
+   changes nothing. A vote that was in flight when the poll closed is
+   therefore held by the households it reached in time and not by the
+   others; the host's stream settles that: once the poll is closed on the
+   host, every member household shows **the host's votes** for other
+   households' people (`apply_synced_poll` replaces them, whatever their
+   stamps), and keeps its own people's (it authored them). What can still
+   differ afterwards is only a voter's own household showing a vote of its
+   own people that the host never got in time.
+
+| Change | Key | Stamp | Removal |
+|---|---|---|---|
+| Post reaction (v_93) | (post, user, emoji) | `at`, in `space_posts.reaction_stamps_json` | tombstone stamp, 30 days |
+| Poll vote (v_94) | (poll, voter) — the voter's whole selection | `at`, in `space_polls.vote_stamps_json` | the empty selection, as a stamp, 30 days |
+| Comment edit | (comment) | `edited_at` | the comment tombstone |
+| Schedule answer | (slot, user) | `responded_at` (compared in the stream) | absent from the host's whole list |
+| Calendar RSVP | (event, user, occurrence) | `updated_at` (compared in the stream) | absent from the host's whole list |
+
+**One kind of change is not a last-writer-wins value and keeps its own
+rule: a state that only ever advances.** A bazaar bid goes pending →
+withdrawn → declined → accepted (`domain/post.py` `BID_STATES`) and never
+back, so its merge is the highest state any household reported
+(`item_merge.advance`, `bazaar_repo.advance_bid`) — commutative and
+idempotent, the same in any order, and it needs no stamp. The seller's
+answer outranks the bidder's withdrawal (owner decision 2026-11-12): when
+a decline and a withdrawal cross, every household ends on *declined*, with
+the seller's reason where it is kept; when an accept and a withdrawal
+cross, on *accepted* (the sale is announced with it). The allowed
+transitions are exactly pending → withdrawn / declined / accepted,
+withdrawn → declined / accepted and declined → accepted; a declined bid is
+never withdrawn and nothing leaves accepted. A schedule poll's pick and a
+poll's close likewise only ever turn on.
+
+**Not on the rule yet.** A schedule answer and an RSVP are stamped where
+they are stored and merged by stamp in the stream, but live they still
+apply in arrival order and their removal is the row's absence, not a
+tombstone (two more tombstone stores and two more wire stamps — left for a
+follow-up); the incremental session now corrects a wrong one within 30
+minutes. A bid's withdrawal that races its auction's end is refused by a
+household that already saw the listing close.
+
+**Cost of carrying these on the incremental session.** A vote, answer,
+RSVP or bid change touches its parent row (`sync_seq`), on the household
+where it is made and on every household that applies it. So per change:
+each provider streams **one parent record** (the post's `posts` record
+plus its `polls` / `schedules` / `bazaar` record, or the event's
+`calendar` record — with its capped lists, ≤ ~150 KB at the caps,
+typically < 2 KB) to each household that asks it on its next periodic
+session — once: a household that already holds the change writes nothing
+and stamps nothing, so nothing bounces. In a space of N households where
+each asks the host and the host asks each (the usual shape) that is ≤ 2 ×
+(N − 1) records per changed item per 30 minutes, however many changes the
+item took in that window; worst case (everyone syncs with everyone) N ×
+(N − 1). A poll with 200 voters in a 50-household space: one `polls`
+record of ~22 KB to each of 49 households per 30-minute window in which
+anyone voted, instead of the same record on the daily full stream only.
+
+**Item state a lost event leaves behind (v_92).** Since v_92 the host's
+stream also carries the state that only live events used to set, so a
+household that missed them (offline past the outbox, a mesh drop) converges
+on the host's next stream. Each is taken **from the space's host (or an
+acting host) only** — `receiver._authored_record` refuses a member
+household's `polls` / `timetables_deleted`, and the persist paths apply the
+rest only `from_host` — and never replaces **this household's own people's**
+votes, answers, RSVPs, reactions or bids (they are authored here; the host
+may not have heard one yet); how what it carries merges with what is held is the
+[merge rule](#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)
+above). The one exception is what the live rule lets
+another household change of theirs: the organiser settling an RSVP request
+(→ going / waitlist, or gone), a waitlisted seat promoted to going while the
+occurrence has room (`_rsvp_allowed`), and the seller's accept / decline of
+a bid:
+
+| Record | Field | Receiver |
+|---|---|---|
+| `polls` | `vote_stamps` (v_94): `{voter: [stamp, [option_id, …]]}` — each voter's selection and the stamp it was made at, a retraction included (an empty list); a vote from before stamps existed goes with the time the host wrote it; the newest `MAX_VOTES_PER_POLL` (1000) voters; `votes_partial` when cut. Toward a v_92 / v_93 requester: `votes` (`{option_id, voter_user_id}`, the most recent 1000 voters' first, never half a voter) | creates the poll and its options when missing (it missed the live `SPACE_POLL_CREATED`), takes the host's question / deadline, closes a closed poll (never reopens), and takes everybody's votes but its own people's by the [merge rule](#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94). **Open poll**: per voter the newest stamp wins; a voter the host's whole map lacks keeps a stamped vote (the host may not have heard it) unless the stamp is older than the 30-day tombstone horizon (then it is a retraction this household missed and the host has forgotten); a vote no stamp orders is dropped at once. **Closed on the host**: the host's map replaces them, whatever the stamps (a cut map only the voters it names). **Closed here but not yet on the host**: nothing is taken (from a host below v_94 either), and a deadline that has passed here is never moved later or cleared by the host's record. A host below v_94 sends `votes`: no stamps to merge by, so the list replaces everybody's votes but its own people's as before v_94 (`apply_synced_poll`) |
+| `schedules` | `responses`: `{slot_id, user_id, availability, responded_at}`, the newest `MAX_RESPONSES_PER_SCHEDULE` (1000); `responses_partial` when cut; `responses_at` (when the host read them); `finalized_slot_id` | everybody's answers but its own people's, **last writer wins on `responded_at`**: a held answer is replaced only by a newer one, and dropped only when the list is whole and the held one is not newer than `responses_at`; the pick (never reverts) (`apply_synced_schedule_state`) |
+| `calendar` | `rsvps`: `{user_id, occurrence_at, status, updated_at}`, the latest `MAX_RSVPS_PER_EVENT` (500) occurrences' worth, each entry at most `RSVP_RECORD_MAX_BYTES` (256 B as JSON — a larger held one is left out); `rsvps_partial` when cut; `rsvps_at` (when the host read them) | everybody's RSVPs but its own people's (bar the organiser transitions above), **last writer wins on `updated_at`**: a held RSVP is replaced only by a newer one, and dropped only when the list is whole and the held one is not newer than `rsvps_at` — an RSVP that reached this household live after the host read its list stays |
+| `posts` | `reaction_stamps`: `{"user\0emoji": [stamp, added]}`, at most `MAX_SYNCED_REACTION_STAMPS` (1024): removals first, then adds, each newest first | each stamp passes the live rules first — no more than 300 s ahead of the receiver's clock (`stored_stamp`; a stamp years ahead would win every later removal) and the emoji length rule (`reaction_emoji_ok(legacy=True)`: NFC, ≤ 32 chars — a reaction from before v_93 may be free text) — or is dropped; then merged last writer wins per user and emoji into a post it holds (a reaction or a removal it missed lands, a newer one it holds stays); a removal travels only as a stamp (kept 30 days): a reaction whose add this household applied stays even when the host's sets lack it — the host may never have received it (v_93); only a reaction NO stamp orders here follows the host's reaction sets (`merge_reaction_stamps`); a person's reactions past the cap of five show as their five newest; its own people's reactions are never touched |
+| `comments` | (`edited_at`, unchanged) | a comment held here takes the host's edit when newer (last writer wins on `edited_at`, like `SPACE_COMMENT_UPDATED`) — before, a held comment was skipped |
+| `bazaar` | `bids`: `{id, bidder_user_id, amount, message, accepted, rejected, withdrawn, created_at}`, the newest `MAX_BIDS_PER_LISTING` (200) — never the seller's decline reason (the bidder's alone) | a bid it lacks is added (without a reason, stamped with its arrival here like the live bid — never the host's `created_at`), a held one only ever **advances** (pending → withdrawn → declined → accepted: the higher of the held and the host's state, see the [merge rule](#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)); its own people's bids are never added or withdrawn from the stream, only accepted / declined (`apply_synced_bids`) |
+| `timetables_deleted` | new resource: `{id, created_by, created_at}` | tombstones a held timetable; an id never held gets a stub only when owner-bound to `created_by` in this space |
+
+All of it is gated on the requester's version
+(`FederationCapability.MIN_FOR_SYNC_ITEM_STATE`, `provider._without_item_state`):
+a requester below v_92 gets the older record shapes and no
+`timetables_deleted`, so it is **sync line 92** (`SYNC_RECORD_LINES`, no
+`SYNC_SHAPE_VERSION` bump: a household crossing v_92 gets one full stream;
+no older one does).
+`vote_stamps` (in place of `votes`) goes to a requester
+at v_94 (`FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS`,
+`PollsExporter.unstamped_votes`) — **sync line 94**: a household crossing
+v_94 gets one full stream, and with it the stamps of every poll.
+
+**One record, one chunk.** `ChunkBuilder` halves a page until a chunk fits
+its 8 KB target but never splits a record, so a record's lists are capped
+by what the tightest hop takes: the 1 MiB inbox body
+(`INBOX_MAX_BODY_BYTES`, the HTTPS / mesh tier), with the record JSON
+base64'd twice on the way (the chunk's encrypted payload inside the
+event's), ~1.8× — so one record stays well under ~550 KB. Each capped list
+is sized to ≤ ~150 KB typical (user and option ids are 32 chars):
+
+| List | Per entry | Cap | Record growth |
+|---|---|---|---|
+| `polls.vote_stamps` (v_94; `polls.votes` before) | ~110 B per voter (~100 B per vote) | 1000 | ≤ ~110 KB |
+| `schedules.responses` | ~150 B | 1000 | ≤ ~150 KB |
+| `calendar.rsvps` | ~160 B | 500 | ≤ ~80 KB |
+| `posts.reaction_stamps` | ~85 B (≤ ~205 B with a 32-char emoji) | 1024 (the repo keeps up to 4096 per post — ~350 KB, ~840 KB worst, too big for a record) | ≤ ~90 KB, ≤ ~210 KB worst |
+| `bazaar.bids` | ~150 B + the message (≤ 280 chars) | 200 | ≤ ~90 KB, ≤ ~260 KB with every message full |
+
+**A requester behind a GFS (v_87).** Its chunks ride
+`SPACE_SYNC_CHUNK` events over the GFS relay, whose JSON envelope takes
+~191 KiB — less than one large record (a 240 KiB page was a ~437 KiB
+envelope and refused, so the stream was abandoned after three strikes and
+the page never arrived). A chunk event too large for the JSON envelope
+now goes as one binary relay frame
+([gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)), and
+inside the frame its record's ciphertext rides **raw** instead of as
+base64url text (body suite `sync-chunk-raw-v1`; the receiver rebuilds the
+identical `{sync_id, chunk}` payload, so the chunk's signature and AEAD
+are untouched). The same layout carries a chunk over a **mesh route**
+inside the route's seal when its JSON would not fit one hop, toward a
+requester at v_87+ ([spaces.md](./spaces.md#mesh-routing-space_routed)), so
+a mesh-only member is healed up to the same record bound. **Record bound
+on this path: ~505 KiB** — the frame's
+532,382 bytes less the chunk's wrapper — which is by construction what a
+live event toward such a household may be (`RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`,
+515,998 bytes, derived from the frame's): every item that reached it
+live also fits its catch-up. The GFS keeps a frame one hour (a JSON
+envelope a day), so for a large item the sync, not the queue, is the
+heal. A record past the bound (`RELAY_SYNC_RECORD_MAX_BYTES`; an item saved
+before the size limits — every save since is refused with 413) is **left out** of a stream to such a household with a WARNING
+naming its resource, id and size, before it takes a chunk index: the
+stream stays whole and clean and the watermark moves on. (Before, the
+refused chunk made the stream unclean, so every later sync re-sent it
+from the old watermark.) Nothing changes
+on the DataChannel or the inbox, in the records or in the resources. On
+the **mesh** the same raw layout rides inside the route's seal toward a
+v_87 requester (above), which brings a record a mesh-only member could not
+get before (over ~433 kB) — **sync line 87** (`SYNC_RECORD_LINES`): a
+household crossing v_87 gets one full stream (every released household
+crosses 92 and 94 in the same step, so it costs no extra stream). A
+requester below v_87, or a GFS without `envelope_media`, keeps the JSON
+envelope and its ~191 KiB.
+
+A cut list is marked (`votes_partial`, `responses_partial`,
+`rsvps_partial`) and the receiver then deletes nothing it could not see; a
+cut stamp map loses only stamps older than the 1024 newest, which the
+reaction sets settle anyway. Every one of these changes re-stamps its
+parent row — votes, picks, and since migration 0146 answers, RSVPs and
+bids too — so they ride the 30-minute incremental session (see
+[the cost](#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)).
+
+**Known limits.** Synced item state publishes no bus event (only a comment
+edit does), so an open view shows a healed vote, answer, RSVP, reaction or
+bid on its next load, not live. The receiver reads per item (one query per
+poll, event or listing) — bounded by the stream's page size, not batched.
+
+### Coverage — every space item type
+
+What a household that missed a live event gets back, and from where. "Full"
+= the host's daily full stream (`FULL_RESYNC_INTERVAL_S`), "incremental" =
+every periodic session (30 min); "Resume" = the `SPACE_SYNC_RESUME` replay
+(creates only — also what a v_92 helper replays while the host is silent).
+Each type the stream carries has a heal test in
+`tests/federation/sync/space/test_sync_coverage.py` (chat messages up to
+the chat sink, whose live create / delete rule has its own tests); each type
+out of the stream, a test pinning that. The item-state rules (votes,
+answers, picks, RSVPs, reactions, comment edits, timetable deletes, bazaar
+bids: whose rows a stream may change, cut lists, stamps) have their own
+module, `tests/federation/sync/space/test_sync_item_state.py`.
+
+| Item type | Live events | Stream resource | Resume (§4.4) | Deletes heal | Notes |
+|---|---|---|---|---|---|
+| Roster: members, roles, bans | `SPACE_MEMBER_*`, `SPACE_ROSTER_SNAPSHOT` | `members`, `bans` (host only) | — | removals / unbans via `SPACE_ROSTER_SNAPSHOT`, sent in reply to a member's BEGIN whose `roster_digest` differs from the host's ([spaces.md](./spaces.md)) | member households never stream the roster |
+| Member pictures | `SPACE_MEMBER_PROFILE_UPDATED` | `member_pictures` | — | reset via `members` (v_58) | re-encoded on receipt |
+| Posts (create, edit) | `SPACE_POST_CREATED` / `_UPDATED` | `posts` (incremental) | yes | `posts_deleted` | |
+| Post reactions | `SPACE_POST_REACTION` (v_93) | `posts.reaction_stamps` (v_92, incremental) | — | removals as stamps only (30 days) | before v_92 a held post kept its own reactions |
+| Comments (create) | `SPACE_COMMENT_CREATED` | `comments` (incremental) | yes | `comments_deleted` | |
+| Comment edits | `SPACE_COMMENT_UPDATED` | `comments` (v_92 receiver, incremental) | — | — | last writer wins on `edited_at` |
+| Polls (question, options, settings) | `SPACE_POLL_CREATED` (the whole definition, after its post) | `polls` (v_92 receiver) | yes, after its post | with the post | created once on every path — a held poll is never rewritten |
+| Poll votes, closure | `SPACE_POLL_VOTE_CAST` (stamped `at`, v_94), `SPACE_POLL_CLOSED` | `polls.vote_stamps` / `meta.closed` (v_94, incremental; `polls.votes` toward v_92 / v_93) | — | a retraction is a stamp (kept 30 days) | merge rule: the newest stamp wins while open; nothing counts after the close, then the host's votes are the result |
+| Schedule polls (slots) | `SPACE_SCHEDULE_CREATED` | `schedules` | — | with the post | |
+| Schedule answers, pick | `SPACE_SCHEDULE_RESPONSE_UPDATED`, `_FINALIZED` | `schedules.responses` / `finalized_slot_id` (v_92, incremental since migration 0146) | — | a retraction is absent from the host's list | |
+| Calendar events | `SPACE_CALENDAR_EVENT_*` | `calendar` (incremental) | yes | `calendar_deleted` | |
+| Calendar RSVPs | `SPACE_RSVP_UPDATED` / `_DELETED` | `calendar.rsvps` (v_92, incremental since migration 0146) | — | dropped when absent (unless `rsvps_partial`) | |
+| Task lists, tasks | `SPACE_TASK_*` | `task_lists`, `tasks`, `tasks_archived` (incremental) | yes | `task_lists_deleted`, `tasks_deleted` | |
+| Pages | `SPACE_PAGE_*` | `pages` (incremental) | yes | `pages_deleted` | v_48 host versions |
+| Stickies | `SPACE_STICKY_*` | `stickies` (incremental) | yes | `stickies_deleted` | |
+| Gallery albums, items | `SPACE_GALLERY_*` | `gallery` (incremental) | yes | `gallery_albums_deleted`, `gallery_items_deleted` | |
+| Zones | `SPACE_ZONE_*` | `space_zones` (member households only) | — | `space_zones_deleted` | never to a follower |
+| Timetables | `SPACE_TIMETABLE_UPSERTED` / `_DELETED` | `timetables` (incremental) | — | `timetables_deleted` (v_92, host only) | the tombstone names no moderator, so only the host's counts |
+| Bazaar listings, FAQ | `BAZAAR_LISTING_*`, `BAZAAR_FAQ_*` | `bazaar` (incremental) | — | with the post | |
+| Bazaar bids | `BAZAAR_BID_PLACED`, `BAZAAR_OFFER_ACCEPTED` / `_UPDATED` | `bazaar.bids` (v_92, incremental since migration 0146) | — | a decline / withdrawal / accept only ever advances | the decline reason never streams |
+| Bazaar offers, offer answers, Ask-the-seller threads | `BAZAAR_OFFER_*`, `BAZAAR_THREAD_MESSAGE` | **never streamed** | — | — | between the seller's and the buyer's households only ([bazaar.md](./bazaar.md)) — not space-wide state |
+| Space chat messages | `SPACE_CHAT_MESSAGE_*` | `chat_messages` (writer households, v_55) | — | `chat_messages_deleted` | |
+| Space chat reactions | `SPACE_CHAT_REACTION` | **not streamed** | — | — | out of scope (see below) |
+| Space config | `SPACE_CONFIG_*` | `SPACE_CONFIG_CATCH_UP` (not §25.6) | — | — | |
+| Moderation queue | `SPACE_MODERATION_SUBMITTED` / `_DECIDED` (targeted, to the host and reviewer households) | **never streamed** — a reviewer household's BEGIN to the host echoes what it holds by state (`mod_held`); the host re-sends the difference to that household alone | — | a missed decision is sent again on that echo | pending items are held by the submitter's household, the host and every household with a live admin / moderator seat (v_43) — never by a plain member household or a follower ([moderation.md](./moderation.md#re-delivery-and-catch-up)) |
+
+Out of scope, with the reason:
+
+- **Space chat reactions** carry no order stamp (`conversation_messages`
+  keeps a plain reaction map, shared with DMs): a host snapshot could only
+  overwrite a newer relayed reaction. Healing them needs a per-reaction
+  stamp — a migration on the DM table too — which fails the "smallest
+  change" bar for a retention-windowed, chat-only surface.
 
 **Long streams are not reaped mid-way.** A session's `last_activity` is
 stamped on every chunk (the provider on each shipped chunk, the requester
@@ -349,17 +833,17 @@ Covered — streamed row by row when changed:
 
 | Resource(s) | Stamped table | Also stamped by |
 |---|---|---|
-| `posts`, `posts_deleted`, `polls`, `schedules`, `bazaar` | `space_posts` | reactions (a column), moderation / soft-delete (an update), and a change to the post's `space_polls` / `space_poll_options` / `space_poll_votes` / `space_schedule_poll_meta` / `space_schedule_slots` / `bazaar_listings` / `bazaar_listing_faq` rows (insert, update, delete), which **touches** the post (`sync_seq = NULL`, re-stamped by the post's trigger) |
+| `posts`, `posts_deleted`, `polls`, `schedules`, `bazaar` | `space_posts` | reactions (a column), moderation / soft-delete (an update), and a change to the post's `space_polls` / `space_poll_options` / `space_poll_votes` / `space_schedule_poll_meta` / `space_schedule_slots` / `space_schedule_responses` / `bazaar_listings` / `bazaar_listing_faq` / `bazaar_bids` rows (insert, update, delete), which **touches** the post (`sync_seq = NULL`, re-stamped by the post's trigger). Since migration 0146 that includes a schedule answer (its `availability`), a bid (amount, message, state) and a poll's vote stamps / close stamp |
 | `comments`, `comments_deleted` | `space_post_comments` | |
 | `chat_messages`, `chat_messages_deleted` | `conversation_messages` | |
 | `gallery`, `gallery_albums_deleted`, `gallery_items_deleted` | `gallery_albums`, `gallery_items` | the 0085 album trigger that tombstones an album's items |
-| `calendar`, `calendar_deleted` | `space_calendar_events` | the 0085 trigger dropping a tombstoned event's RSVPs needs nothing: RSVPs are not part of the record, the tombstone carries the delete |
+| `calendar`, `calendar_deleted` | `space_calendar_events` | the 0085 trigger dropping a tombstoned event's RSVPs needs nothing: the tombstone carries the delete. An RSVP (`space_calendar_rsvps`: insert, a `status` change, delete) **touches** its event since migration 0146, so the event's record — with its RSVPs — rides the next incremental session |
 | `stickies`, `stickies_deleted` | `stickies` | |
 | `space_zones`, `space_zones_deleted` | `space_zones` | an `icon` change (0096 recreates the update trigger with the column); a record without an `icon` key (an older provider) keeps the receiver's stored icon, an explicit `null` clears it |
 | `task_lists`, `task_lists_deleted` | `space_task_lists` (0088) | |
 | `tasks`, `tasks_archived`, `tasks_deleted` | `space_tasks` (0088) | an edit, a status / position change, a move to another list, archive and unarchive (`archived_at`), a delete; the 0069 / 0071 list-tombstone trigger tombstones — and so stamps — the list's tasks |
 | `pages`, `pages_deleted` | `space_pages` (0088) | a change to the page's draft base (`side='base'`) or open conflict sides (`conflict=1`) — rows of `space_page_snapshots`, part of the page's record — **touches** the page (insert, update, delete; household snapshots touch nothing). `page_edit_history` is in no record and stamps nothing |
-| `timetables` | `space_timetables` (0088) | a delete stamps too, but `timetables` streams live rows only (deletes ride the live `SPACE_TIMETABLE_DELETED` outbox, as before) |
+| `timetables`, `timetables_deleted` (v_92) | `space_timetables` (0088) | a delete stamps the row; since v_92 the tombstone streams as `timetables_deleted` |
 
 The tombstone resources keep their existing keyset (`(deleted_at, id)`
 for tasks / lists / pages, the row id for the 0085 types) and are filtered
@@ -403,7 +887,12 @@ mirrors the host's members (a host stream lands there), whose rows and
 pictures every receiver refuses from it. Its own people's `members` rows
 still go because they carry the picture resets only their household may
 make (see "Receiver side" below). The session shape changes with the
-resource set, so the first session after the upgrade is a full one.
+resource set, so the first session after the upgrade is a full one. Nor does any household but the owner stream the owner
+household's own member rows (the owner seat, any seat its household holds):
+a delegated admin that synced with the owner holds them too, but they may
+only come from the owner (`MembersExporter`), and a receiver drops one that
+still arrives from anybody else, with a WARNING
+(`SpaceSyncReceiver._spare_owner_people`).
 
 Its **content** goes the same way (step 16, `provider._OWN_CONTENT_OWNERS`):
 it mirrors the whole space, but every receiver adds a row from it only
@@ -1086,7 +1575,11 @@ for the key it holds now. A household that admin invited
 rotation resumes it only on such a proof — naming the sender, for the pinned
 key and epoch (`apply_inviter_reproof`); an admin the rotation revoked cannot
 make one. A proof that names another household, an older key, or a key
-we do not pin is ignored. The stream whose sentinel resumed the trust was
+we do not pin is ignored. The household does not wait for the periodic tick:
+on the owner's rotation bundle it sends its inviting admin an incremental
+BEGIN right away (trigger 11 of the scheduler, `SpaceInviterReproofDue`) —
+one BEGIN per rotation and invited household, to one admin, answered by an
+incremental stream. The stream whose sentinel resumed the trust was
 applied under the member rules (the trust came back only at its end), so,
 like a held-back stream, it is not reported clean and its snapshot is not
 recorded — the next session re-streams under the restored trust. Owners and
@@ -1262,11 +1755,13 @@ and the sync handlers make no HTTP request.
   (`SyncWindow`, `SyncWindows`) and keyset paging (`SYNC_PAGE_SIZE`,
   `iter_pages`, `iter_tombstone_pages`).
 - `socialhome/federation/sync/space/exporters/{posts_deleted,comments_deleted}.py`
-  and `receiver.py` (`_persist_post_tombstones`,
+  and `receive_posts.py` (`_persist_post_tombstones`,
   `_persist_comment_tombstones`) — post / comment tombstones.
 - `socialhome/federation/sync/space/exporters/{row_tombstones,stickies_deleted,calendar_deleted,gallery_deleted,zones_deleted}.py`
-  and `receiver.py` (`_persist_{sticky,calendar,album,item,zone}_tombstones`,
-  `_writer_delete_admits`) — the migration-0085 tombstones.
+  and `receive_{stickies,calendar,gallery,zones}.py`
+  (`_persist_{sticky,calendar,album,item,zone}_tombstones`), with
+  `receiver_base.py` (`_writer_delete_admits`) — the migration-0085
+  tombstones.
 - `socialhome/federation/sync/space/watermark.py` (`SyncWatermarks`,
   `session_shape`, `FULL_RESYNC_INTERVAL_S`),
   `socialhome/repositories/space_sync_watermark_repo.py`,
@@ -1274,6 +1769,14 @@ and the sync handlers make no HTTP request.
   `iter_changed` of each covered exporter (`IncrementalExporter`,
   `record_batches(…, since=)` in `exporter.py`) and migration
   `0086_space_sync_change_stamps.sql` — incremental sessions.
+- `socialhome/federation/sync/space/host_contact.py` (`HostContact`),
+  `receiver.py` (`attach_host_contact`), `scheduler.py` (trigger 10,
+  `HOST_ANSWER_WAIT_S`, `HELPER_OVERLAP_S`), `space_post_repo
+  .newest_from_household`, `resume.py` (`attach_row_scope`,
+  `RESUME_MAX_AGE_S`) and `file_gate.py` (`SpaceFileBudget`) — trusted
+  helpers while the host is offline (v_92);
+  `provider.py` (`CATCHUP_MEDIA_MAX_AGE_S`, `CATCHUP_MEDIA_MAX_FILES`) and
+  `media_reference_repo.recent_item_files` — the bounded catch-up media.
 
 ## Spec references
 

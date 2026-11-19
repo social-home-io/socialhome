@@ -1,21 +1,22 @@
 """Household side of GFS mailboxes (GFS redesign PR 1 — library only).
 
-A household reached through a GFS gets one anonymous mailbox per (space,
-generation) there. This module holds what the household needs to own one:
+A household that reaches a space through a GFS owns ONE anonymous mailbox
+per (GFS, generation) there, shared by every space it reaches through that
+GFS (v_89). This module holds what the household needs to own one:
 
 * :func:`new_mailbox_root` / :func:`derive_mailbox_keys` — the mailbox's
   X25519 sealing key and Ed25519 claim key, both derived with HKDF-SHA256
   from the household's **mailbox root**: a dedicated 32-byte secret
-  generated once (:func:`new_mailbox_root`), the GFS id, the space id and
-  the generation. The root is stored under the household
+  generated once (:func:`new_mailbox_root`), the GFS id and the
+  generation. The root is stored under the household
   KEK beside its other secrets (wired in redesign PR 2). It is NOT the
   key-wrap seed: that key has its own job (sealing to the household) and
   its own rotation, and a mailbox key must never be able to reveal or
   depend on it. Besides the root, only ``gen`` needs storing: the keys come
   back from the root, the id from the claim key
   (:func:`socialhome.domain.gfs_mailbox.derive_mailbox_id`). Different
-  spaces / generations give unrelated keys and ids, so the GFS cannot link
-  them.
+  GFSs / generations give unrelated keys and ids, so neither two GFSs nor a
+  rotation link them.
 * :class:`TicketIssuer` / :func:`fetch_tickets` / :class:`MailboxTicketCache`
   — anonymous registration tickets (standard Privacy Pass, RFC 9578 token
   type 0x0002, :mod:`socialhome.privacy_pass`). The household asks for a
@@ -24,16 +25,16 @@ generation) there. This module holds what the household needs to own one:
   capability ``mailbox_tickets``; the GFS blind-signs and never sees the
   tokens. :class:`TicketKeyGuard` keeps the key consistent (one key per
   epoch, the same one an anonymous read of ``/gfs/info`` shows) before
-  blinding and before redeeming. The cache refills on its own jittered
-  daily schedule (:meth:`MailboxTicketCache.start`), never right after a
-  register: a fetch next to a register would let the GFS line them up.
+  blinding and before redeeming. The cache refills on its own daily
+  schedule (:meth:`MailboxTicketCache.start`); the mailbox service refills
+  an empty one before a register.
 * :func:`register_mailbox` — the anonymous ``POST /gfs/mailbox/register``
   with proof of possession, bound to the GFS id the household pinned (a
   cluster node answers to its siblings' and its former ids too). It tries
   without a ticket first and shows one only when the GFS answers
   ``ticket_required`` (a NEW mailbox), so re-registering never shows one.
 * :func:`unregister_mailbox` — the anonymous ``POST /gfs/mailbox/unregister``
-  signed by the mailbox key when the household leaves the space. The GFS
+  signed by the mailbox key when the household no longer needs it. The GFS
   answers 200 whatever happened (no oracle); ``False`` means the request did
   not get that answer (an older GFS without the route, a network fault) and
   the mailbox simply ages out in the idle sweep.
@@ -41,8 +42,6 @@ generation) there. This module holds what the household needs to own one:
   one mailbox per socket): answers the challenge, then yields the queued
   and live frames — ``dict`` for a JSON envelope frame, ``bytes`` for a
   binary ``\\x00SHR`` media frame, unchanged.
-
-Not wired into any space flow yet (that is redesign PR 2, v_88).
 """
 
 from __future__ import annotations
@@ -117,9 +116,6 @@ MIN_TICKET_EPOCH_DAYS: int = 7
 TICKET_EPOCH_SKEW_S: int = 3600
 #: Mean time between two ticket refills; each one is jittered ±50 %.
 TICKET_REFILL_PERIOD_S: float = 86_400.0
-#: A refill slot this close after a register (a ticket taken) is skipped:
-#: an identified fetch next to an anonymous register would tie them.
-TICKET_REFILL_QUIET_S: float = 3600.0
 #: Mean time between two anonymous ``/gfs/info`` reads; jittered ±50 %.
 TICKET_ANON_VIEW_PERIOD_S: float = 6 * 3600.0
 _DAY_S: int = 86_400
@@ -180,6 +176,12 @@ class MailboxTicketError(Exception):
         self.error = error
 
 
+class MailboxFlooded(ValueError):
+    """A frame on one of our mailboxes was dropped by that mailbox's inbound
+    budget (v_89). The mailbox service counts these and rotates a mailbox
+    that stays flooded."""
+
+
 class MailboxClaimError(Exception):
     """The claim socket was refused or broke before the claim completed.
     ``close_code`` is the GFS's WebSocket close code when it refused the
@@ -201,7 +203,6 @@ class MailboxClaimError(Exception):
 class MailboxKeys:
     """One mailbox's keys (secret — never logged, never stored: derive)."""
 
-    space_id: str
     gen: int
     kem_private: bytes
     kem_public: bytes
@@ -210,7 +211,7 @@ class MailboxKeys:
     mailbox_id: str
 
     def __repr__(self) -> str:  # never print the secrets
-        return f"MailboxKeys(space_id={self.space_id!r}, gen={self.gen})"
+        return f"MailboxKeys(gen={self.gen})"
 
 
 def _hkdf(seed: bytes, info: bytes) -> bytes:
@@ -227,41 +228,23 @@ def new_mailbox_root() -> bytes:
 def derive_mailbox_keys(
     mailbox_root: bytes,
     gfs_instance_id: str,
-    space_id: str,
     gen: int,
-    *,
-    peer: str | None = None,
 ) -> MailboxKeys:
-    """The mailbox keys of (*space_id*, *gen*[, *peer*]) at the GFS
-    *gfs_instance_id* under the household's dedicated *mailbox_root*
-    secret (:func:`new_mailbox_root`). The GFS id is in the derivation, so
-    two GFSs serving the same (global) space get unrelated mailboxes — they
-    can't match ids to link a household across servers. Pass the id the
-    household PINNED when it minted the mailbox (and keep using it: a GFS
-    that changes its id keeps answering to the old one as an alias)."""
+    """The keys of the household's mailbox of generation *gen* at the GFS
+    *gfs_instance_id* under its dedicated *mailbox_root* secret
+    (:func:`new_mailbox_root`). One mailbox per (GFS, gen) serves every space
+    the household reaches through that GFS (v_89). The GFS id is in the
+    derivation, so two GFSs get unrelated mailboxes — they can't match ids
+    to link a household across servers. Pass the id the household PINNED
+    when it minted the mailbox (and keep using it: a GFS that changes its id
+    keeps answering to the old one as an alias)."""
     if not gfs_instance_id or "|" in gfs_instance_id:
         raise ValueError("invalid GFS instance id")
     if len(mailbox_root) != MAILBOX_ROOT_BYTES:
         raise ValueError("mailbox root must be 32 bytes")
-    if not space_id or "|" in space_id:
-        raise ValueError("invalid space id")
     if isinstance(gen, bool) or not isinstance(gen, int) or gen < 0:
         raise ValueError("gen must be a non-negative integer")
-    if peer is not None and (not peer or "|" in peer):
-        raise ValueError("invalid peer instance id")
-    scope = (
-        b"|"
-        + gfs_instance_id.encode()
-        + b"|"
-        + space_id.encode()
-        + b"|"
-        + str(gen).encode()
-    )
-    if peer is not None:
-        # One mailbox per member PAIR (#1333): the counterpart is part of
-        # the keys, so a household's mailboxes for two members of one space
-        # are as unrelated as two spaces'.
-        scope += b"|peer:" + peer.encode()
+    scope = b"|" + gfs_instance_id.encode() + b"|household|" + str(gen).encode()
     kem_private = _hkdf(mailbox_root, _KEM_INFO + scope)
     sign_seed = _hkdf(mailbox_root, _SIGN_INFO + scope)
     kem_public = (
@@ -271,7 +254,6 @@ def derive_mailbox_keys(
     )
     sign_public = ed25519_public_key(sign_seed)
     return MailboxKeys(
-        space_id=space_id,
         gen=gen,
         kem_private=kem_private,
         kem_public=kem_public,
@@ -591,20 +573,15 @@ class MailboxTicketCache:
     restart costs nothing that matters.
 
     Refills run on their own schedule (:meth:`start`): about once per
-    *period*, each wait jittered ±50 %, and a slot within *quiet* seconds
-    after a register (a ticket taken) is skipped. :meth:`take` never
-    fetches: an identified fetch next to an anonymous register would let
-    the GFS pair the two by time — and a GFS that refused a register on
-    purpose could force exactly that."""
+    *period* (spread ±50 % for load); the mailbox service also refills an
+    empty cache before a register. :meth:`take` itself never fetches."""
 
     __slots__ = (
         "_batch",
         "_fetch",
         "_guard",
-        "_last_take",
         "_lock",
         "_period",
-        "_quiet",
         "_rng",
         "_stop",
         "_task",
@@ -618,7 +595,6 @@ class MailboxTicketCache:
         batch: int,
         guard: TicketKeyGuard,
         period: float = TICKET_REFILL_PERIOD_S,
-        quiet: float = TICKET_REFILL_QUIET_S,
         rng: random.Random | None = None,
     ) -> None:
         self._fetch = fetch
@@ -627,9 +603,7 @@ class MailboxTicketCache:
         self._tickets: list[bytes] = []
         self._lock = asyncio.Lock()
         self._period = period
-        self._quiet = quiet
         self._rng = rng if rng is not None else random.SystemRandom()
-        self._last_take = -float("inf")
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
 
@@ -664,25 +638,14 @@ class MailboxTicketCache:
         self._task = None
 
     async def _slot(self) -> None:
-        await self.refill_if_quiet()
-
-    async def refill_if_quiet(self) -> bool:
-        """:meth:`refill`, unless a ticket was taken within the quiet window
-        (an identified fetch right after an anonymous register would tie
-        them) — e.g. on a (re)connect, so a fresh household is not without
-        tickets until the first daily slot. Returns whether it refilled."""
-        if time.monotonic() - self._last_take < self._quiet:
-            return False  # right after a register: wait for another slot
         await self.refill()
-        return True
 
     def take(self) -> bytes:
         """One unspent ticket (it leaves the cache: a ticket is never
         offered twice). Raises :class:`MailboxTicketError` ``no_ticket``
-        when empty — never fetches (see the class docstring)."""
+        when empty — never fetches."""
         if not self._tickets:
             raise MailboxTicketError(0, "no_ticket")
-        self._last_take = time.monotonic()
         return self._tickets.pop()
 
     def put_back(self, ticket: bytes) -> None:

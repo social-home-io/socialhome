@@ -32,10 +32,9 @@ with one prefix per statement, so no signature can be lifted onto another:
 ``gfs-channel-register:v1:``       registration (by the key being pinned)
 ``gfs-channel-epoch:v1:``          epoch notice
 ``gfs-channel-unregister:v1:``     unregister
-``gfs-channel-cert:v1:``           :class:`ChannelCert`
 ``gfs-channel-pass:v1:``           :class:`ChannelPass`
 ``gfs-channel-writer-key-cert:v1:`` :class:`ChannelWriterKeyCert`
-``gfs-channel-publish-anon:v1:``   strict publish (by the channel writer key)
+``gfs-channel-publish-anon:v1:``   publish (by the channel writer key)
 ``gfs-channel-binding:v1:``        grant binding (by the SPACE authority key)
 =================================  ===========================================
 """
@@ -61,7 +60,6 @@ from .domain.gfs_channel import (
     CHANNEL_SUITE_ED25519,
     SUPPORTED_CHANNEL_BINDING_SUITES,
     SUPPORTED_CHANNEL_SUITES,
-    ChannelCert,
     ChannelEpochNotice,
     ChannelPass,
     ChannelPublishAnonRequest,
@@ -73,7 +71,7 @@ from .domain.gfs_channel import (
     UnsupportedChannelSuite,
     canonical,
 )
-from .domain.writer_cert import MAX_WRITER_CERT_EPOCH, WRITER_SCOPES, scope_permits
+from .domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from .domain.writer_key import (
     SUPPORTED_WRITER_KEY_SUITES,
     WRITER_KEY_SUITE_ED25519,
@@ -87,7 +85,6 @@ _OFFSET_SALT: bytes = b"socialhome-gfs-channel-epoch-offset:v1"
 REGISTER_PREFIX: bytes = b"gfs-channel-register:v1:"
 NOTICE_PREFIX: bytes = b"gfs-channel-epoch:v1:"
 UNREGISTER_PREFIX: bytes = b"gfs-channel-unregister:v1:"
-CERT_PREFIX: bytes = b"gfs-channel-cert:v1:"
 PASS_PREFIX: bytes = b"gfs-channel-pass:v1:"
 WRITER_KEY_CERT_PREFIX: bytes = b"gfs-channel-writer-key-cert:v1:"
 ANON_PREFIX: bytes = b"gfs-channel-publish-anon:v1:"
@@ -201,66 +198,7 @@ def verify_signature(
         raise InvalidChannelSignature("signature does not verify")
 
 
-# ─── Cert / pass / writer key ────────────────────────────────────────────
-
-
-def issue_channel_cert(
-    *,
-    channel_seed: bytes,
-    channel_id: str,
-    epoch: int,
-    instance_pk: bytes,
-    scope: str,
-    issued_at: int | None = None,
-) -> ChannelCert:
-    if scope not in WRITER_SCOPES:
-        raise ValueError(f"unknown scope {scope!r}")
-    if len(instance_pk) != 32:
-        raise ValueError("instance_pk must be 32 bytes")
-    unsigned = ChannelCert(
-        channel_suite=CHANNEL_SUITE_ED25519,
-        channel_id=channel_id,
-        epoch=_check_epoch(epoch),
-        instance_pk=b64url_encode(instance_pk),
-        scope=scope,
-        issued_at=int(time.time()) if issued_at is None else int(issued_at),
-        cert_sig="",
-    )
-    return replace(
-        unsigned, cert_sig=_sign(channel_seed, CERT_PREFIX, unsigned.signing_body())
-    )
-
-
-def verify_channel_cert(
-    cert: ChannelCert,
-    *,
-    channel_pk: bytes,
-    channel_id: str,
-    epoch: int,
-    author_pk: bytes,
-    required_scope: str,
-) -> None:
-    """``cert`` authorizes ``author_pk`` at ``required_scope`` in
-    ``channel_id`` during ``epoch``, under the pinned ``channel_pk``."""
-    verify_signature(
-        prefix=CERT_PREFIX,
-        body=cert.signing_body(),
-        signature=cert.cert_sig,
-        public_key=channel_pk,
-        suite=cert.channel_suite,
-    )
-    if cert.channel_id != channel_id:
-        raise InvalidChannelSignature("cert is for another channel")
-    if cert.epoch != epoch:
-        raise InvalidChannelSignature("cert is for another epoch")
-    if _pk_bytes(cert.instance_pk) != author_pk:
-        raise InvalidChannelSignature("cert names another household")
-    if required_scope not in WRITER_SCOPES or not scope_permits(
-        cert.scope, required_scope
-    ):
-        raise InvalidChannelSignature(
-            f"scope {cert.scope!r} does not permit {required_scope!r}"
-        )
+# ─── Pass / writer key ───────────────────────────────────────────────────
 
 
 def issue_channel_pass(
@@ -431,7 +369,6 @@ def sign_notice(
     gfs_instance_id: str,
     ts: str,
     epoch: int,
-    publish_mode: str,
     writer_key_cert: ChannelWriterKeyCert | None = None,
     gfs_key: str | None = None,
 ) -> ChannelEpochNotice:
@@ -442,7 +379,6 @@ def sign_notice(
         ts=ts,
         nonce=b64url_encode(secrets.token_bytes(16)),
         epoch=_check_epoch(epoch),
-        publish_mode=publish_mode,
         channel_sig="",
         writer_key_cert=writer_key_cert,
         gfs_key=gfs_key,
@@ -553,20 +489,16 @@ def verify_grant(
     own_pk: bytes,
 ) -> bytes | None:
     """Everything a member household checks on a delivered grant: the space
-    binding, a supported channel suite, the pass (if any) and cert naming
-    ``own_pk`` for this channel and epoch under ``channel_pk``, and a writer
-    key that matches its pin. Returns the writer seed (or ``None``)."""
+    binding, a supported channel suite, the pass (if any) naming ``own_pk``
+    for this channel and epoch under ``channel_pk``, and a writer key that
+    matches its pin. Returns the writer seed (or ``None``)."""
     _check_suite(grant.channel_suite)
     if grant.space_id != space_id:
         raise InvalidChannelSignature("grant is for another space")
     verify_grant_binding(grant, space_pubkey=space_pubkey)
     channel_pk = _pk_bytes(grant.channel_pk)
     wire_epoch = grant.channel_epoch
-    if (
-        grant.channel_pass is None
-        and grant.channel_cert is None
-        and (grant.writer_key is None)
-    ):
+    if grant.channel_pass is None and grant.writer_key is None:
         raise InvalidChannelSignature("grant grants nothing")
     if grant.channel_pass is not None:
         if grant.channel_pass.epoch != wire_epoch:
@@ -576,15 +508,6 @@ def verify_grant(
             channel_pk=channel_pk,
             channel_id=grant.channel_id,
             instance_pk=own_pk,
-        )
-    if grant.channel_cert is not None:
-        verify_channel_cert(
-            grant.channel_cert,
-            channel_pk=channel_pk,
-            channel_id=grant.channel_id,
-            epoch=wire_epoch,
-            author_pk=own_pk,
-            required_scope=grant.channel_cert.scope,
         )
     if grant.writer_key is None:
         return None

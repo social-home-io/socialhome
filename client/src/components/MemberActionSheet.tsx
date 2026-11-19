@@ -16,6 +16,7 @@
 import { signal } from '@preact/signals'
 import { api, ApiError } from '@/api'
 import { parseSpaceRole, roleChangeOptions, type SpaceRole } from '@/features/spaces/spaceRoles'
+import { AdminGrantCheck } from './AdminGrantCheck'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -27,6 +28,7 @@ const memberUserId = signal('')
 const memberRole = signal('')
 const memberInstanceId = signal<string | null>(null)
 const actorRole = signal<SpaceRole | undefined>(undefined)
+const adminsActForOwner = signal(false)
 const spaceId = signal('')
 const showBanConfirm = signal(false)
 const roleError = signal<string | null>(null)
@@ -38,12 +40,15 @@ export function openMemberActions(
   role: string,
   instanceId: string | null = null,
   viewerRole?: SpaceRole,
+  /** The space's "Let admins act for me" switch — see AdminGrantCheck. */
+  actForOwner = false,
 ) {
   spaceId.value = sid
   memberUserId.value = userId
   memberRole.value = role
   memberInstanceId.value = instanceId
   actorRole.value = viewerRole
+  adminsActForOwner.value = actForOwner
   roleError.value = null
   roleBusy.value = false
   open.value = true
@@ -154,6 +159,12 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
                   {t(ROLE_OPTION_KEY[r])}
                 </Button>
               ))}
+              {/* Admin on offer for another household's member: who it
+                  is (household ID) and what the role gives. */}
+              {memberInstanceId.value && roleOptions.includes('admin') && (
+                <AdminGrantCheck householdId={memberInstanceId.value}
+                                 actsForSpace={adminsActForOwner.value} />
+              )}
               {roleError.value && (
                 <p class="sh-member-actions-error" role="alert">{roleError.value}</p>
               )}

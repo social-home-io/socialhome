@@ -46,7 +46,6 @@ from ..csp import MEDIA_CSP
 from ..domain.child_protection import name_only
 from ..domain.errors import CodedError, ImageTooLargeError
 from ..domain.federation import PairingStatus
-from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.local_community import local_area_of, local_area_wire
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
@@ -113,8 +112,7 @@ def _features_from_body(
 
     The wire shape mirrors :meth:`SpaceFeatures.to_wire_dict` —
     boolean flags + access-level enums + an ``allowed_post_types``
-    list + ``gfs_publish_mode`` (``"trusted"`` / ``"strict"``, owner-only) +
-    ``private_gfs`` (boolean, owner-only, private spaces).
+    list + ``private_gfs`` (boolean, owner-only, private spaces).
     Missing keys fall back to *defaults*.
     Returns ``None`` when the caller didn't include a ``features``
     block, so the service layer treats it as "leave unchanged".
@@ -128,13 +126,8 @@ def _features_from_body(
     """
     if not isinstance(raw, dict):
         return None
-    # v_50 — ``gfs_publish_mode`` is a privacy setting: an unknown value is a
-    # 422, never silently read as the default (owner-only is enforced by the
-    # service).
-    mode = raw.get("gfs_publish_mode")
-    if mode is not None and mode not in GFS_PUBLISH_MODES:
-        raise ValueError("gfs_publish_mode must be 'trusted' or 'strict'")
-    # ``private_gfs`` likewise: a JSON boolean, never a truthy string.
+    # ``private_gfs`` is a privacy setting: a JSON boolean, never a truthy
+    # string (owner-only is enforced by the service).
     private_gfs = raw.get("private_gfs")
     if private_gfs is not None and not isinstance(private_gfs, bool):
         raise ValueError("private_gfs must be a boolean")

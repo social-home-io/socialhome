@@ -34,7 +34,7 @@ from socialhome.crypto import (
     generate_x25519_keypair,
     sign_ed25519,
 )
-from socialhome.domain.events import SpaceRemoteSeatLive
+from socialhome.domain.events import SpaceMemberJoined, SpaceRemoteSeatLive
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -258,6 +258,12 @@ class _FakeSpaceRepo:
 
     async def save_member(self, member):
         self.members.append(member)
+
+    async def get_member(self, space_id, user_id):
+        for m in self.members:
+            if m.space_id == space_id and m.user_id == user_id:
+                return m
+        return None
 
     async def list_members(self, space_id):
         return [m for m in self.members if getattr(m, "space_id", None) == space_id]
@@ -661,6 +667,64 @@ async def test_redeem_seats_local_stub_and_membership_from_ack_meta():
     # A redeem is the user's accept: pending private invitations from any
     # other household for this space can no longer be joined (0093).
     assert sender_repo.expired_except == ("sp-meta", frozenset({"issuer-1"}))
+
+
+def _joins_announced(coordinator) -> list[tuple[str, str, str]]:
+    """The ``SpaceMemberJoined`` events *coordinator* published."""
+    return [
+        (ev.space_id, ev.user_id, ev.role)
+        for ev in (c.args[0] for c in coordinator._bus.publish.await_args_list)
+        if isinstance(ev, SpaceMemberJoined)
+    ]
+
+
+async def test_a_redeem_announces_the_new_local_member():
+    """The joiner side of a redeem says "a local person is a member now"
+    with the event a host-side seat publishes. Nothing did: a household
+    that joined a publicly readable space took its fan-out seat on the
+    space's connection servers (``GfsMemberPublishService`` reacts to this
+    event) only on its next reconnect, and received nothing published
+    through them until then."""
+    sender, _issuer, *_rest, issuer_repo, _im = _wire_pair(
+        {"space_id": "sp-meta", "created_by": "owner", "uses_remaining": 2},
+    )
+    issuer_repo.space_rows_for_get["sp-meta"] = _a_space("sp-meta")
+    await sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    assert _joins_announced(sender) == [("sp-meta", "u-local", "member")]
+
+    # A second redeem for a person already seated announces nothing more.
+    await sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    assert _joins_announced(sender) == [("sp-meta", "u-local", "member")]
+
+
+async def test_a_redeem_that_seats_nobody_announces_nobody():
+    """No snapshot in the ACK (an old issuer): no stub, no membership row,
+    so no join to announce."""
+    sender, *_rest = _wire_pair(
+        {"space_id": "sp-1", "created_by": "owner", "uses_remaining": 1},
+    )
+    await sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    assert sender._spaces.members == []  # type: ignore[attr-defined]
+    assert _joins_announced(sender) == []
+
+
+async def test_a_bootstrap_redeem_announces_the_new_local_member():
+    """The same for a household seated from a link through a connection
+    server alone — the one that has no other way to the space."""
+    env = _bootstrap_pair()
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert _joins_announced(env.redeemer) == [("space-1", "u-local", "member")]
 
 
 async def test_redeem_blocks_underage_minor_and_seats_nothing():
@@ -1314,6 +1378,7 @@ async def test_redeem_round_trip_via_mesh_routing():
         "created_by": "owner",
         "uses_remaining": 1,
     }
+    issuer_repo.space_rows_for_get["sp-routed"] = _a_space("sp-routed")
     issuer_members = _FakeRemoteMemberRepo()
     # The issuer's route service holds the priv for the pub it would
     # have minted in case 4 of FIND_ROUTE. We seed it here so the
@@ -1387,6 +1452,10 @@ async def test_redeem_round_trip_via_mesh_routing():
         issuer_instance_id="issuer-1",
     )
     assert result == {"space_id": "sp-routed", "role": "member"}
+
+    # The mesh-routed redeem seats the person and says so (the fan-out
+    # seat on the space's connection servers hangs off this event).
+    assert _joins_announced(sender) == [("sp-routed", "u-local", "member")]
 
     # The sender's outbound was wrapped in SPACE_ROUTED, not a bare
     # SPACE_INVITE_TOKEN_REDEEM.

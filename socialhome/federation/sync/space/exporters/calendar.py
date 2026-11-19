@@ -8,16 +8,35 @@ calendar events (the retention sweep touches posts and chat only), so a
 window would hide from a member events the space still shows, and one
 relative to the clock would make a full and an incremental session
 disagree as rows drift across its edge. Deletes ride ``calendar_deleted``.
+
+v_92: a record also carries the event's RSVPs (``rsvps``: ``{user_id,
+occurrence_at, status, updated_at}`` — every member household gets each
+RSVP live, through ``SPACE_RSVP_UPDATED``), the latest
+:data:`MAX_RSVPS_PER_EVENT` occurrences' worth; ``rsvps_partial`` marks a
+list that was cut. A v_92 receiver takes them from the space's host:
+everybody's RSVPs but its own people's, and — unless the list was cut —
+drops the ones the host no longer holds. An RSVP changes no row the change
+stamps cover (migration 0086), so a missed one heals on the host's daily
+full stream. A requester below v_92 gets the record without them
+(:meth:`CalendarExporter.without_rsvps`).
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from .....domain.calendar import OCCURRENCE_ID_SEPARATOR, is_occurrence_id
+import orjson
+
+from .....domain.calendar import (
+    MAX_RSVPS_PER_EVENT,
+    OCCURRENCE_ID_SEPARATOR,
+    RSVP_RECORD_MAX_BYTES,
+    calendar_record,
+    is_occurrence_id,
+)
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, iter_pages
 
@@ -29,10 +48,17 @@ if TYPE_CHECKING:
 class CalendarExporter(PagedExporterMixin):
     resource = "calendar"
 
-    __slots__ = ("_repo",)
+    __slots__ = ("_repo", "_rsvps")
 
-    def __init__(self, space_calendar_repo: AbstractSpaceCalendarRepo) -> None:
+    def __init__(
+        self, space_calendar_repo: AbstractSpaceCalendarRepo, *, rsvps: bool = True
+    ) -> None:
         self._repo = space_calendar_repo
+        self._rsvps = rsvps
+
+    def without_rsvps(self) -> CalendarExporter:
+        """The record set of a requester below v_92: no RSVPs."""
+        return CalendarExporter(self._repo, rsvps=False)
 
     def expanded(self) -> ExpandedCalendarExporter:
         """The record set for a requester below v_56 (see there)."""
@@ -45,8 +71,8 @@ class CalendarExporter(PagedExporterMixin):
         self, space_id: str, since: int
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """The events changed after ``since`` (an incremental session).
-        RSVPs are not part of the record, so an RSVP change streams nothing
-        here."""
+        An RSVP stamps nothing, so an RSVP change alone streams nothing
+        here — it rides the host's daily full stream (v_92 ``rsvps``)."""
         return self._pages(space_id, since)
 
     async def _pages(
@@ -58,7 +84,37 @@ class CalendarExporter(PagedExporterMixin):
             )
 
         async for events in iter_pages(page):
-            yield [_event_to_dict(e) for e in events]
+            records = [calendar_record(e) for e in events]
+            if self._rsvps:
+                for record in records:
+                    await self._add_rsvps(record)
+            yield records
+
+    async def _add_rsvps(self, record: dict[str, Any]) -> None:
+        # When the list was read: an RSVP the receiver got live after this
+        # is never dropped for being absent from it (last writer wins).
+        record["rsvps_at"] = datetime.now(UTC).isoformat()
+        held = await self._repo.list_rsvps(record["id"])
+        held.sort(key=lambda r: (r.occurrence_at, r.user_id), reverse=True)
+        # Held out of the event's measured size under their own hard caps
+        # (``domain/relay_media_frame.py``): an entry larger than
+        # ``RSVP_RECORD_MAX_BYTES`` is not sent, nor any past the count.
+        entries = [
+            entry
+            for entry in (
+                {
+                    "user_id": r.user_id,
+                    "occurrence_at": r.occurrence_at,
+                    "status": r.status,
+                    "updated_at": r.updated_at,
+                }
+                for r in held
+            )
+            if len(orjson.dumps(entry)) <= RSVP_RECORD_MAX_BYTES
+        ]
+        record["rsvps"] = entries[:MAX_RSVPS_PER_EVENT]
+        if len(record["rsvps"]) < len(held):
+            record["rsvps_partial"] = True
 
 
 #: The window an older requester's record set is expanded in (the shape
@@ -105,7 +161,7 @@ class ExpandedCalendarExporter:
             end=now + _EXPANDED_WINDOW,
             since=since,
         )
-        return [_event_to_dict(_as_occurrence(e)) for e in events]
+        return [calendar_record(_as_occurrence(e)) for e in events]
 
 
 def _as_occurrence(event: CalendarEvent) -> CalendarEvent:
@@ -118,13 +174,3 @@ def _as_occurrence(event: CalendarEvent) -> CalendarEvent:
             id=f"{event.id}{OCCURRENCE_ID_SEPARATOR}{event.start.isoformat()}",
         )
     return event
-
-
-def _event_to_dict(event: CalendarEvent) -> dict[str, Any]:
-    d = asdict(event)
-    for field in ("start", "end"):
-        v = d.get(field)
-        if v is not None and not isinstance(v, str):
-            d[field] = v.isoformat()
-    d["attendees"] = list(d.get("attendees") or ())
-    return d

@@ -5,7 +5,8 @@ Drives a real GFS app end to end with the households' real services: the
 owner's :class:`GfsChannelService` registers the channel and announces its
 epoch (the owner turned ``private_gfs`` ON); a link-joined member and a
 paired member both take a seat, and the paired member publishes through the
-real :class:`GfsMemberPublishService` (trusted, then strict). A private space
+real :class:`GfsMemberPublishService` (anonymously, the one mode since
+v_90). A private space
 with the option OFF sends the server nothing at all.
 Every place the server could see or keep anything is checked — every request
 it receives over every session (URL and body), its log records, its database
@@ -114,9 +115,6 @@ class _Gfs:
 
     async def refresh_if_stale(self, conn):
         return conn
-
-    async def member_publish_trusted_supported(self, conn):
-        return True
 
     async def member_publish_strict_supported(self, conn):
         return True
@@ -280,7 +278,7 @@ _CHOSEN = sign_gfs_server_list(
 )
 
 
-def _space(owner: str, *, strict: bool = False) -> Space:
+def _space(owner: str) -> Space:
     return Space(
         gfs_servers=_CHOSEN,
         id=SPACE_ID,
@@ -289,9 +287,7 @@ def _space(owner: str, *, strict: bool = False) -> Space:
         owner_username="o",
         identity_public_key=SPACE_PK.hex(),
         config_sequence=0,
-        features=SpaceFeatures(
-            gfs_publish_mode="strict" if strict else "trusted", private_gfs=True
-        ),
+        features=SpaceFeatures(private_gfs=True),
         space_type=SpaceType.PRIVATE,
         join_mode=JoinMode.INVITE_ONLY,
     )
@@ -417,15 +413,14 @@ async def test_the_gfs_never_learns_the_private_space(world):
     await _grant(world, world.a)
     await _grant(world, world.b)
 
-    # Trusted: paired b publishes; link-joined a's seat gets it.
+    # Paired b publishes (anonymously, under the channel writer key its
+    # grant carries); link-joined a's seat gets it.
     targets = await world.b.member.plan_item(SPACE_ID, AUTHOR, "post")
     assert targets
     inner = {"post_id": "p-1", "space_id": SPACE_ID, "content": "secret recipe"}
     assert await world.b.member.publish_item(SPACE_ID, "post", inner, targets)
 
-    # Strict: the owner switches; new grants carry the channel writer key.
-    for node in (world.owner, world.a, world.b):
-        node.spaces.space = _space(world.owner.h.instance_id, strict=True)
+    # A rotation: the next epoch's grants carry the next writer key.
     await world.owner.channels.announce_epoch(SPACE_ID)
     await _grant(world, world.a)
     await _grant(world, world.b)

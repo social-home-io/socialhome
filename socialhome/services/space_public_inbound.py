@@ -93,6 +93,7 @@ from ..domain.gfs_member_publish import (
     SpaceItemFrame,
 )
 from ..domain.link_preview import card_survives_edit
+from ..domain.media_constraints import space_media_ref
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
 from ..domain.space import SpaceRole
@@ -111,6 +112,7 @@ from ..domain.space_item import (
     required_scope,
     stamp_to_db,
 )
+from ..domain.space_media_fields import replace_item_media
 from ..domain.space_media_ref import SpaceMediaLocalization, post_media_urls
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..federation.pending_parent_buffer import (
@@ -123,12 +125,7 @@ from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
 from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
-from .inbound_media_store import (
-    is_gfs_space_media_name,
-    media_basename,
-    space_media_ref,
-    space_media_refs,
-)
+from .inbound_media_store import media_basename, space_media_refs
 from .link_preview_service import (
     space_wire_link_preview,
 )
@@ -139,9 +136,11 @@ from .space_item_author import (
 )
 from .space_item_inbound import SpaceItemInbound
 from .space_public_author import (
+    UnsupportedFilesSigSuite,
     UnsupportedLinkPreviewSigSuite,
     UnsupportedMediaRefsSigSuite,
     signed_media_refs,
+    verified_file_hashes,
     verified_link_preview,
     verify_signed_author_inner,
 )
@@ -324,7 +323,7 @@ class SpacePublicInbound:
         """A member item relayed through a PRIVATE space's opaque channel
         (v_51). The channel frame names no space — the caller mapped its
         channel id to ``space_id`` locally — and carries no cert; the item
-        then gets exactly the checks of a strict-mode ``space_item`` (the
+        then gets exactly the checks of a ``space_item`` (the
         writer cert from inside the ciphertext against the pinned space key,
         the inner's signed ``space_id`` equal to this space, epoch
         freshness, the author signature, the roster)."""
@@ -558,7 +557,7 @@ class SpacePublicInbound:
 
         post = self._post_from_inner(post_id, author_user_id, inner)
         media = await self._localize_media(space_id, post, origin_instance_id, inner)
-        post = _only_described_files(media.post(post))
+        post = _only_described_files(media.post(post), media)
         if await self._posts.save(space_id, post) is None:
             log.warning(
                 "space_public.inbound: post %s already exists in another space "
@@ -617,7 +616,7 @@ class SpacePublicInbound:
             space.id,
         )
 
-    # ── Member-published items (v_49 trusted mode) ───────────────────────
+    # ── Member-published items (v_49) ────────────────────────────────────
 
     async def _on_space_item(self, frame: dict[str, Any]) -> None:
         """A ``space_item`` a member household published itself over the GFS.
@@ -631,9 +630,8 @@ class SpacePublicInbound:
         other type its own domain and suite); require the author-bound
         ``item_type`` (and for a post-shaped inner ``item_target ==
         post_id``); require the origin to be the author's household and the
-        inner cert (identical to the frame's) valid for this space, the
-        frame's epoch (a strict-mode frame, v_50, carries no plaintext cert —
-        the inner one is then the only one), the inner's ``author_pk`` and
+        inner cert (the only one — a frame carries none) valid for this
+        space, the frame's epoch, the inner's ``author_pk`` and
         :func:`~socialhome.domain.space_item.required_scope`, at an epoch
         still open here, with a v2 user binding naming the author. Then
         apply by type: a post dedupes by id; a post edit lands last-writer-
@@ -701,11 +699,10 @@ class SpacePublicInbound:
             epoch=item.epoch,
             item_type=item_type,
             inner=inner,
-            frame_cert=item.writer_cert,
         )
         if verified is None:
             return
-        inner_cert, item_id, author_user_id, origin_instance_id = verified
+        _cert, item_id, author_user_id, origin_instance_id = verified
         post_shaped = item_type in POST_SHAPED_ITEM_TYPES
         member_household = await self._holds_writer_seat(item.space_id)
         if not post_shaped:
@@ -715,7 +712,6 @@ class SpacePublicInbound:
                     item_type=item_type,
                     inner=inner,
                     origin_instance_id=origin_instance_id,
-                    cert_scope=inner_cert.scope,
                     member_household=member_household,
                     authorship=self._authorship,
                     epoch=item.epoch,
@@ -768,7 +764,6 @@ class SpacePublicInbound:
         epoch: int,
         item_type: str,
         inner: dict[str, Any],
-        frame_cert: object | None,
         fresh_epoch: bool = True,
     ) -> tuple[WriterCert, str, str, str] | None:
         """Every check a member-published item gets before it is applied
@@ -824,16 +819,11 @@ class SpacePublicInbound:
             inner_cert = WriterCert.from_wire(raw_cert)
         except ValueError:
             inner_cert = None
-        # A trusted-mode frame carries only the v1 fields (the binding never
-        # leaves the ciphertext): they must be exactly the inner cert's. A
-        # strict-mode frame (v_50) carries no cert at all — the inner one is
-        # the only one, and it gets every check below either way.
-        if inner_cert is None or (
-            frame_cert is not None and inner_cert.v1() != frame_cert
-        ):
+        # The frame carries no cert: the inner one is the only one, and it
+        # gets every check below.
+        if inner_cert is None:
             log.warning(
-                "space_public.inbound: space_item %s cert differs from the frame's "
-                "— dropped",
+                "space_public.inbound: space_item %s carries no valid cert — dropped",
                 item_id,
             )
             return None
@@ -930,18 +920,16 @@ class SpacePublicInbound:
                     epoch=epoch,
                     item_type=ITEM_TYPE_AUTHOR_PROFILE,
                     inner=raw,
-                    frame_cert=None,
                     fresh_epoch=False,
                 )
                 if verified is None:
                     continue
-                inner_cert, _id, _author, origin = verified
+                _cert, _id, _author, origin = verified
                 if await self._items.apply(
                     space=space,
                     item_type=ITEM_TYPE_AUTHOR_PROFILE,
                     inner=raw,
                     origin_instance_id=origin,
-                    cert_scope=inner_cert.scope,
                     member_household=await self._holds_writer_seat(space_id),
                     authorship=self._authorship,
                     epoch=epoch,
@@ -992,12 +980,28 @@ class SpacePublicInbound:
                 "not sign — dropped",
                 post.id,
             )
+        # The author-signed file hashes: with them each file takes
+        # its content name (``sc-``), the one name it has on every path, so
+        # a member that gets this copy before the host's direct one names
+        # it exactly as that one would (and can still ask the host or a
+        # helper for it, ``SPACE_MEDIA_WANTED``).
+        try:
+            hashes = verified_file_hashes(inner)
+        except UnsupportedFilesSigSuite as exc:
+            log.warning(
+                "space_public.inbound: post %s file hashes signature suite %s "
+                "unsupported — dropped",
+                post.id,
+                exc,
+            )
+            hashes = {}
         return await self._gfs_media.localize(
             space_id,
             refs,
             post_media_urls(post),
             item_id=post.id,
             origin=origin_instance_id,
+            hashes=hashes,
         )
 
     async def _heal_media(
@@ -1037,7 +1041,7 @@ class SpacePublicInbound:
         )
         if not media.refs:
             return
-        files = _only_described_files(media.post(incoming))
+        files = _only_described_files(media.post(incoming), media)
         preview = post.link_preview
         healed = replace(
             post,
@@ -1105,7 +1109,7 @@ class SpacePublicInbound:
             media = await self._localize_media(
                 space_id, post, origin_instance_id, inner
             )
-            post = _only_described_files(media.post(post))
+            post = _only_described_files(media.post(post), media)
             if await self._posts.save(space_id, post) is None:
                 log.warning(
                     "space_public.inbound: post %s already exists in another space "
@@ -1309,32 +1313,26 @@ class SpacePublicInbound:
         )
 
 
-def _only_described_files(post: Post) -> Post:
+def _only_described_files(post: Post, media: SpaceMediaLocalization) -> Post:
     """``post`` with only the file references a signed GFS descriptor
-    renamed to this household's reader name (``sg-``,
-    :func:`is_gfs_space_media_name`). On the relay path that is the only
-    way the author's bytes reach this household; any other name — an
-    ``sd-`` file received from some household over federation, or a plain
-    name that may be one of this household's own uploads, from another
-    space even — would show a file the relayed author never sent. Apply
-    after the localization. The link card stays; only its picture goes."""
+    renamed to this household's name for the GFS copy — a reader name
+    (``sg-``), or the content name (``sc-``) when the author-signed hashes
+    cover the file: exactly the names *media* produced. On the relay path
+    that is the only way the author's bytes reach this household; any other
+    name — an ``sd-`` file received from some household over federation, a
+    raw ``sc-`` name, or a plain name that may be one of this household's
+    own uploads, from another space even — would show a file the relayed
+    author never sent. Apply after the localization. The link card stays;
+    only its picture goes.
+
+    Every field the space media-field registry lists for a post
+    (:func:`replace_item_media`)."""
+    described = set(media.names.values())
 
     def keep(url: str | None) -> bool:
-        return bool(url) and is_gfs_space_media_name(media_basename(url))
+        return bool(url) and media_basename(url) in described
 
-    preview = post.link_preview
-    file_meta = post.file_meta
-    return replace(
-        post,
-        media_url=post.media_url if keep(post.media_url) else None,
-        image_urls=tuple(u for u in post.image_urls or () if keep(u)),
-        link_preview=(
-            replace(preview, thumbnail_url=None)
-            if preview is not None and not keep(preview.thumbnail_url)
-            else preview
-        ),
-        file_meta=file_meta if file_meta is None or keep(file_meta.url) else None,
-    )
+    return replace_item_media("posts", post, lambda u: u if keep(u) else None)
 
 
 def _retained_bytes(frame: dict) -> int:

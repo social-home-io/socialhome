@@ -16,7 +16,11 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from socialhome.crypto import derive_instance_id, ed25519_public_key
+from socialhome.crypto import (
+    derive_instance_id,
+    ed25519_public_key,
+    generate_identity_keypair,
+)
 from socialhome.domain.events import (
     PeerCapabilitiesAdvertised,
     PeerTransportChanged,
@@ -36,6 +40,7 @@ from socialhome.gfs_channel import (
     derive_channel_seed,
 )
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
+from socialhome.global_server import domain as gfs_domain
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_envelope_queue_repo_key,
@@ -46,7 +51,7 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.infrastructure.key_manager import KeyManager, KeyManagerError
 from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.services import gfs_channel_service as chan_mod
 from socialhome.services.gfs_channel_service import GfsChannelService
@@ -174,7 +179,7 @@ class _Federation:
         self.mesh: dict[str, int] = {}
 
     async def peer_supports(self, instance_id, *, min_version):
-        return self.versions.get(instance_id, 51) >= min_version
+        return self.versions.get(instance_id, 90) >= min_version
 
     async def space_member_supports(self, instance_id, *, min_version):
         if instance_id in self.mesh:
@@ -244,9 +249,14 @@ class _Conns:
         self.conn = conn
         #: Pending channel withdrawals (migration 0095).
         self.withdrawals: list[tuple[str, str, str]] = []
+        #: Their wrapped signing seeds (migration 0147), by row.
+        self.seeds: dict[tuple[str, str, str], bytes] = {}
 
     async def list_active(self):
         return [self.conn] if self.conn.status == "active" else []
+
+    async def list_all(self):
+        return [self.conn]
 
     async def get(self, gfs_id):
         return self.conn if gfs_id == self.conn.id else None
@@ -261,6 +271,22 @@ class _Conns:
 
     async def delete_channel_withdrawal(self, space_id, gfs_id, channel_id):
         self.withdrawals.remove((space_id, gfs_id, channel_id))
+        self.seeds.pop((space_id, gfs_id, channel_id), None)
+
+    async def add_channel_withdrawals(
+        self, space_id, channel_id, gfs_ids, *, channel_seed=None
+    ):
+        for gfs_id in gfs_ids:
+            row = (space_id, gfs_id, channel_id)
+            if row not in self.withdrawals:
+                self.withdrawals.append(row)
+            if channel_seed is not None:
+                self.seeds[row] = channel_seed
+
+    async def get_channel_withdrawal_seed(self, space_id, gfs_id, channel_id):
+        if getattr(self, "unreadable", False):
+            raise KeyManagerError("KEK decrypt failed")
+        return self.seeds.get((space_id, gfs_id, channel_id))
 
 
 class _Inbound:
@@ -290,9 +316,7 @@ def _space(owner: str, *, strict: bool = False, kind=SpaceType.PRIVATE) -> Space
         config_sequence=0,
         join_mode=JoinMode.INVITE_ONLY,
         space_type=kind,
-        features=SpaceFeatures(
-            gfs_publish_mode="strict" if strict else "trusted", private_gfs=True
-        ),
+        features=SpaceFeatures(private_gfs=True),
     )
 
 
@@ -503,6 +527,47 @@ async def test_a_seat_going_live_creates_and_distributes_the_channel(env):
     }
 
 
+async def test_a_seated_member_gets_its_grant_again(env):
+    """The demo's ``gfs-private-channel`` (#1336 regression): the snapshot
+    that carried a joiner's grant when its seat went live beat the joiner's
+    own seat and its mailbox gate refused it. Once the household says it is
+    seated (its card), the owner sends its grant again — only where there is
+    one to send."""
+    env.owner.space_service.snapshots.clear()
+    # No channel yet: nothing to re-send.
+    assert (
+        await env.owner.svc.on_member_seated(SPACE_ID, env.member.h.instance_id)
+        is False
+    )
+    assert env.owner.space_service.snapshots == []
+    await _channel_ready(env)
+    env.owner.space_service.snapshots.clear()
+    assert (
+        await env.owner.svc.on_member_seated(SPACE_ID, env.member.h.instance_id) is True
+    )
+    assert env.owner.space_service.snapshots == [(SPACE_ID, env.member.h.instance_id)]
+    # Never to ourselves, nor to a household with no live seat.
+    env.owner.space_service.snapshots.clear()
+    assert (
+        await env.owner.svc.on_member_seated(SPACE_ID, env.owner.h.instance_id) is False
+    )
+    env.owner.remote.seats.discard((SPACE_ID, env.member.h.instance_id))
+    assert (
+        await env.owner.svc.on_member_seated(SPACE_ID, env.member.h.instance_id)
+        is False
+    )
+    assert env.owner.space_service.snapshots == []
+
+
+async def test_a_member_never_re_sends_a_grant(env):
+    """Only the owner hands out grants: on a member the hook does nothing."""
+    await _channel_ready(env)
+    assert (
+        await env.member.svc.on_member_seated(SPACE_ID, env.other.h.instance_id)
+        is False
+    )
+
+
 async def test_paired_members_alone_get_a_channel_when_the_option_is_on(env):
     """With ``private_gfs`` ON the channel is for every member household,
     not only link-joined ones: a space whose only remote member is paired
@@ -598,7 +663,9 @@ async def test_a_mesh_only_member_at_v51_gets_its_grant(env):
     env.owner.federation.mesh[other] = 51
     grant = await env.owner.svc.grant_for_peer(SPACE_ID, other)
     assert grant is not None
-    assert "channel_cert" in grant and "channel_pass" in grant
+    # A v_51 claim: a pass, but no channel writer key (that needs v_90).
+    assert "channel_pass" in grant and "writer_key" not in grant
+    assert "channel_cert" not in grant
     assert await env.other.svc.accept_grant(SPACE_ID, grant)
 
 
@@ -612,7 +679,7 @@ async def test_a_mesh_only_member_of_unknown_or_old_version_gets_no_grant(env):
     assert await env.owner.svc.grant_for_peer(SPACE_ID, other) is None
 
 
-async def test_a_reader_gets_a_pass_but_no_cert(env):
+async def test_a_reader_gets_a_pass_but_no_writer_key(env):
     await _channel_ready(env)
     env.owner.certs.scopes[env.member.h.instance_id] = None
     grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
@@ -648,12 +715,13 @@ async def test_every_member_household_takes_a_seat_with_the_option_on(env):
     assert await repo.has_subscription(channel_id, env.other.h.instance_id)
     assert not await repo.has_subscription(channel_id, env.owner.h.instance_id)
     paired = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    assert "channel_pass" in paired and "channel_cert" in paired
+    assert "channel_pass" in paired and "writer_key" in paired
+    assert "channel_cert" not in paired
     linked = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
     assert "channel_pass" in linked
     env.owner.certs.scopes[env.other.h.instance_id] = None
     reader = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    assert "channel_pass" in reader and "channel_cert" not in reader
+    assert "channel_pass" in reader and "writer_key" not in reader
 
 
 async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
@@ -674,8 +742,9 @@ async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
         "epoch": _wire(env, channel_id),
         "payload": "Y2lwaGVy",
     }
-    # The publisher gets its own item back from nobody.
-    assert await _queued(env, env.other) == []
+    # No publisher is known, so its own seat gets the echo too (the
+    # household drops it: the origin is inside the ciphertext).
+    assert [q.sealed for q in await _queued(env, env.other)] == [frame]
     # The receiving household routes it to its space locally.
     await env.member.svc.handle_frame({"type": "relay", **frame})
     assert env.member.inbound.items == [(SPACE_ID, 3, "Y2lwaGVy")]
@@ -684,21 +753,20 @@ async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
     targets = await env.member.svc.plan(SPACE_ID)
     assert await env.member.svc.publish_sealed(SPACE_ID, 3, "b3RoZXI", targets)
     back = await _queued(env, env.other)
-    assert len(back) == 1 and back[0].sealed["payload"] == "b3RoZXI"
+    # Its own earlier echo, then the link-joined member's item.
+    assert [q.sealed["payload"] for q in back] == ["Y2lwaGVy", "b3RoZXI"]
 
 
-async def test_strict_member_publish_is_anonymous(env):
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
+async def test_member_publish_is_anonymous(env):
+    strict = replace(env.space, features=SpaceFeatures(private_gfs=True))
     for node in (env.owner, env.member, env.other):
         node.spaces.spaces[SPACE_ID] = strict
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member, env.other)
     row = await env.app[gfs_channel_repo_key].get(channel_id)
-    assert row.strict and row.writer_pk_for(_wire(env, channel_id)) is not None
+    assert row.writer_pk_for(_wire(env, channel_id)) is not None
     grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    # Strict: the writer key, no identified channel cert.
+    # The writer key, never an identified channel cert.
     assert "writer_key" in grant and "channel_cert" not in grant
     targets = await env.other.svc.plan(SPACE_ID)
     accepted = await env.other.svc.publish_sealed(SPACE_ID, 3, "YW5vbg", targets)
@@ -707,14 +775,13 @@ async def test_strict_member_publish_is_anonymous(env):
 
 
 @pytest.mark.security
-async def test_strict_space_without_a_writer_key_sends_nothing(env):
+async def test_a_member_without_a_writer_key_sends_nothing(env):
+    """A member below v_90 is handed no channel writer key: nothing goes to
+    any server — never an identified request — the host path carries it."""
+    env.owner.federation.versions[env.member.h.instance_id] = 89
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member)
-    # The owner switches to strict; the member's (trusted) grant has no key.
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
-    env.member.spaces.spaces[SPACE_ID] = strict
+    assert (await env.member.svc.current_grant(SPACE_ID)).writer_key is None
     assert await env.member.svc.plan(SPACE_ID) == []
     conn = (await env.member.svc._capable())[0]
     assert await env.member.svc.publish_sealed(SPACE_ID, 3, "eA", [conn]) == []
@@ -949,9 +1016,7 @@ async def test_owner_replaces_a_channel_whose_writer_key_pin_is_not_its_own(
     env, monkeypatch
 ):
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
+    strict = replace(env.space, features=SpaceFeatures(private_gfs=True))
     env.owner.spaces.spaces[SPACE_ID] = strict
     assert await env.owner.svc.reconcile(SPACE_ID) == "created"
     first = env.owner.spaces.channels[SPACE_ID][0]
@@ -1081,9 +1146,7 @@ async def test_malformed_notice_answers_never_heal(env, monkeypatch, answer):
     no information — never evidence of a take-over (strict space, where the
     writer key pin is compared)."""
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
+    strict = replace(env.space, features=SpaceFeatures(private_gfs=True))
     env.owner.spaces.spaces[SPACE_ID] = strict
     first = await _channel_ready(env)
     _lying_gfs(monkeypatch, answer)
@@ -1096,9 +1159,7 @@ async def test_malformed_notice_answers_never_heal(env, monkeypatch, answer):
 @pytest.mark.security
 async def test_a_writer_key_pin_for_another_epoch_is_not_a_take_over(env, monkeypatch):
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
+    strict = replace(env.space, features=SpaceFeatures(private_gfs=True))
     env.owner.spaces.spaces[SPACE_ID] = strict
     first = await _channel_ready(env)
     _lying_gfs(monkeypatch, {"epoch": _wire(env, first) - 1, "writer_pk": "x" * 43})
@@ -1271,7 +1332,7 @@ async def test_a_member_never_uses_the_channel_while_the_stored_option_is_off(en
     conn = (await env.other.svc._capable())[0]
     assert await env.other.svc.publish_sealed(SPACE_ID, 3, "eA", [conn]) == []
     outcome = await env.other.svc._post_item(
-        conn, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=False
+        conn, SPACE_ID, {"epoch": 3, "payload": "eA"}
     )
     assert outcome.kind == "permanent"
     assert await _queued(env, env.member) == []
@@ -1436,26 +1497,25 @@ async def test_servers_changed_is_owner_only_and_never_raises(env):
     assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
 
 
-async def test_trusted_writer_key_goes_to_v57_members_only(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
-    env.owner.federation.versions[env.member.h.instance_id] = 56
+async def test_the_writer_key_goes_to_v90_members_only(env):
+    """One mode (v_90): the channel writer key is pinned on every notice and
+    handed to a v_90 writer; an older member gets no key (and, since there
+    is no identified path any more, no cert either)."""
+    env.owner.federation.versions[env.member.h.instance_id] = 89
     channel_id = await _channel_ready(env)
     row = await env.app[gfs_channel_repo_key].get(channel_id)
-    # Trusted channel, but its writer key is pinned for anonymous sends.
-    assert not row.strict
     assert row.writer_pk_for(_wire(env, channel_id)) is not None
-    v57 = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    v56 = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
-    assert "writer_key" in v57 and "channel_cert" in v57
-    assert "writer_key" not in v56 and "channel_cert" in v56
+    v90 = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
+    v89 = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert "writer_key" in v90 and "channel_cert" not in v90
+    assert "writer_key" not in v89 and "channel_cert" not in v89
 
 
 @pytest.mark.security
-async def test_a_v57_member_sends_anonymously_to_every_chosen_server(env):
+async def test_a_member_sends_anonymously_to_every_chosen_server(env):
     """A member connected to one channel server publishes to a second one it
     never connected to — anonymously: no instance id, no household
     signature, no cookie session; never the space id."""
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.member, env.other)
     member_conn = env.other.svc._conn_repo.conn
@@ -1479,7 +1539,6 @@ async def test_a_v57_member_sends_anonymously_to_every_chosen_server(env):
 
 @pytest.mark.security
 async def test_a_server_the_grant_does_not_name_gets_nothing(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     stranger = _unconnected(env, env.other, gfs_instance_id="gfs-not-named")
@@ -1492,7 +1551,6 @@ async def test_a_server_the_grant_does_not_name_gets_nothing(env):
 
 
 async def test_an_unproven_channel_server_is_skipped(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     unconnected = _unconnected(env, env.other)
@@ -1502,39 +1560,7 @@ async def test_an_unproven_channel_server_is_skipped(env):
 
 
 @pytest.mark.security
-async def test_identified_channel_items_never_reach_an_unconnected_server(env):
-    """A member without the channel writer key (below v_57) publishes with
-    its channel cert — only where it is registered."""
-    await _channel_ready(env)
-    await _hand_grants(env, env.other)
-    unconnected = _unconnected(env, env.other)
-    env.other.gfs.targets = [env.other.svc._conn_repo.conn, unconnected]
-    env.other.gfs.sent = []
-    targets = await env.other.svc.plan(SPACE_ID)
-    assert [t.id for t in targets] == ["conn-1"]
-    accepted = await env.other.svc.publish_sealed(
-        SPACE_ID, 3, "eA", [*targets, unconnected]
-    )
-    assert [c.id for c in accepted] == ["conn-1"]
-    assert env.other.gfs.sent == []
-    # Even a queued identified item addressed to it is refused outright.
-    outcome = await env.other.svc._post_item(
-        unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=False
-    )
-    assert outcome.kind == "permanent"
-    assert env.other.gfs.sent == []
-
-
-async def test_identified_targets_follow_the_owners_list(env):
-    await _channel_ready(env)
-    await _hand_grants(env, env.other)
-    # The owner's list no longer names our connection.
-    env.other.gfs.targets = [_unconnected(env, env.other)]
-    assert await env.other.svc.plan(SPACE_ID) == []
-
-
 async def test_retry_to_an_unconnected_server(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     unconnected = _unconnected(env, env.other)
@@ -1555,15 +1581,12 @@ async def test_retry_to_an_unconnected_server(env):
     assert (await svc._retry_send(unconnected.id, item)).kind == "permanent"
     gfs.incapable = set()
     assert (await svc._retry_send(unconnected.id, item)).kind == "delivered"
-    # Never an identified item, never without a grant for the epoch.
-    ident = replace(item, event_type=chan_mod._KIND_ITEM)
-    assert (await svc._retry_send(unconnected.id, ident)).kind == "permanent"
+    # Never without a grant for the epoch.
     stale = replace(item, payload={"epoch": 1, "payload": "eA"})
     assert (await svc._retry_send(unconnected.id, stale)).kind == "permanent"
 
 
 async def test_a_refused_listing_address_is_classified(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     unconnected = _unconnected(env, env.other)
@@ -1575,7 +1598,7 @@ async def test_a_refused_listing_address_is_classified(env):
 
     env.other.gfs.anon_session = refused  # type: ignore[method-assign]
     outcome = await env.other.svc._post_item(
-        unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=True
+        unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}
     )
     assert outcome.kind == "permanent"
 
@@ -1617,8 +1640,8 @@ async def test_a_delegated_admins_notice_reaches_unconnected_channel_servers(env
 
 
 async def test_a_delegated_admin_announces_after_its_own_rotation(env):
-    """A seed holder never grants itself: right after its own rotation it
-    holds no grant for the new epoch, and still announces it — using the
+    """Right after its own rotation a seed holder holds no grant for the
+    new epoch yet (it renews its own after the notice), and still announces it — using the
     channel servers its newest grant names."""
     await _delegated_admin(env)
     env.other.keys.epoch = 4
@@ -1804,18 +1827,19 @@ async def test_retire_of_a_non_private_space_ignores_its_list(env, monkeypatch):
     env.owner.spaces.spaces[SPACE_ID] = replace(
         env.owner.spaces.spaces[SPACE_ID], space_type=SpaceType.GLOBAL
     )
-    asked: list[list[str]] = []
-    real = GfsChannelService._unregister_on
+    asked: list[str] = []
+    real = GfsChannelService._unregister_one
 
-    async def spy(self, cid, seed, conns):
-        asked.append([c.id for c in conns])
-        return await real(self, cid, seed, conns)
+    async def spy(self, space_id, cid, conn):
+        asked.append(conn.id)
+        return await real(self, space_id, cid, conn)
 
-    monkeypatch.setattr(GfsChannelService, "_unregister_on", spy)
+    monkeypatch.setattr(GfsChannelService, "_unregister_one", spy)
     assert await env.owner.svc.retire(SPACE_ID) is True
     # The list still names conn-1, but a global space's list is no channel
     # list: nothing to unregister on beyond the (empty) registrations.
-    assert asked == [[]]
+    assert asked == []
+    assert env.owner.svc._conn_repo.withdrawals == []
     assert await env.app[gfs_channel_repo_key].get(channel_id) is not None
 
 
@@ -1869,3 +1893,332 @@ async def test_the_disconnect_unregister_retries_a_transient_failure(env, monkey
     await env.owner.svc.wait_idle()
     assert answers == []
     assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+# ── D4: a retire a server missed survives the key rotation ───────────────
+
+
+def _swap_authority_seed(node: _Node) -> None:
+    """What an authority rotation does to the owner's row: a new seed and
+    pin — the old channel key can no longer be derived."""
+    kp = generate_identity_keypair()
+    node.spaces.seeds[SPACE_ID] = kp.private_key
+    node.spaces.spaces[SPACE_ID] = replace(
+        node.spaces.spaces[SPACE_ID], identity_public_key=kp.public_key.hex()
+    )
+
+
+async def test_a_confirmed_retire_leaves_nothing_pending(env):
+    await _channel_ready(env)
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert env.owner.svc._conn_repo.withdrawals == []
+
+
+async def test_a_retire_the_server_missed_is_retried_after_the_seed_changed(
+    env, monkeypatch
+):
+    """The server was down when the rotation retired the channel. The
+    withdrawal is recorded WITH the channel's signing seed before the space
+    seed is swapped, so the unregister still lands afterwards — instead of
+    the old channel living on for whoever holds the retired key."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    repo = env.app[gfs_channel_repo_key]
+
+    async def down(*_a, **_k):
+        return chan_mod.PublishOutcome.transient()
+
+    monkeypatch.setattr(GfsChannelService, "_post", down)
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert SPACE_ID not in env.owner.spaces.channels
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    assert await repo.get(channel_id) is not None
+    _swap_authority_seed(env.owner)
+    # Still down: the row stays, whatever the seed is now.
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    monkeypatch.undo()
+    # The server is back (its reconnect asks at once).
+    assert await env.owner.svc.withdraw_pending(force=True) == 1
+    assert await repo.get(channel_id) is None
+    assert conns.withdrawals == []
+    assert conns.seeds == {}
+
+
+async def test_a_retire_keeps_an_earlier_pending_withdrawal_signable(env, monkeypatch):
+    """A server the owner had already dropped still owes its unregister when
+    the key rotates: the retire stamps that row with the channel seed too."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    conns.withdrawals.append((SPACE_ID, "conn-1", channel_id))
+
+    async def down(*_a, **_k):
+        return chan_mod.PublishOutcome.transient()
+
+    monkeypatch.setattr(GfsChannelService, "_post", down)
+    _choose(env, env.owner)  # the owner's list no longer names the server
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    _swap_authority_seed(env.owner)
+    monkeypatch.undo()
+    assert await env.owner.svc.withdraw_pending(force=True) == 1
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+async def test_a_retire_with_an_unreachable_chosen_server_is_recorded(env):
+    """The chosen server cannot even be probed right now (suspended): the
+    retire still records what it owes."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    conns.conn = replace(conns.conn, status="suspended")
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    _swap_authority_seed(env.owner)
+    conns.conn = replace(conns.conn, status="active")
+    assert await env.owner.svc.withdraw_pending() == 1
+    assert conns.withdrawals == []
+
+
+# ── The rotating admin's seat is renewed on the member path ──────────────
+
+
+def _trace(monkeypatch, *nodes: _Node) -> dict[str, list[str]]:
+    """What each node's channel service does about its seat, in order:
+    every grant it accepts and every seat it takes (by content epoch)."""
+    seen: dict[str, list[str]] = {n.h.instance_id: [] for n in nodes}
+    by_svc = {id(n.svc): n.h.instance_id for n in nodes}
+    real_accept = GfsChannelService.accept_grant
+    real_subscribe = GfsChannelService.subscribe
+
+    async def accept_spy(self, space_id, raw):
+        if id(self) in by_svc:
+            seen[by_svc[id(self)]].append(f"accept:{raw['epoch']}")
+        return await real_accept(self, space_id, raw)
+
+    async def subscribe_spy(self, space_id, **kw):
+        if id(self) in by_svc:
+            grant = await self.current_grant(space_id)
+            seen[by_svc[id(self)]].append(
+                f"subscribe:{grant.epoch if grant is not None else None}"
+            )
+        return await real_subscribe(self, space_id, **kw)
+
+    monkeypatch.setattr(GfsChannelService, "accept_grant", accept_spy)
+    monkeypatch.setattr(GfsChannelService, "subscribe", subscribe_spy)
+    return seen
+
+
+async def _admin_rotates(env, monkeypatch) -> tuple[str, dict[str, list[str]]]:
+    """``other`` is a seated delegated admin, ``member`` a seated plain
+    member. ``other`` rotates the content key to epoch 4 and its notice
+    lands — the rekey has NOT gone out yet. Returns the channel id and the
+    seat trace of both from here on."""
+    monkeypatch.setattr(gfs_domain, "CHANNEL_EPOCH_STEP_INTERVAL_S", 0)
+    await _delegated_admin(env)
+    await _hand_grants(env, env.member)
+    env.other.remote.seats.add((SPACE_ID, env.member.h.instance_id))
+    env.other.certs.pks[env.member.h.instance_id] = env.member.h.pk
+    trace = _trace(monkeypatch, env.other, env.member)
+    env.other.keys.epoch = 4
+    await env.other.svc.on_rotation(SPACE_ID)
+    await env.other.svc.wait_idle()
+    return env.other.spaces.channels[SPACE_ID][0], trace
+
+
+async def _seats_on(env, channel_id: str, epoch: int) -> list[str]:
+    """The households whose seat on the server carries a pass for *epoch*."""
+    return sorted(
+        await env.app[gfs_channel_repo_key].list_targets(
+            channel_id, {_wire(env, channel_id, epoch)}
+        )
+    )
+
+
+def _frame(env, channel_id: str, epoch: int) -> dict:
+    return {
+        "type": "relay",
+        "channel_id": channel_id,
+        "event_type": "space_item",
+        "epoch": _wire(env, channel_id, epoch),
+        "payload": "eA",
+    }
+
+
+@pytest.mark.security
+async def test_the_rotating_admin_renews_its_seat_on_the_rekey_like_a_member(
+    env, monkeypatch
+):
+    """A connection server must not tell the household that rotated the
+    content key by WHEN its seat is renewed. Every member renews when the
+    rekey reaches it (``accept_grant``); the rotating admin has no rekey to
+    receive, so it used to renew at a moment of its own. It now takes its
+    grant when its rekey went out — the same trigger — through the very
+    same ``accept_grant``: nothing after its own notice, nothing on a
+    frame, no path of its own."""
+    channel_id, trace = await _admin_rotates(env, monkeypatch)
+    admin, member = env.other.h.instance_id, env.member.h.instance_id
+    # The server holds the new epoch and nobody sits on it: the rotating
+    # admin did not renew after its own notice …
+    assert (await env.app[gfs_channel_repo_key].get(channel_id)).epoch == _wire(
+        env, channel_id, 4
+    )
+    assert await _seats_on(env, channel_id, 4) == []
+    assert trace[admin] == []
+    # … nor on an item that comes by while its rekey is still going out (a
+    # member that already holds it posts). The item itself is not lost: it
+    # is read with the grant the admin holds.
+    await env.other.svc.handle_frame(_frame(env, channel_id, 4))
+    await env.other.svc.wait_idle()
+    assert trace[admin] == []
+    assert env.other.inbound.items[-1] == (SPACE_ID, 4, "eA")
+    # The rekey: the member applies its copy, the rotator the one it could
+    # not send itself.
+    env.member.keys.epoch = 4
+    grant = await env.other.svc.grant_for_peer(SPACE_ID, member, epoch=4)
+    assert await env.member.svc.accept_grant(SPACE_ID, grant)
+    await env.member.svc.wait_idle()
+    assert await env.other.svc.on_rekey_sent(SPACE_ID)
+    await env.other.svc.wait_idle()
+    # Same steps, same order, same code: accept the grant, take the seat.
+    assert trace[admin] == trace[member] == ["accept:4", "subscribe:4"]
+    assert await _seats_on(env, channel_id, 4) == sorted([admin, member])
+    # Same shape as the grant the owner gave it before.
+    before = await env.other.svc.own_grant(SPACE_ID, 3)
+    now = await env.other.svc.current_grant(SPACE_ID)
+    assert before is not None and now is not None and now.channel_pass is not None
+    assert (now.channel_id, now.gfs_ids) == (before.channel_id, before.gfs_ids)
+    assert (now.writer_key is None) == (before.writer_key is None)
+    # Once: a second call renews nothing.
+    assert not await env.other.svc.on_rekey_sent(SPACE_ID)
+    assert trace[admin] == ["accept:4", "subscribe:4"]
+
+
+@pytest.mark.security
+async def test_a_rotating_admin_that_missed_it_renews_on_its_next_reconnect(
+    env, monkeypatch
+):
+    """It stopped between its notice and its rekey: the seat is renewed
+    when every household re-takes its seats — the next reconnect."""
+    channel_id, trace = await _admin_rotates(env, monkeypatch)
+    await env.other.svc.heal("conn-1")
+    await env.other.svc.wait_idle()
+    assert await _seats_on(env, channel_id, 4) == [env.other.h.instance_id]
+    assert trace[env.other.h.instance_id][0] == "accept:4"
+
+
+async def test_no_self_grant_for_the_owner_or_a_member_without_the_seed(env):
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    env.owner.keys.epoch = 4
+    env.member.keys.epoch = 4
+    for node in (env.owner, env.member):
+        await node.svc.on_rotation(SPACE_ID)
+        assert not await node.svc.on_rekey_sent(SPACE_ID)
+        await node.svc.handle_frame(_frame(env, channel_id, 4))
+        await node.svc.heal("conn-1")
+    assert env.owner.keys.grants == {}
+    assert await env.member.svc.current_grant(SPACE_ID) is None
+
+
+async def test_a_seed_holder_that_was_never_seated_grants_itself_nothing(env):
+    """It renews what it holds; it never takes a seat nobody gave it."""
+    channel_id = await _channel_ready(env)
+    env.other.spaces.seeds[SPACE_ID] = env.space_seed
+    env.other.keys.epoch = 4
+    await env.other.svc.on_rotation(SPACE_ID)
+    assert not await env.other.svc.on_rekey_sent(SPACE_ID)
+    await env.other.svc.handle_frame(_frame(env, channel_id, 4))
+    await env.other.svc.heal("conn-1")
+    assert env.other.keys.grants == {}
+
+
+async def test_a_retire_records_a_suspended_server_a_restart_forgot(env):
+    """Nothing in memory says the channel lives there (a restart), and the
+    connection is suspended: the owner's list still names it, so the retire
+    is recorded — or the gate on new seed shares would see nothing owed."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    env.owner.svc._registered.clear()
+    conns = env.owner.svc._conn_repo
+    conns.conn = replace(conns.conn, status="suspended")
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    assert (SPACE_ID, "conn-1", channel_id) in conns.seeds
+
+
+async def test_a_refused_retire_is_never_given_up_and_backs_off(env, monkeypatch):
+    """A 403 (clock skew, a stale server key) is not a confirmation, and a
+    channel that may still be open must keep blocking new seed shares: the
+    row and its seed stay for good. Each failed attempt — refused or
+    unreachable alike — doubles the wait before the next, so a server that
+    never confirms costs a few requests a day; a reconnect asks at once."""
+    clock = [1000.0]
+    monkeypatch.setattr(chan_mod, "_monotonic", lambda: clock[0])
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    repo = env.app[gfs_channel_repo_key]
+    asked: list[float] = []
+    outcome = [chan_mod.PublishOutcome.permanent()]
+
+    async def answer(*_a, **_k):
+        asked.append(clock[0])
+        return outcome[0]
+
+    monkeypatch.setattr(GfsChannelService, "_post", answer)
+    assert await env.owner.svc.retire(SPACE_ID)
+    row = (SPACE_ID, "conn-1", channel_id)
+    assert conns.withdrawals == [row] and row in conns.seeds
+    assert len(asked) == 1
+    for _ in range(20):  # twenty retry passes inside the first wait
+        assert await env.owner.svc.withdraw_pending() == 0
+    assert len(asked) == 1
+    clock[0] += chan_mod.RETIRE_RETRY_MIN_S
+    outcome[0] = chan_mod.PublishOutcome.transient()
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert len(asked) == 2
+    clock[0] += chan_mod.RETIRE_RETRY_MIN_S  # the wait doubled
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert len(asked) == 2
+    clock[0] += 400 * 24 * 3600.0  # over a year later: still owed
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert len(asked) == 3
+    assert conns.withdrawals == [row] and row in conns.seeds
+    # The reconnect heal does not wait.
+    monkeypatch.undo()
+    await env.owner.svc.heal("conn-1")
+    assert await repo.get(channel_id) is None
+    assert conns.withdrawals == []
+
+
+async def test_a_seed_that_does_not_unwrap_keeps_the_row_owed(env, caplog):
+    """The stored channel seed is unreadable (another KEK, a damaged row):
+    the unregister cannot be signed, but the channel may still be open —
+    the row stays, loudly, instead of being forgotten."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    conns.conn = replace(conns.conn, status="suspended")
+    assert await env.owner.svc.retire(SPACE_ID)
+    _swap_authority_seed(env.owner)
+    conns.conn = replace(conns.conn, status="active")
+    conns.unreadable = True
+    with caplog.at_level("WARNING"):
+        assert await env.owner.svc.withdraw_pending() == 0
+    assert conns.withdrawals == [(SPACE_ID, "conn-1", channel_id)]
+    assert "cannot be read" in caplog.text
+
+
+async def test_a_retire_records_no_seed_that_is_not_the_channels(env):
+    """The stored channel key is not the one our seed derives (the seed
+    changed under us): a derived seed would sign nothing there, so none is
+    recorded."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    env.owner.spaces.channels[SPACE_ID] = (channel_id, "00" * 32)
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert conns.seeds == {}

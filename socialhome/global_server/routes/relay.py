@@ -10,7 +10,9 @@ from aiohttp import web
 
 from ...domain.gfs_mailbox import (
     ENVELOPE_MAILBOX_CAPABILITY,
+    ENVELOPE_MULTI_CAPABILITY,
     MAILBOX_TICKETS_CAPABILITY,
+    MULTI_MAX_RECIPIENTS,
 )
 from ...domain.gfs_space_media import SPACE_MEDIA_CAPABILITY
 from ...domain.gfs_space_media_on_demand import ON_DEMAND_CAPABILITY_KEY
@@ -27,7 +29,7 @@ from ...domain.subscriber_accepts import parse_accepts
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
-from ..federation import InstanceRegistrationRefused
+from ..federation import InstanceRegistrationRefused, SpaceNotListedError
 from ..public import (
     PAIR_TOKEN_TTL_SECONDS,
     PUBLISH_MAX_BODY_BYTES,
@@ -140,23 +142,24 @@ class GfsInfoView(GfsBaseView):
         # key from an owner-signed cert on publish. Signed like its siblings:
         # a stripped flag only makes a household warn that a revoked admin's
         # old key may keep authorizing relays here.
-        # ``member_publish_trusted`` (v_49): this GFS carries
-        # ``POST /gfs/member-publish`` (identified, writer-cert-authorized
-        # member items under the generic ``space_item`` type) and the
-        # authority-signed ``POST /gfs/spaces/{id}/epoch`` notice. Signed
-        # because a household sends an IDENTIFIED body only to a server that
-        # opted in — a forged flag must not be able to make it reveal itself
-        # to a server that never agreed to the trusted-mode contract.
-        # ``member_publish_strict`` (v_50): this GFS carries the anonymous
-        # ``POST /gfs/member-publish-anon`` (writer-group-key-signed), takes
-        # ``publish_mode`` / ``writer_key_cert`` on the epoch notice, and
-        # refuses identified publishes into a strict space. Signed because a
-        # household only adds those notice fields for a server that verifies
-        # them (an older one would refuse the owner's notice outright).
+        # ``withdrawn_repin``: this GFS takes ``withdrawn: true`` on a publish
+        # — a pin-only re-pin of a listing its owner withdrew, which stays
+        # withdrawn — answers every publish with the key it pins, and takes
+        # the signed ``gfs_key`` (the addressed server) on publish and
+        # unpublish, refusing one that is not its own. Signed
+        # because a household only sends the field to a server that folds it
+        # into the signed bytes (an older one would 403).
+        # ``member_publish_strict`` (v_50; the name is historical — since
+        # v_90 it is the ONLY member publish): this GFS carries the anonymous
+        # ``POST /gfs/member-publish-anon`` (writer-group-key-signed) and the
+        # ``POST /gfs/spaces/{id}/epoch`` notice that pins the writer key
+        # (``writer_key_cert``). Signed because a household only adds that
+        # notice field for a server that verifies it (an older one would
+        # refuse the owner's notice outright).
         # ``private_channels`` (v_51): this GFS carries the opaque
         # ``/gfs/channels/*`` routes — anonymous channel-key-signed
-        # registration and epoch notices, pass-gated member seats, trusted
-        # and strict channel publishes. Signed because a household creates a
+        # registration and epoch notices, pass-gated member seats and the
+        # anonymous channel publish. Signed because a household creates a
         # private space's channel (and its members subscribe, identified)
         # only against a server that agreed to never learn the space.
         # ``open_signup``: this GFS hands out pairing tokens over
@@ -176,7 +179,7 @@ class GfsInfoView(GfsBaseView):
             "envelope_relay": True,
             "invite_links": True,
             "authority_rotation": True,
-            "member_publish_trusted": True,
+            "withdrawn_repin": True,
             "member_publish_strict": True,
             "private_channels": True,
             "open_signup": bool(cfg.open_signup),
@@ -305,6 +308,13 @@ class GfsInfoView(GfsBaseView):
         mailbox = self.svc(K.gfs_mailbox_service_key).capability()
         if mailbox is not None:
             capabilities[ENVELOPE_MAILBOX_CAPABILITY] = mailbox
+            # v_91 — ``POST /gfs/envelope/multi``: ONE sealed frame for up to
+            # this many mailboxes, stored once and pushed to each. Signed: a
+            # household uploads a space's frame once only to a server that
+            # proved it takes it; otherwise it sends one envelope per member.
+            capabilities[ENVELOPE_MULTI_CAPABILITY] = {
+                "max_recipients": MULTI_MAX_RECIPIENTS
+            }
         # Anonymous registration tickets for those mailboxes (Privacy Pass,
         # RFC 9578 type 0x0002): the current issuer key, SIGNED here so a
         # household blinds only under the key every household sees.
@@ -825,12 +835,23 @@ class SpacePublishView(GfsBaseView):
 
     Body: ``{owning_instance, name, description?, about_markdown?,
     cover_url?, min_age?, category?, join_mode?, allow_subscribers?,
-    accent_color?, ts?, signature}``.
+    accent_color?, ts?, withdrawn?, signature}``.
     The Ed25519 signature is verified against the registered
     ``ClientInstance.public_key`` (so a paired-but-malicious peer
     can't masquerade as another household's space owner). ``ts``, when
     present, is inside the signed bytes and replay-guarded (±300 s); only a
     publish carrying one can restore an owner-withdrawn listing.
+
+    ``gfs_key`` (signed, optional) is the key of the server the publish is
+    for; one naming another server is a ``403``.
+
+    ``withdrawn: true`` (signed, needs ``ts`` and ``gfs_key``) makes it a
+    pin-only re-pin of a listing the owner withdrew: no metadata is stored, the listing stays
+    withdrawn, and a space this GFS has no row for is a ``404``.
+
+    Answers ``{status, space_id, identity_public_key}`` — the authority key
+    this GFS pins for the space after the request ("" for none), which is
+    how a household checks that a re-pin took.
     """
 
     async def post(self) -> web.Response:
@@ -853,6 +874,15 @@ class SpacePublishView(GfsBaseView):
         authority_cert = body.get("authority_cert")
         if authority_cert is not None and not isinstance(authority_cert, dict):
             raise web.HTTPBadRequest(reason="authority_cert must be an object")
+        # Only a literal ``true`` or no key at all: the service folds the
+        # flag into the signed bytes as ``true``, so any other spelling could
+        # never verify — and a truthy one must not pass for the real thing.
+        if "withdrawn" in body and body["withdrawn"] is not True:
+            raise web.HTTPBadRequest(reason="withdrawn must be true when present")
+        # The addressed server's key (signed): a string or absent.
+        gfs_key = body.get("gfs_key")
+        if gfs_key is not None and not isinstance(gfs_key, str):
+            raise web.HTTPBadRequest(reason="gfs_key must be a string")
         try:
             space = await svc.publish_space(
                 space_id=space_id,
@@ -888,14 +918,28 @@ class SpacePublishView(GfsBaseView):
                 # present; a malformed one is stored as no pin.
                 place=body.get("place"),
                 join_contact=body.get("join_contact"),
+                withdrawn=True if "withdrawn" in body else None,
+                gfs_key=gfs_key,
             )
         except PermissionError as exc:
             return web.json_response(
                 {"error": str(exc)},
                 status=403,
             )
+        except SpaceNotListedError:
+            # Raised only after the signature verified: an unsigned caller
+            # learns nothing. (A REGISTERED household already tells a space
+            # another one owns from an unknown one by publishing its id —
+            # 403 "already owned" — so this answer adds no new probe.)
+            return web.json_response({"error": "not listed"}, status=404)
         return web.json_response(
-            {"status": space.status, "space_id": space.space_id},
+            {
+                "status": space.status,
+                "space_id": space.space_id,
+                # The pin AFTER this request: the service returns the row as
+                # stored, so a refused re-pin shows the key that stayed.
+                "identity_public_key": space.identity_public_key or "",
+            },
         )
 
 
@@ -934,12 +978,17 @@ class SpaceUnpublishView(GfsBaseView):
             signature = body["signature"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
+        # Optional: the addressed server's key, inside the signed bytes.
+        gfs_key = body.get("gfs_key")
+        if gfs_key is not None and not isinstance(gfs_key, str):
+            raise web.HTTPBadRequest(reason="gfs_key must be a string")
         try:
             await svc.hide_space(
                 space_id,
                 str(owning_instance),
                 str(ts),
                 str(signature),
+                gfs_key=gfs_key,
             )
         except PermissionError as exc:
             return web.json_response({"error": str(exc)}, status=403)

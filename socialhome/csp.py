@@ -43,7 +43,7 @@ Directive notes (what each allowance is for):
   content from other households. The markdown renderer turns an external
   image into a plain link (``client/src/utils/markdown.ts``), federated
   media fields are local-only on receipt
-  (``services/inbound_media_store.local_media_ref``), app icons render
+  (``domain/media_constraints.local_media_ref``), app icons render
   only as ``data:image/…`` (``client/src/utils/appIcon.ts``), and this
   directive refuses whatever slips past. Map tiles need no host: the
   backend proxies them (``routes/map_tiles.py``) whatever

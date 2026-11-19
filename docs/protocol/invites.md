@@ -57,7 +57,8 @@ seats the receiver as a ``SpaceRemoteMember`` + records the
 ``(space, instance)`` mapping, then sends ``SPACE_INVITE_TOKEN_REDEEM_ACK``
 back with ``{space_id, role, space_meta}`` — where ``space_meta`` is the
 full ``build_space_snapshot_for_federation`` blob (config + cover/icon
-bytes, each bounded to ``SPACE_*_SNAPSHOT_MAX_BYTES`` + content key + member
+bytes, each within the one cap ``SPACE_COVER_MAX_BYTES`` /
+``SPACE_ICON_MAX_BYTES`` + content key + member
 roster). Any failure (token unknown, expired,
 exhausted, banned, persistence error) → ``SPACE_INVITE_TOKEN_REDEEM_DENY``
 with a string ``reason``.
@@ -254,15 +255,19 @@ either `{space_id, role, space_meta}` (ACK — the same
 `build_space_snapshot_for_federation` blob the §D2 path returns,
 content key and roster included) or `{reason}` (DENY).
 
-**Per-space mailboxes (v_88).** When the issuer is at v_88 or above, the
-redeemer mints an anonymous mailbox for the space at the invite's GFS
-before it sends the redeem, and adds its signed directory entry to the
-sealed redeem as `mailbox`. The issuer verifies it, mints its own mailbox
-for the space (registered and claimed before the ACK leaves) and returns
-its entry as `mailbox` in the sealed ACK. Both store the other's entry on
-the pair's `space_instances` row, and later envelopes of that space go to
-the mailbox id instead of the instance id. An older issuer ignores the
-field. See [gfs-relay.md](./gfs-relay.md#per-space-mailboxes-v_88).
+**Member cards (v_89).** When the issuer is at v_89 or above, the
+redeemer adds its signed member card to the sealed redeem as `card`: its
+key-wrap key and, when it has one, its ONE anonymous mailbox at the
+invite's GFS (shared by every space it reaches there; minted, registered and
+claimed before the redeem leaves). The issuer verifies the card (the
+instance id derives from its identity key; a mailbox named there must be at
+the GFS the body came through) and returns its own card as `card` in the
+sealed ACK. Both keep the other's card on the pair's `space_instances` row,
+and later envelopes to a household whose card names a mailbox go to the
+mailbox id instead of the instance id. Once seated the redeemer also sends
+`SPACE_MEMBER_CARD`, and the host passes the cards on to the space's
+writer members in `SPACE_MAILBOX_DIRECTORY`, so every member can reach it.
+An older issuer ignores the field. See [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 **The ACK always fits the relay.** A 1200 px space cover is dimension-capped,
 not byte-capped — a detailed photo is several hundred KiB of WebP — and the
@@ -271,14 +276,14 @@ the sealed ciphertext) a ~200 KiB cover alone overran the 256 KiB
 `MAX_SEALED_BLOB_BYTES`, so the relay answered 413 (or the redeemer dropped
 the blob before unsealing it): the issuer had spent the token and seated the
 joiner, and the joiner waited out its 10 s timeout for a 504. The snapshot now
-bounds each image (`domain/media_constraints`):
+bounds each image by the one cap every path carries
+(`domain/media_constraints`, owner decision 2026-11-15): `SPACE_COVER_MAX_BYTES`
+64 KiB, `SPACE_ICON_MAX_BYTES` 16 KiB — the same for the §D2b bootstrap ACK
+over `/gfs/envelope`, the §D1b private invite and the §D2 redeem ACK, so a
+joiner sees the cover every member sees. An upload is stored within it.
 
-| Snapshot carried by | Cover | Icon |
-|---|---|---|
-| §D2b bootstrap ACK over `/gfs/envelope` | `SPACE_COVER_BOOTSTRAP_MAX_BYTES` 64 KiB | `SPACE_ICON_BOOTSTRAP_MAX_BYTES` 16 KiB |
-| §D1b private invite, §D2 redeem ACK (paired / mesh-routed peer, ~1 MiB envelope) | `SPACE_COVER_SNAPSHOT_MAX_BYTES` 256 KiB | `SPACE_ICON_SNAPSHOT_MAX_BYTES` 64 KiB |
-
-An image under its bound ships byte-for-byte; one over it ships as a smaller
+An image under the cap ships byte-for-byte; one over it (stored before the
+cap) ships as a smaller
 WebP rendition (`ImageProcessor.fit_within`, shrunk not cropped, logged at
 INFO on the host) under the host's own `cover_hash` / `icon_hash`; one that
 cannot be shrunk under the bound is left out (WARNING). The wire shape is
@@ -296,9 +301,9 @@ rolls the redeem back (see "A redeem is committed only once its ACK is on
 its way" above): no seat, no gossip, and the link keeps its use.
 
 A later cover or icon change reaches a link-joined member too: the
-`SPACE_CONFIG_CHANGED` for it carries the new image, bounded for this member
-to the same `SPACE_*_BOOTSTRAP_MAX_BYTES` so it fits the relay (see "A cover /
-icon change carries the image" in [spaces.md](./spaces.md)). Other space media
+`SPACE_CONFIG_CHANGED` for it carries the new image — the same bytes every
+member gets, within the one cap that fits the relay (see "One cover size for
+every member" in [spaces.md](./spaces.md)). Other space media
 (post pictures, calendar covers, gallery items) reaches a link-joined v_80
 member through the GFS media cache (see "Media through the GFS cache" below).
 
@@ -700,7 +705,7 @@ class until somebody classifies it on purpose.
 | Space media bytes (`SPACE_MEDIA_BLOB`) | sent | **accepted** |
 | Space roster + config + age gate | sent | **accepted** |
 | Space content key (`SPACE_KEY_EXCHANGE` / `_ACK` / `_REKEY`) | sent | **accepted** |
-| Space seed delegation (`SPACE_ADMIN_KEY_SHARE`) | never | rejected — handing the space authority seed to a household that walked in off a public link is never right |
+| Space seed delegation (`SPACE_ADMIN_KEY_SHARE`, v_94) | sent to an admin household the owner approved, while delegation is on | **accepted** — only from the acting host, only with a live admin seat of our own, only a seed that is the private half of the pinned key; never in a multi frame |
 | Catch-up sync chunks (`SPACE_SYNC_BEGIN` … `_COMPLETE`) | sent | **accepted** |
 | Direct-sync RTC signalling (`SPACE_SYNC_OFFER` / `_ANSWER` / `_ICE` / `_DIRECT_*`) | never | rejected — it exists to negotiate a *direct* connection, and neither household has the other's address by design |
 | Join requests (`SPACE_JOIN_REQUEST*`) | excluded | rejected — they are already a member; this is the ask-an-admin flow |
@@ -781,11 +786,11 @@ design (the invite blob is public, so neither household publishes an
 `inbox_url`), and a `space_session` peer may have no mesh path either.
 Option 1 of the three that were open here is what shipped: every
 federation envelope between such a pair is carried by the same
-`POST /gfs/envelope` relay the redeem handshake used. From v_88 an
-envelope of a space goes to the counterpart's mailbox for that space when
-the redeem / ACK carried its entry and the GFS proves `envelope_mailbox`;
-otherwise it is addressed to the instance id as below
-([gfs-relay.md](./gfs-relay.md#per-space-mailboxes-v_88)).
+`POST /gfs/envelope` relay the redeem handshake used. From v_89 an
+envelope goes to the counterpart's one mailbox at that GFS when its member
+card names one and the GFS proves `envelope_mailbox`; otherwise it is
+addressed to the instance id as below
+([gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89)).
 
 `FederationTransport.send` picks the transport. A peer with
 `source = space_session` is routed to `GfsRelayTransport`
@@ -958,9 +963,9 @@ channel scope, so the GFS learns only the channel id.
 
 **Posting without the host (v_49).** A link-joined member's own posts in a
 PUBLIC/GLOBAL space no longer depend on the host being online: the member
-publishes them to the space's connection server itself, with its writer
-cert (trusted-mode member publish, see
-[`discovery.md`](./discovery.md#member-publish-trusted-mode-v_49)), and
+publishes them to the space's connection server itself, anonymously under
+the writer group key (member publish, see
+[`discovery.md`](./discovery.md#member-publish-v_49-one-anonymous-mode-since-v_90)), and
 subscribes to the space's fan-out to receive the other members' items.
 The `space_session` relay above still carries everything else.
 
@@ -1016,9 +1021,8 @@ sequenceDiagram
 **What the connection server learns** on top of the link-pair residual
 (recipient ids, timing, size of each envelope): the channel's seats — every
 member household connected to it, paired ones included (the owner's
-`private_gfs` opt-in) — when items flow and their size bucket, and in
-trusted mode which member household published each item. Never the space id, name, key or
-content. The owner is not named by channel traffic but stays inferable by
+`private_gfs` opt-in) — when items flow and their size bucket, never which
+member household published one. Never the space id, name, key or content. The owner is not named by channel traffic but stays inferable by
 IP and timing (it is the `to_instance` of every member's envelope). Signed
 off in [`principles.md`](../principles.md).
 
@@ -1218,39 +1222,78 @@ for a local member, `set_remote_member_role` for a remote one — so an
 admin who is not the owner cannot approve an admin grant either. Denying
 or letting it expire leaves the person a member.
 
-#### An admin met through a link never holds the signing seed
+A pending elevation is one row per **(household, user id)**
+(`remote_applicant_instance_id`, `user_id`; a local member's row has no
+household). A remote `user_id` is whatever the redeeming household
+sends, so the user id alone is no key: somebody holding a leaked admin
+link who redeemed first under another person's user id would otherwise
+swallow that person's own request. Both are filed, each shown with its
+own household ID, and approving one neither approves nor removes the
+other. A repeat from the same household still files nothing new — also
+when two redeems arrive together: a partial UNIQUE index over the pending
+elevations (migration 0148) lets one insert through, and the admins are
+told once.
 
-A household that redeems an invite link into an `admin` seat gets the
-ADMIN **role** and not the space's Ed25519 signing seed. This is settled,
-and it holds regardless of the space's `delegated_admin_authority`
-setting — the setting decides whether an admin the owner *knows* may
-hold authority, and a peer met through a public link is not that.
+#### An admin met through a link holds the signing seed like any admin
 
-Two reasons, either sufficient:
+Every space admin is equal, whichever way its household is reached (owner
+decision 2026-11-15, v_94). This retires the earlier rule that a household
+met through a link or a connection server never holds the space's Ed25519
+signing seed.
 
-- **Taking the seed back is not guaranteed everywhere.** Since v_44 the
-  owner rotates the space authority key when an admin household is
-  revoked, and a connection server re-pins from the owner's cert — but only
-  households and connection servers that support it follow (a v_43 member
-  or a GFS without `authority_rotation` keeps the old key, which the revoked
-  household still holds). A credential whose revocation depends on every
-  party being upgraded must not be handed to someone whose only
-  introduction was a string anyone could have copied.
-- **A link is not an acquaintance.** An invite link is, by design,
-  redeemable by whoever holds it. The owner chose to open a seat, not to
-  vouch for the person who walked through it.
+An `admin` link still does not grant admin straight through. The
+redeeming household is seated as a member with the admin role **pending**,
+and only the owner's click (`set_remote_member_role`) makes it an admin. From
+then on it is an admin like a paired one. While the owner lets admins act for
+it (`delegated_admin_authority`), the owner hands it the seed with
+`SPACE_ADMIN_KEY_SHARE`, sealed under the seat's session key and carried by
+the GFS mailbox or relay as ciphertext. The share itself is one sealed frame
+for one mailbox: no space id, no event type, no key. Afterwards
+the household sends the GFS what any writer household sends (anonymous
+items, the same fan-out seat, nothing on a reconnect beyond the seat
+re-take every writer sends) and answers nothing a GFS hands it differently,
+so in a publicly readable space the GFS cannot tell which household was
+handed the seed
+([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)).
+Residuals, stated plainly: an admin household without a mailbox (an older
+sealed-redeem seat) is reached by an instance-addressed relay frame, whose
+routing body shows the GFS its instance id (`to_instance`) — as every frame
+to such a seat does; what only the seed can sign (the notice of a
+rotation the admin runs, a removal made on its household)
+still goes out, anonymously, so the GFS can learn that some household
+besides the owner holds the seed, not which. (On a private space's opaque
+channel a delegated admin's own seat is renewed on the rekey of a rotation
+it runs, like every member's.) See
+[gfs-relay.md](./gfs-relay.md#residuals). With delegation
+off, no admin holds the seed on any path, and a link-joined admin acts
+through the host (`SPACE_REMOTE_ADMIN_ACTION`) like a paired one.
 
-Such an admin therefore manages the space exactly as a delegated admin
-*without* authority does: its moderation and roster actions go out as
-`SPACE_REMOTE_ADMIN_ACTION`, forwarded to the host, which checks them
-and signs on its own behalf. The admin experience is the same; only the
-key custody differs. An owner who later wants a link-joined admin to
-hold authority promotes them through the normal path, where the decision
-is about a household the owner can now name. Even then, the promote path
-(`_share_admin_signing_seed`) withholds the seed from a **relay-only**
-(`InstanceSource.SPACE_SESSION`) household — one met purely through a
-connection server — because the revocation argument above still applies
-to it; such an admin keeps acting through the host.
+The two old reasons no longer hold:
+
+- **Taking the seed back works on every path.** When the household's last
+  admin seat ends, the owner rotates the space authority key (v_44). The
+  rotation bundle reaches link-joined members too (`SPACE_AUTHORITY_ROTATED`
+  is in the seat vocabulary). Every GFS that lists the space re-pins from the
+  owner's cert *before* the per-member bundles go out. Any seed share still
+  queued in the owner's outbox is dropped (one a GFS already holds carries the retired key's seed, which every re-pinned household refuses). The pin on a GFS moves only on a publish signed by the
+  owner household carrying an owner-household cert with a higher epoch, so a
+  revoked admin can neither re-pin nor rotate. The owner shares no seed with
+  any admin while a GFS that lists the space has not proved
+  `authority_rotation`, while a GFS has not confirmed pinning the current
+  key — one the space was withdrawn from included — or while a GFS still
+  owes a retired channel's unregister; each of those is re-sent until the
+  server confirms ([spaces.md](./spaces.md), "Durable re-pin"). A kick made
+  by another admin while the owner was away reaches the owner on that
+  admin's next sync, and a removed household cannot gossip itself back in.
+- **A link is not an acquaintance, but the owner's click is.** The seed goes
+  only to a household the owner itself approved as admin. On the space it
+  hosts, the owner refuses seed-signed gossip that keeps or sets an admin
+  seat, so no other admin can mint one either.
+
+A link-seated admin household below v_94 refuses the type at its peer-class
+gate, so the owner skips it (WARNING) and that admin acts through the host
+until it upgrades. Full flow:
+[spaces.md](./spaces.md#delegated-admin-signing-seed-share-space_admin_key_share-v_22).
 
 #### A Follower link works across households (v_30)
 
@@ -1456,7 +1499,8 @@ redeem and the GFS-mirror subscribe, re-reading the invitation and the space
 row inside it, so two joins for one space id never both seat. The stub is
 seated BEFORE the ACCEPT goes out, so the host's `SPACE_ROSTER_SNAPSHOT`
 (writer cert / key, channel grant) always finds it — the host re-sends that
-snapshot on its periodic sync tick too. A failed seat, or a send that
+snapshot in reply to the member's sync BEGIN when its roster digest or
+writer cert is behind. A failed seat, or a send that
 definitively cannot reach the host (not confirmed, no route, too large),
 rolls a fresh stub back and leaves the invitation pending; an ACCEPT parked
 for redelivery (durable outbox, relay throttle, mesh retry) reaches the

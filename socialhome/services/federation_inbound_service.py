@@ -60,6 +60,7 @@ from ..domain.events import (
     MomentReactionChanged,
     PostDeleted,
     PostEdited,
+    PostReactionChanged,
     SpaceConfigChanged,
     SpaceFeaturesApplied,
     SpaceMemberProfileUpdated,
@@ -80,6 +81,12 @@ from ..domain.highlight import (
     HighlightFrameType,
 )
 from ..domain.link_preview import card_survives_edit
+from ..domain.media_constraints import (
+    is_reserved_media_name,
+    is_safe_media_name,
+    local_media_ref,
+    space_media_ref,
+)
 from ..domain.mention import Mention
 from ..domain.moment import (
     MOMENT_MAX_LIFETIME_DAYS,
@@ -97,6 +104,8 @@ from ..domain.post import (
     LocationData,
     Post,
     PostType,
+    file_meta_from_wire,
+    keep_newer_edit,
 )
 from ..domain.presence import truncate_coord
 from ..domain.space import (
@@ -106,11 +115,17 @@ from ..domain.space import (
     SpaceRole,
     role_change_event_type,
 )
-from ..domain.space_item import item_stamp, stamp_to_db
+from ..domain.space_item import (
+    StaleItemStamp,
+    item_stamp,
+    reaction_emoji_ok,
+    stamp_to_db,
+    stored_stamp,
+)
+from ..domain.space_media_fields import item_media_urls
 from ..domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
-    page_media_urls,
     post_media_urls,
     space_page_media_name,
 )
@@ -151,6 +166,7 @@ from ..media.profile_picture import (
     reencode_peer_picture,
 )
 from ..moment_origin import carries_no_relay, check_relayed_moment_origin
+from ..rate_limiter import RateLimiter
 from ..utils.datetime import parse_iso8601_lenient
 from .dm_audience import local_audience
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
@@ -160,17 +176,13 @@ from .inbound_media_store import (
     dm_media_name,
     drop_parts,
     inbound_size_refusal,
-    is_reserved_media_name,
-    is_safe_media_name,
     link_once,
-    local_media_ref,
     media_basename,
     media_file_path,
     note_existing,
     parse_chunk_meta,
     partial_key,
     space_direct_media_name,
-    space_media_ref,
     space_media_refs,
     store_chunk,
     verbatim_local_media_ref,
@@ -192,7 +204,9 @@ from .space_service import (
     apply_gfs_servers_from_metadata,
     apply_owner_statement_from_metadata,
     apply_space_images_from_config_change,
+    config_within_limit,
     keep_local_space_state,
+    sender_caps_space_images,
     stub_space_from_metadata,
 )
 
@@ -223,6 +237,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+#: v_93 — most applied ``SPACE_POST_REACTION`` events ANNOUNCED on the bus
+#: (notifications) from one household in one space per minute; one past it
+#: is still stored. A backstop a reconnect burst passes: an honest
+#: household's queued toggles are coalesced per reaction.
+REACTION_ARRIVALS_PER_MIN: int = 600
+
+
 class HighlightAudienceCheck(Protocol):
     """Who one of our highlights reached (``HighlightFederationOutbound``)."""
 
@@ -249,6 +270,12 @@ _FILLABLE_HELD = frozenset({ModerationStatus.PENDING, ModerationStatus.APPROVED}
 
 def _scoped(shows_file: bool) -> str | None:
     return None if shows_file else _NOT_ITS_FILE
+
+
+def _item_names(resource: str, item: object) -> set[str]:
+    """The file names a space item of *resource* shows — the registry's
+    fields (:func:`~socialhome.domain.space_media_fields.item_media_urls`)."""
+    return {media_basename(u) for u in item_media_urls(resource, item)}
 
 
 def _moment_expired(expires_at: object) -> bool:
@@ -354,9 +381,7 @@ def _page_scope(
     bound to its sender is filled by nobody else."""
     if page.space_id != space_id:
         return _ROW_ELSEWHERE
-    shown = {
-        media_basename(u) for u in page_media_urls(page.cover_image_url, page.content)
-    }
+    shown = _item_names("pages", page)
     if filename in shown:
         return None
     if known_only or sent in shown:
@@ -509,6 +534,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_pending",
         "_pending_parents",
         "_profile_picture_repo",
+        "_reaction_arrivals",
         "_realtime",
         "_relay_policy",
         "_report_service",
@@ -623,6 +649,9 @@ class FederationInboundService(ProtectionGateMixin):
         #: another path — and replays it when the parent lands. ``None``
         #: refuses instead.
         self._pending_parents = pending_parent_buffer
+        #: v_93 — when each (sending household, space)'s post reactions
+        #: arrived (:data:`REACTION_ARRIVALS_PER_MIN`).
+        self._reaction_arrivals = RateLimiter()
         self._federation_service = None
         #: Where a member stores the cover / icon a host's
         #: ``SPACE_CONFIG_CHANGED`` ships. Optional so unit-test stacks can
@@ -666,13 +695,14 @@ class FederationInboundService(ProtectionGateMixin):
         (:class:`SpaceMediaNamer`; *held* — the files the stored row shows
         already) under the v_80 GFS reader names (empty without a
         fetcher)."""
+        hashes = parse_file_hashes(event.payload)
         direct = self._media_names.localize(
             space_id,
             event.from_instance,
             urls,
             held=held or (),
             # v_85 — vouched for by the sender's envelope signature.
-            hashes=parse_file_hashes(event.payload),
+            hashes=hashes,
         )
         if self._gfs_media is None:
             return direct
@@ -684,6 +714,7 @@ class FederationInboundService(ProtectionGateMixin):
                 urls,
                 item_id=item_id,
                 origin=event.from_instance,
+                hashes=hashes,
             ),
         )
 
@@ -736,6 +767,7 @@ class FederationInboundService(ProtectionGateMixin):
         registry.register(FET.SPACE_POST_UPDATED, self._on_space_post_updated)
         registry.register(FET.SPACE_POST_DELETED, self._on_space_post_deleted)
         registry.register(FET.SPACE_MEDIA_BLOB, self._on_space_media_blob)
+        registry.register(FET.SPACE_POST_REACTION, self._on_space_post_reaction)
         registry.register(FET.SPACE_COMMENT_CREATED, self._on_space_comment_added)
         registry.register(FET.SPACE_COMMENT_UPDATED, self._on_space_comment_updated)
         registry.register(FET.SPACE_COMMENT_DELETED, self._on_space_comment_deleted)
@@ -2051,7 +2083,16 @@ class FederationInboundService(ProtectionGateMixin):
                 deleted=row.deleted,
                 moderated=row.moderated,
                 hidden_from_feed=row.hidden_from_feed,
+                # The "no link card" choice never travels, and a copy
+                # without the file attachment (an older sender's) keeps
+                # the one held.
+                no_link_preview=row.no_link_preview,
+                file_meta=post.file_meta or row.file_meta,
             )
+            # Last writer wins on ``edited_at``: a re-sent create (a resume
+            # replay) from a household that missed an edit never brings the
+            # old words back, and one that carries a newer edit brings it.
+            post = keep_newer_edit(post, row)
         elif not await authorship.may_author(event, space_id, post.author):
             await authorship.hold_or_refuse(
                 event,
@@ -2381,7 +2422,7 @@ class FederationInboundService(ProtectionGateMixin):
         delegated admin, a live ``admin`` or ``moderator`` seat
         (:meth:`SpaceAuthorship.has_content_authority`). Nobody fills a
         deleted row's file. Only files: rows still come from the host or a
-        delegated admin alone (§25.6 ``receiver._acts_as_host``)."""
+        delegated admin alone (§25.6 ``receiver_base._acts_as_host``)."""
         authorship = self._space_authorship(event)
         if authorship is None:
             return False
@@ -2562,15 +2603,7 @@ class FederationInboundService(ProtectionGateMixin):
             post_space, post = found
             if post_space != space_id:
                 return _ROW_ELSEWHERE
-            names = {
-                media_basename(post.media_url),
-                *(media_basename(u) for u in post.image_urls or ()),
-                media_basename(post.file_meta.url if post.file_meta else None),
-                media_basename(
-                    post.link_preview.thumbnail_url if post.link_preview else None
-                ),
-            }
-            if filename in names:
+            if filename in _item_names("posts", post):
                 return None
             if post.type != PostType.BAZAAR:
                 return _NOT_ITS_FILE
@@ -2584,24 +2617,21 @@ class FederationInboundService(ProtectionGateMixin):
                 return _NOT_ITS_FILE if known_only else None
             if listing.space_id != space_id:
                 return _ROW_ELSEWHERE
-            return _scoped(filename in {media_basename(u) for u in listing.image_urls})
+            return _scoped(filename in _item_names("bazaar", listing))
         # A space comment's picture (v_85 ships it).
         comment = await self._space_post_repo.get_comment(correlation_id)
         if comment is not None:
             parent = await self._space_post_repo.get(comment.post_id)
             if parent is None or parent[0] != space_id:
                 return _ROW_ELSEWHERE
-            return _scoped(filename == media_basename(comment.media_url))
+            return _scoped(filename in _item_names("comments", comment))
         if self._gallery_repo is not None:
             item = await self._gallery_repo.get_item(correlation_id)
             if item is not None:
                 album = await self._gallery_repo.get_album(item.album_id)
                 if album is None or album.space_id != space_id:
                     return _ROW_ELSEWHERE
-                return _scoped(
-                    filename
-                    in {media_basename(item.url), media_basename(item.thumbnail_url)}
-                )
+                return _scoped(filename in _item_names("gallery", item))
         if self._space_calendar_repo is not None:
             # A space calendar event's cover.
             found_event = await self._space_calendar_repo.get_event(correlation_id)
@@ -2609,7 +2639,7 @@ class FederationInboundService(ProtectionGateMixin):
                 event_space, event = found_event
                 if event_space != space_id:
                     return _ROW_ELSEWHERE
-                return _scoped(filename == media_basename(event.cover_url))
+                return _scoped(filename in _item_names("calendar", event))
         if self._page_repo is not None:
             page = await self._page_repo.get(correlation_id)
             if page is not None:
@@ -2758,11 +2788,14 @@ class FederationInboundService(ProtectionGateMixin):
             clear_link_preview=clear_card,
             edited_at=_edit_stamp(event),
         ):
-            log_cross_space_refusal(
+            held = await self._space_post_repo.get(post_id)
+            self._log_edit_not_written(
                 event,
                 space_id=gated_space_id,
                 what="post",
                 row_id=post_id,
+                held_here=held is not None and held[0] == gated_space_id,
+                deleted=held is not None and held[1].deleted,
             )
             return
         refreshed = await self._space_post_repo.get(post_id)
@@ -2826,6 +2859,137 @@ class FederationInboundService(ProtectionGateMixin):
                 post_id=post_id,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_space_post_reaction(self, event: FederationEvent) -> None:
+        """v_93 — a member's reaction on a space post, added or removed.
+
+        The reactor must hold a live seat on the SENDING household that may
+        react here: a writer seat, or a follower seat while the space has
+        ``allow_subscriber_react`` on (:meth:`SpaceAuthorship.
+        item_seat_admits` — never a local user, a banned one, or somebody
+        seated elsewhere; the host relays nobody's reaction). The payload's
+        ``at`` orders it: applied only over an older stamp held for that
+        (post, user, emoji), in the same transaction as the reaction
+        (``space_posts.reaction_stamps_json``) — so a re-delivery, a copy
+        on a second path (the v_49 ``space_item`` carries the same stamp)
+        and a late add after a removal are all no-ops.
+        """
+        p = event.payload if isinstance(event.payload, dict) else {}
+        post_id = str(p.get("post_id") or "")
+        reactor = str(p.get("user_id") or "")
+        emoji = p.get("emoji")
+        action = p.get("action")
+        stamp = item_stamp(p.get("at"))
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        if (
+            not post_id
+            or not reactor
+            or action not in ("add", "remove")
+            # A removal may name an old free-text reaction (pre-v_93).
+            or not reaction_emoji_ok(emoji, legacy=action == "remove")
+            or stamp is None
+        ):
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="malformed"
+            )
+            return
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return
+        space = await self._space_repo.get(space_id)
+        if space is None or space.dissolved:
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="space not held"
+            )
+            return
+        if not await authorship.item_seat_admits(
+            origin_instance_id=event.from_instance,
+            space_id=space_id,
+            author_user_id=reactor,
+            subscriber_ok=space.features.allow_subscriber_react,
+        ):
+            await authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="post reaction",
+                row_id=post_id,
+                user_id=reactor,
+            )
+            return
+        if await self._space_post_repo.get(post_id) is None:
+            # The reaction overtook its post on another delivery path.
+            if not self._hold_for_parent(
+                event,
+                space_id,
+                PARENT_POST,
+                post_id,
+                what="post reaction",
+                row_id=post_id,
+            ):
+                log_not_applied(
+                    event,
+                    what="post reaction",
+                    row_id=post_id,
+                    reason="post not held here",
+                )
+            return
+        react = (
+            self._space_post_repo.add_reaction
+            if action == "add"
+            else self._space_post_repo.remove_reaction
+        )
+        try:
+            # Scoped to ``space_id``: a post of another space is a KeyError.
+            post = await react(
+                post_id, emoji, reactor, space_id=space_id, stamp=stamp_to_db(stamp)
+            )
+        except StaleItemStamp:
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="not newer"
+            )
+            return
+        except KeyError, ValueError:
+            log_not_applied(
+                event,
+                what="post reaction",
+                row_id=post_id,
+                reason="post not in this space, deleted, or full",
+            )
+            return
+        # The backstop per (sending household, space) bounds the work a
+        # flood triggers here (the bus event behind notifications), never
+        # the state: the reaction above is stored either way, so every
+        # household converges — a drop could not be retried (the registry
+        # swallows handler errors and the replay cache refuses a re-send)
+        # and the host would drop it too. Only an APPLIED reaction counts:
+        # a stale copy, a refusal and a held one returned before here.
+        if not self._reaction_arrivals.is_allowed(
+            f"{event.from_instance}:{space_id}",
+            limit=REACTION_ARRIVALS_PER_MIN,
+            window_s=60,
+        ):
+            log.warning(
+                "%s from %s: over %d reactions a minute in space %s — stored, "
+                "not announced",
+                event.event_type,
+                event.from_instance,
+                REACTION_ARRIVALS_PER_MIN,
+                space_id,
+            )
+            return
+        self._reaction_arrivals.prune(window_s=60)
+        await self._bus.publish(
+            PostReactionChanged(
+                post=post,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+                reactor_user_id=reactor,
+                emoji=emoji,
+                added=action == "add",
             )
         )
 
@@ -2982,11 +3146,20 @@ class FederationInboundService(ProtectionGateMixin):
             space_id=space_id,
             edited_at=_edit_stamp(event),
         ):
-            log_cross_space_refusal(
+            held = await self._space_post_repo.get_comment(comment_id)
+            parent = (
+                await self._space_post_repo.get(held.post_id)
+                if held is not None
+                else None
+            )
+            self._log_edit_not_written(
                 event,
                 space_id=space_id,
                 what="comment",
                 row_id=comment_id,
+                held_here=parent is not None and parent[0] == space_id,
+                deleted=(held is not None and held.deleted)
+                or (parent is not None and parent[1].deleted),
             )
             return
         refreshed = await self._space_post_repo.get_comment(comment_id)
@@ -3083,6 +3256,37 @@ class FederationInboundService(ProtectionGateMixin):
         ):
             return ()
         return await self._mentions.added(space_id, before, after, author_id=author_id)
+
+    @staticmethod
+    def _log_edit_not_written(
+        event: FederationEvent,
+        *,
+        space_id: str,
+        what: str,
+        row_id: str,
+        held_here: bool,
+        deleted: bool,
+    ) -> None:
+        """An edit that passed its gate and still wrote nothing.
+
+        ``held_here`` — the row is in ``space_id``: the edit is not newer
+        than what this household holds (last writer wins), or the row was
+        deleted here meanwhile (``deleted``). The same edit
+        over a second path does that all the time (a GFS ``space_item`` and
+        the federated event; the mesh's retransmit to a member that
+        restarted), so it is a benign no-op at DEBUG. Anything else is the
+        cross-space refusal at WARNING, as before."""
+        if held_here:
+            log_not_applied(
+                event,
+                what=what,
+                row_id=row_id,
+                reason="deleted here"
+                if deleted
+                else "not newer than what is held here",
+            )
+            return
+        log_cross_space_refusal(event, space_id=space_id, what=what, row_id=row_id)
 
     def _hold_for_parent(
         self,
@@ -3691,35 +3895,11 @@ class FederationInboundService(ProtectionGateMixin):
                     event.from_instance,
                 )
             refreshed = replace(refreshed, features=pinned)
-        # v_50 — ``gfs_publish_mode`` is the OWNER's alone on EVERY household,
-        # not only the host: a member that mirrored a delegated admin's
-        # strict → trusted flip would start publishing IDENTIFIED requests to
-        # the connection server — the very leak strict mode prevents (the
-        # server refuses them, but it has seen them). Only the owner
-        # household's own word moves it; otherwise keep what we store.
-        if (
-            not is_owner
-            and refreshed.features.gfs_publish_mode
-            != existing.features.gfs_publish_mode
-        ):
-            log.info(
-                "SPACE_CONFIG_CHANGED for %s from %s tried to change the "
-                "owner-only gfs_publish_mode — kept the stored value",
-                space_id,
-                event.from_instance,
-            )
-            refreshed = replace(
-                refreshed,
-                features=replace(
-                    refreshed.features,
-                    gfs_publish_mode=existing.features.gfs_publish_mode,
-                ),
-            )
-        # ``private_gfs`` likewise: whether a private space uses a connection
-        # server at all is the OWNER's call on every household. On the host a
-        # delegated admin's flip would register (or drop) the channel and
-        # reveal the member households to the server; elsewhere the mirror
-        # must show the owner's word, not a seed holder's.
+        # ``private_gfs`` is the OWNER's alone on EVERY household: whether a
+        # private space uses a connection server at all is its call. On the
+        # host a delegated admin's flip would register (or drop) the channel
+        # and reveal the member households to the server; elsewhere the
+        # mirror must show the owner's word, not a seed holder's.
         if (
             not is_owner
             and refreshed.features.private_gfs != existing.features.private_gfs
@@ -3743,6 +3923,15 @@ class FederationInboundService(ProtectionGateMixin):
             meta=meta,
             we_host=bool(own_instance_id)
             and existing.owner_instance_id == own_instance_id,
+        )
+        # The one receiver rule (after authorization and ordering): a config
+        # over the limit every household holds and larger than ours keeps
+        # our text — its settings still apply, so no household keeps
+        # enforcing a stale access level for a size reason.
+        refreshed = config_within_limit(
+            refreshed,
+            held=existing,
+            source=f"SPACE_CONFIG_CHANGED from {event.from_instance}",
         )
         if authority_verified:
             # v_44 — the save lands only while the space still pins the key
@@ -3822,6 +4011,9 @@ class FederationInboundService(ProtectionGateMixin):
             previous=existing,
             cover_repo=self._space_cover_repo,
             icon_repo=self._space_icon_repo,
+            sender_caps=functools.partial(
+                sender_caps_space_images, self._federation_service, event.from_instance
+            ),
         )
         # Record the author of the edit we just applied so a later
         # equal-sequence edit can deterministically tie-break (v_24 LWW).
@@ -5499,7 +5691,14 @@ class FederationInboundService(ProtectionGateMixin):
             # (``api/media/<name>``), never a reserved (DM / moment) name;
             # anything else is dropped.
             media_url=space_media_ref(payload.get("media_url")),
-            file_meta=None,
+            # The file attachment, past the §5.2 gate
+            # (``_validate_inbound_media`` strips a non-conforming one) —
+            # a space file only, like the §25.6 stream's.
+            file_meta=file_meta_from_wire(payload.get("file_meta")),
+            # v_49 shape, on an edited post only: when the words were last
+            # edited (no more than the live skew ahead of our clock — a
+            # far-future stamp would block every later edit).
+            edited_at=stored_stamp(payload.get("edited_at")),
             location=location,
             created_at=parse_iso8601_lenient(payload.get("occurred_at")),
             # Mirror the host's feed visibility. Absent on an older sender

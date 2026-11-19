@@ -445,6 +445,12 @@ its GFS media cache ([media](./media.md#space-media-via-the-gfs-cache-v_80)):
   orphan sweep.
 - **Catch-up** — a household's first full §25.6 stream also queues the
   cover of every streamed event (incremental re-syncs ship no media).
+  Since v_92 the host's `calendar` records also carry each event's RSVPs
+  (`rsvps`, ≤ 500), so an RSVP a household missed — or its removal — heals
+  on the host's daily full stream, last writer wins on `updated_at` (an
+  RSVP newer than the host's read, `rsvps_at`, stays); never over this
+  household's own people's RSVPs but for the organiser settling a request
+  or a waitlist promotion ([sync.md](./sync.md#coverage--every-space-item-type)).
 - The receiver accepts the file only when the event it is correlated to
   lives in that space and names it as its cover.
 
@@ -462,7 +468,7 @@ enough) or the household's next full stream.
   `PERSONAL_CALENDAR_EVENT_*` and `PERSONAL_CALENDAR_RSVP_*`.
 - `socialhome/repositories/calendar_repo.py`.
 - `socialhome/federation/sync/space/exporters/calendar_deleted.py` and
-  `receiver.py` (`_persist_calendar_tombstones`) — the event tombstones.
+  `receive_calendar.py` (`_persist_calendar_tombstones`) — the event tombstones.
 - `socialhome/routes/calendar_routes.py`.
 
 ## Spec references

@@ -8,11 +8,12 @@ calendar — in which case ``mirrored_from`` points to the source event id.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from ..utils.timezones import is_valid_tz, local_date, zone_of
-from .errors import CodedError
+from .errors import CalendarAttendeesInvalidError, CodedError
 
 #: Joins a recurring event's id and an occurrence's start in the id of a
 #: virtual occurrence (``<event id>@<start iso>``) — what reading a range
@@ -20,11 +21,98 @@ from .errors import CodedError
 #: and stores the series row, and refuses an occurrence id.
 OCCURRENCE_ID_SEPARATOR: str = "@"
 
+#: The largest capacity kept: a signed 64-bit integer (what SQLite stores
+#: and orjson writes).
+CAPACITY_MAX: int = 2**63 - 1
+
+
+#: The most attendee ids one space calendar event names. Measured with the
+#: event too (the whole item counts, :func:`calendar_record`); this cap
+#: only keeps the list sane.
+MAX_EVENT_ATTENDEES: int = 1000
+
+#: The longest location text kept (characters; longer is cut).
+LOCATION_MAX_CHARS: int = 500
+
+#: The most RSVPs one §25.6 ``calendar`` record carries (a long-running
+#: series with many members): the latest occurrences' first. RSVPs are
+#: added by other people after the event was saved, so they are held out
+#: of the event's measured size under this cap — in count and, per entry,
+#: :data:`RSVP_RECORD_MAX_BYTES` — and reserved next to it
+#: (``domain/relay_media_frame.py``).
+MAX_RSVPS_PER_EVENT: int = 500
+
+#: The most bytes one RSVP entry of a ``calendar`` record takes (as JSON):
+#: ``{user_id, occurrence_at, status, updated_at}``, ~180 bytes for a real
+#: one. A held RSVP larger than this is left out of the record.
+RSVP_RECORD_MAX_BYTES: int = 256
+
+
+def clean_attendees(value: object, *, strict: bool = True) -> tuple[str, ...]:
+    """The attendee ids of a space calendar event: non-empty strings, each
+    kept once (in order), at most :data:`MAX_EVENT_ATTENDEES`. ``None`` is
+    no attendees.
+
+    *strict* (where a person saves): anything else raises
+    :class:`ValueError` (422). Not strict (where a household receives):
+    an event saved before these checks stays deliverable — a bad entry is
+    dropped and the list cut at the cap; its size is the whole item's
+    business."""
+    if value is None:
+        return ()
+    listed = (
+        value
+        if isinstance(value, (list, tuple)) and not isinstance(value, (str, bytes))
+        else None
+    )
+    if listed is None:
+        if strict:
+            raise CalendarAttendeesInvalidError(MAX_EVENT_ATTENDEES)
+        return ()
+    ids: dict[str, None] = {}
+    for raw in listed:
+        if not isinstance(raw, str) or not raw.strip():
+            if strict:
+                raise CalendarAttendeesInvalidError(MAX_EVENT_ATTENDEES)
+            continue
+        ids[raw.strip()] = None
+    if len(ids) > MAX_EVENT_ATTENDEES:
+        if strict:
+            raise CalendarAttendeesInvalidError(MAX_EVENT_ATTENDEES)
+        return tuple(ids)[:MAX_EVENT_ATTENDEES]
+    return tuple(ids)
+
+
+def clean_location(value: object) -> str | None:
+    """A location text: trimmed, blank → ``None``, cut at
+    :data:`LOCATION_MAX_CHARS` characters; anything but a string → ``None``."""
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed[:LOCATION_MAX_CHARS] if trimmed else None
+
+
+def calendar_record(event: CalendarEvent) -> dict[str, Any]:
+    """A space calendar event as it travels: its §25.6 ``calendar`` record
+    (before the provider adds RSVPs). What its size is measured on — every
+    field, so none can grow it unseen."""
+    d = asdict(event)
+    for name in ("start", "end"):
+        v = d.get(name)
+        if v is not None and not isinstance(v, str):
+            d[name] = v.isoformat()
+    d["attendees"] = list(d.get("attendees") or ())
+    return d
+
 
 def coerce_capacity(value: object) -> int | None:
     """A peer-supplied per-occurrence ``capacity``: a non-negative integer,
     else ``None`` (no cap)."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= CAPACITY_MAX
+    ):
         return None
     return value
 
@@ -37,7 +125,11 @@ def validate_capacity(value: object) -> int | None:
     :class:`ValueError`."""
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= CAPACITY_MAX
+    ):
         raise ValueError("capacity must be a non-negative integer")
     return value
 
@@ -148,6 +240,48 @@ class CalendarEvent:
     #: Federated on the calendar event so member households' bridges make
     #: the same decision. Meaningful for space events only.
     announce_in_feed: bool = False
+
+
+def calendar_event_to_wire_dict(event: CalendarEvent, space_id: str) -> dict[str, Any]:
+    """The ``SPACE_CALENDAR_EVENT_CREATED`` / ``_UPDATED`` payload of a
+    space event — what the receiver's ``_on_calendar_saved`` reads.
+
+    ONE shape for every sender: the live fan-out (``SpaceCalendarService``,
+    which adds who made the write, a moderation release and the file
+    hashes) and a ``SPACE_SYNC_RESUME`` replay. A receiver upserts an event
+    it holds and reads an absent ``announce_in_feed`` as True and an absent
+    ``tz`` as UTC, so a sender that left a field out would mint a feed card
+    nobody asked for and move the event's wall clock."""
+    return {
+        # The space this write belongs to, in the payload as well as the
+        # routing field. A mesh-relayed envelope (SPACE_ROUTED) carries no
+        # plaintext routing ``space_id`` — a relay must not learn which
+        # space is being served — so the payload's copy is the only thing
+        # the receiver's §24.11 space-writer gate can read there.
+        "space_id": space_id,
+        "event_id": event.id,
+        "calendar_id": event.calendar_id,
+        "summary": event.summary,
+        "description": event.description,
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "all_day": event.all_day,
+        "attendees": list(event.attendees),
+        "created_by": event.created_by,
+        "rrule": event.rrule,
+        "cover_url": event.cover_url,
+        "location": event.location,
+        # IANA wall-clock anchor.
+        "tz": event.tz,
+        # §23.15 opt-in feed mirror. The receiver's CalendarFeedBridge
+        # reads this to decide whether to mint a feed post. Absent on an
+        # older sender → the receiver defaults to True (the historic
+        # always-mirror behaviour) so events still surface there.
+        "announce_in_feed": event.announce_in_feed,
+        # The per-occurrence cap (Phase C) — members enforce it on RSVPs.
+        # A receiver keeps its held value when it is absent.
+        "capacity": event.capacity,
+    }
 
 
 @dataclass(slots=True, frozen=True)

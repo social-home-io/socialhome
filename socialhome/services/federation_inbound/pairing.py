@@ -168,11 +168,13 @@ class PairingInboundHandlers:
         """
         token = str(event.payload.get("token") or "")
         reason = str(event.payload.get("reason") or "")[:200]
+        cancelled = False
         if token:
             session = await self._repo.get_pairing(token)
             if session is not None:
                 if self._session_peer_id(session) == event.from_instance:
                     await self._repo.delete_pairing(token)
+                    cancelled = True
                 else:
                     log.warning(
                         "PAIRING_ABORT refused for pending session: from=%s "
@@ -180,11 +182,28 @@ class PairingInboundHandlers:
                         event.from_instance,
                         token[:8],
                     )
+        # Our half of a pairing code with a household we share a space
+        # with waits beside its seat: the half of THIS code and its
+        # sessions go; the seat (the row below, "confirmed") is never
+        # touched, and neither is another handshake with the sender.
+        if (
+            self._federation is not None
+            and token
+            and await self._federation.pending_pairings.cancel(
+                event.from_instance, token=token
+            )
+        ):
+            cancelled = True
         instance = await self._repo.get_instance(event.from_instance)
         if instance is not None and instance.status is not PairingStatus.CONFIRMED:
             # Through the shared purge: whatever was queued for the
             # half-paired household goes with its row.
             await self._peer_unpair.purge(instance.id)
+            cancelled = True
+        if not cancelled:
+            # Nothing of ours was in flight with this household: its
+            # (sender-chosen) reason is nobody's news.
+            return
         await self._bus.publish(
             PairingAborted(
                 instance_id=event.from_instance,
@@ -245,6 +264,15 @@ class PairingInboundHandlers:
         if instance is None:
             log.debug(
                 "URL_UPDATED from unknown instance=%s — drop",
+                event.from_instance,
+            )
+            return
+        if instance.source is InstanceSource.SPACE_SESSION:
+            # Households met through a GFS never talk directly: a seat
+            # never takes an address (the peer-class step refuses this
+            # event from one already; this keeps the rule local).
+            log.warning(
+                "URL_UPDATED from space-session seat %s ignored",
                 event.from_instance,
             )
             return

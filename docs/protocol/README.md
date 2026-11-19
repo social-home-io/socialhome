@@ -72,6 +72,15 @@ Each step is an independently-testable async callable composed via
 steps are appended to the chain — `handle_inbound_envelope` is not
 edited. The same chain runs for RTC-delivered envelopes.
 
+**A duplicate is told apart from a refusal.** The replay step refuses an
+envelope whose `msg_id` it already holds; over the HTTPS inbox the answer
+is `410 {"error": "gone", "code": "REPLAY"}` — the one 4xx a sender counts
+as *delivered* (its earlier POST timed out while the receiver was still
+working, and this is the retry). Every other 410 (timestamp outside the
+window; a receiver that predates the code) carries no `code` and stays a
+permanent refusal. Details:
+[architecture → Replay cache](../architecture.md#replay-cache).
+
 **A gate that drops a valid envelope answers like a dispatch.** The
 post-signature gates (idempotent duplicate, space ban, deprovisioned author,
 archived space, reader / non-member write, write held for a seat) all
@@ -82,6 +91,21 @@ learn whether a space exists, is hosted here, is archived or has banned it.
 The reason is kept server-side (`InboundContext.drop_reason` and the gate's
 log line). Over the DataChannel and the GFS relay the answer is not sent
 back at all.
+
+**A handler failure is the receiver's to retry.** The replay step has
+stored the `msg_id` by the time a handler runs, so the sender cannot
+deliver the envelope again. A handler that failed on a locked or busy
+database is run once more by the receiver, in place, behind the
+post-decrypt gates (`federation/inbound_retry.py`); every final handler
+failure is logged at ERROR (event type, sender and traceback; no payload
+in the message). Limits: no
+other failure is retried (handler I/O, timeouts, bugs); the retry re-runs the
+whole handler, so writes made before the failing one are repeated (handlers
+must be idempotent up to it); a later event of
+the same sender on another connection or transport can overtake a retried
+one; a restart loses an event waiting for its retry. The space sync is the
+heal for space content. Details:
+[architecture → Inbound handler retry](../architecture.md#inbound-handler-retry).
 
 The signature step **also binds `from_instance` to the verified signing
 identity**: an envelope whose `from_instance` claim does not match the

@@ -14,6 +14,7 @@ from socialhome.crypto import generate_x25519_keypair
 from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_CHUNK_RESIZE,
     DELIVERY_ERROR_RELAY_THROTTLED,
+    SPACE_SESSION_ALLOWED_EVENT_TYPES,
     FederationEventType,
     InstanceSource,
 )
@@ -44,6 +45,9 @@ from tests.federation.test_federation_service import (
 )
 
 GFS = "https://gfs.example"
+#: Long and distinctive: the leak check searches sealed bytes for it, and a
+#: short id (e.g. "sp1") turns up in random ciphertext by chance.
+_SPACE_ID = "space-relay-media-leak-check-0001"
 
 
 class _CaptureRelayTransport(_CaptureMediaTransport):
@@ -99,7 +103,7 @@ async def _send(p, raw: bytes):
         event_type=FederationEventType.SPACE_MEDIA_BLOB,
         payload={"filename": "img.webp", "transfer_id": "t1"},
         raw_chunk=raw,
-        space_id="sp1",
+        space_id=_SPACE_ID,
         mesh_fallback=True,
     )
 
@@ -167,6 +171,28 @@ async def test_a_throttled_relay_frame_is_waitable_and_never_goes_json():
     assert p.cap.json_envelopes == []
 
 
+async def test_a_seat_never_gets_a_direct_https_media_post():
+    """A household seated from an invite link has no inbox address (the
+    redeem stores ``remote_inbox_url=""`` and a seat may not send
+    ``URL_UPDATED``): with its relay unable to take frames, a chunk
+    goes as a JSON envelope through the relay — never a binary POST to the
+    household itself."""
+    p = _relay_paired()
+    p.cap.relay_ready = False
+    posts: list = []
+
+    async def _https(**kw):
+        posts.append(kw)
+        return True
+
+    p.cap.send_media_https = _https
+    result = await _send(p, os.urandom(RELAY_JSON_CHUNK_BYTES))
+    assert result.ok
+    assert posts == [] and p.cap.relay_media == []
+    assert len(p.cap.json_envelopes) == 1
+    assert FederationEventType.URL_UPDATED not in (SPACE_SESSION_ALLOWED_EVENT_TYPES)
+
+
 async def test_a_paired_direct_peer_never_uses_the_relay_leg():
     p = _relay_paired()
     p.repo_a._instances[p.b_id] = dataclasses.replace(
@@ -202,7 +228,7 @@ def _frame(p, *, raw=b"chunk", event_type=FederationEventType.SPACE_MEDIA_BLOB):
         event_type=event_type,
         payload={"filename": "f.webp", "transfer_id": "t1"},
         raw_chunk=raw,
-        space_id="sp1",
+        space_id=_SPACE_ID,
     )
 
 
@@ -252,10 +278,13 @@ async def test_unknown_kem_suite_is_refused():
         await p.inbound.handle_frame({**frame, "body": bytes(body)})
 
 
-async def test_a_non_media_event_in_a_relay_frame_is_refused():
+async def test_an_event_outside_the_seat_vocabulary_in_a_relay_frame_is_refused():
+    """A relay frame carries a media chunk or an event a household
+    behind a GFS may send at all — the framed-event tests are in
+    ``test_federation_service_relay_large_events``."""
     p = _relay_paired()
-    header, sealed = _frame(p, event_type=FederationEventType.SPACE_POST_CREATED)
-    with pytest.raises(ValueError):
+    header, sealed = _frame(p, event_type=FederationEventType.DM_MESSAGE)
+    with pytest.raises(ValueError, match="not allowed here"):
         await p.inbound.handle_frame(_relay_frame(p, header, sealed))
     assert p.received == []
 
@@ -291,7 +320,7 @@ async def test_relay_frame_header_carries_no_plaintext_for_the_gfs():
     p = _relay_paired()
     header, sealed = _frame(p)
     body = _relay_frame(p, header, sealed)["body"]
-    for leak in (p.a_id, "space_media_blob", "sp1"):
+    for leak in (p.a_id, "space_media_blob", _SPACE_ID):
         assert leak.encode() not in body
     assert orjson.dumps(header)[:20] not in body
 

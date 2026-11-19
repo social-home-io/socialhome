@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -27,6 +28,8 @@ from socialhome.domain.events import (
     RemoteSpaceMemberRemoved,
     SpaceRemoteSeatEnded,
 )
+from socialhome.domain.federation import FederationEventType
+from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES
 from socialhome.domain.space import (
     JoinMode,
     RemoteAdminOutcome,
@@ -629,6 +632,166 @@ async def test_out_of_vocabulary_gossip_role_keeps_the_mutation(handler):
     kwargs = handler.remote_members.apply_member_event.await_args.kwargs
     assert kwargs["role"] == "member"
     assert kwargs["tombstoned"] is True
+
+
+def _hosting(handler, *, applied: bool = True):
+    """The handler as the HOST of ``sp-gossip``, with a federation service."""
+    handler.h._own_instance_id = "inst-host"
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(
+            id="sp-gossip",
+            owner_instance_id="inst-host",
+            authority_key_epoch=0,
+            roster_sequence=8,
+        )
+    )
+    handler.remote_members.get_including_tombstones = AsyncMock(
+        return_value=SimpleNamespace(role="member", tombstoned=False)
+    )
+    handler.remote_members.apply_member_event = AsyncMock(return_value=applied)
+    handler.remote_members.list_for_instance = AsyncMock(return_value=[])
+    fed = SimpleNamespace(
+        send_with_mesh_fallback=AsyncMock(return_value=SimpleNamespace(ok=True))
+    )
+    handler.h._federation = fed
+    return fed
+
+
+_LEFT = {
+    "space_id": "sp-gossip",
+    "user_id": "u-gone",
+    "instance_id": "inst-gone",
+    "role": "member",
+    "member_version": 9,
+}
+
+
+async def test_the_host_tells_a_household_an_admin_removed_while_it_was_away(handler):
+    """A household drops its copy of a space only on its host's word. A
+    removal a delegated admin made while the host was offline reaches the
+    host as roster gossip — the host then says it to the removed household
+    itself, before it stops treating that household as a member. Without it
+    the household kept its copy, kept syncing, and was only told by the
+    reconnect backstop (its next sync BEGIN to the host, up to 30 minutes)."""
+    fed = _hosting(handler)
+    order: list[str] = []
+    fed.send_with_mesh_fallback.side_effect = lambda **kw: (
+        order.append("told") or SimpleNamespace(ok=True)
+    )
+    handler.space_repo.remove_space_instance = AsyncMock(
+        side_effect=lambda *a: order.append("instance row dropped")
+    )
+    await handler.h._merge_roster_entry(
+        "SPACE_MEMBER_LEFT",
+        "sp-gossip",
+        dict(_LEFT),
+        tombstoned=True,
+        verified_epoch=0,
+        sender="inst-admin",
+    )
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "inst-gone"
+    assert kw["event_type"] is FederationEventType.SPACE_REMOTE_MEMBER_REMOVED
+    assert kw["payload"] == {"space_id": "sp-gossip", "user_id": "u-gone"}
+    assert kw["space_id"] == "sp-gossip"
+    assert order == ["told", "instance row dropped"]
+
+
+@pytest.mark.parametrize(
+    ("sender", "applied", "hosted"),
+    [
+        ("inst-gone", True, True),  # the household left by itself: it knows
+        ("inst-admin", False, True),  # a stale removal changed nothing
+        ("inst-admin", True, False),  # we are a member: not ours to say
+        (None, True, True),  # an entry of a snapshot, not live gossip
+    ],
+)
+async def test_only_the_host_tells_and_only_for_a_removal_it_applied(
+    handler, sender, applied, hosted
+):
+    fed = _hosting(handler, applied=applied)
+    if not hosted:
+        handler.h._own_instance_id = "inst-member"
+    await handler.h._merge_roster_entry(
+        "SPACE_MEMBER_LEFT",
+        "sp-gossip",
+        dict(_LEFT),
+        tombstoned=True,
+        verified_epoch=0,
+        sender=sender,
+    )
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "prior",
+    [None, SimpleNamespace(role="member", tombstoned=True)],
+    ids=["never seated", "already removed"],
+)
+async def test_the_host_tells_no_household_it_did_not_seat(handler, prior):
+    """A signed LEFT can name ANY household — one that was never in the
+    space (a paired peer of the host), or one removed long ago, again at a
+    higher version. The notice carries the space id, so the host sends it
+    only for a seat it held live itself."""
+    fed = _hosting(handler)
+    handler.remote_members.get_including_tombstones = AsyncMock(return_value=prior)
+    await handler.h._merge_roster_entry(
+        "SPACE_MEMBER_LEFT",
+        "sp-gossip",
+        dict(_LEFT),
+        tombstoned=True,
+        verified_epoch=0,
+        sender="inst-admin",
+    )
+    handler.remote_members.apply_member_event.assert_awaited_once()
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tombstoned", [True, False])
+async def test_a_roster_version_far_ahead_of_ours_is_dropped(
+    handler, caplog, tombstoned
+):
+    """Versions are counters. A seed holder that signs one near the top of
+    the range would outrank every honest event for that seat for good — and
+    drag the counter of whoever next signs for the space up to it. Dropped
+    on receive, live gossip and snapshot entries alike; one just inside the
+    lead is taken."""
+    _hosting(handler)  # roster_sequence 8
+    for version, taken in (
+        (2**63 - 1, False),
+        (8 + 2**32 + 1, False),
+        (8 + 2**32, True),
+    ):
+        handler.remote_members.apply_member_event.reset_mock()
+        with caplog.at_level(logging.WARNING):
+            await handler.h._merge_roster_entry(
+                "SPACE_MEMBER_LEFT",
+                "sp-gossip",
+                dict(_LEFT) | {"member_version": version},
+                tombstoned=tombstoned,
+                verified_epoch=0,
+                sender=None,
+            )
+        assert handler.remote_members.apply_member_event.await_count == int(taken)
+    assert "far ahead of ours" in caplog.text
+
+
+async def test_a_removed_household_that_cannot_be_told_is_still_removed(handler):
+    """Telling it is best effort (the reconnect backstop remains): a failed
+    send never undoes or blocks the removal."""
+    fed = _hosting(handler)
+    fed.send_with_mesh_fallback.side_effect = RuntimeError("no transport")
+    await handler.h._merge_roster_entry(
+        "SPACE_MEMBER_LEFT",
+        "sp-gossip",
+        dict(_LEFT),
+        tombstoned=True,
+        verified_epoch=0,
+        sender="inst-admin",
+    )
+    handler.space_repo.remove_space_instance.assert_awaited_once_with(
+        "sp-gossip", "inst-gone"
+    )
 
 
 async def test_invite_with_roster_seats_remote_members_for_each_peer(handler):
@@ -2671,3 +2834,77 @@ async def test_a_left_seat_is_announced_as_ended(handler):
     assert [(e.space_id, e.instance_id, e.user_id) for e in ended] == [
         ("sp-gossip", "inst-bye", "u-bye")
     ]
+
+
+async def test_the_last_seats_row_is_gone_before_the_seat_is_announced_ended(handler):
+    """Review round 3 (#1361): listeners of ``SpaceRemoteSeatEnded`` (the
+    member directory ends that household's lazy seat once no shared space
+    is left) must not still see its ``space_instances`` row."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-bye",
+        "instance_id": "inst-bye",
+        "member_version": 4,
+    }
+    ev = _event("SPACE_MEMBER_LEFT", payload, from_instance="inst-bye")
+    handler.remote_members.apply_member_event = AsyncMock(return_value=True)
+    handler.remote_members.list_for_instance = AsyncMock(return_value=[])
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(
+            id="sp-gossip", owner_instance_id="host-1", authority_key_epoch=0
+        )
+    )
+    order: list[str] = []
+    handler.space_repo.remove_space_instance = AsyncMock(
+        side_effect=lambda *_a: order.append("row dropped")
+    )
+    publish = handler.bus.publish
+
+    async def recording_publish(event):
+        if isinstance(event, SpaceRemoteSeatEnded):
+            order.append("seat ended")
+        return await publish(event)
+
+    handler.bus.publish = recording_publish
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
+    ):
+        await handler.h._on_space_member_left(ev)
+    assert order == ["row dropped", "seat ended"]
+
+
+async def test_a_join_snapshot_over_the_config_limit_seats_the_space_without_its_text(
+    handler,
+):
+    """A join snapshot is a config like any other: over the limit, the
+    space is seated with its settings and without its description — the
+    join never fails for it (nothing is left half-seated)."""
+    issuer = derive_instance_id(generate_identity_keypair().public_key)
+    meta = {
+        "name": "Board",
+        "description": "d" * SPACE_CONFIG_ITEM_MAX_BYTES,
+        "identity_public_key": "ab" * 32,
+        "owner_instance_id": issuer,
+        "config_hlc": "9" * 5000,
+    }
+    await seat_join_stub(
+        space_repo=handler.space_repo,
+        remote_member_repo=handler.remote_members,
+        bus=handler.bus,
+        space_id="sp1",
+        meta=meta,
+        join=resolve_join_owner("sp1", meta, issuer, own_instance_id=None),
+        issuer_instance_id=issuer,
+        joining_user_id="u1",
+        own_instance_id=None,
+        cover_repo=handler.cover_repo,
+        icon_repo=handler.icon_repo,
+    )
+    seated = handler.space_repo.save.await_args.args[0]
+    assert (seated.name, seated.description, seated.config_hlc) == (
+        "Board",
+        None,
+        "0-0",
+    )

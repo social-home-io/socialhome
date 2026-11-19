@@ -485,3 +485,55 @@ async def test_the_peers_unpair_drops_the_saves(env):
     env["repo"].instances["peer-c"] = _inst("peer-c")
     await _with_moments(env).forget("peer-c")
     assert ("drop_saves", "peer-c") in env["log"]
+
+
+# ── After a purge: the space the two households share gets its seat back ──
+
+
+async def test_the_after_purge_hook_runs_last(env):
+    """The member directory seats the household again once its row and
+    everything queued for the ended pairing are gone."""
+
+    async def _reseat(instance_id: str) -> None:
+        env["log"].append(("reseat", instance_id))
+
+    env["svc"].attach_after_purge(_reseat)
+    env["repo"].instances["peer-p"] = _inst("peer-p")
+
+    await env["svc"].forget("peer-p")
+
+    assert [c for c, _ in env["log"]][-2:] == ["close_rtc_peer", "reseat"]
+    assert env["log"][-1] == ("reseat", "peer-p")
+    assert [e.instance_id for e in env["published"]] == ["peer-p"]
+
+
+async def test_a_failing_after_purge_hook_never_strands_the_unpair(env):
+    async def _boom(instance_id: str) -> None:
+        raise RuntimeError("directory down")
+
+    env["svc"].attach_after_purge(_boom)
+    env["repo"].instances["peer-p"] = _inst("peer-p")
+
+    assert await env["svc"].unpair("peer-p") is True
+
+    assert "peer-p" not in env["repo"].instances
+    assert [e.instance_id for e in env["published"]] == ["peer-p"]
+
+
+async def test_a_tombstone_is_not_reseated_until_it_is_purged(env):
+    """While our UNPAIR still waits for an offline peer the row is a
+    tombstone; a seat made now would replace it and cancel the UNPAIR."""
+    seen: list[str] = []
+
+    async def _reseat(instance_id: str) -> None:
+        seen.append(instance_id)
+
+    env["svc"].attach_after_purge(_reseat)
+    env["repo"].instances["peer-p"] = _inst("peer-p")
+    env["fed"].result = "fail"
+
+    assert await env["svc"].unpair("peer-p") is False
+    assert seen == []
+
+    await env["svc"].finish_unpair("peer-p")
+    assert seen == ["peer-p"]

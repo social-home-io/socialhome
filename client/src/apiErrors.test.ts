@@ -34,6 +34,39 @@ describe('apiErrorMessage — known codes', () => {
       .toBe('Your home is still converting a lot of videos. Try again later.')
   })
 
+  it('names a picture limit under a megabyte in kB, not as "under 1 MB"', () => {
+    expect(apiErrorMessage(422, '/api/spaces/s/cover', {
+      code: 'IMAGE_TOO_LARGE', detail: 'x', params: { max_kb: 65 },
+    })).toBe("This picture can't be made small enough for the space (at most 65 kB). Try a simpler picture.")
+    expect(apiErrorMessage(422, '/api/me/picture', {
+      code: 'IMAGE_TOO_LARGE', detail: 'x', params: { max_mb: 10 },
+    })).toBe('This picture is too big. Pick one under 10 MB.')
+  })
+
+  it('says a space item is too large, with the limit', () => {
+    expect(apiErrorMessage(413, '/api/spaces/s/pages', {
+      code: 'SPACE_ITEM_TOO_LARGE', detail: 'x', params: { max_kb: 475 },
+    })).toBe('This is too large to share with the space (at most 475 kB in total). Shorten it or split it up.')
+    // Without the limit: the server's own words.
+    expect(apiErrorMessage(413, '/api/spaces/s/pages', {
+      code: 'SPACE_ITEM_TOO_LARGE', detail: 'Too large.',
+    })).toBe('Too large.')
+  })
+
+  it('names the cap of a space name, an emoji and a calendar list', () => {
+    expect(apiErrorMessage(422, '/api/spaces', {
+      code: 'SPACE_NAME_TOO_LONG', detail: 'x', params: { max: 120 },
+    })).toBe('This name is too long — use at most 120 characters.')
+    expect(apiErrorMessage(422, '/api/spaces', { code: 'SPACE_EMOJI_TOO_LONG', detail: 'x' }))
+      .toBe('Pick a single emoji.')
+    expect(apiErrorMessage(422, '/api/spaces/s/calendar/events', {
+      code: 'CALENDAR_RRULE_INVALID', detail: 'x', params: { max: 512 },
+    })).toBe("This repeat setting can't be used. Choose daily, weekly, monthly or yearly.")
+    expect(apiErrorMessage(422, '/api/spaces/s/calendar/events', {
+      code: 'CALENDAR_ATTENDEES_INVALID', detail: 'x', params: { max: 1000 },
+    })).toBe("This guest list can't be saved. Invite at most 1000 people.")
+  })
+
   it('tells an app turned off by an admin from one that is not for this account', () => {
     expect(apiErrorMessage(403, '/api/apps/chess/store/k', {
       code: 'APP_NOT_ENABLED', detail: "App 'chess' is disabled",
@@ -98,6 +131,15 @@ describe('apiErrorMessage — known codes', () => {
       code: 'PAIRING_CONFIRMED',
       detail: 'This pairing is already confirmed — remove the connection instead.',
     })).toBe('This household is already paired with you.')
+  })
+
+  it('says how many reactions a person can leave on a post', async () => {
+    const refused = { code: 'REACTION_LIMIT', detail: 'Too many reactions: you can leave up to five on a post.' }
+    expect(apiErrorMessage(422, '/api/spaces/s/posts/p/reactions', refused))
+      .toBe('You can leave up to five reactions on a post. Remove one to add another.')
+    await setLocale('de')
+    expect(apiErrorMessage(422, '/api/spaces/s/posts/p/reactions', refused))
+      .toBe('Du kannst bis zu fünf Reaktionen pro Beitrag hinterlassen. Entferne eine, um eine andere hinzuzufügen.')
   })
 
   it('translates an expired trust-relay pairing request', () => {

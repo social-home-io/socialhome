@@ -21,6 +21,7 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
     RELAY_QUEUE_TTL_SECONDS,
@@ -30,25 +31,34 @@ from socialhome.federation.inbound_validator import (
     TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
+    ReplayDetectedError,
     UnpairedPeerRefusedError,
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
-    make_check_mailbox_space,
+    make_check_mailbox_sender,
+    make_check_multi_recipient,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
     make_check_space_archived,
     make_check_space_writer,
+    make_check_staged_half,
     make_check_timestamp,
     make_check_unpairing,
     make_confirm_relay_approval,
+    make_decrypt_and_parse,
     make_idempotency_check,
     make_lookup_instance,
     make_lookup_instance_by_id,
     make_parse_json,
     make_persist_replay,
+    make_verify_signature,
     run_post_decrypt_gates,
+)
+from socialhome.federation.multi_recipient import (
+    MULTI_TO_INSTANCE,
+    multi_to_instance,
 )
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
@@ -248,8 +258,75 @@ async def test_replay_rejects_duplicate():
     step = make_check_replay(replay_cache=_FakeReplayCache(already_seen=True))
     ctx = InboundContext()
     ctx.envelope = _minimal_envelope()
-    with pytest.raises(ValueError, match="Replay detected"):
+    with pytest.raises(ReplayDetectedError, match="Replay detected"):
         await step(ctx)
+    assert ctx.replay_undo is None
+
+
+async def _replay_then(step_after, cache: ReplayCache) -> InboundContext:
+    ctx = InboundContext()
+    ctx.envelope = _minimal_envelope()
+    pipeline = InboundPipeline([make_check_replay(replay_cache=cache), step_after])
+    await pipeline.run(ctx)
+    return ctx
+
+
+async def test_an_internal_error_before_the_id_is_persisted_forgets_the_id():
+    """The sender is answered 5xx and retries the same ``msg_id``: that
+    retry must be taken, not refused as a replay of an envelope that was
+    never applied."""
+    cache = ReplayCache()
+
+    async def _db_down(ctx: InboundContext) -> None:
+        raise RuntimeError("database is locked")
+
+    with pytest.raises(RuntimeError):
+        await _replay_then(_db_down, cache)
+
+    async def _fine(ctx: InboundContext) -> None:
+        return None
+
+    ctx = await _replay_then(_fine, cache)  # the retry: no ReplayDetectedError
+    assert ctx.replay_undo is not None
+
+
+async def test_a_refusal_after_the_replay_step_keeps_the_id():
+    """A refusal is final for that envelope: its copy is a replay."""
+    cache = ReplayCache()
+
+    async def _refuse(ctx: InboundContext) -> None:
+        raise ValueError("Failed to decrypt payload")
+
+    with pytest.raises(ValueError, match="decrypt"):
+        await _replay_then(_refuse, cache)
+    with pytest.raises(ReplayDetectedError):
+        await _replay_then(_refuse, cache)
+
+
+async def test_a_persisted_id_is_never_forgotten():
+    class _Repo:
+        async def insert_replay_id(self, msg_id: str) -> None:
+            return None
+
+    cache = ReplayCache()
+    ctx = InboundContext()
+    ctx.envelope = _minimal_envelope()
+
+    async def _late_crash(ctx: InboundContext) -> None:
+        raise RuntimeError("after the id was persisted")
+
+    pipeline = InboundPipeline(
+        [
+            make_check_replay(replay_cache=cache),
+            make_persist_replay(federation_repo=_Repo()),
+            _late_crash,
+        ]
+    )
+    with pytest.raises(RuntimeError):
+        await pipeline.run(ctx)
+    assert ctx.replay_undo is None
+    with pytest.raises(ReplayDetectedError):
+        await _replay_then(_late_crash, cache)
 
 
 # ─── Step 8: idempotency ─────────────────────────────────────────────────
@@ -619,10 +696,10 @@ async def test_peer_class_gate_rejects_every_unclassified_type_by_default():
 @pytest.mark.parametrize(
     "event_type",
     [
-        FederationEventType.SPACE_ADMIN_KEY_SHARE,
         FederationEventType.SPACE_FIND_ROUTE,
         FederationEventType.SPACE_ROUTE_FOUND,
-        FederationEventType.SPACE_ROUTED,
+        # SPACE_ROUTED passes this gate since v_89 — only in the host-hop
+        # shape, which ``SpaceRoutedHandler`` enforces (test_host_hop.py).
         FederationEventType.SPACE_JOIN_REQUEST,
         FederationEventType.SPACE_JOIN_REQUEST_VIA,
         FederationEventType.DM_MESSAGE,
@@ -644,6 +721,20 @@ async def test_peer_class_gate_names_the_types_the_review_probed(event_type):
     )
     with pytest.raises(ValueError, match="not permitted"):
         await step(ctx)
+
+
+async def test_peer_class_gate_lets_the_seed_share_reach_a_gfs_only_admin():
+    """Every space admin is equal on every path (owner decision
+    2026-11-15): the seed share passes the class gate; the handler decides
+    (acting host, delegation, live admin seat, seed matches the pin)."""
+    step = make_check_peer_class()
+    ctx = InboundContext(
+        envelope=_minimal_envelope(
+            event_type=FederationEventType.SPACE_ADMIN_KEY_SHARE.value
+        ),
+        instance=_SourcedInstance(InstanceSource.SPACE_SESSION),
+    )
+    await step(ctx)
 
 
 async def test_peer_class_gate_logs_type_and_instance_but_never_payload(caplog):
@@ -687,6 +778,8 @@ class _RelayInstance:
         self.source = source
         self.gfs_relay = gfs_relay
         self.from_instance = "remote-iid"
+        #: A link-joined (sealed-redeem) seat carries its relay.
+        self.relay_via: str | None = "https://gfs.example.org"
 
 
 async def test_relay_gate_rejects_a_paired_peer_we_never_opted_in_with(caplog):
@@ -778,26 +871,33 @@ async def test_relay_gate_runs_after_the_lookup_and_before_any_crypto():
     assert names.index("check_relay_opt_in") < names.index("verify_signature")
 
 
-# ─── v_88: per-space mailbox gates ───────────────────────────────────────
+# ─── v_89: the sender gate of our GFS mailbox ─────────────────────────────
 
 
-def _mailbox_ctx(space_id, *, mailbox_space="sp-1", event_type=None):
-    env = _minimal_envelope()
+def _mailbox_ctx(space_id, *, event_type=None, sender="remote-iid"):
+    env = _minimal_envelope(from_instance=sender)
     if event_type is not None:
         env["event_type"] = event_type
     env["space_id"] = space_id
-    return InboundContext(
-        envelope=env,
-        transport=TRANSPORT_GFS_MAILBOX,
-        mailbox_space_id=mailbox_space,
-    )
+    return InboundContext(envelope=env, transport=TRANSPORT_GFS_MAILBOX)
+
+
+def _carded(*pairs):
+    """A directory check that knows the (sender, space) cards in *pairs*."""
+    seen: list[tuple[str, str]] = []
+
+    async def check(sender, space_id):
+        seen.append((sender, space_id))
+        return (sender, space_id) in pairs
+
+    return check, seen
 
 
 async def test_a_space_less_space_event_is_refused_on_a_mailbox():
-    """A ``SPACE_*`` event must name its space to ride a mailbox (senders
-    send a space-less one instance-addressed), so a mailbox frame can never
-    carry space traffic of a space it was not given for."""
-    step = make_check_mailbox_space()
+    """A ``SPACE_*`` event must name its space to ride our mailbox (senders
+    send a space-less one instance-addressed)."""
+    check, _ = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
     for space_id in (None, ""):
         with pytest.raises(ValueError, match="space"):
             await step(_mailbox_ctx(space_id))
@@ -805,34 +905,70 @@ async def test_a_space_less_space_event_is_refused_on_a_mailbox():
         await step(_mailbox_ctx(None, event_type="space_invite_token_redeem_ack"))
 
 
-async def test_mailbox_frame_of_its_own_space_or_a_space_less_non_space_event_passes():
-    step = make_check_mailbox_space()
+async def test_a_carded_sender_of_its_space_and_space_less_non_space_events_pass():
+    check, seen = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
     await step(_mailbox_ctx("sp-1"))
+    assert seen == [("remote-iid", "sp-1")]
     await step(_mailbox_ctx(None, event_type="instance_capabilities_updated"))
     await step(_mailbox_ctx("", event_type="instance_capabilities_updated"))
 
 
-async def test_mailbox_frame_of_another_space_is_refused_without_naming_it(caplog):
-    step = make_check_mailbox_space()
-    with caplog.at_level("DEBUG"), pytest.raises(ValueError, match="space"):
+async def test_a_sender_without_a_card_for_that_space_is_refused_quietly(caplog):
+    """One mailbox serves all our spaces: knowing the address authorizes
+    nothing — a card for THAT space does. The log names neither."""
+    check, _ = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
+    with caplog.at_level("DEBUG"), pytest.raises(ValueError, match="card"):
         await step(_mailbox_ctx("sp-other"))
+    with pytest.raises(ValueError, match="card"):
+        await step(_mailbox_ctx("sp-1", sender="stranger-iid"))
     assert "sp-other" not in caplog.text and "sp-1" not in caplog.text
 
 
-async def test_mailbox_frame_with_no_recorded_space_fails_closed():
-    step = make_check_mailbox_space()
+async def test_the_mailbox_sender_gate_fails_closed_unwired():
+    step = make_check_mailbox_sender(lambda: None)
     with pytest.raises(ValueError):
-        await step(_mailbox_ctx("sp-1", mailbox_space=None))
+        await step(_mailbox_ctx("sp-1"))
 
 
-async def test_mailbox_space_gate_ignores_every_other_transport():
-    step = make_check_mailbox_space()
+async def test_the_mailbox_sender_gate_ignores_every_other_transport():
+    step = make_check_mailbox_sender(lambda: None)
     env = _minimal_envelope()
     env["space_id"] = "sp-other"
     for transport in ("", TRANSPORT_GFS_RELAY):
-        await step(
-            InboundContext(envelope=env, transport=transport, mailbox_space_id="x")
+        await step(InboundContext(envelope=env, transport=transport))
+
+
+async def test_a_directory_seat_gets_the_card_check_on_the_instance_relay():
+    """Review round 1 (#1336): a household seated from a host's directory
+    (``space_session``, no relay of its own) must not skip the card gate by
+    addressing our instance id on the GFS relay instead of our mailbox. Its
+    space envelope there needs the card for that space; a space-less one is
+    left to the seat vocabulary; a sealed-redeem seat (with its relay) is
+    not affected."""
+    check, seen = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
+    directory_seat = _RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False)
+    directory_seat.relay_via = None
+
+    def _ctx(space_id, instance, event_type=None):
+        env = _minimal_envelope()
+        env["space_id"] = space_id
+        if event_type:
+            env["event_type"] = event_type
+        return InboundContext(
+            envelope=env, instance=instance, transport=TRANSPORT_GFS_RELAY
         )
+
+    with pytest.raises(ValueError, match="card"):
+        await step(_ctx("sp-other", directory_seat))
+    await step(_ctx("sp-1", directory_seat))
+    await step(_ctx(None, directory_seat, "space_session_cleanup"))
+    redeem_seat = _RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False)
+    seen.clear()
+    await step(_ctx("sp-other", redeem_seat))
+    assert seen == []  # not judged here at all
 
 
 async def test_mailbox_transport_gets_the_relay_gates_and_window():
@@ -855,14 +991,15 @@ async def test_mailbox_transport_gets_the_relay_gates_and_window():
     )
 
 
-async def test_mailbox_space_gate_runs_right_after_the_parse():
+async def test_mailbox_sender_gate_runs_right_after_the_lookup():
     steps = FederationService._common_pipeline_steps(
         _StubPipelineOwner(),  # type: ignore[arg-type]
         lookup_step=_noop_step,
     )
     names = [getattr(s, "__name__", "") for s in steps]
-    assert names.index("parse_json") < names.index("check_mailbox_space")
-    assert names.index("check_mailbox_space") < names.index("_noop_step")
+    # Right after the lookup (it reads the sender's row), before any crypto.
+    assert names.index("_noop_step") < names.index("check_mailbox_sender")
+    assert names.index("check_mailbox_sender") < names.index("verify_signature")
 
 
 async def test_unpairing_gate_sits_between_signature_and_replay():
@@ -927,7 +1064,7 @@ async def test_unpairing_gate_lets_only_unpair_through_from_a_tombstone():
 
 
 async def test_unpairing_gate_refuses_even_when_the_nudge_fails():
-    async def _boom(iid: str) -> None:
+    async def _boom(iid: str, _inbox: str = "") -> None:
         raise RuntimeError("db down")
 
     step = make_check_unpairing(on_refused=_boom)
@@ -1025,7 +1162,13 @@ class _StubPipelineOwner:
     _pending_seat_buffer = None
     _on_tombstone_contact = None
     _on_relay_approval_contact = None
+    _on_staged_approval_cancelled = None
     _own_instance_id = "own-1"
+
+    class _pending_pairings:
+        @staticmethod
+        def has_code_half(instance_id: str) -> bool:
+            return False
 
     async def _notify_archived_write(self, event, space) -> None:
         return None
@@ -1050,15 +1193,25 @@ class _StubPipelineOwner:
 
 
 class _FakeFeatures:
-    def __init__(self, allow_subscriber_comment: bool = False) -> None:
+    def __init__(
+        self,
+        allow_subscriber_comment: bool = False,
+        allow_subscriber_react: bool = False,
+    ) -> None:
         self.allow_subscriber_comment = allow_subscriber_comment
-        self.allow_subscriber_react = False
+        self.allow_subscriber_react = allow_subscriber_react
 
 
 class _FakeSpace:
-    def __init__(self, owner_instance_id: str, *, allow_comment: bool = False) -> None:
+    def __init__(
+        self,
+        owner_instance_id: str,
+        *,
+        allow_comment: bool = False,
+        allow_react: bool = False,
+    ) -> None:
         self.owner_instance_id = owner_instance_id
-        self.features = _FakeFeatures(allow_comment)
+        self.features = _FakeFeatures(allow_comment, allow_react)
 
 
 class _FakeSpaceRepo:
@@ -1139,13 +1292,18 @@ def _writer_step(
     owner=OWN,
     seats=None,
     allow_comment=False,
+    allow_react=False,
     space_id="sp-1",
 ):
     if seats is None:
         seats = [_FakeSeat("subscriber")]
     return make_check_space_writer(
         space_repo=_FakeSpaceRepo(
-            {space_id: _FakeSpace(owner, allow_comment=allow_comment)}
+            {
+                space_id: _FakeSpace(
+                    owner, allow_comment=allow_comment, allow_react=allow_react
+                )
+            }
         ),
         remote_member_repo=_FakeRemoteMemberRepo({(space_id, "peer-x"): seats}),
     )
@@ -1373,6 +1531,32 @@ async def test_space_writer_allows_a_comment_only_with_the_opt_in():
     assert allowed.early_response is None
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_COMMENT_UPDATED,
+        FederationEventType.SPACE_COMMENT_DELETED,
+    ],
+)
+async def test_a_follower_edits_or_deletes_its_comment_only_with_the_opt_in(
+    event_type,
+):
+    """S2 (#1375 review): a follower's own comment edit / delete follows the
+    comment switch exactly like its create, on the direct path as on the GFS
+    path — refused with the switch off, allowed with it on (the handler
+    still checks the comment is the sender household's own)."""
+    payload = {
+        "id": "c-1",
+        "comment_id": "c-1",
+        "post_id": "p1",
+        "author": "u-follower",
+    }
+    blocked = await _run(_writer_step(allow_comment=False), event_type, payload)
+    assert blocked.drop_reason == REFUSED
+    allowed = await _run(_writer_step(allow_comment=True), event_type, payload)
+    assert allowed.early_response is None
+
+
 async def test_space_writer_binds_the_comment_opt_in_to_a_real_seat():
     """Even under the opt-in the author must name a LIVE ``subscriber``
     seat of that same household — otherwise the exception would be the
@@ -1383,6 +1567,40 @@ async def test_space_writer_binds_the_comment_opt_in_to_a_real_seat():
         {"author": "u-somebody-else", "content": "nice"},
     )
     assert ctx.drop_reason == REFUSED
+
+
+_REACTION = {"user_id": "u-follower", "post_id": "p1", "emoji": "👍", "action": "add"}
+
+
+async def test_space_writer_allows_a_follower_reaction_only_with_the_opt_in():
+    """v_93 — ``allow_subscriber_react`` is the second opt-in: a follower-only
+    household's ``SPACE_POST_REACTION`` passes only while the space lets
+    followers react, and only for a reactor that IS a live follower seat of
+    that household. The comment opt-in never covers it."""
+    FET = FederationEventType
+    blocked = await _run(_writer_step(), FET.SPACE_POST_REACTION, _REACTION)
+    assert blocked.drop_reason == REFUSED
+    comment_only = await _run(
+        _writer_step(allow_comment=True), FET.SPACE_POST_REACTION, _REACTION
+    )
+    assert comment_only.drop_reason == REFUSED
+    allowed = await _run(
+        _writer_step(allow_react=True), FET.SPACE_POST_REACTION, _REACTION
+    )
+    assert allowed.early_response is None
+    spoof = await _run(
+        _writer_step(allow_react=True),
+        FET.SPACE_POST_REACTION,
+        {**_REACTION, "user_id": "u-somebody-else"},
+    )
+    assert spoof.drop_reason == REFUSED
+    # The react opt-in never lets a follower comment.
+    comment = await _run(
+        _writer_step(allow_react=True),
+        FET.SPACE_COMMENT_CREATED,
+        {"author": "u-follower", "content": "nice"},
+    )
+    assert comment.drop_reason == REFUSED
 
 
 async def test_space_writer_never_extends_the_comment_opt_in_to_a_post():
@@ -1739,7 +1957,7 @@ class _KeyedStatusInstance(_StatusInstance):
 async def test_relay_approval_step_confirms_on_the_requesters_first_envelope():
     seen: list[str] = []
 
-    async def _confirm(iid: str) -> None:
+    async def _confirm(iid: str, _inbox: str = "") -> None:
         seen.append(iid)
 
     step = make_confirm_relay_approval(on_contact=_confirm)
@@ -1766,7 +1984,7 @@ async def test_relay_approval_step_confirms_on_the_requesters_first_envelope():
 async def test_relay_approval_step_ignores_every_other_row(status):
     seen: list[str] = []
 
-    async def _confirm(iid: str) -> None:
+    async def _confirm(iid: str, _inbox: str = "") -> None:
         seen.append(iid)
 
     step = make_confirm_relay_approval(on_contact=_confirm)
@@ -1782,10 +2000,155 @@ async def test_relay_approval_step_ignores_every_other_row(status):
 async def test_relay_approval_step_never_rejects_the_envelope():
     """Fail-soft: a promotion that blows up leaves the envelope alone."""
 
-    async def _boom(iid: str) -> None:
+    async def _boom(iid: str, _inbox: str = "") -> None:
         raise RuntimeError("db down")
 
     step = make_confirm_relay_approval(on_contact=_boom)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        instance=_KeyedStatusInstance(PairingStatus.PENDING_SENT),
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+class _StagedApproval(_KeyedStatusInstance):
+    """An approval kept beside a space seat (``_InboxInstance.staged``)."""
+
+    staged = True
+
+
+class _StagedHalf:
+    """What ``_lookup_inbox`` resolves a staged half to."""
+
+    staged = True
+
+    def __init__(self, kind) -> None:
+        self.pending_kind = kind
+
+
+async def _staged_gate(kind, event_type) -> None:
+    await make_check_staged_half()(
+        InboundContext(
+            envelope=_minimal_envelope(event_type=event_type.value),
+            inbox_id="pair-inbox",
+            instance=_StagedHalf(kind),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.PAIRING_ABORT,
+    ],
+)
+async def test_a_staged_approval_takes_the_requesters_envelope(event_type):
+    await _staged_gate("approval", event_type)
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        FederationEventType.UNPAIR,
+        FederationEventType.PAIRING_ABORT,
+        FederationEventType.PAIRING_CONFIRM,
+        FederationEventType.PAIRING_INTRO_AUTO,
+    ],
+)
+async def test_a_staged_pairing_code_takes_nothing(event_type):
+    """Nobody verified the code yet, and the household's row says
+    "confirmed" (its seat): nothing under the code's keys is read — its
+    cancel arrives as the seat's own traffic instead."""
+    with pytest.raises(ValueError, match="No instance found"):
+        await _staged_gate("code", event_type)
+
+
+@pytest.mark.parametrize("kind", ["request", None, "something-new"])
+async def test_any_other_staged_half_takes_nothing(kind):
+    """Fail closed for a kind this gate does not know."""
+    with pytest.raises(ValueError, match="No instance found"):
+        await _staged_gate(kind, FederationEventType.PAIRING_ABORT)
+
+
+async def test_the_staged_gate_leaves_every_row_alone():
+    for status in PairingStatus:
+        await make_check_staged_half()(
+            InboundContext(
+                envelope=_minimal_envelope(),
+                instance=_KeyedStatusInstance(status),
+            )
+        )
+
+
+async def test_the_staged_gate_runs_before_any_crypto():
+    steps = FederationService._common_pipeline_steps(
+        _StubPipelineOwner(),  # type: ignore[arg-type]
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert names.index("check_staged_half") < names.index("verify_signature")
+    assert names.index("check_staged_half") < names.index("decrypt_and_parse")
+
+
+async def test_a_staged_approval_that_confirms_lets_the_envelope_through():
+    async def _confirm(iid: str, _inbox: str = "") -> bool:
+        return True
+
+    step = make_confirm_relay_approval(on_contact=_confirm)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        instance=_StagedApproval(PairingStatus.PENDING_SENT),
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_a_staged_approval_that_does_not_confirm_refuses_the_envelope():
+    """Fail closed. The row for this household is still its space seat, so
+    a handler would take the sender for a confirmed household and its
+    envelope — sealed under keys of a pairing that did not happen — for
+    trusted. It is refused like an unknown inbox; the sender retries."""
+
+    async def _refuse(iid: str, _inbox: str = "") -> bool:
+        return False
+
+    step = make_confirm_relay_approval(on_contact=_refuse)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        inbox_id="appr-inbox",
+        instance=_StagedApproval(PairingStatus.PENDING_SENT),
+    )
+    with pytest.raises(ValueError, match="No instance found"):
+        await step(ctx)
+
+
+async def test_a_staged_approval_whose_promotion_fails_refuses_the_envelope():
+    async def _boom(iid: str, _inbox: str = "") -> bool:
+        raise RuntimeError("db down")
+
+    step = make_confirm_relay_approval(on_contact=_boom)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        inbox_id="appr-inbox",
+        instance=_StagedApproval(PairingStatus.PENDING_SENT),
+    )
+    with pytest.raises(ValueError, match="No instance found"):
+        await step(ctx)
+
+
+async def test_a_row_approval_that_does_not_confirm_still_proceeds():
+    """Unchanged for an approval stored in the row (no seat): the row
+    itself says ``pending_sent`` to every handler."""
+
+    async def _refuse(iid: str, _inbox: str = "") -> bool:
+        return False
+
+    step = make_confirm_relay_approval(on_contact=_refuse)
     ctx = InboundContext(
         envelope=_minimal_envelope(),
         instance=_KeyedStatusInstance(PairingStatus.PENDING_SENT),
@@ -1825,3 +2188,488 @@ async def test_check_event_types_refuses_any_other_type():
     ctx = InboundContext(envelope=_minimal_envelope(event_type="dm_message"))
     with pytest.raises(ValueError, match="Event type not allowed"):
         await step(ctx)
+
+
+# ─── v_91: multi-recipient mailbox frames ────────────────────────────────
+
+
+_SELF = "self-iid"
+
+
+def _multi_ctx(
+    *,
+    transport=TRANSPORT_GFS_MAILBOX,
+    multi: bool = True,
+    audience=(_SELF, "other-iid"),
+    **env,
+):
+    ctx = InboundContext(
+        envelope=_minimal_envelope(
+            **{
+                "to_instance": multi_to_instance(audience),
+                "space_id": "sp-1",
+                **env,
+            }
+        ),
+        transport=transport,
+    )
+    ctx.multi_frame = multi
+    return ctx
+
+
+def _multi_step():
+    return make_check_multi_recipient(own_instance_id=_SELF)
+
+
+async def test_multi_recipient_step_takes_a_matching_multi_frame():
+    await _multi_step()(_multi_ctx())
+
+
+async def test_a_star_envelope_without_a_multi_context_is_refused():
+    """``to_instance`` starting with ``"*"`` only ever arrives inside a multi
+    frame — on any other path (RTC, HTTPS, an ordinary relay/mailbox frame)
+    it is refused, whatever follows the star."""
+    step = _multi_step()
+    for transport in ("", TRANSPORT_GFS_RELAY, TRANSPORT_GFS_MAILBOX):
+        with pytest.raises(ValueError, match="multi-recipient"):
+            await step(_multi_ctx(transport=transport, multi=False))
+        for to in (MULTI_TO_INSTANCE, "*x", "*:"):
+            with pytest.raises(ValueError, match="multi-recipient"):
+                await step(
+                    InboundContext(
+                        envelope=_minimal_envelope(to_instance=to),
+                        transport=transport,
+                    )
+                )
+    # An ordinary addressed envelope passes untouched.
+    await step(InboundContext(envelope=_minimal_envelope()))
+
+
+@pytest.mark.parametrize(
+    "ctx_kwargs",
+    [
+        {"transport": TRANSPORT_GFS_RELAY},
+        {"transport": ""},
+        {"to_instance": "self-iid"},
+        {"to_instance": MULTI_TO_INSTANCE},
+        {"space_id": ""},
+        {"space_id": None},
+        {"space_id": 5},
+    ],
+)
+async def test_a_multi_frame_must_be_a_mailbox_star_envelope_naming_a_space(
+    ctx_kwargs,
+):
+    with pytest.raises(ValueError):
+        await _multi_step()(_multi_ctx(**ctx_kwargs))
+
+
+async def test_a_multi_frame_re_pushed_to_a_household_it_does_not_list_is_refused():
+    """A recipient re-pushing a captured frame to a mailbox the sender left
+    out: our tag is not in the signed audience."""
+    with pytest.raises(ValueError, match="not addressed to us"):
+        await _multi_step()(_multi_ctx(audience=("member-1", "member-2")))
+    # Listed: taken.
+    await _multi_step()(_multi_ctx(audience=("member-1", _SELF)))
+
+
+@pytest.mark.parametrize("to", ["*:", "*:short", "*:" + "!" * 11, "*:A"])
+async def test_a_multi_frame_with_a_malformed_audience_is_refused(to):
+    with pytest.raises(ValueError, match="not addressed to us"):
+        await _multi_step()(_multi_ctx(to_instance=to))
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_MEMBER_CARD.value,
+        FederationEventType.SPACE_MAILBOX_DIRECTORY.value,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY.value,
+        FederationEventType.SPACE_ROUTED.value,
+        FederationEventType.DM_MESSAGE.value,
+        "not-a-type",
+    ],
+)
+async def test_a_multi_frame_of_an_excluded_type_is_refused(event_type):
+    with pytest.raises(ValueError, match="multi-recipient"):
+        await _multi_step()(_multi_ctx(event_type=event_type))
+
+
+async def test_decrypt_and_parse_takes_a_multi_frame_s_payload_as_is():
+    """A multi frame's payload rides inside the body sealed under K, so it
+    is taken as-is — never under the pair's session key (the sender row may
+    have none we share)."""
+
+    class _NoSessionKey:
+        def decrypt(self, *_a, **_kw):
+            raise AssertionError("the session key must not be used")
+
+    step = make_decrypt_and_parse(
+        key_manager=_NoSessionKey(),
+        encoder=FederationEncoder(b"\x02" * 32),
+        loads=_loads,
+    )
+    ctx = _multi_ctx(encrypted_payload='{"x": 1}')
+    ctx.instance = SimpleNamespace(key_remote_to_self="unused")
+    await step(ctx)
+    assert ctx.event is not None and ctx.event.payload == {"x": 1}
+    assert ctx.event.space_id == "sp-1"
+    with pytest.raises(ValueError, match="not a JSON string"):
+        await step(_multi_ctx(encrypted_payload={"x": 1}))
+
+
+async def test_an_unencrypted_payload_is_refused_outside_a_multi_frame():
+    """Only the multi mailbox path takes a payload as-is: the same plaintext
+    on any other envelope must open under the pair's session key, and does
+    not."""
+
+    class _SessionKey:
+        def decrypt(self, *_a, **_kw):
+            return b"\x01" * 32
+
+    step = make_decrypt_and_parse(
+        key_manager=_SessionKey(),
+        encoder=FederationEncoder(b"\x02" * 32),
+        loads=_loads,
+    )
+    ctx = _multi_ctx(encrypted_payload='{"x": 1}', multi=False)
+    ctx.instance = SimpleNamespace(key_remote_to_self="wrapped")
+    with pytest.raises(ValueError, match="Failed to decrypt payload"):
+        await step(ctx)
+
+
+async def test_a_multi_payload_naming_another_space_is_refused():
+    """The payload of a multi frame names the envelope's space, or none — a
+    payload pointing at another space is refused after decrypt."""
+    step = make_decrypt_and_parse(
+        key_manager=None,
+        encoder=FederationEncoder(b"\x02" * 32),
+        loads=_loads,
+    )
+    for payload, ok in (
+        ('{"space_id": "sp-1", "x": 1}', True),
+        ('{"x": 1}', True),
+        ('{"space_id": "sp-other"}', False),
+    ):
+        ctx = _multi_ctx(encrypted_payload=payload)
+        if ok:
+            await step(ctx)
+            assert ctx.event is not None
+        else:
+            with pytest.raises(ValueError, match="another space"):
+                await step(ctx)
+
+
+async def test_a_seed_share_inside_a_multi_frame_is_refused():
+    """The signing seed is for ONE admin household: a multi frame (whose body
+    every listed household can read) carrying it is refused before any
+    decrypt."""
+    with pytest.raises(ValueError, match="never rides a multi-recipient frame"):
+        await _multi_step()(
+            _multi_ctx(event_type=FederationEventType.SPACE_ADMIN_KEY_SHARE.value)
+        )
+
+
+# ── A seat with a pending pairing beside it ───────────────────────────────
+
+
+class _SeatRow:
+    """A seat as ``make_lookup_instance_by_id`` wraps it."""
+
+    source = InstanceSource.SPACE_SESSION
+    status = PairingStatus.CONFIRMED
+    from_instance = "remote-iid"
+    key_remote_to_self = "seat-key"
+    gfs_relay = False
+
+
+class _ApprovedHalf:
+    staged = True
+    pending_kind = "approval"
+    source = InstanceSource.MANUAL
+    status = PairingStatus.PENDING_SENT
+    from_instance = "remote-iid"
+    key_remote_to_self = "pair-key"
+
+    def __init__(self, *, gfs_relay: bool = True) -> None:
+        self.gfs_relay = gfs_relay
+
+
+def _seat_ctx(event_type, *, alt=None, transport: str = "") -> InboundContext:
+    return InboundContext(
+        envelope={
+            **_minimal_envelope(event_type=event_type.value),
+            "encrypted_payload": "ct",
+        },
+        instance=_SeatRow(),
+        staged_alt=alt,
+        transport=transport,
+    )
+
+
+async def test_a_seat_may_abort_only_while_a_pairing_code_waits_beside_it():
+    asked: list[str] = []
+
+    def _has_code(instance_id: str) -> bool:
+        asked.append(instance_id)
+        return instance_id == "remote-iid"
+
+    ctx = _seat_ctx(FederationEventType.PAIRING_ABORT)
+    await make_check_peer_class(may_abort=_has_code)(ctx)
+    # Still the seat: its keys, its route — the handler binds the token.
+    assert isinstance(ctx.instance, _SeatRow) and asked == ["remote-iid"]
+
+    with pytest.raises(ValueError, match="not permitted from a space-scoped peer"):
+        await make_check_peer_class(may_abort=lambda _i: False)(
+            _seat_ctx(FederationEventType.PAIRING_ABORT)
+        )
+    with pytest.raises(ValueError, match="not permitted from a space-scoped peer"):
+        await make_check_peer_class()(_seat_ctx(FederationEventType.PAIRING_ABORT))
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [FederationEventType.UNPAIR, FederationEventType.DM_MESSAGE],
+)
+async def test_a_code_half_lets_a_seat_send_nothing_but_the_abort(event_type):
+    with pytest.raises(ValueError, match="not permitted from a space-scoped peer"):
+        await make_check_peer_class(may_abort=lambda _i: True)(_seat_ctx(event_type))
+
+
+async def test_an_event_a_seat_may_not_send_is_the_approved_pairings():
+    """On a transport that knows the sender only by its id, an event
+    outside the space vocabulary from a seat with an APPROVED pairing
+    beside it can only be that pairing's: it goes on under the half (whose
+    keys and the confirm step decide)."""
+    half = _ApprovedHalf()
+    ctx = _seat_ctx(FederationEventType.DM_MESSAGE, alt=half)
+    await make_check_peer_class()(ctx)
+    assert ctx.instance is half and ctx.staged_alt is None
+
+
+async def test_a_pairing_without_a_gfs_reach_is_not_read_off_the_relay():
+    """Over the GFS relay the pairing must be a relay pairing — our half
+    holds the opt-in only when its code had a GFS reach."""
+    ctx = _seat_ctx(
+        FederationEventType.DM_MESSAGE,
+        alt=_ApprovedHalf(gfs_relay=False),
+        transport=TRANSPORT_GFS_RELAY,
+    )
+    with pytest.raises(ValueError, match="GFS relay is not enabled"):
+        await make_check_peer_class()(ctx)
+
+
+class _KeyRing:
+    def decrypt(self, key):
+        return key
+
+
+class _OneKeyEncoder:
+    """Opens the payload only under ``pair-key``."""
+
+    def decrypt_payload(self, payload, key):
+        if key != "pair-key":
+            raise ValueError("bad tag")
+        return '{"hello": 1}'
+
+
+async def test_a_payload_the_seat_keys_do_not_open_is_read_under_the_approved_half():
+    """The scanner's first envelope after it confirmed a GFS-reach code:
+    in the seat's vocabulary (its capabilities, a space post), through the
+    relay, under the PAIRING's keys."""
+    half = _ApprovedHalf()
+    ctx = _seat_ctx(
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        alt=half,
+        transport=TRANSPORT_GFS_RELAY,
+    )
+    step = make_decrypt_and_parse(
+        key_manager=_KeyRing(), encoder=_OneKeyEncoder(), loads=orjson.loads
+    )
+    await step(ctx)
+    assert ctx.instance is half and ctx.event.payload == {"hello": 1}
+
+
+async def test_a_payload_neither_key_opens_is_refused():
+    class _NoKeyEncoder:
+        def decrypt_payload(self, payload, key):
+            raise ValueError("bad tag")
+
+    ctx = _seat_ctx(FederationEventType.SPACE_POST_CREATED, alt=_ApprovedHalf())
+    step = make_decrypt_and_parse(
+        key_manager=_KeyRing(), encoder=_NoKeyEncoder(), loads=orjson.loads
+    )
+    with pytest.raises(ValueError, match="Failed to decrypt payload"):
+        await step(ctx)
+    assert isinstance(ctx.instance, _SeatRow)
+
+
+async def test_the_seats_own_traffic_stays_the_seats():
+    """Opens under the seat's keys: the approved half is not consulted."""
+
+    class _SeatKeyEncoder:
+        def decrypt_payload(self, payload, key):
+            assert key == "seat-key"
+            return "{}"
+
+    ctx = _seat_ctx(FederationEventType.SPACE_POST_CREATED, alt=_ApprovedHalf())
+    await make_decrypt_and_parse(
+        key_manager=_KeyRing(), encoder=_SeatKeyEncoder(), loads=orjson.loads
+    )(ctx)
+    assert isinstance(ctx.instance, _SeatRow)
+
+
+# ── What confirms a waiting pairing, and what ends it ─────────────────────
+
+
+def _approval_ctx(event_type, *, staged: bool) -> InboundContext:
+    inst = (_StagedApproval if staged else _KeyedStatusInstance)(
+        PairingStatus.PENDING_SENT
+    )
+    inst.local_inbox_id = "appr-inbox"
+    return InboundContext(
+        envelope=_minimal_envelope(event_type=event_type.value),
+        inbox_id="appr-inbox",
+        instance=inst,
+    )
+
+
+@pytest.mark.parametrize("staged", [True, False])
+@pytest.mark.parametrize(
+    "event_type", [FederationEventType.PAIRING_ABORT, FederationEventType.UNPAIR]
+)
+async def test_a_cancel_never_confirms_an_approval(event_type, staged):
+    """The peer's first envelope proves it confirmed — unless that envelope
+    says the opposite. A staged approval is cancelled and the envelope
+    answered (nothing is dispatched: the row is the seat); a row approval
+    is left to the event's own handler, unconfirmed."""
+    confirmed: list[str] = []
+    cancelled: list[tuple[str, str]] = []
+
+    async def _confirm(iid: str, inbox_id: str = "") -> bool:
+        confirmed.append(iid)
+        return True
+
+    async def _cancel(iid: str, inbox_id: str) -> None:
+        cancelled.append((iid, inbox_id))
+
+    ctx = _approval_ctx(event_type, staged=staged)
+    await make_confirm_relay_approval(on_contact=_confirm, on_cancel=_cancel)(ctx)
+
+    assert confirmed == []
+    if staged:
+        assert cancelled == [("remote-iid", "appr-inbox")]
+        assert ctx.early_response == {"status": "ok"}
+    else:
+        assert cancelled == [] and ctx.early_response is None
+
+
+async def test_the_confirm_step_names_the_half_the_envelope_was_read_under():
+    seen: list[tuple[str, str]] = []
+
+    async def _confirm(iid: str, inbox_id: str = "") -> bool:
+        seen.append((iid, inbox_id))
+        return True
+
+    await make_confirm_relay_approval(on_contact=_confirm)(
+        _approval_ctx(FederationEventType.SPACE_POST_CREATED, staged=True)
+    )
+    assert seen == [("remote-iid", "appr-inbox")]
+
+
+class _HybridOnlyEncoder:
+    """Verifies only with the PQ key — a hybrid-suite envelope."""
+
+    def verify_signatures_all(
+        self, _bytes, *, suite, signatures, ed_public_key, pq_public_key
+    ):
+        return pq_public_key == bytes.fromhex("cd" * 4)
+
+
+def _signed_ctx(*, alt) -> InboundContext:
+    seat = _SeatRow()
+    seat.remote_identity_pk = "ab" * 32
+    seat.remote_pq_identity_pk = None  # a seat holds no PQ key
+    return InboundContext(
+        envelope={
+            **_minimal_envelope(),
+            "from_instance": "remote-iid",
+            "to_instance": "own-1",
+            "msg_id": "m1",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "encrypted_payload": "ct",
+            "sig_suite": "ed25519+mldsa65",
+            "signatures": {},
+        },
+        instance=seat,
+        staged_alt=alt,
+    )
+
+
+async def test_a_hybrid_signature_is_verified_under_the_approved_half():
+    """A GFS-reach pairing negotiated a hybrid suite; its first envelope
+    arrives on a by-id transport, where the lookup found the SEAT row —
+    which holds no PQ key. The signature is checked against the approved
+    half's keys, and the envelope goes on under the half."""
+    half = _ApprovedHalf()
+    half.remote_identity_pk = "ab" * 32
+    half.remote_pq_identity_pk = "cd" * 4
+    ctx = _signed_ctx(alt=half)
+    await make_verify_signature(encoder=_HybridOnlyEncoder())(ctx)
+    assert ctx.instance is half and ctx.staged_alt is None
+
+
+async def test_a_signature_neither_key_set_verifies_is_refused():
+    half = _ApprovedHalf()
+    half.remote_identity_pk = "ab" * 32
+    half.remote_pq_identity_pk = "ee" * 4
+    ctx = _signed_ctx(alt=half)
+    with pytest.raises(ValueError, match="Invalid envelope signature"):
+        await make_verify_signature(encoder=_HybridOnlyEncoder())(ctx)
+    with pytest.raises(ValueError, match="Invalid envelope signature"):
+        await make_verify_signature(encoder=_HybridOnlyEncoder())(_signed_ctx(alt=None))
+
+
+@pytest.mark.parametrize("staged", [True, False])
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.PAIRING_CONFIRM,
+        FederationEventType.PAIRING_INTRO_AUTO,
+        FederationEventType.PAIRING_PEER_CONFIRM,
+    ],
+)
+async def test_only_listed_events_confirm_an_approval(event_type, staged):
+    """Fail closed: the confirm step promotes on an explicit list
+    (``CONFIRMS_PAIRING_EVENT_TYPES``) — a handshake message, or a type
+    nobody classified yet, confirms nothing. A staged approval then
+    refuses the envelope (its row is the seat); a row approval lets it go
+    on unconfirmed."""
+    confirmed: list[str] = []
+
+    async def _confirm(iid: str, inbox_id: str = "") -> bool:
+        confirmed.append(iid)
+        return True
+
+    step = make_confirm_relay_approval(on_contact=_confirm)
+    ctx = _approval_ctx(event_type, staged=staged)
+    if staged:
+        with pytest.raises(ValueError, match="No instance found"):
+            await step(ctx)
+    else:
+        await step(ctx)
+        assert ctx.early_response is None
+    assert confirmed == []
+
+
+async def test_an_unknown_event_type_confirms_nothing():
+    confirmed: list[str] = []
+
+    async def _confirm(iid: str, inbox_id: str = "") -> bool:
+        confirmed.append(iid)
+        return True
+
+    ctx = _approval_ctx(FederationEventType.SPACE_POST_CREATED, staged=False)
+    ctx.envelope["event_type"] = "something_new"
+    await make_confirm_relay_approval(on_contact=_confirm)(ctx)
+    assert confirmed == []

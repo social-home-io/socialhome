@@ -21,18 +21,21 @@ import copy
 import hashlib
 import hmac
 import logging
+import os
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
 import orjson as _orjson
 
 if TYPE_CHECKING:
+    from .host_hop import HostHop
     from .pending_seat_buffer import PendingSeatBuffer
     from .route_discovery import RouteDiscoveryService
     from .routed_envelope import SpaceRoutedHandler
@@ -49,6 +52,7 @@ from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
     LocalHomeLocationUpdated,
+    PairingAborted,
     PairingConfirmed,
     PairingIntroRelayReceived,
     PeerHomeChanged,
@@ -70,6 +74,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DELIVERY_ERROR_ROUTED_SEND_FAILED,
     DELIVERY_ERROR_SUPERSEDED,
+    MULTI_EVENT_TYPES,
     PAIRING_REACH_URL,
     PENDING_KIND_APPROVAL,
     BroadcastResult,
@@ -79,6 +84,7 @@ from ..domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    is_paired,
     pending_kind,
 )
 from ..domain.federation_capabilities import FederationCapability
@@ -93,12 +99,15 @@ from ..domain.media_chunking import (
     routed_media_chunk_bytes,
 )
 from ..domain.media_validator import validate_inbound_media_meta
+from ..domain.outbox import DeliveryOutcome, OutboxEntry, OutboxPayload, RetryAfter
+from ..domain.relay_media_frame import relay_event_payload_limit
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..peer_http import post_to_peer
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
+from ..task_drain import wait_tasks_done
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
@@ -107,7 +116,14 @@ from .app_framing import (
 )
 from .encoder import FederationEncoder
 from .event_dispatch_registry import EventDispatchRegistry
-from .gfs_relay_transport import RELAY_STATUS_THROTTLED, RELAY_STATUS_TOO_LARGE
+from .gfs_relay_transport import (
+    RELAY_STATUS_THROTTLED,
+    RELAY_STATUS_TOO_LARGE,
+    MailboxTarget,
+    normalize_gfs_base,
+    relay_envelope_fits,
+)
+from .inbound_retry import InboundRetry
 from .inbound_validator import (
     TRANSPORT_GFS_RELAY,
     InboundContext,
@@ -116,12 +132,14 @@ from .inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
-    make_check_mailbox_space,
+    make_check_mailbox_sender,
+    make_check_multi_recipient,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
     make_check_space_archived,
     make_check_space_writer,
+    make_check_staged_half,
     make_check_timestamp,
     make_check_unpairing,
     make_confirm_relay_approval,
@@ -135,7 +153,13 @@ from .inbound_validator import (
     run_post_decrypt_gates,
 )
 from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
-from .media_envelope import MEDIA_HTTPS_EVENT_TYPES, build_media_envelope
+from .media_envelope import (
+    FRAME_BINDING_FIELDS,
+    MEDIA_HTTPS_EVENT_TYPES,
+    RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES,
+    RELAY_FRAME_EVENT_TYPES,
+    build_media_envelope,
+)
 from .media_framing import (
     MEDIA_FRAME_SUITE_V1,
     SUPPORTED_MEDIA_AEAD_SUITES,
@@ -151,15 +175,44 @@ from .mesh_member_claim import (
     MESH_CLAIM_VERSION_FIELD,
     parse_mesh_member_claim,
 )
+from .multi_recipient import (
+    build_multi_envelope,
+    new_mr_key,
+    seal_multi,
+    wrap_mr_key,
+)
 from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
+from .pending_pairing import PendingPairings
 from .pq_signer import PqSigner
+from .relay_event_body import (
+    EVENT_BODY_SUITE_FIELD,
+    pack_event_body,
+    unpack_event_body,
+)
 
 
 def _dumps(obj: dict) -> str:
     """Compact UTF-8 JSON — the wire format for every federation envelope."""
     return _orjson.dumps(obj).decode("utf-8")
+
+
+def _group_key(obj: dict) -> bytes:
+    """A payload's content, key order aside — what one multi frame's
+    recipients must share (v_90). Grouping only; the bytes sent stay
+    :func:`_dumps`."""
+    return _orjson.dumps(obj, option=_orjson.OPT_SORT_KEYS)
+
+
+def _multi_group_key(
+    target: MailboxTarget, content: bytes | str
+) -> tuple[str, bytes | str]:
+    """The one grouping key of a multi frame (v_91): the recipient's GFS
+    (normalized) and the content every recipient shares — the payload's
+    :func:`_group_key` bytes in a broadcast, its stored payload id in the
+    outbox."""
+    return normalize_gfs_base(target.gfs_url), content
 
 
 def _loads(s: str | bytes) -> dict:
@@ -194,9 +247,12 @@ _MESH_CATCHUP_TRANSIENT: frozenset[str] = frozenset(
 #: past its lookup) rather than a send to a household we never knew.
 UNPAIR_SEND_RACE_S: float = 300.0
 
-#: ``SPACE_SYNC_DIRECT_FAILED`` reasons that mean "no free slot now": the
-#: BEGIN was never served, so the requester asks again (``SpaceSyncDeferred``).
-_CAPACITY_REFUSALS = frozenset({"too_many_sessions", "node_capacity"})
+#: ``SPACE_SYNC_DIRECT_FAILED`` reasons a provider refuses a BEGIN with before
+#: any session exists (S-6 / S-8): no free slot now, or the hourly budget is
+#: spent. The BEGIN was never served — ``SpaceSyncDeferred`` with the reason;
+#: the scheduler asks again after a capacity refusal and takes any of them
+#: as the host's answer (v_92 trigger 10).
+_BEGIN_REFUSALS = frozenset({"too_many_sessions", "node_capacity", "rate_limited"})
 
 #: Maximum allowed clock skew for inbound envelopes (§24.11 §5).
 _TIMESTAMP_SKEW_SECONDS = 300
@@ -262,6 +318,24 @@ MAX_DEFERRED_MESH_BYTES: int = 16 * 1024 * 1024
 #: item should not eat the shared budget.
 MAX_DEFERRED_MESH_PAYLOAD_BYTES: int = 256 * 1024
 
+#: The moderation queue's per-row outbox check (``still_wanted``), resolved
+#: per pass — ``None`` until the moderation service is wired.
+StillWantedOf = Callable[[], Callable[[OutboxEntry], Awaitable[bool]] | None]
+
+#: How long a throttled v_91 multi upload waits when the GFS's ``429`` named
+#: no ``Retry-After``: the GFS's per-address, per-node upload and recipient
+#: budgets are a minute wide, and it answers ``Retry-After: 60`` itself.
+#: Coming back sooner only earns another 429. (A named one is capped by the
+#: outbox at :data:`~socialhome.infrastructure.outbox_processor.MAX_RETRY_AFTER_S`.)
+MULTI_THROTTLE_RETRY_S: float = 60.0
+
+#: After this many TRANSIENT failures of a v_91 multi upload (counted by its
+#: rows' ``attempts``), its payload is ungrouped and the rows go per row —
+#: with the host-hop fallback a multi upload lacks — so a NEVER_DROP multi
+#: row can never hold its seats' later content (the outbox ordering gate)
+#: on the ceiling backoff.
+MULTI_MAX_TRANSIENT: int = 3
+
 #: Broadcast events whose own effect takes the recipient out of
 #: ``space_instances`` right after the broadcast: ``dissolve_space`` purges
 #: every row once its ``SPACE_DISSOLVED`` fan-out returns, and a leave whose
@@ -271,8 +345,8 @@ MAX_DEFERRED_MESH_PAYLOAD_BYTES: int = 256 * 1024
 #: would find the target gone and silently lose the very event that tells
 #: it so. Only these two: the other removals do not ride
 #: ``broadcast_to_space_members`` to the household they remove
-#: (``SPACE_REMOTE_MEMBER_REMOVED`` is a direct send after the host already
-#: dropped the row; bans are not broadcast this way at all). They carry
+#: (``SPACE_REMOTE_MEMBER_REMOVED`` is a direct send BEFORE the seat and the
+#: row go; bans are not broadcast this way at all). They carry
 #: lifecycle / roster state, never space content, and a household that was
 #: instance-BANNED meanwhile is still skipped (see :meth:`_deferred_send_one`).
 #: Every other event re-reads membership.
@@ -289,6 +363,20 @@ def _deferred_payload_size(payload: dict) -> int:
     return len(_orjson.dumps(payload, default=str))
 
 
+#: Events that are file traffic themselves: they never mark their space
+#: for the missing-file check (:meth:`FederationService.attach_space_applied`).
+_FILE_TRAFFIC: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.SPACE_MEDIA_BLOB,
+        FederationEventType.SPACE_MEDIA_WANTED,
+    }
+)
+
+
+class _HostSeen(Protocol):
+    def heard_from(self, space_id: str, instance_id: str) -> None: ...
+
+
 @dataclass(slots=True, frozen=True)
 class _DeferredMeshSend:
     """One broadcast waiting in a mesh target's deferred FIFO. Process-local
@@ -302,6 +390,28 @@ class _DeferredMeshSend:
     snapshot: bool
     #: Serialized payload size, charged to :data:`MAX_DEFERRED_MESH_BYTES`.
     size: int
+
+
+class _SeatTurn:
+    """One ``space_session`` seat's turn for live multi-type sends: the lock
+    and how many sends hold or wait on it (the entry goes when none do)."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
+def _outbox_payload_ad(
+    payload_id: str, event_type: FederationEventType, space_id: str | None
+) -> bytes:
+    """KEK associated data of a stored outbox payload (migration 0145): its
+    id, event type and space, so its ciphertext unwraps only as the row it
+    was stored as."""
+    return (
+        f"sh-outbox-payload:v1\n{payload_id}\n{event_type.value}\n{space_id or ''}"
+    ).encode()
 
 
 class FederationService:
@@ -348,23 +458,33 @@ class FederationService:
         "_encoder",
         "_event_registry",
         "_federation_repo",
+        "_host_contact",
+        "_host_hop",
         "_http_client",
         "_ice_servers",
         "_idempotency_cache",
         "_inbound_pipeline",
+        "_inbound_retry",
         "_key_manager",
         "_last_mesh_begin_at",
+        "_mailbox_sender_check",
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_media_relay_inbound_pipeline",
+        "_mesh_claim_answer",
+        "_mesh_claim_answer_tasks",
         "_online_status_service",
+        "_outbox_payload_key",
         "_outbox_repo",
+        "_outbox_still_wanted",
+        "_outbox_wake",
         "_own_identity_pk",
         "_own_identity_seed",
         "_own_instance_id",
         "_own_pq_pk",
         "_own_pq_seed",
         "_pairing",
+        "_pending_pairings",
         "_pending_seat_buffer",
         "_presence_service",
         "_relay_accepted_at",
@@ -372,7 +492,9 @@ class FederationService:
         "_route_service",
         "_routed_handler",
         "_rtc_inbound_pipeline",
+        "_seat_send_locks",
         "_sig_suite",
+        "_space_applied",
         "_space_remote_member_repo",
         "_space_repo",
         "_space_sync_receiver",
@@ -380,6 +502,7 @@ class FederationService:
         "_state_send_seq",
         "_state_sends",
         "_stopping",
+        "_sync_begin_admitted",
         "_sync_manager",
         "_transport",
         "_typing_service",
@@ -408,6 +531,11 @@ class FederationService:
         self._db = db
         self._federation_repo = federation_repo
         self._outbox_repo = outbox_repo
+        #: Migration 0145 — keys the HMAC that names a stored outbox payload,
+        #: so the failed recipients of one send share one row while the id
+        #: says nothing about the content. Never persisted: after a restart
+        #: the same content simply gets a new row.
+        self._outbox_payload_key = os.urandom(32)
         self._key_manager = key_manager
         self._bus = bus
         self._own_instance_id = own_instance_id
@@ -422,6 +550,9 @@ class FederationService:
         self._call_signaling = call_signaling
         self._ice_servers = ice_servers or []
         self._idempotency_cache = None
+        #: v_92 — told of every dispatched space event's sender
+        #: (:meth:`attach_host_contact`).
+        self._host_contact: _HostSeen | None = None
         self._typing_service = None
         self._dm_routing_service = None
         self._transport = None
@@ -474,6 +605,19 @@ class FederationService:
         #: :data:`UNPAIR_SEND_RACE_S`, so bounded by recent unpairs.
         self._unpaired_at: dict[str, float] = {}
         self._routed_handler: SpaceRoutedHandler | None = None
+        #: v_89 — the host as the one hop toward a directory seat we cannot
+        #: reach directly; and the member directory's check of a sender on
+        #: our GFS mailbox (``make_check_mailbox_sender``). Unwired → no host
+        #: hop, and every mailbox frame with a space is refused.
+        self._host_hop: HostHop | None = None
+        self._mailbox_sender_check: Callable[[str, str], Awaitable[bool]] | None = None
+        #: v_91 — ``OutboxProcessor.wake``: a queued multi payload goes up
+        #: on a pass now, not at the next poll (:meth:`attach_outbox_wake`).
+        self._outbox_wake: Callable[[], None] | None = None
+        #: v_91 — one turn per ``space_session`` seat with a live multi-type
+        #: send under way (:meth:`_seat_turn`); empty when none is.
+        self._seat_send_locks: dict[str, _SeatTurn] = {}
+        self._outbox_still_wanted: StillWantedOf | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
         # dropped (no app bridge wired on this instance).
@@ -486,6 +630,16 @@ class FederationService:
         #: unreferenced task can be GC'd mid-flight); it removes both entries
         #: when its queue is empty. :meth:`stop` cancels the rest.
         self._deferred_mesh_queues: dict[str, deque[_DeferredMeshSend]] = {}
+        #: See :meth:`attach_mesh_claim_answer`.
+        self._mesh_claim_answer: Callable[[str], Awaitable[bool]] | None = None
+        #: Answers on their way (:meth:`_spawn_mesh_claim_answer`).
+        self._mesh_claim_answer_tasks: set[asyncio.Task[None]] = set()
+        #: See :meth:`attach_space_applied`.
+        self._space_applied: Callable[[str], None] | None = None
+        #: See :meth:`attach_sync_begin_admitted`.
+        self._sync_begin_admitted: (
+            Callable[[FederationEvent], Awaitable[None]] | None
+        ) = None
         self._deferred_mesh_tasks: dict[str, asyncio.Task[None]] = {}
         #: Per pending target: set to cut its drain task's wait short when a
         #: route to it is learned (:meth:`on_route_learned`).
@@ -509,6 +663,10 @@ class FederationService:
         # §11 QR-code pairing handshake delegate. The peer-pairing
         # client (plaintext Ed25519-signed bootstrap transport) is
         # attached right after construction — circular-free.
+        #: Where a pairing handshake keeps its pending half: the row, or
+        #: beside a space seat. ONE instance for the QR handshake, the
+        #: trust relay, the cancel path and the inbound pipeline.
+        self._pending_pairings = PendingPairings(federation_repo)
         self._pairing = PairingCoordinator(
             federation_repo,
             key_manager,
@@ -516,6 +674,7 @@ class FederationService:
             own_pq_pk=own_pq_pk,
             own_sig_suite=sig_suite,
             bus=bus,
+            pending_pairings=self._pending_pairings,
         )
         self._pairing.attach_peer_pairing_client(
             PeerPairingClient(
@@ -533,7 +692,11 @@ class FederationService:
         self._media_relay_inbound_pipeline = None  # lazy, v_87 relay frames
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
-        self._event_registry = EventDispatchRegistry()
+        # A handler that failed on a locked database is run once more, in
+        # place: the replay id is stored before dispatch, so the sender
+        # cannot re-deliver.
+        self._inbound_retry = InboundRetry(gate=self._retry_allowed)
+        self._event_registry = EventDispatchRegistry(retry=self._inbound_retry)
         self._register_default_handlers()
         # Subscribe to domain events that trigger outbound federation.
         self._bus.subscribe(
@@ -594,10 +757,29 @@ class FederationService:
             self._common_pipeline_steps(
                 lookup_step=make_lookup_instance(
                     repo=self._federation_repo,
-                    lookup_fn=_lookup_by_inbox_id,
+                    lookup_fn=self._lookup_inbox,
                 ),
             )
         )
+
+    async def _lookup_inbox(
+        self, repo: AbstractFederationRepo, inbox_id: str
+    ) -> _InboxInstance | None:
+        """Who an envelope on *inbox_id* is from: the household whose row
+        holds that inbox id — or, first, one we hold a space seat for and
+        are pairing with. That pending half is kept beside the seat with
+        an inbox id of its own (:meth:`PendingPairings.keyed_for_inbox`),
+        and what it may be sent is narrow (:func:`make_check_staged_half`):
+        an approval takes the requester's first envelope under the
+        approved keys, which confirms the pair
+        (:func:`make_confirm_relay_approval` — fail closed for it). Only
+        an approval is ever resolved (a trust-relay approval, or a pairing
+        code our admin entered); the by-id pipelines find the same half
+        through ``staged_for``."""
+        half = self._pending_pairings.keyed_for_inbox(inbox_id)
+        if half is not None:
+            return _InboxInstance(half, staged=True)
+        return await _lookup_by_inbox_id(repo, inbox_id)
 
     def _build_media_https_pipeline(self):
         """The §24.11 inbox pipeline for a binary media body on the inbox.
@@ -620,17 +802,59 @@ class FederationService:
     def _build_media_relay_pipeline(self):
         """The §24.11 pipeline for a media body that came through the GFS
         relay (v_87): the DataChannel chain (lookup by the sender's
-        instance id) with the inbox media route's event-type gate straight
-        after the parse — a relay media frame is a media chunk, nothing
-        else. Composed from the shared step list, never a copy."""
+        instance id) with an event-type gate straight after the parse — a
+        relay frame is a media chunk or an event of the vocabulary a
+        household behind a GFS may send at all
+        (:data:`~socialhome.federation.media_envelope.RELAY_FRAME_EVENT_TYPES`),
+        nothing else — and, straight after the payload decrypt, the step
+        that makes a framed event's bytes its payload
+        (:meth:`_open_framed_event`), so every later step (idempotency,
+        ban, replay persist, deprovisioned author, archived space, space
+        writer) judges the real payload exactly as for a JSON envelope.
+        Composed from the shared step list, never a copy."""
         steps = self._common_pipeline_steps(
             lookup_step=make_lookup_instance_by_id(
                 repo=self._federation_repo,
                 unpaired_recently=self._unpaired_recently,
             ),
+            after_decrypt=self._open_framed_event,
         )
-        steps.insert(1, make_check_event_types(MEDIA_HTTPS_EVENT_TYPES))
+        steps.insert(1, make_check_event_types(RELAY_FRAME_EVENT_TYPES))
         return InboundPipeline(steps)
+
+    async def _open_framed_event(self, ctx: InboundContext) -> None:
+        """Relay media pipeline step (v_87): for an event that is not a
+        media chunk, the frame's bytes ARE its payload. Opens them (suites,
+        AEAD, the signed ``chunk_sha256``) and replaces the event's payload
+        with the JSON object inside; the signed metadata held only the
+        binding fields. A media chunk is left to :meth:`_finish_media_frame`.
+        Raises :class:`ValueError` on any refusal."""
+        event = ctx.event
+        if event is None or event.event_type in MEDIA_HTTPS_EVENT_TYPES:
+            return
+        if getattr(ctx.instance, "source", None) is not InstanceSource.SPACE_SESSION:
+            # Only a household behind a GFS is ever sent an event this way,
+            # so only one may send it: a paired peer on the relay opt-in
+            # has its inbox for large events.
+            raise ValueError("framed event from a household that is not behind a GFS")
+        meta = event.payload if isinstance(event.payload, dict) else None
+        if meta is None or not set(meta) <= FRAME_BINDING_FIELDS | {
+            EVENT_BODY_SUITE_FIELD
+        }:
+            # Nothing rides next to the bytes: one place for the payload.
+            raise ValueError("framed event metadata carries more than the binding")
+        raw = self._open_frame_bytes(
+            ctx, ctx.frame_payload, wire_frame_suite=ctx.frame_suite
+        )
+        if len(raw) < RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES:
+            # A frame is for what no JSON envelope carries — never a second
+            # lane (with the media leg's budgets) for ordinary events.
+            raise ValueError("framed event is small enough for a JSON envelope")
+        # How the bytes carry the payload: named, required, never guessed.
+        payload = unpack_event_body(
+            meta.get(EVENT_BODY_SUITE_FIELD), raw, event_type=event.event_type
+        )
+        ctx.event = replace(event, payload=payload)
 
     def _build_rtc_inbound_pipeline(self):
         """Build the §24.11 pipeline variant for WebRTC DataChannel frames.
@@ -644,24 +868,41 @@ class FederationService:
                 lookup_step=make_lookup_instance_by_id(
                     repo=self._federation_repo,
                     unpaired_recently=self._unpaired_recently,
+                    # The relay, a mailbox and a DataChannel know the sender
+                    # by its id: an approved pairing kept beside its seat
+                    # is found there too (GFS-reach pairings have no inbox).
+                    staged_for=self._pending_pairings.keyed_for,
                 ),
             )
         )
 
-    def _common_pipeline_steps(self, *, lookup_step):
-        """Return the shared step list for both inbox and RTC pipelines."""
+    def _common_pipeline_steps(self, *, lookup_step, after_decrypt=None):
+        """Return the shared step list for both inbox and RTC pipelines.
+        ``after_decrypt``: one extra step run straight after the payload
+        decrypt, before every step that judges the payload (the relay media
+        pipeline opens a framed event's bytes there)."""
+        opened = [after_decrypt] if after_decrypt is not None else []
         steps = [
             make_parse_json(loads=_loads),
-            # v_88: a frame on one of our per-space mailboxes carries only
-            # that space's envelopes (or space-less ones). No-op elsewhere.
-            make_check_mailbox_space(),
+            # v_91: ``to_instance = "*"`` only inside a multi-recipient
+            # frame, that frame only for the space whose key opened it and
+            # only when its signed audience lists us.
+            make_check_multi_recipient(own_instance_id=self._own_instance_id),
             lookup_step,
+            # v_89: a frame on our GFS mailbox (or relayed from a directory
+            # seat) is taken only from a sender whose member card we hold
+            # for its space. No-op elsewhere.
+            make_check_mailbox_sender(lambda: self._mailbox_sender_check),
+            # A pending pairing kept beside a space seat: its keys open
+            # only what its kind allows (an approval's first envelope, a
+            # pairing code's abort). No-op for every row.
+            make_check_staged_half(),
             # §D2b peer-class gate: a household seated from an invite link
             # may only speak the space vocabulary. Straight after the
             # lookup (the first step that knows WHO the sender is) and
             # before any crypto, so an off-vocabulary envelope costs a
             # set lookup.
-            make_check_peer_class(),
+            make_check_peer_class(may_abort=self._pending_pairings.has_code_half),
             # Relay opt-in gate: a paired peer reaches us over the GFS
             # relay only when we opted into the relay with it. Also before
             # any crypto.
@@ -679,11 +920,15 @@ class FederationService:
                 encoder=self._encoder,
                 loads=_loads,
             ),
+            *opened,
             # An approved trust-relay pair confirms on the requester's first
             # envelope that verified AND decrypted — proof it completed the
             # pairing on its side. Before dispatch, so the handler already
             # sees a confirmed peer.
-            make_confirm_relay_approval(on_contact=self._on_relay_approval_contact),
+            make_confirm_relay_approval(
+                on_contact=self._on_relay_approval_contact,
+                on_cancel=self._on_staged_approval_cancelled,
+            ),
             make_idempotency_check(
                 cache_holder=lambda: self._idempotency_cache,
             ),
@@ -698,20 +943,52 @@ class FederationService:
         steps.extend(self.post_decrypt_gate_steps())
         return steps
 
-    async def _on_relay_approval_contact(self, instance_id: str) -> None:
+    @property
+    def pending_pairings(self) -> PendingPairings:
+        """Where this household's pending pairing halves live."""
+        return self._pending_pairings
+
+    async def _on_staged_approval_cancelled(
+        self, instance_id: str, inbox_id: str
+    ) -> None:
+        """The household we wait for (our approval kept beside its space
+        seat) sent a ``PAIRING_ABORT`` / ``UNPAIR`` under that approval's
+        keys: the half of exactly that handshake (*inbox_id*) and its
+        sessions go; the seat stays."""
+        if await self._pending_pairings.cancel(instance_id, inbox_id=inbox_id):
+            log.info("pairing: %s cancelled the pairing we approved", instance_id)
+            await self._bus.publish(
+                PairingAborted(instance_id=instance_id, reason="cancelled")
+            )
+
+    async def _on_relay_approval_contact(
+        self, instance_id: str, inbox_id: str = ""
+    ) -> bool:
         """The household whose introduction our admin approved just sent its
         first authenticated envelope — confirm the pair (§11 simple
-        pairing). Atomic and only while the row is still an approval
-        (:func:`~socialhome.domain.federation.pending_kind`): a cancel that
-        committed first leaves nothing to confirm."""
-        inst = await self._federation_repo.get_instance(instance_id)
-        if inst is None or pending_kind(inst) != PENDING_KIND_APPROVAL:
-            return
-        confirmed = replace(inst, status=PairingStatus.CONFIRMED)
-        if not await self._federation_repo.promote_pending_instance(confirmed):
-            return
-        log.info("auto-pair: %s confirmed the approved pairing", instance_id)
-        await self._bus.publish(PairingConfirmed(instance_id=instance_id))
+        pairing). Atomic and only while our half is still an approval
+        (:func:`~socialhome.domain.federation.pending_kind`) — in the row,
+        or beside the household's space seat, which the confirmed pair then
+        replaces: a cancel that committed first leaves nothing to confirm.
+        Returns whether the pair is confirmed now — also when another
+        envelope of the requester's got here first (it sends several at
+        once when its side confirms): the pair is announced once, and
+        every one of those envelopes goes on."""
+        inst = await self._pending_pairings.get(instance_id)
+        if (
+            inst is not None
+            and pending_kind(inst) == PENDING_KIND_APPROVAL
+            # The half the envelope was read under — not another
+            # handshake's that took its place meanwhile.
+            and inbox_id in ("", inst.local_inbox_id)
+        ):
+            confirmed = replace(inst, status=PairingStatus.CONFIRMED)
+            if await self._pending_pairings.promote(confirmed):
+                log.info("pairing: %s confirmed the approved pairing", instance_id)
+                await self._bus.publish(PairingConfirmed(instance_id=instance_id))
+                await self._pairing.probe_routes(confirmed)
+                return True
+        return is_paired(await self._federation_repo.get_instance(instance_id))
 
     async def drop_queued(
         self,
@@ -730,6 +1007,18 @@ class FederationService:
         removal drops the frames still queued for it (they would land after
         the removal and bring it back)."""
         return await self._outbox_repo.drop_pending_with_key_prefix(instance_id, prefix)
+
+    def _state_key(
+        self, event_type: FederationEventType, space_id: str | None, payload: dict
+    ) -> str | None:
+        """The latest-only key of a send (:func:`supersede_key`, else a
+        moment delete's :func:`moment_delete_key`), ``None`` for an ordinary
+        event."""
+        return supersede_key(
+            event_type, space_id=space_id, payload=payload
+        ) or moment_delete_key(
+            event_type, payload, own_instance_id=self._own_instance_id
+        )
 
     def _claim_state_send(self, instance_id: str, state_key: str | None) -> int | None:
         """Mark this send as the newest one of a latest-only state to
@@ -773,7 +1062,9 @@ class FederationService:
             FederationEventType.UNPAIR,
         )
 
-    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
+    def post_decrypt_gate_steps(
+        self, *, include_ban_check: bool = False, hold_for_seat: bool = True
+    ) -> list:
         """The gates that judge a DECRYPTED event, in pipeline order.
 
         Split out because the mesh path needs exactly these and nothing
@@ -791,6 +1082,11 @@ class FederationService:
         path needs it here, because the envelope the pipeline judged was
         the RELAY's — nothing has yet checked whether the ORIGIN household
         is banned from the space.
+
+        ``hold_for_seat=False`` makes the writer gate refuse a write with
+        no seat instead of holding it in the seat buffer — for a handler's
+        second try (:class:`InboundRetry`), whose event was dispatched once
+        already.
         """
         steps: list = []
         if include_ban_check:
@@ -820,7 +1116,7 @@ class FederationService:
                 make_check_space_writer(
                     space_repo=self._space_repo,
                     remote_member_repo=self._space_remote_member_repo,
-                    pending=self._pending_seat_buffer,
+                    pending=self._pending_seat_buffer if hold_for_seat else None,
                 ),
             )
         return steps
@@ -844,6 +1140,7 @@ class FederationService:
         provider_instance_id: str,
         sync_mode: str = "initial",
         have_seq: int | None = None,
+        roster_digest: dict | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -860,6 +1157,7 @@ class FederationService:
             provider_instance_id=provider_instance_id,
             sync_mode=sync_mode,
             have_seq=have_seq,
+            roster_digest=roster_digest,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -975,10 +1273,30 @@ class FederationService:
         ):
             await self.replay_held(held, reason=f"the seat landed in {event.space_id}")
 
-    async def replay_held(self, held: FederationEvent, *, reason: str) -> None:
-        """Re-run a held inbound event through the post-decrypt gates, then
-        dispatch it — the decision is taken again with the awaited state in
-        place (a write that still doesn't qualify is refused then)."""
+    async def _retry_allowed(self, held: FederationEvent) -> bool:
+        """The gate of a second try (:class:`InboundRetry`): the sender must
+        still be a peer — a household unpaired meanwhile gets nothing applied
+        (its own ``UNPAIR`` may come from the tombstone; a mesh-routed
+        event's origin never was a peer) — and the post-decrypt gates must
+        still pass. Refuse, never hold for a seat: a hold would later replay
+        the event to the handlers that already ran."""
+        if (
+            held.routed_path is None
+            and await self._federation_repo.get_instance(
+                held.from_instance,
+                include_unpairing=held.event_type is FederationEventType.UNPAIR,
+            )
+            is None
+        ):
+            return False
+        return await self._held_event_allowed(held, hold_for_seat=False)
+
+    async def _held_event_allowed(
+        self, held: FederationEvent, *, hold_for_seat: bool = True
+    ) -> bool:
+        """Whether an event held since it was verified (a seat wait, a
+        handler's second try) still passes the post-decrypt gates — ban
+        check included — with the state as it is now."""
         payload = held.payload if isinstance(held.payload, dict) else {}
         ctx = InboundContext(
             envelope={
@@ -987,9 +1305,18 @@ class FederationService:
             },
             event=held,
         )
-        if not await run_post_decrypt_gates(
-            ctx, steps=self.post_decrypt_gate_steps(include_ban_check=True)
-        ):
+        return await run_post_decrypt_gates(
+            ctx,
+            steps=self.post_decrypt_gate_steps(
+                include_ban_check=True, hold_for_seat=hold_for_seat
+            ),
+        )
+
+    async def replay_held(self, held: FederationEvent, *, reason: str) -> None:
+        """Re-run a held inbound event through the post-decrypt gates, then
+        dispatch it — the decision is taken again with the awaited state in
+        place (a write that still doesn't qualify is refused then)."""
+        if not await self._held_event_allowed(held):
             return
         log.info(
             "replaying held %s from %s now that %s",
@@ -998,6 +1325,44 @@ class FederationService:
             reason,
         )
         await self._event_registry.dispatch(held)
+
+    def attach_host_contact(self, contact: _HostSeen) -> None:
+        """Wire the v_92 host contact
+        (:class:`~socialhome.federation.sync.space.host_contact.HostContact`):
+        every verified event dispatched here tells it who sent it for which
+        space, so a silent host that speaks again — any event, not only a
+        sync answer — stops the helper fallback at once."""
+        self._host_contact = contact
+
+    def attach_space_applied(self, applied: Callable[[str], None]) -> None:
+        """Wire ``applied(space_id)``
+        (:meth:`~socialhome.services.space_media_wanted.SpaceMediaWanted
+        .applied`): called after every verified event of a space was
+        handled here — a live row, a sync or resume chunk, a helper's
+        catch-up — so the files of the rows it stored that never arrived
+        are asked for without waiting for a view. O(1) per event."""
+        self._space_applied = applied
+
+    def attach_sync_begin_admitted(
+        self, admitted: Callable[[FederationEvent], Awaitable[None]]
+    ) -> None:
+        """Wire ``admitted(event)`` (``SpaceService.on_sync_begin_roster``):
+        called for a ``SPACE_SYNC_BEGIN`` only once the S-6 / S-8 admission
+        let it in — never for one refused (rate limited, too many sessions,
+        not a member) — so whatever it answers costs at most what an
+        admitted BEGIN may. Fail-soft."""
+        self._sync_begin_admitted = admitted
+
+    def attach_mesh_claim_answer(
+        self, answer: Callable[[str], Awaitable[bool]]
+    ) -> None:
+        """``answer(instance_id)`` tells a member household we reach only
+        over the mesh our own version
+        (``CapabilitiesOutbound.announce_over_mesh``). Run by
+        :meth:`record_mesh_member_claim` whenever such a household's claimed
+        version rises: it holds no row for us either, so until it has OUR
+        claim its version-gated space broadcasts skip us."""
+        self._mesh_claim_answer = answer
 
     def attach_idempotency_cache(self, cache) -> None:
         """Attach an :class:`IdempotencyCache` for inbound dedup."""
@@ -1095,6 +1460,32 @@ class FederationService:
         # A learned route drains that member's deferred queue at once
         # instead of after its backoff.
         route_service.add_route_learned_listener(self.on_route_learned)
+
+    def attach_member_mesh(
+        self,
+        *,
+        host_hop: HostHop,
+        mailbox_sender_check: Callable[[str, str], Awaitable[bool]],
+    ) -> None:
+        """Wire the v_89 member mesh: the host hop
+        (:meth:`send_with_mesh_fallback` toward a directory seat with no
+        usable mailbox) and the check of a sender on our GFS mailbox."""
+        self._host_hop = host_hop
+        self._mailbox_sender_check = mailbox_sender_check
+
+    def attach_outbox_wake(
+        self,
+        wake: Callable[[], None],
+        *,
+        still_wanted: StillWantedOf | None = None,
+    ) -> None:
+        """Wire ``OutboxProcessor.wake`` — the outbox is the only multi
+        sender (v_91), and a broadcast that queued a multi payload wakes it.
+        *still_wanted* resolves the moderation queue's per-row check (or
+        ``None`` until it is wired): :meth:`outbox_multi_groups` keeps a row
+        it refuses out of every group (it goes single and is dropped)."""
+        self._outbox_wake = wake
+        self._outbox_still_wanted = still_wanted
 
     def attach_call_signaling(self, call_signaling) -> None:
         """Attach a :class:`CallSignalingService` after construction."""
@@ -1499,6 +1890,9 @@ class FederationService:
         cert, writer key and channel grant — right away. A caller about to
         send that snapshot itself (an accept seats and snapshots) passes
         ``notify=False``.
+
+        Rising also answers the household with OUR claim
+        (:meth:`attach_mesh_claim_answer`), whatever ``notify`` says.
         """
         origin = event.from_instance
         if event.routed_path is None or not origin or origin == self._own_instance_id:
@@ -1550,6 +1944,11 @@ class FederationService:
                         new_version=claim.proto_version,
                     )
                 )
+            # The claimant holds no row for us either: answer with our own
+            # claim, or its version-gated space broadcasts keep skipping us
+            # (a reaction, a bazaar listing). Only on a rise, so two
+            # households answering each other stop after one exchange.
+            self._spawn_mesh_claim_answer(origin)
         elif claim.proto_version < previous:
             log.warning(
                 "mesh member %s: claimed proto_version %d below its high-water "
@@ -1560,6 +1959,36 @@ class FederationService:
                 previous,
             )
         return True
+
+    def _spawn_mesh_claim_answer(self, instance_id: str) -> None:
+        """Answer *instance_id*'s claim in a tracked task: the answer is a
+        send over the mesh and must not hold up the inbound event that
+        carried the claim. :meth:`stop` ends the ones still on their way."""
+        if self._mesh_claim_answer is None or self._stopping:
+            return
+        task = asyncio.create_task(
+            self._answer_mesh_claim(instance_id), name="mesh-claim-answer"
+        )
+        self._mesh_claim_answer_tasks.add(task)
+        task.add_done_callback(self._mesh_claim_answer_tasks.discard)
+
+    async def drain_mesh_claim_answers(self) -> None:
+        """Wait until every answer started so far is done (tests)."""
+        await wait_tasks_done(lambda: self._mesh_claim_answer_tasks)
+
+    async def _answer_mesh_claim(self, instance_id: str) -> None:
+        """Tell *instance_id* our version over the mesh. Never raises: a
+        failed answer is retried by the scheduler's mesh sweep."""
+        if self._mesh_claim_answer is None:
+            return
+        try:
+            await self._mesh_claim_answer(instance_id)
+        except Exception:
+            log.warning(
+                "mesh member %s: answering its version claim failed",
+                instance_id,
+                exc_info=True,
+            )
 
     async def is_space_session_peer(self, instance_id: str) -> bool:
         """``True`` iff ``instance_id`` is a household seated from an invite
@@ -1725,6 +2154,35 @@ class FederationService:
                 ok=False,
                 error="unknown_instance",
             )
+        async with self._seat_turn(instance, event_type):
+            return await self._send_live(
+                instance,
+                event_type=event_type,
+                payload=payload,
+                space_id=space_id,
+                outbox_key=outbox_key,
+            )
+
+    async def _send_live(
+        self,
+        instance: RemoteInstance,
+        *,
+        event_type: FederationEventType,
+        payload: dict,
+        space_id: str | None,
+        outbox_key: str | None,
+    ) -> DeliveryResult:
+        """:meth:`send_event` past the lookup: live, or queued on failure
+        (or behind a seat's pending row)."""
+        to_instance_id = instance.id
+        if await self._must_queue_behind(instance, event_type):
+            return await self._queue_behind(
+                to_instance_id,
+                event_type=event_type,
+                payload=payload,
+                space_id=space_id,
+                state_key=outbox_key or self._state_key(event_type, space_id, payload),
+            )
 
         envelope_dict = self._seal_envelope(
             instance,
@@ -1743,13 +2201,7 @@ class FederationService:
         # at most one queued row per person (and space) for this peer.
         # A moment's delete is keyed by who signed it, so the outbox can cap
         # how many it keeps 30 days per relayed origin (adversarial review F2).
-        state_key = (
-            outbox_key
-            or supersede_key(event_type, space_id=space_id, payload=payload)
-            or moment_delete_key(
-                event_type, payload, own_instance_id=self._own_instance_id
-            )
-        )
+        state_key = outbox_key or self._state_key(event_type, space_id, payload)
         state_ticket = self._claim_state_send(to_instance_id, state_key)
 
         # Dispatch the envelope. When a FederationTransport facade is
@@ -1765,10 +2217,20 @@ class FederationService:
         status_code: int | None = None
         transport_error: str | None = None
         if self._transport is not None:
-            result = await self._transport.send(
-                instance=instance,
-                envelope_dict=envelope_dict,
+            # v_87 — too large for a JSON envelope on the GFS relay: one
+            # binary relay frame instead. ``None``: the ordinary send.
+            result = await self.relay_event_frame(
+                instance,
+                envelope_dict,
+                event_type=event_type,
+                payload_json=lambda: _dumps(payload),
+                space_id=space_id,
             )
+            if result is None:
+                result = await self._transport.send(
+                    instance=instance,
+                    envelope_dict=envelope_dict,
+                )
             if result.ok:
                 # Reachability is only provable by DELIVERY. The
                 # connection-server relay answers a uniform 202 to every
@@ -1883,12 +2345,16 @@ class FederationService:
                 status_code=status_code if isinstance(status_code, int) else None,
                 error=DELIVERY_ERROR_SUPERSEDED,
             )
+        # Migration 0145: the payload is stored ONCE (KEK-wrapped) for every
+        # recipient this send fails to reach; the row only references it and
+        # is sealed for this peer when it is sent.
         queued = await self._outbox_repo.enqueue(
             instance_id=to_instance_id,
             event_type=event_type,
-            payload_json=_dumps(envelope_dict),
+            payload_json="",
             msg_id=msg_id,
             supersede_key=state_key,
+            payload_ref=self._outbox_payload(event_type, space_id, payload),
         )
         if queued is None:
             # The pairing ended while this send was in flight (an unpair
@@ -1918,6 +2384,217 @@ class FederationService:
             ok=False,
             status_code=status_code if isinstance(status_code, int) else None,
             error=DELIVERY_ERROR_QUEUED,
+        )
+
+    @asynccontextmanager
+    async def _seat_turn(
+        self, instance: RemoteInstance, event_type: FederationEventType
+    ) -> AsyncIterator[None]:
+        """Serialise live :data:`MULTI_EVENT_TYPES` sends to one
+        ``space_session`` seat around "check pending row → live send →
+        queue on failure": a send that starts while another is still in
+        flight (a slow GFS) waits for it, then finds its queued row and
+        queues behind it — never overtakes it. Every other send passes."""
+        if (
+            event_type not in MULTI_EVENT_TYPES
+            or instance.source is not InstanceSource.SPACE_SESSION
+        ):
+            yield
+            return
+        turn = self._seat_send_locks.get(instance.id)
+        if turn is None:
+            turn = self._seat_send_locks[instance.id] = _SeatTurn()
+        turn.users += 1
+        try:
+            async with turn.lock:
+                yield
+        finally:
+            turn.users -= 1
+            if turn.users == 0:
+                del self._seat_send_locks[instance.id]
+
+    async def _must_queue_behind(
+        self, instance: RemoteInstance, event_type: FederationEventType
+    ) -> bool:
+        """The live half of the outbox ordering gate
+        (:meth:`~socialhome.repositories.outbox_repo.SqliteOutboxRepo.list_due`):
+        a :data:`MULTI_EVENT_TYPES` event to a ``space_session`` seat that
+        still has any pending, unexpired outbox row would overtake it. One
+        indexed read, only for such an event to a seat."""
+        return (
+            event_type in MULTI_EVENT_TYPES
+            and instance.source is InstanceSource.SPACE_SESSION
+            and await self._outbox_repo.has_pending_row(instance.id)
+        )
+
+    async def _queue_behind(
+        self,
+        to_instance_id: str,
+        *,
+        event_type: FederationEventType,
+        payload: dict,
+        space_id: str | None,
+        state_key: str | None,
+    ) -> DeliveryResult:
+        """Queue a live send :meth:`_must_queue_behind` holds to the outbox,
+        due now: the outbox's ordering gate hands it out only once every
+        older row of the seat is gone."""
+        self._settle_state_send(
+            to_instance_id,
+            state_key,
+            self._claim_state_send(to_instance_id, state_key),
+        )
+        row_id = await self._outbox_repo.enqueue(
+            instance_id=to_instance_id,
+            event_type=event_type,
+            payload_json="",
+            supersede_key=state_key,
+            payload_ref=self._outbox_payload(event_type, space_id, payload),
+        )
+        if row_id is None:
+            return DeliveryResult(
+                instance_id=to_instance_id, ok=False, error="unknown_instance"
+            )
+        log.info(
+            "fed send: %s for %s queued behind its pending outbox row(s)",
+            event_type.value,
+            to_instance_id,
+        )
+        if self._outbox_wake is not None:
+            self._outbox_wake()
+        return DeliveryResult(
+            instance_id=to_instance_id,
+            ok=False,
+            error=DELIVERY_ERROR_QUEUED,
+            via="gfs_relay",
+            held_in_order=True,
+        )
+
+    async def relay_event_frames_ok(
+        self,
+        instance: RemoteInstance,
+        *,
+        event_type: FederationEventType | None = None,
+        space_id: str | None = None,
+    ) -> bool:
+        """Whether an event too large for a JSON relay envelope can go to
+        *instance* — a household reached only through a GFS — as one binary
+        relay frame (v_87): the peer is at
+        :data:`FederationCapability.MIN_FOR_RELAY_MEDIA` and the GFS
+        that reaches it (its mailbox's, else its ``relay_via``) proved
+        ``envelope_media``. Otherwise the large event is refused at the
+        sender, as before v_87."""
+        return (
+            self._transport is not None
+            and instance.source is InstanceSource.SPACE_SESSION
+            and instance.status is PairingStatus.CONFIRMED
+            and await self.peer_supports(
+                instance.id,
+                min_version=FederationCapability.MIN_FOR_RELAY_MEDIA,
+            )
+            and await self._transport.relay_frame_ready(
+                instance,
+                event_type=event_type.value if event_type is not None else "",
+                space_id=space_id,
+            )
+        )
+
+    async def large_event_reaches(
+        self, instance_id: str, *, space_id: str | None = None
+    ) -> bool:
+        """Whether a space event too large for a JSON relay envelope can
+        reach *instance_id* at all — for a local action to check BEFORE it
+        stores anything, so a large item that could never leave is refused
+        instead of shown as delivered. Only a household reached solely
+        through a GFS can fail this (:meth:`relay_event_frames_ok`); every
+        other path carries large events as ever."""
+        instance = await self._federation_repo.get_instance(instance_id)
+        if instance is None or instance.source is not InstanceSource.SPACE_SESSION:
+            return True
+        return await self.relay_event_frames_ok(instance, space_id=space_id)
+
+    async def relay_event_frame(
+        self,
+        instance: RemoteInstance,
+        envelope_dict: dict,
+        *,
+        event_type: FederationEventType,
+        payload_json: Callable[[], str],
+        space_id: str | None,
+    ):
+        """v_87 — the ONE rule for a large event toward a household behind
+        a GFS: when *envelope_dict* (the sealed JSON envelope of this send)
+        does not fit a JSON envelope on the relay and *instance* is reached
+        only through a GFS, the event goes as one binary relay frame — the
+        v_87 frame, the same event type, signature scheme, session-key
+        encryption and ``msg_id``; ``payload_json()`` (read only once the
+        rule applies) as the frame's bytes.
+
+        Returns the transport's result (``ok`` = the relay accepted it;
+        ``relay_too_large`` when not even a frame can carry it — refused
+        here, logged, never sent), or ``None`` when the rule does not apply
+        and the caller sends the JSON envelope: it fits, the peer is not
+        behind a GFS, or the peer / its GFS takes no event frames (the JSON
+        relay leg then refuses the envelope with its WARNING, as before
+        v_87). Used by the live send and the outbox alike."""
+        if (
+            self._transport is None
+            or instance.source is not InstanceSource.SPACE_SESSION
+            or relay_envelope_fits(envelope_dict)
+            or not await self.relay_event_frames_ok(
+                instance, event_type=event_type, space_id=space_id
+            )
+        ):
+            return None
+        try:
+            session_key = self._key_manager.decrypt(instance.key_self_to_remote)
+        except Exception:
+            log.warning(
+                "send_event: failed to decrypt session key for %s",
+                instance.id,
+                exc_info=True,
+            )
+            return None
+        # A sync chunk rides with its record's ciphertext raw and may fill
+        # the frame, and so may a routed wrapper (its sealed inner raw);
+        # anything else must also fit the sync chunk that heals a lost frame
+        # (one bound, derived).
+        body_suite, raw_payload = pack_event_body(event_type, payload_json())
+        limit = relay_event_payload_limit(event_type)
+        if len(raw_payload) > limit:
+            log.warning(
+                "send_event: a %d-byte %r payload for %s does not fit — a "
+                "household behind a GFS takes at most %d bytes of it (one "
+                "binary relay frame, and the sync chunk that re-delivers "
+                "it); refused, not sent",
+                len(raw_payload),
+                event_type.value,
+                instance.id,
+                limit,
+            )
+            return DeliveryResult(
+                instance_id=instance.id,
+                ok=False,
+                status_code=RELAY_STATUS_TOO_LARGE,
+                error=DELIVERY_ERROR_RELAY_TOO_LARGE,
+                via="gfs_relay",
+            )
+        header, sealed = build_media_envelope(
+            encoder=self._encoder,
+            session_key=session_key,
+            from_instance=self._own_instance_id,
+            to_instance=instance.id,
+            sig_suite=instance.sig_suite or self._encoder.sig_suite,
+            event_type=event_type,
+            # The signed metadata holds only what binds the bytes and
+            # names how they carry the payload.
+            payload={EVENT_BODY_SUITE_FIELD: body_suite},
+            raw_chunk=raw_payload,
+            space_id=space_id,
+            msg_id=envelope_dict["msg_id"],
+        )
+        return await self._transport.send_event_frame(
+            instance=instance, header_dict=header, payload_bytes=sealed
         )
 
     async def send_event_once(
@@ -1975,48 +2652,6 @@ class FederationService:
             instance_id=instance.id,
             ok=200 <= status_code < 300,
             status_code=status_code,
-        )
-
-    async def send_event_unqueued(
-        self,
-        *,
-        to_instance_id: str,
-        event_type: FederationEventType,
-        payload: dict,
-        space_id: str | None,
-        mailbox_only: bool,
-    ) -> DeliveryResult:
-        """Seal one event like :meth:`send_event` and try it ONCE over the
-        transport — never the outbox (whose quick replays would ignore the
-        caller's timing) and no reachability change. *mailbox_only*: the
-        target's per-space mailbox or nothing (v_88 mailbox updates).
-        """
-        instance = await self._federation_repo.get_instance(to_instance_id)
-        if instance is None or self._transport is None:
-            return DeliveryResult(
-                instance_id=to_instance_id, ok=False, error="unavailable"
-            )
-        envelope_dict = self._seal_envelope(
-            instance, event_type=event_type, payload=payload, space_id=space_id
-        )
-        if envelope_dict is None:
-            return DeliveryResult(
-                instance_id=to_instance_id, ok=False, error="key_decrypt_error"
-            )
-        if mailbox_only:
-            result = await self._transport.send_mailbox_only(
-                instance=instance, envelope_dict=envelope_dict
-            )
-        else:
-            result = await self._transport.send(
-                instance=instance, envelope_dict=envelope_dict
-            )
-        return DeliveryResult(
-            instance_id=to_instance_id,
-            ok=result.ok,
-            status_code=result.status_code,
-            error=result.error,
-            via=result.via,
         )
 
     async def send_event_via_gfs(
@@ -2089,12 +2724,35 @@ class FederationService:
         event_type: FederationEventType,
         payload: dict,
         space_id: str | None,
+        msg_id: str | None = None,
     ) -> dict | None:
         """Encrypt ``payload`` for *instance* and sign the envelope.
+
+        ``msg_id`` defaults to a fresh one; an outbox row sealed for its
+        peer passes its own id, so the receiver's replay cache keys on the
+        row across every attempt.
 
         Returns the signed envelope dict, or ``None`` when the stored
         session key cannot be unwrapped (logged; nothing can be sealed).
         """
+        return self._seal_payload_json(
+            instance,
+            event_type=event_type,
+            payload_json=_dumps(payload),
+            space_id=space_id,
+            msg_id=msg_id,
+        )
+
+    def _seal_payload_json(
+        self,
+        instance: RemoteInstance,
+        *,
+        event_type: FederationEventType,
+        payload_json: str,
+        space_id: str | None,
+        msg_id: str | None,
+    ) -> dict | None:
+        """:meth:`_seal_envelope` over payload bytes already serialised."""
         # Decrypt the directional session key (stored KEK-encrypted).
         try:
             session_key = self._key_manager.decrypt(instance.key_self_to_remote)
@@ -2116,14 +2774,13 @@ class FederationService:
             return None
 
         # Encrypt the payload.
-        payload_json = _dumps(payload)
         encrypted_payload = self._encrypt_payload(payload_json, session_key)
 
         # Build the envelope. The per-peer sig_suite (negotiated at
         # pairing time) decides which algorithms sign this envelope.
         effective_suite = instance.sig_suite or self._encoder.sig_suite
         envelope_dict: dict = {
-            "msg_id": str(uuid.uuid4()),
+            "msg_id": msg_id or str(uuid.uuid4()),
             "event_type": event_type.value,
             "from_instance": self._own_instance_id,
             "to_instance": instance.id,
@@ -2140,6 +2797,115 @@ class FederationService:
             suite=effective_suite,
         )
         return envelope_dict
+
+    def _outbox_payload(
+        self,
+        event_type: FederationEventType,
+        space_id: str | None,
+        payload: dict,
+        *,
+        msg_id: str | None = None,
+    ) -> OutboxPayload:
+        """The stored form of *payload* for the outbox (migration 0145).
+
+        ``id`` is an HMAC over (event type, space, payload bytes) under the
+        per-process :attr:`_outbox_payload_key`, so every failed recipient
+        of one broadcast references ONE row; the payload is wrapped under the
+        local KEK with that id as associated data, so the database never
+        holds it in the clear and a row's ciphertext cannot be swapped into
+        another (:func:`_outbox_payload_ad` binds the event type and space
+        too, so a row edited to another event or space does not unwrap).
+
+        With a ``msg_id`` it is a broadcast's multi payload (v_91): a random
+        id — one broadcast, one row, never shared with another — and the
+        ``msg_id`` every envelope built from it carries."""
+        payload_json = _dumps(payload)
+        if msg_id is None:
+            mac = hmac.new(self._outbox_payload_key, digestmod=hashlib.sha256)
+            for part in (event_type.value, space_id or "", payload_json):
+                mac.update(part.encode("utf-8"))
+                mac.update(b"\x00")
+            payload_id = mac.hexdigest()
+        else:
+            payload_id = uuid.uuid4().hex
+        return OutboxPayload(
+            id=payload_id,
+            event_type=event_type,
+            space_id=space_id,
+            msg_id=msg_id,
+            payload_enc=self._key_manager.encrypt(
+                payload_json.encode("utf-8"),
+                associated_data=_outbox_payload_ad(payload_id, event_type, space_id),
+            ),
+        )
+
+    async def _outbox_payload_json(self, payload_id: str) -> tuple[OutboxPayload, str]:
+        """The stored payload *payload_id* and its unwrapped JSON.
+
+        Raises :class:`ValueError` when the row is gone or does not unwrap —
+        a condition retrying cannot fix."""
+        stored = await self._outbox_repo.get_payload(payload_id)
+        if stored is None:
+            raise ValueError(f"outbox payload {payload_id} is gone")
+        try:
+            raw = self._key_manager.decrypt(
+                stored.payload_enc,
+                associated_data=_outbox_payload_ad(
+                    stored.id, stored.event_type, stored.space_id
+                ),
+            )
+        except Exception as exc:
+            raise ValueError(f"outbox payload {payload_id} does not unwrap") from exc
+        return stored, raw.decode("utf-8")
+
+    async def seal_outbox_entry(
+        self, entry: OutboxEntry, instance: RemoteInstance
+    ) -> str:
+        """Seal a ref row (migration 0145) for its one peer: the stored
+        payload, encrypted under *instance*'s session key, in an envelope
+        with a fresh timestamp + signature and as ``msg_id`` the multi
+        payload's (v_91 — so it and the multi frame are one message to the
+        receiver's replay cache), else the row's id.
+
+        Raises :class:`ValueError` when the payload is gone, does not unwrap
+        or the session key cannot be unwrapped — the outbox drops the row
+        (PERMANENT), as for an undecodable stored envelope."""
+        if entry.payload_id is None:
+            raise ValueError(f"outbox entry {entry.id} references no payload")
+        stored, payload_json = await self._outbox_payload_json(entry.payload_id)
+        envelope = self._seal_payload_json(
+            instance,
+            event_type=entry.event_type,
+            payload_json=payload_json,
+            space_id=stored.space_id,
+            msg_id=stored.msg_id or entry.id,
+        )
+        if envelope is None:
+            raise ValueError(f"no session key to seal {entry.id} for {instance.id}")
+        return _dumps(envelope)
+
+    async def relay_outbox_frame(
+        self, entry: OutboxEntry, instance: RemoteInstance, envelope_dict: dict
+    ):
+        """:meth:`relay_event_frame` for an outbox row sealed for
+        *instance* as *envelope_dict* (v_87): a row that references a
+        stored payload and is too large for a JSON relay envelope goes as
+        one binary relay frame under the same ``msg_id``. ``None`` → the
+        caller sends the JSON envelope."""
+        if (
+            entry.payload_id is None
+            or instance.source is not InstanceSource.SPACE_SESSION
+            or relay_envelope_fits(envelope_dict)
+        ):
+            return None
+        stored, payload_json = await self._outbox_payload_json(entry.payload_id)
+        return await self.relay_event_frame(
+            instance,
+            envelope_dict,
+            event_type=entry.event_type,
+            payload_json=lambda: payload_json,
+            space_id=stored.space_id,
+        )
 
     async def queue_event(
         self,
@@ -2234,8 +3000,14 @@ class FederationService:
         event_type: FederationEventType,
         payload: dict,
         space_id: str | None = None,
+        routed_raw_body: bool = False,
     ) -> DeliveryResult:
         """Deliver to ``to_instance_id`` direct when CONFIRMED, else via mesh.
+
+        ``routed_raw_body`` — the target reads a raw sealed body (the caller
+        knows its version, e.g. a §25.6 requester at v_87): a mesh route
+        may then seal a sync chunk with its ciphertext raw
+        (:meth:`SpaceRoutedHandler.send_routed`).
 
         Behaviour:
 
@@ -2256,6 +3028,41 @@ class FederationService:
         """
         instance = await self._federation_repo.get_instance(to_instance_id)
         if instance is not None and instance.status is PairingStatus.CONFIRMED:
+            if (
+                instance.source is InstanceSource.SPACE_SESSION
+                and not instance.relay_via
+                and space_id
+                and self._host_hop is not None
+                and (
+                    self._transport is None
+                    or not await self._transport.mailbox_reachable(instance, space_id)
+                )
+            ):
+                # v_89 — a member seated from the host's directory that we
+                # cannot reach at its GFS mailbox (no connection to that GFS,
+                # or it has none): the space's host is the one hop. Never
+                # past a row it still has queued: the same rule as a live
+                # send (:meth:`_must_queue_behind`), in the seat's turn.
+                log.info(
+                    "member mesh: no mailbox of %s we reach for %s — through the host",
+                    to_instance_id,
+                    event_type.value,
+                )
+                async with self._seat_turn(instance, event_type):
+                    if await self._must_queue_behind(instance, event_type):
+                        return await self._queue_behind(
+                            to_instance_id,
+                            event_type=event_type,
+                            payload=payload,
+                            space_id=space_id,
+                            state_key=self._state_key(event_type, space_id, payload),
+                        )
+                    return await self._host_hop.send(
+                        to_instance_id=to_instance_id,
+                        event_type=event_type,
+                        payload=payload,
+                        space_id=space_id,
+                    )
             return await self.send_event(
                 to_instance_id=to_instance_id,
                 event_type=event_type,
@@ -2306,6 +3113,7 @@ class FederationService:
                 inner_event_type=event_type,
                 inner_payload=payload,
                 target_identity_pk=pinned_pk,
+                raw_body_ok=routed_raw_body,
             )
         except Exception as exc:
             # The cached path is the prime suspect — a relay that has since
@@ -2344,6 +3152,7 @@ class FederationService:
                         self._route_service.cached_target_identity_pk(to_instance_id)
                         or ""
                     ),
+                    raw_body_ok=routed_raw_body,
                 )
             except Exception as retry_exc:
                 log.warning(
@@ -2365,11 +3174,24 @@ class FederationService:
         space_id: str,
         host_instance_id: str,
         extra_payload: dict | None = None,
+        sync_mode: str = "initial",
+        dir_seq: int | None = None,
+        have_seq: int | None = None,
+        mod_held: dict | None = None,
+        roster_digest: dict | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
         ``extra_payload`` is the v_46 ``authority_epoch_echo`` for the
-        host, carried on the BEGIN under that key when given.
+        host, carried on the BEGIN under that key when given. ``dir_seq``
+        (v_89) is the member directory version we hold, echoed so a host
+        that is ahead answers with one snapshot; ``sync_mode="incremental"``
+        (with its ``have_seq``) is the periodic BEGIN after catch-up that
+        carries it. ``mod_held`` is the moderation queue echo of a
+        household that reviews the space (the items it holds, by state),
+        carried by that same incremental BEGIN. ``roster_digest`` is the
+        digest of our roster mirror for the space (only toward its host):
+        the host repairs it only on a mismatch, as for a paired member.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
         relay), the normal SpaceSyncScheduler never triggers (it only syncs with
@@ -2397,6 +3219,9 @@ class FederationService:
                 sync_id=sync_id,
                 space_id=space_id,
                 provider_instance_id=host_instance_id,
+                sync_mode=sync_mode,
+                have_seq=have_seq,
+                roster_digest=roster_digest,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -2407,11 +3232,19 @@ class FederationService:
             payload: dict = {
                 "sync_id": sync_id,
                 "space_id": space_id,
-                "sync_mode": "initial",
+                "sync_mode": sync_mode,
                 "prefer_direct": False,
             }
             if extra_payload is not None:
                 payload["authority_epoch_echo"] = extra_payload
+            if dir_seq is not None:
+                payload["dir_seq"] = dir_seq
+            if have_seq is not None:
+                payload["have_seq"] = have_seq
+            if mod_held is not None:
+                payload["mod_held"] = mod_held
+            if roster_digest is not None:
+                payload["roster_digest"] = roster_digest
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
@@ -2598,6 +3431,10 @@ class FederationService:
                 space_id=space_id,
             )
         if (
+            # Defence in depth: a seat has no inbox address (the redeem
+            # stores ``""`` and ``URL_UPDATED`` from a seat is ignored), and a
+            # household met through a GFS is never POSTed to directly even
+            # if it somehow had one.
             instance.source is not InstanceSource.SPACE_SESSION
             and instance.remote_inbox_url
             # A peer already known to be away gets the JSON leg straight
@@ -2966,7 +3803,6 @@ class FederationService:
         payload: dict,
         *,
         min_proto_version: int | None = None,
-        relay_payload: dict | None = None,
         legacy_payload: dict | None = None,
         legacy_below: int | None = None,
         per_peer: Callable[[str, dict], Awaitable[dict]] | None = None,
@@ -2983,7 +3819,7 @@ class FederationService:
         is not a member of ``space_id`` gets nothing whatever it lists.
 
         ``per_peer``, when given, is awaited with ``(instance_id, payload)``
-        for each target AFTER the legacy / relay variant is picked and
+        for each target AFTER the legacy variant is picked and
         returns the copy that target receives. For content meant for ONE
         household only — its own v_49 writer cert — so nothing addressed to
         one member ever rides another member's envelope. It must return a
@@ -2998,15 +3834,9 @@ class FederationService:
         ``moderator`` role ships as ``member`` to a v_40 household, which
         drops roles it does not know. Only for payloads that are not signed
         as a whole (the per-peer envelope signature still covers whichever
-        variant a peer gets). ``relay_payload`` takes precedence for a relay
-        seat — callers never combine them today.
-
-        ``relay_payload``, when given, is sent INSTEAD of ``payload`` to a
-        member seated from an invite link (``InstanceSource.SPACE_SESSION``):
-        that household is reached only through the connection-server relay,
-        whose envelope cap (``RELAY_MAX_ENVELOPE_BYTES``, ~191 KiB) is far
-        tighter than a paired peer's ~1 MiB. A caller shipping bulky bytes
-        (a space cover) hands a smaller variant for exactly those members.
+        variant a peer gets). Every member household gets the same payload
+        however it is reached — a caller shipping bulky bytes (a space
+        cover) bounds them so they fit the tightest path (the GFS relay).
 
         Each per-peer ship goes through :meth:`send_with_mesh_fallback`
         so a member whose household is *not* a direct CONFIRMED peer
@@ -3034,6 +3864,8 @@ class FederationService:
             space_id,
         )
         results: list[DeliveryResult] = []
+        #: ``(instance_id, final payload)`` per target, in member order.
+        planned: list[tuple[str, dict]] = []
         for iid in instance_ids:
             if iid == self._own_instance_id:
                 # ``create_space`` puts the host's OWN row in ``space_instances``,
@@ -3067,13 +3899,6 @@ class FederationService:
                 and not await self.space_member_supports(iid, min_version=legacy_below)
             ):
                 peer_payload = legacy_payload
-            if relay_payload is not None:
-                instance = await self._federation_repo.get_instance(iid)
-                if (
-                    instance is not None
-                    and instance.source is InstanceSource.SPACE_SESSION
-                ):
-                    peer_payload = relay_payload
             if FILES_FIELD in peer_payload and not await self.space_member_supports(
                 iid, min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
             ):
@@ -3087,6 +3912,18 @@ class FederationService:
                 }
             if per_peer is not None:
                 peer_payload = await per_peer(iid, peer_payload)
+            planned.append((iid, peer_payload))
+        # v_91 — the mailbox seats behind one GFS whose bytes are the same go
+        # to the outbox as ONE multi payload, which uploads it once. The
+        # audience is exactly these planned targets (the current member set,
+        # narrowed by ``only_instances``): the body key is wrapped to each
+        # one's mailbox and nobody else's. Everyone else goes per recipient
+        # below, in the original order.
+        queued = await self._queue_multi_groups(space_id, event_type, planned)
+        for iid, peer_payload in planned:
+            if iid in queued:
+                results.append(queued[iid])
+                continue
             if iid in self._deferred_mesh_queues:
                 # A deferred send to this target is still pending: queue
                 # behind it rather than overtake it, so the target sees
@@ -3165,6 +4002,301 @@ class FederationService:
                 ", ".join(f"{r.instance_id}={r.error}" for r in terminal),
             )
         return broadcast
+
+    async def _queue_multi_groups(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        planned: list[tuple[str, dict]],
+    ) -> dict[str, DeliveryResult]:
+        """v_91 — hand the outbox, the only multi sender, every group of two
+        or more targets one multi frame may carry: ONE multi payload (random
+        id, uuid4 ``msg_id``) and one ref row each, in one transaction; then
+        wake it. Returns those targets' results — :data:`DELIVERY_ERROR_QUEUED`,
+        self-healing like a failed :meth:`send_event`. Everyone else goes per
+        recipient.
+
+        A target is eligible per :meth:`_multi_target`; groups are keyed by
+        :func:`_multi_group_key` on its GFS and the payload's content (key
+        order aside), so nothing addressed to one member (a ``per_peer``
+        copy) rides another's frame.
+
+        Cost: one ``list_instances_in_space`` read per broadcast with ≥ 2
+        targets of a multi event type; one mailbox lookup per
+        ``space_session`` seat among them and one capability probe per GFS.
+        Never raises."""
+        done: dict[str, DeliveryResult] = {}
+        if (
+            event_type not in MULTI_EVENT_TYPES
+            or self._transport is None
+            or len(planned) < 2
+        ):
+            return done
+        try:
+            seats = {
+                row.id: row
+                for row in await self._federation_repo.list_instances_in_space(space_id)
+                if row.source is InstanceSource.SPACE_SESSION
+            }
+            caps: dict[str, int] = {}
+            groups: dict[tuple[str, bytes | str], tuple[dict, list[str]]] = {}
+            for iid, peer_payload in planned:
+                row = seats.get(iid) if len(seats) >= 2 else None
+                target = (
+                    None
+                    if row is None
+                    else await self._multi_target(row, event_type, space_id, caps)
+                )
+                if target is not None:
+                    key = _multi_group_key(target, _group_key(peer_payload))
+                    groups.setdefault(key, (peer_payload, []))[1].append(iid)
+            ready = [g for g in groups.values() if len(g[1]) >= 2]
+            for payload, recipients in ready:
+                done.update(
+                    await self._queue_multi_payload(
+                        space_id, event_type, payload, recipients
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 — never raises; per recipient
+            log.warning(
+                "broadcast: space=%s multi queueing failed (%s) — per recipient",
+                space_id,
+                type(exc).__name__,
+            )
+        return done
+
+    async def _queue_multi_payload(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        recipients: list[str],
+    ) -> dict[str, DeliveryResult]:
+        """One multi payload and its ref rows for *recipients*, then wake the
+        outbox. A latest-only state supersedes each recipient's older row."""
+        state_key = self._state_key(event_type, space_id, payload)
+        for iid in recipients:
+            # The newest send of this state: an older one still in flight
+            # must not drop the row below when it lands.
+            self._settle_state_send(
+                iid, state_key, self._claim_state_send(iid, state_key)
+            )
+        written = await self._outbox_repo.enqueue_refs(
+            instance_ids=recipients,
+            event_type=event_type,
+            supersede_key=state_key,
+            payload_ref=self._outbox_payload(
+                event_type, space_id, payload, msg_id=str(uuid.uuid4())
+            ),
+        )
+        if written and self._outbox_wake is not None:
+            self._outbox_wake()
+        return {
+            iid: DeliveryResult(
+                instance_id=iid,
+                ok=False,
+                # Not written: the pairing ended meanwhile.
+                error=DELIVERY_ERROR_QUEUED if iid in written else "unknown_instance",
+                via="gfs_relay",
+            )
+            for iid in recipients
+        }
+
+    async def _multi_target(
+        self,
+        row: RemoteInstance,
+        event_type: FederationEventType,
+        space_id: str,
+        caps: dict[str, int],
+    ) -> MailboxTarget | None:
+        """*row*'s GFS mailbox for *space_id* when a multi frame may carry
+        *event_type* to it (v_90) — the one eligibility rule of the broadcast
+        and the outbox: an event a receiver takes in a multi frame
+        (:data:`MULTI_EVENT_TYPES`), a household with no deferred mesh queue,
+        a confirmed ``space_session`` seat whose mailbox (its card: v_89+,
+        so every household holding one opens a multi frame) sits on a GFS of
+        ours that proved ``envelope_multi``. *caps*
+        caches each GFS's capability for the pass. ``None`` → per recipient."""
+        assert self._transport is not None
+        if (
+            event_type not in MULTI_EVENT_TYPES
+            or row.id in self._deferred_mesh_queues
+            or row.status is not PairingStatus.CONFIRMED
+            or row.source is not InstanceSource.SPACE_SESSION
+        ):
+            return None
+        return await self._transport.multi_mailbox_target(row, space_id, caps=caps)
+
+    async def outbox_multi_groups(
+        self, entries: list[OutboxEntry]
+    ) -> list[list[OutboxEntry]]:
+        """:class:`~socialhome.infrastructure.outbox_processor.OutboxMulti` —
+        the due outbox rows that go up as ONE multi upload each.
+
+        Only rows of a multi payload (its ``msg_id`` set — never a failed
+        send's payload) whose peer passes :meth:`_multi_target`. Grouped by :func:`_multi_group_key` (GFS +
+        stored payload), every recipient at most once per group, chunked at
+        the GFS's ``max_recipients``; groups of one are left out (they go per
+        recipient). Each peer row is read once and each GFS probed once per
+        pass. A row the moderation queue no longer wants (``still_wanted``,
+        :meth:`attach_outbox_wake`) is left out — it goes single, and the
+        delivery callback drops it. A row whose upload already failed
+        :data:`MULTI_MAX_TRANSIENT` times (its ``attempts`` — a timeout and a
+        raised send count too) ungroups its payload for good
+        (``ungroup_payload``): its rows go per row from now on, with the
+        host-hop fallback, so a NEVER_DROP multi row cannot hold its seats'
+        later content (the outbox ordering gate) on the ceiling backoff."""
+        if self._transport is None:
+            return []
+        still_wanted = (
+            self._outbox_still_wanted() if self._outbox_still_wanted else None
+        )
+        rows: dict[str, RemoteInstance | None] = {}
+        caps: dict[str, int] = {}
+        buckets: dict[tuple[str, bytes | str], list[list[OutboxEntry]]] = {}
+        ungrouped: set[str] = set()
+        for entry in entries:
+            space_id = entry.space_id
+            if entry.msg_id is None or entry.payload_id is None or space_id is None:
+                continue
+            if entry.payload_id in ungrouped:
+                continue
+            if entry.attempts >= MULTI_MAX_TRANSIENT:
+                ungrouped.add(entry.payload_id)
+                await self._outbox_repo.ungroup_payload(entry.payload_id)
+                continue
+            if entry.instance_id not in rows:
+                rows[entry.instance_id] = await self._federation_repo.get_instance(
+                    entry.instance_id
+                )
+            row = rows[entry.instance_id]
+            target = (
+                None
+                if row is None
+                else await self._multi_target(row, entry.event_type, space_id, caps)
+            )
+            if target is None or (
+                still_wanted is not None and not await still_wanted(entry)
+            ):
+                continue
+            cap = max(caps.get(target.gfs_url, 1), 1)
+            chunks = buckets.setdefault(_multi_group_key(target, entry.payload_id), [])
+            for chunk in chunks:
+                if len(chunk) < cap and all(
+                    e.instance_id != entry.instance_id for e in chunk
+                ):
+                    chunk.append(entry)
+                    break
+            else:
+                chunks.append([entry])
+        return [
+            c
+            for chunks in buckets.values()
+            for c in chunks
+            if len(c) >= 2 and c[0].payload_id not in ungrouped
+        ]
+
+    async def deliver_outbox_multi(
+        self, group: list[OutboxEntry]
+    ) -> tuple[DeliveryOutcome | RetryAfter, list[OutboxEntry]] | None:
+        """:class:`~socialhome.infrastructure.outbox_processor.OutboxMulti` —
+        ONE multi upload of *group*'s stored payload, under its ``msg_id``;
+        returns the outcome and the rows it applies to.
+
+        A row whose peer is no longer a multi target (removed, no mailbox,
+        an older peer) is left out — handed back to go per row — and the
+        rest still go up while two or more remain.
+
+        SUCCESS on the relay's acceptance (recorded per household as such,
+        never as reachability). A fresh body key *K* per attempt seals the
+        body once and is wrapped to each target mailbox's ``kem_pk``. A
+        throttled upload waits the GFS's ``Retry-After``
+        (:data:`MULTI_THROTTLE_RETRY_S` when it named none); a timeout, a
+        ``5xx`` or a transport error is TRANSIENT — the group is retried as
+        it is. A payload that is gone or does not unwrap is PERMANENT.
+        ``None`` (nothing went up; every row is handed back to go on its own,
+        under the same ``msg_id``) when fewer than two targets remain, or
+        the GFS refused the upload with any other ``4xx``, or no frame can
+        be built (over the top size bucket). The last two mark the payload
+        so it is never grouped again (``ungroup_payload``) — the same frame
+        would only be refused again."""
+        assert self._transport is not None
+        first = group[0]
+        space_id = first.space_id
+        if first.payload_id is None or space_id is None:
+            return None
+        try:
+            stored, payload_json = await self._outbox_payload_json(first.payload_id)
+        except ValueError:
+            log.warning(
+                "outbox: multi payload %s unusable — dropping", first.payload_id
+            )
+            return DeliveryOutcome.PERMANENT, group
+        caps: dict[str, int] = {}
+        sent: list[OutboxEntry] = []
+        targets: list[MailboxTarget] = []
+        for entry in group:
+            row = await self._federation_repo.get_instance(entry.instance_id)
+            target = (
+                None
+                if row is None
+                else await self._multi_target(row, stored.event_type, space_id, caps)
+            )
+            if target is not None:
+                sent.append(entry)
+                targets.append(target)
+        if stored.msg_id is None or len(sent) < 2:
+            return None
+        recipients = [e.instance_id for e in sent]
+        key = new_mr_key()
+        try:
+            body = seal_multi(
+                build_multi_envelope(
+                    encoder=self._encoder,
+                    own_instance_id=self._own_instance_id,
+                    event_type=stored.event_type.value,
+                    payload_json=payload_json,
+                    space_id=space_id,
+                    recipients=recipients,
+                    msg_id=stored.msg_id,
+                ),
+                key=key,
+            )
+            to = [(t, wrap_mr_key(key, t.kem_pk)) for t in targets]
+        except ValueError as exc:
+            log.info(
+                "outbox: multi frame for space=%s goes per row (%s)", space_id, exc
+            )
+            await self._outbox_repo.ungroup_payload(stored.id)
+            return None
+        ok, status, retry_after_s = await self._transport.send_multi_mailbox(
+            to=to, body=body
+        )
+        if ok:
+            for iid in recipients:
+                self.note_relay_accepted(iid)
+            return DeliveryOutcome.SUCCESS, sent
+        # Instance-level context only — never a mailbox id.
+        log.info(
+            "outbox: multi upload for %d household(s) of space=%s not taken "
+            "(status=%s)",
+            len(sent),
+            space_id,
+            status,
+        )
+        if status == RELAY_STATUS_THROTTLED:
+            return RetryAfter(
+                seconds=MULTI_THROTTLE_RETRY_S
+                if retry_after_s is None
+                else retry_after_s
+            ), sent
+        if status is not None and 400 <= status < 500:
+            # Refused for good (a malformed or oversize upload): the same
+            # frame would be refused again — each row goes on its own, and
+            # the payload is never grouped again.
+            await self._outbox_repo.ungroup_payload(stored.id)
+            return None
+        return DeliveryOutcome.TRANSIENT, sent
 
     def _defer_mesh_send(
         self,
@@ -3508,7 +4640,16 @@ class FederationService:
         since a deferred send rides both.
         """
         self._stopping = True
-        tasks = [t for t in self._deferred_mesh_tasks.values() if not t.done()]
+        # An inbound event waiting for its second try gets it now.
+        await self._inbound_retry.stop()
+        tasks = [
+            t
+            for t in (
+                *self._deferred_mesh_tasks.values(),
+                *self._mesh_claim_answer_tasks,
+            )
+            if not t.done()
+        ]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -3560,7 +4701,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
-        mailbox_space_id: str | None = None,
+        multi: bool = False,
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -3585,8 +4726,8 @@ class FederationService:
             raw_body=raw_body,
             instance_id=instance_id,
             transport=transport,
-            mailbox_space_id=mailbox_space_id,
         )
+        ctx.multi_frame = multi
         await pipeline.run(ctx)
         return ctx
 
@@ -3596,7 +4737,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
-        mailbox_space_id: str | None = None,
+        multi: bool = False,
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
@@ -3608,12 +4749,18 @@ class FederationService:
         :data:`~socialhome.federation.inbound_validator.TRANSPORT_GFS_RELAY`
         for an envelope the connection server queued and replayed later,
         which widens the timestamp step's skew budget accordingly.
+
+        ``multi`` (v_91) marks a multi-recipient frame our mailbox opened
+        (its wrap under our mailbox key, then the body): the pipeline then
+        requires our tag in the ``"*:"`` audience and a named space, and
+        takes the payload as-is (the body seal covered it). Only the mailbox
+        leg sets it.
         """
         ctx = await self.validate_inbound_rtc(
             instance_id,
             raw_body,
             transport=transport,
-            mailbox_space_id=mailbox_space_id,
+            multi=multi,
         )
 
         if ctx.early_response is not None:
@@ -3707,10 +4854,11 @@ class FederationService:
         media_body: bytes,
         *,
         transport: str = TRANSPORT_GFS_RELAY,
-        mailbox_space_id: str | None = None,
     ) -> dict:
         """Validate + decrypt one binary media body that the GFS relay
-        delivered (v_87), then dispatch.
+        delivered (v_87), then dispatch — a media chunk, or a space
+        event too large for a JSON relay envelope, whose payload the
+        pipeline opens from the frame's bytes (:meth:`_open_framed_event`).
 
         *media_body* is the inbox media body (``\\x00SHM``, the suite byte,
         one ``fed-media-v1`` frame) the caller opened from a ``\\x00SHR``
@@ -3742,9 +4890,19 @@ class FederationService:
             raw_body=frame.header,
             instance_id=claimed,
             transport=transport,
-            mailbox_space_id=mailbox_space_id,
+            frame_payload=frame.payload,
+            frame_suite=wire_suite,
         )
         await pipeline.run(ctx)
+        if (
+            ctx.early_response is None
+            and ctx.event is not None
+            and ctx.event.event_type not in MEDIA_HTTPS_EVENT_TYPES
+        ):
+            # v_87 — a framed event: the pipeline opened its bytes into its
+            # payload and ran every gate on it; dispatched like any event.
+            await self._dispatch_event(ctx.event)
+            return {"status": "ok"}
         return await self._finish_media_frame(
             ctx, frame.payload, wire_frame_suite=wire_suite
         )
@@ -3774,7 +4932,29 @@ class FederationService:
             event is None
         ):  # pragma: no cover — pipeline always sets event or early_response
             return {"status": "ok"}
-        meta = event.payload if isinstance(event.payload, dict) else {}
+        raw = self._open_frame_bytes(
+            ctx, payload_bytes, wire_frame_suite=wire_frame_suite
+        )
+        await self._dispatch_event(replace(event, media_bytes=raw))
+        return {"status": "ok"}
+
+    def _open_frame_bytes(
+        self,
+        ctx: InboundContext,
+        payload_bytes: bytes,
+        *,
+        wire_frame_suite: str | None,
+    ) -> bytes:
+        """The plaintext bytes of a binary frame whose header the §24.11
+        pipeline validated and decrypted: frame and AEAD suites checked,
+        the bytes decrypted under the directional session key and matched
+        against the signed ``chunk_sha256``. Raises on any mismatch."""
+        event = ctx.event
+        meta = (
+            event.payload
+            if event is not None and isinstance(event.payload, dict)
+            else {}
+        )
         frame_suite = meta.get("media_frame_suite")
         if frame_suite is None and wire_frame_suite is None:
             frame_suite = MEDIA_FRAME_SUITE_V1
@@ -3803,8 +4983,7 @@ class FederationService:
         actual = b64url_encode(hashlib.sha256(raw).digest())
         if not _digest_matches(meta.get("chunk_sha256"), actual):
             raise ValueError("media chunk sha256 mismatch")
-        await self._dispatch_event(replace(event, media_bytes=raw))
-        return {"status": "ok"}
+        return raw
 
     async def _dispatch_event(self, event: FederationEvent) -> None:
         """Route a validated inbound event to registered handlers.
@@ -3820,7 +4999,24 @@ class FederationService:
             event.space_id,
         )
 
+        if self._host_contact is not None and event.space_id:
+            # In memory, O(1) — clears a silent host only (v_92).
+            self._host_contact.heard_from(event.space_id, event.from_instance)
         await self._event_registry.dispatch(event)
+        if (
+            self._space_applied is not None
+            and event.space_id
+            and event.event_type not in _FILE_TRAFFIC
+        ):
+            # After the handlers: the row this event carried is stored.
+            try:
+                self._space_applied(event.space_id)
+            except Exception:
+                log.warning(
+                    "marking space %s for its file check failed",
+                    event.space_id,
+                    exc_info=True,
+                )
 
     def _register_default_handlers(self) -> None:
         """Register built-in event handlers available in all configurations.
@@ -4250,6 +5446,11 @@ class FederationService:
                 space_id=space_id,
             )
             return
+        if decision.accepted and self._sync_begin_admitted is not None:
+            try:
+                await self._sync_begin_admitted(event)
+            except Exception:
+                log.exception("sync %s: admitted-BEGIN hook failed", sync_id)
 
         # A requester reachable only via the mesh (not a CONFIRMED direct
         # peer) cannot complete the WebRTC handshake — ICE can't traverse a
@@ -4443,18 +5644,25 @@ class FederationService:
                 event.from_instance,
             )
             return
-        sdp_answer = await self._sync_manager.apply_offer(
-            sync_id=sync_id,
-            sdp_offer=sdp_offer,
-            requester_instance_id=self._own_instance_id,
-            provider_instance_id=event.from_instance,
-            space_id=space_id,
-            ice_servers=payload.get("ice_servers"),
-            # What our BEGIN asked for — a relay retry re-sends it, so a
-            # periodic sync behind a NAT stays incremental.
-            sync_mode=pending.sync_mode,
-            have_seq=pending.have_seq,
-        )
+        try:
+            sdp_answer = await self._sync_manager.apply_offer(
+                sync_id=sync_id,
+                sdp_offer=sdp_offer,
+                requester_instance_id=self._own_instance_id,
+                provider_instance_id=event.from_instance,
+                space_id=space_id,
+                ice_servers=payload.get("ice_servers"),
+                # What our BEGIN asked for — a relay retry re-sends it, so a
+                # periodic sync behind a NAT stays incremental.
+                sync_mode=pending.sync_mode,
+                have_seq=pending.have_seq,
+                roster_digest=pending.roster_digest,
+            )
+        except ConnectionError:
+            # Closed while the offer was applied (reaped, superseded):
+            # nothing to answer for.
+            log.debug("sync %s: sync session closed during handshake", sync_id)
+            return
         await self.send_event(
             to_instance_id=event.from_instance,
             event_type=FederationEventType.SPACE_SYNC_ANSWER,
@@ -4637,11 +5845,16 @@ class FederationService:
         sdp_answer = payload.get("sdp_answer") or ""
         if not sync_id or not sdp_answer:
             return
-        await self._sync_manager.apply_answer(
-            sync_id=sync_id,
-            sdp_answer=sdp_answer,
-            from_instance=event.from_instance,
-        )
+        try:
+            await self._sync_manager.apply_answer(
+                sync_id=sync_id,
+                sdp_answer=sdp_answer,
+                from_instance=event.from_instance,
+            )
+        except ConnectionError:
+            # Closed while the answer was applied (the requester gave up,
+            # the reaper ran): the stream simply doesn't start.
+            log.debug("sync %s: sync session closed during handshake", sync_id)
 
     async def _handle_space_sync_ice(self, event) -> None:
         """Either side: trickle an ICE candidate through with S-7 validation."""
@@ -4716,9 +5929,9 @@ class FederationService:
                 # against us with ``prefer_direct=False``.
                 self._sync_manager.close_session(sync_id)
                 return
-        elif event.payload.get("reason") in _CAPACITY_REFUSALS:
-            # The provider had no free slot for a BEGIN we sent (S-6 / S-8:
-            # it caps concurrent syncs per household). No session was ever
+        elif event.payload.get("reason") in _BEGIN_REFUSALS:
+            # The provider refused a BEGIN we sent (S-6 / S-8: it caps
+            # concurrent syncs per household, and BEGINs per hour). No session was ever
             # made, so there is nothing to relay — the sync is simply owed.
             # A household that restarts and asks one host for more spaces
             # than the cap used to lose the rest until the 30-minute tick.
@@ -4740,6 +5953,7 @@ class FederationService:
                         provider_instance_id=event.from_instance,
                         sync_mode=request.sync_mode,
                         sync_id=sync_id,
+                        reason=str(event.payload.get("reason")),
                     )
                 )
                 return

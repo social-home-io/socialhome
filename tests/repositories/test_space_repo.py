@@ -474,6 +474,27 @@ async def test_increment_roster_sequence_atomic(env):
     assert v2 == 2
 
 
+async def test_increment_roster_sequence_outranks_every_seat_we_hold(env):
+    """A member household's counter only moves with the config it is sent,
+    while the seats it mirrors arrive at the HOST's versions (gossip, a
+    snapshot, a rotation baseline). A delegated admin's removal signed at
+    its own lagging counter + 1 was below the seat's version and every
+    household dropped it as stale — the owner never heard of the removal
+    and never retired the removed admin's key. The next version is above
+    every seat version this household holds for the space."""
+    await env.repo.save(_space("sp-lag"))
+    await env.repo.save(_space("sp-other"))
+    await env.repo.increment_roster_sequence("sp-lag")  # 1
+    for space_id, version in (("sp-lag", 6), ("sp-other", 40)):
+        await env.db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id,"
+            " role, member_version) VALUES(?,?,?,?,?)",
+            (space_id, "peer", "u-1", "admin", version),
+        )
+    assert await env.repo.increment_roster_sequence("sp-lag") == 7
+    assert await env.repo.increment_roster_sequence("sp-lag") == 8
+
+
 async def test_increment_roster_sequence_concurrent(env):
     """Concurrent roster increments each return a unique sequence number."""
     await env.repo.save(_space("sp-rconc"))
@@ -944,7 +965,9 @@ async def test_list_pending_join_request_space_ids_for_user(env):
     # A pending request for bob → excluded (different user).
     await env.repo.save_join_request("sp-other", "uid-bob")
 
-    ids = await env.repo.list_pending_join_request_space_ids_for_user("uid-alice")
+    ids = await env.repo.list_pending_join_request_space_ids_for_user(
+        "uid-alice", own_instance_id="inst-x"
+    )
     assert set(ids) == {"sp-pend-a", "sp-pend-b"}
     assert len(ids) == len(set(ids))  # DISTINCT — no duplicate space_ids
     assert "sp-approved" not in ids
@@ -954,8 +977,90 @@ async def test_list_pending_join_request_space_ids_for_user(env):
 async def test_list_pending_join_request_space_ids_for_user_empty(env):
     """A user with no pending requests gets an empty list."""
     assert (
-        await env.repo.list_pending_join_request_space_ids_for_user("uid-alice") == []
+        await env.repo.list_pending_join_request_space_ids_for_user(
+            "uid-alice", own_instance_id="inst-x"
+        )
+        == []
     )
+
+
+async def test_my_pending_requests_leave_out_another_households(env):
+    """A request is keyed by (household, user id) — the other household
+    chooses the user id it sends. A request ANOTHER household filed under
+    my user id, kept here because this household hosts the space (or
+    seated the redeemer of an admin link), is not mine: only a local
+    request and my own outgoing copy (which names the HOST) are."""
+    await env.repo.save(_space("sp-hosted"))  # owned by inst-x: we host it
+    await env.repo.save(_space("sp-elevated"))
+    await env.repo.save(_space("sp-mine"))
+    # Another household asks to join a space we host, under alice's id.
+    await env.repo.save_join_request(
+        "sp-hosted", "uid-alice", remote_applicant_instance_id="peer"
+    )
+    # Another household's pending admin elevation under alice's id.
+    await env.repo.save_join_request(
+        "sp-elevated",
+        "uid-alice",
+        remote_applicant_instance_id="peer",
+        requested_role="admin",
+    )
+    # Alice's own: a local request, and her outgoing copy for a space of
+    # another household (no ``spaces`` row here; the row names the host).
+    await env.repo.save_join_request("sp-mine", "uid-alice")
+    await env.repo.save_join_request(
+        "the-hosts-space", "uid-alice", remote_applicant_instance_id="host"
+    )
+
+    ids = await env.repo.list_pending_join_request_space_ids_for_user(
+        "uid-alice", own_instance_id="inst-x"
+    )
+    assert sorted(ids) == ["sp-mine", "the-hosts-space"]
+
+
+async def test_my_outgoing_request_shows_for_a_space_mirrored_here(env):
+    """The applicant may hold a row for the host's space (a mirrored
+    public / global space): its own outgoing request still shows."""
+    await env.repo.save(_space("sp-theirs"))  # owned by inst-x, not by us
+    await env.repo.save_join_request(
+        "sp-theirs", "uid-alice", remote_applicant_instance_id="inst-x"
+    )
+    ids = await env.repo.list_pending_join_request_space_ids_for_user(
+        "uid-alice", own_instance_id="inst-us"
+    )
+    assert ids == ["sp-theirs"]
+
+
+async def test_a_second_pending_admin_elevation_returns_the_first(env):
+    """Migration 0148: one pending admin elevation per (space, household,
+    user id) — a second insert files nothing and returns the row on file.
+    Another household, a local member, and an ordinary join are their own
+    rows; once the first is answered a new one can be filed."""
+    await env.repo.save(_space("sp-el"))
+
+    async def file(household):
+        return await env.repo.save_join_request(
+            "sp-el",
+            "uid-alice",
+            remote_applicant_instance_id=household,
+            requested_role="admin",
+        )
+
+    first = await file("peer")
+    assert await file("peer") == first
+    local = await file(None)
+    assert await file(None) == local
+    other = await file("peer-2")
+    plain = await env.repo.save_join_request(
+        "sp-el", "uid-alice", remote_applicant_instance_id="peer"
+    )
+    assert len({first, local, other, plain}) == 4
+    rows = await env.repo.list_pending_join_requests("sp-el")
+    assert sorted(r["id"] for r in rows) == sorted([first, local, other, plain])
+
+    await env.repo.update_join_request_status(first, "denied")
+    again = await file("peer")
+    assert again != first
+    assert (await env.repo.get_join_request(again))["status"] == "pending"
 
 
 async def test_host_identity_pk_round_trips(env):
@@ -2047,33 +2152,6 @@ async def test_one_space_instance_mailbox_is_read_by_its_key(env):
     assert await env.repo.get_space_instance_mailbox("sp-a", "hh-2") is None
 
 
-async def test_unmarked_session_pairs_are_space_session_seats_at_a_version(env):
-    """v_88 sweep: seated ``space_session`` pairs at or above a version that
-    hold no mailbox state yet (seated before v_88, an old invite link, a
-    crash between the seat and its row write)."""
-
-    async def _peer(iid: str, source: str, proto: int) -> None:
-        await env.db.enqueue(
-            "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
-            " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
-            " local_inbox_id, source, proto_version)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (iid, iid, "00", "k", "k", "", f"wh-{iid}", source, proto),
-        )
-
-    await env.repo.save(_space("sp-a"))
-    await _peer("hh-new", "space_session", 88)
-    await _peer("hh-old", "space_session", 87)
-    await _peer("hh-paired", "manual", 88)
-    await _peer("hh-marked", "space_session", 88)
-    for iid in ("hh-new", "hh-old", "hh-paired", "hh-marked"):
-        await env.repo.add_space_instance("sp-a", iid)
-    await env.repo.set_space_instance_mailbox("sp-a", "hh-marked", "{}")
-    assert await env.repo.list_unmarked_session_pairs(min_proto=88) == [
-        ("sp-a", "hh-new")
-    ]
-
-
 async def test_invited_by_round_trips_and_save_never_touches_it(env):
     await env.repo.save(_space("sp-i"))
     assert await env.repo.get_invited_by("sp-i") is None
@@ -2375,6 +2453,33 @@ async def test_unread_posts_compare_below_the_second(env):
     assert row.unread_posts == 1
 
 
+async def test_an_elevation_answered_during_the_conflict_is_filed_anew(
+    env, monkeypatch
+):
+    """The request on file is answered between the refused insert and the
+    read-back: the key is free again, so the second insert lands — never an
+    id that names no row."""
+    await env.repo.save(_space("sp-el"))
+    first = await env.repo.save_join_request(
+        "sp-el", "uid-alice", requested_role="admin"
+    )
+    real = env.db.fetchone
+
+    async def answered_meanwhile(sql, params=()):
+        monkeypatch.setattr(env.db, "fetchone", real)
+        await env.repo.update_join_request_status(first, "denied")
+        return await real(sql, params)
+
+    monkeypatch.setattr(env.db, "fetchone", answered_meanwhile)
+    second = await env.repo.save_join_request(
+        "sp-el", "uid-alice", requested_role="admin"
+    )
+    assert second != first
+    assert [r["id"] for r in await env.repo.list_pending_join_requests("sp-el")] == [
+        second
+    ]
+
+
 async def test_a_join_request_keeps_a_local_communitys_verdict(env):
     """Migration 0111: inside / edge — never the location itself."""
     await env.repo.save(_space("sp-lc"))
@@ -2389,7 +2494,9 @@ async def test_an_applicant_keeps_a_request_for_a_space_it_does_not_hold(env):
     rid = await env.repo.save_join_request(
         "the-hosts-space", "uid-alice", remote_applicant_instance_id="host"
     )
-    ids = await env.repo.list_pending_join_request_space_ids_for_user("uid-alice")
+    ids = await env.repo.list_pending_join_request_space_ids_for_user(
+        "uid-alice", own_instance_id="inst-x"
+    )
     assert ids == ["the-hosts-space"]
     assert rid
 
@@ -2441,3 +2548,46 @@ async def test_answer_join_request_moves_a_pending_request_once(env):
     assert not await env.repo.answer_join_request("missing", "denied")
     with pytest.raises(ValueError):
         await env.repo.answer_join_request(rid, "pending")
+
+
+async def test_a_purged_item_is_revived_and_open_items_are_listed(env):
+    """The moderation catch-up: an EXPIRED copy (purged while this
+    household did not review) is pending again with the re-sent content —
+    never a decided one, never somebody else's id; and every item whose
+    review window is open is listed in one read, pending first."""
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    now = datetime.now(UTC)
+    for item_id in ("m1", "m2", "m3"):
+        await env.repo.insert_moderation_item(_mod_item(item_id))
+    assert (
+        await env.repo.drop_pending_from_others("sp-1", keep_submitters=frozenset())
+        == 3
+    )
+    gone = await env.repo.get_moderation_item("m1")
+    assert (gone.status, gone.payload) == (ModerationStatus.EXPIRED, {})
+    assert await env.repo.revive_moderation_item(_mod_item("m1"))
+    back = await env.repo.get_moderation_item("m1")
+    assert back.status is ModerationStatus.PENDING
+    assert back.payload["patch"] == {"title": "New"} and back.reviewed_at is None
+    # Not twice, not another submitter's row, not a decided one.
+    assert not await env.repo.revive_moderation_item(_mod_item("m1"))
+    assert not await env.repo.revive_moderation_item(
+        _mod_item("m2", submitted_by="uid-eve")
+    )
+    await env.db.enqueue(
+        "UPDATE space_moderation_queue SET status='rejected' WHERE id='m3'", ()
+    )
+    assert not await env.repo.revive_moderation_item(_mod_item("m3"))
+    # A row past its review window is not open any more.
+    await env.db.enqueue(
+        "UPDATE space_moderation_queue SET expires_at=? WHERE id='m2'",
+        ((now - timedelta(minutes=1)).isoformat(),),
+    )
+    open_rows = await env.repo.list_moderation_open("sp-1", now, limit=10)
+    assert [(i.id, i.status.value) for i in open_rows] == [
+        ("m1", "pending"),
+        ("m3", "rejected"),
+    ]
+    assert len(await env.repo.list_moderation_open("sp-1", now, limit=1)) == 1

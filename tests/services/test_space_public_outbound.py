@@ -10,6 +10,7 @@ spaces, and inbound-driven (loop) events do not relay.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import CommentDeleted, PostDeleted, SpacePostCreated
+from socialhome.domain.file_hashes import FileHash
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
     JoinMode,
@@ -59,11 +61,13 @@ from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import space_public_outbound
+from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_author import (
     author_signing_bytes,
     build_signed_author_inner,
     signed_media_refs,
+    verified_file_hashes,
     verify_signed_author_inner,
 )
 from socialhome.services.space_public_authority import is_approved
@@ -127,13 +131,14 @@ async def env(tmp_dir):
         with_seed: bool,
         join_mode: JoinMode = JoinMode.OPEN,
         allow_subscribers: bool = True,
+        owner: str = own_iid,
     ):
         skp = generate_space_keypair()
         await space_repo.save(
             Space(
                 id=space_id,
                 name="S",
-                owner_instance_id=own_iid,
+                owner_instance_id=owner,
                 owner_username="alice",
                 identity_public_key=skp.public_key.hex(),
                 config_sequence=0,
@@ -1293,11 +1298,13 @@ async def test_a_removal_without_a_content_key_is_dropped(env, caplog):
 # ─── Approved moderated posts: relayed under the author's signature ─────
 
 
-async def _approved_env(env, *, seats=("member",)):
+async def _approved_env(env, *, seats=("member",), owner=None):
     """A remote author household whose instance id is its key fingerprint,
     a MODERATED public space, and the post the host just published from the
     queue with the submitter's signed copy."""
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    skp = await env["make_space"](
+        "sp-pub", SpaceType.PUBLIC, with_seed=True, owner=owner or env["own_iid"]
+    )
     space = await env["space_repo"].get("sp-pub")
     await env["space_repo"].save(_with_posts_level(space, "moderated"))
     author_kp = generate_identity_keypair()
@@ -1568,3 +1575,195 @@ async def test_a_text_post_carries_no_media_refs(env):
     )
     assert "media_refs" not in inner
     assert media.planned == []
+
+
+async def test_a_relayed_picture_post_carries_its_signed_file_hashes(env, tmp_dir):
+    """v_92 — one name on every path: the relayed inner carries the post's
+    file hashes under the author's signature, so a member that gets this
+    copy first names the file by content, as the host's direct copy does."""
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    env["sub"].attach_media_gfs(_MediaGfs())
+    media_dir = tmp_dir / "hashed-media"
+    media_dir.mkdir()
+    (media_dir / "a.webp").write_bytes(b"picture-bytes")
+    env["sub"].attach_file_hasher(MediaFileHasher(media_dir))
+    post = dataclasses.replace(
+        _post(env["author_user_id"]),
+        type=PostType.IMAGE,
+        image_urls=("api/media/a.webp",),
+    )
+    await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
+    envelope = env["gfs"].calls[0]["payload"]
+    inner = _unpadded(
+        json.loads(
+            await env["crypto"].decrypt(
+                "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
+            )
+        )
+    )
+    assert verify_signed_author_inner(inner)
+    assert verified_file_hashes(inner) == {
+        "a.webp": FileHash(hashlib.sha256(b"picture-bytes").hexdigest())
+    }
+
+
+# ─── A delegated admin: only what the seed alone can say ───────────────────
+
+#: The space's owner household, when this one merely holds its seed.
+_OWNER_ELSEWHERE = "owner.home"
+
+
+async def test_a_delegated_admins_own_post_is_not_relayed_under_the_authority(env):
+    """It goes out as its household's anonymous item, like any writer's
+    (``GfsMemberPublishService``); an authority-signed copy from a household
+    that is not the owner would mark it as a seed holder."""
+    await env["make_space"](
+        "sp-pub", SpaceType.GLOBAL, with_seed=True, owner=_OWNER_ELSEWHERE
+    )
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_a_delegated_admin_does_not_relay_other_members_posts(env):
+    """The owner relays them (and their v_90 authors publish them
+    themselves): a delegated admin answering every member post with an
+    authority-signed relay would stand out from every other writer."""
+    skp = await env["make_space"](
+        "sp-pub", SpaceType.GLOBAL, with_seed=True, owner=_OWNER_ELSEWHERE
+    )
+    author_kp, author_user_id, relay = _remote_relay()
+    await _with_certs(
+        env, seats={"beta.home": ["member"]}, pks={"beta.home": author_kp.public_key}
+    )
+    relay["writer_cert"] = await _remote_cert(
+        skp,
+        author_kp.public_key,
+        epoch=await env["crypto"].get_current_epoch("sp-pub"),
+    )
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_a_delegated_admin_still_relays_a_removal(env):
+    """Acting for an offline owner: only the seed can tell followers an
+    item is gone, so this still goes out (identity-free, like the owner's)."""
+    skp = await env["make_space"](
+        "sp-pub", SpaceType.GLOBAL, with_seed=True, owner=_OWNER_ELSEWHERE
+    )
+    await env["bus"].publish(
+        PostDeleted(
+            post_id="post-9",
+            space_id="sp-pub",
+            actor_user_id="moderator-user",
+            author_user_id="author-user",
+        )
+    )
+    assert len(env["gfs"].calls) == 1
+    assert "from_instance" not in env["gfs"].calls[0]
+    inner = await _removal_inner(env, skp)
+    assert inner[AUTHORITY_KIND_FIELD] == AUTHORITY_KIND_REMOVAL
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("origin", ["m.home", _OWNER_ELSEWHERE])
+async def test_a_delegated_admin_answers_no_removal_it_only_received(env, origin):
+    """A delete that reached it from another household — over federation,
+    by sync or through its fan-out seat on the GFS — gets no authority-signed
+    answer. Otherwise a GFS could hand one household's seat a delete and
+    watch for the removal notice only a seed holder sends."""
+    await env["make_space"](
+        "sp-pub", SpaceType.GLOBAL, with_seed=True, owner=_OWNER_ELSEWHERE
+    )
+    await env["bus"].publish(
+        PostDeleted(
+            post_id="post-9",
+            space_id="sp-pub",
+            origin_instance_id=origin,
+            author_user_id="author-user",
+        )
+    )
+    await env["bus"].publish(
+        CommentDeleted(
+            post_id="post-9",
+            comment_id="c-9",
+            space_id="sp-pub",
+            origin_instance_id=origin,
+            author_user_id="author-user",
+        )
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_the_owner_without_an_identity_still_warns(env, caplog):
+    """The owner gate must not swallow the wiring warning."""
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    env["sub"].attach_identity(
+        own_instance_id="", own_instance_public_key=b"", own_identity_seed=b""
+    )
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    assert env["gfs"].calls == []
+    assert "identity not attached" in caplog.text
+
+
+@pytest.mark.security
+async def test_a_delegated_admin_relays_no_post_even_one_marked_released(env):
+    """Only the owner releases a queued post, so a release never happens
+    here; should a ``SpacePostCreated`` ever arrive marked approved, it must
+    still not open an authority-signed relay on a household that merely
+    holds the seed."""
+    _skp, _author_kp, _iid, post, relay = await _approved_env(
+        env, owner=_OWNER_ELSEWHERE
+    )
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=post,
+            space_id="sp-pub",
+            approved_by="the-moderator",
+            public_relay=relay,
+        )
+    )
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(env["author_user_id"]),
+            space_id="sp-pub",
+            approved_by="the-moderator",
+        )
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_the_owner_still_relays_a_removal_that_reached_it(env):
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    await env["bus"].publish(
+        CommentDeleted(
+            post_id="post-1",
+            comment_id="c-1",
+            space_id="sp-pub",
+            origin_instance_id="m.home",
+            author_user_id="someone",
+        )
+    )
+    assert (await _removal_inner(env, skp))["item_id"] == "c-1"
+
+
+async def test_a_removal_without_an_identity_warns(env, caplog):
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    env["sub"].attach_identity(
+        own_instance_id="", own_instance_public_key=b"", own_identity_seed=b""
+    )
+    await env["bus"].publish(
+        PostDeleted(post_id="post-9", space_id="sp-pub", origin_instance_id="m.home")
+    )
+    assert env["gfs"].calls == []
+    assert "identity not attached" in caplog.text

@@ -175,3 +175,39 @@ async def test_a_failed_row_is_rearmed_by_a_fresh_enqueue(repo):
     assert rows["b-flight"].status == "in_flight"
     due = {e.blob_id for e in await repo.list_due()}
     assert "b-failed" in due and "b-pending" not in due
+
+
+async def test_a_queued_row_takes_the_fresh_bytes_path(repo):
+    """v_92 ``wire_names``: a row queued under a content name whose local
+    file is missing here (stored under a reader name instead) is re-queued
+    by ``SPACE_MEDIA_WANTED`` with the file that exists — a pending row takes
+    the new ``bytes_path`` (keeping its schedule); an in-flight one is the
+    scheduler's and is left alone."""
+    for blob in ("b-pending", "b-flight"):
+        await repo.enqueue(
+            blob_id=blob,
+            space_id="sp-1",
+            correlation_id="p-r",
+            target_instance_id="inst-kept",
+            bytes_path=f"/m/{blob}",
+        )
+    await repo.reschedule(
+        blob_id="b-pending",
+        target_instance_id="inst-kept",
+        attempts=2,
+        next_attempt_at="2099-01-01 00:00:00",
+        last_error="no such file",
+    )
+    await repo.mark_in_flight(blob_id="b-flight", target_instance_id="inst-kept")
+    for blob in ("b-pending", "b-flight"):
+        await repo.enqueue(
+            blob_id=blob,
+            space_id="sp-1",
+            correlation_id="p-other",  # the first row's backref is kept
+            target_instance_id="inst-kept",
+            bytes_path="/m/sg-held",
+        )
+    rows = {r.blob_id: r for r in await repo.list_for_correlation("p-r")}
+    assert rows["b-pending"].bytes_path == "/m/sg-held"
+    assert (rows["b-pending"].status, rows["b-pending"].attempts) == ("pending", 2)
+    assert rows["b-flight"].bytes_path == "/m/b-flight"

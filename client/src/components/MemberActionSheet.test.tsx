@@ -155,3 +155,42 @@ describe('MemberActionSheet role picker', () => {
     expect(roleButtons(r.baseElement)).toEqual([])
   })
 })
+
+describe('MemberActionSheet — making another household an admin', () => {
+  const HOUSEHOLD = 'ab2cd3ef4gh5ij6kl7mn2op3qr4st5uv'
+
+  it('the owner sees the household ID and what an admin can do', () => {
+    openMemberActions('sp-1', 'u-eve', 'member', HOUSEHOLD, 'owner', true)
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(roleButtons(r.baseElement)).toEqual(['admin', 'moderator'])
+    const check = r.baseElement.querySelector('[data-testid="admin-grant-check"]')
+    expect(check?.textContent).toContain(HOUSEHOLD)
+    expect(check?.textContent).toContain(
+      "As an admin, this household can act for the space while you're offline.",
+    )
+  })
+
+  it('without "Let admins act for me" only the household ID shows', () => {
+    openMemberActions('sp-1', 'u-eve', 'member', HOUSEHOLD, 'owner')
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    const check = r.baseElement.querySelector('[data-testid="admin-grant-check"]')
+    expect(check?.textContent).toContain(HOUSEHOLD)
+    expect(check?.textContent).not.toContain('act for the space')
+  })
+
+  it('not shown for a member of this household', () => {
+    openMemberActions('sp-1', 'u-bob', 'member', null, 'owner')
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(r.baseElement.querySelector('[data-testid="admin-grant-check"]')).toBeNull()
+  })
+
+  it('not shown when admin is not on offer (an admin moving a seat, or a seat that is admin already)', () => {
+    openMemberActions('sp-1', 'u-eve', 'member', HOUSEHOLD, 'admin')
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(r.baseElement.querySelector('[data-testid="admin-grant-check"]')).toBeNull()
+    cleanup()
+    openMemberActions('sp-1', 'u-eve', 'admin', HOUSEHOLD, 'owner')
+    const r2 = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(r2.baseElement.querySelector('[data-testid="admin-grant-check"]')).toBeNull()
+  })
+})

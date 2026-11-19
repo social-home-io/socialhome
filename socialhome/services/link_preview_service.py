@@ -58,11 +58,15 @@ from ..domain.link_preview import (
     link_preview_from_dict,
     normalise_url,
 )
+from ..domain.media_constraints import (
+    MEDIA_REF_PREFIX,
+    local_media_ref,
+    space_media_ref,
+)
 from ..domain.post import PostType
 from ..domain.preferences import FeatureDisabledError
 from ..outbound_fetch import OutboundFetcher, OutboundFetchRefused
 from ..rate_limiter import RateLimiter
-from .inbound_media_store import MEDIA_REF_PREFIX, local_media_ref, space_media_ref
 from .link_preview_html import extract_page_meta
 
 if TYPE_CHECKING:
@@ -117,7 +121,7 @@ def wire_link_preview(raw: object) -> LinkPreview | None:
 def space_wire_link_preview(raw: object) -> LinkPreview | None:
     """:func:`wire_link_preview` for a SPACE post another household sent:
     the image also never names a file the DM or moment-media paths own
-    (:func:`~.inbound_media_store.space_media_ref`)."""
+    (:func:`~socialhome.domain.media_constraints.space_media_ref`)."""
     return link_preview_from_dict(raw, image_ref=space_media_ref)
 
 

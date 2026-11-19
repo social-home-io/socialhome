@@ -14,13 +14,16 @@ from typing import TYPE_CHECKING
 
 import orjson
 
+from ...domain.emoji import MAX_EMOJI_CODEPOINTS
 from ...domain.events import (
     RemoteSpaceCreated,
     RemoteSpaceDissolved,
     RemoteSpaceMemberBanned,
 )
 from ...domain.federation import FederationEventType
+from ...domain.relay_media_frame import bounded_counter, bounded_id
 from ...domain.space import (
+    SPACE_NAME_MAX_CHARS,
     JoinMode,
     Space,
     SpaceFeatures,
@@ -37,6 +40,7 @@ from ..child_protection_service import _VALID_MIN_AGES
 from ..space_authority_pin import owner_authority_cert_via, owner_statement_via
 from ..space_service import (
     can_seat_remote_stub,
+    config_within_limit,
     space_metadata_for_federation,
     store_owner_statement,
 )
@@ -51,6 +55,11 @@ if TYPE_CHECKING:
     from ..space_service import SpaceService
 
 log = logging.getLogger(__name__)
+
+
+def _text(raw: object) -> str | None:
+    """A config's free text read from the wire: a string, else none."""
+    return raw if isinstance(raw, str) else None
 
 
 class SpaceMembershipInboundHandlers:
@@ -111,8 +120,9 @@ class SpaceMembershipInboundHandlers:
         if not space_id:
             return
         p = event.payload
-        name = str(p.get("name") or space_id[:8])
-        identity_pk = str(p.get("identity_public_key") or "")
+        # Bounded where it is read, like every config (the size rule).
+        name = (str(p.get("name") or "") or space_id[:8])[:SPACE_NAME_MAX_CHARS]
+        identity_pk = bounded_id(p.get("identity_public_key"))
         if not identity_pk:
             log.debug("SPACE_CREATED missing identity_public_key")
             return
@@ -144,14 +154,26 @@ class SpaceMembershipInboundHandlers:
             id=space_id,
             name=name,
             owner_instance_id=event.from_instance,
-            owner_username=str(p.get("owner_username") or ""),
+            owner_username=bounded_id(p.get("owner_username")),
             identity_public_key=identity_pk,
-            config_sequence=int(p.get("config_sequence") or 0),
+            config_sequence=bounded_counter(p.get("config_sequence")),
             features=SpaceFeatures(),
             space_type=space_type,
             join_mode=join_mode,
-            description=p.get("description"),
-            emoji=p.get("emoji"),
+            description=_text(p.get("description")),
+            emoji=(
+                emoji
+                if isinstance(emoji := p.get("emoji"), str)
+                and len(emoji) <= MAX_EMOJI_CODEPOINTS
+                else None
+            ),
+        )
+        # The one receiver rule for a space's config: over the limit and
+        # larger than what we hold → seated without that text.
+        space = config_within_limit(
+            space,
+            held=await self._space_repo.get(space_id),
+            source=f"SPACE_CREATED from {event.from_instance}",
         )
         await self._space_repo.save(space)
         await self._bus.publish(

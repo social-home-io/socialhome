@@ -75,18 +75,18 @@ SEALED = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "Y2lwaGVy"}
 # ── Derivation ───────────────────────────────────────────────────────────
 
 
-def test_keys_are_deterministic_per_space_and_gen():
-    a = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
-    assert a == derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+def test_keys_are_deterministic_per_gfs_and_gen():
+    a = derive_mailbox_keys(ROOT, GFS_ID, 853190)
+    assert a == derive_mailbox_keys(ROOT, GFS_ID, 853190)
     assert a.mailbox_id == derive_mailbox_id(a.sign_public)
     assert INSTANCE_ID_RE.fullmatch(a.mailbox_id)
     others = [
-        derive_mailbox_keys(ROOT, GFS_ID, "space-2", 0),
-        derive_mailbox_keys(ROOT, GFS_ID, "space-1", 1),
-        derive_mailbox_keys(b"\x09" * 32, GFS_ID, "space-1", 0),
-        # The same space at another GFS: unrelated, so two GFSs can't match
-        # ids to link a household (v_88 privacy invariant).
-        derive_mailbox_keys(ROOT, "gfs-node-b", "space-1", 0),
+        derive_mailbox_keys(ROOT, GFS_ID, 176610),
+        derive_mailbox_keys(ROOT, GFS_ID, 853191),
+        derive_mailbox_keys(b"\x09" * 32, GFS_ID, 853190),
+        # The same generation at another GFS: unrelated, so two GFSs can't
+        # match ids to link a household.
+        derive_mailbox_keys(ROOT, "gfs-node-b", 853190),
     ]
     for other in others:
         assert other.mailbox_id != a.mailbox_id
@@ -95,63 +95,55 @@ def test_keys_are_deterministic_per_space_and_gen():
     assert a.kem_private != a.sign_seed
 
 
-def test_keys_are_per_member_pair():
-    """Owner decision (#1333 round 4): one mailbox per (space, peer, gen) —
-    a host's mailboxes for two members of one space are unrelated, and the
-    peer is part of the keys, not of the space the mailbox serves."""
-    a = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="a" * 32)
-    b = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="b" * 32)
-    plain = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
-    assert len({a.mailbox_id, b.mailbox_id, plain.mailbox_id}) == 3
-    assert a.kem_public != b.kem_public and a.sign_public != b.sign_public
-    assert a.space_id == b.space_id == "space-1"
-    assert a == derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="a" * 32)
-    other_gfs = derive_mailbox_keys(ROOT, "gfs-node-b", "space-1", 0, peer="a" * 32)
-    assert other_gfs.mailbox_id != a.mailbox_id
-    with pytest.raises(ValueError):
-        derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="x|y")
+def test_keys_name_no_space_or_peer():
+    """v_89: ONE mailbox per (GFS, gen) serves every space the household
+    reaches there — the keys depend on the GFS and the generation only."""
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 7)
+    assert not hasattr(keys, "space_id")
+    with pytest.raises(TypeError):
+        derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)  # type: ignore[call-arg]
 
 
 def test_a_mailbox_root_is_a_fresh_32_byte_secret():
     one, two = new_mailbox_root(), new_mailbox_root()
     assert len(one) == len(two) == 32 and one != two
-    assert derive_mailbox_keys(one, GFS_ID, "s", 0) != derive_mailbox_keys(
-        two, GFS_ID, "s", 0
+    assert derive_mailbox_keys(one, GFS_ID, 553390) != derive_mailbox_keys(
+        two, GFS_ID, 553390
     )
 
 
 def test_kem_key_is_a_working_x25519_pair():
-    a = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
-    b = derive_mailbox_keys(ROOT, GFS_ID, "space-2", 0)
+    a = derive_mailbox_keys(ROOT, GFS_ID, 853190)
+    b = derive_mailbox_keys(ROOT, GFS_ID, 176610)
     assert x25519_exchange(a.kem_private, b.kem_public) == x25519_exchange(
         b.kem_private, a.kem_public
     )
 
 
 def test_repr_never_shows_the_secrets():
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 853190)
     text = repr(keys)
     assert keys.sign_seed.hex() not in text and str(keys.sign_seed) not in text
     assert keys.mailbox_id not in text
 
 
 @pytest.mark.parametrize(
-    ("seed", "space", "gen"),
+    ("seed", "gfs", "gen"),
     [
-        (b"short", "s", 0),
+        (b"short", GFS_ID, 0),
         (ROOT, "", 0),
         (ROOT, "a|b", 0),
-        (ROOT, "s", -1),
-        (ROOT, "s", True),
+        (ROOT, GFS_ID, -1),
+        (ROOT, GFS_ID, True),
     ],
 )
-def test_derivation_refuses_bad_input(seed, space, gen):
+def test_derivation_refuses_bad_input(seed, gfs, gen):
     with pytest.raises(ValueError):
-        derive_mailbox_keys(seed, GFS_ID, space, gen)
+        derive_mailbox_keys(seed, gfs, gen)
 
 
 def test_register_body_carries_the_suite_tag():
-    body = build_register_body(derive_mailbox_keys(ROOT, GFS_ID, "s", 0), GFS_ID)
+    body = build_register_body(derive_mailbox_keys(ROOT, GFS_ID, 553390), GFS_ID)
     assert body["sig_suite"] == "ed25519"
 
 
@@ -249,7 +241,7 @@ async def _settle(app) -> None:
 
 async def test_register_claim_and_receive_queued_and_live_frames(gfs):
     server, session, url, tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 853190)
     assert (
         await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
         == keys.mailbox_id
@@ -283,7 +275,7 @@ async def test_register_claim_and_receive_queued_and_live_frames(gfs):
 
 async def test_claim_of_an_unregistered_mailbox_is_refused(gfs):
     _server, session, url, _tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "never-registered", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 621780)
     with pytest.raises(MailboxClaimError, match="4401") as info:
         async with MailboxClaim(session, url, keys, GFS_ID):
             pass
@@ -297,7 +289,7 @@ async def test_a_claim_signed_for_another_gfs_id_is_refused(gfs):
     does not answer to it refuses (4401) — the id the challenge names is
     never what gets signed."""
     _server, session, url, tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 853190)
     await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     with pytest.raises(MailboxClaimError, match="4401"):
         async with MailboxClaim(session, url, keys, "some-other-gfs"):
@@ -306,7 +298,7 @@ async def test_a_claim_signed_for_another_gfs_id_is_refused(gfs):
 
 async def test_register_refusal_raises_with_the_error_code(gfs):
     _server, session, url, tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 853190)
     with pytest.raises(MailboxRegisterError) as err:
         await register_mailbox(session, url, keys, "some-other-gfs", tickets=tickets)
     assert (err.value.status, err.value.error) == (403, "wrong_gfs")
@@ -314,7 +306,7 @@ async def test_register_refusal_raises_with_the_error_code(gfs):
 
 async def test_iterating_a_claim_ends_when_the_server_closes(gfs):
     server, session, url, tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 853190)
     await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     async with session.post(
         url + "/gfs/envelope", json={"to_instance": keys.mailbox_id, "sealed": SEALED}
@@ -352,7 +344,7 @@ async def test_a_household_pinned_to_an_alias_registers_and_claims(tmp_dir):
         async with aiohttp.ClientSession() as session:
             url = str(server.make_url("")).rstrip("/")
             tickets = await _ticket_cache(server.app, session, url)
-            keys = derive_mailbox_keys(ROOT, GFS_ID, "space-9", 0)
+            keys = derive_mailbox_keys(ROOT, GFS_ID, 549970)
             await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
             async with MailboxClaim(session, url, keys, GFS_ID) as claim:
                 assert claim is not None
@@ -362,7 +354,7 @@ async def test_a_household_pinned_to_an_alias_registers_and_claims(tmp_dir):
 
 async def test_a_claim_entered_by_hand_closes_with_aclosing(gfs):
     _server, session, url, tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-a", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 559870)
     await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     claim = MailboxClaim(session, url, keys, GFS_ID)
     await claim.__aenter__()
@@ -377,8 +369,8 @@ async def test_a_claim_entered_by_hand_closes_with_aclosing(gfs):
 async def test_tickets_are_fetched_once_and_one_is_spent_per_new_mailbox(gfs):
     _server, session, url, tickets = gfs
     assert await tickets.refill() == 4
-    for space in ("s-1", "s-2"):
-        keys = derive_mailbox_keys(ROOT, GFS_ID, space, 0)
+    for gen in (1, 2):
+        keys = derive_mailbox_keys(ROOT, GFS_ID, gen)
         await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     assert len(tickets) == 2  # one each; no fetch in between
     assert "<2 tickets>" in repr(tickets)
@@ -386,7 +378,7 @@ async def test_tickets_are_fetched_once_and_one_is_spent_per_new_mailbox(gfs):
 
 async def test_a_new_mailbox_without_a_ticket_is_refused(gfs):
     _server, session, url, _tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "no-ticket", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 190590)
     with pytest.raises(MailboxRegisterError) as err:
         await register_mailbox(session, url, keys, GFS_ID)
     assert (err.value.status, err.value.error) == (403, "ticket_required")
@@ -398,10 +390,10 @@ async def test_a_spent_ticket_is_replaced_once(gfs):
     _server, session, url, tickets = gfs
     await tickets.refill()
     spent = tickets._tickets[-1]
-    first = derive_mailbox_keys(ROOT, GFS_ID, "a", 0)
+    first = derive_mailbox_keys(ROOT, GFS_ID, 559070)
     await register_mailbox(session, url, first, GFS_ID, tickets=tickets)
     tickets._tickets.append(spent)
-    second = derive_mailbox_keys(ROOT, GFS_ID, "b", 0)
+    second = derive_mailbox_keys(ROOT, GFS_ID, 386810)
     assert await register_mailbox(session, url, second, GFS_ID, tickets=tickets)
     assert len(tickets) == 2
 
@@ -427,7 +419,7 @@ async def test_tickets_under_a_retired_key_are_dropped_without_a_fetch(tmp_dir):
             # Two epochs on for the household too (its guard takes a new key
             # only in a later epoch than the one it pinned).
             tickets._guard._clock = lambda: time.time() + 61 * 86_400
-            keys = derive_mailbox_keys(ROOT, GFS_ID, "after-rotation", 0)
+            keys = derive_mailbox_keys(ROOT, GFS_ID, 657950)
             with pytest.raises(MailboxRegisterError) as err:
                 await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
             assert (err.value.status, err.value.error) == (403, "stale_ticket_key")
@@ -540,7 +532,7 @@ def test_the_issuer_capability_is_checked():
 
 
 def test_a_register_body_carries_the_ticket_and_its_suite():
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "s", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 553390)
     body = build_register_body(keys, GFS_ID, ticket=b"t" * 354)
     assert body["ticket_suite"] == pp.TICKET_SUITE_PP_BLINDRSA
     assert body["ticket"] == b64url_encode(b"t" * 354)
@@ -689,7 +681,7 @@ async def test_a_ticket_is_not_redeemed_when_the_anonymous_view_moved(gfs):
         return other
 
     guard._anon_view = anon_view
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "moved", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 916050)
     with pytest.raises(MailboxTicketError) as err:
         await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     assert err.value.error == "ticket_key_inconsistent"
@@ -699,7 +691,7 @@ async def test_a_ticket_is_not_redeemed_when_the_anonymous_view_moved(gfs):
 
 async def test_reregistering_an_existing_mailbox_spends_no_ticket(gfs):
     _server, session, url, tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "again", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 255960)
     await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     assert len(tickets) == 3
     for _ in range(2):
@@ -747,7 +739,7 @@ async def test_a_ticket_that_never_reached_the_gfs_is_put_back():
     cache = MailboxTicketCache(None, batch=4, guard=guard)  # type: ignore[arg-type]
     cache._tickets = [_local_ticket(issuer, key)]
     session = _FlakySession()
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "offline", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 381300)
     with pytest.raises(aiohttp.ClientConnectorError):
         await register_mailbox(
             session,  # type: ignore[arg-type]
@@ -760,9 +752,8 @@ async def test_a_ticket_that_never_reached_the_gfs_is_put_back():
     assert ["ticket" in b for b in session.bodies] == [False, True]
 
 
-async def test_refills_run_at_jittered_times_and_never_next_to_a_register():
-    """The cache refills on its own jittered schedule, and skips a slot
-    that falls right after a register (a ticket taken)."""
+async def test_refills_run_on_their_own_schedule():
+    """The cache refills on its own schedule (spread for load)."""
     issuer, key = _local_issuer()
     calls: list[int] = []
 
@@ -779,23 +770,12 @@ async def test_refills_run_at_jittered_times_and_never_next_to_a_register():
             return lo
 
     rng = _Rng()
-    cache = MailboxTicketCache(
-        fetch, batch=2, guard=None, period=0.05, quiet=3600.0, rng=rng
-    )  # type: ignore[arg-type]
-    cache._tickets = [b"x"]
-    cache.take()  # a register just happened
+    cache = MailboxTicketCache(fetch, batch=2, guard=None, period=0.05, rng=rng)  # type: ignore[arg-type]
     await cache.start()
     await asyncio.sleep(0.2)
     await cache.stop()
-    assert calls == []  # every slot was too close to the register
+    assert calls == [2] and len(cache) == 2
     assert rng.asked and all(lo < hi for lo, hi in rng.asked)
-    quiet = MailboxTicketCache(
-        fetch, batch=2, guard=None, period=0.05, quiet=0.0, rng=rng
-    )  # type: ignore[arg-type]
-    await quiet.start()
-    await asyncio.sleep(0.2)
-    await quiet.stop()
-    assert calls == [2] and len(quiet) == 2
 
 
 async def test_the_issuer_is_read_only_under_the_pinned_gfs_key(gfs):
@@ -910,9 +890,7 @@ async def test_the_refill_loop_survives_an_outage():
         def uniform(self, lo: float, hi: float) -> float:
             return lo
 
-    cache = MailboxTicketCache(
-        fetch, batch=2, guard=None, period=0.05, quiet=0.0, rng=_Rng()
-    )  # type: ignore[arg-type]
+    cache = MailboxTicketCache(fetch, batch=2, guard=None, period=0.05, rng=_Rng())  # type: ignore[arg-type]
     await cache.start()
     await asyncio.sleep(0.3)
     await cache.stop()
@@ -926,7 +904,7 @@ async def test_a_ticket_under_a_retired_key_is_dropped_not_put_back(gfs):
     _server, session, url, tickets = gfs
     stranger, skey = _local_issuer()
     tickets._tickets.append(_local_ticket(stranger, skey))  # taken first
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "dead-ticket", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 392240)
     with pytest.raises(MailboxTicketError) as err:
         await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     assert err.value.error == "ticket_key_not_admitted"
@@ -939,7 +917,7 @@ async def test_a_ticket_under_a_retired_key_is_dropped_not_put_back(gfs):
 
 
 def test_unregister_body_signs_under_the_mailbox_key():
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "s", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 553390)
     body = build_unregister_body(keys, GFS_ID, now=1_700_000_000, nonce="n" * 22)
     assert set(body) == {
         "sig_suite",
@@ -967,7 +945,7 @@ def test_unregister_body_signs_under_the_mailbox_key():
 
 async def test_unregister_mailbox_drops_it_at_the_gfs(gfs):
     server, session, url, tickets = gfs
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "leaving", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 615420)
     await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     assert await server.app[gfs_mailbox_repo_key].get(keys.mailbox_id) is not None
     assert await unregister_mailbox(session, url, keys, GFS_ID) is True
@@ -992,7 +970,7 @@ async def test_unregister_mailbox_is_false_on_a_gfs_without_the_route(tmp_dir):
     try:
         async with aiohttp.ClientSession() as session:
             url = str(server.make_url("")).rstrip("/")
-            keys = derive_mailbox_keys(ROOT, GFS_ID, "s", 0)
+            keys = derive_mailbox_keys(ROOT, GFS_ID, 553390)
             assert await unregister_mailbox(session, url, keys, GFS_ID) is False
     finally:
         await server.close()
@@ -1019,7 +997,7 @@ class _SlowSession:
 
 @pytest.mark.parametrize("session", [_DeadSession(), _SlowSession()])
 async def test_unregister_mailbox_is_false_on_a_network_fault(session):
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "s", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, 553390)
     assert (
         await unregister_mailbox(
             session,  # type: ignore[arg-type]

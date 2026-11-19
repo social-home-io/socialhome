@@ -40,6 +40,11 @@ if TYPE_CHECKING:
     from .post import PostType
 
 
+#: The longest space name (characters) — what the SPA's name field allows.
+#: The emoji is capped at ``domain.emoji.MAX_EMOJI_CODEPOINTS``.
+SPACE_NAME_MAX_CHARS: int = 120
+
+
 # ─── Discovery categories (§23.50) ────────────────────────────────────────
 
 #: Discovery categories (§23.50). A space's ``category`` is one of these;
@@ -401,6 +406,12 @@ SPACE_ALLOWED_APPS_MAX: int = 20
 _APP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
+#: How many post types, and how long a name, a wire config's
+#: ``allowed_post_types`` keeps.
+_POST_TYPES_MAX = 32
+_POST_TYPE_MAX_CHARS = 32
+
+
 def normalize_allowed_apps(raw: object, *, strict: bool = False) -> tuple[str, ...]:
     """A space's games list as stored: distinct app ids, sorted, at most
     :data:`SPACE_ALLOWED_APPS_MAX`.
@@ -465,19 +476,6 @@ def normalize_retention_exempt_types(
             continue
         kept.add(item)
     return tuple(sorted(kept))
-
-
-def _publish_mode(
-    raw: object, default: Literal["trusted", "strict"]
-) -> Literal["trusted", "strict"]:
-    """A ``gfs_publish_mode`` value: ``"strict"`` / ``"trusted"`` as given,
-    ``default`` for anything else (absent, or an unknown value from a newer
-    peer — never silently ``strict``, never an error)."""
-    if raw == "strict":
-        return "strict"
-    if raw == "trusted":
-        return "trusted"
-    return default
 
 
 @dataclass(slots=True, frozen=True)
@@ -565,23 +563,14 @@ class SpaceFeatures:
     #: authorised admins to act on the space's behalf (moderate, invite,
     #: publish) even while the owner is offline. Flipping it on distributes
     #: the space's Ed25519 signing seed to remote admin households via
-    #: ``SPACE_ADMIN_KEY_SHARE`` (v_22); flipping it off rotates the space
+    #: ``SPACE_ADMIN_KEY_SHARE`` (v_22) — every admin household, whichever
+    #: way it is reached (paired, mesh or only through a GFS, v_94);
+    #: flipping it off rotates the space
     #: authority key so every shared seed stops verifying (v_44, see
     #: ``SpaceAuthorityRotationService``). Toggling it is
     #: OWNER-only (a host-local admin can't enact it). Defaults OFF
     #: (least-privilege). Older peers that omit the field default to False.
     delegated_admin_authority: bool = False
-
-    #: Owner choice (v_50): how member households publish over a connection
-    #: server (GFS). ``"trusted"`` (the default): the publish is IDENTIFIED —
-    #: the server learns which household posted, never the content.
-    #: ``"strict"``: the publish is ANONYMOUS, signed with the epoch's writer
-    #: group key; the server learns only that some publisher of the space
-    #: posted, and refuses identified publishes into the space. OWNER-only
-    #: (like ``allow_subscribers``): pinned on host inbound and only taken
-    #: from the owner household on every other household. Older peers that
-    #: omit the field read ``"trusted"``.
-    gfs_publish_mode: Literal["trusted", "strict"] = "trusted"
 
     #: Owner choice for a PRIVATE space: may it use a connection server
     #: (GFS) at all? OFF (the default for a new private space): the space
@@ -594,7 +583,7 @@ class SpaceFeatures:
     #: members reach each other while the host is offline. The server then
     #: learns those member households, never the space id, name, key or
     #: content. Turning it OFF is refused while link-joined members remain.
-    #: OWNER-only (like ``gfs_publish_mode``): pinned on host inbound and
+    #: OWNER-only (like ``allow_subscribers``): pinned on host inbound and
     #: only taken from the owner household everywhere else. Meaningless on a
     #: public / global space. Older peers that omit the field read OFF.
     private_gfs: bool = False
@@ -738,7 +727,6 @@ class SpaceFeatures:
             allow_subscriber_comment=bool(row.get("allow_subscriber_comment", 0)),
             allow_subscriber_react=bool(row.get("allow_subscriber_react", 0)),
             delegated_admin_authority=bool(row.get("delegated_admin_authority", 0)),
-            gfs_publish_mode=_publish_mode(row.get("gfs_publish_mode"), "trusted"),
             private_gfs=bool(row.get("private_gfs", 0)),
             allowed_post_types=allowed or ("text",),
             allowed_apps=_allowed_apps_column(row.get("allowed_apps")),
@@ -765,7 +753,6 @@ class SpaceFeatures:
             "allow_subscriber_comment": int(self.allow_subscriber_comment),
             "allow_subscriber_react": int(self.allow_subscriber_react),
             "delegated_admin_authority": int(self.delegated_admin_authority),
-            "gfs_publish_mode": self.gfs_publish_mode,
             "private_gfs": int(self.private_gfs),
             "allow_post_text": int("text" in self.allowed_post_types),
             "allow_post_image": int("image" in self.allowed_post_types),
@@ -805,7 +792,6 @@ class SpaceFeatures:
             "allow_subscriber_comment": self.allow_subscriber_comment,
             "allow_subscriber_react": self.allow_subscriber_react,
             "delegated_admin_authority": self.delegated_admin_authority,
-            "gfs_publish_mode": self.gfs_publish_mode,
             "private_gfs": self.private_gfs,
             "allowed_post_types": list(self.allowed_post_types),
             "allowed_apps": list(self.allowed_apps),
@@ -855,11 +841,22 @@ class SpaceFeatures:
             "zone_only" if location_mode_raw == "zone_only" else "gps"
         )
         allowed_raw = raw.get("allowed_post_types")
+        # Bounded where it is read (a newer peer's type is kept): distinct
+        # short names, a few dozen at most — a config's settings stay far
+        # below its size limit.
         allowed = (
-            tuple(sorted(str(t) for t in allowed_raw))
+            tuple(
+                sorted(
+                    {
+                        t
+                        for t in allowed_raw
+                        if isinstance(t, str) and 0 < len(t) <= _POST_TYPE_MAX_CHARS
+                    }
+                )
+            )[:_POST_TYPES_MAX]
             if isinstance(allowed_raw, (list, tuple)) and allowed_raw
-            else defaults.allowed_post_types
-        )
+            else ()
+        ) or defaults.allowed_post_types
         return cls(
             calendar=bool(raw.get("calendar", defaults.calendar)),
             todo=bool(raw.get("todo", defaults.todo)),
@@ -887,9 +884,6 @@ class SpaceFeatures:
             ),
             delegated_admin_authority=bool(
                 raw.get("delegated_admin_authority", defaults.delegated_admin_authority)
-            ),
-            gfs_publish_mode=_publish_mode(
-                raw.get("gfs_publish_mode"), defaults.gfs_publish_mode
             ),
             private_gfs=bool(raw.get("private_gfs", defaults.private_gfs)),
             allowed_post_types=allowed,

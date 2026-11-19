@@ -16,11 +16,13 @@ from socialhome.domain.federation_retention import (
     SHORT_LIVED,
     SHORT_LIVED_TTL,
     TERMINAL_GRACE,
+    admin_seed_key_prefix,
     capped_delete_key,
     is_long_lived,
     moment_delete_key,
     relayed_delete_prefix,
     retention_expires_at,
+    roster_snapshot_key_prefix,
     supersede_key,
 )
 from socialhome.domain.moment import MOMENT_MAX_LIFETIME_DAYS
@@ -141,6 +143,40 @@ def test_location_and_online_keys_never_collide():
     )
 
 
+def test_a_poll_vote_supersedes_per_space_poll_and_voter():
+    """A vote is the voter's whole selection — state, not history: an older
+    one delivered after a newer one would roll it back."""
+
+    def key(space="s1", post="p1", voter="u1", **over):
+        return supersede_key(
+            FederationEventType.SPACE_POLL_VOTE_CAST,
+            space_id=space,
+            payload={
+                "post_id": post,
+                "voter_user_id": voter,
+                "option_ids": ["a"],
+                **over,
+            },
+        )
+
+    assert key() == "poll-vote:s1:p1:u1"
+    assert key() == key(option_ids=[])
+    assert len({key(), key(space="s2"), key(post="p2"), key(voter="u2")}) == 4
+    for broken in (key(space=None), key(post=""), key(voter=""), key(post=5)):
+        assert broken is None
+    # A poll's definition and its close are not latest-only state.
+    for t in (
+        FederationEventType.SPACE_POLL_CREATED,
+        FederationEventType.SPACE_POLL_CLOSED,
+    ):
+        assert (
+            supersede_key(
+                t, space_id="s1", payload={"post_id": "p1", "voter_user_id": "u1"}
+            )
+            is None
+        )
+
+
 def test_ordinary_events_never_supersede():
     """A DM or a post is never replaced by a later one."""
     for t in (
@@ -238,3 +274,89 @@ def test_only_an_uncapped_moment_delete_is_long_lived():
     assert is_long_lived(MD, f"{RELAYED_DELETE_KEY_PREFIX}them:m1")
     assert not is_long_lived(MD, capped_delete_key("them", "m1"))
     assert not is_long_lived(FederationEventType.MOMENT_CREATED, None)
+
+
+def test_a_space_post_reaction_keeps_only_its_latest_toggle_queued():
+    """v_93 — a reaction is state per (space, post, user, emoji): a newer
+    toggle replaces the queued one, so a flood of toggles holds one outbox
+    slot per reaction, not one per click."""
+    from socialhome.domain.federation import FederationEventType as FET
+    from socialhome.domain.federation_retention import supersede_key
+
+    payload = {"post_id": "p1", "user_id": "u1", "emoji": "👍", "action": "add"}
+    key = supersede_key(FET.SPACE_POST_REACTION, space_id="sp", payload=payload)
+    assert key == "reaction:sp:p1:u1:👍"
+    assert key == supersede_key(
+        FET.SPACE_POST_REACTION, space_id="sp", payload={**payload, "action": "remove"}
+    )
+    assert key != supersede_key(
+        FET.SPACE_POST_REACTION, space_id="sp", payload={**payload, "emoji": "🎉"}
+    )
+    for broken in ({**payload, "post_id": ""}, {**payload, "emoji": None}):
+        assert (
+            supersede_key(FET.SPACE_POST_REACTION, space_id="sp", payload=broken)
+            is None
+        )
+    assert (
+        supersede_key(FET.SPACE_POST_REACTION, space_id=None, payload=payload) is None
+    )
+
+
+def test_a_seed_share_supersedes_per_space_and_names_its_space():
+    """A household needs only the newest seed share of a space: a queued
+    older one would carry the seed of a retired key. One slot per (peer,
+    space) — and the key starts with ``admin_seed_key_prefix`` so a rotation
+    drops every queued share for that space (a stale one must never land
+    after a revocation)."""
+    t = FederationEventType.SPACE_ADMIN_KEY_SHARE
+    a = supersede_key(t, space_id="s1", payload={"space_seed": "x"})
+    assert a is not None
+    assert a == supersede_key(t, space_id="s1", payload={"space_seed": "y"})
+    assert a != supersede_key(t, space_id="s2", payload={"space_seed": "x"})
+    assert a.startswith(admin_seed_key_prefix("s1"))
+    assert not a.startswith(admin_seed_key_prefix("s"))
+    assert supersede_key(t, space_id=None, payload={}) is None
+
+
+def test_a_roster_snapshot_supersedes_per_space_and_part():
+    """Should-fix 5: a newer roster snapshot to a household replaces the
+    queued older one (per peer — the outbox key is per recipient — space
+    and part), so a household away for a while holds one snapshot, not
+    one per repair."""
+
+    def key(space="s1", **payload):
+        return supersede_key(
+            FederationEventType.SPACE_ROSTER_SNAPSHOT,
+            space_id=space,
+            payload={"space_id": space, "entries": [{"seat": 1}], **payload},
+        )
+
+    assert key() == "roster-snapshot:s1:0"
+    assert key(snapshot_id="a", part=0, parts=2) == key()
+    assert key(snapshot_id="a", part=1, parts=2) == "roster-snapshot:s1:1"
+    assert key(space="s2") != key()
+    assert key(space=None) is None
+    assert key(part="x") is None
+    assert key().startswith(roster_snapshot_key_prefix("s1"))
+    assert not key(space="s10").startswith(roster_snapshot_key_prefix("s1"))
+
+
+def test_a_credentials_only_snapshot_has_its_own_key():
+    """#1375 adversarial review: a credentials-only snapshot (``entries:
+    []``) shared part 0's key with a full roster snapshot and replaced it in
+    the outbox. It has its own latest-only key, outside the roster prefix."""
+    key = supersede_key(
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
+        space_id="s1",
+        payload={"space_id": "s1", "entries": [], "writer_cert": {}},
+    )
+    assert key == "roster-credentials:s1"
+    assert not key.startswith(roster_snapshot_key_prefix("s1"))
+    assert (
+        supersede_key(
+            FederationEventType.SPACE_ROSTER_SNAPSHOT,
+            space_id=None,
+            payload={"entries": []},
+        )
+        is None
+    )

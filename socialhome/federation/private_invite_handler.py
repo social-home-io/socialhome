@@ -39,11 +39,16 @@ from ..domain.events import (
     SpaceRemoteSeatEnded,
     SpaceRemoteSeatLive,
 )
-from ..domain.federation import FederationEvent, FederationEventType
+from ..domain.federation import (
+    DELIVERY_ERROR_QUEUED,
+    FederationEvent,
+    FederationEventType,
+)
 from ..domain.local_community import Eligibility, parse_join_location
 from ..domain.space import (
     WRITER_ROLES,
     RemoteAdminOutcome,
+    Space,
     SpacePermissionError,
     SpaceRole,
     cap_remote_role,
@@ -75,21 +80,28 @@ from ..services.space_service import (
     admit_join,
     apply_space_content_key_from_metadata,
     seal_join_snapshot,
+    signed_roster_event,
 )
 from ..services.space_writer_households import holds_member_seat
-from .host_equivalence import acts_as_host
+from .host_equivalence import acts_as_host, holds_local_admin_seat
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
 
 if TYPE_CHECKING:
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
     from ..repositories.space_remote_member_repo import (
         AbstractSpaceRemoteMemberRepo,
+        SpaceRemoteMember,
     )
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..services.space_writer_cert_service import SpaceWriterCertService
     from .federation_service import FederationService
 
 log = logging.getLogger(__name__)
+
+#: How far above our own ``roster_sequence`` a roster entry's
+#: ``member_version`` may be. Versions are counters (one per roster change);
+#: a household that was away for years of changes is still far inside this.
+MAX_ROSTER_VERSION_LEAD: int = 2**32
 
 #: Longest ``join_request_id`` a host's ``SPACE_REMOTE_MEMBER_REMOVED`` may
 #: name (it is ``uuid4().hex`` on the host).
@@ -99,6 +111,27 @@ _MAX_JOIN_REQUEST_ID_LEN = 128
 #: make us verify — a space roster is far smaller; this only caps the work
 #: a malformed or hostile snapshot can cause.
 _MAX_ROSTER_SNAPSHOT_ENTRIES = 5000
+
+#: Most parts one roster send may have, and the longest ``snapshot_id`` —
+#: what the receiver tracks of a send in progress (one per space and host).
+_MAX_ROSTER_SNAPSHOT_PARTS = 512
+_MAX_SNAPSHOT_ID_LEN = 64
+
+#: Most removals one host snapshot makes a seed holder re-state to the host
+#: (``PrivateSpaceInviteHandler._restate_removals``). A removal the host has
+#: not seen is one seat, rarely a handful; the cap bounds what one snapshot
+#: — each part of a large one — can make us sign and send. The rest go with
+#: the next snapshot.
+ROSTER_REMOVAL_RESTATE_MAX = 16
+
+#: The same removal (seat and version) is re-stated to the host at most once
+#: in this many seconds: a send that is queued for an unreachable host, or
+#: one the host refuses, is not repeated on every snapshot.
+ROSTER_REMOVAL_RESTATE_INTERVAL_S = 3600
+
+#: Past this many remembered re-statements the expired ones are dropped
+#: (and, still over it, the oldest).
+_MAX_REMEMBERED_RESTATEMENTS = 512
 
 #: Receive-side caps on pending private invitations holding a join snapshot
 #: (migration 0093 stores each one until the user answers): per issuing
@@ -199,6 +232,10 @@ _MAX_LOCATION_REMOVALS: int = 10_000
 _LOCATION_FUTURE_SKEW = timedelta(minutes=5)
 
 
+def _monotonic() -> float:
+    return time.monotonic()
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -236,6 +273,8 @@ class PrivateSpaceInviteHandler:
         "_own_instance_id",
         "_remote_locations",
         "_remote_members",
+        "_removal_restated",
+        "_snapshot_parts",
         "_space_crypto",
         "_space_repo",
         "_space_service",
@@ -279,6 +318,17 @@ class PrivateSpaceInviteHandler:
         #: path (rotation, role-check, broadcast). Tests that don't
         #: exercise admin actions can omit it.
         self._space_service = space_service
+        #: A roster send in parts still arriving, per (space, host): its
+        #: ``(snapshot_id, parts, roster_version)``, the parts applied and
+        #: the host's own live seats (user ids) they named.
+        self._snapshot_parts: dict[
+            tuple[str, str], tuple[tuple[str, int, int], set[int], set[str]]
+        ] = {}
+        #: When each removal was last re-stated to its space's host, per
+        #: ``(space, household, user, member_version)`` (monotonic seconds),
+        #: see :data:`ROSTER_REMOVAL_RESTATE_INTERVAL_S`. In memory: after a
+        #: restart a removal is re-stated once more, nothing else.
+        self._removal_restated: dict[tuple[str, str, str, int], float] = {}
         #: Optional — multi-admin approval workflow (v_16). Dispatches the
         #: ``propose`` / ``vote`` verbs and the ``SPACE_ADMIN_PROPOSAL_UPDATED``
         #: mirror. Wired post-construction like ``_space_service``.
@@ -1475,7 +1525,7 @@ class PrivateSpaceInviteHandler:
             and self._writer_certs is not None
         ):
             await self._writer_certs.accept(space_id, event.payload.get("writer_cert"))
-        # v_50 — and, in a strict space, the new epoch's writer group key
+        # v_50 — and the new epoch's writer group key (a v_90 publisher)
         # (verified against the pinned space key on its own).
         if (
             event.payload.get("writer_key") is not None
@@ -1530,6 +1580,18 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
+        if event.space_id != space_id:
+            # The pipeline's gates (mailbox sender, ban) judged the envelope's
+            # signed ``space_id``; the payload must name the same space — and
+            # a share without one on its envelope skipped those gates.
+            log.warning(
+                "SPACE_ADMIN_KEY_SHARE from %s names space %s in its payload "
+                "but %s on its envelope — dropping",
+                event.from_instance,
+                space_id,
+                event.space_id,
+            )
+            return
         space = await self._space_repo.get(space_id)
         if space is None:
             log.warning(
@@ -1558,6 +1620,19 @@ class PrivateSpaceInviteHandler:
             log.warning(
                 "SPACE_ADMIN_KEY_SHARE: delegated_admin_authority is OFF "
                 "locally for %s — refusing signing-seed share from %s",
+                space_id,
+                event.from_instance,
+            )
+            return
+        # SECURITY: only a household one of whose people holds a live ADMIN
+        # seat takes the seed — never a plain member's household (a share
+        # that outlived a demotion or kick, queued in an outbox or a GFS; an
+        # inviting admin pushing it at an invitee). A share that beat the
+        # promotion here is re-sent through the admin's authority epoch echo.
+        if not await holds_local_admin_seat(self._space_repo, space_id):
+            log.warning(
+                "SPACE_ADMIN_KEY_SHARE: none of our people holds an admin seat "
+                "in %s — refusing signing-seed share from %s",
                 space_id,
                 event.from_instance,
             )
@@ -1713,7 +1788,45 @@ class PrivateSpaceInviteHandler:
             p,
             tombstoned=tombstoned,
             verified_epoch=verified_epoch,
+            sender=event.from_instance,
         )
+
+    async def _tell_removed_household(
+        self, space_id: str, instance_id: str, user_id: str
+    ) -> None:
+        """The host's ``SPACE_REMOTE_MEMBER_REMOVED`` for a seat that ended
+        through a delegated admin's gossip — one frame to the one household,
+        what the host's own ``remove_remote_member`` sends. Best effort: a
+        household it does not reach now is told by the reconnect backstop
+        (``SPACE_SYNC_REJECTED`` on its next sync BEGIN)."""
+        if self._federation is None:
+            return
+        try:
+            result = await self._federation.send_with_mesh_fallback(
+                to_instance_id=instance_id,
+                event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+                payload={"space_id": space_id, "user_id": user_id},
+                space_id=space_id,
+            )
+        except Exception:
+            log.info(
+                "roster-gossip: telling %s that %s left space %s failed — its "
+                "next sync is answered instead",
+                instance_id,
+                user_id,
+                space_id,
+                exc_info=True,
+            )
+            return
+        if not result.ok:
+            log.info(
+                "roster-gossip: %s could not be told that %s left space %s (%s) "
+                "— its next sync is answered instead",
+                instance_id,
+                user_id,
+                space_id,
+                getattr(result, "error", None),
+            )
 
     async def _merge_roster_entry(
         self,
@@ -1723,13 +1836,17 @@ class PrivateSpaceInviteHandler:
         *,
         tombstoned: bool,
         verified_epoch: int,
+        sender: str | None = None,
     ) -> None:
         """Merge one already-verified roster entry into the mirror.
 
         ``verified_epoch`` is the authority-key epoch the entry's signature
         verified against; the write lands only while that key is still
         pinned (v_44), so a rotation between the verify and the write drops
-        the old-key entry rather than stamping it as a new-key row."""
+        the old-key entry rather than stamping it as a new-key row.
+
+        ``sender`` is the household whose envelope carried the entry as
+        live gossip; ``None`` for an entry of the host's snapshot."""
         user_id = str(p.get("user_id") or "")
         instance_id = str(p.get("instance_id") or "")
         if not user_id or not instance_id:
@@ -1748,6 +1865,25 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
+        space = await self._space_repo.get(space_id)
+        held_sequence = getattr(space, "roster_sequence", None)
+        if (
+            isinstance(held_sequence, int)
+            and member_version > held_sequence + MAX_ROSTER_VERSION_LEAD
+        ):
+            # A version is a small counter the signer takes just above what
+            # it holds. One far ahead of ours is forged — and once stored it
+            # would outrank every honest event for that seat for good, and
+            # drag the counter of whoever next signs for the space up to it.
+            log.warning(
+                "roster-gossip %s for %s: member_version %d is far ahead of "
+                "ours (%d) — dropping",
+                event_type,
+                space_id,
+                member_version,
+                held_sequence,
+            )
+            return
         raw_role = str(p.get("role") or SpaceRole.MEMBER.value)
         role = mirrorable_remote_role(raw_role)
         # ``owner`` is expected (the host names its owner seat, migration
@@ -1762,11 +1898,19 @@ class PrivateSpaceInviteHandler:
             )
         display_name = p.get("display_name")
         user_pk = p.get("user_pk")
-        space = await self._space_repo.get(space_id)
         hosted = (
             space is not None
             and bool(self._own_instance_id)
             and space.owner_instance_id == self._own_instance_id
+        )
+        # Live gossip that seats somebody, from any household but the host
+        # (the authority on its own space). (No space row: the versioned
+        # write below stores nothing either way.)
+        seats_by_gossip = (
+            sender is not None
+            and not tombstoned
+            and space is not None
+            and sender != space.owner_instance_id
         )
         prior = (
             await self._remote_members.get_including_tombstones(
@@ -1775,6 +1919,37 @@ class PrivateSpaceInviteHandler:
             if hosted
             else None
         )
+        if (
+            seats_by_gossip
+            and sender is not None
+            and await self._removed_without_admin_seat(space_id, sender)
+        ):
+            # SECURITY: a removed household that still holds the seed (the
+            # key is rotated only once the owner hears of the removal) could
+            # sign a JOINED for its own seat at a higher version — or for a
+            # user id nobody ever removed — and the version guard alone
+            # would take it. Or it seats a SECOND household it controls. So a
+            # household we hold a removal for, with no live admin seat,
+            # seats nobody by gossip — not itself, not anyone else: only a
+            # seed holder by right sends a JOINED at all, and people come
+            # (back) through the host (its gossip or its snapshot) or an
+            # admin household in good standing.
+            # (The sender is all this can judge: the same signed entry
+            # carried by an accomplice household that was never removed
+            # still lands. What ends that is the rotation, once the owner
+            # hears of the removal.)
+            log.warning(
+                "roster-gossip %s for %s: %s seats %s@%s — refused (%s)",
+                event_type,
+                space_id,
+                sender,
+                user_id,
+                instance_id,
+                "a removed household cannot re-seat itself"
+                if sender == instance_id
+                else "a removed household seats nobody",
+            )
+            return
         if hosted and not tombstoned:
             # SECURITY (v_44): on the household that HOSTS the space, gossip
             # may lower a seat but never raise it. Promotion is the owner's
@@ -1800,6 +1975,23 @@ class PrivateSpaceInviteHandler:
                     instance_id,
                     ceiling,
                     role,
+                )
+                return
+            if role == SpaceRole.ADMIN.value:
+                # SECURITY (D5, owner decision 2026-11-15): only the owner
+                # makes admins, so on the space we host no seed-signed gossip
+                # keeps or sets an ADMIN seat either. Otherwise an admin a
+                # delegated admin kicked while we were offline could re-assert
+                # its own seat at a higher version, turn the kick stale here,
+                # and never be rotated out. A JOINED for an admin seat changes
+                # nothing we need (the owner's own writes are the truth).
+                log.warning(
+                    "roster-gossip %s for %s would keep %s@%s an admin on the "
+                    "space we host — refused (only the owner grants admin)",
+                    event_type,
+                    space_id,
+                    user_id,
+                    instance_id,
                 )
                 return
         applied = await self._remote_members.apply_member_event(
@@ -1830,6 +2022,43 @@ class PrivateSpaceInviteHandler:
                     space_id=space_id, instance_id=instance_id, user_id=user_id
                 )
             )
+        if (
+            applied
+            and tombstoned
+            and hosted
+            and sender is not None
+            and sender != instance_id
+            and prior is not None
+            and not prior.tombstoned
+        ):
+            # On the space we host, another household's gossip just ended
+            # this seat: a delegated admin removed the member while we were
+            # offline. A household drops its copy of a space only on its
+            # HOST's word, so say it — before its ``space_instances`` row
+            # goes below. (Its own LEFT needs no answer.) Only for a seat
+            # WE held live: a signed LEFT can name any household — one that
+            # was never in the space, or one already removed — and the
+            # notice carries the space id.
+            await self._tell_removed_household(space_id, instance_id, user_id)
+        if (
+            applied
+            and tombstoned
+            and space is not None
+            and instance_id != space.owner_instance_id
+            and not await self._remote_members.list_for_instance(
+                space_id, instance_id, include_tombstoned=False
+            )
+        ):
+            # The household's LAST seat just went: stop treating it as a
+            # member household, exactly as the host's own
+            # ``remove_remote_member`` does — otherwise every later fan-out
+            # (posts, rekeys, a rotation bundle) still reaches it (v_44: a
+            # lingering target would receive the next rekey or rotation
+            # bundle). Before the seat is announced as ended: a listener
+            # that asks "do we still share a space with that household?"
+            # (the member directory ending its lazy seat) must not see the
+            # row.
+            await self._space_repo.remove_space_instance(space_id, instance_id)
         if applied and tombstoned:
             await self._bus.publish(
                 SpaceRemoteSeatEnded(
@@ -1856,27 +2085,26 @@ class PrivateSpaceInviteHandler:
         # ``broadcast_to_space_members`` (config edits, posts, rekeys) would
         # never reach them. This is exactly the offline-of-owner case: a
         # delegated admin must be able to fan a change out to every member it
-        # knows, not just the host it accepted from. On a LEFT
-        # tombstone the household stays a target only while it still holds
-        # another live seat (v_44: a lingering target would receive the next
-        # rekey or rotation bundle). ``add_space_instance`` is an idempotent upsert and
+        # knows, not just the host it accepted from. (On a LEFT tombstone
+        # the household stays a target only while it still holds another
+        # live seat — its row went above, before the seat was announced.)
+        # ``add_space_instance`` is an idempotent upsert and
         # ``broadcast_to_space_members`` already excludes our own household, so
         # a gossip row naming our instance is harmless.
         if not tombstoned:
             await self._space_repo.add_space_instance(space_id, instance_id)
-        elif (
-            applied
-            and space is not None
-            and instance_id != space.owner_instance_id
-            and not await self._remote_members.list_for_instance(
-                space_id, instance_id, include_tombstoned=False
-            )
-        ):
-            # The household's LAST seat just went: stop treating it as a
-            # member household, exactly as the host's own
-            # ``remove_remote_member`` does — otherwise every later fan-out
-            # (posts, rekeys, a rotation bundle) still reaches it.
-            await self._space_repo.remove_space_instance(space_id, instance_id)
+
+    async def _removed_without_admin_seat(
+        self, space_id: str, instance_id: str
+    ) -> bool:
+        """Whether our mirror holds a removal (a tombstoned seat) of that
+        household and no live admin seat of it."""
+        seats = await self._remote_members.list_for_instance(
+            space_id, instance_id, include_tombstoned=True
+        )
+        return any(seat.tombstoned for seat in seats) and not any(
+            seat.role == SpaceRole.ADMIN and not seat.tombstoned for seat in seats
+        )
 
     async def _on_space_member_joined(self, event: FederationEvent) -> None:
         """Authority-signed roster JOINED (v_23) — apply (upsert) the member."""
@@ -1982,6 +2210,11 @@ class PrivateSpaceInviteHandler:
         from_host = bool(space.owner_instance_id) and (
             event.from_instance == space.owner_instance_id
         )
+        # Removals we hold that the host may not have seen (see
+        # :meth:`_restatable_removals`); a live entry at or below one of
+        # them is dropped by the version guard below and answered after.
+        restatable = await self._restatable_removals(space) if from_host else None
+        unseen: dict[tuple[str, str], SpaceRemoteMember] = {}
         for (entry_type, payload, tombstoned), reason in zip(
             candidates, reasons, strict=True
         ):
@@ -1990,6 +2223,19 @@ class PrivateSpaceInviteHandler:
                     reason, entry_type, space_id, event.from_instance, payload
                 )
                 continue
+            if restatable is not None and not tombstoned:
+                seat = (
+                    str(payload.get("instance_id") or ""),
+                    str(payload.get("user_id") or ""),
+                )
+                removal = restatable[1].get(seat)
+                version = payload.get("member_version")
+                if (
+                    removal is not None
+                    and type(version) is int
+                    and removal.member_version >= version
+                ):
+                    unseen[seat] = removal
             if (
                 from_host
                 and not tombstoned
@@ -2009,21 +2255,259 @@ class PrivateSpaceInviteHandler:
                 tombstoned=tombstoned,
                 verified_epoch=space.authority_key_epoch,
             )
+        if restatable is not None and unseen:
+            await self._restate_removals(space, restatable[0], list(unseen.values()))
         # The host's snapshot names the roster version it is complete up to;
         # echoed on our next BEGIN to the host, it spares us the periodic
         # resend of what we hold. Only a snapshot from the host, every entry
         # of which verified — anything less, and the host keeps sending.
+        # A large roster comes in parts (``roster_snapshot_parts``): the
+        # version is noted only once EVERY part of one send was applied
+        # this way — a lost part, or one we could not verify, leaves nothing
+        # noted, and the host's next send heals it.
         roster_version = p.get("roster_version")
         if (
-            from_host
-            and self._space_service is not None
-            and isinstance(roster_version, int)
-            and not isinstance(roster_version, bool)
-            and all(reason is None for reason in reasons)
+            not from_host
+            or not isinstance(roster_version, int)
+            or isinstance(roster_version, bool)
+            or not all(reason is None for reason in reasons)
         ):
+            return
+        host = space.owner_instance_id
+        named = self._snapshot_complete(
+            space_id,
+            event.from_instance,
+            p,
+            {
+                str(payload.get("user_id") or "")
+                for _type, payload, tombstoned in candidates
+                if not tombstoned and payload.get("instance_id") == host
+            },
+        )
+        if named is None:
+            return
+        if host and host != self._own_instance_id:
+            await self._end_unnamed_host_seats(
+                space, named, roster_version=roster_version
+            )
+        if self._space_service is not None:
             self._space_service.note_roster_snapshot_applied(
                 space_id, event.from_instance, roster_version
             )
+
+    async def _restatable_removals(
+        self, space: Space
+    ) -> tuple[bytes, dict[tuple[str, str], SpaceRemoteMember]] | None:
+        """The space seed we hold and the removals we may re-state to the
+        host, by ``(instance_id, user_id)`` — ``None`` when we may re-state
+        nothing (never raises).
+
+        Only a household that can sign for the space does this: the space
+        is another household's, delegated admin authority is on, and the
+        seed we hold is the private half of the key we pin (none, or a
+        stale one: nothing is sent, and the first snapshot after the seed
+        arrived repairs it). Left out: the host's own seats (only the host
+        seats or removes its own people), our own, and a removal written
+        under an older authority key — it may be a since-revoked seed
+        holder's, and signing it again with the current key would hand that
+        household a removal the rotation took from it."""
+        own = self._own_instance_id
+        host = space.owner_instance_id
+        if (
+            not own
+            or not host
+            or host == own
+            or self._federation is None
+            or not space.features.delegated_admin_authority
+        ):
+            return None
+        try:
+            seed = await self._space_repo.get_space_seed(space.id)
+            if (
+                seed is None
+                or ed25519_public_key(seed).hex()
+                != (space.identity_public_key or "").lower()
+            ):
+                return None
+            rows = await self._remote_members.list_for_space_including_tombstones(
+                space.id
+            )
+        except Exception:
+            log.warning(
+                "roster-snapshot for %s: reading the removals we hold failed",
+                space.id,
+                exc_info=True,
+            )
+            return None
+        return seed, {
+            (row.instance_id, row.user_id): row
+            for row in rows
+            if row.tombstoned
+            and row.instance_id not in (host, own)
+            and row.authority_epoch == space.authority_key_epoch
+        }
+
+    async def _restate_removals(
+        self, space: Space, seed: bytes, removals: list[SpaceRemoteMember]
+    ) -> None:
+        """Tell the host of *space* about removals its snapshot shows it has
+        not seen: one ``SPACE_MEMBER_LEFT`` per seat, signed with the space
+        seed, to the host alone.
+
+        A delegated admin's removal reaches the host only as droppable
+        gossip, and the host asks nobody for roster state — so one lost
+        while it was unreachable would leave the seat live there for good
+        (an admin seat: every later rotation would hand that household the
+        new seed). The removal is the one we hold, at its own version: no
+        row changes and no roster sequence moves here; on the host it wins
+        the equal-version tie as a removal. Bounded by
+        :data:`ROSTER_REMOVAL_RESTATE_MAX` per snapshot and once per
+        :data:`ROSTER_REMOVAL_RESTATE_INTERVAL_S` per removal. Never raises:
+        a failed send is logged and tried again with the next snapshot."""
+        federation = self._federation
+        if federation is None:
+            return
+        now = _monotonic()
+        told = self._removal_restated
+        if len(told) > _MAX_REMEMBERED_RESTATEMENTS:
+            for key in [
+                key
+                for key, at in told.items()
+                if now - at >= ROSTER_REMOVAL_RESTATE_INTERVAL_S
+            ]:
+                del told[key]
+            # Still over: drop the oldest (insertion order), never all of
+            # them — clearing would let every recent removal be re-stated
+            # again at once.
+            for key in list(told)[: len(told) - _MAX_REMEMBERED_RESTATEMENTS]:
+                del told[key]
+        attempts = 0
+        for seat in removals:
+            key = (space.id, seat.instance_id, seat.user_id, seat.member_version)
+            last = told.get(key)
+            if last is not None and now - last < ROSTER_REMOVAL_RESTATE_INTERVAL_S:
+                continue
+            if attempts >= ROSTER_REMOVAL_RESTATE_MAX:
+                break
+            attempts += 1
+            log.info(
+                "roster-snapshot: re-stating the removal of %s@%s (version %d) "
+                "to the host of space %s",
+                seat.user_id,
+                seat.instance_id,
+                seat.member_version,
+                space.id,
+            )
+            try:
+                event_type, payload = signed_roster_event(
+                    space.id,
+                    user_id=seat.user_id,
+                    instance_id=seat.instance_id,
+                    display_name=seat.display_name,
+                    user_pk=seat.user_pk,
+                    role=seat.role,
+                    member_version=seat.member_version,
+                    tombstoned=True,
+                    seed=seed,
+                )
+                # To the host alone — it is the one household that lacks
+                # the removal — over whichever path reaches it (paired,
+                # mesh or its GFS mailbox), like every single-recipient
+                # space event.
+                result = await federation.send_with_mesh_fallback(
+                    to_instance_id=space.owner_instance_id,
+                    event_type=event_type,
+                    payload=payload,
+                    space_id=space.id,
+                )
+            except Exception:
+                log.warning(
+                    "roster-snapshot: re-stating the removal of %s@%s to the "
+                    "host of space %s failed",
+                    seat.user_id,
+                    seat.instance_id,
+                    space.id,
+                    exc_info=True,
+                )
+                continue
+            if result.ok or result.error == DELIVERY_ERROR_QUEUED:
+                told[key] = now
+            else:
+                log.warning(
+                    "roster-snapshot: re-stating the removal of %s@%s to the "
+                    "host of space %s was not sent (%s)",
+                    seat.user_id,
+                    seat.instance_id,
+                    space.id,
+                    result.error,
+                )
+
+    async def _end_unnamed_host_seats(
+        self, space: Space, named: set[str], *, roster_version: int
+    ) -> None:
+        """A complete, fully verified snapshot from the host names every one
+        of the HOST'S OWN live seats: only the host seats its own people (no
+        delegated admin can seat a user of the owner's household). A
+        mirrored host seat it does not name — a departure or ban whose LEFT
+        gossip we missed — ends here, as a LEFT at the snapshot's version,
+        only where our seat is at or below it (a newer one is gossip that
+        overtook the snapshot). Seats of every other household are never
+        inferred from absence: a seat the host has not heard of yet stays."""
+        host = space.owner_instance_id
+        for seat in await self._remote_members.list_for_instance(
+            space.id, host, include_tombstoned=False
+        ):
+            if seat.user_id in named or seat.member_version > roster_version:
+                continue
+            await self._merge_roster_entry(
+                FederationEventType.SPACE_MEMBER_LEFT,
+                space.id,
+                {
+                    "space_id": space.id,
+                    "user_id": seat.user_id,
+                    "instance_id": host,
+                    "display_name": seat.display_name,
+                    "user_pk": seat.user_pk,
+                    "role": SpaceRole.MEMBER.value,
+                    "member_version": roster_version,
+                },
+                tombstoned=True,
+                verified_epoch=space.authority_key_epoch,
+            )
+
+    def _snapshot_complete(
+        self, space_id: str, host: str, p: dict, named: set[str]
+    ) -> set[str] | None:
+        """The host's own live seats (user ids) its roster names, once the
+        fully verified snapshot event *p* (naming *named*) completes it —
+        else ``None``: a single event completes it; a part (``snapshot_id``
+        / ``part`` / ``parts``) only when it is the last missing one of its
+        send. One send is tracked per (space, host); a part of another send
+        starts over. A malformed part completes nothing."""
+        if "parts" not in p and "part" not in p and "snapshot_id" not in p:
+            return named
+        snapshot_id, part, parts = p.get("snapshot_id"), p.get("part"), p.get("parts")
+        if (
+            not isinstance(snapshot_id, str)
+            or not 0 < len(snapshot_id) <= _MAX_SNAPSHOT_ID_LEN
+            or type(part) is not int
+            or type(parts) is not int
+            or not 0 <= part < parts <= _MAX_ROSTER_SNAPSHOT_PARTS
+            or type(p.get("roster_version")) is not int
+        ):
+            return None
+        key = (space_id, host)
+        tracked = self._snapshot_parts.get(key)
+        stamp = (snapshot_id, parts, p["roster_version"])
+        if tracked is None or tracked[0] != stamp:
+            tracked = (stamp, set(), set())
+            self._snapshot_parts[key] = tracked
+        tracked[1].add(part)
+        tracked[2].update(named)
+        if len(tracked[1]) < parts:
+            return None
+        del self._snapshot_parts[key]
+        return tracked[2]
 
     @staticmethod
     def _check_snapshot_sigs_sync(

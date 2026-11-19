@@ -10,14 +10,13 @@
  *
  * The owner-only GFS switches below save the moment they flip, like the
  * rest of the page: the private-space GFS (turning it off asks first — it
- * ends the space's GFS links), the private channel's GFSs, and how members
- * post through the GFS (trusted / strict).
+ * ends the space's GFS links) and the private channel's GFSs. (Members
+ * always post through a GFS anonymously — there is nothing to choose.)
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
-import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { confirmDialog } from '@/components/confirm'
 import {
   GfsChecklist, defaultGfsSelection, revealGfsChecklist, type GfsChoice,
@@ -32,7 +31,7 @@ import { visibilityOptions } from '@/components/spaceModeOptions'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
-import type { GfsConnection, GfsPublishMode, Space } from '@/types'
+import type { GfsConnection, Space } from '@/types'
 import {
   patchSpace, useServerValue, type LinkMemberHousehold,
 } from './spacePatch'
@@ -203,7 +202,6 @@ export function FindSection({ space, isOwner, isRemoteSpace, adminCount, onUpdat
       {isOwner && space.space_type === 'private' && (
         <PrivateGfs space={space} isRemoteSpace={isRemoteSpace} onUpdate={onUpdate} />
       )}
-      {isOwner && <PublishMode space={space} onUpdate={onUpdate} />}
     </div>
   )
 }
@@ -318,54 +316,5 @@ function PrivateGfs({ space, isRemoteSpace, onUpdate }: {
         </div>
       )}
     </div>
-  )
-}
-
-/** How members post through the GFS (v_50) — owner-only, and only where
- *  members publish over a GFS at all. A strict space keeps it visible so
- *  the owner can always switch back. */
-function PublishMode({ space, onUpdate }: { space: Space; onUpdate: () => void }) {
-  const stored = space.features?.gfs_publish_mode ?? 'trusted'
-  const [mode, setMode] = useServerValue<GfsPublishMode>(stored)
-  const isPrivate = space.space_type === 'private'
-  const shown = isPrivate
-    ? Boolean(space.features?.private_gfs)
-    : ((space.space_type === 'public' || space.space_type === 'global')
-      && Boolean(space.features?.allow_subscribers)) || stored !== 'trusted'
-  if (!shown) return null
-
-  const choose = async (next: GfsPublishMode) => {
-    if (next === mode) return
-    const before = mode
-    setMode(next)
-    const outcome = await patchSpace(space.id, { features: { gfs_publish_mode: next } }, {
-      onUpdate,
-      okToast: next === 'strict' ? t('space.gfs_publish.strict_switch_note') : undefined,
-    })
-    if (outcome === 'failed') setMode(before)
-  }
-
-  return (
-    <fieldset class="sh-form-fieldset sh-gfs-publish-mode">
-      <legend id={`gfs-publish-legend-${space.id}`}>{t('space.gfs_publish.legend')}</legend>
-      <p class="sh-ss-hint">
-        {isPrivate ? t('space.gfs_publish.private_intro') : t('space.gfs_publish.intro')}
-      </p>
-      <ChipRadioGroup<GfsPublishMode>
-        labelledBy={`gfs-publish-legend-${space.id}`}
-        value={mode}
-        onChange={(v) => void choose(v)}
-        options={[
-          { value: 'trusted', label: t('space.gfs_publish.trusted') },
-          { value: 'strict', label: t('space.gfs_publish.strict') },
-        ]}
-      />
-      <dl class="sh-gfs-publish-mode__help">
-        <dt>{t('space.gfs_publish.trusted')}</dt>
-        <dd>{t('space.gfs_publish.trusted_help')}</dd>
-        <dt>{t('space.gfs_publish.strict')}</dt>
-        <dd>{t('space.gfs_publish.strict_help')}</dd>
-      </dl>
-    </fieldset>
   )
 }

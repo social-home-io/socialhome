@@ -37,16 +37,22 @@ for a listing already settled) is DEBUG — see :func:`log_not_applied`.
 
 from __future__ import annotations
 
+import functools
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+import orjson
 
 from ...domain.bazaar_thread import announced_end
 from ...domain.calendar import (
     CalendarEvent,
     CalendarRSVP,
     RSVPStatus,
+    clean_attendees,
+    clean_location,
     coerce_capacity,
     material_changes,
 )
@@ -66,6 +72,8 @@ from ...domain.events import (
     GalleryItemUploaded,
     PageDeleted,
     PollClosed,
+    PollCreated,
+    PollVoted,
     RemoteSchedulePollFinalized,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
@@ -81,21 +89,27 @@ from ...domain.events import (
 from ...domain.federation import FederationEventType
 from ...domain.file_hashes import parse_file_hashes
 from ...domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
-from ...domain.media_constraints import CAPTION_MAX
+from ...domain.item_merge import change_stamp
+from ...domain.media_constraints import CAPTION_MAX, space_media_ref
 from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
 from ...domain.page_version import version_hash
 from ...domain.post import (
     BAZAAR_MAX_IMAGES,
     BAZAAR_OFFER_MESSAGE_MAX_CHARS,
     BAZAAR_REJECT_REASON_MAX_CHARS,
+    MAX_POLL_OPTIONS,
+    MAX_POLL_TEXT,
     BazaarBid,
     BazaarListing,
     BazaarMode,
     BazaarOffer,
     BazaarStatus,
     Post,
+    poll_closes_at_from_wire,
     poll_deadline_passed,
+    poll_options_from_wire,
 )
+from ...domain.relay_media_frame import ITEM_ID_MAX_CHARS, bounded_id, bounded_stamp
 from ...domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
@@ -106,13 +120,13 @@ from ...domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
+from ...domain.space_media_fields import item_media_urls, replace_item_media
 from ...domain.space_media_ref import (
     MAX_PAGE_FILES,
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
     page_file_count,
     page_media_urls,
-    rewrite_page_body_media,
 )
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
@@ -140,6 +154,7 @@ from ...federation.owner_bound_id import (
     is_owner_bound,
     owner_bound_id_refused,
 )
+from ...federation.pending_parent_buffer import PARENT_POLL, PARENT_POST
 from ...federation.space_authorship import payload_actor
 from ...federation.space_scope import (
     log_cross_space_refusal,
@@ -148,20 +163,23 @@ from ...federation.space_scope import (
 )
 from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
-from ...repositories.bazaar_repo import BidStateError, OfferStateError
+from ...repositories.bazaar_repo import OfferStateError
 from ...utils.datetime import parse_iso8601_optional
+from ...utils.rrule import clean_rrule
 from ...utils.timezones import coerce_tz
-from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
-from ..inbound_media_store import (
-    space_media_ref,
-    space_media_refs,
-    verbatim_local_media_ref,
+from ..calendar_service import (
+    calendar_event_too_large,
+    log_calendar_event_not_stored,
 )
+from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
+from ..inbound_media_store import space_media_refs, verbatim_local_media_ref
 from ..page_conflict_service import (
     CanonicalVersion,
     PageMode,
     Proposal,
     canonical_from_wire,
+    log_page_not_stored,
+    page_too_large,
     proposal_from_wire,
 )
 from ..space_media_names import SpaceMediaNamer
@@ -171,6 +189,7 @@ if TYPE_CHECKING:
 
     from ...domain.federation import FederationEvent
     from ...federation.federation_service import FederationService
+    from ...federation.pending_parent_buffer import PendingParentBuffer
     from ...federation.space_authorship import SpaceAuthorship
     from ...repositories.bazaar_repo import AbstractBazaarRepo
     from ...repositories.calendar_repo import AbstractSpaceCalendarRepo
@@ -224,13 +243,15 @@ def _page_from_payload(p: dict, page_id: str, space_id: str) -> Page:
         id=page_id,
         title=str(p.get("title") or ""),
         content=str(p.get("content") or ""),
-        created_by=str(p.get("created_by") or ""),
-        created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
-        updated_at=str(p.get("updated_at") or p.get("occurred_at") or ""),
+        # Ids and stamps bounded where they are read (the size rule
+        # measures them at their widest).
+        created_by=bounded_id(p.get("created_by")),
+        created_at=bounded_stamp(p.get("created_at") or p.get("occurred_at")),
+        updated_at=bounded_stamp(p.get("updated_at") or p.get("occurred_at")),
         space_id=space_id,
         cover_image_url=cover if isinstance(cover, str) else None,
-        last_editor_user_id=str(
-            p.get("last_editor_user_id") or p.get("actor_user_id") or ""
+        last_editor_user_id=bounded_id(
+            p.get("last_editor_user_id") or p.get("actor_user_id")
         )
         or None,
     )
@@ -244,6 +265,7 @@ class SpaceContentInboundHandlers:
         "_bazaar_repo",
         "_bus",
         "_calendar_repo",
+        "_federation",
         "_gallery_repo",
         "_gfs_media",
         "_legacy_album_deletes",
@@ -252,6 +274,7 @@ class SpaceContentInboundHandlers:
         "_media_refs",
         "_page_conflicts",
         "_page_repo",
+        "_pending_parents",
         "_poll_repo",
         "_post_repo",
         "_sticky_repo",
@@ -279,8 +302,14 @@ class SpaceContentInboundHandlers:
         media_refs: AbstractMediaReferenceRepo | None = None,
         legacy_album_deletes: LegacyAlbumDeletes | None = None,
         page_conflicts: PageConflictService | None = None,
+        pending_parents: PendingParentBuffer | None = None,
     ) -> None:
         self._bus = bus
+        #: Holds a poll definition until its post lands, and a vote or a
+        #: close until the poll does. ``None``: they are refused as before.
+        self._pending_parents = pending_parents
+        #: Replays a held event (set by :meth:`attach_to`).
+        self._federation: FederationService | None = None
         #: v_48 — applies another household's version of an existing page
         #: (fast-forward / merge / conflict). ``None``: last write wins.
         self._page_conflicts = page_conflicts
@@ -317,9 +346,9 @@ class SpaceContentInboundHandlers:
         event: FederationEvent,
         space_id: str,
         item_id: str,
-        urls: list[str | None],
+        urls: Sequence[str | None],
         *,
-        held: list[str | None] | None = None,
+        held: Sequence[str | None] | None = None,
     ) -> SpaceMediaLocalization:
         """This household's names for an item's files, as delivered by the
         envelope's authenticated sender: its direct names
@@ -328,13 +357,14 @@ class SpaceContentInboundHandlers:
         (it reached a link-joined member without its bytes). Apply it
         before the item is saved; :meth:`_keep_media` once it is."""
         present = [u for u in urls if u]
+        hashes = parse_file_hashes(event.payload)
         direct = self._media_names.localize(
             space_id,
             event.from_instance,
             present,
             held=held or (),
             # v_85 — vouched for by the sender's envelope signature.
-            hashes=parse_file_hashes(event.payload),
+            hashes=hashes,
         )
         if self._gfs_media is None:
             return direct
@@ -346,6 +376,7 @@ class SpaceContentInboundHandlers:
                 present,
                 item_id=item_id,
                 origin=event.from_instance,
+                hashes=hashes,
             ),
         )
 
@@ -358,6 +389,7 @@ class SpaceContentInboundHandlers:
             await self._gfs_media.keep(media)
 
     def attach_to(self, federation_service: FederationService) -> None:
+        self._federation = federation_service
         registry = federation_service._event_registry
 
         # Tasks
@@ -420,12 +452,14 @@ class SpaceContentInboundHandlers:
         )
 
         # Polls — only registered when a poll_repo is attached (deployments
-        # without polls skip it entirely, classical behaviour). Poll
-        # creation rides inline on ``SPACE_POST_CREATED`` (posts with
-        # ``type=poll`` carry the poll body), so there is no inbound
-        # handler for the bare ``SPACE_POLL_CREATED`` event — the
-        # dispatch registry no-ops on unknown events.
+        # without polls skip it entirely, classical behaviour). The wrapper
+        # post lands via ``SPACE_POST_CREATED``; ``SPACE_POLL_CREATED``
+        # carries the poll itself (question, options with their ids).
         if self._poll_repo is not None:
+            registry.register(
+                FederationEventType.SPACE_POLL_CREATED,
+                self._on_poll_created,
+            )
             registry.register(
                 FederationEventType.SPACE_POLL_VOTE_CAST,
                 self._on_poll_vote,
@@ -922,8 +956,12 @@ class SpaceContentInboundHandlers:
         p = event.payload
         page_id = str(p.get("id") or p.get("page_id") or "")
         title = str(p.get("title") or "")
-        if not page_id or (not title and "sequenced" not in p):
-            log.debug("SPACE_PAGE_* missing required field")
+        if (
+            not page_id
+            or len(page_id) > ITEM_ID_MAX_CHARS
+            or (not title and "sequenced" not in p)
+        ):
+            log.debug("SPACE_PAGE_* missing or oversize required field")
             return
         existing = await self._page_repo.get(page_id)
         if existing is not None and existing.space_id != space_id:
@@ -987,6 +1025,12 @@ class SpaceContentInboundHandlers:
         ):
             return  # an update of a page we never held, not from the host
         if not await self._page_write_gates(event, space_id, page_id, page, existing):
+            return
+        if page_too_large(
+            page, (), was=(existing, ()) if existing is not None else None
+        ):
+            # The one receiver rule: over the limit and larger than our copy.
+            log_page_not_stored(event.event_type, page, (), event.from_instance)
             return
         if existing is not None and engine is not None:
             # A pre-v_48 host: last write wins, the old body kept in history.
@@ -1209,15 +1253,8 @@ class SpaceContentInboundHandlers:
         settles its draft. A file another receiving path owns (a DM
         attachment, GFS moment media, a GFS reader copy) is dropped."""
         sent = proposal
-        cover = proposal.cover_image_url
-        if cover and space_media_ref(cover) is None:
-            cover = None
-        proposal = replace(
-            proposal,
-            content=rewrite_page_body_media(
-                proposal.content, lambda ref: ref if space_media_ref(ref) else ""
-            ),
-            cover_image_url=cover,
+        proposal = replace_item_media(
+            "pages", proposal, lambda ref: ref if space_media_ref(ref) else None
         )
         urls = page_media_urls(proposal.cover_image_url, proposal.content)
         if not urls:
@@ -1238,13 +1275,7 @@ class SpaceContentInboundHandlers:
         names = self._media_names.localize(
             space_id, event.from_instance, urls, held=held
         )
-        proposal = replace(
-            proposal,
-            content=rewrite_page_body_media(
-                proposal.content, lambda ref: names.url(ref) or ref
-            ),
-            cover_image_url=names.url(proposal.cover_image_url),
-        )
+        proposal = names.item("pages", proposal)
         await self._fetch_proposed_files(
             event, space_id, page_id, sent, dict(names.names)
         )
@@ -1344,6 +1375,8 @@ class SpaceContentInboundHandlers:
                 row_owner=existing.created_by if existing else page.created_by,
             ):
                 return
+        # The size rule is the engine's (``mirror``): one rule for every
+        # host version — live, a refusal answer, the §25.6 stream.
         await engine.mirror(space_id=space_id, page_id=page_id, version=version)
         if version.has_state and not refusal:
             await self._keep_page_media(event, space_id, page_id, version)
@@ -1637,7 +1670,23 @@ class SpaceContentInboundHandlers:
         cover = verbatim_local_media_ref(p.get("cover_url"))
         if cover is not None and space_media_ref(cover) is None:
             cover = None  # a reserved (DM / moment) name is never a cover
-        location = p.get("location")
+        try:
+            # Where a household receives: an event saved before the checks
+            # a person's save gets stays deliverable (bad ids dropped, the
+            # list cut at its cap, an unknown rule kept); a rule over its
+            # length cap is refused.
+            attendees = clean_attendees(p.get("attendees"), strict=False)
+            rrule = clean_rrule(p.get("rrule"), strict=False)
+        except ValueError as exc:
+            log.warning(
+                "%s from %s: calendar event %s in space %s — %s; not stored",
+                event.event_type,
+                event.from_instance,
+                event_id,
+                space_id,
+                exc,
+            )
+            return
         ev = CalendarEvent(
             id=event_id,
             calendar_id=calendar_id,
@@ -1647,15 +1696,15 @@ class SpaceContentInboundHandlers:
             created_by=created_by,
             description=p.get("description"),
             all_day=bool(p.get("all_day", False)),
-            attendees=tuple(str(a) for a in (p.get("attendees") or ())),
+            attendees=attendees,
             mirrored_from=p.get("mirrored_from"),
-            rrule=p.get("rrule"),
+            rrule=rrule,
             # The per-occurrence cap members enforce on RSVPs; anything but
             # a non-negative integer (or an older sender's absent field) is
             # no cap.
             capacity=coerce_capacity(p.get("capacity")),
             cover_url=cover,
-            location=location if isinstance(location, str) and location else None,
+            location=clean_location(p.get("location")),
             # IANA wall-clock anchor. Old peers omit; default ``"UTC"``.
             # Peer-supplied, so validated here: an unknown zone name
             # makes ``Intl`` throw in the SPA and one bad row breaks
@@ -1708,14 +1757,27 @@ class SpaceContentInboundHandlers:
             row_owner=created_by if existing is None else existing[1].created_by,
         ):
             return
+        # The one receiver rule: an event over the limit every household
+        # holds (measured whole) AND larger than our copy is not stored. An
+        # honest sender never passes it (its own save answers 413); one
+        # stored before the limit keeps arriving as long as it does not grow.
+        if calendar_event_too_large(
+            ev, was=existing[1] if existing is not None else None
+        ):
+            log_calendar_event_not_stored(event.event_type, ev, event.from_instance)
+            return
         media = await self._localize_media(
             event,
             space_id,
             ev.id,
-            [ev.cover_url],
-            held=[existing[1].cover_url] if existing is not None else None,
+            item_media_urls("calendar", ev),
+            held=(
+                item_media_urls("calendar", existing[1])
+                if existing is not None
+                else None
+            ),
         )
-        ev = replace(ev, cover_url=media.url(ev.cover_url))
+        ev = media.item("calendar", ev)
         if not await self._calendar_repo.save_event(ev, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id
@@ -1922,9 +1984,68 @@ class SpaceContentInboundHandlers:
 
     # ─── Polls ──────────────────────────────────────────────────────────
 
-    async def _on_poll_vote(self, event: FederationEvent) -> None:
-        """Mirror a remote poll vote. Enforces the single-choice invariant
-        (the old vote is cleared first) matching the local poll service."""
+    def _hold_for(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        kind: str,
+        post_id: str,
+        *,
+        what: str,
+    ) -> bool:
+        """Hold ``event`` until ``kind`` ``post_id`` (the post, or its poll)
+        lands in ``space_id``, then replay it through the §24.11
+        post-decrypt gates and its handler again. ``False`` when it cannot
+        be held — the caller refuses as before."""
+        buffer, federation = self._pending_parents, self._federation
+        if buffer is None or federation is None:
+            return False
+        return buffer.hold(
+            space_id=space_id,
+            kind=kind,
+            parent_id=post_id,
+            token=f"{event.event_type}:{post_id}:{event.from_instance}:{event.msg_id}",
+            sender=event.from_instance,
+            size=len(orjson.dumps(event.payload or {})),
+            replay=functools.partial(
+                federation.replay_held, event, reason=f"{kind} {post_id} landed"
+            ),
+            label=f"{event.event_type} from {event.from_instance} ({what} {post_id})",
+        )
+
+    async def _poll_missing(
+        self, event: FederationEvent, space_id: str, post_id: str, *, what: str
+    ) -> bool:
+        """``True`` when ``post_id`` holds no poll here yet and ``event``
+        (a vote, a close) therefore waits for it: held until the post, or
+        the poll of a live post of this space, lands — a vote from one
+        household routinely overtakes the author's definition. A deleted
+        or foreign post is the caller's refusal (``False``)."""
+        assert self._poll_repo is not None
+        if await self._poll_repo.get_meta(post_id) is not None:
+            return False
+        got = await self._post_repo.get(post_id)
+        if got is None:
+            kind = PARENT_POST
+        elif got[0] == space_id and not getattr(got[1], "deleted", False):
+            kind = PARENT_POLL
+        else:
+            return False
+        if not self._hold_for(event, space_id, kind, post_id, what=what):
+            log_not_applied(
+                event, what=what, row_id=post_id, reason="no such poll here"
+            )
+        return True
+
+    async def _on_poll_created(self, event: FederationEvent) -> None:
+        """Persist a peer's reply poll — question, options (with the ids
+        every household's votes name), ``allow_multiple``, ``closes_at`` —
+        on the wrapper post that arrived via ``SPACE_POST_CREATED``.
+
+        Created once: a post that already holds a poll keeps it (a re-send,
+        a resume replay, the §25.6 stream that got here first), so nobody
+        rewrites a poll people voted in. A definition that overtakes its
+        post is held until the post lands."""
         if self._poll_repo is None:
             return
         space_id = resolve_space_id(event)
@@ -1932,25 +2053,162 @@ class SpaceContentInboundHandlers:
             return
         p = event.payload
         post_id = str(p.get("post_id") or "")
-        option_id = str(p.get("option_id") or "")
-        voter = str(p.get("voter_user_id") or p.get("user_id") or "")
-        if not post_id or not option_id or not voter:
-            log.debug("SPACE_POLL_VOTE_CAST missing required field")
+        question = str(p.get("question") or "").strip()
+        # Option ids are bound to the post: no other poll can hold them.
+        options = poll_options_from_wire(p.get("options"), post_id=post_id)
+        closes_ok, closes_at = poll_closes_at_from_wire(p.get("closes_at") or None)
+        allow_multiple = p.get("allow_multiple", False)
+        if (
+            not post_id
+            or not 0 < len(question) <= MAX_POLL_TEXT
+            or options is None
+            or not closes_ok
+            or not isinstance(allow_multiple, bool)
+        ):
+            # An older sender's event carried no options: nothing to keep.
+            log.debug("SPACE_POLL_CREATED without a usable poll definition")
+            return
+        got = await self._post_repo.get(post_id)
+        if got is None:
+            if not self._hold_for(event, space_id, PARENT_POST, post_id, what="poll"):
+                log_not_applied(
+                    event, what="poll", row_id=post_id, reason="no such post here"
+                )
+            return
+        # The poll belongs to the wrapper post: its author's household
+        # creates it (or the host, releasing a reviewed post).
+        anchor = await self._post_in_space(event, space_id, post_id, what="poll")
+        if anchor is None:
+            return
+        if self._system_post_refused(event, space_id, anchor, what="poll"):
+            return
+        if not await self._authorship.may_author(event, space_id, anchor.author):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="poll",
+                row_id=post_id,
+                user_id=anchor.author,
+            )
+            return
+        # A poll is part of its post: the space's ``posts`` level applies
+        # (§4.3) — under ADMIN_ONLY / MODERATED a plain member's poll is
+        # refused unless it is the host's release of the reviewed post.
+        if not await self._authorship.access_admits(
+            event,
+            space_id,
+            "posts",
+            ContentAction.CREATE,
+            actor=payload_actor(event),
+            row_owner=anchor.author,
+        ):
+            return
+        created = await self._poll_repo.create_poll_in_space(
+            space_id=space_id,
+            post_id=post_id,
+            question=question,
+            closes_at=closes_at,
+            allow_multiple=allow_multiple,
+            options=options,
+        )
+        if created is None:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="poll", row_id=post_id
+            )
+            return
+        if not created:
+            # Held already (the §25.6 stream got here first): kept as it
+            # is — and what waited for it replays now.
+            if self._pending_parents is not None:
+                await self._pending_parents.release(
+                    space_id=space_id, kind=PARENT_POLL, parent_id=post_id
+                )
+            return
+        # The SPA shows it, and the votes / close held for it replay.
+        # ``origin_instance_id`` stops the outbound bridge echoing it back.
+        await self._bus.publish(
+            PollCreated(
+                post_id=post_id,
+                question=question,
+                allow_multiple=allow_multiple,
+                space_id=space_id,
+                options=tuple(options),
+                closes_at=closes_at,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_poll_vote(self, event: FederationEvent) -> None:
+        """Merge a remote voter's selection: ``option_ids`` is the whole
+        set after the change (empty — the vote was retracted), as
+        :class:`PollFederationOutbound` sends it, stamped ``at`` by the
+        voter's household (v_94; an older household sends none and is
+        stamped with its envelope's timestamp). While the poll is open
+        here the newest stamp wins in any arrival order; once it is closed
+        here nothing counts any more, whatever its stamp
+        (:meth:`set_votes_in_space`)."""
+        if self._poll_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        p = event.payload
+        post_id = str(p.get("post_id") or "")
+        raw = p.get("option_ids")
+        voter = str(p.get("voter_user_id") or "")
+        stamp = change_stamp(p.get("at"), envelope_timestamp=event.timestamp)
+        if (
+            not post_id
+            or not voter
+            or not isinstance(raw, list)
+            or len(raw) > MAX_POLL_OPTIONS
+            or not all(isinstance(o, str) and o for o in raw)
+            or stamp is None
+        ):
+            log_not_applied(event, what="poll vote", row_id=post_id, reason="malformed")
             return
         if not await self._acts_for(event, space_id, voter, "poll vote", post_id):
             return
-        # The repo proves, in the same transaction as the write, that the
+        if await self._poll_missing(event, space_id, post_id, what="poll vote"):
+            return
+        # The repo proves, in the same transaction as the write, that every
         # option belongs to this post (a mismatched pair would corrupt the
-        # tally) and that the post lives in the gated space.
-        if not await self._poll_repo.cast_vote_in_space(
+        # tally) and that the post lives in the gated space — and merges by
+        # the stamp.
+        outcome = await self._poll_repo.set_votes_in_space(
             space_id=space_id,
             post_id=post_id,
-            option_id=option_id,
+            option_ids=list(raw),
             voter_user_id=voter,
-        ):
+            stamp=stamp,
+        )
+        if outcome == "refused":
             log_cross_space_refusal(
-                event, space_id=space_id, what="poll option", row_id=option_id
+                event, space_id=space_id, what="poll vote", row_id=post_id
             )
+            return
+        if outcome == "late":
+            # A closed poll's result stands (``PollService.cast_vote``).
+            log_not_applied(
+                event,
+                what="poll vote",
+                row_id=post_id,
+                reason="the poll is closed",
+            )
+            return
+        if outcome == "kept":
+            return  # a re-delivery, or older than the one that stands
+        # The open SPA re-reads the tally.
+        # ``origin_instance_id`` stops the outbound bridge echoing it back.
+        await self._bus.publish(
+            PollVoted(
+                post_id=post_id,
+                voter_user_id=voter,
+                option_ids=tuple(dict.fromkeys(raw)),
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     async def _on_poll_closed(self, event: FederationEvent) -> None:
         if self._poll_repo is None:
@@ -1963,9 +2221,15 @@ class SpaceContentInboundHandlers:
             return
         # Only the poll's author closes it (``PollService.close_poll``, or
         # its household's deadline sweep).
+        if await self._poll_missing(event, space_id, post_id, what="poll close"):
+            return
         if not await self._post_owner_acts(event, space_id, post_id, what="poll"):
             return
         meta = await self._poll_repo.get_meta(post_id)
+        # A close only ever turns on, and it carries no stamp to order
+        # votes by: once it is applied here no vote counts here any more
+        # (``set_votes_in_space``), so a re-sent or forged close can erase
+        # nothing.
         if not await self._poll_repo.close_in_space(post_id, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="poll", row_id=post_id
@@ -2018,6 +2282,8 @@ class SpaceContentInboundHandlers:
             event, space_id, post_id, what="schedule poll"
         )
         if anchor is None:
+            return
+        if self._system_post_refused(event, space_id, anchor, what="schedule poll"):
             return
         if not await self._authorship.may_author(event, space_id, anchor.author):
             await self._authorship.hold_or_refuse(
@@ -2498,13 +2764,9 @@ class SpaceContentInboundHandlers:
             return
         is_new = await self._gallery_repo.get_item(item_id) is None
         media = await self._localize_media(
-            event, space_id, item.id, [item.thumbnail_url, item.url]
+            event, space_id, item.id, item_media_urls("gallery", item)
         )
-        item = replace(
-            item,
-            url=media.url(item.url) or "",
-            thumbnail_url=media.url(item.thumbnail_url) or "",
-        )
+        item = media.item("gallery", item)
         try:
             if not await self._gallery_repo.create_item_in_space(
                 item, space_id=space_id
@@ -2683,7 +2945,7 @@ class SpaceContentInboundHandlers:
         # Same rule as ``GalleryService.delete_item``: the files go unless
         # another row still names them.
         await unlink_unreferenced(
-            self._media_dir, self._media_refs, [item.url, item.thumbnail_url]
+            self._media_dir, self._media_refs, item_media_urls("gallery", item)
         )
         await self._bus.publish(
             GalleryItemDeleted(
@@ -3189,13 +3451,10 @@ class SpaceContentInboundHandlers:
         names = self._media_names.localize(
             space_id,
             event.from_instance,
-            list(listing.image_urls),
+            item_media_urls("bazaar", listing),
             hashes=parse_file_hashes(event.payload),
         )
-        listing = replace(
-            listing,
-            image_urls=tuple(names.url(u) or u for u in listing.image_urls),
-        )
+        listing = names.item("bazaar", listing)
         try:
             if not await self._bazaar_repo.save_listing(listing, space_id=space_id):
                 # The wrapper post is not in this space (or has not landed
@@ -3412,10 +3671,12 @@ class SpaceContentInboundHandlers:
         """F7: mirror an offer acceptance on the bidder + every other
         member's local row.
 
-        ``accept_offer`` flips ``accepted=1`` for the row; the matching
-        F8 BAZAAR_LISTING_UPDATED handler will fire separately and
-        mark the listing sold via ``mark_sold``. Both are idempotent
-        so the order doesn't matter.
+        ``advance_bid`` moves the row to ``accepted`` — a bid only ever
+        advances (``BID_STATES``), so an accept that crosses the bidder's
+        withdrawal ends the same on every household whichever arrives
+        first; the matching F8 BAZAAR_LISTING_UPDATED handler will fire
+        separately and mark the listing sold via ``mark_sold``. Both are
+        idempotent so the order doesn't matter.
         """
         if self._bazaar_repo is None:
             return
@@ -3438,16 +3699,10 @@ class SpaceContentInboundHandlers:
             event, space_id, listing.seller_user_id, "bazaar offer", bid_id
         ):
             return
-        try:
-            await self._bazaar_repo.accept_offer(bid_id, space_id=space_id)
-        except Exception as exc:
-            log.debug(
-                "BAZAAR_OFFER_ACCEPTED apply failed bid=%s: %s",
-                bid_id,
-                exc,
-                exc_info=True,
-            )
-            return
+        if not await self._bazaar_repo.advance_bid(
+            bid_id, "accepted", space_id=space_id
+        ):
+            return  # a replay: accepted here already
         # The buyer hears of it on their own household.
         await self._bus.publish(
             BazaarOfferAccepted(
@@ -3715,9 +3970,12 @@ class SpaceContentInboundHandlers:
         takes the decline — only from the household seating the listing's
         seller (a demoted seat still may, as for offers). The reason is
         kept only where the bidder is one of OUR people; the seller's
-        household sends it to no one else. The first answer stands: a
-        bid already accepted / declined / withdrawn here is left as it is,
-        so a replay or a second decline can't swap the words.
+        household sends it to no one else. A bid only ever advances
+        (``BID_STATES``: pending → withdrawn → declined → accepted): a
+        decline takes effect on a pending bid and on one whose withdrawal
+        crossed it on the way — every household ends on the decline,
+        whichever of the two it heard first; an accepted bid outranks it,
+        and a replay or a second decline can't swap the words.
         """
         assert self._bazaar_repo is not None
         if status != "rejected":
@@ -3745,20 +4003,17 @@ class SpaceContentInboundHandlers:
                 user_id=listing.seller_user_id,
             )
             return
-        if bid.accepted or bid.rejected or bid.withdrawn:
-            log_not_applied(
-                event, what="bazaar bid", row_id=bid_id, reason="already answered"
-            )
-            return
         kept = (
             reason
             if reason and await self._authorship.is_local_user(bid.bidder_user_id)
             else None
         )
-        try:
-            await self._bazaar_repo.reject_offer(bid_id, reason=kept)
-        except (BidStateError, ValueError) as exc:
-            log_not_applied(event, what="bazaar bid", row_id=bid_id, reason=str(exc))
+        if not await self._bazaar_repo.advance_bid(
+            bid_id, "rejected", space_id=space_id, reason=kept
+        ):
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="already answered"
+            )
             return
         # The bidder hears of it on their own household (the notification
         # gate drops it everywhere else); open listings refresh.
@@ -3784,10 +4039,12 @@ class SpaceContentInboundHandlers:
         ``bid_id``, ``status: withdrawn``). Every member household mirrors
         the bid, so every one takes the withdrawal — only from the
         household seating the bidder (a seat demoted to follower since
-        still may, as for an offer), and only as the bidder's own household
-        allows it: the bid neither accepted, declined nor withdrawn yet,
-        on a listing still open here (active, before ``end_time`` — past
-        it the high bid is the winner). A replay is a no-op. The high bid
+        still may, as for an offer), on a listing still open here (active,
+        before ``end_time`` — past it the high bid is the winner). A bid
+        only ever advances (``BID_STATES``): a withdrawal takes effect on a
+        pending bid only — a bid the seller declined or accepted outranks
+        it, in whichever order they arrive, so a declined bid keeps the
+        seller's answer and reason. A replay is a no-op. The high bid
         recomputes on its own (``highest_bid`` skips a withdrawn bid); the
         seller is not notified, open listings refresh.
         """
@@ -3812,20 +4069,17 @@ class SpaceContentInboundHandlers:
                 user_id=bid.bidder_user_id,
             )
             return
-        if bid.accepted or bid.rejected or bid.withdrawn:
-            log_not_applied(
-                event, what="bazaar bid", row_id=bid_id, reason="already answered"
-            )
-            return
         if not listing.is_open(datetime.now(UTC)):
             log_not_applied(
                 event, what="bazaar bid", row_id=bid_id, reason="listing closed"
             )
             return
-        try:
-            await self._bazaar_repo.withdraw_bid(bid_id)
-        except (BidStateError, ValueError) as exc:
-            log_not_applied(event, what="bazaar bid", row_id=bid_id, reason=str(exc))
+        if not await self._bazaar_repo.advance_bid(
+            bid_id, "withdrawn", space_id=space_id
+        ):
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="already answered"
+            )
             return
         await self._bus.publish(
             BazaarBidWithdrawn(
@@ -4001,6 +4255,20 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(event, space_id=space_id, what=what, row_id=post_id)
             return None
         return post
+
+    def _system_post_refused(
+        self, event: FederationEvent, space_id: str, anchor: Post, *, what: str
+    ) -> bool:
+        """A poll / schedule poll belongs to a PERSON's post. A system (bot)
+        post has no author's household: ``may_author`` admits the system
+        author from any sender (any household may relay a bot's post), so
+        without this any member household could hang a poll on a bot post."""
+        if anchor.author != SYSTEM_AUTHOR:
+            return False
+        self._authorship.log_refusal(
+            event, space_id=space_id, what=what, row_id=anchor.id, user_id=anchor.author
+        )
+        return True
 
     async def _post_owner_acts(
         self,

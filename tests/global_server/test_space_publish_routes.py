@@ -18,8 +18,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from socialhome.authority_cert import sign_authority_cert
 from socialhome.crypto import (
     b64url_encode,
+    derive_instance_id,
     generate_identity_keypair,
     sign_ed25519,
 )
@@ -173,7 +175,11 @@ async def test_publish_space_happy_path_active(gfs_client):
     resp = await gfs_client.post("/gfs/spaces/sp-1/publish", json=body)
     assert resp.status == 200
     payload = await resp.json()
-    assert payload == {"status": "active", "space_id": "sp-1"}
+    assert payload == {
+        "status": "active",
+        "space_id": "sp-1",
+        "identity_public_key": "",
+    }
 
     listing = await gfs_client.get("/gfs/spaces")
     items = (await listing.json())["spaces"]
@@ -1423,3 +1429,227 @@ async def test_a_re_publish_keeps_an_accepted_space_active(gfs_client):
     assert (await fed_repo.get_space("sp-acc")).status == "active"
     await fed_repo.set_space_status("sp-acc", "banned")
     assert await publish("Again") == "banned"
+
+
+# ── ``withdrawn: true`` — a pin-only re-pin, and the pinned key in the answer ──
+
+
+async def _derivable_owner(app):
+    """Register an owner whose instance id DERIVES from its key, as an
+    authority cert requires. Returns ``(keypair, instance_id)``."""
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    await app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id=owner_id,
+            display_name="o",
+            public_key=owner.public_key.hex(),
+            status="active",
+            auto_accept=True,
+        )
+    )
+    return owner, owner_id
+
+
+def _pin_body(space_id: str, owner_id: str, *, name: str, key_hex: str) -> dict:
+    return {
+        "space_id": space_id,
+        "owning_instance": owner_id,
+        "name": name,
+        "description": "",
+        "about_markdown": "",
+        "cover_url": "",
+        "icon_url": "",
+        "min_age": 0,
+        "category": "general",
+        "accent_color": "#D2542A",
+        "primary_color": "#D2542A",
+        "identity_public_key": key_hex,
+    }
+
+
+async def test_publish_answers_with_the_key_this_gfs_pins(gfs_client):
+    """Every publish answers with the pinned authority key, so a household
+    can tell whether its re-pin took: an uncertified swap is answered with
+    the OLD key."""
+    owner, owner_id = await _derivable_owner(gfs_client.server.app)
+    k1 = generate_identity_keypair()
+    k2 = generate_identity_keypair()
+    first = _sign_publish_body(
+        _pin_body("sp-pin", owner_id, name="Pin", key_hex=k1.public_key.hex()),
+        seed=owner.private_key,
+        ts=_now_iso(),
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-pin/publish", json=first)
+    assert await resp.json() == {
+        "status": "active",
+        "space_id": "sp-pin",
+        "identity_public_key": k1.public_key.hex(),
+    }
+    swap = _sign_publish_body(
+        _pin_body("sp-pin", owner_id, name="Pin", key_hex=k2.public_key.hex()),
+        seed=owner.private_key,
+        ts=_now_iso(),
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-pin/publish", json=swap)
+    assert (await resp.json())["identity_public_key"] == k1.public_key.hex()
+
+
+async def test_publish_without_a_key_answers_an_empty_pin(gfs_client):
+    seed, _pk = await _register_owner(gfs_client.server.app)
+    body = _sign_publish_body(
+        _pin_body("sp-nk", "owner.home", name="NK", key_hex=""),
+        seed=seed,
+        ts=_now_iso(),
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-nk/publish", json=body)
+    assert (await resp.json())["identity_public_key"] == ""
+
+
+async def _gfs_key(gfs_client) -> str:
+    """The identity key this GFS serves — what a household pins and binds."""
+    return (await (await gfs_client.get("/gfs/info")).json())["public_key"]
+
+
+@pytest.mark.security
+async def test_unpublish_route_takes_the_addressed_server(gfs_client):
+    seed, _pk = await _register_owner(gfs_client.server.app)
+    first = _sign_publish_body(
+        _pin_body("sp-ua", "owner.home", name="UA", key_hex=""),
+        seed=seed,
+        ts=_now_iso(),
+    )
+    assert (
+        await gfs_client.post("/gfs/spaces/sp-ua/publish", json=first)
+    ).status == 200
+    fed_repo = gfs_client.server.app[gfs_fed_repo_key]
+    for key, status, withdrawn in (
+        ("6b" * 32, 403, False),
+        (await _gfs_key(gfs_client), 200, True),
+    ):
+        ts = _now_iso()
+        canonical = json.dumps(
+            {
+                "action": "unpublish",
+                "gfs_key": key,
+                "owning_instance": "owner.home",
+                "space_id": "sp-ua",
+                "ts": ts,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        body = {
+            "owning_instance": "owner.home",
+            "ts": ts,
+            "gfs_key": key,
+            "signature": b64url_encode(sign_ed25519(seed, canonical)),
+        }
+        resp = await gfs_client.post("/gfs/spaces/sp-ua/unpublish", json=body)
+        assert resp.status == status
+        assert (await fed_repo.get_space("sp-ua")).withdrawn is withdrawn
+
+
+@pytest.mark.security
+async def test_withdrawn_publish_route_repins_a_withdrawn_listing(gfs_client):
+    app = gfs_client.server.app
+    fed_repo = app[gfs_fed_repo_key]
+    owner, owner_id = await _derivable_owner(app)
+    k1 = generate_identity_keypair()
+    k2 = generate_identity_keypair()
+    first = _sign_publish_body(
+        _pin_body("sp-wd", owner_id, name="Birds", key_hex=k1.public_key.hex()),
+        seed=owner.private_key,
+        ts=_now_iso(),
+    )
+    assert (
+        await gfs_client.post("/gfs/spaces/sp-wd/publish", json=first)
+    ).status == 200
+    await fed_repo.set_space_withdrawn("sp-wd", True)
+    cert = sign_authority_cert(
+        space_id="sp-wd",
+        owner_instance_id=owner_id,
+        owner_seed=owner.private_key,
+        owner_pk_hex=owner.public_key.hex(),
+        authority_pk_hex=k2.public_key.hex(),
+        key_epoch=1,
+    )
+    repin = _sign_publish_body(
+        {
+            **_pin_body("sp-wd", owner_id, name="", key_hex=k2.public_key.hex()),
+            "authority_cert": cert,
+            "withdrawn": True,
+            "gfs_key": await _gfs_key(gfs_client),
+        },
+        seed=owner.private_key,
+        ts=_now_iso(),
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-wd/publish", json=repin)
+    assert resp.status == 200
+    # The same body minus the addressee, or for another server: refused.
+    for other in ({}, {"gfs_key": "6b" * 32}):
+        bad = _sign_publish_body(
+            {
+                **_pin_body("sp-wd", owner_id, name="", key_hex=k2.public_key.hex()),
+                "authority_cert": cert,
+                "withdrawn": True,
+                **other,
+            },
+            seed=owner.private_key,
+            ts=_now_iso(),
+        )
+        refused = await gfs_client.post("/gfs/spaces/sp-wd/publish", json=bad)
+        assert refused.status == 403
+    assert await resp.json() == {
+        "status": "active",
+        "space_id": "sp-wd",
+        "identity_public_key": k2.public_key.hex(),
+    }
+    stored = await fed_repo.get_space("sp-wd")
+    assert stored.withdrawn is True
+    assert stored.name == "Birds"
+    assert stored.authority_cert == cert
+    assert not await _listed(gfs_client, "sp-wd")
+
+
+@pytest.mark.security
+async def test_withdrawn_publish_route_unknown_space_is_404(gfs_client):
+    seed, _pk = await _register_owner(gfs_client.server.app)
+    body = _sign_publish_body(
+        {
+            **_pin_body("sp-gone", "owner.home", name="", key_hex=""),
+            "withdrawn": True,
+            "gfs_key": await _gfs_key(gfs_client),
+        },
+        seed=seed,
+        ts=_now_iso(),
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-gone/publish", json=body)
+    assert resp.status == 404
+    assert await resp.json() == {"error": "not listed"}
+    fed_repo = gfs_client.server.app[gfs_fed_repo_key]
+    assert await fed_repo.get_space("sp-gone") is None
+    # An unsigned caller gets the same 403 as for any space — never the 404.
+    resp = await gfs_client.post(
+        "/gfs/spaces/sp-gone/publish", json={**body, "signature": "AAAA"}
+    )
+    assert resp.status == 403
+
+
+@pytest.mark.parametrize("value", [False, "yes", 1, None])
+async def test_withdrawn_publish_route_rejects_anything_but_true(gfs_client, value):
+    seed, _pk = await _register_owner(gfs_client.server.app)
+    body = _sign_publish_body(
+        {
+            "space_id": "sp-bad",
+            "owning_instance": "owner.home",
+            "name": "Bad",
+            "withdrawn": value,
+        },
+        seed=seed,
+        ts=_now_iso(),
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-bad/publish", json=body)
+    assert resp.status == 400
+    fed_repo = gfs_client.server.app[gfs_fed_repo_key]
+    assert await fed_repo.get_space("sp-bad") is None

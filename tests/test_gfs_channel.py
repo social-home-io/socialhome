@@ -23,7 +23,6 @@ from socialhome.gfs_channel import (
     derive_channel_epoch_offset,
     derive_channel_seed,
     derive_channel_writer_seed,
-    issue_channel_cert,
     issue_channel_pass,
     issue_channel_writer_key,
     new_channel_id,
@@ -31,7 +30,6 @@ from socialhome.gfs_channel import (
     sign_publish_anon,
     sign_register,
     sign_unregister,
-    verify_channel_cert,
     verify_channel_pass,
     verify_channel_writer_key_grant,
     verify_grant,
@@ -80,68 +78,6 @@ def test_channel_key_is_unlinkable_to_space_and_writer_keys() -> None:
         derive_channel_seed(b"short", SPACE_ID, CHANNEL_ID)
     with pytest.raises(ValueError):
         derive_channel_writer_seed(SPACE_SEED, SPACE_ID, CHANNEL_ID, -1)
-
-
-def test_cert_round_trip_and_refusals() -> None:
-    cert = issue_channel_cert(
-        channel_seed=CH_SEED,
-        channel_id=CHANNEL_ID,
-        epoch=3,
-        instance_pk=OWN_PK,
-        scope="write",
-    )
-    wire = cert.to_wire()
-    assert "space_id" not in wire
-    kw = {
-        "channel_pk": CH_PK,
-        "channel_id": CHANNEL_ID,
-        "epoch": 3,
-        "author_pk": OWN_PK,
-    }
-    verify_channel_cert(cert, required_scope="comment", **kw)
-    # Forged (another key), wrong channel, stale epoch, other household.
-    other = derive_channel_seed(os.urandom(32), SPACE_ID, CHANNEL_ID)
-    forged = issue_channel_cert(
-        channel_seed=other,
-        channel_id=CHANNEL_ID,
-        epoch=3,
-        instance_pk=OWN_PK,
-        scope="write",
-    )
-    with pytest.raises(InvalidChannelSignature):
-        verify_channel_cert(forged, required_scope="comment", **kw)
-    with pytest.raises(InvalidChannelSignature):
-        verify_channel_cert(
-            cert, required_scope="comment", **{**kw, "channel_id": new_channel_id()}
-        )
-    with pytest.raises(InvalidChannelSignature):
-        verify_channel_cert(cert, required_scope="comment", **{**kw, "epoch": 4})
-    with pytest.raises(InvalidChannelSignature):
-        verify_channel_cert(
-            cert, required_scope="comment", **{**kw, "author_pk": os.urandom(32)}
-        )
-    # A tampered field breaks the signature.
-    with pytest.raises(InvalidChannelSignature):
-        verify_channel_cert(
-            dataclasses.replace(cert, epoch=4),
-            required_scope="comment",
-            **{**kw, "epoch": 4},
-        )
-    comment = issue_channel_cert(
-        channel_seed=CH_SEED,
-        channel_id=CHANNEL_ID,
-        epoch=3,
-        instance_pk=OWN_PK,
-        scope="comment",
-    )
-    with pytest.raises(InvalidChannelSignature):
-        verify_channel_cert(comment, required_scope="write", **kw)
-    with pytest.raises(UnsupportedChannelSuite):
-        verify_channel_cert(
-            dataclasses.replace(cert, channel_suite="rot13"),
-            required_scope="comment",
-            **kw,
-        )
 
 
 def test_pass_is_scope_free_and_bound() -> None:
@@ -199,7 +135,6 @@ def test_register_notice_unregister_signatures() -> None:
         gfs_instance_id="g",
         ts=TS,
         epoch=4,
-        publish_mode="trusted",
     )
     verify_notice(notice, channel_pk=CH_PK)
     with pytest.raises(InvalidChannelSignature):
@@ -262,13 +197,6 @@ def _grant(**over) -> GfsChannelGrant:
         channel_pass=issue_channel_pass(
             channel_seed=CH_SEED, channel_id=CHANNEL_ID, epoch=WIRE, instance_pk=OWN_PK
         ),
-        channel_cert=issue_channel_cert(
-            channel_seed=CH_SEED,
-            channel_id=CHANNEL_ID,
-            epoch=WIRE,
-            instance_pk=OWN_PK,
-            scope="write",
-        ),
         writer_key=issue_channel_writer_key(
             space_seed=SPACE_SEED, space_id=SPACE_ID, channel_id=CHANNEL_ID, epoch=WIRE
         ),
@@ -301,12 +229,12 @@ def test_grant_round_trip_and_verification() -> None:
         verify_grant(moved, space_pubkey=SPACE_PK, space_id=SPACE_ID, own_pk=OWN_PK)
     with pytest.raises(InvalidChannelSignature):
         verify_grant(grant, space_pubkey=SPACE_PK, space_id="other", own_pk=OWN_PK)
-    # Someone else's grant (pass / cert name another household).
+    # Someone else's grant (its pass names another household).
     with pytest.raises(InvalidChannelSignature):
         verify_grant(
             grant, space_pubkey=SPACE_PK, space_id=SPACE_ID, own_pk=os.urandom(32)
         )
-    reader = _grant(channel_cert=None, writer_key=None)
+    reader = _grant(writer_key=None)
     assert (
         verify_grant(reader, space_pubkey=SPACE_PK, space_id=SPACE_ID, own_pk=OWN_PK)
         is None
@@ -330,16 +258,14 @@ def test_epoch_offset_is_secret_per_channel_and_40_bits() -> None:
 
 def test_a_paired_members_grant_is_publish_only() -> None:
     """No pass: a paired member never takes a seat — only link-joined
-    households do. A grant that grants nothing is refused."""
-    publish_only = _grant(channel_pass=None, writer_key=None)
+    households do; it publishes with the channel writer key alone. A grant
+    that grants nothing is refused."""
+    publish_only = _grant(channel_pass=None)
     assert "channel_pass" not in publish_only.to_wire()
     assert GfsChannelGrant.from_wire(publish_only.to_wire()) == publish_only
-    assert (
-        verify_grant(
-            publish_only, space_pubkey=SPACE_PK, space_id=SPACE_ID, own_pk=OWN_PK
-        )
-        is None
-    )
-    empty = _grant(channel_pass=None, channel_cert=None, writer_key=None)
+    assert verify_grant(
+        publish_only, space_pubkey=SPACE_PK, space_id=SPACE_ID, own_pk=OWN_PK
+    ) == derive_channel_writer_seed(SPACE_SEED, SPACE_ID, CHANNEL_ID, WIRE)
+    empty = _grant(channel_pass=None, writer_key=None)
     with pytest.raises(InvalidChannelSignature):
         verify_grant(empty, space_pubkey=SPACE_PK, space_id=SPACE_ID, own_pk=OWN_PK)

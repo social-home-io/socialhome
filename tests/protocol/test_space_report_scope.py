@@ -51,6 +51,8 @@ from socialhome.app_keys import (
     db_key,
     federation_service_key,
     notification_delivery_key,
+    report_service_key,
+    space_moderation_service_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
@@ -575,3 +577,110 @@ async def test_a_reporters_household_below_v71_is_sent_no_answer(mesh):
     await _resolve_on(mesh["H"])
     assert _sent(mesh["H"], FET.SPACE_REPORT_ANSWERED) == []
     assert await _status(mesh["A"]) == ["pending"]
+
+
+# ── A household promoted later gets the reports already pending ─────────
+
+
+async def _deliver_all_in_order(mesh) -> None:
+    """Every captured send, whatever its type, in the order each household
+    sent it — the order the wire keeps."""
+    by_iid = {h.iid: h for h in mesh.values()}
+    for iid, sent in list(OUTBOX.items()):
+        batch, sent[:] = list(sent), []
+        for to, et, payload, space in batch:
+            if to in by_iid:
+                body = {**payload, "space_id": payload.get("space_id") or space}
+                await _receive(by_iid[to], _event(by_iid[iid], body, by_iid[to], et))
+
+
+async def _begin(mesh, house: House) -> None:
+    """``house``'s §25.6 ``SPACE_SYNC_BEGIN`` reaches the host — with the
+    reviewer echo when ``house`` reviews the space."""
+    h = mesh["H"]
+    payload: dict = {"sync_id": "s-1", "space_id": SID, "sync_mode": "incremental"}
+    federated = house.app[space_moderation_service_key]._federated
+    ask = getattr(federated, "held_echo", None)
+    echo = await ask(SID, h.iid) if ask is not None else None
+    if echo is not None:
+        payload["mod_held"] = echo
+    answer = getattr(h.app[report_service_key], "on_sync_begin", None)
+    if answer is not None:
+        await answer(_event(house, payload, h, FET.SPACE_SYNC_BEGIN))
+
+
+async def test_a_household_promoted_later_gets_the_pending_reports(mesh):
+    """dora is made a moderator after anna's report was filed. The host
+    used to re-send the report from the role change's bus event — BEFORE
+    it sent the role change — so D got it while it did not review yet and
+    dropped it. Now D asks once it has applied the promotion (its BEGIN
+    carries the reviewer echo) and the host re-sends then."""
+    a, h, d = mesh["A"], mesh["H"], mesh["D"]
+    # The reported post is hanna's (a report about dora's own post never
+    # goes to the household where only dora reviews).
+    for house in mesh.values():
+        await house.db.enqueue("UPDATE space_posts SET author=?", (h.user_id,))
+    await _file(a, target_type="post", target_id="p-1")
+    await _pump(mesh)
+    assert await _rows(d) == []
+    r = await h.tc.patch(
+        f"/api/spaces/{SID}/remote-members/{d.iid}/{d.user_id}",
+        json={"role": "moderator"},
+        headers=h.headers,
+    )
+    assert r.status == 200, await r.text()
+    await _deliver_all_in_order(mesh)
+    await _begin(mesh, d)
+    assert [to for to, et, *_ in OUTBOX[h.iid] if et is FET.SPACE_REPORT] == [d.iid]
+    await _pump(mesh)
+    assert [(r["space_id"], r["reporter_instance_id"]) for r in await _rows(d)] == [
+        (SID, a.iid)
+    ]
+    # Once per promotion: the next sync re-sends nothing…
+    await _begin(mesh, d)
+    assert not [1 for _to, et, *_ in OUTBOX[h.iid] if et is FET.SPACE_REPORT]
+    # …a plain member household's BEGIN (no echo) never does…
+    await _begin(mesh, a)
+    assert not [1 for _to, et, *_ in OUTBOX[h.iid] if et is FET.SPACE_REPORT]
+    # …and a household that is not the host answers nobody.
+    await (
+        mesh["C"]
+        .app[report_service_key]
+        .on_sync_begin(
+            _event(
+                d, {"space_id": SID, "mod_held": {}}, mesh["C"], FET.SPACE_SYNC_BEGIN
+            )
+        )
+    )
+    assert not OUTBOX.get(mesh["C"].iid)
+
+
+async def _mesh_only(on: House, peer: House, version: int = 71) -> None:
+    """``on`` reaches ``peer`` only over the mesh: no pairing row, just the
+    version ``peer`` claimed as a member of the space."""
+    await on.db.enqueue("DELETE FROM remote_instances WHERE id=?", (peer.iid,))
+    await on.db.enqueue(
+        "UPDATE space_instances SET proto_version=? WHERE instance_id=?",
+        (version, peer.iid),
+    )
+
+
+async def test_a_mesh_only_reviewer_household_gets_reports_and_answers(mesh):
+    """A reviewer household — or a reporter's — reached only over the mesh
+    is judged by the version it claimed as a space member, not by a pairing
+    row it does not have. (The real version checks run here.)"""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    await _at_v71(mesh)
+    for house in (a, h):
+        await _mesh_only(house, c)
+    await _mesh_only(h, a)
+    # The first fan-out reaches the mesh-only moderator household…
+    await _file(a, target_type="post", target_id="p-1")
+    assert {to for to, *_ in _sent(a, FET.SPACE_REPORT)} == {h.iid, c.iid}
+    await _pump(mesh)
+    assert [r["reporter_instance_id"] for r in await _rows(c)] == [a.iid]
+    # …so does the host's re-delivery…
+    assert await h.app[report_service_key].resend_pending(SID, c.iid) == 1
+    # …and the host's "reviewed" reaches the mesh-only reporter household.
+    await _resolve_on(h, dismissed=True)
+    assert [to for to, *_ in _sent(h, FET.SPACE_REPORT_ANSWERED)] == [a.iid]

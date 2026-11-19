@@ -38,6 +38,7 @@
   "notification.space.feature.stickies": "Stickies",
   "notification.space.feature.calendar": "Agenda-items",
   "notification.space.admins_reconfirm": "Hersteld uit back-up: controleer de beheerders van de ruimte en zet gedelegeerd beheer daarna weer aan",
+  "notification.space.delegation_blocked": "Beheerders kunnen in een space nog niet namens jou handelen: een van de GFS'en kan geen nieuwe space-sleutel aannemen of is niet bereikbaar",
   "notification.space.report.filed": "Nieuwe melding in {space_name}",
   "dashboard.login.title": "Dashboard openen",
   "dashboard.login.password": "Dashboardwachtwoord",

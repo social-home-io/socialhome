@@ -151,3 +151,36 @@ def test_long_summary_is_folded():
     # with a space.
     for line in payload.split("\r\n"):
         assert len(line.encode("utf-8")) <= 75
+
+
+def _unfolded(payload: bytes) -> list[str]:
+    """The feed's logical lines (RFC 5545 §3.1 unfolding)."""
+    return payload.decode().replace("\r\n ", "").split("\r\n")
+
+
+def test_a_rule_with_a_line_break_never_starts_another_property():
+    """A rule stored before the RECUR check (or from an older household)
+    could carry ``\\r\\nURL:…`` — it is not written, so no subscriber's
+    calendar app is told to fetch a third-party URL."""
+    for rule in (
+        "FREQ=WEEKLY;X=1\r\nURL:https://evil.example/x",
+        "FREQ=BOGUS\nATTACH:https://evil.example/a",
+        "FREQ=DAILY:URL=x",
+    ):
+        lines = _unfolded(serialize_feed([_ev(rrule=rule)]))
+        assert not any(line.startswith(("URL", "ATTACH", "RRULE")) for line in lines)
+    lines = _unfolded(serialize_feed([_ev(rrule="FREQ=WEEKLY;BYDAY=MO,-1FR")]))
+    assert "RRULE:FREQ=WEEKLY;BYDAY=MO,-1FR" in lines
+
+
+def test_user_text_cannot_end_its_line():
+    """SUMMARY / DESCRIPTION / LOCATION are RFC 5545 TEXT: a line break is
+    escaped, a CR, any other control character and U+2028 / U+2029 are
+    dropped — none can start a property."""
+    evil = "Hi\r\nURL:https://evil.example\rX\x0bY Z ,;\\"
+    payload = serialize_feed([_ev(summary=evil, description=evil, location=evil)])
+    lines = _unfolded(payload)
+    assert not any(line.startswith("URL") for line in lines)
+    assert b"\x0b" not in payload and " ".encode() not in payload
+    summary = next(line for line in lines if line.startswith("SUMMARY:"))
+    assert summary == r"SUMMARY:Hi\nURL:https://evil.example" + r"XYZ\,\;\\"

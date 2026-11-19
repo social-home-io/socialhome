@@ -77,6 +77,9 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   // Listing a space on a GFS: only a global space, on servers its owner
   // picks. Publishing a public space would make it global (a tier change).
   TIER_CHANGE_REQUIRED: () => t('error.tier_change_required'),
+  // Admins may hold the space key: never listed on a GFS that can't take
+  // a new one (a revoked admin would keep it there).
+  GFS_KEY_ROTATION_UNSUPPORTED: () => t('error.gfs_key_rotation_unsupported'),
   GFS_SELECTION_REQUIRED: () => t('error.gfs_selection_required'),
   GFS_SELECTION_INVALID: (_b, p) => {
     switch (p.reason) {
@@ -95,6 +98,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   SUBSCRIBE_NOT_ALLOWED: () => t('error.subscribe_not_allowed'),
   SUBSCRIBER_READ_ONLY: () => t('error.subscriber_read_only'),
   SPACE_ARCHIVED: () => t('error.space_archived'),
+  REACTION_LIMIT: () => t('error.reaction_limit'),
   INVALID_LINK: () => t('error.invalid_link'),
   NOT_PAIRED: () => t('error.not_paired'),
   HOST_NOT_REACHABLE: () => t('error.host_not_reachable'),
@@ -151,7 +155,11 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   BAZAAR_FAQ_USED_UP: (_b, p) => t('error.bazaar_faq_used_up', { max: str(p, 'max') || '30' }),
   BAZAAR_FAQ_RATE_LIMITED: () => t('error.bazaar_faq_rate_limited'),
   // Pictures.
-  IMAGE_TOO_LARGE: (_b, p) => t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
+  // max_kb: a space cover / icon that cannot be re-encoded under its cap
+  // (1 kB = 1000 B); max_mb: an upload over the size limit.
+  IMAGE_TOO_LARGE: (_b, p) => p.max_kb !== undefined
+    ? t('error.image_too_large_kb', { max_kb: str(p, 'max_kb') })
+    : t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
   APP_BUNDLE_TOO_LARGE: () => t('error.app_bundle_too_large'),
   APP_DOWNLOAD_FAILED: () => t('error.app_download_failed'),
   APP_CATALOG_DISABLED: () => t('error.app_catalog_disabled'),
@@ -184,6 +192,20 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     }),
   VIDEO_UNREADABLE: () => t('error.video_unreadable'),
   TRANSCODE_QUEUE_FULL: () => t('error.transcode_queue_full'),
+  // A space page, calendar event or space settings over the limit of its
+  // kind, measured as a whole (413); max_kb is that limit (1 kB = 1000 B).
+  SPACE_ITEM_TOO_LARGE: (_b, p) => p.max_kb === undefined
+    ? null
+    : t('error.space_item_too_large', { max_kb: str(p, 'max_kb') }),
+  // Caps of a space's name / emoji and of a calendar event's lists (422).
+  SPACE_NAME_TOO_LONG: (_b, p) => p.max === undefined
+    ? null
+    : t('error.space_name_too_long', { max: str(p, 'max') }),
+  SPACE_EMOJI_TOO_LONG: () => t('error.space_emoji_too_long'),
+  CALENDAR_RRULE_INVALID: () => t('error.calendar_rrule_invalid'),
+  CALENDAR_ATTENDEES_INVALID: (_b, p) => p.max === undefined
+    ? null
+    : t('error.calendar_attendees_invalid', { max: str(p, 'max') }),
   // Private albums (D7): privacy follows the upload.
   // Never names the person: apiErrors stays free of stores (no import cycle).
   ALBUM_AUDIENCE: (_b, p) => {

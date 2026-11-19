@@ -15,32 +15,25 @@ from socialhome.authority_sig import (
     authority_signing_bytes,
 )
 from socialhome.canonical_json import canonical_bytes
-from socialhome.domain.gfs_channel import ChannelCert
 from socialhome.domain.gfs_space_media import (
     ADDR_SUITE_SM1,
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
-    AUTH_CHANNEL_CERT,
-    AUTH_WRITER_CERT,
+    AUTH_KINDS_BY_SCOPE,
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_PUT_PREFIX,
     SCOPE_CHANNEL,
     SCOPE_SPACE,
     SPACE_MEDIA_AUTH_MAX_CHARS,
-    SPACE_MEDIA_SIG_SUITE_ED25519,
     SPACE_MEDIA_WRITER_PREFIX,
     SUPPORTED_ADDR_SUITES,
-    SUPPORTED_SPACE_MEDIA_SIG_SUITES,
     InvalidSpaceMediaAuth,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
     UnsupportedSpaceMediaAddrSuite,
-    UnsupportedSpaceMediaSigSuite,
     media_delete_payload,
-    require_space_media_sig_suite,
     space_media_address,
 )
-from socialhome.domain.writer_cert import WriterCert
 from socialhome.moment_public_media import MAX_BLOB_BYTES
 
 BID = "ab" * 32
@@ -63,24 +56,15 @@ CH_CLAIM = SpaceMediaClaim(
     ts=1_000_000,
 )
 
-CERT = WriterCert(
-    cert_suite="ed25519",
-    space_id="sp-1",
-    epoch=3,
-    instance_pk="A" * 43,
-    scope="write",
-    issued_at=1,
-    cert_sig="S" * 86,
-)
-CH_CERT = ChannelCert(
-    channel_suite="ed25519",
-    channel_id=CHANNEL,
-    epoch=3,
-    instance_pk="A" * 43,
-    scope="comment",
-    issued_at=1,
-    cert_sig="S" * 86,
-)
+CERT_WIRE = {
+    "cert_suite": "ed25519",
+    "space_id": "sp-1",
+    "epoch": 3,
+    "instance_pk": "A" * 43,
+    "scope": "write",
+    "issued_at": 1,
+    "cert_sig": "S" * 86,
+}
 
 
 def _b64(obj: dict) -> str:
@@ -163,12 +147,11 @@ def test_channel_kind_signs_the_claim_after_its_own_prefix():
 
 
 def test_writer_bytes_bind_the_kind_epoch_and_scope():
-    a = CLAIM.writer_signing_bytes(kind=AUTH_WRITER_CERT, epoch=3)
+    a = CLAIM.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=3)
     assert a == SPACE_MEDIA_WRITER_PREFIX + canonical_bytes(
-        {**CLAIM.signing_body(), "auth": AUTH_WRITER_CERT, "epoch": 3}
+        {**CLAIM.signing_body(), "auth": AUTH_WRITER_KEY, "epoch": 3}
     )
-    assert a != CLAIM.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=3)
-    assert a != CLAIM.writer_signing_bytes(kind=AUTH_WRITER_CERT, epoch=4)
+    assert a != CLAIM.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=4)
     assert CLAIM.writer_signing_bytes(
         kind=AUTH_WRITER_KEY, epoch=3
     ) != CH_CLAIM.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=3)
@@ -185,14 +168,6 @@ def test_writer_bytes_bind_the_kind_epoch_and_scope():
         ),
         SpaceMediaUploadAuth(
             claim=CLAIM,
-            kind=AUTH_WRITER_CERT,
-            sig="x" * 86,
-            sig_suite=SPACE_MEDIA_SIG_SUITE_ED25519,
-            epoch=3,
-            writer_cert=CERT,
-        ),
-        SpaceMediaUploadAuth(
-            claim=CLAIM,
             kind=AUTH_WRITER_KEY,
             sig="x" * 86,
             sig_suite="ed25519",
@@ -203,28 +178,13 @@ def test_writer_bytes_bind_the_kind_epoch_and_scope():
         ),
         SpaceMediaUploadAuth(
             claim=CH_CLAIM,
-            kind=AUTH_CHANNEL_CERT,
-            sig="x" * 86,
-            sig_suite="ed25519",
-            epoch=3,
-            channel_cert=CH_CERT,
-        ),
-        SpaceMediaUploadAuth(
-            claim=CH_CLAIM,
             kind=AUTH_WRITER_KEY,
             sig="x" * 86,
             sig_suite="ed25519",
             epoch=3,
         ),
     ],
-    ids=[
-        "authority",
-        "writer_cert",
-        "writer_key",
-        "channel",
-        "channel_cert",
-        "channel_writer_key",
-    ],
+    ids=["authority", "writer_key", "channel", "channel_writer_key"],
 )
 def test_header_round_trips(auth):
     header = auth.to_header()
@@ -232,27 +192,12 @@ def test_header_round_trips(auth):
     assert SpaceMediaUploadAuth.from_header(header) == auth
 
 
-def test_writer_cert_never_carries_the_user_binding():
-    bound = WriterCert(
-        **{
-            **{f: getattr(CERT, f) for f in CERT.__slots__},
-            "writer_user_ids": ("u1",),
-            "users_sig": "U" * 86,
-            "users_sig_suite": "ed25519",
-        }
-    )
-    auth = SpaceMediaUploadAuth(
-        claim=CLAIM,
-        kind=AUTH_WRITER_CERT,
-        sig="x",
-        sig_suite="ed25519",
-        epoch=3,
-        writer_cert=bound,
-    )
-    wire = auth.to_wire()
-    assert "writer_user_ids" not in wire["writer_cert"]
-    with pytest.raises(InvalidSpaceMediaAuth):
-        SpaceMediaUploadAuth.from_header(_b64({**wire, "writer_cert": bound.to_wire()}))
+def test_no_kind_names_a_household():
+    # v_90 — the identified writer-cert / channel-cert kinds are gone.
+    assert AUTH_KINDS_BY_SCOPE == {
+        SCOPE_SPACE: frozenset({AUTH_AUTHORITY, AUTH_WRITER_KEY}),
+        SCOPE_CHANNEL: frozenset({AUTH_CHANNEL, AUTH_WRITER_KEY}),
+    }
 
 
 def _wire(claim=CLAIM, **over) -> dict:
@@ -280,10 +225,9 @@ def _wire(claim=CLAIM, **over) -> dict:
         # Each scope takes only its own kinds.
         _b64(_wire(auth=AUTH_CHANNEL)),
         _b64(_wire(CH_CLAIM, auth=AUTH_AUTHORITY)),
-        _b64(
-            _wire(CH_CLAIM, auth=AUTH_WRITER_CERT, epoch=3, writer_cert=CERT.to_wire())
-        ),
-        _b64(_wire(auth=AUTH_CHANNEL_CERT, epoch=3, channel_cert=CH_CERT.to_wire())),
+        # The identified kinds are gone (v_90).
+        _b64(_wire(auth="writer_cert", epoch=3, writer_cert=CERT_WIRE)),
+        _b64(_wire(CH_CLAIM, auth="channel_cert", epoch=3, channel_cert={"x": 1})),
         _b64(_wire(size=0)),
         _b64(_wire(size=MAX_BLOB_BYTES + 1)),
         _b64(_wire(size=True)),
@@ -294,10 +238,8 @@ def _wire(claim=CLAIM, **over) -> dict:
         _b64(_wire(sig_suite="")),
         _b64(_wire(epoch=3)),
         _b64(_wire(auth=AUTH_WRITER_KEY)),
-        _b64(_wire(auth=AUTH_WRITER_KEY, epoch=3, writer_cert=CERT.to_wire())),
-        _b64(_wire(auth=AUTH_WRITER_CERT, epoch=3)),
-        _b64(_wire(auth=AUTH_WRITER_CERT, epoch=-1, writer_cert=CERT.to_wire())),
-        _b64(_wire(CH_CLAIM, auth=AUTH_CHANNEL_CERT, epoch=3, channel_cert={"x": 1})),
+        _b64(_wire(auth=AUTH_WRITER_KEY, epoch=3, writer_cert=CERT_WIRE)),
+        _b64(_wire(auth=AUTH_WRITER_KEY, epoch=-1)),
         _b64(_wire(extra=1)),
         "a" * (SPACE_MEDIA_AUTH_MAX_CHARS + 1),
     ],
@@ -305,13 +247,6 @@ def _wire(claim=CLAIM, **over) -> dict:
 def test_malformed_headers_are_refused(raw):
     with pytest.raises(InvalidSpaceMediaAuth):
         SpaceMediaUploadAuth.from_header(raw)
-
-
-def test_cert_holder_suite_is_checked_never_defaulted():
-    assert SPACE_MEDIA_SIG_SUITE_ED25519 in SUPPORTED_SPACE_MEDIA_SIG_SUITES
-    assert require_space_media_sig_suite("ed25519") == "ed25519"
-    with pytest.raises(UnsupportedSpaceMediaSigSuite):
-        require_space_media_sig_suite("ed25519+mldsa65")
 
 
 def test_delete_payload_binds_scope_blob_and_time():

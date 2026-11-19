@@ -18,8 +18,8 @@ from ..app_keys import (
     media_signer_key,
     media_transcode_repo_key,
     media_transcode_service_key,
-    relay_media_refill_key,
     space_media_gfs_fetcher_key,
+    space_media_wanted_key,
     storage_quota_service_key,
 )
 from ..auth import SIGNED_URL_PRINCIPAL
@@ -27,14 +27,15 @@ from ..csp import media_response_headers, media_type_for
 from ..domain.errors import CodedError
 from ..domain.media_constraints import (
     AUDIO_ACCEPTED_MIMES,
+    DM_MEDIA_PREFIX,
     FILE_DENIED_EXTENSIONS,
     FILE_MAX_UPLOAD_BYTES,
     VIDEO_MAX_UPLOAD_BYTES,
+    is_safe_media_name,
 )
 from ..media.audio_processor import AudioProcessor
 from ..media.image_processor import ImageProcessor, sniff_image_mime
 from ..security import error_response
-from ..services.inbound_media_store import DM_MEDIA_PREFIX, is_safe_media_name
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -135,12 +136,13 @@ class MediaServeView(BaseView):
         if not await aiofiles.os.path.isfile(file_path):
             fetcher = self.request.app.get(space_media_gfs_fetcher_key)
             if fetcher is None or not await fetcher.ensure_local(filename):
-                # v_87 — a file pushed to us through the GFS relay that never
-                # arrived: ask its relay-seated host to re-push it (in the
-                # background; this view still answers 404).
-                refill = self.request.app.get(relay_media_refill_key)
-                if refill is not None:
-                    refill.schedule(filename)
+                # v_92 — a file of a live space item that never reached us:
+                # a member household asks the host (then a trusted helper)
+                # with SPACE_MEDIA_WANTED, in the background; this view
+                # still answers 404.
+                wanted = self.request.app.get(space_media_wanted_key)
+                if wanted is not None:
+                    wanted.schedule(filename)
                 return error_response(404, "NOT_FOUND", "Media file not found.")
         gallery = self.request.app.get(gallery_service_key)
         # A private album's file is never kept in a browser or proxy cache:

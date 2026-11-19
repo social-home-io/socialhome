@@ -46,6 +46,7 @@ class AbstractFederationRepo(Protocol):
         include_unpairing: bool = False,
     ) -> RemoteInstance | None: ...
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance: ...
+    async def save_pending_instance(self, inst: RemoteInstance) -> bool: ...
     async def set_proto_version(
         self,
         instance_id: str,
@@ -78,6 +79,16 @@ class AbstractFederationRepo(Protocol):
         *,
         token: str | None = None,
     ) -> bool: ...
+    async def upgrade_seat_instance(
+        self,
+        inst: RemoteInstance,
+        *,
+        token: str | None = None,
+    ) -> bool: ...
+    async def cancel_pairing_sessions(
+        self, *, local_inbox_id: str, peer_identity_pk: str
+    ) -> list[str]: ...
+    async def pairing_token_for_inbox(self, local_inbox_id: str) -> str | None: ...
     async def mark_unpairing(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
     async def mark_unreachable(self, instance_id: str) -> None: ...
@@ -231,6 +242,44 @@ class SqliteFederationRepo:
 
         await self._db.transact(_run)
         return inst
+
+    async def save_pending_instance(self, inst: RemoteInstance) -> bool:
+        """Write the pending half *inst* of a pairing handshake as its
+        household's row — unless that row is a live space seat. Returns
+        whether it was written; ``False`` means the row is a seat and was
+        not touched (the caller keeps the half beside it,
+        :class:`~socialhome.federation.pending_pairing.PendingPairings`).
+
+        ONE transaction decides and writes, so a seat made between a
+        caller's read and its write is never overwritten by a pending
+        half. An unpair tombstone is replaced outright, as in
+        :meth:`save_instance`. Unlike that upsert, the row takes the
+        half's ``local_inbox_id`` even over an existing row: a new
+        handshake hands out a new inbox, and the session that confirms it
+        is bound to that inbox (``handle_peer_confirm``).
+        """
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT status, source FROM remote_instances WHERE id=?",
+                (inst.id,),
+            ).fetchone()
+            if row is not None and (str(row[0]), str(row[1])) == (
+                PairingStatus.CONFIRMED.value,
+                InstanceSource.SPACE_SESSION.value,
+            ):
+                return False
+            if row is not None and str(row[0]) == PairingStatus.UNPAIRING.value:
+                conn.execute("DELETE FROM remote_instances WHERE id=?", (inst.id,))
+                _purge_instance_side_rows(conn, [inst.id])
+            conn.execute(_UPSERT_INSTANCE_SQL, _instance_params(inst))
+            conn.execute(
+                "UPDATE remote_instances SET local_inbox_id=? WHERE id=?",
+                (inst.local_inbox_id, inst.id),
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
 
     async def set_proto_version(
         self,
@@ -451,19 +500,7 @@ class SqliteFederationRepo:
             ).fetchone()
             if row is None:
                 return None
-            inbox_id, peer_pk = str(row[0]), str(row[1] or "")
-            tokens = [
-                str(r[0])
-                for r in conn.execute(
-                    "SELECT token FROM pending_pairings WHERE own_local_inbox_id=?"
-                    " OR (?<>'' AND lower(peer_identity_pk)=lower(?))",
-                    (inbox_id, peer_pk, peer_pk),
-                ).fetchall()
-            ]
-            conn.executemany(
-                "DELETE FROM pending_pairings WHERE token=?",
-                [(t,) for t in tokens],
-            )
+            tokens = _drop_pairing_sessions(conn, str(row[0]), str(row[1] or ""))
             conn.execute("DELETE FROM remote_instances WHERE id=?", (instance_id,))
             _purge_instance_side_rows(conn, [instance_id])
             return tokens
@@ -506,6 +543,92 @@ class SqliteFederationRepo:
             return bool(await self._db.transact(_run))
         except _NotPending:
             return False
+
+    async def upgrade_seat_instance(
+        self,
+        inst: RemoteInstance,
+        *,
+        token: str | None = None,
+    ) -> bool:
+        """Write the confirmed pairing *inst* over a space seat — and, with
+        *token*, consume that ``pending_pairings`` session — in ONE
+        transaction. Returns whether it happened.
+
+        How a pairing whose pending half was kept beside a seat
+        (:class:`~socialhome.federation.pending_pairing.PendingPairings`)
+        confirms; the counterpart of :meth:`promote_pending_instance`, with
+        the same all-or-nothing rule. The row it may write over:
+
+        * a confirmed ``space_session`` row — the seat the people upgrade.
+          Every column of the pairing replaces the seat's, including
+          ``local_inbox_id`` (the peer was given the pairing's inbox, the
+          seat never had an address) and the local opt-ins the handshake
+          chose (``share_home``, ``gfs_relay``). The household's version
+          (a high-water mark) and its verified key-wrap key are kept, and
+          so is what is queued for it: a seat's envelopes are sealed at
+          delivery, under whatever keys the row then holds.
+        * no row — the shared space ended meanwhile; the pairing stands
+          on its own.
+
+        Anything else (a pairing confirmed by another handshake, a pending
+        row, an unpair tombstone) is never touched.
+        """
+
+        def _run(conn) -> bool:
+            if (
+                token is not None
+                and not conn.execute(
+                    "DELETE FROM pending_pairings WHERE token=?", (token,)
+                ).rowcount
+            ):
+                raise _NotPending()
+            row = conn.execute(
+                "SELECT 1 FROM remote_instances WHERE id=?", (inst.id,)
+            ).fetchone()
+            if row is None:
+                conn.execute(_UPSERT_INSTANCE_SQL, _instance_params(inst))
+                return True
+            if not conn.execute(
+                _UPGRADE_SEAT_SQL,
+                (
+                    *_promote_set_params(inst),
+                    inst.local_inbox_id,
+                    int(inst.share_home),
+                    int(inst.gfs_relay),
+                    inst.id,
+                ),
+            ).rowcount:
+                raise _NotPending()
+            return True
+
+        try:
+            return bool(await self._db.transact(_run))
+        except _NotPending:
+            return False
+
+    async def cancel_pairing_sessions(
+        self, *, local_inbox_id: str, peer_identity_pk: str
+    ) -> list[str]:
+        """Drop the ``pending_pairings`` sessions behind a pending pairing
+        that has no row of its own (it was kept beside a space seat) and
+        return their tokens: the one that minted *local_inbox_id* and any
+        naming *peer_identity_pk* — exactly the sessions
+        :meth:`cancel_pending_instance` takes with a pending row. No
+        ``remote_instances`` row is read or changed."""
+        tokens = await self._db.transact(
+            lambda conn: _drop_pairing_sessions(conn, local_inbox_id, peer_identity_pk)
+        )
+        return list(tokens)
+
+    async def pairing_token_for_inbox(self, local_inbox_id: str) -> str | None:
+        """The token of the pairing-code session that minted
+        *local_inbox_id*, or ``None`` (no code: a trust-relay half)."""
+        token = await self._db.fetchval(
+            "SELECT token FROM pending_pairings WHERE own_local_inbox_id=? LIMIT 1",
+            (local_inbox_id,),
+            default=None,
+        )
+        return str(token) if token else None
 
     async def mark_unpairing(self, instance_id: str) -> None:
         """Turn a pairing into an unpair tombstone, atomically.
@@ -1089,7 +1212,9 @@ class _NotPending(Exception):
     """Rolls back :meth:`SqliteFederationRepo.promote_pending_instance`."""
 
 
-_PROMOTE_PENDING_SQL = """
+#: What a confirmation writes over the row it confirms — bound by
+#: :func:`_promote_set_params`, in this order.
+_PROMOTE_SET_SQL = """
 UPDATE remote_instances SET
     display_name=?,
     remote_identity_pk=?,
@@ -1109,12 +1234,55 @@ UPDATE remote_instances SET
     home_lon=?,
     paired_at=?,
     last_reachable_at=?,
-    unreachable_since=?
+    unreachable_since=?"""
+
+_PROMOTE_PENDING_SQL = (
+    _PROMOTE_SET_SQL
+    + """
 WHERE id=? AND status IN ('pending_sent', 'pending_received')
 """
+)
+
+
+#: :data:`_PROMOTE_PENDING_SQL` for a row that is a live space seat, plus the
+#: columns a seat holds its own value of (see ``upgrade_seat_instance``).
+_UPGRADE_SEAT_SQL = (
+    _PROMOTE_SET_SQL
+    + """,
+    local_inbox_id=?,
+    share_home=?,
+    gfs_relay=?
+WHERE id=? AND status='confirmed' AND source='space_session'
+"""
+)
+
+
+def _drop_pairing_sessions(conn, inbox_id: str, peer_pk: str) -> list[str]:
+    """Inside a transaction: delete every ``pending_pairings`` session that
+    minted *inbox_id* or names the peer identity *peer_pk* (a re-scan mints
+    a fresh inbox id, so the inbox match alone could miss one). Returns
+    their tokens."""
+    tokens = [
+        str(r[0])
+        for r in conn.execute(
+            "SELECT token FROM pending_pairings WHERE own_local_inbox_id=?"
+            " OR (?<>'' AND lower(peer_identity_pk)=lower(?))",
+            (inbox_id, peer_pk, peer_pk),
+        ).fetchall()
+    ]
+    conn.executemany(
+        "DELETE FROM pending_pairings WHERE token=?",
+        [(t,) for t in tokens],
+    )
+    return tokens
 
 
 def _promote_params(inst: RemoteInstance) -> tuple:
+    return (*_promote_set_params(inst), inst.id)
+
+
+def _promote_set_params(inst: RemoteInstance) -> tuple:
+    """The values of :data:`_PROMOTE_SET_SQL`, in its order."""
     return (
         inst.display_name,
         inst.remote_identity_pk,
@@ -1135,7 +1303,6 @@ def _promote_params(inst: RemoteInstance) -> tuple:
         inst.paired_at,
         inst.last_reachable_at,
         inst.unreachable_since,
-        inst.id,
     )
 
 

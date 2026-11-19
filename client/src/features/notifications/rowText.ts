@@ -137,6 +137,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.space_ownership_transferred_none
  *   notifications.row.space_location_enabled_none
  *   notifications.row.space_admins_reconfirm_none
+ *   notifications.row.space_delegation_blocked_none
  *   notifications.row.post_moderated_none
  *   notifications.row.post_moderated_none_in
  *   notifications.row.bazaar_bid_placed_none

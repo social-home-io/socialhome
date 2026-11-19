@@ -10,11 +10,15 @@ All types are immutable. Mutations return new dataclass instances.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+import hashlib
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time
 from enum import StrEnum
+from typing import Any
 
-from .link_preview import LinkPreview
+from .link_preview import LinkPreview, link_preview_to_dict
+from .media_constraints import space_media_ref
 
 # ─── Core enums ───────────────────────────────────────────────────────────
 
@@ -254,6 +258,31 @@ class BazaarBid:
     withdrawn: bool = False
 
 
+#: A bid's states in the order they outrank each other when two
+#: households change the same bid at once (the seller declines or accepts
+#: while the bidder withdraws). A bid only ever ADVANCES — it is no
+#: last-writer-wins value, so it carries no stamp: every household merges
+#: what it hears with :func:`socialhome.domain.item_merge.advance` and ends
+#: on the highest state, in any arrival order. The seller's answer
+#: outranks the bidder's withdrawal (owner decision 2026-11-12): a decline
+#: that crosses a withdrawal stands, with its reason, and an accept that
+#: crosses one stands too (the sale it made is announced with it). So the
+#: only transitions are pending → withdrawn / rejected / accepted,
+#: withdrawn → rejected / accepted, rejected → accepted; nothing ever
+#: leaves ``accepted``, and a declined bid is never withdrawn.
+BID_STATES: tuple[str, ...] = ("pending", "withdrawn", "rejected", "accepted")
+
+
+def bid_rank(*, accepted: object, rejected: object, withdrawn: object) -> int:
+    """The rank in :data:`BID_STATES` of a bid's stored flags (a row from
+    before the merge rule may hold two: the highest counts)."""
+    if accepted:
+        return 3
+    if rejected:
+        return 2
+    return 1 if withdrawn else 0
+
+
 #: Legal transitions for :class:`BazaarOffer.status`.
 BAZAAR_OFFER_TRANSITIONS: dict[str, frozenset[str]] = {
     "pending": frozenset({"accepted", "rejected", "withdrawn"}),
@@ -361,6 +390,108 @@ def poll_deadline_passed(closes_at: str | None, now: datetime) -> bool:
     if at.tzinfo is None:
         at = at.replace(tzinfo=UTC)
     return at <= now
+
+
+#: Caps on a reply poll (the composer's own limits; receivers enforce them).
+MAX_POLL_OPTIONS = 20
+MAX_POLL_TEXT = 500
+#: An option id is 32 characters (:func:`poll_option_id`; a uuid4 hex on a
+#: poll made before ids were post-bound); anything much longer is not ours.
+MAX_POLL_OPTION_ID = 64
+#: What a post-bound option id starts with. Never the start of a uuid4 hex,
+#: so an id of this shape can be told from an older poll's and checked.
+POLL_OPTION_ID_PREFIX = "po"
+#: The longest ``closes_at`` (an ISO 8601 stamp) a peer may send.
+MAX_POLL_CLOSES_AT = 40
+
+
+def poll_option_id(post_id: str, index: int) -> str:
+    """The id of option ``index`` of the reply poll on ``post_id``.
+
+    Derived from the post, so every household can check it: a poll's
+    options can only carry the ids of ITS post, and no other poll (on any
+    post, in any space) can claim them first — ``space_poll_options.id`` is
+    one key space per household. :data:`POLL_OPTION_ID_PREFIX` + 30 hex
+    characters of ``SHA-256("poll-option\\0" + post_id + "\\0" + index)``."""
+    digest = hashlib.sha256(f"poll-option\0{post_id}\0{index}".encode())
+    return POLL_OPTION_ID_PREFIX + digest.hexdigest()[:30]
+
+
+def poll_to_wire_dict(
+    *,
+    post_id: str,
+    space_id: str,
+    question: str,
+    options: Iterable[Mapping[str, Any]],
+    allow_multiple: bool,
+    closes_at: str | None,
+) -> dict[str, Any]:
+    """The ``SPACE_POLL_CREATED`` payload: the whole poll definition, its
+    options as ``{id, text}`` in display order (the ids are the ones votes
+    name on every household)."""
+    return {
+        "post_id": post_id,
+        "space_id": space_id,
+        "question": question,
+        "allow_multiple": bool(allow_multiple),
+        "closes_at": closes_at or None,
+        "options": [{"id": str(o["id"]), "text": str(o["text"])} for o in options],
+    }
+
+
+def poll_options_from_wire(
+    raw: object, *, post_id: str | None = None
+) -> list[dict[str, str]] | None:
+    """The ``{id, text}`` options of a received poll definition, in order —
+    ``None`` unless they are a well-formed poll's: 2 to
+    :data:`MAX_POLL_OPTIONS` options, distinct ids, bounded non-empty text.
+    With ``post_id`` (the live create's rule) a list with any id of the
+    post-bound shape (:data:`POLL_OPTION_ID_PREFIX`) must be that post's own
+    ids (:func:`poll_option_id`), all of them, in order. A list with none is
+    a poll made before ids were post-bound (uuid4 hex ids) and is taken as
+    stored — the caller has bound the definition to the post's author's
+    household."""
+    if not isinstance(raw, list) or not 2 <= len(raw) <= MAX_POLL_OPTIONS:
+        return None
+    out: list[dict[str, str]] = []
+    for o in raw:
+        if not isinstance(o, Mapping):
+            return None
+        oid, text = o.get("id"), o.get("text")
+        if (
+            not isinstance(oid, str)
+            or not isinstance(text, str)
+            or not 0 < len(oid) <= MAX_POLL_OPTION_ID
+            or not 0 < len(text) <= MAX_POLL_TEXT
+        ):
+            return None
+        out.append({"id": oid, "text": text})
+    if len({o["id"] for o in out}) != len(out):
+        return None
+    # One id of the post-bound shape makes it a post-bound poll: every id
+    # must then be the post's own — never a mix with free-form ids.
+    if (
+        post_id is not None
+        and any(o["id"].startswith(POLL_OPTION_ID_PREFIX) for o in out)
+        and any(o["id"] != poll_option_id(post_id, i) for i, o in enumerate(out))
+    ):
+        return None
+    return out
+
+
+def poll_closes_at_from_wire(raw: object) -> tuple[bool, str | None]:
+    """``(ok, closes_at)`` for a received poll's deadline: absent / ``None``
+    is no deadline; otherwise a bounded, parseable ISO 8601 stamp (the
+    string is kept as sent — every household reads it the same way)."""
+    if raw is None:
+        return True, None
+    if not isinstance(raw, str) or not 0 < len(raw) <= MAX_POLL_CLOSES_AT:
+        return False, None
+    try:
+        datetime.fromisoformat(raw)
+    except ValueError:
+        return False, None
+    return True, raw
 
 
 @dataclass(slots=True, frozen=True)
@@ -641,3 +772,119 @@ class Comment:
     def soft_delete(self) -> Comment:
         """Clear content but keep the node in the tree (children remain)."""
         return copy.replace(self, content=None, media_url=None, deleted=True)
+
+
+def post_to_wire_dict(post: Post, space_id: str) -> dict[str, Any]:
+    """The ``SPACE_POST_CREATED`` payload of a space post — what
+    ``FederationInboundService._post_from_payload`` reads.
+
+    ONE shape for every sender: the live fan-out (``SpacePostOutbound``,
+    which adds who made the write, the file hashes and the relay hints) and
+    a ``SPACE_SYNC_RESUME`` replay. A receiver applies a create for a post
+    it already holds as an upsert of that row, so a field one sender left
+    out would be a field wiped there — a replay without ``image_urls`` took
+    the pictures off every post it touched."""
+    payload: dict[str, Any] = {
+        "id": post.id,
+        "space_id": space_id,
+        "author": post.author,
+        "type": post.type.value,
+        "content": post.content,
+        "media_url": post.media_url,
+        "image_urls": list(post.image_urls),
+        "occurred_at": post.created_at.isoformat() if post.created_at else None,
+        # Mirror feed visibility on member households: a Bazaar listing's
+        # anchor post is hidden from the feed unless the seller announced
+        # it. Omitted-on-older-sender → receiver defaults to visible.
+        "hidden_from_feed": post.hidden_from_feed,
+    }
+    if post.location is not None:
+        # Coords are already 4dp-truncated before the post is persisted.
+        payload["location"] = {
+            "lat": post.location.lat,
+            "lon": post.location.lon,
+            "label": post.location.label,
+        }
+    # The author-built link card rides inside the encrypted payload like
+    # the text; receivers validate it and never fetch the URL. Older
+    # receivers ignore the key and show the post without a card.
+    if post.link_preview is not None:
+        payload["link_preview"] = link_preview_to_dict(post.link_preview)
+    if post.linked_event_id is not None:
+        payload["linked_event_id"] = post.linked_event_id
+    if post.file_meta is not None:
+        payload["file_meta"] = {
+            "url": post.file_meta.url,
+            "mime_type": post.file_meta.mime_type,
+            "original_name": post.file_meta.original_name,
+            "size_bytes": post.file_meta.size_bytes,
+        }
+    # When the words were last edited (tz-aware; a stored stamp is naive
+    # UTC) — only on an edited post, so a new post's payload is unchanged.
+    # A receiver that holds the post orders this copy against its own by
+    # it (:func:`keep_newer_edit`); older receivers ignore the key.
+    if post.edited_at is not None:
+        payload["edited_at"] = _as_utc(post.edited_at).isoformat()
+    return payload
+
+
+def _as_utc(stamp: datetime) -> datetime:
+    """*stamp* tz-aware; a naive one is UTC (every stored stamp is)."""
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
+
+
+def keep_newer_edit(incoming: Post, held: Post) -> Post:
+    """*incoming* — another copy of the post *held* here (a re-sent
+    ``SPACE_POST_CREATED``, the host's §25.6 record) — with what an edit
+    writes (the words, the link card, the stamp) taken from whichever copy
+    was edited last. Last writer wins on ``edited_at``:
+
+    * the held row was edited and *incoming* is older (it was never
+      edited, or earlier): the held words stay — a provider that missed
+      the edit cannot bring the old ones back;
+    * otherwise *incoming* as it is: an edit this household missed, with
+      its stamp — or the same edit (an equal stamp), whose words are the
+      same unless this household's copy was damaged (a restore), which
+      the copy then repairs."""
+    if held.edited_at is None:
+        return incoming
+    if incoming.edited_at is not None and _as_utc(incoming.edited_at) >= _as_utc(
+        held.edited_at
+    ):
+        return incoming
+    return replace(
+        incoming,
+        content=held.content,
+        link_preview=held.link_preview,
+        edited_at=held.edited_at,
+    )
+
+
+def file_meta_from_wire(raw: object) -> FileMeta | None:
+    """A received post's file attachment (a live payload's or a §25.6
+    record's ``file_meta``), kept only when its ``url`` is a space file
+    (:func:`~.media_constraints.space_media_ref` — never a name another
+    receiving path owns, a foreign URL or junk), normalised. A file post
+    means nothing without its file, so a refused url drops the whole
+    attachment (the registry's ``parent_requires``). Exactly the four
+    fields, each of its type: a stored attachment with a wrong-typed one
+    would make every read of the row raise."""
+    if not isinstance(raw, dict) or set(raw) != _FILE_META_KEYS:
+        return None
+    url = space_media_ref(raw.get("url"))
+    mime_type, name, size = raw["mime_type"], raw["original_name"], raw["size_bytes"]
+    if (
+        url is None
+        or not isinstance(mime_type, str)
+        or not isinstance(name, str)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+    ):
+        return None
+    return FileMeta(url=url, mime_type=mime_type, original_name=name, size_bytes=size)
+
+
+_FILE_META_KEYS: frozenset[str] = frozenset(
+    {"url", "mime_type", "original_name", "size_bytes"}
+)

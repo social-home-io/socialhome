@@ -36,18 +36,24 @@ import builtins
 import contextlib
 import pathlib
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import aiofiles.os
 
-from ..domain.errors import PageFilesNotShareableError
+from ..domain.errors import (
+    NotFoundError,
+    PageFilesNotShareableError,
+    SpaceItemTooLargeError,
+)
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.file_hashes import is_space_content_media_name
+from ..domain.media_constraints import is_reserved_media_name
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
 from ..domain.page_version import PageConflictSide, is_version_hash, version_hash
+from ..domain.relay_media_frame import SPACE_PAGE_ITEM_MAX_BYTES
 from ..domain.space import (
     AccessDecision,
     ContentAction,
@@ -74,7 +80,6 @@ from ..repositories.page_repo import mint_page_id, new_page
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .inbound_media_store import (
-    is_reserved_media_name,
     is_space_direct_media_name,
     is_space_page_media_name,
     media_basename,
@@ -86,6 +91,7 @@ from .page_conflict_service import (
     NoActiveConflictError,
     PageConflictStaleError,
     PageMode,
+    page_too_large,
 )
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
@@ -184,10 +190,24 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         self._files_reach_host: Callable[[str], Awaitable[bool]] | None = None
         self._moderation: ModerationSubmitter | None = None
 
+    async def _require_size(
+        self, page: Page, *, resolves: Sequence[str] = (), was: Page | None = None
+    ) -> None:
+        """413 for a page that — measured whole, with every conflict side
+        left open — is over the limit every space has
+        (``SPACE_PAGE_ITEM_MAX_BYTES``). A save that makes a page stored
+        before the limit no larger is let through: it stays editable."""
+        space_id = page.space_id or ""
+        held = await self.conflict_sides(space_id, page.id) if was is not None else []
+        sides = [s for s in held if s.hash not in resolves]
+        if page_too_large(page, sides, was=(was, held) if was is not None else None):
+            raise SpaceItemTooLargeError(SPACE_PAGE_ITEM_MAX_BYTES)
+
     def attach_files_reach_host(self, check: Callable[[str], Awaitable[bool]]) -> None:
         """Wire ``check(space_id)``: whether a page's new files can reach
-        the space's host from here (v_82; a link-joined household needs a
-        GFS upload authorization)."""
+        the space's host from here (v_82; only a link-joined household
+        whose host's relay takes no binary frames needs a GFS upload
+        authorization)."""
         self._files_reach_host = check
 
     async def _require_files_reach_host(
@@ -391,7 +411,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         """
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         if space.archived:
             raise SpaceArchivedError()
         member = await self._spaces.get_member(space_id, user_id)
@@ -407,7 +427,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
     async def get(self, space_id: str, page_id: str) -> Page:
         page = await self._pages.get_space_page(page_id, space_id=space_id)
         if page is None:
-            raise KeyError(f"page {page_id!r} not found in this space")
+            raise NotFoundError(f"page {page_id!r} not found in this space")
         return page
 
     async def versions(self, space_id: str, page_id: str) -> builtins.list[PageVersion]:
@@ -477,6 +497,9 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             cover_image_url=cover,
             page_id=page_id,
         )
+        # After the gate and before anything is stored. A reviewed create
+        # was queued above — the queue has its own, smaller cap.
+        await self._require_size(page)
         mode = await self._mode(space_id)
         if mode is PageMode.HOST:
             assert self._conflicts is not None
@@ -569,6 +592,12 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             user_id=actor_user_id,
             field="cover_image_url",
         )
+        # After the gate, before it is queued for review or stored: the
+        # page as it would be (with its open sides) within the limit. Every
+        # write re-checks under the page lock (``_write``).
+        await self._require_size(
+            replace(page, **patch, last_editor_user_id=actor_user_id), was=page
+        )
         if decision is AccessDecision.QUEUE:
             before = _page_dict(page)
             await self._submit_for_review(
@@ -618,6 +647,15 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
                 hashes = [s.hash for s in await self.conflict_sides(space_id, page_id)]
                 if set(sides_seen) != set(hashes):
                     raise PageConflictStaleError(hashes)
+            # EVERY local write passes here (an edit, a resolution, an
+            # approved item's replay), already authorized: the page as it
+            # would be — its text and the sides left open — stays within the
+            # limit every space has.
+            await self._require_size(
+                replace(current, **patch, last_editor_user_id=actor_user_id),
+                resolves=resolves or (),
+                was=current,
+            )
 
         mode = await self._mode(space_id)
         if mode is PageMode.HOST:

@@ -22,7 +22,7 @@ re-pin, and the rotation bundle carries the new grant.
 **Why a new key** (CLAUDE.md "no new key" rule): the content key is held by
 every reader, including GFS followers, so it cannot authorize a write; the
 authority seed must not spread to every publisher; the household identity key
-is exactly what strict mode withholds from the connection server.
+is exactly what member publish withholds from the connection server.
 
 Signing bytes (each with its own domain-separation prefix, so no signature
 can be lifted onto another statement):

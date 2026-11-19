@@ -5,12 +5,12 @@ Streams each timetable as its domain wire dict
 ``SPACE_TIMETABLE_UPSERTED`` event carries) so a member household joining
 mid-life gets every timetable, not just the ones edited after its join.
 
-Tombstones are not streamed — no other resource streams its deletes
-either. A joiner that never held a timetable has nothing to delete; a
-member that was offline for a delete gets it from the outbox retry of the
-live ``SPACE_TIMETABLE_DELETED``; and a receiver that holds the tombstone
-refuses any later copy of the id (the repo's last-writer-wins upsert never
-touches a deleted row), so a stale provider cannot bring one back.
+Tombstones stream as their own resource since v_92
+(:mod:`.timetables_deleted`, before this one), so a member that missed a
+live ``SPACE_TIMETABLE_DELETED`` drops its copy on the host's next stream;
+a receiver that holds the tombstone refuses any later copy of the id (the
+repo's last-writer-wins upsert never touches a deleted row), so a stale
+provider cannot bring one back.
 """
 
 from __future__ import annotations

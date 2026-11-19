@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
+from socialhome.domain.page import Page
 from socialhome.domain.page_version import (
     SCALAR_CONFLICT,
+    PageConflictSide,
     is_version_hash,
     merge_scalar,
+    page_record,
+    side_to_wire,
     version_hash,
 )
 
@@ -73,3 +78,49 @@ def test_merge_scalar(base, mine, theirs, out):
         merge_scalar(base, mine, theirs) is out
         or merge_scalar(base, mine, theirs) == out
     )
+
+
+def _page() -> Page:
+    return Page(
+        id="p",
+        title="T",
+        content="body",
+        created_by="u",
+        created_at="2026-01-01",
+        updated_at="2026-01-02",
+        space_id="s",
+        seq=3,
+        pending_base_seq=2,
+    )
+
+
+def test_page_record_is_the_row_its_hash_and_every_side():
+    side = PageConflictSide(
+        hash=version_hash("T", "other"), title="T", content="other", by="b", at="t"
+    )
+    record = page_record(_page(), [side])
+    assert "pending_base_seq" not in record  # this household's own marker
+    assert record["version_hash"] == version_hash("T", "body")
+    assert record["conflict"] == [side_to_wire(side)]
+    assert record["seq"] == 3 and record["content"] == "body"
+
+
+def test_measuring_a_page_counts_ids_stamps_and_counters_at_their_widest():
+    """Whoever measures (the saving household, the host, a receiver) gets
+    one number for the same words, whatever its stamps say — and never less
+    than what travels."""
+    plain = _page()
+    stamped = replace(
+        plain,
+        created_at="2026-11-15T09:00:00.123456+00:00",
+        updated_at="2026-11-15 09:00:00",
+        last_editor_user_id="u-" + "a" * 32,
+        seq=2**53,
+    )
+    measured = {
+        len(json.dumps(page_record(p, [], measure=True), ensure_ascii=False))
+        for p in (plain, stamped)
+    }
+    assert len(measured) == 1
+    full = len(json.dumps(page_record(stamped, []), ensure_ascii=False))
+    assert full < measured.pop()

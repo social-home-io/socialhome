@@ -19,7 +19,6 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 
 from __future__ import annotations
 
-import functools
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
@@ -75,6 +74,8 @@ from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
 from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
+from .federation.host_hop import HostHop
+from .federation.inbox_reply import inbox_holds_envelope
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
 from .federation.pairing_gfs_reach import PairingGfsReach
@@ -126,7 +127,8 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
-from .federation.sync.space.file_gate import CatchUpFileGates, local_file_size
+from .federation.sync.space.file_gate import CatchUpFileGates, SpaceFileBudget
+from .federation.sync.space.host_contact import HostContact
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
@@ -166,6 +168,7 @@ from .infrastructure.dm_gc_scheduler import DmGcScheduler
 from .infrastructure.dm_relay_seen_scheduler import DmRelaySeenPruneScheduler
 from .infrastructure.gallery_trash_purge_scheduler import GalleryTrashPurgeScheduler
 from .infrastructure.gfs_capability_warmup import GfsCapabilityWarmup
+from .infrastructure.gfs_cleanup_scheduler import GfsCleanupScheduler
 from .infrastructure.gfs_info_refresh_scheduler import GfsInfoRefreshScheduler
 from .infrastructure.gfs_reconcile_retry import GfsReconcileRetry
 from .infrastructure.gfs_route_discovery_scheduler import GfsRouteDiscoveryScheduler
@@ -356,6 +359,7 @@ from .services.gfs_channel_service import GfsChannelService
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_directory import GfsDirectoryCache
 from .services.gfs_envelope_sender import GfsEnvelopeSender
+from .services.gfs_mailbox_service import GfsMailboxService
 from .services.gfs_member_publish_service import GfsMemberPublishService
 from .services.gfs_relay_inbound import GfsRelayInbound
 from .services.gfs_route_discovery_service import GfsRouteDiscoveryService
@@ -417,7 +421,6 @@ from .services.push_withdraw_service import PushWithdrawService
 from .services.realtime_service import RealtimeService
 from .services.recovery_kit_service import RecoveryKitService
 from .services.recovery_reconnect_service import RecoveryReconnectService
-from .services.relay_media_refill import RelayMediaRefill
 from .services.relay_policy import RelayPolicy
 from .services.report_scope import ReportScope
 from .services.report_service import ReportService
@@ -445,12 +448,13 @@ from .services.space_crypto_service import (
     SpaceContentEncryption,
 )
 from .services.space_location_outbound import SpaceLocationOutbound
-from .services.space_mailbox_service import SpaceMailboxService
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
 from .services.space_media_names import SpaceMediaNamer
 from .services.space_media_sync_service import SpaceMediaSyncService
+from .services.space_media_wanted import SpaceMediaWanted, SpaceMediaWantedProvider
+from .services.space_member_directory import SpaceMemberDirectory
 from .services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
 )
@@ -542,6 +546,49 @@ async def _deliver_outbox_entry(
     return outcome
 
 
+def _build_outbox_processor(
+    app: web.Application,
+    outbox_repo,
+    federation_service: FederationService,
+    federation_repo,
+    peer_unpair: PeerUnpairService,
+) -> OutboxProcessor:
+    """The :class:`OutboxProcessor` that drains ``federation_outbox``.
+
+    Each row is re-delivered by :func:`_deliver_outbox_entry` (a row queued
+    with its sealed envelope is re-stamped + re-signed; a ref row, migration
+    0145, has the stored payload sealed for its peer). ``after_prune``: once
+    the retention sweep has failed an UNPAIR past its max age, that peer's
+    unpair tombstone is purged. ``multi``: due ref rows of one multi
+    payload to mailbox seats on one GFS go up as ONE upload (v_91); rows the
+    moderation check refuses stay single. The federation service wakes it
+    when a broadcast queued a multi payload — it is the only multi sender.
+    """
+
+    def _still_wanted():
+        """The moderation queue's check, once its service is wired."""
+        moderation = app.get(K.space_moderation_service_key)
+        return moderation.outbox_entry_wanted if moderation is not None else None
+
+    async def _deliver(entry):
+        return await _deliver_outbox_entry(
+            federation_service,
+            federation_repo,
+            peer_unpair,
+            entry,
+            still_wanted=_still_wanted(),
+        )
+
+    processor = OutboxProcessor(
+        outbox_repo,
+        _deliver,
+        after_prune=peer_unpair.sweep_tombstones,
+        multi=federation_service,
+    )
+    federation_service.attach_outbox_wake(processor.wake, still_wanted=_still_wanted)
+    return processor
+
+
 def _parse_retry_after_s(value: str | None) -> float | None:
     """``Retry-After`` as delta-seconds, or ``None`` when absent/unusable.
 
@@ -599,6 +646,11 @@ async def _redeliver_envelope(
       unrelated envelopes (an UNPAIR, a replayed highlight) to one echo
       storm. Bounded like any transient failure — :data:`MAX_ATTEMPTS`,
       the 7-day TTL and the per-peer pending cap.
+    * 410 ``{"code": "REPLAY"}`` → :attr:`DeliveryOutcome.SUCCESS`: the
+      peer says it already holds this envelope — a POST of ours that
+      timed out while it was still working on it, then this retry
+      (:mod:`socialhome.federation.inbox_reply`). Delivered, not
+      "permanently rejected".
     * other 4xx → :attr:`DeliveryOutcome.PERMANENT` (drop). The federation
       inbox returns 4xx for several distinct reasons — most are
       genuinely "the receiver has this state already" (success-
@@ -608,11 +660,9 @@ async def _redeliver_envelope(
       re-signed with a fresh timestamp on every attempt. The remaining
       terminal reasons are:
 
-      * **410 ``Replay detected``** — receiver already saw this
-        ``msg_id``; their state is consistent with ours. Most
-        commonly the residue of a previously-mangled response (e.g.
-        the HA integration's pre-2026.5.18 charset bug) that left
-        the row queued even though the peer processed it.
+      * **410 without the duplicate code** — a peer that predates the
+        code and already saw this ``msg_id`` (their state is consistent
+        with ours), or one whose answer was rewritten on the way.
       * **403 banned / signature invalid** — receiver refuses this
         sender. Dropping the entry is the right call: retrying gives
         the sender no path to recover, and the ban / key revocation
@@ -673,7 +723,12 @@ async def _redeliver_envelope(
     # correct: the node that originally signed it had the signer, so a missing
     # one is misconfiguration, not a transient condition.)
     try:
-        body = federation_service.resign_for_redelivery(entry.payload_json)
+        if entry.payload_id is not None:
+            # Migration 0145: a ref row stores no envelope — seal the stored
+            # payload for this one peer now (its id as ``msg_id``).
+            body = await federation_service.seal_outbox_entry(entry, instance)
+        else:
+            body = federation_service.resign_for_redelivery(entry.payload_json)
     except Exception as exc:
         log.warning(
             "outbox: undecodable entry %s — dropping: %s", entry.id, exc, exc_info=True
@@ -726,6 +781,16 @@ async def _redeliver_envelope(
                 await federation_repo.mark_reachable(entry.instance_id)
                 if resp.status == 429:
                     return _throttled_outcome(entry, resp)
+                if await inbox_holds_envelope(resp):
+                    # Our earlier POST reached the peer and timed out on
+                    # our side while it was still being worked on; this
+                    # retry is its duplicate. The peer holds the envelope.
+                    log.info(
+                        "outbox: %s already holds %s — delivered",
+                        entry.instance_id,
+                        entry.id,
+                    )
+                    return DeliveryOutcome.SUCCESS
                 # 404 ``No instance found`` is *transient*: the peer just
                 # hasn't installed its RemoteInstance row for us yet,
                 # which happens in the relay-pair handshake window where
@@ -733,8 +798,8 @@ async def _redeliver_envelope(
                 # synchronous ``PairingConfirmed`` bus subscriber) races
                 # ahead of the ack reaching the peer. Retry through the
                 # outbox so the envelope lands once the peer's mirror
-                # catches up. Other 4xx (410 ``Replay detected`` / ``Skew
-                # too old``, 422 ``Malformed`` etc.) stay PERMANENT —
+                # catches up. Other 4xx (a 410 without the duplicate code,
+                # 422 ``Malformed`` etc.) stay PERMANENT —
                 # those are genuinely "the peer will never accept this".
                 if resp.status == 404:
                     # WHO produced this 404 matters, and the status alone
@@ -890,10 +955,23 @@ async def _redeliver_via_gfs_relay(
             entry.instance_id,
         )
         return DeliveryOutcome.PERMANENT
-    result = await transport.send_via_gfs_relay(
-        instance=instance,
-        envelope_dict=orjson.loads(body),
-    )
+    envelope_dict = orjson.loads(body)
+    result = None
+    if not fallback:
+        try:
+            # v_87 — a row too large for a JSON relay envelope goes as one
+            # binary relay frame (``None``: the JSON envelope below).
+            result = await federation_service.relay_outbox_frame(
+                entry, instance, envelope_dict
+            )
+        except ValueError as exc:
+            log.warning("outbox: unusable entry %s — dropping: %s", entry.id, exc)
+            return DeliveryOutcome.PERMANENT
+    if result is None:
+        result = await transport.send_via_gfs_relay(
+            instance=instance,
+            envelope_dict=envelope_dict,
+        )
     if result.ok:
         # NO ``mark_reachable`` here. The relay answers a uniform 202
         # to every well-formed envelope — recipient online, offline,
@@ -906,9 +984,10 @@ async def _redeliver_via_gfs_relay(
         federation_service.note_relay_accepted(entry.instance_id)
         return DeliveryOutcome.SUCCESS
     if not fallback and result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
-        # Deterministic: the frame is over the relay's body cap and
-        # will be on every retry too (media does not ride this
-        # transport). Retrying spends the whole attempt budget
+        # Deterministic: the envelope is over the relay's JSON cap and
+        # cannot go as a binary relay frame either (the peer is below
+        # v_87, its GFS carries none, or not even a frame fits it) — and
+        # will be on every retry too. Retrying spends the whole attempt budget
         # re-deriving one length compare and then reports a
         # permanent condition as a transient one. The transport
         # already logged a WARNING naming the peer, event type and
@@ -966,7 +1045,7 @@ def _build_gfs_relay_inbound(
     )
 
 
-def _build_space_mailboxes(
+def _build_gfs_mailboxes(
     *,
     repos: SimpleNamespace,
     key_manager: KeyManager,
@@ -975,36 +1054,50 @@ def _build_space_mailboxes(
     instance_id: str,
     gfs_relay_inbound: GfsRelayInbound,
     gfs_envelope_sender: GfsEnvelopeSender,
-) -> SpaceMailboxService:
-    """v_88 — this household's per-space GFS mailboxes (GFS redesign PR 2),
-    with frames on them handed to the relay's inbound leg."""
+) -> tuple[GfsMailboxService, SpaceMemberDirectory]:
+    """v_89 — this household's ONE mailbox per GFS (frames on it handed to
+    the relay's inbound leg) and the member directory on top of it."""
     # Every mailbox request rides its own cookie-less session with no
-    # keep-alive: no pooled connection carries two mailboxes' traffic, and no
-    # cookie of the identified session reaches a mailbox. Closed by stop().
+    # keep-alive: no pooled connection carries mailbox traffic next to the
+    # identified one, and no cookie of the identified session reaches a
+    # mailbox. Closed by stop().
     mailbox_session = aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(force_close=True),
         cookie_jar=aiohttp.DummyCookieJar(),
         json_serialize=dumps_str,
     )
     gfs_envelope_sender.attach_mailbox_session(mailbox_session)
-    svc = SpaceMailboxService(
+    mailboxes = GfsMailboxService(
         mailbox_session=mailbox_session,
-        space_repo=repos.space,
         instance_config=repos.instance_config,
         key_manager=key_manager,
         gfs_repo=repos.gfs_connection,
         gfs_service=gfs_connection_service,
         instance_id=instance_id,
         identity_seed=identity.identity_seed,
-        keywrap_public_key=identity.keywrap_public_key,
-        keywrap_sig=identity.keywrap_sig,
     )
 
     async def _inbound(frame: dict | bytes, keys) -> object:
         return await gfs_relay_inbound.handle_mailbox_frame(frame, keys=keys)
 
-    svc.attach_inbound(_inbound)
-    return svc
+    mailboxes.attach_inbound(_inbound)
+    directory = SpaceMemberDirectory(
+        space_repo=repos.space,
+        federation_repo=repos.federation,
+        writer_households=SpaceWriterHouseholds(
+            repos.space_remote_member, own_instance_id=instance_id
+        ),
+        mailboxes=mailboxes,
+        instance_id=instance_id,
+        identity_seed=identity.identity_seed,
+        identity_pk=identity.identity_public_key,
+        keywrap_pk=identity.keywrap_public_key,
+        keywrap_sig=identity.keywrap_sig,
+        # Who acts as a space's host: its owner, or the delegated admin
+        # that invited us (``federation/host_equivalence.py``).
+        remote_member_repo=repos.space_remote_member,
+    )
+    return mailboxes, directory
 
 
 def _build_gfs_join_requests(
@@ -1128,6 +1221,22 @@ def _build_peer_gfs_relay(
     )
     service.wire()
     return service
+
+
+def _build_gfs_cleanup_scheduler(
+    gfs_connection_service: GfsConnectionService,
+    gfs_channels: GfsChannelService | None,
+) -> GfsCleanupScheduler:
+    """The periodic retry of what a GFS still owes after a space key
+    rotation: space key re-pins (listings and withdrawn listings) and a
+    private space's channel unregisters. Each step sends only what is still
+    owed."""
+    steps: list[tuple[str, Callable[[], Awaitable[int]]]] = [
+        ("space key re-pins still owed", gfs_connection_service.repin_owed)
+    ]
+    if gfs_channels is not None:
+        steps.append(("channel unregisters confirmed", gfs_channels.withdraw_pending))
+    return GfsCleanupScheduler(steps)
 
 
 def _wire_space_authority_rotation(
@@ -1510,6 +1619,11 @@ def _wire_federation_stack(
         identity.instance_id,
     )
     report_service.watch_seats(bus)
+    # A household that (again) reviews a space asks its host with a §25.6
+    # BEGIN; the host re-sends the pending reports then.
+    federation_service._event_registry.register(
+        FederationEventType.SPACE_SYNC_BEGIN, report_service.on_sync_begin
+    )
     dm_routing_service.attach_federation(
         federation_service,
         own_instance_id=identity.instance_id,
@@ -1696,6 +1810,8 @@ def _wire_federation_stack(
         own_identity_pk=identity.identity_public_key,
         inbox=auto_pair_inbox,
         preferences_repo=preferences_repo,
+        # One store for every handshake and the inbound pipeline.
+        pending_pairings=federation_service.pending_pairings,
     )
     federation_service._event_registry.register(
         FederationEventType.PAIRING_INTRO_AUTO,
@@ -1721,6 +1837,7 @@ def _wire_federation_stack(
         federation=federation_service,
         federation_repo=federation_repo,
         auto_pair=auto_pair_coordinator,
+        pending_pairings=federation_service.pending_pairings,
     )
     space_membership_handlers = SpaceMembershipInboundHandlers(
         bus=bus,
@@ -1774,6 +1891,8 @@ def _wire_federation_stack(
         # v_48: another household's version of a held page — fast-forward,
         # merge or conflict instead of last write wins.
         page_conflicts=page_conflict_service,
+        # A poll that overtakes its post, a vote that overtakes its poll.
+        pending_parents=pending_parent_buffer,
     )
     content_inbound.attach_to(federation_service)
     PersonalCalendarInboundHandlers(
@@ -1788,7 +1907,14 @@ def _wire_federation_stack(
     sync_windows = SyncWindows(space_repo)
     exporters: dict = {
         "bans": BansExporter(space_repo),
-        "members": MembersExporter(space_repo, profile_picture_repo),
+        "members": MembersExporter(
+            space_repo,
+            profile_picture_repo,
+            # A household that does not own the space never streams the
+            # owner household's member rows (they come from the owner).
+            own_instance_id=federation_service.own_instance_id,
+            remote_member_repo=space_remote_member_repo,
+        ),
         "member_pictures": MemberPicturesExporter(
             space_repo,
             profile_picture_repo,
@@ -1832,15 +1958,11 @@ def _wire_federation_stack(
         builder=chunk_builder,
         exporters=exporters,
         sig_suite=config.federation_sig_suite,
-        # Catch-up media: after the metadata chunks stream the
-        # requester also gets bytes for every post + gallery item +
-        # bazaar listing + calendar cover in the space via the shared
-        # SpaceMediaSyncService outbox.
+        # Catch-up media: after the metadata chunks stream the requester
+        # also gets the files of the space's recent items (30 days, 200
+        # files) via the shared SpaceMediaSyncService outbox.
         media_sync=space_media_sync_service,
-        space_post_repo=space_post_repo,
-        gallery_repo=gallery_repo,
-        bazaar_repo=bazaar_repo,
-        space_calendar_repo=space_calendar_repo,
+        item_files=media_reference_repo,
         windows=sync_windows,
         # §25.6 incremental sessions: a periodic sync streams only the rows
         # changed since the household's last confirmed stream (0086).
@@ -2133,10 +2255,13 @@ def _wire_federation_stack(
     )
     capabilities_outbound.wire()
     app[K.capabilities_outbound_key] = capabilities_outbound
-    # A space host we reach only over the mesh holds no row for us: the
-    # scheduler's mesh sweep tells it our version (migration 0078).
-    space_sync_scheduler.attach_mesh_announce(
-        capabilities_outbound.announce_to_mesh_host
+    # A member household of one of our spaces that we reach only over the
+    # mesh holds no row for us: the scheduler's mesh sweep tells it our
+    # version (migration 0078), and a household whose own claim just raised
+    # its version here is answered right away.
+    space_sync_scheduler.attach_mesh_announce(capabilities_outbound.announce_over_mesh)
+    federation_service.attach_mesh_claim_answer(
+        capabilities_outbound.announce_over_mesh
     )
 
     peer_directory_service = PeerDirectoryService(
@@ -2228,6 +2353,9 @@ def _wire_federation_stack(
     # for events newer than ``since``; we replay individual ``SPACE_*_CREATED``
     # events for posts, comments, tasks, pages, stickies, calendar events
     # and the gallery (albums, album deletes, items).
+    # v_92 — ONE file budget per (requester, space) across a resume's files
+    # and SPACE_MEDIA_WANTED.
+    file_budget = SpaceFileBudget()
     space_sync_resume_provider = SpaceSyncResumeProvider(
         federation_service=federation_service,
         space_repo=space_repo,
@@ -2237,6 +2365,7 @@ def _wire_federation_stack(
         sticky_repo=sticky_repo,
         space_calendar_repo=space_calendar_repo,
         gallery_repo=gallery_repo,
+        space_poll_repo=space_poll_repo,
         # A replayed row's files ship from us: the receiver names them by
         # the household that delivered the row (``SpaceMediaNamer``) —
         # bounded per request by the files' sizes here.
@@ -2244,24 +2373,55 @@ def _wire_federation_stack(
         media_dir=pathlib.Path(config.media_path),
         # v_82: only a replayed page's own files ship.
         media_refs=media_reference_repo,
+        budget=file_budget,
+        # v_85: a replayed row names its files' hashes, as its live event.
+        file_hasher=space_media_sync_service.file_hasher,
     )
 
-    # v_86 — which files of a row we ship on catch-up / resume: as a
-    # non-host household, our own people's files and (holding an admin /
-    # moderator seat) other people's hashed files to a v_86 requester.
-    file_gates = _build_catch_up_file_gates(
-        space_repo, _roster_authority, federation_service, config
+    # v_86 — which files of a row we ship: on a catch-up, as a non-host
+    # household, our own people's files only; on a SPACE_MEDIA_WANTED,
+    # holding an admin / moderator seat, other people's too.
+    file_gates = CatchUpFileGates(
+        space_repo=space_repo, roster_authority=_roster_authority
     )
     space_sync_service.attach_file_gates(file_gates)
-    space_sync_resume_provider.attach_file_gates(file_gates)
-    # v_87 — a space file the GFS relay accepted but never delivered is
-    # asked for again from its relay-seated host on the next view.
-    app[K.relay_media_refill_key] = RelayMediaRefill(
-        media_refs=media_reference_repo,
-        space_repo=space_repo,
-        federation_repo=federation_repo,
-        federation=federation_service,
+    # v_92 — a resume from a household that is not the roster authority
+    # (a trusted helper while the host is offline) carries only its own
+    # people's rows and their files, to member households only.
+    space_sync_resume_provider.attach_row_scope(
+        _roster_authority,
+        own_members=_own_members,
+        member_gate=SpaceWriterHouseholds(
+            space_remote_member_repo, own_instance_id=identity.instance_id
+        ).may_receive,
+    )
+    # v_92 — the receiver notes each answer of a space's acting host; a
+    # member household whose host stays silent asks ONE trusted helper. Any
+    # verified event from a silent host (federation dispatch) ends it.
+    host_contact = HostContact()
+    space_sync_receiver.attach_host_contact(host_contact)
+    federation_service.attach_host_contact(host_contact)
+    space_sync_scheduler.attach_helpers(
+        host_contact=host_contact,
         resume=space_sync_resume_provider,
+        roster_authority=_roster_authority,
+        # A helper's resume starts at its people's newest row stored here
+        # before this process started (the boot marks, set at startup).
+        newest_from=space_post_repo.newest_from_household,
+    )
+    # v_92 — a member household that views a space file it misses asks the
+    # host (then a trusted helper) for it; we answer such requests too.
+    app[K.space_media_wanted_key] = _build_space_media_wanted(
+        federation_service=federation_service,
+        space_repo=space_repo,
+        space_remote_member_repo=space_remote_member_repo,
+        media_reference_repo=media_reference_repo,
+        file_gates=file_gates,
+        file_budget=file_budget,
+        host_contact=host_contact,
+        space_media_sync_service=space_media_sync_service,
+        own_instance_id=identity.instance_id,
+        config=config,
     )
 
     async def _space_sync_resume(event) -> None:
@@ -2335,35 +2495,79 @@ def _wire_federation_stack(
     )
 
 
-def _build_catch_up_file_gates(
-    space_repo: SqliteSpaceRepo,
-    roster_authority: Callable[[str], Awaitable[bool]],
+def _build_space_media_wanted(
+    *,
     federation_service: FederationService,
+    space_repo: SqliteSpaceRepo,
+    space_remote_member_repo: SqliteSpaceRemoteMemberRepo,
+    media_reference_repo: SqliteMediaReferenceRepo,
+    file_gates: CatchUpFileGates,
+    file_budget: SpaceFileBudget,
+    host_contact: HostContact,
+    space_media_sync_service: SpaceMediaSyncService,
+    own_instance_id: str,
     config: Config,
-) -> CatchUpFileGates:
-    """v_86 — the catch-up / resume file gate (:mod:`.federation.sync.space
-    .file_gate`), sizing files from this household's media dir."""
-    return CatchUpFileGates(
-        space_repo=space_repo,
-        roster_authority=roster_authority,
-        supports=federation_service.space_member_supports,
-        size=functools.partial(local_file_size, pathlib.Path(config.media_path)),
+) -> SpaceMediaWanted:
+    """v_92 ``SPACE_MEDIA_WANTED``: the requester the media route schedules
+    on a miss (a helper only while ``host_contact`` shows the host silent),
+    and the provider registered for the inbound event (the file gate
+    decides what we ship, within the shared budget; the media outbox
+    pushes it)."""
+    provider = SpaceMediaWantedProvider(
+        # Member households only — the §25.6 gate for member-only data; a
+        # follower-only household asks its GFS (v_83).
+        member_gate=SpaceWriterHouseholds(
+            space_remote_member_repo, own_instance_id=own_instance_id
+        ).may_receive,
+        media_refs=media_reference_repo,
+        file_gates=file_gates,
+        hasher=space_media_sync_service.file_hasher,
+        media_sync=space_media_sync_service,
+        media_dir=pathlib.Path(config.media_path),
+        budget=file_budget,
+        # A sender-bound (``sd-``) name is ours to deliver only when bound
+        # to this household.
+        own_instance_id=own_instance_id,
     )
+
+    async def _space_media_wanted(event) -> None:
+        await provider.handle(event)
+
+    federation_service._event_registry.register(
+        FederationEventType.SPACE_MEDIA_WANTED, _space_media_wanted
+    )
+    wanted = SpaceMediaWanted(
+        media_refs=media_reference_repo,
+        space_repo=space_repo,
+        remote_members=space_remote_member_repo,
+        federation=federation_service,
+        host_contact=host_contact,
+        own_instance_id=own_instance_id,
+        media_dir=pathlib.Path(config.media_path),
+    )
+    # Not only on view: every verified event of a space has the files of
+    # its recent rows checked, and the ones that never arrived asked for.
+    federation_service.attach_space_applied(wanted.applied)
+    return wanted
 
 
 def _build_page_files_reach_host(
     page_conflicts: PageConflictService, uploader: SpaceMediaGfsUploader
 ) -> Callable[[str], Awaitable[bool]]:
     """``check(space_id)``: whether a page's new files can reach the space's
-    host from here (v_82). A household seated from an invite link hands
-    them over only through its GFS media cache, which it needs an upload
-    authorization for; any other member uses the outbox."""
+    host from here (v_82). Every member pushes them through the outbox —
+    also over the GFS relay when the host takes binary relay frames (v_87).
+    Only a household whose host's relay cannot carry the push (a v_80–86
+    seat, a GFS without ``envelope_media``) hands them over through its GFS
+    media cache, which it needs an upload authorization for."""
 
     async def _reach(space_id: str) -> bool:
         mode, host = await page_conflicts.mode(space_id)
         if mode is not PageMode.MEMBER or not host:
             return True
         if not await uploader.is_relay_reader(host):
+            return True
+        if await uploader.takes_relay_frames(host):
             return True
         return await uploader.can_upload(space_id)
 
@@ -2400,7 +2604,6 @@ def _build_space_media_gfs(
         writer_certs=writer_certs,
     )
     uploader.attach_federation(federation_service)
-    uploader.attach_identity(own_identity_seed=identity_seed)
     fetcher = SpaceMediaGfsFetcher(
         refs_repo=repos.space_media_ref,
         space_crypto=space_crypto,
@@ -2408,6 +2611,7 @@ def _build_space_media_gfs(
         gfs_repo=repos.gfs_connection,
         federation_repo=repos.federation,
         space_repo=space_repo,
+        federation=federation_service,
         media_dir=media_dir,
     )
     # v_83 — the holder side of on demand: a GFS asks this household for a
@@ -2422,6 +2626,10 @@ def _build_space_media_gfs(
         media_dir=media_dir,
     )
     responder.attach_federation(federation_service)
+    if (wanted := app.get(K.space_media_wanted_key)) is not None:
+        # A file this household reads from a GFS media cache is fetched
+        # there (prefetch / on view), never asked for by the file check.
+        wanted.attach_gfs_refs(repos.space_media_ref.get)
     app[K.space_media_gfs_uploader_key] = uploader
     app[K.space_media_gfs_fetcher_key] = fetcher
     app[K.space_media_gfs_responder_key] = responder
@@ -4041,6 +4249,7 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_reconcile_retry: GfsReconcileRetry | None = None
     routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
+    gfs_cleanup_scheduler: GfsCleanupScheduler | None = None
     gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
     moderation_expiry_scheduler: ModerationExpiryScheduler | None = None
     join_request_expiry_scheduler: JoinRequestExpiryScheduler | None = None
@@ -4246,6 +4455,18 @@ def create_app(config: Config | None = None) -> web.Application:
         nonlocal key_manager, federation_service, outbox_processor
         log.info("socialhome: starting up (mode=%s)", config.mode)
         await db.startup()
+        # v_92 — which rows were stored before this process started, read
+        # before ANY inbound path (GFS mailboxes, GFS websockets, RTC) can
+        # store something queued while we were down: a helper resume counts
+        # only those (handed to the scheduler once it is built). A failed
+        # read leaves none, and then no helper is asked.
+        boot_row_marks: tuple[int, int] | None = None
+        try:
+            boot_row_marks = await space_post_repo.row_marks()
+        except Exception:
+            log.exception(
+                "startup: reading the boot row marks failed — no helper resume"
+            )
         # Notification fan-out runs here from now on, off the publisher.
         await notification_delivery.start()
 
@@ -4286,6 +4507,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # The user repo unwraps each user's Ed25519 identity seed under the
         # same KEK (proto-v_25 per-user identity binding) — same late-wiring.
         user_repo.attach_key_manager(key_manager)
+        # A retired private channel's signing seed waits wrapped under it
+        # until every GFS confirmed the unregister (migration 0147).
+        repos.gfs_connection.attach_key_manager(key_manager)
         # The dashboard's tablet-cookie key is stored wrapped under it too.
         dashboard.settings.attach_key_manager(key_manager)
 
@@ -4541,8 +4765,9 @@ def create_app(config: Config | None = None) -> web.Application:
         nonlocal space_public_outbound, space_public_inbound
         nonlocal space_subscriber_key_outbound, space_subscriber_key_inbound
         nonlocal gfs_member_publish, gfs_channels
-        # v_49 trusted-mode member publish (household side): our own posts
-        # to each capable GFS, epoch notices on rotation, member subscriptions.
+        # v_49 member publish (household side, anonymous since v_90): our
+        # own items to each capable GFS, epoch notices on rotation, member
+        # subscriptions.
         gfs_member_publish = GfsMemberPublishService(
             gfs=gfs_connection_service,
             conn_repo=repos.gfs_connection,
@@ -4753,6 +4978,8 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
+        if boot_row_marks is not None:
+            app[K.space_sync_scheduler_key].set_row_marks(boot_row_marks)
         # v_67: ``reactions_reach`` on every moment the API returns; seal /
         # open routed reactions with the existing key-wrap key, and return
         # tokens under a key derived from the existing routing secret.
@@ -4832,6 +5059,16 @@ def create_app(config: Config | None = None) -> web.Application:
             bazaar_service=bazaar_service,
         )
         app[K.space_moderation_service_key] = space_moderation
+        # Catch-up for a reviewer household rides the §25.6 BEGIN to the
+        # host: it echoes the items it holds by state, the host answers with
+        # what it lacks (``moderation_federation.on_sync_begin``). A
+        # household that starts reviewing asks at once.
+        app[K.space_sync_scheduler_key].attach_moderation_echo(
+            moderation_federation.held_echo
+        )
+        space_moderation.attach_host_sync(
+            app[K.space_sync_scheduler_key].sync_with_host
+        )
         # Releases of items held here are checked against our own rows, and
         # move the held row to approved (v_43).
         fed.space_authorship.attach_moderation(
@@ -4924,24 +5161,26 @@ def create_app(config: Config | None = None) -> web.Application:
             space_authority_rotation.authority_epoch_echo
         )
         # v_32 roster snapshots: the host re-sends its whole roster to a
-        # member household that just upgraded, and on every periodic sync
-        # tick, so a roster mirror that missed gossip heals by itself.
+        # member household that just upgraded…
         bus.subscribe(
             PeerProtoVersionRaised,
             real_space_service.on_peer_proto_version_raised,
         )
-        app[K.space_sync_scheduler_key].attach_roster_refresh(
-            real_space_service.send_hosted_roster_snapshots
-        )
-        # …except to a household whose BEGIN echoes the roster version it
-        # already applied (``roster_echo``): the member echoes, the host
-        # reads it next to the sync admission and the v_46 authority echo.
+        # …and repairs a mirror that missed gossip in reply to the member's
+        # sync BEGIN. An older member echoes the roster version it applied
+        # (``roster_echo``); ours carries a digest of the mirror.
         app[K.space_sync_scheduler_key].attach_roster_echo(
             real_space_service.roster_echo_for
         )
-        federation_service._event_registry.register(
-            FederationEventType.SPACE_SYNC_BEGIN,
-            real_space_service.on_sync_begin_roster_echo,
+        # The roster repair: a member's BEGIN carries the digest of its
+        # roster mirror; the host answers with a snapshot only on a mismatch.
+        app[K.space_sync_scheduler_key].attach_roster_digest(
+            real_space_service.roster_digest_for
+        )
+        # …only for a BEGIN the sync admission let in (S-6: 5/h per
+        # household), never for a refused one.
+        federation_service.attach_sync_begin_admitted(
+            real_space_service.on_sync_begin_roster
         )
         # Multi-admin approval (quorum) — rebuild with the real instance_id
         # (mirrors the real_space_service rebuild) and wire federation + the
@@ -4989,6 +5228,14 @@ def create_app(config: Config | None = None) -> web.Application:
             target_eph_lookup=route_discovery.lookup_target_eph_priv,
         )
         routed_handler.attach_to(federation_service)
+        # A media chunk the target nacked (it restarted and cannot open
+        # what was sealed to its old key) is not retransmitted by the mesh
+        # (the file is on disk; every other large inner is kept and
+        # retransmitted): the media outbox queues the file again.
+        routed_handler.attach_lost_inner_listener(
+            FederationEventType.SPACE_MEDIA_BLOB,
+            space_media_sync_service.on_mesh_chunk_lost,
+        )
         # Mesh lives on the federation service so every outbound that
         # goes through ``send_with_mesh_fallback`` (private invites,
         # space-content broadcasts, future per-peer fanouts) sees the
@@ -5080,10 +5327,12 @@ def create_app(config: Config | None = None) -> web.Application:
             rate_limiter=limiter,
         )
         gfs_relay_inbound.attach_join_requests(gfs_join_requests)
-        # v_88 — a household reached only through a GFS gets an anonymous
-        # mailbox per space there; minted at seat time by the redeem paths,
-        # released with the seat, frames into the relay's inbound leg.
-        space_mailboxes = _build_space_mailboxes(
+        # v_89 — ONE anonymous mailbox per GFS for a household that reaches
+        # a space through it (minted at seat time, released when nothing
+        # needs it), member cards and the host's member directory (any
+        # member reaches a GFS-reached one), and the host as the one
+        # SPACE_ROUTED hop for a member with no connection to that GFS.
+        space_mailboxes, member_directory = _build_gfs_mailboxes(
             repos=repos,
             key_manager=key_manager,
             gfs_connection_service=gfs_connection_service,
@@ -5092,12 +5341,46 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_relay_inbound=gfs_relay_inbound,
             gfs_envelope_sender=gfs_envelope_sender,
         )
-        invite_redeem_coordinator.attach_mailboxes(space_mailboxes)
+        invite_redeem_coordinator.attach_mailboxes(space_mailboxes, member_directory)
         real_space_service.attach_space_mailboxes(space_mailboxes)
-        # Lost / moved mailboxes: SPACE_MAILBOX_UPDATED both ways.
-        space_mailboxes.attach_to(federation_service, repos.federation)
+        member_directory.attach_seat_ender(
+            real_space_service.end_space_session_if_unused
+        )
+        member_directory.attach_to(federation_service)
+        member_directory.wire(bus)
+        # A pairing that ends leaves the space the two households share as
+        # it was before they paired: the household is seated again from
+        # its member card.
+        app[K.peer_unpair_service_key].attach_after_purge(member_directory.reseat)
+        if gfs_channels is not None:
+            # A joiner's "seated" card re-sends its private-channel grant:
+            # the one sent when its seat went live can beat its seat.
+            member_directory.attach_on_seated(gfs_channels.on_member_seated)
+        # Repair of a lost directory delta rides the periodic §25.6 sync:
+        # the BEGIN echoes the member's ``dir_seq``; a host ahead answers.
+        app[K.space_sync_scheduler_key].attach_directory_echo(
+            member_directory.directory_seq
+        )
+        federation_service._event_registry.register(
+            FederationEventType.SPACE_SYNC_BEGIN, member_directory.on_sync_begin
+        )
+        host_hop = HostHop(
+            own_instance_id=real_instance_id,
+            card_of=member_directory.usable_card_of,
+            hosts_of=member_directory.hop_hosts,
+            acting_hosts=member_directory.hosts_of,
+            serves=member_directory.serves,
+            keywrap_private_key=identity.keywrap_private_key,
+            keywrap_public_key=identity.keywrap_public_key,
+            ask_host=member_directory.ask_host,
+        )
+        routed_handler.attach_host_hop(host_hop)
+        federation_service.attach_member_mesh(
+            host_hop=host_hop, mailbox_sender_check=member_directory.sender_allowed
+        )
         await space_mailboxes.start()
         app[K.space_mailbox_service_key] = space_mailboxes
+        app[K.space_member_directory_key] = member_directory
         real_space_service.attach_gfs_join_requests(gfs_join_requests)
         # An approval whose redeem did not seat its person yet (the host was
         # offline, we restarted): retried now, and on every GFS reconnect.
@@ -5238,10 +5521,14 @@ def create_app(config: Config | None = None) -> web.Application:
         space_post_outbound.attach_media_gfs(space_media_uploader)
         if space_public_outbound is not None:
             space_public_outbound.attach_media_gfs(space_media_uploader)
+            # v_92 — the relayed post carries its author-signed file hashes.
+            space_public_outbound.attach_file_hasher(file_hasher)
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
         fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
-        # …and no SPACE_MEDIA_BLOB push to them: the relay refuses the bytes.
+        # …and the outbox skips a SPACE_MEDIA_BLOB push to one of them only
+        # while its GFS is known to hold the file (every member is pushed
+        # the rest, through the relay like any envelope).
         space_media_sync_service.attach_relay_readers(space_media_uploader)
         fed.inbound_service.attach_gfs_media(space_media_fetcher)
         # v_82: a page's files keep the names the host's page shows.
@@ -5329,9 +5616,9 @@ def create_app(config: Config | None = None) -> web.Application:
                 federation_repo=repos.federation,
                 gfs_connection_repo=repos.gfs_connection,
             ),
-            # v_88 — a link-joined household's per-space mailbox, when it
-            # sent one and our connection to its GFS proved mailboxes.
-            mailbox_targets=space_mailboxes.target_for,
+            # v_89 — a carded household's GFS mailbox, when our connection
+            # to its GFS proved mailboxes.
+            mailbox_targets=member_directory.target_for,
             signaling_send=_signaling_send,
             ice_servers=fed_ice_servers,
             inbound_handler=federation_service.handle_inbound_rtc,
@@ -5526,7 +5813,7 @@ def create_app(config: Config | None = None) -> web.Application:
             # v_84 — a connection came up: retry approvals of "Ask to join"
             # that have not seated their person yet (own task, non-blocking).
             gfs_join_requests.resume_soon()
-            # v_88 — mailbox tickets: a household with none gets a batch now
+            # v_89 — mailbox tickets: a household with none gets a batch now
             # rather than at its first daily slot. Fail-soft.
             try:
                 await space_mailboxes.on_connected(gfs_id)
@@ -5583,9 +5870,9 @@ def create_app(config: Config | None = None) -> web.Application:
                 except Exception:
                     log.exception("gfs: member subscription list failed for %s", gfs_id)
             await gfs_space_mirror.resubscribe_all(gfs_id, also=member_ids)
-            # Re-announce the current epoch of every seed-held space (the
+            # Re-announce the current epoch of every space we OWN (the
             # owner's notice also confirms what a delegated admin rotated
-            # meanwhile). Fail-soft.
+            # meanwhile; a delegated admin sends nothing here). Fail-soft.
             if gfs_member_publish is not None:
                 try:
                     await gfs_member_publish.announce_held_epochs(gfs_id)
@@ -5619,9 +5906,9 @@ def create_app(config: Config | None = None) -> web.Application:
                     exc_info=True,
                 )
             # Phase 5b-c reconcile: pull this GFS's subscriber list for every
-            # seed-held public/global space and re-seal the content key to each
-            # — delivering keys missed while no seed-holder was online (works
-            # owner-offline via any delegated admin). Fail-soft (never raises).
+            # public/global space we own and listed there and re-seal the
+            # content key to each — delivering keys missed while we were
+            # offline. Fail-soft (never raises).
             if space_subscriber_key_outbound is not None:
                 await space_subscriber_key_outbound.reconcile(gfs_id)
 
@@ -5699,7 +5986,7 @@ def create_app(config: Config | None = None) -> web.Application:
         gfs_connection_service.attach_on_removed(
             lambda conn: gfs_ws_supervisor.forget(conn.id)
         )
-        # v_88 — and its mailbox-ticket loops stop with it.
+        # v_89 — and its mailbox-ticket loops stop with it.
         gfs_connection_service.attach_on_removed(space_mailboxes.forget_connection)
         # Warm the RAM-only GFS capability cache now, not only when each
         # socket connects: until then ``GET /api/gfs/connections`` reads
@@ -5730,30 +6017,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # 6. OutboxProcessor — drains federation_outbox in the background.
         peer_unpair_service = app[K.peer_unpair_service_key]
 
-        async def _deliver(entry):
-            """Re-deliver an outbox entry via FederationService.
-
-            The outbox stores the full envelope JSON (signed + encrypted)
-            from the original send_event() call. On retry we POST the same
-            bytes verbatim — no re-encryption.
-            """
-            moderation = app.get(K.space_moderation_service_key)
-            return await _deliver_outbox_entry(
-                federation_service,
-                federation_repo,
-                peer_unpair_service,
-                entry,
-                still_wanted=(
-                    moderation.outbox_entry_wanted if moderation is not None else None
-                ),
-            )
-
-        # ``after_prune``: once the retention sweep has failed an UNPAIR
-        # past its max age, purge that peer's unpair tombstone.
-        outbox_processor = OutboxProcessor(
-            outbox_repo,
-            _deliver,
-            after_prune=peer_unpair_service.sweep_tombstones,
+        outbox_processor = _build_outbox_processor(
+            app, outbox_repo, federation_service, federation_repo, peer_unpair_service
         )
         await outbox_processor.start()
         app[K.outbox_processor_key] = outbox_processor
@@ -5769,6 +6034,13 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo, window=REPLAY_CACHE_WINDOW
         )
         await replay_cache_scheduler.start()
+        # What a GFS still owes after a space key rotation is re-sent until
+        # it confirms (durable re-pin / channel retire).
+        nonlocal gfs_cleanup_scheduler
+        gfs_cleanup_scheduler = _build_gfs_cleanup_scheduler(
+            gfs_connection_service, gfs_channels
+        )
+        await gfs_cleanup_scheduler.start()
         await push_withdraw_service.start()
         if gfs_route_discovery_scheduler is not None:
             await gfs_route_discovery_scheduler.start()
@@ -6119,7 +6391,7 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_reconcile_retry.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
-        # v_88 — the anonymous mailbox claim sockets and ticket loops.
+        # v_89 — the anonymous mailbox claim sockets and ticket loops.
         if (space_mailboxes := app.get(K.space_mailbox_service_key)) is not None:
             await space_mailboxes.stop()
         # Before the HTTP session closes: queued sealed moment keys ride it.
@@ -6149,6 +6421,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await highlight_signaling_handler.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        if gfs_cleanup_scheduler is not None:
+            await gfs_cleanup_scheduler.stop()
         # Before the shared HTTP session closes: pending withdraws go out.
         await push_withdraw_service.stop()
         if gfs_route_discovery_scheduler is not None:
@@ -6179,6 +6453,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # so we don't leave a row marked ``in_flight`` past the
         # restart (the next boot would see it stuck and never retry).
         await dm_media_sync_service.stop()
+        # v_92 — file requests waiting for their window or a provider end
+        # without sending more.
+        if (wanted := app.get(K.space_media_wanted_key)) is not None:
+            await wanted.stop()
         await space_media_sync_service.stop()
         if (uploader := app.get(K.space_media_gfs_uploader_key)) is not None:
             await uploader.stop()

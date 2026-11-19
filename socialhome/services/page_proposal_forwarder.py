@@ -242,9 +242,9 @@ class PageProposalForwarder:
         creates = proposal.base_seq == 0
         if creates:
             payload["created_by"] = proposal.created_by
-        # A host reached only through a GFS relay (we were seated from an
-        # invite link) can't take our bytes: the draft's new files ride its
-        # GFS media cache, described in the proposal (v_82).
+        # A host reached only through a GFS relay whose relay takes no
+        # binary frames can't take our bytes: the draft's new files ride
+        # its GFS media cache, described in the proposal (v_82).
         plan = await self._describe_files(space_id, page_id, proposal, host)
         if plan is not None:
             # Inside the proposal's encrypted payload, under the envelope's
@@ -310,13 +310,17 @@ class PageProposalForwarder:
         self, space_id: str, page_id: str, proposal: Proposal, host: str
     ) -> SpaceMediaPlan | None:
         """The upload plan for the draft's new files when the host reads us
-        only through a GFS (a link-joined v_82 pair): sealed for this page
-        and our household, at the address on the GFS that relays us to the
-        host. ``None`` otherwise (the outbox carries them) or on any
-        failure (the draft goes out without them; logged)."""
+        only through a GFS whose relay cannot carry the push (a link-joined
+        v_82 pair below v_87 frames): sealed for this page and our
+        household, at the address on the GFS that relays us to the host.
+        ``None`` otherwise — the outbox pushes them, as from any member (a
+        host taking binary relay frames gains nothing from a cache for one
+        recipient) — or on any failure (the draft goes out without them;
+        logged)."""
         if (
             self._media_gfs is None
             or not await self._media_gfs.is_relay_reader(host)
+            or await self._media_gfs.takes_relay_frames(host)
             or not await self._federation.space_member_supports(
                 host, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
             )
@@ -378,6 +382,11 @@ class PageProposalForwarder:
                 correlation_id=page_id,
                 target_instance_ids=[host],
                 media_urls=urls,
+                # The host needs these bytes whatever its GFS cache holds:
+                # the outbox's "reads from its GFS" skip matches by file
+                # name, so a plain row could be dropped for a same-named
+                # file there under another item or epoch.
+                push=True,
             )
         except Exception:
             log.exception(

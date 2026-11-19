@@ -41,7 +41,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.link_preview import link_preview_to_dict
+from ..domain.post import post_to_wire_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_item import (
     ITEM_TYPE_COMMENT,
@@ -53,7 +53,7 @@ from ..domain.space_item import (
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
 )
-from ..domain.space_media_ref import post_media_urls
+from ..domain.space_media_fields import item_media_urls
 from ..infrastructure.event_bus import EventBus
 from .file_hashes_sender import FileHashesMixin
 from .moderation_release import current_release, with_release
@@ -62,6 +62,9 @@ from .space_media_refs import SpaceMediaRefsMixin
 from .space_public_author import build_signed_author_inner
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from ..domain.file_hashes import FileHash
     from ..domain.post import Post
     from ..federation.federation_service import FederationService
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -118,7 +121,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         #: cert for the current epoch (a seed holder re-checks + re-stamps it).
         self._writer_certs: SpaceWriterCertService | None = None
         #: v_49 — when wired, a non-seed-holding writer household publishes
-        #: its own public/global post to the GFS itself (trusted mode).
+        #: its own public/global post to the GFS itself (anonymously).
         self._member_gfs: GfsMemberPublishService | None = None
         #: Optional — when wired, ``SPACE_POST_CREATED`` broadcasts
         #: are followed by per-peer outbox enqueues for every
@@ -147,8 +150,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._bus.subscribe(CommentAdded, self._on_comment_added)
         self._bus.subscribe(CommentUpdated, self._on_comment_updated)
         self._bus.subscribe(CommentDeleted, self._on_comment_deleted)
-        # v_49 — a local user's space reaction rides only the member relay
-        # (space reactions are not federated events).
+        # A local user's space reaction: v_93 to every member household,
+        # and (v_49) over the member relay where the space has one.
         self._bus.subscribe(PostReactionChanged, self._on_reaction_changed)
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
@@ -156,7 +159,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._writer_certs = writer_certs
 
     def attach_member_gfs(self, member_gfs: GfsMemberPublishService) -> None:
-        """Wire the v_49 trusted-mode member publisher."""
+        """Wire the v_49 member publisher."""
         self._member_gfs = member_gfs
 
     def attach_identity(
@@ -177,7 +180,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self, space_id: str, post: Post, *, media_refs: dict | None = None
     ) -> None:
         """Build the GFS inner of our own post and hand it to the member
-        publisher's background queue (v_49 trusted mode). ``media_refs``
+        publisher's background queue (v_49). ``media_refs``
         (v_80) rides the inner under the author's separate signature over
         the descriptor (``media_refs_sig`` — not part of the main author
         bytes), so followers find the pictures in their GFS's media cache and
@@ -198,6 +201,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 item_type=ITEM_TYPE_POST,
                 item_target=post.id,
                 media_refs=media_refs,
+                # One name on every path for the post's files.
+                file_hashes=await self._file_hashes_of(item_media_urls("posts", post)),
             )
             self._member_gfs.schedule_post(space_id, post.author, inner)
         except Exception:
@@ -242,10 +247,13 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         *,
         target: str,
         post_id: str,
+        ts: str | None = None,
+        file_hashes: Mapping[str, FileHash] | None = None,
         **fields: str | None,
     ) -> None:
         """Sign a generic item inner for our own user and hand it to the
-        member publisher's background queue. Never raises."""
+        member publisher's background queue. ``ts``: the item's signed stamp
+        when the caller already fixed one (default: now). Never raises."""
         assert self._member_gfs is not None
         try:
             author = await self._users.get_by_user_id(author_user_id)
@@ -262,7 +270,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 author_identity_seed=self._own_identity_seed,
                 origin_instance_id=self._own_instance_id,
                 author_identity_anchor=author.identity_anchor,
-                ts=datetime.now(UTC).isoformat(),
+                ts=ts or datetime.now(UTC).isoformat(),
+                file_hashes=file_hashes,
                 **fields,
             )
             self._member_gfs.schedule_item(space_id, author_user_id, item_type, inner)
@@ -288,7 +297,10 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             # IS the post: it carries the signed descriptor too (uploads
             # already stored are not repeated).
             media_plan = await self._plan_media_refs(
-                space_id, post_media_urls(post), item_id=post.id, followers=True
+                space_id,
+                item_media_urls("posts", post),
+                item_id=post.id,
+                followers=True,
             )
             inner = build_signed_author_inner(
                 post=post,
@@ -302,6 +314,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 item_target=post.id,
                 edited_at=edited_at or datetime.now(UTC).isoformat(),
                 media_refs=media_plan.wire() if media_plan is not None else None,
+                file_hashes=await self._file_hashes_of(item_media_urls("posts", post)),
             )
             self._upload_media(media_plan)
             self._member_gfs.schedule_item(
@@ -315,17 +328,51 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             )
 
     async def _on_reaction_changed(self, event: PostReactionChanged) -> None:
-        if event.origin_instance_id is not None or not event.reactor_user_id:
+        """A local user's reaction on a space post, added or removed.
+
+        v_93: the delta goes to every member household
+        (``SPACE_POST_REACTION``; one at an older version is skipped — it
+        keeps showing its own people's reactions). Where the space is also
+        read through a GFS, the v_49 ``space_item`` follows as before. Both
+        carry the event's own time, so a household that gets both applies
+        one. Never an inbound reaction (no echo), never a household post.
+        """
+        if (
+            event.origin_instance_id is not None
+            or not event.reactor_user_id
+            or not event.space_id
+        ):
             return
+        at = event.occurred_at.astimezone(UTC).isoformat()
+        try:
+            await self._federation.broadcast_to_space_members(
+                event.space_id,
+                FederationEventType.SPACE_POST_REACTION,
+                {
+                    "space_id": event.space_id,
+                    "post_id": event.post.id,
+                    "user_id": event.reactor_user_id,
+                    "emoji": event.emoji,
+                    "action": "add" if event.added else "remove",
+                    "at": at,
+                },
+                min_proto_version=FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
+            )
+        except Exception:
+            log.exception(
+                "SPACE_POST_REACTION broadcast failed for space=%s post=%s",
+                event.space_id,
+                event.post.id,
+            )
         if not await self._member_publishable(event.space_id):
             return
-        assert event.space_id is not None
         await self._schedule_item(
             event.space_id,
             event.reactor_user_id,
             ITEM_TYPE_REACTION_ADD if event.added else ITEM_TYPE_REACTION_REMOVE,
             target=event.post.id,
             post_id=event.post.id,
+            ts=at,
             emoji=event.emoji,
         )
 
@@ -373,50 +420,20 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             release is None or event.approved_by is None
         ):
             return
+        # The post itself in the one shape a resume replays too
+        # (``post_to_wire_dict``), plus v_42: who made the write — receivers
+        # check it against the space's ``posts`` access level. A create's
+        # actor is its author — a release from the moderation queue too
+        # (v_43: the approver is named in the approval block instead); a
+        # v_42 host's release named the approver here.
         payload: dict = {
-            "id": post.id,
-            "space_id": event.space_id,
-            "author": post.author,
-            # v_42: who made the write — receivers check it against the
-            # space's ``posts`` access level. A create's actor is its author
-            # — a release from the moderation queue too (v_43: the approver
-            # is named in the approval block instead); a v_42 host's release
-            # named the approver here.
+            **post_to_wire_dict(post, event.space_id),
             "actor_user_id": (
                 post.author if release is not None else event.approved_by or post.author
             ),
-            "type": post.type.value,
-            "content": post.content,
-            "media_url": post.media_url,
-            "image_urls": list(post.image_urls),
-            "occurred_at": post.created_at.isoformat() if post.created_at else None,
-            # Mirror feed visibility on member households: a Bazaar listing's
-            # anchor post is hidden from the feed unless the seller announced
-            # it. Omitted-on-older-sender → receiver defaults to visible.
-            "hidden_from_feed": post.hidden_from_feed,
         }
-        if post.location is not None:
-            payload["location"] = {
-                "lat": post.location.lat,
-                "lon": post.location.lon,
-                "label": post.location.label,
-            }
-        # The author-built link card rides inside the encrypted payload like
-        # the text; receivers validate it and never fetch the URL. Older
-        # receivers ignore the key and show the post without a card.
-        if post.link_preview is not None:
-            payload["link_preview"] = link_preview_to_dict(post.link_preview)
-        if post.linked_event_id is not None:
-            payload["linked_event_id"] = post.linked_event_id
-        if post.file_meta is not None:
-            payload["file_meta"] = {
-                "url": post.file_meta.url,
-                "mime_type": post.file_meta.mime_type,
-                "original_name": post.file_meta.original_name,
-                "size_bytes": post.file_meta.size_bytes,
-            }
-        # Attach a pre-signed relay hint so a seed-holding member can forward this
-        # public/global post to the GFS subscribers even when the owner is offline
+        # Attach a pre-signed relay hint so the space's owner can relay this
+        # public/global post to the GFS subscribers
         # (remote-author relay). Built only for a public/global space + a local
         # author we can sign for; private spaces never relay to the GFS. A
         # public/global space that allows no subscribers is listed for
@@ -439,7 +456,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # copy of the payload (``per_peer``), followers inside the relayed
         # inner — planned first, because the author signs the descriptor
         # there (a separate ``media_refs_sig``, not in the main author bytes).
-        media_urls = post_media_urls(post)
+        media_urls = item_media_urls("posts", post)
         media_plan = await self._plan_media_refs(
             event.space_id,
             media_urls,
@@ -464,10 +481,11 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                     # so its signed bytes stay v_25-compatible.
                     author_identity_anchor=author.identity_anchor,
                     media_refs=media_refs,
+                    file_hashes=await self._file_hashes_of(media_urls),
                 )
                 # v_49 — our household's writer cert, outside the author
                 # signature (it authenticates itself against the space key).
-                # Absent → a seed holder relays it on its own authority, as
+                # Absent → the owner relays it on its own authority, as
                 # for a pre-v_49 author.
                 if self._writer_certs is not None:
                     try:
@@ -691,7 +709,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             "parent_id": c.parent_id,
             "occurred_at": c.created_at.isoformat() if c.created_at else None,
         }
-        media_urls = [c.media_url] if c.media_url else []
+        media_urls = item_media_urls("comments", c)
         payload = await self._with_file_hashes(payload, media_urls)
         try:
             await self._federation.broadcast_to_space_members(
@@ -721,6 +739,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 content=c.content,
                 media_url=c.media_url,
                 created_at=c.created_at.isoformat() if c.created_at else None,
+                # One name on every path for the comment's picture.
+                file_hashes=await self._file_hashes_of(media_urls),
             )
 
     async def _on_comment_updated(self, event: CommentUpdated) -> None:
@@ -737,6 +757,9 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             "content": c.content,
             # Receivers order a comment's edits by it (last writer wins).
             "edited_at": datetime.now(UTC).isoformat(),
+            # The comment's author: a follower's own edit passes the §24.11
+            # writer gate only under the comment switch, bound to its seat.
+            "author": c.author,
         }
         try:
             await self._federation.broadcast_to_space_members(
@@ -778,6 +801,9 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             "post_id": event.post_id,
             "space_id": event.space_id,
         }
+        if event.author_user_id:
+            # As for an edit: a follower's own delete is bound to its seat.
+            payload["author"] = event.author_user_id
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,

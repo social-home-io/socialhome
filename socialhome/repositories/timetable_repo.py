@@ -36,7 +36,15 @@ from ..domain.timetable import (
     validity_from_dict,
     validity_to_dict,
 )
-from .base import changed_since_sql, dump_json, load_json, row_to_dict, rows_to_dicts
+from ..domain.tombstone import SpaceRowTombstone
+from .base import (
+    changed_since_sql,
+    dump_json,
+    load_json,
+    row_to_dict,
+    rows_to_dicts,
+    sync_page_cursor,
+)
 
 log = logging.getLogger(__name__)
 
@@ -303,6 +311,17 @@ class AbstractSpaceTimetableRepo(Protocol):
         space_id: str,
         at: datetime,
     ) -> bool: ...
+    async def list_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+        since: int | None = None,
+    ) -> tuple[list[SpaceRowTombstone], int | None]:
+        """One page of the space's timetable tombstones for the §25.6
+        ``timetables_deleted`` resource (v_92), keyset on the rowid."""
+        ...
 
 
 class SqliteSpaceTimetableRepo:
@@ -449,3 +468,35 @@ class SqliteSpaceTimetableRepo:
             (timetable_id, space_id, stamp, stamp, stamp, space_id),
         )
         return n > 0
+
+    async def list_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+        since: int | None = None,
+    ) -> tuple[list[SpaceRowTombstone], int | None]:
+        """The space's deleted timetables, page by page (keyset on the
+        rowid) — identity only. The deleting moderator is not recorded on
+        the row, so ``deleted_by`` stays empty."""
+        changed, changed_params = changed_since_sql("sync_seq", since)
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, id, created_by, created_at, deleted_at"
+                " FROM space_timetables"
+                " WHERE space_id=? AND deleted_at IS NOT NULL"
+                + changed
+                + " AND rowid > ? ORDER BY rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
+            )
+        )
+        return [
+            SpaceRowTombstone(
+                id=r["id"],
+                owner=r["created_by"] or "",
+                created_at=r["created_at"] or "",
+                deleted_at=r["deleted_at"],
+            )
+            for r in rows
+        ], sync_page_cursor(rows, limit)

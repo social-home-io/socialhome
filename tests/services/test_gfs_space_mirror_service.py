@@ -26,6 +26,7 @@ from socialhome.domain.events import (
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.gfs_space_seat import GfsSpaceSeat
 from socialhome.domain.public_space import PublicSpaceListing
+from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -2458,3 +2459,20 @@ async def test_a_server_that_does_not_take_it_tries_the_next_seat(env):
     gfs = _KeyGfs(takes=False)
     assert await _mirror(env, _StubSession(), gfs).request_space_key("sp-1") is False
     assert sorted(gfs.asked) == [("sp-1", "gfs-1"), ("sp-1", "gfs-2")]
+
+
+async def test_ensure_mirror_takes_no_description_over_the_config_limit(env, caplog):
+    """The mirror is a config read from outside: the one receiver rule for
+    a space's config — over the limit, its settings are seated, its text
+    is not (WARNING)."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    big = "d" * SPACE_CONFIG_ITEM_MAX_BYTES
+    session = _StubSession(
+        {"https://gfs.test/gfs/spaces/sp-1": (200, _gfs_space_body(description=big))},
+    )
+    caplog.set_level(logging.WARNING)
+    got = await _mirror(env, session).ensure_mirror("sp-1")
+    assert got is not None
+    stored = await env.spaces.get("sp-1")
+    assert (stored.name, stored.description, stored.min_age) == ("Cool Space", None, 13)
+    assert "not taken" in caplog.text

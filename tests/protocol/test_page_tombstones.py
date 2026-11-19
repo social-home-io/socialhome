@@ -270,7 +270,9 @@ async def test_a_stale_members_resume_replay_cannot_resurrect_a_page(mesh, monke
             a,
         ),
     )
-    assert _sent_to(a, b, FET.SPACE_PAGE_CREATED)
+    # v_92: A is no roster authority, so it does not even replay a page of
+    # another household's person (the receiver would refuse it anyway).
+    assert not _sent_to(a, b, FET.SPACE_PAGE_CREATED)
     await _deliver(a, b)
     assert await _content(b, pid) is None and await _deleted(b, pid)
 

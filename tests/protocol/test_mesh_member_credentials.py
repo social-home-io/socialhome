@@ -150,14 +150,14 @@ async def test_mesh_member_gets_its_cert_sealed_end_to_end():
     )
 
 
-async def test_mesh_member_in_a_strict_space_gets_the_writer_key_too():
+async def test_mesh_member_in_a_readable_space_gets_the_writer_key_too():
     d, _b, c = _mesh_topology()
     repo = _MeshRepo(
         seated={d.instance_id},
         claims={d.instance_id: (OURS, d.fed.identity.public_key.hex())},
     )
     _fed, certs = _host(
-        c.instance_id, d.instance_id, repo, space=_space(gfs_publish_mode="strict")
+        c.instance_id, d.instance_id, repo, space=_space(allow_subscribers=True)
     )
     out = await certs.peer_payload_hook("sp-1")(d.instance_id, {})
     assert "writer_cert" in out and "writer_key" in out
@@ -175,7 +175,7 @@ async def test_mesh_member_of_unknown_or_old_version_gets_nothing(claimed):
     )
     repo = _MeshRepo(seated={d.instance_id}, claims=claims)
     _fed, certs = _host(
-        c.instance_id, d.instance_id, repo, space=_space(gfs_publish_mode="strict")
+        c.instance_id, d.instance_id, repo, space=_space(allow_subscribers=True)
     )
     assert await certs.cert_for_peer("sp-1", d.instance_id) is None
     out = await certs.peer_payload_hook("sp-1")(d.instance_id, {})

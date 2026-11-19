@@ -707,24 +707,40 @@ class SchedulePollResponded(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class PollCreated(DomainEvent):
-    """A reply poll was attached to a post (§9)."""
+    """A reply poll was attached to a post (§9).
+
+    ``options`` (``{id, text}`` in display order) and ``closes_at`` are the
+    rest of the definition: a space poll's goes to the member households
+    whole (``SPACE_POLL_CREATED``), so every household holds the same
+    option ids. ``origin_instance_id`` is set when the poll came from a
+    peer: the outbound bridge does not echo it back.
+    """
 
     post_id: str
     question: str
     allow_multiple: bool
     space_id: str | None = None
+    options: tuple[dict, ...] = ()
+    closes_at: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class PollVoted(DomainEvent):
     """A user cast or retracted a vote. ``option_ids`` is the full set
-    after the change (empty = retracted)."""
+    after the change (empty = retracted). ``origin_instance_id`` is set
+    when the vote came from a peer (``SPACE_POLL_VOTE_CAST``): the outbound
+    bridge does not echo it back. ``at`` is the stamp the voter's household
+    wrote with a space poll's selection (tz-aware ISO 8601) — what every
+    other household orders it by (v_94)."""
 
     post_id: str
     voter_user_id: str
     option_ids: tuple[str, ...]
     space_id: str | None = None
+    origin_instance_id: str | None = None
+    at: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1492,7 +1508,7 @@ class SpaceSyncComplete(DomainEvent):
     from_instance: str
     sync_id: str = ""
     #: Every chunk the provider counted arrived and applied here
-    #: (:class:`~socialhome.federation.sync.space.receiver.StreamHealth`) —
+    #: (:class:`~socialhome.federation.sync.space.stream_health.StreamHealth`) —
     #: sent back as ``SPACE_SYNC_COMPLETE {clean}`` so only a clean stream
     #: advances the provider's incremental-sync watermark.
     clean: bool = False
@@ -1502,9 +1518,10 @@ class SpaceSyncComplete(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class SpaceSyncDeferred(DomainEvent):
     """A sync we asked a provider for was not served and must be asked for
-    again: the provider refused our ``SPACE_SYNC_BEGIN`` for lack of
-    capacity (``too_many_sessions`` / ``node_capacity``, §25.6 S-6 / S-8),
-    or its stream broke off before the end-of-stream sentinel (the
+    again: the provider refused our ``SPACE_SYNC_BEGIN`` (``reason``: its
+    ``too_many_sessions`` / ``node_capacity`` / ``rate_limited``, §25.6
+    S-6 / S-8 — only a capacity refusal is asked again shortly), or its
+    stream broke off before the end-of-stream sentinel (the
     DataChannel closed under it — the provider restarted; ``reason``
     ``"interrupted"``).
 
@@ -1517,8 +1534,9 @@ class SpaceSyncDeferred(DomainEvent):
     provider_instance_id: str
     sync_mode: str = "initial"
     sync_id: str = ""
-    #: ``"capacity"`` (refused) or ``"interrupted"`` (cut mid-stream).
-    reason: str = "capacity"
+    #: The provider's refusal, or ``"interrupted"`` (cut mid-stream, noticed
+    #: on our side — not an answer from the provider).
+    reason: str = "too_many_sessions"
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1897,6 +1915,18 @@ class SpaceAdminSeedsRetiredAfterRestore(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceDelegationBlocked(DomainEvent):
+    """No admin household of a space this household owns can get the
+    space's signing seed right now (D1, owner decision 2026-11-15): a GFS the
+    space is listed on can't take a new space key, or couldn't be reached to
+    prove it can. Told to the owner so delegated admin never fails silently;
+    the next share after that GFS proves it goes out as usual."""
+
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceAuthorityEchoDue(DomainEvent):
     """A member household just learned something its space owner must hear
     now rather than on the next periodic sync (v_46): the owner's
@@ -1906,6 +1936,20 @@ class SpaceAuthorityEchoDue(DomainEvent):
 
     space_id: str
     owner_instance_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceInviterReproofDue(DomainEvent):
+    """A member household a delegated admin invited just took the owner's
+    rotation of the space key: that admin proved the seed of the OLD key,
+    so it stops acting as host here (``federation/host_equivalence.py``)
+    until its §25.6 sentinel carries a proof for the new one. The sync
+    scheduler answers with an incremental ``SPACE_SYNC_BEGIN`` to it now
+    rather than at the next periodic tick."""
+
+    space_id: str
+    inviter_instance_id: str
     occurred_at: datetime = field(default_factory=_now)
 
 

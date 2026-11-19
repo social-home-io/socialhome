@@ -12,6 +12,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     DeliveryResult,
     FederationEventType,
     InstanceSource,
@@ -27,6 +28,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
+from socialhome.services import space_media_sync_service as sms
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_media_sync_service import (
     PIPELINE_WINDOW,
@@ -47,7 +49,7 @@ async def _seed_space(db, *, space_id="sp-1"):
     )
     # The outbox queues only for a paired or member household of the space
     # (the enqueue guard): seat every peer these tests address.
-    for peer in ("peer-a", "peer-b", "peer-x", "peer-tomb", "peer-mesh"):
+    for peer in ("peer-a", "peer-b", "peer-e", "peer-x", "peer-tomb", "peer-mesh"):
         await db.enqueue(
             "INSERT INTO space_instances(space_id, instance_id) VALUES(?,?)",
             (space_id, peer),
@@ -276,6 +278,66 @@ async def test_flush_once_reschedules_on_delivery_failure(
     assert rows[0].last_error == "no_route"
 
 
+async def test_a_chunk_held_behind_the_seats_pending_rows_is_not_a_failure(
+    db, outbox, tmp_path, caplog
+):
+    """#1361: a member posts a picture to a space with GFS-reached members.
+    The post goes to the outbox as one multi upload; the picture's chunk for
+    one of those seats, sent right after, is held BEHIND that pending row by
+    the ordering gate — in the durable outbox, delivered in order. That is
+    accepted, not failed: no WARNING, no second send of the whole file."""
+    await _seed_space(db)
+    (tmp_path / "x.webp").write_bytes(b"x")
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(
+        return_value=DeliveryResult(
+            instance_id="peer-x",
+            ok=False,
+            error=DELIVERY_ERROR_QUEUED,
+            via="gfs_relay",
+            held_in_order=True,
+        ),
+    )
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-x"],
+        media_urls=["api/media/x.webp"],
+    )
+    with caplog.at_level("WARNING"):
+        shipped = await svc.flush_once()
+    assert shipped == 1
+    assert "failed" not in caplog.text
+    assert await svc.flush_once() == 0  # nothing left to send again
+    fed.send_media_chunk.assert_awaited_once()
+
+
+async def test_a_send_that_failed_and_was_queued_still_reschedules_the_file(
+    db, outbox, tmp_path
+):
+    """Only the ordering gate's hold is accepted: a send that FAILED (and
+    was queued for retry) keeps today's handling."""
+    await _seed_space(db)
+    (tmp_path / "x.webp").write_bytes(b"x")
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(
+        return_value=DeliveryResult(
+            instance_id="peer-x", ok=False, error=DELIVERY_ERROR_QUEUED
+        ),
+    )
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-x"],
+        media_urls=["api/media/x.webp"],
+    )
+    assert await svc.flush_once() == 0
+    [row] = await outbox.list_for_correlation("p-1")
+    assert row.attempts == 1 and row.last_error == DELIVERY_ERROR_QUEUED
+
+
 async def test_dedup_same_blob_to_same_peer(db, outbox, tmp_path):
     """ON CONFLICT(blob_id, target_instance_id) DO NOTHING — same
     blob referenced by two different correlation ids deduplicates."""
@@ -412,21 +474,25 @@ async def test_a_700_kb_picture_ships_in_chunks_the_targets_channel_takes(
 
 
 class _Readers:
-    """Stand-in for the GFS media uploader's reader check (v_80)."""
+    """Stand-in for the GFS media uploader's check (v_80): which households
+    take a file from their GFS's media cache."""
 
     def __init__(self, readers):
         self.readers = set(readers)
 
-    async def is_relay_reader(self, iid):
+    async def reads_from_gfs(self, iid, filename):
         return iid in self.readers
 
 
 async def test_a_link_joined_v80_reader_gets_no_byte_push(db, outbox, tmp_path):
     """A member seated from an invite link at v_80 reads the space's
-    pictures from its GFS's media cache; the relay refuses these bytes, so
-    no outbox row is ever queued for it."""
+    pictures from its GFS's media cache: its row is dropped at send time,
+    nothing is pushed to it."""
     await _seed_space(db)
-    svc = SpaceMediaSyncService(outbox=outbox, federation=None, media_dir=tmp_path)
+    (tmp_path / "img-1.webp").write_bytes(b"x" * 64)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
     svc.attach_relay_readers(_Readers({"peer-e"}))
     await svc.enqueue_for_blob(
         space_id="sp-1",
@@ -434,8 +500,116 @@ async def test_a_link_joined_v80_reader_gets_no_byte_push(db, outbox, tmp_path):
         target_instance_ids=["peer-a", "peer-e"],
         media_urls=["api/media/img-1.webp"],
     )
-    rows = await outbox.list_for_correlation("p-1")
-    assert {r.target_instance_id for r in rows} == {"peer-a"}
+    assert await svc.flush_once() == 1
+    sent_to = {c.kwargs["to_instance_id"] for c in fed.send_media_chunk.call_args_list}
+    assert sent_to == {"peer-a"}
+    assert await outbox.list_for_correlation("p-1") == []
+
+
+async def test_who_reads_from_the_gfs_is_decided_at_send_time(db, outbox, tmp_path):
+    """Round 7: a household that looked like a GFS-cache reader when the
+    post was made (a capability view not yet refreshed after its GFS
+    restarted without a cache) still gets the push once the send-time
+    check says it is not one — the decision is no longer frozen at
+    enqueue time."""
+    await _seed_space(db)
+    (tmp_path / "img-1.webp").write_bytes(b"x" * 64)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    readers = _Readers({"peer-e"})
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    svc.attach_relay_readers(readers)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-e"],
+        media_urls=["api/media/img-1.webp"],
+    )
+    readers.readers.clear()  # the fresh view: its GFS keeps no cache
+    assert await svc.flush_once() == 1
+    assert fed.send_media_chunk.call_args.kwargs["to_instance_id"] == "peer-e"
+
+
+async def test_an_asked_for_file_is_pushed_even_to_a_gfs_reader(db, outbox, tmp_path):
+    """v_92: a file a member asked for with ``SPACE_MEDIA_WANTED`` is queued
+    with ``push=True`` — the requester already missed its GFS cache, so the
+    "reads from its GFS" shortcut never drops it. Other rows to the same
+    reader still take the shortcut."""
+    await _seed_space(db)
+    (tmp_path / "img-1.webp").write_bytes(b"x" * 64)
+    (tmp_path / "img-2.webp").write_bytes(b"y" * 64)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    svc.attach_relay_readers(_Readers({"peer-e"}))
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-e"],
+        media_urls=["api/media/img-1.webp"],
+        push=True,
+    )
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-2",
+        target_instance_ids=["peer-e"],
+        media_urls=["api/media/img-2.webp"],
+    )
+    assert await svc.flush_once() == 1
+    sent = [
+        c.kwargs["payload"]["filename"] for c in fed.send_media_chunk.call_args_list
+    ]
+    assert sent == ["img-1.webp"]
+    # Shipped: the mark is gone, so a later ordinary row takes the shortcut.
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-e"],
+        media_urls=["api/media/img-1.webp"],
+    )
+    assert await svc.flush_once() == 0
+
+
+async def test_a_file_is_sent_under_its_wire_name_with_its_local_bytes(
+    db, outbox, tmp_path
+):
+    """v_92: a helper holding another member's hashed file under its own
+    reader name (``sg-``, reserved — a receiver refuses it by name) ships
+    it under the asked-for content name, read from its local file."""
+    await _seed_space(db)
+    body = b"the helper's copy"
+    (tmp_path / "sg-local.webp").write_bytes(body)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-e"],
+        media_urls=["sg-local.webp"],
+        push=True,
+        wire_names={"sg-local.webp": "sc-content.webp"},
+    )
+    [row] = await outbox.list_for_correlation("p-1")
+    assert row.blob_id == "sc-content.webp"
+    assert row.bytes_path == str(tmp_path / "sg-local.webp")
+    assert await svc.flush_once() == 1
+    [call] = fed.send_media_chunk.call_args_list
+    assert call.kwargs["payload"]["filename"] == "sc-content.webp"
+    assert call.kwargs["raw_chunk"] == body
+
+
+async def test_an_unsafe_wire_name_is_never_queued(db, outbox, tmp_path):
+    await _seed_space(db)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=None, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-e"],
+        media_urls=["img.webp"],
+        wire_names={"img.webp": "../escape.webp"},
+    )
+    assert await outbox.list_for_correlation("p-1") == []
 
 
 async def _enqueue_many_chunks(db, outbox, tmp_path, fed, *, chunks: int):
@@ -476,7 +650,8 @@ async def test_chunk_sends_never_exceed_the_pipeline_window(db, outbox, tmp_path
     assert await svc.flush_once() == 1
     assert fed.send_media_chunk.await_count == 64
     assert 1 < peak_inflight <= PIPELINE_WINDOW
-    assert peak_tasks <= baseline + PIPELINE_WINDOW
+    # + 1: the recipient's own task (recipients are served in parallel).
+    assert peak_tasks <= baseline + PIPELINE_WINDOW + 1
 
 
 async def test_a_failed_chunk_stops_sending_the_rest(db, outbox, tmp_path):
@@ -578,3 +753,309 @@ async def test_the_whole_files_hash_comes_from_the_shared_cache(
     assert reads == ["c.webp", "c.webp"]
     hashes = {c.kwargs["payload"]["h"] for c in fed.send_media_chunk.call_args_list}
     assert hashes == {hashlib.sha256(body).hexdigest()}
+
+
+async def test_one_stuck_recipient_never_starves_the_others(
+    db, outbox, tmp_path, monkeypatch
+):
+    """Round 7: rows go out one at a time, so a send that never returns
+    (a mesh path that hangs) held every later recipient back. Each row now
+    has its own time limit: the stuck one is rescheduled, the next one
+    ships."""
+    monkeypatch.setattr(sms, "CHUNK_IDLE_TIMEOUT_S", 0.05)
+    await _seed_space(db)
+    (tmp_path / "img.webp").write_bytes(b"x" * 64)
+    hang = asyncio.Event()
+
+    async def send(*, to_instance_id, **_kw):
+        if to_instance_id == "peer-a":
+            await hang.wait()  # never set
+        return _OK
+
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b"],
+        media_urls=["api/media/img.webp"],
+    )
+    assert await asyncio.wait_for(svc.flush_once(), timeout=5) == 1
+    left = await outbox.list_for_correlation("p-1")
+    assert [r.target_instance_id for r in left] == ["peer-a"]
+    assert left[0].status == "pending" and "timeout" in (left[0].last_error or "")
+
+
+async def test_recipients_are_sent_in_parallel_one_row_each_at_a_time(
+    db, outbox, tmp_path
+):
+    """Owner (round 7): like the GFS — one copy of the bytes, one row per
+    recipient, and the recipients served in parallel (a small cap), never
+    two sends to the same recipient at once."""
+    await _seed_space(db)
+    for name in ("one.webp", "two.webp"):
+        (tmp_path / name).write_bytes(b"x" * 64)
+    in_flight: dict[str, int] = {}
+    peak: dict[str, int] = {"all": 0}
+    both = asyncio.Event()
+
+    async def send(*, to_instance_id, **_kw):
+        in_flight[to_instance_id] = in_flight.get(to_instance_id, 0) + 1
+        assert in_flight[to_instance_id] == 1  # one per recipient
+        peak["all"] = max(peak["all"], sum(in_flight.values()))
+        if peak["all"] >= 2:
+            both.set()
+        await asyncio.wait_for(both.wait(), timeout=2)
+        in_flight[to_instance_id] -= 1
+        return _OK
+
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b"],
+        media_urls=["api/media/one.webp", "api/media/two.webp"],
+    )
+    assert await svc.flush_once() == 4
+    assert peak["all"] == 2  # two recipients at once
+
+
+async def test_a_slow_but_steady_send_completes(db, outbox, tmp_path, monkeypatch):
+    """Round 8: the limit is per chunk (no progress for so long), not per
+    file — a big file over a slow path that keeps moving is delivered."""
+    monkeypatch.setattr(sms, "CHUNK_IDLE_TIMEOUT_S", 0.2)
+    fed = _fed(1024)
+
+    async def send(**_kw):
+        await asyncio.sleep(0.02)  # each chunk well inside the limit
+        return _OK
+
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = await _enqueue_many_chunks(db, outbox, tmp_path, fed, chunks=64)
+    # 64 chunks / window × 0.02 s > 0.2 s in total: a whole-file deadline
+    # of the same size would have cut it.
+    assert await svc.flush_once() == 1
+    assert fed.send_media_chunk.await_count == 64
+
+
+async def test_a_stalled_chunk_times_out(db, outbox, tmp_path, monkeypatch):
+    monkeypatch.setattr(sms, "CHUNK_IDLE_TIMEOUT_S", 0.05)
+    fed = _fed(1024)
+    calls = 0
+
+    async def send(**_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            await asyncio.Event().wait()  # stalls for good
+        return _OK
+
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = await _enqueue_many_chunks(db, outbox, tmp_path, fed, chunks=8)
+    assert await asyncio.wait_for(svc.flush_once(), timeout=5) == 0
+    (row,) = await outbox.list_for_correlation("ev-1")
+    assert row.status == "pending" and "timeout" in (row.last_error or "")
+
+
+async def test_files_in_flight_stay_within_a_byte_budget(
+    db, outbox, tmp_path, monkeypatch
+):
+    """Round 8: recipients go in parallel, but the files held in memory
+    for them at once stay within ``MAX_INFLIGHT_FILE_BYTES``."""
+    monkeypatch.setattr(sms, "MAX_INFLIGHT_FILE_BYTES", 3000)
+    await _seed_space(db)
+    for name in ("one.webp", "two.webp", "three.webp"):
+        (tmp_path / name).write_bytes(b"x" * 2000)
+    held = 0
+    peak = 0
+
+    async def send(*, raw_chunk, **_kw):
+        nonlocal held, peak
+        held += 2000
+        peak = max(peak, held)
+        await asyncio.sleep(0.01)
+        held -= 2000
+        return _OK
+
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b", "peer-x"],
+        media_urls=["api/media/one.webp"],
+    )
+    assert await svc.flush_once() == 3
+    assert peak <= 3000  # one 2000-byte file at a time under a 3000 budget
+
+
+async def test_a_row_left_in_flight_is_sent_on_the_next_pass(db, outbox, tmp_path):
+    """Round 8: a send that died past ``Exception`` (an inner cancellation,
+    a DB error while rescheduling) left its row ``in_flight`` until the
+    next restart. Every pass now takes such rows back first."""
+    await _seed_space(db)
+    (tmp_path / "img.webp").write_bytes(b"x" * 64)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a"],
+        media_urls=["api/media/img.webp"],
+    )
+    await outbox.mark_in_flight(blob_id="img.webp", target_instance_id="peer-a")
+    await svc.flush_once()
+    (row,) = await outbox.list_for_correlation("p-1")
+    assert row.status == "pending"  # taken back: due again in a few seconds
+
+
+# ── A mesh chunk the target could not open (SPACE_ROUTE_STALE) ────────────
+
+
+async def _sent_over_the_mesh(db, outbox, tmp_path):
+    await _seed_space(db)
+    (tmp_path / "img.webp").write_bytes(b"picture bytes")
+    fed = _fed(ROUTED_CHUNK_BYTES)
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-mesh"],
+        media_urls=["api/media/img.webp"],
+    )
+    assert await svc.flush_once() == 1
+    assert await outbox.list_for_correlation("p-1") == []
+    return svc, fed
+
+
+async def test_a_file_whose_mesh_chunk_was_lost_is_sent_again_once(
+    db, outbox, tmp_path
+):
+    """A member posts a picture while the host is down: the relay takes the
+    chunk (the row is done), the restarted host cannot open it and nacks —
+    and the mesh never retransmits a chunk. The whole file is queued again,
+    once: every chunk of the first send may be nacked, and a nack for the
+    second send gives up (the receiver asks on view)."""
+    svc, fed = await _sent_over_the_mesh(db, outbox, tmp_path)
+    lost = {"blob_id": "img.webp", "space_id": "sp-1", "chunk_index": 0}
+    await svc.on_mesh_chunk_lost("peer-mesh", lost)
+    await svc.on_mesh_chunk_lost("peer-mesh", {**lost, "chunk_index": 1})
+    [row] = await outbox.list_for_correlation("p-1")
+    assert (row.blob_id, row.target_instance_id, row.space_id) == (
+        "img.webp",
+        "peer-mesh",
+        "sp-1",
+    )
+    assert row.bytes_path == str(tmp_path / "img.webp")
+    assert await svc.flush_once() == 1
+    assert fed.send_media_chunk.await_count == 2
+    # A late nack for the first send, or one for the second: not again.
+    await svc.on_mesh_chunk_lost("peer-mesh", lost)
+    assert await outbox.list_for_correlation("p-1") == []
+    assert await svc.flush_once() == 0
+
+
+async def test_a_chunk_reported_lost_while_the_file_is_still_being_sent(
+    db, outbox, tmp_path
+):
+    """The host is already back and the route cached: the nack for chunk 0
+    of a file in several chunks arrives while a later chunk is still being
+    sent. The send still "succeeds" (the relay took every chunk) — the row
+    must stay queued instead of being deleted, and go out again once."""
+    await _seed_space(db)
+    (tmp_path / "img.webp").write_bytes(b"x" * 64)
+    fed = _fed(16)  # four chunks
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    lost = {"blob_id": "img.webp", "space_id": "sp-1", "chunk_index": 0}
+    nacked = False
+
+    async def _send(**kwargs):
+        nonlocal nacked
+        if kwargs["payload"]["chunk_index"] == 1 and not nacked:
+            nacked = True
+            await svc.on_mesh_chunk_lost("peer-mesh", lost)
+        return _OK
+
+    fed.send_media_chunk = AsyncMock(side_effect=_send)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-mesh"],
+        media_urls=["api/media/img.webp"],
+    )
+    await svc.flush_once()
+    assert nacked
+    [row] = await outbox.list_for_correlation("p-1")
+    assert (row.status, row.attempts) == ("pending", 0)
+    first = fed.send_media_chunk.await_count
+    assert await svc.flush_once() == 1  # the one resend, at once
+    assert fed.send_media_chunk.await_count == 2 * first
+    assert await outbox.list_for_correlation("p-1") == []
+    # A nack for the resend gives up.
+    await svc.on_mesh_chunk_lost("peer-mesh", lost)
+    assert await outbox.list_for_correlation("p-1") == []
+
+
+async def test_a_resend_that_fails_and_is_retried_is_still_the_one_resend(
+    db, outbox, tmp_path
+):
+    svc, fed = await _sent_over_the_mesh(db, outbox, tmp_path)
+    lost = {"blob_id": "img.webp", "space_id": "sp-1", "chunk_index": 0}
+    await svc.on_mesh_chunk_lost("peer-mesh", lost)
+    fed.send_media_chunk = AsyncMock(
+        return_value=DeliveryResult(instance_id="peer-mesh", ok=False, error="x")
+    )
+    assert await svc.flush_once() == 0
+    await db.enqueue("UPDATE space_media_outbox SET next_attempt_at=datetime('now')")
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    assert await svc.flush_once() == 1
+    await svc.on_mesh_chunk_lost("peer-mesh", lost)  # for the resend: gives up
+    assert await outbox.list_for_correlation("p-1") == []
+
+
+async def test_a_lost_chunk_of_a_file_never_sent_from_here_queues_nothing(
+    db, outbox, tmp_path
+):
+    svc, _ = await _sent_over_the_mesh(db, outbox, tmp_path)
+    await svc.on_mesh_chunk_lost("peer-mesh", {"blob_id": "other.webp"})
+    await svc.on_mesh_chunk_lost("peer-a", {"blob_id": "img.webp"})
+    await svc.on_mesh_chunk_lost("peer-mesh", {})
+    await svc.on_mesh_chunk_lost("peer-mesh", {"blob_id": 7})
+    assert await outbox.list_for_correlation("p-1") == []
+
+
+async def test_sent_rows_remembered_for_a_nack_stay_bounded(
+    db, outbox, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(sms, "MAX_SENT_MARKS", 1)
+    await _seed_space(db)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    for name in ("one.webp", "two.webp"):
+        (tmp_path / name).write_bytes(b"x")
+        await svc.enqueue_for_blob(
+            space_id="sp-1",
+            correlation_id="p-1",
+            target_instance_ids=["peer-mesh"],
+            media_urls=[name],
+        )
+        assert await svc.flush_once() == 1
+    await svc.on_mesh_chunk_lost("peer-mesh", {"blob_id": "one.webp"})
+    assert await outbox.list_for_correlation("p-1") == []
+    await svc.on_mesh_chunk_lost("peer-mesh", {"blob_id": "two.webp"})
+    assert len(await outbox.list_for_correlation("p-1")) == 1
+
+
+async def test_held_files_names_only_the_files_that_are_here(tmp_path):
+    (tmp_path / "here.webp").write_bytes(b"x")
+    svc = SpaceMediaSyncService(outbox=AsyncMock(), federation=None, media_dir=tmp_path)
+    assert await svc.held_files(
+        ["api/media/here.webp", "/api/media/gone.webp", "here.webp?exp=1", "../x", ""]
+    ) == ["api/media/here.webp", "here.webp?exp=1"]

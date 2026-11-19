@@ -32,6 +32,7 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..db.unit_of_work import UnitOfWork
+from ..domain.errors import NotFoundError
 from ..domain.gfs_server import (
     SignedGfsServerList,
     signed_gfs_server_list_from_column,
@@ -243,9 +244,6 @@ class AbstractSpaceRepo(Protocol):
     async def get_space_instance_mailbox(
         self, space_id: str, instance_id: str
     ) -> str | None: ...
-    async def list_unmarked_session_pairs(
-        self, *, min_proto: int
-    ) -> list[tuple[str, str]]: ...
     async def list_member_instances(self, space_id: str) -> list[str]: ...
 
     # ── Bans ───────────────────────────────────────────────────────────
@@ -300,6 +298,10 @@ class AbstractSpaceRepo(Protocol):
         self, item_id: str, *, reviewed_by: str
     ) -> bool: ...
     async def fill_moderation_tombstone(self, item: SpaceModerationItem) -> bool: ...
+    async def revive_moderation_item(self, item: SpaceModerationItem) -> bool: ...
+    async def list_moderation_open(
+        self, space_id: str, now: datetime, *, limit: int
+    ) -> list[SpaceModerationItem]: ...
     async def count_moderation_tombstones(self, from_instance: str) -> int: ...
     async def delete_stale_tombstones(self, before: datetime) -> int: ...
     async def drop_pending_from_others(
@@ -438,6 +440,8 @@ class AbstractSpaceRepo(Protocol):
     async def list_pending_join_request_space_ids_for_user(
         self,
         user_id: str,
+        *,
+        own_instance_id: str,
     ) -> list[str]: ...
     async def update_join_request_status(
         self,
@@ -614,7 +618,7 @@ class SqliteSpaceRepo:
                 calendar_access, tasks_access,
                 allow_subscribers,
                 allow_subscriber_comment, allow_subscriber_react,
-                delegated_admin_authority, gfs_publish_mode, private_gfs,
+                delegated_admin_authority, private_gfs,
                 allow_post_text, allow_post_image, allow_post_video,
                 allow_post_transcript, allow_post_poll, allow_post_schedule,
                 allow_post_file, allow_post_bazaar,
@@ -624,7 +628,7 @@ class SqliteSpaceRepo:
                 dissolved, archived, archived_reason, about_markdown, cover_hash, tz,
                 min_age, category
             ) VALUES(
-                -- 61 placeholders, one per column listed above.
+                -- 60 placeholders, one per column listed above.
                 ?, ?, ?, ?,                   -- id, name, description, emoji
                 ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
                 ?, ?, ?,                      -- config_sequence, roster_sequence, config_hlc
@@ -637,7 +641,7 @@ class SqliteSpaceRepo:
                 ?, ?,                         -- calendar_access, tasks_access
                 ?,                            -- allow_subscribers
                 ?, ?,                         -- allow_subscriber_comment, allow_subscriber_react
-                ?, ?, ?,                      -- delegated_admin_authority, gfs_publish_mode, private_gfs
+                ?, ?,                         -- delegated_admin_authority, private_gfs
                 ?, ?, ?,                      -- allow_post_text, allow_post_image, allow_post_video
                 ?, ?, ?,                      -- allow_post_transcript, allow_post_poll, allow_post_schedule
                 ?, ?,                         -- allow_post_file, allow_post_bazaar
@@ -678,7 +682,6 @@ class SqliteSpaceRepo:
                 allow_subscriber_comment=excluded.allow_subscriber_comment,
                 allow_subscriber_react=excluded.allow_subscriber_react,
                 delegated_admin_authority=excluded.delegated_admin_authority,
-                gfs_publish_mode=excluded.gfs_publish_mode,
                 private_gfs=excluded.private_gfs,
                 allow_post_text=excluded.allow_post_text,
                 allow_post_image=excluded.allow_post_image,
@@ -741,7 +744,6 @@ class SqliteSpaceRepo:
                 cols["allow_subscriber_comment"],
                 cols["allow_subscriber_react"],
                 cols["delegated_admin_authority"],
-                cols["gfs_publish_mode"],
                 cols["private_gfs"],
                 cols["allow_post_text"],
                 cols["allow_post_image"],
@@ -1688,7 +1690,7 @@ class SqliteSpaceRepo:
                 (space_id,),
             ).fetchone()
             if row is None:
-                raise KeyError(f"space {space_id!r} not found")
+                raise NotFoundError(f"space {space_id!r} not found")
             new_hlc = HLC.parse(row[1]).tick(now_ms)
             conn.execute(
                 "UPDATE spaces SET config_sequence = config_sequence + 1, "
@@ -1706,15 +1708,28 @@ class SqliteSpaceRepo:
         counter, so roster gossip versions advance independently of config-LWW
         versions. Same ``BEGIN IMMEDIATE`` UPDATE+SELECT so concurrent callers
         always see strictly increasing values.
+
+        The new value is also above every seat version this household holds
+        for the space. On the host that is always so. A member household's
+        counter moves only with the config it is sent, while the seats it
+        mirrors arrive at the HOST's versions (gossip, a snapshot, a rotation
+        baseline) — so a delegated admin's removal, signed at its own lagging
+        counter + 1, was BELOW the seat's version and every household dropped
+        it as stale: the owner never heard of it and never retired the
+        removed admin's key. (Capped one below the widest counter, so a
+        forged huge version cannot overflow the next one.)
         """
 
         def _run(conn):
             cur = conn.execute(
-                "UPDATE spaces SET roster_sequence = roster_sequence + 1 WHERE id=?",
+                "UPDATE spaces SET roster_sequence = MIN(MAX(roster_sequence,"
+                " COALESCE((SELECT MAX(member_version) FROM space_remote_members"
+                " WHERE space_id = spaces.id), 0)), 9223372036854775806) + 1"
+                " WHERE id=?",
                 (space_id,),
             )
             if cur.rowcount == 0:
-                raise KeyError(f"space {space_id!r} not found")
+                raise NotFoundError(f"space {space_id!r} not found")
             row = conn.execute(
                 "SELECT roster_sequence FROM spaces WHERE id=?",
                 (space_id,),
@@ -1941,29 +1956,13 @@ class SqliteSpaceRepo:
     async def set_space_instance_mailbox(
         self, space_id: str, instance_id: str, mailbox_json: str | None
     ) -> None:
-        """Store the per-space GFS mailbox JSON of one (space, household)
-        pair (migration 0144). UPDATE-only: never creates membership."""
+        """Store the mailbox JSON of one (space, household) row (migration
+        0144; since v_89 the household's member card and the directory
+        bookkeeping). UPDATE-only: never creates membership."""
         await self._db.enqueue(
             "UPDATE space_instances SET mailbox=? WHERE space_id=? AND instance_id=?",
             (mailbox_json, space_id, instance_id),
         )
-
-    async def list_unmarked_session_pairs(
-        self, *, min_proto: int
-    ) -> list[tuple[str, str]]:
-        """``(space_id, instance_id)`` of every seated ``space_session``
-        household at *min_proto* or above that holds no mailbox state yet
-        (migration 0144 — seated before v_88, an old invite link, a crash
-        between the seat and its row write)."""
-        rows = await self._db.fetchall(
-            "SELECT si.space_id, si.instance_id FROM space_instances si"
-            " JOIN remote_instances ri ON ri.id = si.instance_id"
-            " WHERE si.mailbox IS NULL AND ri.source = 'space_session'"
-            " AND ri.proto_version >= ?"
-            " ORDER BY si.space_id, si.instance_id",
-            (min_proto,),
-        )
-        return [(r["space_id"], r["instance_id"]) for r in rows]
 
     async def list_space_instance_mailboxes(self) -> list[tuple[str, str, str]]:
         """Every ``(space_id, instance_id, mailbox_json)`` with a mailbox."""
@@ -2219,6 +2218,47 @@ class SqliteSpaceRepo:
             (reviewed_by, datetime.now(UTC).isoformat(), item_id),
         )
         return changed > 0
+
+    async def revive_moderation_item(self, item: SpaceModerationItem) -> bool:
+        """Make an EXPIRED copy of ``item`` pending again, with the content
+        the space's host just re-sent — a household that stopped reviewing
+        purged it (:meth:`drop_pending_from_others`) and reviews again. Only
+        an expired row of the same space and submitter; a decided one is
+        never reopened."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE space_moderation_queue SET status='pending', feature=?, "
+            "action=?, payload_json=?, current_snapshot=?, submitted_at=?, "
+            "expires_at=?, reviewed_by=NULL, reviewed_at=NULL, "
+            "rejection_reason=NULL "
+            "WHERE id=? AND space_id=? AND submitted_by=? AND status='expired'",
+            (
+                item.feature,
+                item.action,
+                dump_json(item.payload),
+                item.current_snapshot,
+                _iso_ts(item.submitted_at),
+                _iso_ts(item.expires_at),
+                item.id,
+                item.space_id,
+                item.submitted_by,
+            ),
+        )
+        return changed > 0
+
+    async def list_moderation_open(
+        self, space_id: str, now: datetime, *, limit: int
+    ) -> list[SpaceModerationItem]:
+        """Every item of ``space_id`` held here whose review window is
+        still open — any status, pending first, then the newest — for the
+        moderation catch-up (what a household echoes, what the host
+        compares it with)."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM space_moderation_queue "
+            "WHERE space_id=? AND feature != '' AND expires_at>? "
+            "ORDER BY (status='pending') DESC, submitted_at DESC LIMIT ?",
+            (space_id, now.isoformat(), int(limit)),
+        )
+        return _moderation_items(rows)
 
     async def fill_moderation_tombstone(self, item: SpaceModerationItem) -> bool:
         """Give a decision tombstone (an early decision, v_43) the content of
@@ -3001,31 +3041,57 @@ class SqliteSpaceRepo:
 
         ``gfs_relay`` — JSON relay contact of a household that asked
         through a GFS (migration 0143): where the answer goes back sealed.
+
+        ``requested_role`` — a pending admin elevation is unique per
+        (space, household, user id) (migration 0148): when one is already
+        pending, nothing is inserted and ITS id is returned, so a caller
+        that passed ``request_id`` can tell (the ids differ).
         """
         rid = request_id or uuid.uuid4().hex
         expires = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
-        await self._db.enqueue(
-            """
-            INSERT INTO space_join_requests(
-                id, space_id, user_id, message, expires_at,
-                remote_applicant_instance_id, remote_applicant_pk,
-                requested_role, area_verdict, gfs_relay
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO NOTHING
-            """,
-            (
-                rid,
-                space_id,
-                user_id,
-                message,
-                expires,
-                remote_applicant_instance_id,
-                remote_applicant_pk,
-                requested_role,
-                area_verdict,
-                gfs_relay,
-            ),
-        )
+        # Twice: a conflicting elevation answered between our insert and the
+        # read-back leaves the key free again, so the second insert lands.
+        for _ in range(2):
+            inserted = await self._db.enqueue_rowcount(
+                """
+                INSERT INTO space_join_requests(
+                    id, space_id, user_id, message, expires_at,
+                    remote_applicant_instance_id, remote_applicant_pk,
+                    requested_role, area_verdict, gfs_relay
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    rid,
+                    space_id,
+                    user_id,
+                    message,
+                    expires,
+                    remote_applicant_instance_id,
+                    remote_applicant_pk,
+                    requested_role,
+                    area_verdict,
+                    gfs_relay,
+                ),
+            )
+            if inserted or requested_role is None:
+                break
+            row = await self._db.fetchone(
+                """
+                SELECT id FROM space_join_requests
+                 WHERE space_id=? AND user_id=?
+                   AND IFNULL(remote_applicant_instance_id, '')=?
+                   AND status='pending' AND requested_role=?
+                """,
+                (
+                    space_id,
+                    user_id,
+                    remote_applicant_instance_id or "",
+                    requested_role,
+                ),
+            )
+            if row is not None:
+                return str(row["id"])
         return rid
 
     async def has_approved_join_request(
@@ -3113,13 +3179,37 @@ class SqliteSpaceRepo:
     async def list_pending_join_request_space_ids_for_user(
         self,
         user_id: str,
+        *,
+        own_instance_id: str,
     ) -> list[str]:
+        """Spaces ``user_id`` of THIS household has a pending request for.
+
+        A request is keyed by (household, user id), and a remote ``user_id``
+        is whatever the other household sends — so a row another household
+        filed under this user id is not theirs. Each household's copy names
+        the OTHER party in ``remote_applicant_instance_id``; the host's copy
+        is told apart the way the inbound answer check does
+        (``federation_inbound/space_invites.py``): a request for a space
+        this household owns, or an admin elevation (the applicant's side
+        never records one). Ours are a local request (no other party) and
+        our outgoing copy (the other party is the host)."""
         rows = await self._db.fetchall(
             """
-            SELECT DISTINCT space_id FROM space_join_requests
-             WHERE user_id=? AND status='pending'
+            SELECT DISTINCT r.space_id FROM space_join_requests AS r
+             WHERE r.user_id=? AND r.status='pending'
+               AND (
+                    r.remote_applicant_instance_id IS NULL
+                    OR (
+                        r.requested_role IS NULL
+                        AND NOT EXISTS (
+                            SELECT 1 FROM spaces AS s
+                             WHERE s.id = r.space_id
+                               AND s.owner_instance_id = ?
+                        )
+                    )
+               )
             """,
-            (user_id,),
+            (user_id, own_instance_id),
         )
         return [r["space_id"] for r in rows]
 

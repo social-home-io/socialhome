@@ -28,9 +28,8 @@ the reason at DEBUG, never logged with anything but the channel id:
   :data:`MAX_FIRST_CHANNEL_EPOCH`; later the epoch rises by at most one per
   :data:`~.domain.CHANNEL_EPOCH_STEP_INTERVAL_S` since the last raise (a
   faster rotation gets ``429`` + ``Retry-After`` and lands on the retry).
-  Carries the publish mode (moves only with a notice at or above the
-  current epoch, then forward in ``ts``) and optionally the
-  channel writer key pin for that epoch (first pin per epoch wins).
+  Optionally carries the channel writer key pin for that epoch (first pin
+  per epoch wins).
 * **unregister** (anonymous, channel-key-signed) — drops the channel and
   every seat.
 * **subscribe** (household-signed, identified like a follower's subscribe)
@@ -41,17 +40,15 @@ the reason at DEBUG, never logged with anything but the channel id:
   no longer open receives nothing. So the seats are exactly the member
   households, and a household removed at a rotation drops out after the
   grace.
-* **publish** (trusted, household-signed) — refused in a strict channel; a
-  :class:`~socialhome.domain.gfs_channel.ChannelCert` for this household,
-  channel and an open epoch, scope ``comment`` at least (the real item type
-  is inside the ciphertext, receivers enforce the real scope).
-* **publish-anon** (strict, no identity) — signed with the channel writer
-  key pinned for that epoch; per-(channel, address), per-channel and
-  per-writer-key limits; exact replays refused.
+* **publish-anon** (no identity — the only channel publish since v_90) —
+  signed with the channel writer key pinned for that epoch;
+  per-(channel, address), per-channel and per-writer-key limits; exact
+  replays refused. The real item type is inside the ciphertext; receivers
+  enforce the real scope.
 
 Fan-out reuses the member-publish workers and the offline relay queue
 unchanged: ``{type: "relay", channel_id, event_type: "space_item", epoch,
-payload}`` to every open seat except a trusted publisher.
+payload}`` to every open seat (the publisher drops its own echo).
 """
 
 from __future__ import annotations
@@ -64,22 +61,18 @@ from typing import TYPE_CHECKING
 
 from ..domain.gfs_channel import (
     CHANNEL_ROUTES,
-    ChannelCert,
     ChannelEpochNotice,
     ChannelPublishAnonRequest,
-    ChannelPublishRequest,
     ChannelRegisterRequest,
     ChannelSubscribeRequest,
     ChannelUnregisterRequest,
     ChannelUnsubscribeRequest,
     UnsupportedChannelSuite,
 )
-from ..domain.writer_cert import WRITER_SCOPE_COMMENT
 from ..domain.writer_key import UnsupportedWriterKeySuite
 from ..gfs_channel import (
     InvalidChannelSignature,
     channel_pk_bytes,
-    verify_channel_cert,
     verify_channel_pass,
     verify_channel_writer_key_cert,
     verify_notice,
@@ -96,7 +89,6 @@ from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import MAX_SUBSCRIPTIONS_PER_INSTANCE, SeenPayloadCache
 from .member_publish import (
     MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP,
-    MEMBER_PUBLISH_MAX_PER_MINUTE,
     MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP,
     MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE,
     MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
@@ -151,7 +143,7 @@ class ChannelEpochTooSoon(Exception):
 
 
 def _open_epochs(ch: GfsChannel, *, now: int) -> set[int]:
-    """The epochs a pass / cert / seat may carry right now."""
+    """The epochs a pass / seat may carry right now."""
     if ch.epoch is None:
         return set()
     epochs = {ch.epoch, ch.epoch + 1}
@@ -174,11 +166,9 @@ class GfsChannelService:
         "_channels",
         "_clock",
         "_federation",
-        "_limiter",
         "_max_channels",
         "_member_publish",
         "_register_limiter",
-        "_seen",
         "_writer_key_limiter",
     )
 
@@ -205,7 +195,6 @@ class GfsChannelService:
         self._register_limiter = register_limiter or SlidingWindowCounter(
             CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP
         )
-        self._limiter = SlidingWindowCounter(MEMBER_PUBLISH_MAX_PER_MINUTE)
         self._channel_limiter = SlidingWindowCounter(
             MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
         )
@@ -215,7 +204,6 @@ class GfsChannelService:
         self._anon_ip_limiter = SlidingWindowCounter(
             MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
         )
-        self._seen = SeenPayloadCache()
         self._anon_seen = SeenPayloadCache(ttl_s=float(2 * CHANNEL_TS_SKEW_S))
 
     # ── Shared checks ────────────────────────────────────────────────────
@@ -300,30 +288,6 @@ class GfsChannelService:
         except (InvalidChannelSignature, UnsupportedChannelSuite) as exc:
             raise PermissionError(f"channel signature refused: {exc}") from exc
 
-    async def verify_cert_holder(
-        self, channel_id: str, cert: ChannelCert, *, epoch: int, author_pk: bytes
-    ) -> None:
-        """Trusted-channel writer check (as :meth:`publish` makes it): the
-        channel is not strict, *cert* — signed by the pinned channel key —
-        names *author_pk* for this channel and *epoch*, scope ``comment`` at
-        least, and *epoch* is open. :class:`PermissionError` otherwise."""
-        ch = await self._channel(channel_id)
-        if ch.strict:
-            raise PermissionError("channel is in strict mode — identified refused")
-        try:
-            verify_channel_cert(
-                cert,
-                channel_pk=self._pinned(ch),
-                channel_id=channel_id,
-                epoch=epoch,
-                author_pk=author_pk,
-                required_scope=WRITER_SCOPE_COMMENT,
-            )
-        except (InvalidChannelSignature, UnsupportedChannelSuite, ValueError) as exc:
-            raise PermissionError(f"channel cert refused: {exc}") from exc
-        if not ch.admits(epoch, now=self._now()):
-            raise PermissionError("cert epoch is not open here")
-
     async def verify_writer_key(
         self,
         channel_id: str,
@@ -333,7 +297,7 @@ class GfsChannelService:
         writer_sig: str,
         suite: str,
     ) -> None:
-        """Strict-channel writer check: *writer_sig* (suite checked, never
+        """Channel writer check: *writer_sig* (suite checked, never
         defaulted) signs *message* under the channel writer key pinned for
         *epoch*, and *epoch* is open. :class:`PermissionError` otherwise."""
         ch = await self._channel(channel_id)
@@ -414,7 +378,7 @@ class GfsChannelService:
         another key holder moved the channel past it. Raises
         :class:`PermissionError` or :class:`ChannelEpochTooSoon`."""
         self._addressed(notice.gfs_instance_id, notice.gfs_key)
-        at = self._fresh(notice.ts)
+        self._fresh(notice.ts)
         ch = await self._channel(notice.channel_id)
         pinned = self._pinned(ch)
         try:
@@ -446,12 +410,6 @@ class GfsChannelService:
             # racing notice that moved it first makes this a no-op.
             await self._channels.set_epoch(
                 notice.channel_id, notice.epoch, expected=ch.epoch, now=now
-            )
-            # The mode moves only WITH a raise (a mode switch rotates): a
-            # notice at the current epoch — a replay, a reconnect, a lagging
-            # seed holder — never flips it.
-            await self._channels.set_publish_mode(
-                notice.channel_id, notice.publish_mode, at=at
             )
         state = await self._channels.get(notice.channel_id)
         if (
@@ -550,38 +508,10 @@ class GfsChannelService:
         ):
             raise MemberPublishBusy()
 
-    async def publish(self, req: ChannelPublishRequest) -> bool:
-        """Trusted publish. Returns ``False`` for a suppressed replay."""
-        inst = await self._federation.verify_signed_request(
-            req.instance_id, req.signing_payload(), signature=req.signature
-        )
-        if inst.status != "active":
-            raise PermissionError("instance is not active")
-        self._addressed(req.gfs_instance_id, req.gfs_key)
-        if not self._limiter.allow(f"{inst.instance_id}\x00{req.channel_id}"):
-            raise MemberPublishRateLimited()
-        if not self._channel_limiter.allow(req.channel_id):
-            raise MemberPublishRateLimited()
-        try:
-            author_pk = bytes.fromhex(inst.public_key)
-        except ValueError as exc:
-            raise PermissionError("channel cert refused: bad household key") from exc
-        await self.verify_cert_holder(
-            req.channel_id, req.channel_cert, epoch=req.epoch, author_pk=author_pk
-        )
-        now = self._now()
-        digest = SeenPayloadCache.digest(req.to_wire())
-        if self._seen.seen(digest):
-            return False
-        self._submit(req.channel_id, inst.instance_id, req.fan_out_frame())
-        self._seen.record(digest)
-        await self._channels.touch(req.channel_id, now=now)
-        return True
-
     async def publish_anon(
         self, req: ChannelPublishAnonRequest, *, client_ip: str
     ) -> None:
-        """Strict (anonymous) publish."""
+        """Anonymous publish (the only channel publish)."""
         self._addressed(req.gfs_instance_id, req.gfs_key)
         self._fresh(req.ts)
         ch = await self._channel(req.channel_id)

@@ -385,6 +385,43 @@ async def test_list_items_since_joins_through_album(env):
     assert ids == ["new-space"]
 
 
+async def test_list_items_since_leaves_out_the_mirrors_of_post_media(env):
+    """A mirror of a post's media (``source_post_id``, the system "Posts"
+    album) never federates: every household rebuilds its own from the post,
+    in its OWN system album. A resume that replayed one named an album the
+    receiver does not hold (refused there with a WARNING) and shipped its
+    files for nothing."""
+    db, repo = env
+    await repo.create_album(_album("alb-space", space_id="sp-1"))
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, space_id, is_system, name)"
+        " VALUES('alb-posts', 'sp-1', 1, 'Posts')"
+    )
+    for item_id, album_id, source in (
+        ("upload", "alb-space", None),
+        ("mirror", "alb-posts", "p-1"),
+    ):
+        await db.enqueue(
+            "INSERT INTO gallery_items"
+            "(id, album_id, uploaded_by, item_type, filename, thumbnail_filename,"
+            " width, height, source_post_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                item_id,
+                album_id,
+                "a-id",
+                "photo",
+                "f",
+                "t",
+                1,
+                1,
+                source,
+                "2026-04-10T12:00:00Z",
+            ),
+        )
+    rows = await repo.list_items_since("sp-1", "2026-01-01T00:00:00Z")
+    assert [r.id for r in rows] == ["upload"]
+
+
 async def test_list_items_since_respects_limit(env):
     """``limit`` caps the burst size."""
     db, repo = env

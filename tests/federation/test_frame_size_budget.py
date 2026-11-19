@@ -11,9 +11,10 @@ for realistic items on both delivery paths and pins their sizes:
   under the space content key, authority-signed, fanned out by the GFS as
   ``{"type": "relay", "space_id", "event_type": "space_post_public",
   "payload": {...}}``.
-* **member** — the author's household publishes the item itself (v_49
-  trusted mode): ``{"type": "relay", "space_id", "event_type":
-  "space_item", "epoch", "writer_cert", "payload"}``.
+* **member** — the author's household publishes the item itself
+  (anonymously, the one mode since v_90): ``{"type": "relay", "space_id",
+  "event_type": "space_item", "epoch", "payload"}`` — no frame cert, the
+  writer cert rides inside the ciphertext.
 
 Run with ``-s`` to print the table. The numbers are the regression guard
 for the payload-size work (canonical suite, compression, binary frames).
@@ -250,7 +251,6 @@ def member_frame(
         "space_id": SPACE_ID,
         "event_type": SPACE_ITEM_EVENT_TYPE,
         "epoch": EPOCH,
-        "writer_cert": cert.v1().to_wire(),
         "payload": _encrypt(world, plaintext),
     }
     if suite != PAYLOAD_SUITE_JSON:
@@ -321,16 +321,16 @@ def _print_table(rows: list[tuple[str, str, int, int]]) -> None:
 #: it — or that pushes a case into a bigger bucket — fails here first.
 BUDGET: dict[tuple[str, str], tuple[int, int]] = {
     ("post en", "relay"): (4096, 5840),
-    ("post en", "member"): (4096, 5920),
+    ("post en", "member"): (4096, 5630),
     ("post de", "relay"): (4096, 5840),
-    ("post de", "member"): (4096, 5920),
+    ("post de", "member"): (4096, 5630),
     ("post cjk", "relay"): (4096, 5840),
-    ("post cjk", "member"): (4096, 5920),
+    ("post cjk", "member"): (4096, 5630),
     ("post cjk 600", "relay"): (4096, 5840),
-    ("post cjk 600", "member"): (4096, 5920),
+    ("post cjk 600", "member"): (4096, 5630),
     ("post en + link preview", "relay"): (4096, 5840),
-    ("post en + link preview", "member"): (4096, 5920),
-    ("comment", "member"): (4096, 5920),
+    ("post en + link preview", "member"): (4096, 5630),
+    ("comment", "member"): (4096, 5630),
 }
 
 
@@ -354,16 +354,16 @@ def test_frame_sizes_stay_within_budget() -> None:
 #: the publisher then sends no compressed copy at all.
 BUDGET_ZLIB: dict[tuple[str, str], tuple[int, int]] = {
     ("post en", "relay"): (1024, 1760),
-    ("post en", "member"): (1024, 1840),
+    ("post en", "member"): (1024, 1560),
     ("post de", "relay"): (1024, 1760),
-    ("post de", "member"): (1024, 1840),
+    ("post de", "member"): (1024, 1560),
     ("post cjk", "relay"): (4096, 5860),
-    ("post cjk", "member"): (4096, 5940),
+    ("post cjk", "member"): (4096, 5655),
     ("post cjk 600", "relay"): (4096, 5860),
-    ("post cjk 600", "member"): (4096, 5940),
+    ("post cjk 600", "member"): (4096, 5655),
     ("post en + link preview", "relay"): (4096, 5860),
-    ("post en + link preview", "member"): (4096, 5940),
-    ("comment", "member"): (1024, 1840),
+    ("post en + link preview", "member"): (4096, 5655),
+    ("comment", "member"): (1024, 1560),
 }
 
 
@@ -383,16 +383,16 @@ def test_compressed_frame_sizes_stay_within_budget() -> None:
 #: ~22 % off a 4 KiB one (5 823 → 4 522 B) — the rest is the JSON header.
 BUDGET_BINARY: dict[tuple[str, str], int] = {
     ("post en", "relay"): 1460,
-    ("post en", "member"): 1520,
+    ("post en", "member"): 1230,
     ("post de", "relay"): 1460,
-    ("post de", "member"): 1520,
+    ("post de", "member"): 1230,
     ("post cjk", "relay"): 4530,
-    ("post cjk", "member"): 4590,
+    ("post cjk", "member"): 4300,
     ("post cjk 600", "relay"): 4530,
-    ("post cjk 600", "member"): 4590,
+    ("post cjk 600", "member"): 4300,
     ("post en + link preview", "relay"): 4530,
-    ("post en + link preview", "member"): 4590,
-    ("comment", "member"): 1520,
+    ("post en + link preview", "member"): 4300,
+    ("comment", "member"): 1230,
 }
 
 
@@ -406,49 +406,18 @@ def test_binary_frame_sizes_stay_within_budget() -> None:
         assert size < text[(case, path)] * 0.85, (case, path)
 
 
-#: Member items to a follower whose hello listed ``space_item_no_cert``: the
-#: GFS leaves the plaintext v1 ``writer_cert`` (279 B of JSON, the server's
-#: own authorization material) out of the frame: 294 B, ~19 % off a 1 KiB-bucket
-#: binary frame (1 512 → 1 218 B). The relay path never carried it.
-BUDGET_NO_FRAME_CERT: dict[str, int] = {
-    "post en": 1220,
-    "post de": 1220,
-    "post cjk": 4300,
-    "post cjk 600": 4300,
-    "post en + link preview": 4300,
-    "comment": 1220,
-}
-
-
-def test_member_frames_without_the_frame_cert_stay_within_budget() -> None:
-    rows = _size_table(PAYLOAD_SUITE_ZLIB)
-    with_cert = {
-        c: s
-        for c, p, _b, s in size_table(PAYLOAD_SUITE_ZLIB, binary=True)
-        if p == "member"
-    }
-    lean = {}
-    for case, path, _bucket, frame in rows:
-        if path != "member":
-            continue
-        parsed = orjson.loads(frame)
-        assert "writer_cert" in parsed
-        del parsed["writer_cert"]
-        raw = encode_binary_frame(parsed)
-        assert raw is not None
-        lean[case] = len(raw)
-    print()
-    for case, size in lean.items():
-        print(f"{case:<26}member  {with_cert[case]:>6} → {size:>6}")
-    assert set(lean) == set(BUDGET_NO_FRAME_CERT)
-    for case, size in lean.items():
-        assert size <= BUDGET_NO_FRAME_CERT[case], (case, size)
-        assert with_cert[case] - size >= 290, case
+def test_member_frames_carry_no_frame_cert() -> None:
+    """v_90 — the member frame never carries a plaintext writer cert (it
+    rides inside the ciphertext): ~290 B less per follower than the
+    identified publish's frame used to cost."""
+    for _case, path, _bucket, frame in _size_table(PAYLOAD_SUITE_ZLIB):
+        if path == "member":
+            assert "writer_cert" not in orjson.loads(frame)
 
 
 #: ``zlib1+dict1`` (preset dictionary ``domain/item_zdict.ZDICT_V1``):
-#: ``(bucket, binary frame bytes)`` — member frames as a
-#: ``space_item_no_cert`` follower gets them (no plaintext writer cert). The
+#: ``(bucket, binary frame bytes)`` — member frames carry no plaintext
+#: writer cert. The
 #: link-preview post drops from the 4 KiB to the 1 KiB bucket; items already
 #: in 1 KiB stay there (the bucket floor).
 BUDGET_DICT: dict[tuple[str, str], tuple[int, int]] = {

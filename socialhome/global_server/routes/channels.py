@@ -14,8 +14,8 @@ refusals to ONE uniform ``403`` body (the reason goes to DEBUG).
   ``Retry-After`` while the epoch is ahead of its time-bounded allowance.
 * ``POST /gfs/channels/unregister`` — ``200`` (idempotent).
 * ``POST /gfs/channels/subscribe`` / ``unsubscribe`` — ``200``.
-* ``POST /gfs/channels/publish`` / ``publish-anon`` — ``200``; ``429``; ``503``
-  while the fan-out is full.
+* ``POST /gfs/channels/publish-anon`` — ``200``; ``429``; ``503`` while the
+  fan-out is full.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ from aiohttp import web
 from ...domain.gfs_channel import (
     ChannelEpochNotice,
     ChannelPublishAnonRequest,
-    ChannelPublishRequest,
     ChannelRegisterRequest,
     ChannelSubscribeRequest,
     ChannelUnregisterRequest,
@@ -135,23 +134,6 @@ class ChannelUnsubscribeView(_ChannelView):
         except PermissionError as exc:
             return self._refused("unsubscribe", req.channel_id, exc)
         return web.json_response({"status": "unsubscribed"})
-
-
-class ChannelPublishView(_ChannelView):
-    async def post(self) -> web.Response:
-        svc = self.svc(K.gfs_channel_service_key)
-        req = await self._parse(ChannelPublishRequest, PUBLISH_MAX_BODY_BYTES)
-        try:
-            await svc.publish(req)
-        except MemberPublishRateLimited:
-            return self._limited()
-        except MemberPublishBusy:
-            resp = web.json_response({"error": "busy"}, status=503)
-            resp.headers["Retry-After"] = "5"
-            return resp
-        except PermissionError as exc:
-            return self._refused("publish", req.channel_id, exc)
-        return web.json_response({"status": "published"})
 
 
 class ChannelPublishAnonView(_ChannelView):

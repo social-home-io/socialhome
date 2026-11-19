@@ -1,10 +1,9 @@
 """Author-side producer for the public space-content relay (Phase 5a2).
 
 Bus subscriber on :class:`SpacePostCreated`. When a PUBLIC/GLOBAL space
-post is created locally on a household that *holds the space's signing
-seed* (the owner, or a delegated admin per the owner-offline epic), this
-service relays the post to the space's GFS subscribers via the
-content-blind GFS relay:
+post is created locally on the space's OWNER household (which holds the
+space's signing seed), this service relays the post to the space's GFS
+subscribers via the content-blind GFS relay:
 
 1. Build the inner content payload (post id, author identity, content,
    media refs, created_at) — including ``author_pk`` so the subscriber
@@ -29,23 +28,33 @@ proves the named author wrote it). Without the per-author signature,
 ``author_pk`` / ``author_user_id`` are both public, so a seed-holder could
 attribute a post to any member; the signature closes that hole.
 
-Scope: only a *seed-holding* household relays here, and on the local-author
+**Who relays what.** The OWNER household relays posts: its own, and other
+members' (the remote-author path below). A *delegated admin* (a household
+the owner handed the seed, so it can act while the owner is offline) relays
+no posts — its own go out as its household's anonymous ``space_item`` like
+any writer's, so a connection server cannot tell which household was handed
+the seed. It relays only what no other path carries and only the seed can
+sign: the removals made on its own household (authority-only items, below)
+— never an answer to something it merely received. (A post is released
+from the moderation queue on the owner alone.) Effect: a post by an author below
+v_90 (who publishes nothing itself) reaches GFS followers once the owner
+has it — while the owner is offline it waits.
+
+Scope: only the owner relays posts here, and on the local-author
 path only its OWN household's posts (the producer's ``author`` must be a
 local user — enforced below — so this household always holds the author's
 identity seed and can produce ``author_sig``). Since v_49 a plain member
 household publishes its own items itself, over the member relay
 (``space_item``, :mod:`socialhome.services.gfs_member_publish_service`:
-anonymous under the writer group key in a strict space, and since v_57 in a
-publicly readable trusted one too, to every GFS the owner listed; a member
-household without the group key publishes identified to the servers it is
-registered on). Its posts are still also relayed by every seed-holder
+always anonymous under the writer group key, to every GFS the owner listed;
+a member household without the group key publishes nothing there). Its posts are still also relayed by the owner
 (the remote-author path below), because a follower on an older build reads
 only ``space_post_public``. Followers dedupe the two copies by post id.
 Authors' own edits and deletes travel over the member relay only; see below
 for removals.
 
 Remote-author relay (Phase 5a relay): a *remote* member's public post — where
-this seed-holder does NOT hold the author's identity seed — is relayed when it
+the owner does NOT hold the author's identity seed — is relayed when it
 arrives carrying the author household's pre-signed inner as
 ``SpacePostCreated.public_relay`` (built by
 :func:`build_signed_author_inner` on the author's household and propagated
@@ -87,9 +96,10 @@ migration tripwire — once every member ships v_49 it can become a refusal.
 
 Authority-only items (:mod:`socialhome.services.space_public_authority`):
 
-* **Removals.** Every space post or comment delete this seed holder applies —
+* **Removals.** Every space post or comment delete the owner applies —
   a moderator's, an admin's or the author's own, local or federated (the host
-  path already authorized it) — is relayed as an
+  path already authorized it) — and every one a delegated admin's own
+  household makes is relayed as an
   :class:`~socialhome.domain.space_item.AuthorityRemoval` naming the item
   and its author: never who removed it or why. Followers soft-delete, or keep
   a tombstone under an id owner-bound to that author in this space.
@@ -144,6 +154,7 @@ from ..domain.writer_cert import (
 )
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
+from .file_hashes_sender import FileHashesMixin
 from .space_media_refs import SpaceMediaRefsMixin
 from .space_public_author import (
     build_signed_author_inner,
@@ -158,18 +169,20 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .gfs_connection_service import GfsConnectionService
+    from .media_file_hasher import MediaFileHasher
     from .space_crypto_service import SpaceContentEncryption
     from .space_relay_coverage import SkipTarget, SpaceRelayCoverage
 
 log = logging.getLogger(__name__)
 
 
-class SpacePublicOutbound(SpaceMediaRefsMixin):
+class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
     """Bus-event → GFS-relay producer for public/global space posts."""
 
     __slots__ = (
         "_bus",
         "_crypto",
+        "_file_hasher",
         "_gfs",
         "_media_gfs",
         "_own_identity_seed",
@@ -196,6 +209,8 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         self._crypto = space_crypto
         self._users = user_repo
         self._gfs = gfs_service
+        #: The post's file hashes, author-signed into the inner (one name on every path).
+        self._file_hasher: MediaFileHasher | None = None
         self._own_instance_id: str = ""
         #: This household's 32-byte Ed25519 identity public key. Shipped as
         #: ``author_pk`` inside the encrypted payload so the subscriber can
@@ -242,6 +257,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         self._own_instance_pk = own_instance_public_key
         self._own_identity_seed = own_identity_seed
 
+    def _owns(self, space: Space) -> bool:
+        """Whether this household is *space*'s owner (callers check the
+        identity is attached first)."""
+        return space.owner_instance_id == self._own_instance_id
+
     def wire(self) -> None:
         self._bus.subscribe(SpacePostCreated, self._on_space_post_created)
         self._bus.subscribe(PostDeleted, self._on_post_deleted)
@@ -250,7 +270,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
         # Inbound (another member's post). Relay it to the GFS subscribers
         # only when it carries a verified, author-signed public_relay hint and
-        # we hold the space seed (remote-author relay, owner-offline). Otherwise
+        # we own the space (remote-author relay). Otherwise
         # this is the loop guard — never re-fan an inbound post.
         if event.origin_instance_id is not None:
             await self._relay_remote_authored(event)
@@ -278,8 +298,8 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
                 event.space_id,
             )
             return
-        # Only a seed-holder (owner or delegated admin) relays. A NULL seed
-        # means this household can't authority-sign — skip silently.
+        # Only the owner relays posts. A NULL seed means this household
+        # can't authority-sign — skip silently.
         seed = await self._spaces.get_space_seed(event.space_id)
         if seed is None:
             return
@@ -293,6 +313,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
                 "dropping relay for space %s",
                 event.space_id,
             )
+            return
+        # A delegated admin's own post goes out as its household's anonymous
+        # item, like any writer's. (A post released from the moderation
+        # queue is applied on the owner alone, so it is relayed there.)
+        if not self._owns(space):
             return
         author = await self._users.get_by_user_id(post.author)
         if author is None:
@@ -333,6 +358,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
             # its signed bytes stay v_25-compatible.
             author_identity_anchor=author.identity_anchor,
             media_refs=media_plan.wire() if media_plan is not None else None,
+            file_hashes=await self._file_hashes_of(post_media_urls(post)),
         )
         # Encrypt under the existing per-space epoch key. Raises if no key —
         # we never relay plaintext (Encryption-First Rule). v_49: our own
@@ -354,11 +380,12 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
 
     async def _relay_remote_authored(self, event: SpacePostCreated) -> None:
         """Relay another member household's public/global post to the GFS
-        subscribers — owner-offline path.
+        subscribers — on the space's OWNER household only.
 
-        A remote member's public post can't reach subscribers on its own
-        (only a seed-holder can authority-sign the GFS relay). When such a post
-        reaches THIS household and we hold the space seed, we re-wrap the
+        A v_90 member publishes its own post itself (``space_item``); this
+        copy is for a follower that reads only ``space_post_public`` and for
+        an author below v_90, who publishes nothing itself. When such a post
+        reaches the owner, we re-wrap the
         author's pre-signed inner (carried as ``event.public_relay``) under our
         authority signature. We verify the original author's self-cert +
         signature first — never relay forgeable / unverifiable content — and
@@ -372,7 +399,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         space = await self._spaces.get(event.space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
             return
-        # Same gate on the owner-offline path: a seed-holder must not launder
+        # Same gate on the remote-author path: a seed-holder must not launder
         # another member's post into the (nonexistent) public stream of a
         # space that admits no subscribers.
         if not space.features.allow_subscribers:
@@ -384,13 +411,19 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
             return
         seed = await self._spaces.get_space_seed(event.space_id)
         if seed is None:
-            return  # not a seed-holder — can't authority-sign the relay
+            return  # no seed here — can't authority-sign the relay
         if not self._own_instance_id:
             log.warning(
                 "space_public.outbound: identity not attached — cannot relay "
                 "remote-authored post for space %s",
                 event.space_id,
             )
+            return
+        if not self._owns(space):
+            # A delegated admin relays no member's post: answering each one
+            # with an authority-signed copy would set it apart from every
+            # other writer household — and a GFS could test a household by
+            # handing a post to its seat alone.
             return
         # Verify the ORIGINAL author's signature + self-cert before relaying —
         # never relay unverifiable / forgeable content (the subscriber
@@ -549,7 +582,12 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
                 return  # a calendar-derived post was never relayed
             author = author or got[1].author
         await self._relay_removal(
-            event.space_id, REMOVAL_TARGET_POST, event.post_id, event.post_id, author
+            event.space_id,
+            REMOVAL_TARGET_POST,
+            event.post_id,
+            event.post_id,
+            author,
+            origin=event.origin_instance_id,
         )
 
     async def _on_comment_deleted(self, event: CommentDeleted) -> None:
@@ -567,15 +605,28 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
             event.comment_id,
             event.post_id,
             author,
+            origin=event.origin_instance_id,
         )
 
     async def _relay_removal(
-        self, space_id: str, target: str, item_id: str, post_id: str, author: str
+        self,
+        space_id: str,
+        target: str,
+        item_id: str,
+        post_id: str,
+        author: str,
+        *,
+        origin: str | None,
     ) -> None:
-        """Relay a post or comment removal applied here — a moderator's, an
-        admin's or the author's own, local or federated (the host path
-        already authorized it) — to the space's GFS followers, on this seed
-        holder's authority. The notice names the item and its author (for
+        """Relay a post or comment removal to the space's GFS followers, on
+        this seed holder's authority. The OWNER relays every removal applied
+        here — a moderator's, an admin's or the author's own, local or
+        federated (the host path already authorized it). A delegated admin
+        relays only a removal made on its own household (*origin* ``None``):
+        one that merely reached it — over federation, by sync or through its
+        fan-out seat — gets no answer, or a connection server could hand a
+        delete to one household's seat and learn from the reply that it
+        holds the seed. Such a removal reaches followers through the owner. The notice names the item and its author (for
         the follower's tombstone rule) — never who removed it or why. Inside
         the ciphertext and padded, so the connection server cannot tell it
         from a short post. A follower that already applied it is unaffected
@@ -590,6 +641,16 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         seed = await self._spaces.get_space_seed(space_id)
         if seed is None:
             return  # only a seed holder speaks for the space
+        if not self._own_instance_id:
+            log.warning(
+                "space_public.outbound: identity not attached — dropping a "
+                "%s removal for space %s",
+                target,
+                space_id,
+            )
+            return
+        if origin is not None and not self._owns(space):
+            return
         try:
             removal = AuthorityRemoval(
                 space_id=space_id,

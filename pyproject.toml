@@ -30,7 +30,7 @@ dependencies = [
     # ``cannot identify image file`` and the upload 422s.
     "pillow-heif==1.8.1",
     "av==19.0.2",
-    "python-multipart==0.0.32",
+    "python-multipart==0.0.33",
     "jinja2==3.1.6",
     "icalendar==7.3.0",
     # WebRTC DataChannel transport (§4.2.3, §24.12). Primary SH-to-SH
@@ -63,12 +63,18 @@ dependencies = [
     # "never block the loop" rule this project applies to its own code.
     # It also vendors libdatachannel v0.24.5
     # (social-home-io/aiolibdatachannel#21).
-    "aiolibdatachannel==2026.10.15",
+    # 2026.11.10 fixes a hang in ``DataChannel.send(wait_for_drain=True)``
+    # with small frames: the drain event was cleared whenever any bytes
+    # stayed buffered but only set again when the buffer crossed the low
+    # threshold from above, so the next waiting send parked forever (space
+    # sync streams, #1347). It now clears only above the threshold
+    # (social-home-io/aiolibdatachannel#25).
+    "aiolibdatachannel==2026.11.15",
     # mDNS announcement of the household dashboard to wall panels
     # (``socialhome/dashboard/advertiser.py``). LGPL-2.1-or-later, used as
     # an unmodified, dynamically imported library — compatible with
     # MPL-2.0. Pure ``asyncio`` API; cp314 wheels on every arch we ship.
-    "zeroconf==0.151.5",
+    "zeroconf==0.154.0",
     # Interface scan for the addresses the dashboard announces (also a
     # zeroconf dependency; declared because we import it directly). MIT.
     "ifaddr==0.2.0",
@@ -77,7 +83,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest==9.2.0",
-    "pytest-asyncio==1.4.1",
+    "pytest-asyncio==1.5.0",
     "pytest-aiohttp==1.1.1",    # provides ``aiohttp_server`` / ``aiohttp_client`` fixtures
     "pytest-cov==7.1.0",
     # ``pytest-xdist`` runs the suite across all available CPU cores
@@ -91,7 +97,7 @@ dev = [
     # Schemas (``docs/display-api/v1/``).
     "jsonschema==4.26.0",
     "mypy==2.4.1",
-    "types-aiofiles==25.1.0.20260518",
+    "types-aiofiles==25.1.0.20261107",
     # Keep the pin identical to ``.pre-commit-config.yaml``'s
     # ``ruff-pre-commit`` rev and CI's ``pip install ruff==`` — ruff
     # format rules change between minors, so a dev env on a different
@@ -194,6 +200,10 @@ testpaths = ["tests"]
 # rare case where a module-level fixture isn't reset between runs.
 # Disable with ``-p no:xdist`` for noisier output during debugging.
 addopts = "-n auto --dist=loadfile"
+# A test still running after 5 minutes dumps every thread's stack to the
+# output (pytest's built-in faulthandler) — a hung test in a CI shard then
+# names itself in the log instead of dying silently as an orphan.
+faulthandler_timeout = 300
 # Every async fixture is function-scoped; say so rather than lean on
 # pytest-asyncio's default (it warns that the default will change).
 asyncio_default_fixture_loop_scope = "function"

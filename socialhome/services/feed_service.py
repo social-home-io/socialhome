@@ -23,6 +23,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     CommentAdded,
     CommentDeleted,
@@ -281,7 +282,7 @@ class FeedService(MediaRefGuardedMixin):
         ``KeyError`` (404) — the permalink hides what the feed hides."""
         post = await self._require_post(post_id)
         if await self._users.is_blocked(viewer_user_id, post.author):
-            raise KeyError(f"post {post_id!r} not found")
+            raise NotFoundError(f"post {post_id!r} not found")
         return post
 
     async def list_feed(
@@ -399,7 +400,9 @@ class FeedService(MediaRefGuardedMixin):
         if parent_id is not None:
             parent = await self._posts.get_comment(parent_id)
             if parent is None or parent.post_id != post_id:
-                raise KeyError(f"parent comment {parent_id!r} not found in this post")
+                raise NotFoundError(
+                    f"parent comment {parent_id!r} not found in this post"
+                )
 
         comment = Comment(
             id=uuid.uuid4().hex,
@@ -427,7 +430,7 @@ class FeedService(MediaRefGuardedMixin):
         comments cannot be edited in v1."""
         comment = await self._posts.get_comment(comment_id)
         if comment is None or comment.deleted:
-            raise KeyError(f"comment {comment_id!r} not found")
+            raise NotFoundError(f"comment {comment_id!r} not found")
         if comment.type is not CommentType.TEXT:
             raise ValueError("only text comments can be edited")
         await self._require_author_or_admin(comment.author, editor_user_id)
@@ -450,7 +453,7 @@ class FeedService(MediaRefGuardedMixin):
     ) -> None:
         comment = await self._posts.get_comment(comment_id)
         if comment is None:
-            raise KeyError(f"comment {comment_id!r} not found")
+            raise NotFoundError(f"comment {comment_id!r} not found")
         if comment.deleted:
             return
         await self._require_author_or_admin(comment.author, actor_user_id)
@@ -499,13 +502,13 @@ class FeedService(MediaRefGuardedMixin):
     async def _require_post(self, post_id: str) -> Post:
         post = await self._posts.get(post_id)
         if post is None or post.deleted:
-            raise KeyError(f"post {post_id!r} not found")
+            raise NotFoundError(f"post {post_id!r} not found")
         return post
 
     async def _require_author(self, user_id: str):
         author = await self._users.get_by_user_id(user_id)
         if author is None:
-            raise KeyError(f"user {user_id!r} not found")
+            raise NotFoundError(f"user {user_id!r} not found")
         if not author.is_active():
             raise PermissionError(f"user {user_id!r} is not active")
         return author

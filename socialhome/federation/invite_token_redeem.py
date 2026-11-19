@@ -43,26 +43,23 @@ import logging
 import secrets
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from ..domain.events import SpaceRemoteSeatLive
+from ..domain.events import SpaceMemberJoined, SpaceRemoteSeatLive
 from ..domain.federation import (
+    PENDING_KIND_CODE,
+    PENDING_KIND_REQUEST,
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    pending_kind,
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
 from ..domain.local_community import Eligibility, parse_join_location
-from ..domain.media_constraints import (
-    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
-)
+from ..domain.member_card import MemberCard
 from ..domain.space import (
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
@@ -77,8 +74,7 @@ from ..domain.space import (
     SpaceRole,
     SpaceType,
 )
-from ..domain.space_mailbox import InvalidMailboxEntry, OwnMailbox, SpaceMailboxEntry
-from ..services.gfs_envelope_sender import normalize_gfs_base
+from ..services.auto_pair_inbox import AUTO_PAIR_REQUEST_TTL_SECONDS
 from ..services.local_community import (
     APPROVAL_HONOURED_DAYS,
     LocalAreaBudget,
@@ -92,6 +88,7 @@ from ..services.space_authority_pin import (
     owner_statement_via,
 )
 from ..services.space_service import (
+    UnfittableImages,
     _coerce_min_age,
     admit_join,
     build_space_snapshot_for_federation,
@@ -111,7 +108,7 @@ from .invite_bootstrap import (
     verify_peer_keywrap,
 )
 from .mesh_member_claim import mesh_member_claim, parse_mesh_member_claim
-from .space_mailbox_entry import verify_entry
+from .pairing_coordinator import PAIRING_TTL_SECONDS
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
@@ -125,7 +122,8 @@ if TYPE_CHECKING:
     )
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
-    from ..services.space_mailbox_service import SpaceMailboxService
+    from ..services.gfs_mailbox_service import GfsMailboxService
+    from ..services.space_member_directory import SpaceMemberDirectory
     from ..services.space_writer_cert_service import SpaceWriterCertService
     from .federation_service import FederationService
     from .invite_bootstrap import RelayEnvelopeSender
@@ -174,16 +172,13 @@ def _int_or_one(raw: object) -> int:
 #: Calibrated for a single hop over a healthy WebRTC DataChannel.
 REDEEM_TIMEOUT_SECONDS: float = 10.0
 
-#: v_88 — how long the host may spend minting its mailbox for a space
-#: before the ACK goes without it: well inside the joiner's redeem
-#: timeout, so a slow GFS never costs the join.
+#: v_89 — how long the host may spend minting its GFS mailbox before the
+#: ACK goes without it: well inside the joiner's redeem timeout, so a slow
+#: GFS never costs the join (a late mint reaches the joiner in the next
+#: directory delta).
 HOST_MINT_TIMEOUT_S: float = 3.0
-#: v_88 — the joiner's bound on minting its mailbox before the redeem.
+#: v_89 — the joiner's bound on minting its GFS mailbox before the redeem.
 JOINER_MINT_TIMEOUT_S: float = 20.0
-#: v_88 — a host mint past its bound waits up to TRIES × S for the seat row
-#: (the commit follows the ACK) before handing its entry over.
-LATE_MINT_SEAT_WAIT_TRIES: int = 60
-LATE_MINT_SEAT_WAIT_S: float = 0.5
 
 #: The ONE reason string every issuer-side denial ships.
 #:
@@ -363,6 +358,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_bus",
         "_child_protection",
         "_cover_repo",
+        "_directory",
         "_federation",
         "_federation_repo",
         "_icon_repo",
@@ -385,6 +381,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_space_service",
         "_spaces",
         "_timeout",
+        "_unfittable",
         "_users",
         "_writer_certs",
     )
@@ -423,6 +420,8 @@ class SpaceInviteTokenRedeemCoordinator:
         #: placeholder (§D1b #116).
         self._cover_repo = cover_repo
         self._icon_repo = icon_repo
+        #: Stored images that cannot fit the cap (not re-encoded each send).
+        self._unfittable = UnfittableImages()
         #: Optional — when wired, the issuer ships the current
         #: epoch's space content key in the ACK and the receiver
         #: imports it into its local space_keys (#117).
@@ -482,89 +481,77 @@ class SpaceInviteTokenRedeemCoordinator:
         #: v_49 writer certs: the issuer puts the redeemer's own cert in the
         #: ACK ``space_meta``; the redeemer stores it. ``None`` → no cert.
         self._writer_certs: SpaceWriterCertService | None = None
-        #: v_88 — this household's per-space GFS mailboxes. ``None`` → a
-        #: §D2b seat keeps the instance-addressed relay both ways.
-        self._mailboxes: SpaceMailboxService | None = None
+        #: v_89 — this household's GFS mailboxes and the member directory.
+        #: ``None`` → a §D2b seat keeps the instance-addressed relay both
+        #: ways and carries no card.
+        self._mailboxes: GfsMailboxService | None = None
+        self._directory: SpaceMemberDirectory | None = None
 
-    def attach_mailboxes(self, mailboxes: SpaceMailboxService) -> None:
-        """Wire the v_88 per-space mailboxes into the §D2b seat paths."""
-        self._mailboxes = mailboxes
-
-    async def _mint_mailbox(
-        self,
-        space_id: str,
-        gfs_url: str,
-        *,
-        peer: str,
-        timeout: float,
-        on_late: Callable[[tuple[SpaceMailboxEntry, OwnMailbox]], Awaitable[None]]
-        | None = None,
-    ) -> tuple[SpaceMailboxEntry, OwnMailbox] | None:
-        """Our mailbox for *space_id* toward the ONE counterpart *peer* at
-        *gfs_url* (v_88, one mailbox per member pair), or ``None`` —
-        never raises, and stops waiting after *timeout* seconds: a seat
-        without a mailbox keeps today's relay. A mint that finishes later
-        goes to *on_late*."""
-        if self._mailboxes is None or not space_id or not gfs_url:
-            return None
-        try:
-            return await self._mailboxes.mint_within(
-                space_id, gfs_url, peer=peer, timeout=timeout, on_late=on_late
-            )
-        except Exception:
-            log.warning("invite bootstrap: minting a mailbox failed", exc_info=True)
-            return None
-
-    async def _remember_mailbox(
-        self,
-        space_id: str,
-        instance_id: str,
-        *,
-        peer: SpaceMailboxEntry | None,
-        own: OwnMailbox | None,
+    def attach_mailboxes(
+        self, mailboxes: GfsMailboxService, directory: SpaceMemberDirectory
     ) -> None:
-        if self._mailboxes is None:
+        """Wire the v_89 GFS mailbox and member cards into the §D2b seat
+        paths, and seat directory members through :meth:`seat_directory_member`."""
+        self._mailboxes = mailboxes
+        self._directory = directory
+        directory.attach_seater(self.seat_directory_member, self.seat_redeemed_member)
+
+    async def _ensure_mailbox(self, gfs_url: str, *, timeout: float) -> None:
+        """Our ONE mailbox at *gfs_url*, minted if missing — bounded by
+        *timeout*, never raises (a seat without one keeps the
+        instance-addressed relay)."""
+        if self._mailboxes is None or not gfs_url:
             return
         try:
-            await self._mailboxes.remember(space_id, instance_id, peer=peer, own=own)
+            await self._mailboxes.ensure_within(gfs_url, timeout=timeout)
         except Exception:
-            log.warning("invite bootstrap: storing a mailbox failed", exc_info=True)
+            log.warning("invite bootstrap: minting a mailbox failed", exc_info=True)
 
-    @staticmethod
-    def _peer_entry(
-        raw: object,
-        *,
-        identity_pk: str,
-        instance_id: str,
-        space_id: str,
-        gfs_url: str,
-    ) -> SpaceMailboxEntry | None:
-        """The counterpart's directory entry from a sealed redeem / ACK,
-        verified under its identity key and bound to the GFS the body came
-        through (*gfs_url*: a peer may not steer our frames to another GFS)
-        — or ``None`` (absent, or refused: the pair then keeps today's relay
-        toward it)."""
-        if raw is None:
+    async def _own_card(self, space_id: str, gfs_url: str) -> MemberCard | None:
+        if self._directory is None:
             return None
         try:
-            entry = verify_entry(
-                raw,
-                identity_pk_hex=identity_pk,
-                expected_instance_id=instance_id,
-                expected_space_id=space_id,
-            )
-            if not gfs_url or normalize_gfs_base(entry.gfs) != normalize_gfs_base(
-                gfs_url
-            ):
-                raise InvalidMailboxEntry("entry names another GFS than this leg's")
-            return entry
-        except InvalidMailboxEntry as exc:
-            log.info(
-                "invite bootstrap: ignoring a mailbox entry from %s: %s",
-                instance_id,
-                exc,
-            )
+            return await self._directory.own_card(space_id, gfs_url=gfs_url)
+        except Exception:
+            log.warning("invite bootstrap: building our card failed", exc_info=True)
             return None
+
+    async def seat_directory_member(self, card: MemberCard) -> None:
+        """A lazy ``space_session`` seat for a household the space's host
+        listed in its member directory (v_89): from its verified card's
+        key-wrap key, static-static session keys, no round-trip and no
+        address (``relay_via`` empty — it is reached at its mailbox or
+        through the host, never instance-addressed). Both ends derive the
+        same keys: the lower instance id takes the redeemer's side. Never
+        replaces a confirmed row (:meth:`_seat_space_session_instance`)."""
+        await self._seat_space_session_instance(
+            instance_id=card.instance_id,
+            display_name="",
+            identity_pk=card.identity_pk,
+            keywrap_pk=card.keywrap_pk,
+            keywrap_sig=card.keywrap_sig,
+            proto_version=card.proto_version,
+            is_redeemer=self._federation.own_instance_id < card.instance_id,
+        )
+
+    async def seat_redeemed_member(
+        self, card: MemberCard, gfs_url: str, is_redeemer: bool
+    ) -> None:
+        """Re-make the sealed-redeem seat with *card*'s household — the
+        seat a link-joined household and its host held until they paired —
+        after that pairing ended: the same static-static keys (each side's
+        role in the redeem, *is_redeemer*) and the GFS of that redeem as
+        the relay again. Never replaces a confirmed row."""
+        await self._seat_space_session_instance(
+            instance_id=card.instance_id,
+            display_name="",
+            identity_pk=card.identity_pk,
+            keywrap_pk=card.keywrap_pk,
+            keywrap_sig=card.keywrap_sig,
+            proto_version=card.proto_version,
+            is_redeemer=is_redeemer,
+            gfs_url=gfs_url,
+        )
 
     def _redeem_lock(self, instance_id: str) -> asyncio.Lock:
         lock = self._redeem_locks.get(instance_id)
@@ -620,7 +607,7 @@ class SpaceInviteTokenRedeemCoordinator:
         if cert is None:
             return
         meta["writer_cert"] = cert
-        # v_50 — in a strict space, the epoch's writer group key too.
+        # v_50 — the epoch's writer group key too (a v_90 publisher).
         try:
             key = await self._writer_certs.writer_key_for_peer(
                 str(ack_body.get("space_id") or ""),
@@ -809,22 +796,20 @@ class SpaceInviteTokenRedeemCoordinator:
         use_bootstrap = not direct_peer and route_path is None
         if use_bootstrap:
             assert bootstrap is not None
-            # v_88 — our mailbox for this space, registered and claimed
-            # BEFORE the redeem leaves, so the host's first envelopes land.
-            minted = (
-                await self._mint_mailbox(
-                    bootstrap.space_id,
-                    bootstrap.gfs_url,
-                    peer=issuer_instance_id,
-                    timeout=JOINER_MINT_TIMEOUT_S,
+            # v_89 — our ONE mailbox at this GFS, registered and claimed
+            # BEFORE the redeem leaves (so the host's first envelopes land),
+            # and our signed card naming it, sealed to the host. A redeem
+            # that fails leaves a fresh mailbox pending for a while
+            # (``PENDING_TTL_S``): a retry reuses it.
+            card: MemberCard | None = None
+            if (
+                bootstrap.proto_version
+                >= FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH
+            ):
+                await self._ensure_mailbox(
+                    bootstrap.gfs_url, timeout=JOINER_MINT_TIMEOUT_S
                 )
-                if bootstrap.proto_version >= FederationCapability.MIN_FOR_SPACE_MAILBOX
-                else None
-            )
-            # A redeem that fails leaves the mailbox pending for a while
-            # (``PENDING_TTL_S``): a retry reuses it and its ticket; the
-            # service's sweep drops it after that.
-            own = minted[1] if minted is not None else None
+                card = await self._own_card(bootstrap.space_id, bootstrap.gfs_url)
             try:
                 result = await self._request_redeem_bootstrap(
                     token,
@@ -832,7 +817,7 @@ class SpaceInviteTokenRedeemCoordinator:
                     user=user,
                     hint=bootstrap,
                     join_location=join_location,
-                    mailbox=minted[0] if minted is not None else None,
+                    card=card,
                 )
             except JoinRequestSentError as exc:
                 await self._record_review_request(
@@ -840,7 +825,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 )
                 raise
             return await self._seat_local_after_ack(
-                {**result, "_own_mailbox": own},
+                result,
                 viewer_user_id=viewer_user_id,
                 issuer_instance_id=issuer_instance_id,
                 bootstrap=bootstrap,
@@ -860,6 +845,21 @@ class SpaceInviteTokenRedeemCoordinator:
         }
         if join_location is not None:
             payload["join_location"] = join_location
+        if self._directory is not None:
+            # v_89 — our card rides every redeem, so the host holds it when
+            # the seat commits (a card sent after the ACK could beat the
+            # commit). Our mailbox only at the relay of an existing seat
+            # with the issuer (a second space joined over it).
+            issuer_row = await self._federation_repo.get_instance(issuer_instance_id)
+            relay = (
+                issuer_row.relay_via or ""
+                if issuer_row is not None
+                and issuer_row.source is InstanceSource.SPACE_SESSION
+                else ""
+            )
+            own = await self._own_card("", relay)
+            if own is not None:
+                payload["card"] = own.to_wire()
         try:
             if direct_peer:
                 await self._federation.send_event(
@@ -960,12 +960,27 @@ class SpaceInviteTokenRedeemCoordinator:
         lock, so a redeem and an accept (or two redeems) for one space id
         from different households never both seat."""
         async with self._seating_lock(str(result.get("space_id") or "")):
-            return await self._seat_local_after_ack_locked(
+            out, joined = await self._seat_local_after_ack_locked(
                 result,
                 viewer_user_id=viewer_user_id,
                 issuer_instance_id=issuer_instance_id,
                 bootstrap=bootstrap,
             )
+        if joined is not None:
+            # Outside the seating lock (subscribers talk to a connection
+            # server). The joiner side of every cross-household join ends
+            # here or in ``SpaceService.accept_remote_invite``; both say so
+            # with the event a host-side seat publishes, so whatever a new
+            # local member needs at once — the fan-out seat on the space's
+            # connection servers, above all — hangs off ONE event.
+            await self._bus.publish(
+                SpaceMemberJoined(
+                    space_id=joined.space_id,
+                    user_id=joined.user_id,
+                    role=joined.role,
+                )
+            )
+        return out
 
     async def _seat_local_after_ack_locked(
         self,
@@ -974,8 +989,11 @@ class SpaceInviteTokenRedeemCoordinator:
         viewer_user_id: str,
         issuer_instance_id: str,
         bootstrap: InviteBootstrapHint | None = None,
-    ) -> dict:
-        """Receiver-side persistence for an accepted redeem.
+    ) -> tuple[dict, SpaceMember | None]:
+        """Receiver-side persistence for an accepted redeem. Returns the
+        result for the caller and the membership row this redeem newly
+        wrote (``None``: nothing seated, or the person was a member
+        already), which :meth:`_seat_local_after_ack` announces.
 
         Shared by all three outbound paths (direct peer, mesh-routed,
         §D2b bootstrap) so the §CP.F1 age gate, the §D1b anti-hijack
@@ -992,6 +1010,7 @@ class SpaceInviteTokenRedeemCoordinator:
         # the issuer's household.
         space_id = str(result.get("space_id") or "")
         role_str = str(result.get("role") or SpaceRole.MEMBER.value)
+        joined: SpaceMember | None = None
         if space_id:
             meta = result.get("space_meta")
             meta_dict = meta if isinstance(meta, dict) else None
@@ -1065,13 +1084,14 @@ class SpaceInviteTokenRedeemCoordinator:
             # above has passed.
             # The host's CURRENT version comes from its identity-signed ACK,
             # not the link: an invite minted before the host upgraded still
-            # carries the old one (v_88: the pair is then a mailbox pair).
+            # carries the old one.
             host_proto = max(
                 bootstrap.proto_version if bootstrap is not None else 1,
                 _int_or_one(result.get("proto_version")),
             )
+            made_seat = False
             if bootstrap is not None:
-                await self._seat_space_session_instance(
+                made_seat = await self._seat_space_session_instance(
                     instance_id=issuer_instance_id,
                     display_name=(bootstrap.display_hint or issuer_instance_id[:8]),
                     identity_pk=bootstrap.identity_pk,
@@ -1136,14 +1156,18 @@ class SpaceInviteTokenRedeemCoordinator:
                     await self._writer_certs.accept_channel_grant(
                         space_id, meta.get("gfs_channel")
                     )
-                await self._spaces.save_member(
-                    SpaceMember(
-                        space_id=space_id,
-                        user_id=viewer_user_id,
-                        role=role_str,
-                        joined_at=datetime.now(UTC).isoformat(),
-                    )
+                was_member = (
+                    await self._spaces.get_member(space_id, viewer_user_id) is not None
                 )
+                member = SpaceMember(
+                    space_id=space_id,
+                    user_id=viewer_user_id,
+                    role=role_str,
+                    joined_at=datetime.now(UTC).isoformat(),
+                )
+                await self._spaces.save_member(member)
+                if not was_member:
+                    joined = member
                 # A pending private invitation from another household for
                 # this space can no longer be joined (migration 0093).
                 await expire_superseded_invitations(
@@ -1151,32 +1175,35 @@ class SpaceInviteTokenRedeemCoordinator:
                 )
             if (
                 bootstrap is not None
-                and host_proto >= FederationCapability.MIN_FOR_SPACE_MAILBOX
+                and self._directory is not None
+                and host_proto >= FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH
             ):
-                # v_88 — the pair's mailboxes: the host's (if it sent one)
-                # and ours (minted for this space before the redeem). Written
-                # even when neither side has one yet: the pair is marked, and
-                # the sweep mints the missing half later (``retry_missing``).
-                # Written AFTER our person is seated: until then the
-                # mailbox is pending, never swept as "a space we left".
-                own = result.get("_own_mailbox")
-                await self._remember_mailbox(
-                    space_id,
-                    issuer_instance_id,
-                    peer=self._peer_entry(
-                        result.get("mailbox"),
-                        identity_pk=bootstrap.identity_pk,
-                        instance_id=issuer_instance_id,
-                        space_id=space_id,
-                        gfs_url=bootstrap.gfs_url,
-                    ),
-                    own=(
-                        own
-                        if isinstance(own, OwnMailbox)
-                        and bootstrap.space_id == space_id
-                        else None
-                    ),
+                # v_89 — the host's card (its mailbox at this GFS, if it has
+                # one), stored AFTER our person is seated (the row exists).
+                host_card = self._directory.verify_seat_card(
+                    result.get("card"),
+                    instance_id=issuer_instance_id,
+                    gfs_url=bootstrap.gfs_url,
                 )
+                if host_card is not None:
+                    await self._directory.store_seat_card(
+                        space_id,
+                        host_card,
+                        # This redeem made the seat: its GFS, our role.
+                        redeem=(bootstrap.gfs_url, True) if made_seat else None,
+                    )
+        if self._directory is not None:
+            # v_89 — every redeem path: our card to the host, which doubles
+            # as "seated, send my directory" (a snapshot that raced the
+            # seat is sent again). Skipped for a host below v_89.
+            await self._directory.seated(
+                space_id,
+                issuer_instance_id,
+                host_proto=max(
+                    bootstrap.proto_version if bootstrap is not None else 1,
+                    _int_or_one(result.get("proto_version")),
+                ),
+            )
         out: dict = {
             "space_id": space_id,
             "role": role_str,
@@ -1187,7 +1214,7 @@ class SpaceInviteTokenRedeemCoordinator:
             # the owner's approval on the host. Surface it so the SPA can
             # say so rather than showing a bare member seat.
             out["pending_role"] = str(pending)
-        return out
+        return out, joined
 
     # ── Receiver side (the issuer in this exchange) ────────────────────
 
@@ -1270,7 +1297,9 @@ class SpaceInviteTokenRedeemCoordinator:
                 )
                 return
             await self._add_writer_cert(ack_payload, event.from_instance)
-            ack_payload = {"redeem_nonce": nonce, **ack_payload}
+            # v_89 — our version: a mesh-only redeemer holds no row it could
+            # read it from (it gives us its card only at v_89).
+            ack_payload = {"redeem_nonce": nonce, "proto_version": OURS, **ack_payload}
             try:
                 if routed_route_id is not None and self._routed_handler is not None:
                     await self._routed_handler.send_routed_reply(
@@ -1310,6 +1339,28 @@ class SpaceInviteTokenRedeemCoordinator:
             # above could not carry them: its version was unknown then).
             # ``record_mesh_member_claim`` owns every check.
             await self._federation.record_mesh_member_claim(event)
+            # v_89 — now that its version is known (its row, or the mesh
+            # claim just recorded): its card (carried by the redeem) is
+            # stored, and the newcomer gets the space's member directory if
+            # the space has a member reached through a GFS.
+            seated_space = ack_payload.get("space_id")
+            if self._directory is not None and isinstance(seated_space, str):
+                card = self._directory.verify_seat_card(
+                    event.payload.get("card"),
+                    instance_id=event.from_instance,
+                    gfs_url=(
+                        sender.relay_via or ""
+                        if sender is not None
+                        and sender.source is InstanceSource.SPACE_SESSION
+                        else ""
+                    ),
+                )
+                if card is not None:
+                    await self._directory.store_seat_card(seated_space, card)
+                try:
+                    await self._directory.reconcile(seated_space)
+                except Exception:
+                    log.warning("invite redeem: directory update failed", exc_info=True)
 
     async def _redeemer_may_moderate(
         self,
@@ -1359,9 +1410,10 @@ class SpaceInviteTokenRedeemCoordinator:
         refused — and is logged.
 
         ``bootstrap`` marks the §D2b invite-link leg, whose ACK rides the
-        connection server's size-capped relay: the snapshot's cover and
-        icon are bounded to ``SPACE_*_BOOTSTRAP_MAX_BYTES`` instead of the
-        peer-envelope defaults.
+        connection server's size-capped relay. The snapshot's cover and
+        icon are bounded by the one cap every path carries
+        (``SPACE_COVER_MAX_BYTES`` / ``SPACE_ICON_MAX_BYTES``), which fits
+        that relay too — the joiner sees the cover every member sees.
 
         ``over_gfs`` (implied by ``bootstrap``) marks a redeem that reached
         us over the connection-server relay. Such a redeem is refused — the
@@ -1405,7 +1457,6 @@ class SpaceInviteTokenRedeemCoordinator:
             token,
             redeemer_instance_id=redeemer_instance_id,
             redeemer_user_id=redeemer_user_id,
-            bootstrap=bootstrap,
         )
         if reack is not None:
             ack, reason = reack
@@ -1492,10 +1543,11 @@ class SpaceInviteTokenRedeemCoordinator:
         # An admin/mod link does NOT grant admin straight through (owner
         # decision, 2026-09-19). The redeeming household is seated as a
         # MEMBER now and a pending elevation is filed on the HOST; the owner
-        # approves it with a click (``set_remote_member_role``), and the
-        # relay-only seed guard in ``share_admin_signing_seed`` keeps the
-        # standing "a link-joined admin never holds the seed" rule. A leaked
-        # admin link is therefore at worst a member on the host.
+        # approves it with a click (``set_remote_member_role``). Only then,
+        # and only while the owner lets admins act for it, does that
+        # household get the signing seed — like any admin, on any path
+        # (owner decision 2026-11-15). A leaked admin link is therefore at
+        # worst a member on the host.
         pending_admin = seat == SpaceRole.ADMIN.value
         if pending_admin:
             seat = SpaceRole.MEMBER.value
@@ -1588,7 +1640,6 @@ class SpaceInviteTokenRedeemCoordinator:
                 space_id,
                 seat=seat,
                 pending_admin=pending_admin,
-                bootstrap=bootstrap,
             )
         except Exception:
             log.exception(
@@ -1672,7 +1723,6 @@ class SpaceInviteTokenRedeemCoordinator:
         *,
         seat: str,
         pending_admin: bool,
-        bootstrap: bool,
     ) -> dict:
         """``{space_id, role[, pending_role], space_meta}`` for an ACK.
 
@@ -1698,20 +1748,11 @@ class SpaceInviteTokenRedeemCoordinator:
                 cover_repo=self._cover_repo,
                 icon_repo=self._icon_repo,
                 space_crypto_service=self._space_crypto,
-                cover_max_bytes=(
-                    SPACE_COVER_BOOTSTRAP_MAX_BYTES
-                    if bootstrap
-                    else SPACE_COVER_SNAPSHOT_MAX_BYTES
-                ),
-                icon_max_bytes=(
-                    SPACE_ICON_BOOTSTRAP_MAX_BYTES
-                    if bootstrap
-                    else SPACE_ICON_SNAPSHOT_MAX_BYTES
-                ),
                 # v_44 — the owner's cert for the current authority key, so
                 # a redeemer whose old stub pins a retired key re-pins.
                 authority_cert=owner_authority_cert_via(self._federation, space),
                 owner_statement=owner_statement_via(self._federation, space),
+                unfittable=self._unfittable,
             )
         return ack_body
 
@@ -1721,7 +1762,6 @@ class SpaceInviteTokenRedeemCoordinator:
         *,
         redeemer_instance_id: str,
         redeemer_user_id: str,
-        bootstrap: bool,
     ) -> tuple[dict | None, str | None] | None:
         """Answer the retry of a redeem the issuer already committed.
 
@@ -1762,7 +1802,6 @@ class SpaceInviteTokenRedeemCoordinator:
                 space_id,
                 seat=role,
                 pending_admin=False,
-                bootstrap=bootstrap,
             )
         except Exception:
             log.exception(
@@ -1984,6 +2023,8 @@ class SpaceInviteTokenRedeemCoordinator:
                 # space on the redeemer's side (the seating block keyed on
                 # result["space_meta"] which was always absent).
                 "space_meta": p.get("space_meta"),
+                # v_89 — the issuer's version (a mesh-only host has no row).
+                "proto_version": p.get("proto_version"),
             }
         )
 
@@ -2039,7 +2080,7 @@ class SpaceInviteTokenRedeemCoordinator:
         user: Any,
         hint: InviteBootstrapHint,
         join_location: dict[str, float] | None = None,
-        mailbox: SpaceMailboxEntry | None = None,
+        card: MemberCard | None = None,
     ) -> dict:
         """Seal a redeem request to the issuer and await the sealed reply.
 
@@ -2089,9 +2130,9 @@ class SpaceInviteTokenRedeemCoordinator:
         if join_location is not None:
             # Inside the sealed body: the relay routes it, never reads it.
             body["join_location"] = join_location
-        if mailbox is not None:
-            # v_88 — our signed mailbox for this space, sealed to the host.
-            body["mailbox"] = mailbox.to_wire()
+        if card is not None:
+            # v_89 — our signed member card, sealed to the host.
+            body["card"] = card.to_wire()
         try:
             envelope = seal_bootstrap_envelope(
                 body=body,
@@ -2318,7 +2359,7 @@ class SpaceInviteTokenRedeemCoordinator:
         # joiner's first envelopes after it applies the ACK find a row;
         # a rollback drops it again.
         try:
-            await self._seat_space_session_instance(
+            made_seat = await self._seat_space_session_instance(
                 instance_id=redeemer_instance_id,
                 display_name=str(body.get("display_name") or redeemer_instance_id[:8]),
                 identity_pk=str(body["identity_pk"]),
@@ -2335,54 +2376,29 @@ class SpaceInviteTokenRedeemCoordinator:
                 await self._rollback_redeem(reservation, space_session=True)
             raise
         await self._add_writer_cert(ack_body, redeemer_instance_id)
-        # v_88 — the joiner reaches this space only through the GFS: if it
-        # sent its signed mailbox, address it there from now on and answer
-        # with ours (registered and claimed BEFORE the ACK leaves, so the
+        # v_89 — the joiner reaches this space only through the GFS: its
+        # signed card (its mailbox there) is checked now and stored once the
+        # seat is committed; we answer with ours, naming our ONE mailbox at
+        # this GFS (registered and claimed BEFORE the ACK leaves, so the
         # joiner's first envelopes land). Paired / mesh joiners never get
         # here (they redeem over the direct or routed path).
         space_id = str(ack_body["space_id"])
-        peer_entry = self._peer_entry(
-            body.get("mailbox"),
-            identity_pk=str(body["identity_pk"]),
-            instance_id=redeemer_instance_id,
-            space_id=space_id,
-            gfs_url=gfs_url,
-        )
-        own: OwnMailbox | None = None
-        if peer_entry is not None:
-            # Bounded well inside the joiner's redeem timeout: a slow GFS
-            # costs this pair its mailbox toward us, never the join.
-            mailboxes = self._mailboxes
-
-            async def _late(result: tuple[SpaceMailboxEntry, OwnMailbox]) -> None:
-                # Past the bound: once the seat row exists (it may not yet —
-                # the ACK can still be on its way), put OUR mailbox on it,
-                # keeping whatever entry the joiner holds there NOW (never
-                # the redeem's, which a later update may have replaced), and
-                # hand the joiner our entry (SPACE_MAILBOX_UPDATED). A seat
-                # that never comes leaves the mint pending, then swept.
-                if mailboxes is None:
-                    return
-                for _ in range(LATE_MINT_SEAT_WAIT_TRIES):
-                    if await mailboxes.set_own(
-                        space_id, redeemer_instance_id, result[1]
-                    ):
-                        await mailboxes.announce_change(space_id, redeemer_instance_id)
-                        return
-                    await asyncio.sleep(LATE_MINT_SEAT_WAIT_S)
-
-            minted = await self._mint_mailbox(
-                space_id,
-                gfs_url,
-                peer=redeemer_instance_id,
-                timeout=HOST_MINT_TIMEOUT_S,
-                on_late=_late,
+        joiner_card = None
+        if (
+            self._directory is not None
+            and _int_or_one(body.get("proto_version"))
+            >= FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH
+        ):
+            joiner_card = self._directory.verify_seat_card(
+                body.get("card"), instance_id=redeemer_instance_id, gfs_url=gfs_url
             )
-            if minted is not None:
-                ack_body["mailbox"] = minted[0].to_wire()
-                own = minted[1]
-        # A mailbox minted for an ACK that never lands stays pending for a
-        # while (the joiner's retry reuses it), then the sweep drops it.
+            # Bounded well inside the joiner's redeem timeout: a slow GFS
+            # costs the ACK our card's mailbox, never the join (a late mint
+            # reaches the joiner in the next directory delta).
+            await self._ensure_mailbox(gfs_url, timeout=HOST_MINT_TIMEOUT_S)
+            card = await self._own_card(space_id, gfs_url)
+            if card is not None:
+                ack_body["card"] = card.to_wire()
         acked = await self._send_bootstrap_ack(
             body,
             nonce,
@@ -2395,24 +2411,17 @@ class SpaceInviteTokenRedeemCoordinator:
             if reservation is not None:
                 await self._rollback_redeem(reservation, space_session=True)
             return {"ok": True, "denied": True}
-        # A v_88 joiner's pair is marked even with no mailbox on either side
-        # yet: the sweep mints ours later and announces it.
-        mailbox_pair = (
-            _int_or_one(body.get("proto_version"))
-            >= FederationCapability.MIN_FOR_SPACE_MAILBOX
-        )
-        if reservation is None:
-            if mailbox_pair:
-                await self._remember_mailbox(
-                    space_id, redeemer_instance_id, peer=peer_entry, own=own
-                )
-            return {"ok": True, "space_id": ack_body["space_id"]}
-        await self._commit_redeem(reservation)
+        if reservation is not None:
+            await self._commit_redeem(reservation)
         # After the commit: its ``space_instances`` row now exists.
-        if mailbox_pair:
-            await self._remember_mailbox(
-                space_id, redeemer_instance_id, peer=peer_entry, own=own
+        if joiner_card is not None and self._directory is not None:
+            await self._directory.store_seat_card(
+                space_id,
+                joiner_card,
+                redeem=(gfs_url, False) if made_seat else None,
             )
+        if reservation is None:
+            return {"ok": True, "space_id": ack_body["space_id"]}
         # The ONE operator-visible record that a stranger joined through a
         # public link. Every other outcome on this path is already
         # observable (a DENY, a rejected relay envelope, a failed seal),
@@ -2560,12 +2569,12 @@ class SpaceInviteTokenRedeemCoordinator:
                 "space_id": space_id,
                 "role": role,
                 "pending_role": body.get("pending_role"),
-                # v_88 — the host's current version (the link's may be old).
+                # The host's current version (the link's may be old).
                 "proto_version": body.get("proto_version"),
                 "space_meta": body.get("space_meta"),
-                # v_88 — the host's mailbox for this space (verified when
-                # the seat is written, against the hint's identity key).
-                "mailbox": body.get("mailbox"),
+                # v_89 — the host's member card (verified when the seat is
+                # written, against the hint's instance id and GFS).
+                "card": body.get("card"),
             }
         )
         return {"ok": True}
@@ -2655,8 +2664,10 @@ class SpaceInviteTokenRedeemCoordinator:
         proto_version: int,
         is_redeemer: bool,
         gfs_url: str = "",
-    ) -> None:
+    ) -> bool:
         """Persist the counterpart as a **space-scoped** instance row.
+        Returns whether a seat row was written (``False``: an existing
+        relationship was kept).
 
         :data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`
         is what makes this row space-scoped rather than a full social
@@ -2695,28 +2706,45 @@ class SpaceInviteTokenRedeemCoordinator:
         # An unpair tombstone is hidden from this lookup (it is no
         # relationship); ``save_instance`` below replaces it outright.
         existing = await self._federation_repo.get_instance(instance_id)
-        if existing is not None and existing.status is PairingStatus.CONFIRMED:
+        if (
+            existing is not None
+            and existing.status is PairingStatus.CONFIRMED
+            and not (
+                # v_89 — a seat made from a host's member directory (no relay
+                # of its own) is replaced by a sealed-redeem seat: the other
+                # side holds no row (it redeemed over the bootstrap leg), so
+                # both must take the redeem's roles, or their static-static
+                # keys would not match.
+                gfs_url
+                and existing.source is InstanceSource.SPACE_SESSION
+                and not existing.relay_via
+            )
+        ):
             # Never downgrade or re-key an existing RELATIONSHIP (a real
             # pairing, or a second space joined with the same household)
             # off the back of an invite link.
-            return
-        if existing is not None:
-            # …but a row is not a relationship. A ``pending_sent`` /
-            # ``pending_received`` row is an abandoned or half-finished
-            # handshake, and bailing out on it left this
-            # seat with no session keys, no ``relay_via`` and no key-wrap
-            # key — so the redeem ACKed, both households believed they
-            # were seated, and then every envelope failed silently
-            # because the relay transport had nothing to seal to. There
-            # is no trust here to preserve (an unfinished pairing granted
-            # nothing), so the seat replaces it. The local inbox id is
-            # carried over: it is the URL the other side may already
-            # hold, and there is no reason to invalidate it.
+            return False
+        pending = (
+            existing
+            if existing is not None and existing.status is not PairingStatus.CONFIRMED
+            else None
+        )
+        if pending is not None:
+            # …but a pending row is not a relationship: it is a pairing
+            # handshake in flight, and bailing out on it left this seat
+            # with no session keys, no ``relay_via`` and no key-wrap key —
+            # so the redeem ACKed, both households believed they were
+            # seated, and then every envelope failed silently because the
+            # relay transport had nothing to seal to. The seat takes the
+            # row. The handshake is not thrown away for it: its half is
+            # kept beside the new seat (below), exactly where it would be
+            # had the seat been there first — a seat and a pending pairing
+            # never overwrite each other, whichever comes first.
             log.info(
-                "invite bootstrap: replacing a stale %s row for %s with a "
-                "space-session seat",
-                existing.status.value,
+                "invite bootstrap: seating %s over its pending pairing (%s) "
+                "— the handshake goes on beside the seat",
                 instance_id,
+                pending.status.value,
             )
         now = datetime.now(UTC).isoformat()
         await self._federation_repo.save_instance(
@@ -2759,6 +2787,45 @@ class SpaceInviteTokenRedeemCoordinator:
                 paired_at=now,
             )
         )
+        if pending is not None:
+            await self._keep_pending_beside_seat(pending)
+        return True
+
+    async def _keep_pending_beside_seat(self, pending: RemoteInstance) -> None:
+        """The seat just took the row of a pairing handshake in flight:
+        keep that handshake's half beside the seat
+        (:class:`~socialhome.federation.pending_pairing.PendingPairings`)
+        for as long as it could still complete, and hand the seat row back
+        the opt-ins the handshake had set on it. Fail-soft: the seat is
+        what the space needs; a handshake that cannot be kept is started
+        again by the people."""
+        try:
+            # A pairing code's half for the code's lifetime, a request for
+            # the introduction's, an approval until it confirms.
+            ttl_s: float | None = {
+                PENDING_KIND_CODE: float(PAIRING_TTL_SECONDS),
+                PENDING_KIND_REQUEST: float(AUTO_PAIR_REQUEST_TTL_SECONDS),
+            }.get(pending_kind(pending) or "")
+            if pending.gfs_relay:
+                # The relay opt-in of a GFS-reach code is the pairing's,
+                # not the seat's (the half carries it to the confirmation).
+                await self._federation_repo.set_gfs_relay(pending.id, enabled=False)
+            await self._federation.pending_pairings.save(
+                pending,
+                ttl_s=ttl_s,
+                # Still the half of its pairing code: the peer's cancel
+                # over the seat names that token.
+                token=await self._federation_repo.pairing_token_for_inbox(
+                    pending.local_inbox_id
+                ),
+            )
+        except Exception:
+            log.warning(
+                "invite bootstrap: could not keep the pending pairing with "
+                "%s beside its new seat",
+                pending.id,
+                exc_info=True,
+            )
 
     # ── Internal helpers ───────────────────────────────────────────────
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime
 
+from ..domain.errors import NotFoundError
 from ..domain.events import SpaceZoneDeleted, SpaceZoneUpserted
 from ..domain.space import (
     MAX_ZONE_RADIUS_M,
@@ -135,7 +136,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         await self._require_admin(space_id, actor_username)
         actor = await self._users.get(actor_username)
         if actor is None:
-            raise KeyError(f"actor {actor_username!r} not found")
+            raise NotFoundError(f"actor {actor_username!r} not found")
         clean_name = validate_zone_name(name)
         clean_radius = _validate_radius(radius_m)
         clean_color = validate_zone_color(color)
@@ -253,7 +254,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
             raise SpaceZoneNotFoundError(zone_id)
         actor = await self._users.get(actor_username)
         if actor is None:
-            raise KeyError(f"actor {actor_username!r} not found")
+            raise NotFoundError(f"actor {actor_username!r} not found")
         await self._zones.delete(zone_id, space_id=space_id, deleted_by=actor.user_id)
         await self._emit(
             SpaceZoneDeleted(

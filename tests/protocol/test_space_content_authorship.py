@@ -55,6 +55,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.domain.post import poll_option_id
 from socialhome.federation.inbound_validator import (
     InboundContext,
     run_post_decrypt_gates,
@@ -612,6 +613,58 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         (AUTHOR, OTHER),
     ),
     (
+        FET.SPACE_POST_REACTION,
+        "react as u-o",
+        {
+            "post_id": "post-a",
+            "user_id": "u-o",
+            "emoji": "🎉",
+            "action": "add",
+            "at": _GAME_TS,
+        },
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST, STRANGER, MOD),
+    ),
+    (
+        FET.SPACE_POST_REACTION,
+        "take back u-o's reaction",
+        {
+            "post_id": "post-a",
+            "user_id": "u-o",
+            "emoji": "👍",
+            "action": "remove",
+            "at": _GAME_TS,
+        },
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST, STRANGER, MOD),
+    ),
+    (
+        FET.SPACE_POST_REACTION,
+        "react as our local user",
+        {
+            "post_id": "post-a",
+            "user_id": LOCAL_USER,
+            "emoji": "🎉",
+            "action": "add",
+            "at": _GAME_TS,
+        },
+        (),
+        (AUTHOR, OTHER, ADMIN, HOST, MOD),
+    ),
+    (
+        FET.SPACE_POST_REACTION,
+        "react as a follower",
+        {
+            "post_id": "post-a",
+            "user_id": "u-sub",
+            "emoji": "🎉",
+            "action": "add",
+            "at": _GAME_TS,
+        },
+        (),
+        (AUTHOR,),
+    ),
+    (
         FET.SPACE_COMMENT_CREATED,
         "comment as u-a",
         {
@@ -733,11 +786,25 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         (AUTHOR,),
         (OTHER, ADMIN, MOD),
     ),
+    (
+        FET.SPACE_POLL_CREATED,
+        "poll on u-a's post",
+        {
+            "post_id": "post-a-sched",
+            "question": "Which?",
+            "options": [
+                {"id": poll_option_id("post-a-sched", 0), "text": "a"},
+                {"id": poll_option_id("post-a-sched", 1), "text": "b"},
+            ],
+        },
+        (AUTHOR,),
+        (OTHER, ADMIN, MOD),
+    ),
     # ── Personal actions: strictly the named user's own household ──
     (
         FET.SPACE_POLL_VOTE_CAST,
         "vote as u-a",
-        {"post_id": "post-a", "option_id": "opt-a", "voter_user_id": "u-a"},
+        {"post_id": "post-a", "option_ids": ["opt-a"], "voter_user_id": "u-a"},
         (AUTHOR,),
         (OTHER, ADMIN, HOST, MOD),
     ),
@@ -2897,8 +2964,35 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
     ),
 ]
 
+SYNC_CASES += [
+    (
+        "polls",
+        "vote on u-a's poll and close it (v_92)",
+        [
+            {
+                "post_id": "post-a",
+                "meta": {"question": "Q", "closed": True},
+                "options": [{"id": "opt-a", "text": "Yes"}],
+                "votes": [{"option_id": "opt-a", "voter_user_id": "u-o"}],
+            }
+        ],
+        # The host's alone — not even the poll's author household or an
+        # admin may set everybody's votes by stream.
+        (HOST,),
+        (AUTHOR, OTHER, ADMIN, MOD),
+    ),
+    (
+        "timetables_deleted",
+        "delete u-adm's timetable (v_92)",
+        [{"id": _TT_A, "created_by": "u-adm", "created_at": _NOW}],
+        # The row names no deleting moderator: only the host's counts.
+        (HOST,),
+        (ADMIN, MOD, AUTHOR, OTHER),
+    ),
+]
+
 #: Resources a provider streams that write nothing, with the reason.
-_SYNC_NOT_WRITTEN = {"polls": "informational — polls ride on the posts stream"}
+_SYNC_NOT_WRITTEN: dict[str, str] = {}
 
 
 @pytest.mark.parametrize(

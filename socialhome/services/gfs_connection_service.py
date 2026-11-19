@@ -75,9 +75,17 @@ import aiohttp
 from ..canonical_json import canonical_bytes
 from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
 from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
-from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
+from ..domain.errors import (
+    GfsKeyRotationUnsupportedError,
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+)
 from ..domain.federation import GfsConnection, GfsSpacePublication
-from ..domain.gfs_mailbox import ENVELOPE_MAILBOX_CAPABILITY
+from ..domain.gfs_mailbox import (
+    ENVELOPE_MAILBOX_CAPABILITY,
+    ENVELOPE_MULTI_CAPABILITY,
+    MULTI_MAX_RECIPIENTS,
+)
 from ..domain.gfs_server import GfsServer
 from ..domain.gfs_space_media import (
     MEDIA_SCOPES,
@@ -101,6 +109,8 @@ from ..domain.media_constraints import (
 from ..domain.moment_public import is_path_safe_id
 from ..domain.relay_media_frame import ENVELOPE_MEDIA_CAPABILITY
 from ..domain.space import (
+    PUBLIC_SPACE_TIERS,
+    Space,
     SpaceType,
     normalize_category,
     normalize_join_mode,
@@ -143,6 +153,19 @@ SPACE_MEDIA_PUT_TIMEOUT_S: float = 120.0
 #: Longest wait a GFS may advertise for an on-demand request (v_83); a
 #: larger (or malformed) value reads as "no on-demand support".
 MAX_ON_DEMAND_WAIT_S: int = 60
+
+
+def _envelope_multi_cap(entry: object) -> int:
+    """The usable per-upload recipient cap of a verified ``envelope_multi``
+    entry: ``0`` when it is absent or not a dict, else the server's
+    ``max_recipients`` (a positive int) capped at ours, or ours when the
+    entry names none."""
+    if not isinstance(entry, dict):
+        return 0
+    cap = entry.get("max_recipients")
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+        return min(cap, MULTI_MAX_RECIPIENTS)
+    return MULTI_MAX_RECIPIENTS
 
 
 def _space_media_limit(
@@ -188,6 +211,17 @@ MAX_REMOTE_DETAIL_CHARS = 200
 #: Bytes read from a remote error body at all. Beyond this even the log
 #: line is not worth the memory.
 _REMOTE_DETAIL_READ_BYTES = 8192
+
+#: First wait before an owed re-pin is tried again on a server that just
+#: failed or did not confirm it; doubles per failure up to the ceiling. The
+#: retry pass and the seed-share gate both go through it, so neither can
+#: hammer a dead or old server; a reconnect heal and a newer key ask at once.
+GFS_REPIN_RETRY_MIN_S: float = 240.0
+GFS_REPIN_RETRY_MAX_S: float = 6 * 3600.0
+
+#: What the GFS publish route reads a missing colour as — the value a
+#: metadata-free (pin-only) publish signs, so its signature verifies there.
+_GFS_DEFAULT_COLOR = "#D2542A"
 
 #: How long a FAILED ``GET /gfs/info`` probe suppresses the next one, in
 #: seconds. The answer itself is never cached as ``False``: an unreachable
@@ -422,6 +456,7 @@ class GfsConnectionService:
         "_encrypted_moments",
         "_envelope_mailbox",
         "_envelope_media",
+        "_envelope_multi",
         "_envelope_relay",
         "_http_client",
         "_icon_repo",
@@ -434,7 +469,6 @@ class GfsConnectionService:
         "_listing_seen",
         "_listing_sessions",
         "_member_publish_strict",
-        "_member_publish_trusted",
         "_member_servers",
         "_moment_counts",
         "_moment_delete_log",
@@ -449,6 +483,7 @@ class GfsConnectionService:
         "_own_signing_key",
         "_payload_zlib1",
         "_payload_zlib1_dict1",
+        "_pin_confirmed",
         "_place_pin",
         "_possession",
         "_private_channels",
@@ -458,6 +493,7 @@ class GfsConnectionService:
         "_publish_retry",
         "_rebind_warned",
         "_refreshed_at",
+        "_repin_tried",
         "_replaces",
         "_repo",
         "_rotation_warned",
@@ -470,6 +506,8 @@ class GfsConnectionService:
         "_target_warned",
         "_targeted_publish",
         "_theme_repo",
+        "_withdrawn_repin",
+        "_withdrawn_repin_warned",
     )
 
     def __init__(
@@ -540,6 +578,12 @@ class GfsConnectionService:
         # delivers to anonymous per-space mailboxes. Same rule as
         # ``_envelope_media`` — recorded only from a VERIFIED block.
         self._envelope_mailbox: dict[str, bool] = {}
+        # …and ``envelope_multi`` (v_91): ``POST /gfs/envelope/multi`` takes
+        # one sealed frame for many mailboxes. Holds the usable recipient
+        # cap per upload (the server's ``max_recipients``, never above ours);
+        # ``0`` = the verified block said no. Recorded only from a VERIFIED
+        # block; a missing entry is unknown, re-probed.
+        self._envelope_multi: dict[str, int] = {}
         # Same discipline again, for the ``invite_links`` capability
         # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
         self._invite_links: dict[str, bool] = {}
@@ -608,15 +652,11 @@ class GfsConnectionService:
         # (``time.monotonic()``): the next suite there for
         # :data:`PAYLOAD_SUITE_REFUSAL_TTL_S`. Bounded, oldest out.
         self._suite_refused_at: dict[tuple[str, str, str], float] = {}
-        # Same again for ``member_publish_trusted`` (v_49): whether the GFS
-        # carries the identified ``POST /gfs/member-publish`` and the
-        # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
-        # to a GFS that has not proved it under a valid signature.
-        self._member_publish_trusted: dict[str, bool] = {}
-        # Same again for ``member_publish_strict`` (v_50): whether the GFS
-        # carries the anonymous ``POST /gfs/member-publish-anon`` and takes
-        # ``publish_mode`` / ``writer_key_cert`` on the epoch notice (an older
-        # server would refuse an owner notice carrying them).
+        # Same again for ``member_publish_strict`` (v_50; the only member
+        # publish since v_90): whether the GFS carries the anonymous
+        # ``POST /gfs/member-publish-anon`` and the ``/gfs/spaces/{id}/epoch``
+        # notice with its ``writer_key_cert`` (an older server would refuse
+        # an owner notice carrying it).
         self._member_publish_strict: dict[str, bool] = {}
         self._private_channels: dict[str, bool] = {}
         # Same discipline for ``addressee_key``: whether the server takes the
@@ -633,6 +673,22 @@ class GfsConnectionService:
         # relays — so a household publishing a cert there warns, once.
         self._authority_rotation: dict[str, bool] = {}
         self._rotation_warned: set[str] = set()
+        # ``withdrawn_repin``: whether the GFS takes the pin-only publish of
+        # a WITHDRAWN listing (and answers every publish with its pin).
+        self._withdrawn_repin: dict[str, bool] = {}
+        self._withdrawn_repin_warned: set[str] = set()
+        #: ``(space_id, connection id)`` → the space authority key that GFS
+        #: CONFIRMED pinning in its answer to our last publish there. RAM
+        #: only: every reconnect re-publishes each listing anyway, and a cold
+        #: entry is asked for again before a signing seed goes out
+        #: (:meth:`authority_key_revocable`). A listing is "owed a re-pin"
+        #: while this differs from the space's current key.
+        self._pin_confirmed: dict[tuple[str, str], str] = {}
+        #: ``(space_id, connection id)`` → ``(key, not before, wait)`` of
+        #: the last re-pin attempt there that was not confirmed: the next
+        #: one for the SAME key waits (:data:`GFS_REPIN_RETRY_MIN_S`,
+        #: doubling). The re-pin stays owed meanwhile.
+        self._repin_tried: dict[tuple[str, str], tuple[str, float, float]] = {}
         # Failed ``POST /gfs/publish`` calls wait here for a retry —
         # identity-free bodies only, in memory, bounded (see the module).
         self._publish_retry = GfsPublishRetryQueue(self._retry_publish)
@@ -824,6 +880,7 @@ class GfsConnectionService:
             self._envelope_relay,
             self._envelope_media,
             self._envelope_mailbox,
+            self._envelope_multi,
             self._invite_links,
             self._place_pin,
             self._targeted_publish,
@@ -840,11 +897,11 @@ class GfsConnectionService:
             self._space_item_followers,
             self._payload_zlib1,
             self._payload_zlib1_dict1,
-            self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
             self._addressee_key,
             self._authority_rotation,
+            self._withdrawn_repin,
             self._proof_offered,
             self._info_failed_at,
             self._replaces,
@@ -1970,10 +2027,16 @@ class GfsConnectionService:
             self._envelope_mailbox[conn.id] = isinstance(
                 caps.get(ENVELOPE_MAILBOX_CAPABILITY), dict
             )
+            # v_91 — one frame for many mailboxes (a dict of its limits).
+            self._envelope_multi[conn.id] = _envelope_multi_cap(
+                caps.get(ENVELOPE_MULTI_CAPABILITY)
+            )
             if _space_media_limit(caps) is None:
                 self._space_media.pop(conn.id, None)
         if caps is not None and caps.get("addressee_key") is True:
             self._addressee_key[conn.id] = True
+        if caps is not None and caps.get("withdrawn_repin") is True:
+            self._withdrawn_repin[conn.id] = True
         if caps is not None:
             self._proof_offered[conn.id] = caps.get(PROOF_CAPABILITY) is True
             limit = _space_media_limit(caps)
@@ -2226,6 +2289,26 @@ class GfsConnectionService:
                 await self._fetch_gfs_info(conn)
         return self._envelope_mailbox.get(conn.id, False)
 
+    async def envelope_multi_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``envelope_multi`` (v_91) under a
+        valid signature: ``POST /gfs/envelope/multi`` takes one sealed frame
+        for many mailbox ids. Probed once on a cold miss."""
+        if self._listing_failed(conn):
+            return False
+        if conn.id not in self._envelope_multi:
+            failed_at = self._info_failed_at.get(conn.id)
+            if failed_at is None or time.monotonic() - failed_at >= (
+                GFS_INFO_NEGATIVE_TTL_S
+            ):
+                await self._fetch_gfs_info(conn)
+        return self._envelope_multi.get(conn.id, 0) > 0
+
+    def envelope_multi_max_recipients(self, conn: GfsConnection) -> int:
+        """Most mailbox ids one multi upload to *conn* may name: the
+        verified ``max_recipients`` capped at :data:`MULTI_MAX_RECIPIENTS`;
+        ``0`` while unproven (read :meth:`envelope_multi_supported` first)."""
+        return self._envelope_multi.get(conn.id, 0)
+
     def space_media_cache_off(self, conn: GfsConnection) -> bool:
         """Whether the last VERIFIED capability block of *conn*'s GFS proved
         ``envelope_media`` and carried no ``space_media`` cache (the operator
@@ -2251,27 +2334,13 @@ class GfsConnectionService:
             self._invite_links,
         )
 
-    async def member_publish_trusted_supported(self, conn: GfsConnection) -> bool:
-        """Whether *conn*'s GFS proved ``member_publish_trusted`` on /gfs/info.
-
-        Gates every identified member publish and every epoch notice
-        (:mod:`socialhome.services.gfs_member_publish_service`): a household
-        sends its identity to a connection server only after that server's
-        signed capability block proved it agreed to the trusted-mode
-        contract."""
-        return await self._signed_capability_supported(
-            conn,
-            "member_publish_trusted",
-            self._member_publish_trusted,
-        )
-
     async def member_publish_strict_supported(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s GFS proved ``member_publish_strict`` on /gfs/info.
 
-        Gates every anonymous member publish and the v_50 fields of the
-        epoch notice (:mod:`socialhome.services.gfs_member_publish_service`).
-        Without it a strict space's items take the host path — never the
-        identified one."""
+        Gates every member publish (always anonymous), every member
+        auto-subscribe and every epoch notice
+        (:mod:`socialhome.services.gfs_member_publish_service`). Without it a
+        space's items take the host path. (The label keeps its v_50 name.)"""
         return await self._signed_capability_supported(
             conn,
             "member_publish_strict",
@@ -2496,6 +2565,7 @@ class GfsConnectionService:
                 await hook(conn)
             except Exception:
                 log.exception("gfs: on-disconnect hook failed for %s", gfs_id)
+        self._forget_connection_pins(gfs_id)
         # ``repo.delete`` removes this connection's publication rows itself,
         # without passing through :meth:`unpublish_space`, so note the spaces
         # first.
@@ -2552,6 +2622,7 @@ class GfsConnectionService:
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
         await self._require_publishable(space_id)
+        await self._require_key_rotation(space_id, conn)
 
         # v_57 — whether this is the space's first listing there (then the
         # epoch is announced below, before members hear of the server).
@@ -2577,8 +2648,19 @@ class GfsConnectionService:
         ) and await self._signed_capability_supported(
             conn, "join_contact", self._join_contact
         )
+        # The server this listing is for, inside the signed bytes: without
+        # it the server that received the body could replay it, within the
+        # ``ts`` window, to another GFS this household is registered on and
+        # list the space there. Only to a server that proved it folds the
+        # field in (``withdrawn_repin``; an older one would fail the
+        # signature) — that one gets today's body. Read from the cache each
+        # connect's ``/gfs/info`` fetch warms: no extra round-trip.
+        gfs_key = self._listing_addressee_key(conn)
         body = await self._build_publish_body(
-            space_id, with_place=with_place, with_contact=with_contact
+            space_id,
+            with_place=with_place,
+            with_contact=with_contact,
+            gfs_key=gfs_key,
         )
         if "authority_cert" in body and not await self._signed_capability_supported(
             conn, "authority_rotation", self._authority_rotation
@@ -2593,6 +2675,7 @@ class GfsConnectionService:
                 with_cert=False,
                 with_place=with_place,
                 with_contact=with_contact,
+                gfs_key=gfs_key,
             )
         client = self._client()
         publish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/publish"
@@ -2619,6 +2702,16 @@ class GfsConnectionService:
 
         status = data.get("status") or "active"
         publication = await self._repo.publish_space(space_id, gfs_id, status=status)
+        if self._pin_answered(space_id, conn, body, data):
+            self._pin_confirmed[(space_id, gfs_id)] = body[
+                "identity_public_key"
+            ].lower()
+            self._repin_tried.pop((space_id, gfs_id), None)
+        else:
+            # Accepted, not confirmed: the same body gets the same answer,
+            # so the retry waits like after any failed attempt.
+            self._pin_confirmed.pop((space_id, gfs_id), None)
+            self._repin_failed(space_id, gfs_id, body.get("identity_public_key") or "")
         if self._on_repinned is not None and (
             "authority_cert" in body or not listed_before
         ):
@@ -2670,8 +2763,12 @@ class GfsConnectionService:
         with_cert: bool = True,
         with_place: bool = False,
         with_contact: bool = False,
+        gfs_key: str | None = None,
     ) -> dict:
         """Compose + sign the publish body.
+
+        ``gfs_key`` — the addressed server's identity key, folded into the
+        signed bytes when given (see :meth:`publish_space`).
 
         Fail-closed: the GFS now mandates an Ed25519 signature on every
         publish, so an instance with no signing key (publish context not
@@ -2772,6 +2869,8 @@ class GfsConnectionService:
         contact = await self._join_contact_for(space) if with_contact else None
         if contact is not None:
             body["join_contact"] = contact
+        if gfs_key is not None:
+            body["gfs_key"] = gfs_key
         canonical = canonical_bytes(body)
         body["signature"] = b64url_encode(
             sign_ed25519(self._own_signing_key, canonical),
@@ -2890,19 +2989,24 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
         ts = datetime.now(UTC).isoformat()
-        canonical = canonical_bytes(
-            {
-                "action": "unpublish",
-                "owning_instance": self._own_instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            }
-        )
-        body = {
+        signed: dict[str, object] = {
+            "action": "unpublish",
             "owning_instance": self._own_instance_id,
+            "space_id": space_id,
             "ts": ts,
-            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
         }
+        body: dict[str, object] = {"owning_instance": self._own_instance_id, "ts": ts}
+        # Name the server the withdrawal is for, inside the signed bytes:
+        # without it this server could replay the body, within the ``ts``
+        # window, to another GFS the space is listed on and delist it
+        # there. Only to a server that proved it folds the field in (an
+        # older one would fail the signature); that one gets today's body.
+        gfs_key = self._listing_addressee_key(conn)
+        if gfs_key is not None:
+            signed["gfs_key"] = body["gfs_key"] = gfs_key
+        body["signature"] = b64url_encode(
+            sign_ed25519(self._own_signing_key, canonical_bytes(signed))
+        )
 
         client = self._client()
         unpublish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/unpublish"
@@ -2924,6 +3028,19 @@ class GfsConnectionService:
         except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
+        # A withdrawal hides the listing only: the GFS keeps its row, the
+        # pinned space key and the followers seated there. Remember that
+        # (migration 0147) so a later key rotation moves that pin too
+        # (:meth:`repin_owed`) — unless the space is not ours to rotate
+        # (gone, dissolved). Also after a 404: a proxy answers one too, so
+        # it proves nothing; the row goes when the server itself says "not
+        # listed" to the pin-only publish.
+        confirmed = self._pin_confirmed.pop((space_id, gfs_id), None)
+        self._repin_tried.pop((space_id, gfs_id), None)
+        if await self._owns(space_id):
+            await self._repo.mark_listing_withdrawn(
+                space_id, gfs_id, confirmed.lower() if confirmed else None
+            )
         await self._repo.unpublish_space(space_id, gfs_id)
         if announce:
             await self._listings_changed(space_id)
@@ -3255,6 +3372,423 @@ class GfsConnectionService:
             raise TierChangeRequiredError()
         raise SpaceNotPublishableError()
 
+    async def _require_key_rotation(self, space_id: str, conn: GfsConnection) -> None:
+        """D1 at listing time: while admins may hold the space's signing key
+        (delegation on, or a seed shared for the current key epoch), refuse
+        to list it on a GFS that has not proved ``authority_rotation`` — it
+        would keep the key pinned after a revocation.
+        :class:`GfsKeyRotationUnsupportedError` (409) tells the owner why."""
+        if self._space_repo is None:
+            return
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return
+        if not space.features.delegated_admin_authority:
+            shared = await self._space_repo.get_seed_shared_epoch(space_id)
+            if shared is None or shared != space.authority_key_epoch:
+                return
+        if await self._signed_capability_supported(
+            conn, "authority_rotation", self._authority_rotation
+        ):
+            return
+        log.warning(
+            "gfs: not listing space %s on gfs %s — admins may hold its key and "
+            "that server never proved it re-pins a rotated key",
+            space_id,
+            conn.id,
+        )
+        raise GfsKeyRotationUnsupportedError()
+
+    async def authority_key_revocable(self, space_id: str) -> bool:
+        """Whether every GFS that holds state tied to *space_id*'s authority
+        key could be moved onto a new key by a rotation — the gate on handing
+        the space's signing seed to any admin household (D1, owner decision
+        2026-11-15): a seed whose revocation one GFS would not follow must not
+        go out.
+
+        That state is: the pin of every listing, the pin a GFS keeps for a
+        listing the owner withdrew, and a private channel a GFS has not
+        confirmed unregistering. So, all of:
+
+        * every GFS listing the space proved the signed
+          ``authority_rotation`` capability (an unreachable or unproven one
+          answers ``False`` — fail closed; the caller retries on a later
+          share);
+        * no re-pin is owed (:meth:`repin_owed`, which tries once more right
+          here): each of those servers CONFIRMED pinning the current key in
+          its answer to our publish. The capability is the server's own
+          claim, cached for the process; the answered pin is what its
+          relay checks against;
+        * no retired channel of the space still waits for its unregister
+          (:meth:`_channel_retire_owed`).
+
+        No GFS state at all → ``True``.
+        """
+        for conn in await self._repo.list_gfs_for_space(space_id):
+            if not await self._signed_capability_supported(
+                conn, "authority_rotation", self._authority_rotation
+            ):
+                return False
+        if await self.repin_owed(space_id):
+            return False
+        return not await self._channel_retire_owed(space_id)
+
+    async def _channel_retire_owed(self, space_id: str) -> bool:
+        """Whether a GFS still owes the unregister of a channel *space_id*
+        no longer uses (its key derived from a space key since rotated away,
+        or the channel was turned off): a pending withdrawal for any channel
+        but the current one."""
+        rows = await self._repo.list_channel_withdrawals(space_id=space_id)
+        if not rows:
+            return False
+        current = (
+            await self._space_repo.get_gfs_channel(space_id)
+            if self._space_repo is not None
+            else None
+        )
+        return any(current is None or ch != current[0] for _s, _c, ch in rows)
+
+    # ── The pin each GFS holds for a space (durable re-pin) ──────────────
+
+    def pin_confirmed(self, space_id: str, gfs_id: str) -> bool:
+        """Whether *gfs_id* confirmed pinning SOME key for *space_id* in this
+        process (which one is compared in :meth:`repin_owed`)."""
+        return (space_id, gfs_id) in self._pin_confirmed
+
+    def _listing_addressee_key(self, conn: GfsConnection) -> str | None:
+        """*conn*'s pinned server key to bind into a listing publish or a
+        withdrawal (``gfs_key``, signed), or ``None`` while its server has not proved
+        ``withdrawn_repin`` — the capability that says it folds the field
+        into the signed bytes — or we pinned no key for it. Read from the
+        cache every ``/gfs/info`` fetch warms (each connect does one): a
+        withdrawal never waits on a probe."""
+        if not conn.public_key or not self._withdrawn_repin.get(conn.id):
+            return None
+        return conn.public_key.lower()
+
+    def _pin_answered(
+        self, space_id: str, conn: GfsConnection, body: dict, answer: dict
+    ) -> bool:
+        """Whether *conn*'s answer to a publish of *space_id* confirms the
+        pin: only when the server names exactly the key we offered. Anything else — another key (it refused or could not apply
+        the re-pin), or no ``identity_public_key`` at all (an older server)
+        — leaves the re-pin owed."""
+        offered = str(body.get("identity_public_key") or "").lower()
+        pinned = answer.get("identity_public_key")
+        if offered and isinstance(pinned, str) and pinned.lower() == offered:
+            return True
+        log.warning(
+            "GFS %r (%s) did not confirm the space key for %s — it %s. The "
+            "re-pin stays owed and is retried; no signing key is shared with "
+            "admins of that space meanwhile.",
+            conn.display_name,
+            conn.inbox_url,
+            space_id,
+            "still pins another key"
+            if isinstance(pinned, str) and pinned
+            else "named no pinned key (an older server?)",
+        )
+        return False
+
+    async def repin_owed(
+        self,
+        space_id: str | None = None,
+        *,
+        gfs_id: str | None = None,
+        listings: bool = True,
+        force: bool = False,
+    ) -> int:
+        """Bring every GFS that pins a key for a space we own onto the
+        space's CURRENT authority key, and return how many still are not.
+
+        Two kinds of pin, each tried at most once per call, only where it
+        is not already confirmed current, and — after an attempt that was
+        not confirmed — only once its wait is over (it doubles from
+        :data:`GFS_REPIN_RETRY_MIN_S`; ``force``, a reconnect, skips the
+        wait, and a newer key starts over). So a pass with nothing owed
+        sends nothing, and a dead or old server costs a few requests a day:
+
+        * a **listing** (``gfs_space_publications``): re-published with the
+          owner's cert (:meth:`_relist`);
+        * a **withdrawn listing** (``gfs_withdrawn_listings``, 0147): the
+          pin-only publish (:meth:`_repin_withdrawn`) — never a server the
+          space was not on, so a rotation tells no GFS anything new.
+
+        This is what makes a re-pin durable: the rotation calls it, every
+        reconnect (:meth:`heal_space_pins`) and the periodic retry
+        (:class:`~socialhome.infrastructure.gfs_cleanup_scheduler
+        .GfsCleanupScheduler`) call it again until the count is 0.
+        *space_id* / *gfs_id* narrow it; ``listings=False`` leaves the live
+        listings to a caller that just re-published them. Rows of a space that is no longer
+        ours (gone, dissolved) are forgotten. Fail-soft per server.
+        """
+        if self._space_repo is None:
+            return 0
+        withdrawn = await self._repo.list_withdrawn_listings(
+            space_id=space_id, gfs_id=gfs_id
+        )
+        space_ids = (
+            [space_id]
+            if space_id is not None
+            else list(
+                dict.fromkeys(
+                    [r["space_id"] for r in await self._repo.list_publications_all()]
+                    + [r[0] for r in withdrawn]
+                )
+            )
+        )
+        owed = 0
+        for sid in space_ids:
+            rows = [r for r in withdrawn if r[0] == sid]
+            if not await self._owns(sid):
+                for _s, cid, _k in rows:
+                    await self._repo.delete_withdrawn_listing(sid, cid)
+                continue
+            space = await self._space_repo.get(sid)
+            if space is None or not space.identity_public_key:
+                continue
+            # Lower case throughout: what we compare and what we store.
+            key = space.identity_public_key.lower()
+            for conn in await self._repo.list_gfs_for_space(sid) if listings else ():
+                if gfs_id is not None and conn.id != gfs_id:
+                    continue
+                if self._pin_confirmed.get((sid, conn.id)) == key:
+                    continue
+                if conn.status == "active" and self._repin_due(
+                    sid, conn.id, key, force
+                ):
+                    await self._repin_listing(space, conn)
+                if self._pin_confirmed.get((sid, conn.id)) != key:
+                    self._repin_failed(sid, conn.id, key)
+                    owed += 1
+            for _s, cid, pinned in rows:
+                if pinned is not None and pinned.lower() == key:
+                    continue
+                held_by = await self._repo.get(cid)
+                if held_by is None:
+                    await self._repo.delete_withdrawn_listing(sid, cid)
+                    continue
+                outcome: str = "owed"
+                if held_by.status == "active" and self._repin_due(sid, cid, key, force):
+                    outcome = await self._repin_withdrawn_row(space, held_by)
+                if outcome == "confirmed":
+                    await self._repo.set_withdrawn_listing_pin(sid, cid, key)
+                    self._repin_tried.pop((sid, cid), None)
+                elif outcome in ("gone", "listed"):
+                    await self._repo.delete_withdrawn_listing(sid, cid)
+                    self._repin_tried.pop((sid, cid), None)
+                else:
+                    self._repin_failed(sid, cid, key)
+                    owed += 1
+        return owed
+
+    def _repin_due(self, space_id: str, gfs_id: str, key: str, force: bool) -> bool:
+        """Whether a re-pin of *space_id* on *gfs_id* may be sent now: no
+        unconfirmed attempt for this key yet, its wait is over, or *force*."""
+        tried = self._repin_tried.get((space_id, gfs_id))
+        return force or tried is None or tried[0] != key or time.monotonic() >= tried[1]
+
+    def _repin_failed(self, space_id: str, gfs_id: str, key: str) -> None:
+        """Note an owed re-pin that is still owed: start its wait, or — when
+        the wait was over and it was tried again — double it."""
+        now = time.monotonic()
+        tried = self._repin_tried.get((space_id, gfs_id))
+        if tried is not None and tried[0] == key:
+            if now < tried[1]:
+                return  # still waiting; nothing was sent
+            wait = min(tried[2] * 2, GFS_REPIN_RETRY_MAX_S)
+        else:
+            wait = GFS_REPIN_RETRY_MIN_S
+        self._repin_tried[(space_id, gfs_id)] = (key, now + wait, wait)
+
+    def _forget_connection_pins(self, gfs_id: str) -> None:
+        """Drop what a removed connection confirmed or was asked."""
+        for pins in (self._pin_confirmed, self._repin_tried):
+            for entry in [e for e in pins if e[1] == gfs_id]:
+                del pins[entry]
+        self._withdrawn_repin_warned.discard(gfs_id)
+
+    async def _repin_listing(self, space: Space, conn: GfsConnection) -> None:
+        """One re-pin of a listing whose pin is not confirmed current.
+
+        A GLOBAL space is re-published; a refusal of any kind (the server
+        unreachable, the publish rejected, a capability that could not be
+        read) leaves the re-pin owed. Only a listing left over from before
+        the space left the public tiers (its withdrawal has not landed yet)
+        gets the pin-only publish instead — which also withdraws it there,
+        exactly what its owner asked for. Never a global space: that
+        publish would take a live listing and its invite pages down."""
+        try:
+            if space.space_type in PUBLIC_SPACE_TIERS:
+                await self._relist(space.id, conn.id)
+                return
+            async with self._change_lock(space.id):
+                current = (
+                    await self._space_repo.get(space.id)
+                    if self._space_repo is not None
+                    else None
+                )
+                if (
+                    current is None
+                    or current.space_type in PUBLIC_SPACE_TIERS
+                    or conn.id
+                    not in {
+                        p.gfs_connection_id
+                        for p in await self._repo.list_publications_for_space(space.id)
+                    }
+                ):
+                    return
+                if await self._repin_withdrawn(current, conn) == "confirmed":
+                    self._pin_confirmed[(space.id, conn.id)] = (
+                        current.identity_public_key.lower()
+                    )
+        except (GfsConnectionError, SpaceNotPublishableError) as exc:
+            log.warning(
+                "gfs: re-pinning space %s on gfs %s failed: %s", space.id, conn.id, exc
+            )
+        except Exception:
+            log.exception(
+                "gfs: re-pinning space %s on gfs %s failed", space.id, conn.id
+            )
+
+    async def _repin_withdrawn_row(
+        self, space: Space, conn: GfsConnection
+    ) -> Literal["confirmed", "gone", "owed", "listed"]:
+        """The pin-only publish for a withdrawn-listing row, under the
+        space's change lock and only while the row still stands: the owner
+        may have listed the space there again since the rows were read, and
+        the pin-only publish would withdraw that live listing (``listed`` —
+        the row is stale and goes)."""
+        try:
+            async with self._change_lock(space.id):
+                if not await self._repo.list_withdrawn_listings(
+                    space_id=space.id, gfs_id=conn.id
+                ) or conn.id in {
+                    p.gfs_connection_id
+                    for p in await self._repo.list_publications_for_space(space.id)
+                }:
+                    return "listed"
+                return await self._repin_withdrawn(space, conn)
+        except Exception:
+            log.exception(
+                "gfs: the pin-only publish of space %s on gfs %s failed",
+                space.id,
+                conn.id,
+            )
+            return "owed"
+
+    async def _repin_withdrawn(
+        self, space: Space, conn: GfsConnection
+    ) -> Literal["confirmed", "gone", "owed"]:
+        """Move the pin *conn* keeps for a listing we withdrew: a publish
+        with ``withdrawn: true`` inside the signed bytes, the owner's cert
+        for the current key and NO metadata (the space may be private by
+        now — its name is none of that server's business any more). The
+        listing stays withdrawn there.
+
+        ``confirmed`` — the server answered that it pins the current key;
+        ``gone`` — it holds no row for the space, or a row with NO pinned
+        key (no key at all authorizes a relay there: nothing to revoke);
+        ``owed`` — anything else, including a server that never proved
+        ``withdrawn_repin`` (nothing is sent to it: it would refuse the
+        field, and a plain publish would list the space again)."""
+        if not await self._signed_capability_supported(
+            conn, "withdrawn_repin", self._withdrawn_repin
+        ):
+            if conn.id not in self._withdrawn_repin_warned:
+                self._withdrawn_repin_warned.add(conn.id)
+                log.warning(
+                    "GFS %r (%s) does not advertise withdrawn_repin — it keeps "
+                    "the old key of a space withdrawn from it after a rotation, "
+                    "so a revoked admin's relays to its followers there stay "
+                    "authorized. Ask its operator to upgrade, or disconnect "
+                    "that GFS.",
+                    conn.display_name,
+                    conn.inbox_url,
+                )
+            return "owed"
+        if not self._own_instance_id or not self._own_signing_key:
+            return "owed"
+        if not conn.public_key:
+            return "owed"
+        # Exactly the fields the GFS folds into the signed bytes, each at
+        # the value its route defaults a missing one to.
+        body: dict = {
+            "space_id": space.id,
+            "owning_instance": self._own_instance_id,
+            "name": "",
+            "description": "",
+            "about_markdown": "",
+            "cover_url": "",
+            "icon_url": "",
+            "min_age": 0,
+            "category": "general",
+            "accent_color": _GFS_DEFAULT_COLOR,
+            "primary_color": _GFS_DEFAULT_COLOR,
+            "identity_public_key": space.identity_public_key,
+            "ts": datetime.now(UTC).isoformat(),
+            "withdrawn": True,
+            # The one server this is for (mandatory there): the pin-only
+            # publish also WITHDRAWS a listing, so replayed to another GFS
+            # it would take a live listing down.
+            "gfs_key": conn.public_key.lower(),
+        }
+        cert = owner_authority_cert(
+            space,
+            own_instance_id=self._own_instance_id,
+            owner_seed=self._own_signing_key,
+            owner_pk=ed25519_public_key(self._own_signing_key),
+        )
+        if cert is not None:
+            body["authority_cert"] = cert
+        body["signature"] = b64url_encode(
+            sign_ed25519(self._own_signing_key, canonical_bytes(body))
+        )
+        try:
+            async with self._client().post(
+                f"{conn.inbox_url}/gfs/spaces/{space.id}/publish",
+                allow_redirects=False,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 404:
+                    # Only the server's own "not listed" (sent after it
+                    # verified our signature) forgets the row; any other
+                    # 404 (a proxy, a wrong path) leaves it owed.
+                    try:
+                        gone = await resp.json() == {"error": "not listed"}
+                    except aiohttp.ClientError, ValueError:
+                        gone = False
+                    if gone:
+                        return "gone"
+                if resp.status not in (200, 201):
+                    log.warning(
+                        "gfs: GFS %s answered HTTP %d to the pin-only publish "
+                        "of withdrawn space %s",
+                        conn.id,
+                        resp.status,
+                        space.id,
+                    )
+                    return "owed"
+                try:
+                    data = await resp.json()
+                except aiohttp.ClientError, ValueError:
+                    data = {}
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            log.warning(
+                "gfs: could not reach GFS %s for the pin-only publish of "
+                "withdrawn space %s: %s",
+                conn.id,
+                space.id,
+                exc or type(exc).__name__,
+            )
+            return "owed"
+        if not isinstance(data, dict):
+            data = {}
+        if data.get("identity_public_key") == "":
+            return "gone"
+        return "confirmed" if self._pin_answered(space.id, conn, body, data) else "owed"
+
     async def republish_space(self, space_id: str) -> int:
         """Re-publish ``space_id`` to every GFS it is ALREADY published to.
 
@@ -3303,7 +3837,7 @@ class GfsConnectionService:
         :data:`PAYLOAD_SUITE_REFUSAL_TTL_S` (:meth:`payload_suite_for`).
 
         ``skip`` (step 12): a server it answers ``True`` for gets nothing —
-        a seed holder's copy of a member's post where every follower reads
+        the owner's copy of a member's post where every follower reads
         the member's own item (:mod:`socialhome.services.space_relay_coverage`).
 
         POSTs to ``POST /gfs/publish`` on every GFS on the owner's signed list
@@ -3608,18 +4142,14 @@ class GfsConnectionService:
         blob_id: str,
         blob: bytes,
         auth_header: str,
-        identified: bool = False,
     ) -> int | None:
         """``PUT /gfs/media/{blob_id}`` — the one scope-free path; the scope
         (a listed space, or a private space's opaque channel) rides only
         inside the signed claim — one sealed blob,
         authorized by *auth_header* (:mod:`socialhome.domain.gfs_space_media`).
         The request names no household: it rides the cookie-less session
-        (:meth:`anon_session`). An ``identified`` upload (a writer cert names
-        our household key) never goes to a server we are not registered on.
-        Returns the HTTP status, or ``None`` when nothing could be sent."""
-        if identified and not conn.registered:
-            return None
+        (:meth:`anon_session`). Returns the HTTP status, or ``None`` when
+        nothing could be sent."""
         url = f"{conn.inbox_url.rstrip('/')}/gfs/media/{blob_id}"
         headers = {
             SPACE_MEDIA_AUTH_HEADER: auth_header,
@@ -4179,6 +4709,12 @@ class GfsConnectionService:
                     pub.space_id,
                     gfs_id,
                 )
+        # And every pin this server still owes us a move for — above all a
+        # listing we withdrew from it (it has no publication row any more).
+        try:
+            await self.repin_owed(gfs_id=gfs_id, listings=False, force=True)
+        except Exception:
+            log.exception("gfs.heal_space_pins: owed re-pins failed for %s", gfs_id)
         return healed
 
     async def _owns(self, space_id: str) -> bool:

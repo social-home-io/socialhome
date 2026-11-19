@@ -31,6 +31,7 @@ import uuid
 from datetime import UTC, datetime
 
 from ..domain.conversation import ConversationMessage
+from ..domain.errors import NotFoundError
 from ..domain.events import DmMessageCreated, SpacePostCreated
 from ..domain.post import Post, PostType
 from ..domain.space import (
@@ -155,7 +156,7 @@ class BotBridgeService(ContentAccessMixin):
             # Bot outlived its space (racing with space deletion). The FK
             # is ON DELETE CASCADE on space_bots.space_id, so this branch
             # is rare — treat as 404 via the route's KeyError mapping.
-            raise KeyError(f"space {bot.space_id!r} not found")
+            raise NotFoundError(f"space {bot.space_id!r} not found")
         if not space.bot_enabled:
             raise SpaceBotDisabledError("bot posting is disabled for this space")
         await self._require_maker_may_post(bot)
@@ -230,7 +231,7 @@ class BotBridgeService(ContentAccessMixin):
         self._validate_payload(title, message)
         conv = await self._conversations.get(conversation_id)
         if conv is None:
-            raise KeyError(f"conversation {conversation_id!r} not found")
+            raise NotFoundError(f"conversation {conversation_id!r} not found")
         if not conv.bot_enabled:
             raise SpaceBotDisabledError("bot posting is disabled for this conversation")
         content = f"**{title}**\n{message}" if title else message

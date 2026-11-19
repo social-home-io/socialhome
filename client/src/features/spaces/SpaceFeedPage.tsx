@@ -108,6 +108,9 @@ interface SpaceDetail {
     allowed_post_types?: string[]
     /** "Games allowed here" (group play, v_77). */
     allowed_apps?: string[]
+    /** Owner opt-in: admins act for the owner while they're offline (an
+     *  admin's household then holds the signing seed). Absent → off. */
+    delegated_admin_authority?: boolean
   }
   /** §D1b — the originating instance. When it differs from
    *  ``instanceConfig.value.instance_id``, this is a stub of a
@@ -496,9 +499,16 @@ export default function SpaceFeedPage() {
   }
 
   const handleReact = async (postId: string, emoji: string) => {
-    await api.post(
-      `/api/spaces/${spaceId}/posts/${postId}/reactions`, { emoji },
-    )
+    try {
+      await api.post(
+        `/api/spaces/${spaceId}/posts/${postId}/reactions`, { emoji },
+      )
+    } catch (err) {
+      // A refused reaction (a sixth on one post, an archived space…): say
+      // why — the API error carries the translated line.
+      showToast(err instanceof Error ? err.message : String(err), 'error')
+      return
+    }
     void loadSpaceFeed(spaceId)
   }
 
@@ -858,6 +868,7 @@ export default function SpaceFeedPage() {
 
       {section === 'members' && (
         <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value}
+                         adminsActForOwner={features?.delegated_admin_authority === true}
                          joinRequests={attention?.spaceId === spaceId ? attention.joinRequests : 0} />
       )}
 
@@ -945,7 +956,8 @@ export default function SpaceFeedPage() {
       )}
 
       {section === 'moderation' && canModerateQueue && hasSettingsAuthority(viewerRole.value) && (
-        <JoinRequestList spaceId={spaceId} />
+        <JoinRequestList spaceId={spaceId}
+                         adminsActForOwner={features?.delegated_admin_authority === true} />
       )}
       {section === 'moderation' && canModerateQueue && (
         // Approving creates the item as the approver: a moderator can't

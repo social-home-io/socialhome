@@ -18,6 +18,7 @@ from socialhome.domain.errors import (
     ImageTooLargeError,
     ImageUnreadableError,
     InvalidMediaRefError,
+    NotFoundError,
     PayloadTooLargeError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
@@ -99,8 +100,16 @@ def test_image_too_large_reports_whole_megabytes():
     assert (exc.status, exc.code) == (422, "IMAGE_TOO_LARGE")
     assert exc.params == {"max_mb": 10}
     assert not isinstance(exc, ValueError)
+
+
+def test_image_too_large_under_a_megabyte_reports_kilobytes():
+    """N10: a space cover / icon cap (64 KiB / 16 KiB) is told in kB
+    (1 kB = 1000 B, rounded down), never as "under 1 MB"."""
+    assert ImageTooLargeError(64 * 1024).params == {"max_kb": 65}
+    assert ImageTooLargeError(16 * 1024).params == {"max_kb": 16}
     # Never rounds down to zero.
-    assert ImageTooLargeError(1000).params == {"max_mb": 1}
+    assert ImageTooLargeError(10).params == {"max_kb": 1}
+    assert ImageTooLargeError(1024 * 1024).params == {"max_mb": 1}
 
 
 def test_download_too_large_says_how_many_and_how_big():
@@ -382,3 +391,22 @@ def test_video_unreadable_and_queue_full():
     full = TranscodeQueueFullError()
     assert (full.status, full.code) == (503, "TRANSCODE_QUEUE_FULL")
     assert not isinstance(full, ValueError)
+
+
+# ─── Not found ───────────────────────────────────────────────────────────
+
+
+def test_not_found_is_a_coded_404_that_is_still_a_key_error():
+    """Callers that caught the old bare ``KeyError`` keep catching it; the
+    client sees only the fixed detail, never the id in ``what``."""
+    exc = NotFoundError("space post 'p1' not found")
+    assert isinstance(exc, KeyError)
+    assert (exc.status, exc.code, exc.detail) == (
+        404,
+        "NOT_FOUND",
+        "Resource not found.",
+    )
+    assert exc.params == {}
+    assert str(exc) == str(KeyError("space post 'p1' not found"))
+    with pytest.raises(KeyError, match="p1"):
+        raise exc

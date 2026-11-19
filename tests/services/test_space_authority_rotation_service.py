@@ -8,6 +8,7 @@ service's own branches with real repos and a recording federation double.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import replace
@@ -24,12 +25,15 @@ from socialhome.domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceAuthorityEchoDue,
+    SpaceInviterReproofDue,
 )
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
 )
+from socialhome.domain.federation_retention import admin_seed_key_prefix
+from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.event_bus import EventBus
@@ -58,6 +62,10 @@ class _Fed:
         self.own_instance_id = derive_instance_id(kp.public_key)
         self._versions = versions
         self.sent: list[tuple[str, FederationEventType, dict]] = []
+        #: (instance, outbox-key prefix) per dropped-queue call, and the
+        #: order of drops and sends (``("drop", iid)`` / ``("send", iid, et)``).
+        self.dropped: list[tuple[str, str]] = []
+        self.log: list[tuple] = []
         self.registered: dict = {}
         self._event_registry = SimpleNamespace(
             register=lambda et, h: self.registered.__setitem__(et, h)
@@ -70,7 +78,13 @@ class _Fed:
         self, *, to_instance_id, event_type, payload, space_id=None
     ):
         self.sent.append((to_instance_id, event_type, payload))
+        self.log.append(("send", to_instance_id, event_type))
         return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    async def drop_queued_with_key_prefix(self, instance_id, prefix):
+        self.dropped.append((instance_id, prefix))
+        self.log.append(("drop", instance_id))
+        return 0
 
 
 class _FedRepo:
@@ -346,13 +360,14 @@ async def test_bundle_parts_not_signed_by_the_new_key_are_ignored(env):
 async def test_public_space_republishes_then_reseals(env):
     """A public / global space: every GFS that lists it re-pins (republish)
     BEFORE the K2-signed subscriber re-seal, which a GFS only accepts once
-    it re-pinned. A private space touches no GFS at all."""
+    it re-pinned. A private space gets the re-pin pass too — a GFS it was
+    WITHDRAWN from may still pin the old key (D2) — but no re-seal."""
     calls: list[str] = []
 
     class _Gfs:
-        async def republish_space(self, space_id):
+        async def repin_owed(self, space_id):
             calls.append(f"republish:{space_id}")
-            return 1
+            return 0
 
     class _Keys:
         async def reconcile_space_everywhere(self, space_id):
@@ -361,7 +376,8 @@ async def test_public_space_republishes_then_reseals(env):
     env.svc.attach_gfs(_Gfs())
     env.svc.attach_subscriber_keys(_Keys())
     await env.svc.rotate(SPACE)  # private
-    assert calls == []
+    assert calls == [f"republish:{SPACE}"]
+    calls.clear()
     await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
     await env.svc.rotate(SPACE)
     assert calls == [f"republish:{SPACE}", f"reseal:{SPACE}"]
@@ -437,7 +453,7 @@ async def test_post_restore_rotation_shares_no_seed_and_asks_the_owner(env):
     shared: list[str] = []
 
     class _Svc:
-        async def share_admin_signing_seed(self, space, *, instance_id):
+        async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
             shared.append(instance_id)
 
         async def roster_snapshot_entries(self, space, *, seed, to_instance_id):
@@ -953,7 +969,7 @@ class _SeedSvc:
     def __init__(self):
         self.shared: list[str] = []
 
-    async def share_admin_signing_seed(self, space, *, instance_id):
+    async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
         self.shared.append(instance_id)
 
     async def roster_snapshot_entries(self, space, *, seed, to_instance_id):
@@ -1144,9 +1160,9 @@ async def test_a_re_pin_re_announces_the_epoch_before_the_reseal(env):
     calls: list[str] = []
 
     class _Gfs:
-        async def republish_space(self, space_id):
+        async def repin_owed(self, space_id):
             calls.append("republish")
-            return 1
+            return 0
 
     class _Keys:
         async def reconcile_space_everywhere(self, space_id):
@@ -1223,3 +1239,351 @@ async def test_member_takes_the_channel_grant_from_the_owner_bundle_only(env):
             )
         )
     assert certs.accepted == [(SPACE, {"grant": env.fed.own_instance_id})]
+
+
+async def test_the_bundle_config_over_the_limit_keeps_the_text_and_the_owner_steps(env):
+    """The rotation's config is judged by the one receiver rule: over the
+    limit, the held description stays and the settings apply — and the
+    owner's signed GFS list (a security step after it) is still taken."""
+    member, _handler = await _member_env(env)
+    k2 = generate_identity_keypair()
+    assert await env.spaces.adopt_authority_key(SPACE, k2.public_key.hex(), 9)
+    space = await env.spaces.get(SPACE)
+    gfs_list = sign_gfs_server_list(
+        space_id=SPACE, servers=(), issued_at=3, owner_seed=env.fed.own_identity_seed
+    )
+    meta = {
+        "name": "Baseline",
+        "config_sequence": 1,
+        "description": "d" * SPACE_CONFIG_ITEM_MAX_BYTES,
+        "gfs_servers": gfs_list.to_wire(),
+    }
+    meta.update(
+        sign_authority_event(
+            event_type="space_config_changed",
+            space_id=SPACE,
+            payload=strip_authority_sig_fields(meta),
+            space_seed=k2.private_key,
+        )
+    )
+    await member._reset_config(space, meta, env.fed.own_instance_id, 9)
+    got = await env.spaces.get(SPACE)
+    assert (got.name, got.description) == ("Baseline", space.description)
+    assert got.gfs_servers == gfs_list
+
+
+# ─── Every admin is equal on every path (owner decision 2026-11-15) ──────
+
+
+async def test_rotation_drops_every_queued_seed_share_before_sharing_again(env):
+    """A seed share still queued (outbox, a slow GFS) when an admin is
+    revoked must never land after it: the rotation drops every queued share
+    of the space — to each member household AND the revoked one, which may
+    hold no seat any more — before the new seed goes to the admins it keeps."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+
+    class _SpaceSvc:
+        async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
+            await env.fed.send_with_mesh_fallback(
+                to_instance_id=instance_id,
+                event_type=FET.SPACE_ADMIN_KEY_SHARE,
+                payload={},
+                space_id=space.id,
+            )
+
+        async def roster_snapshot_entries(self, space, *, seed, to_instance_id):
+            return []
+
+    env.svc.attach_space_service(_SpaceSvc())
+    await env.svc.rotate(SPACE, revoked_instance="gone")
+    prefix = admin_seed_key_prefix(SPACE)
+    assert {i for i, p in env.fed.dropped if p == prefix} >= {
+        "v44",
+        "v43",
+        "mesh",
+        "gone",
+    }
+    first_share = next(
+        n
+        for n, e in enumerate(env.fed.log)
+        if e[0] == "send" and e[2] is FET.SPACE_ADMIN_KEY_SHARE
+    )
+    last_drop = max(n for n, e in enumerate(env.fed.log) if e[0] == "drop")
+    assert last_drop < first_share
+
+
+async def test_rotation_repins_every_gfs_before_the_bundles_go_out(env):
+    """The revoked holder can use a GFS that still pins the old key until
+    it re-pins: the re-publish runs as soon as the new key AND its content
+    epoch exist, before the per-member bundles (N sends), and the
+    subscriber re-seal still follows it."""
+    calls: list[str] = []
+    epoch_before = await env.crypto.get_current_epoch(SPACE)
+
+    class _Gfs:
+        async def repin_owed(self, space_id):
+            assert await env.crypto.get_current_epoch(space_id) > epoch_before
+            assert not any(
+                e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED
+                for e in env.fed.log
+            )
+            calls.append("republish")
+            return 0
+
+    class _Keys:
+        async def reconcile_space_everywhere(self, space_id):
+            assert any(
+                e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED
+                for e in env.fed.log
+            )
+            calls.append("reseal")
+
+    env.svc.attach_gfs(_Gfs())
+    env.svc.attach_subscriber_keys(_Keys())
+    await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
+    await env.svc.rotate(SPACE)
+    assert calls == ["republish", "reseal"]
+
+
+async def test_rotation_reannounces_the_epoch_with_the_repin_before_the_bundles(env):
+    """The re-pin clears each GFS's epoch state: the owner re-announces right
+    away, so members' anonymous publishes are not refused for the length of
+    N bundle sends."""
+    order: list[str] = []
+
+    class _Gfs:
+        async def repin_owed(self, space_id):
+            order.append("republish")
+            return 0
+
+    class _MemberGfs:
+        async def retire_channel(self, space_id):
+            return None
+
+        async def reconcile_channel(self, space_id):
+            return None
+
+        async def announce_epoch(self, space_id):
+            assert not any(
+                e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED
+                for e in env.fed.log
+            )
+            order.append("announce")
+
+    env.svc.attach_gfs(_Gfs())
+    env.svc.attach_member_gfs(_MemberGfs())
+    await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
+    await env.svc.rotate(SPACE)
+    assert order == ["republish", "announce"]
+
+
+async def test_a_failing_drop_never_stops_the_rotation(env):
+    async def boom(instance_id, prefix):
+        raise RuntimeError("boom")
+
+    env.fed.drop_queued_with_key_prefix = boom
+    assert await env.svc.rotate(SPACE) is not None
+    assert _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)
+
+
+class _ReshareSvc:
+    """Space-service stand-in for the echo re-share: records the build (the
+    key epoch it saw), the re-check and the send; ``prepare_ok`` /
+    ``due`` decide those gates, ``send_gate`` (an Event) holds a send."""
+
+    def __init__(self, *, prepare_ok=True, due=True, send_gate=None):
+        self.prepare_ok = prepare_ok
+        self.due = due
+        self.send_gate = send_gate
+        self.built: list[int] = []
+        self.sent: list[str] = []
+
+    async def prepare_admin_seed_share(self, space, *, instance_id, mint=True):
+        assert mint is False  # never re-mint under the rotation lock
+        self.built.append(space.authority_key_epoch)
+        return (space, {"space_id": space.id}) if self.prepare_ok else None
+
+    async def admin_seed_share_still_due(self, prepared, *, instance_id):
+        return self.due
+
+    async def send_admin_seed_share(self, prepared, *, instance_id):
+        if self.send_gate is not None:
+            await self.send_gate.wait()
+        self.sent.append(instance_id)
+
+    async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
+        self.sent.append(instance_id)
+        return True
+
+    async def roster_snapshot_entries(self, space, *, seed, to_instance_id):
+        return []
+
+
+async def _echo_reshare(env, svc):
+    env.svc.attach_space_service(svc)
+    space = await env.spaces.get(SPACE)
+    seats = await env.remote.list_for_instance(SPACE, "v44", include_tombstoned=False)
+    env.svc._maybe_reshare_seed(space, "v44", seats)
+
+
+async def test_the_owner_never_reshares_while_delegation_is_off(env):
+    """An admin's ``seed_held: false`` earns nothing once the owner stopped
+    letting admins act for it."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    await env.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=0 WHERE id=?", (SPACE,)
+    )
+    svc = _ReshareSvc()
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.built == [] and svc.sent == []
+
+
+async def test_the_echo_reshare_is_built_under_the_rotation_lock(env):
+    """A rotation in progress (the revocation of that very household)
+    finishes before an echo-triggered re-share reads the space."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    svc = _ReshareSvc()
+    async with env.svc._lock(SPACE):
+        await _echo_reshare(env, svc)
+        await asyncio.sleep(0.01)
+        assert svc.built == []
+        await env.db.enqueue(
+            "UPDATE spaces SET authority_key_epoch=5 WHERE id=?", (SPACE,)
+        )
+    await env.svc.wait_idle()
+    assert svc.built == [5]
+    assert svc.sent == ["v44"]
+
+
+async def test_a_slow_reshare_send_never_holds_up_a_rotation(env):
+    """SF4: the send runs outside the rotation lock — a revocation rotation
+    is not stuck behind a re-share's network timeout."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    gate = asyncio.Event()
+    svc = _ReshareSvc(send_gate=gate)
+    await _echo_reshare(env, svc)
+    for _ in range(50):
+        if svc.built:
+            break
+        await asyncio.sleep(0.01)
+    assert svc.built and not svc.sent  # built, send pending
+    assert await asyncio.wait_for(env.svc.rotate(SPACE), timeout=5) is not None
+    gate.set()
+    await env.svc.wait_idle()
+
+
+async def test_a_reshare_that_is_no_longer_due_is_not_sent(env):
+    """Re-checked right before the send: a household revoked (or a key
+    rotated) after the build gets nothing."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    svc = _ReshareSvc(due=False)
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.built and svc.sent == []
+
+
+async def test_a_refused_reshare_costs_no_window(env):
+    """SF3: a share refused at a gate (a GFS down, its probe failing) does not
+    stamp the hourly window — the admin's next echo tries again."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    svc = _ReshareSvc(prepare_ok=False)
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.sent == []
+    assert (SPACE, "v44") not in env.svc._seed_reshared
+    svc.prepare_ok = True
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.sent == ["v44"]
+    # …and a share that passed stamps it: the next echo inside the hour waits.
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.sent == ["v44"]
+
+
+async def test_a_rotation_says_so_when_a_gfs_still_owes_the_repin(env, caplog):
+    """R5: a GFS that did not take the new key leaves the re-pin owed — the
+    rotation stands, says so, and the retry takes it from there."""
+
+    class _Gfs:
+        async def repin_owed(self, space_id):
+            return 2
+
+    env.svc.attach_gfs(_Gfs())
+    with caplog.at_level(logging.WARNING):
+        assert await env.svc.rotate(SPACE) is not None
+    assert any(
+        "2 connection server(s) still pin the retired key" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+# ── A rotation asks the inviting admin for its fresh proof at once ────────
+
+
+async def _rotated_for_an_invitee(env, *, inviter_role="admin"):
+    """The owner rotates; the bundle it sent "v44" is what a member
+    household that "v43" invited (proved at epoch 0) receives."""
+    await env.remote.set_role(SPACE, "v43", "u-v43", inviter_role)
+    await env.spaces.set_invited_by(SPACE, "v43", 0)
+    due: list = []
+
+    async def _rec(event):
+        due.append((event.space_id, event.inviter_instance_id))
+
+    env.bus.subscribe(SpaceInviterReproofDue, _rec)
+    await env.svc.rotate(SPACE)
+    _member, handler = await _member_env(env)
+    bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+
+    async def deliver(sender=env.fed.own_instance_id):
+        await handler(
+            FederationEvent(
+                msg_id=str(uuid.uuid4()),
+                event_type=FET.SPACE_AUTHORITY_ROTATED,
+                from_instance=sender,
+                to_instance="member-household",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload=bundle,
+                space_id=SPACE,
+            )
+        )
+
+    return due, deliver
+
+
+async def test_a_rotation_asks_the_inviting_admin_for_its_fresh_proof(env):
+    """The key rotated: the admin that invited us proved the OLD key's
+    seed, so it stops acting as host here until its §25.6 sentinel carries
+    a proof for the new one. We ask for that stream now, not at the next
+    periodic sync (30 minutes of a valid admin not counting)."""
+    due, deliver = await _rotated_for_an_invitee(env)
+    await deliver()
+    assert due == [(SPACE, "v43")]
+    # Re-proved meanwhile: a redelivered bundle asks for nothing.
+    epoch = (await env.spaces.get(SPACE)).authority_key_epoch
+    await env.spaces.set_invited_by_epoch(SPACE, epoch)
+    await deliver()
+    assert len(due) == 1
+
+
+async def test_a_bundle_not_from_the_owner_asks_the_inviter_for_nothing(env):
+    due, deliver = await _rotated_for_an_invitee(env)
+    await deliver(sender="v44")
+    assert due == []
+
+
+async def test_an_inviter_without_an_admin_seat_is_not_asked(env):
+    """The rotation revoked the very admin that invited us (its seat is a
+    member's now): no proof can come from it."""
+    due, deliver = await _rotated_for_an_invitee(env, inviter_role="member")
+    await deliver()
+    assert due == []
+
+
+async def test_a_household_nobody_but_the_owner_invited_asks_nobody(env):
+    due, deliver = await _rotated_for_an_invitee(env)
+    await env.spaces.set_invited_by(SPACE, None)
+    await deliver()
+    assert due == []

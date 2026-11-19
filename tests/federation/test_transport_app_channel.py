@@ -54,7 +54,7 @@ class _ScriptedChannel:
     async def wait_open(self) -> None:
         pass
 
-    async def send(self, data) -> None:
+    async def send(self, data, *, wait_for_drain: bool = True) -> None:
         if self.raise_on_send is not None:
             raise self.raise_on_send
         self.sent.append(data)

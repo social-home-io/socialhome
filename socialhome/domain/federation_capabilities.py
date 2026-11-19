@@ -1278,6 +1278,9 @@ from __future__ import annotations
 #:   same descriptor (sync line 80). No ``SPACE_MEDIA_BLOB`` push is queued
 #:   to a v_80 link-joined member (live), nor to ANY link-joined requester of
 #:   a §25.6 catch-up (the relay refuses those bytes whatever the version).
+#:   **Since v_92 (one member path):** such a member is pushed like every
+#:   member again — as v_87 relay frames or JSON chunks — and the media
+#:   outbox skips a push only while its GFS is known to hold the file.
 #:   Followers of a global space get the descriptor in the relayed post's
 #:   inner under the author's own separate signature (``media_refs_sig``,
 #:   suite ``ed25519``; taken only when it verifies) — gated on the GFS's
@@ -1348,6 +1351,10 @@ from __future__ import annotations
 #:   listed the label and is never asked; a link-joined reader below v_83
 #:   keeps eager video uploads. No household-to-household event, no sync
 #:   stream change. Labelled "Older space pictures come back on view".
+#:   **Since v_92 (one member path):** the household side never counts a
+#:   member as one that asks its GFS (that [v_83, v_92) window was dropped
+#:   before release): a large video is lazy only where no member household
+#:   reads the space through a GFS; the GFS path is for followers.
 #: * **v_84** (2026-11-07) — **Ask to join a global space through the GFS**.
 #:   A household that found a global space in a GFS directory and is not
 #:   paired with its host gets the host's sealing keys from that GFS
@@ -1393,7 +1400,11 @@ from __future__ import annotations
 #:   gets no helper fills (the host still fills; a v_85 receiver would take
 #:   them, an older one stores them under a name no row shows); a helper
 #:   below v_86 ships none. No sync-stream record change. Labelled
-#:   "Admins and moderators fill in missing space pictures".
+#:   "Admins and moderators fill in missing space pictures". Since v_92 a
+#:   helper's replay ships only its own people's rows and files; other
+#:   people's files ride only ``SPACE_MEDIA_WANTED`` (v_92 requesters), so
+#:   no code gates on ``MIN_FOR_TRUSTED_FILE_FILLS`` any more (kept for
+#:   history; the receiver's fill rule stands).
 #: * **v_87** (2026-11-08) — **mesh-sized media through the GFS relay**.
 #:   A ``SPACE_MEDIA_BLOB`` / ``DM_MEDIA_BLOB`` chunk to a household seated
 #:   from an invite link (``space_session``) whose GFS proved the signed
@@ -1409,25 +1420,173 @@ from __future__ import annotations
 #:   ``envelope_media``, gets JSON chunks of ``RELAY_JSON_CHUNK_BYTES``
 #:   (96 KiB), which fit the JSON relay's envelope cap. Not space-scoped, no
 #:   sync-stream change. Labelled "Members reached through a GFS get pictures
-#:   in full-size pieces".
-#: * **v_88** (2026-11-08) — **per-space GFS mailboxes** (GFS redesign PR 2).
-#:   A household that reaches a space only through a GFS (a ``space_session``
-#:   seat, from an invite link or an approved "Ask to join") mints one
-#:   anonymous mailbox per (space, generation) at that GFS, registers it with
-#:   an anonymous ticket and claims it on its own anonymous socket. Its
-#:   signed directory entry (``{space, instance_id, mailbox_id, kem_pk,
-#:   kem_suite, sign_pk, gfs, gen, proto_version, keywrap_pk, keywrap_sig,
-#:   sig_suite, sig}``) rides inside the sealed redeem; the host stores it on
-#:   the pair's ``space_instances`` row (migration 0144) and answers with its
-#:   own in the sealed ACK. Envelopes (and v_87 media frames) of that space
-#:   then go to the mailbox id, the whole envelope sealed to the entry's
-#:   ``kem_pk`` — the GFS sees a mailbox id, never an instance id. The
-#:   receiver takes a frame on mailbox M only for M's space (or space-less).
-#:   **Fallback**: no entry, an entry below v_88, or a GFS whose signed
-#:   ``/gfs/info`` lacks ``envelope_mailbox`` → today's instance-addressed
-#:   relay. No sync-stream record change. Labelled "Members reached through a
-#:   GFS get an anonymous mailbox per space".
-OURS: int = 88
+#:   in full-size pieces". **Large space events ride the same frame**
+#:   (owner decision 2026-11-13: a household behind a GFS keeps size parity
+#:   with local federation; no new version — v_81..v_94 ship together): a
+#:   space event whose sealed envelope does not fit a JSON envelope on the
+#:   relay (~191 KiB) — a large page, a pending item, a §25.6
+#:   ``space_sync_chunk`` holding one — goes to a household reached only
+#:   through a GFS (relay seat or mailbox) as ONE such frame: the same event
+#:   type, signature, encryption and ``msg_id``, the payload JSON as the
+#:   frame's bytes (``FederationService.relay_event_frame``). The receiver
+#:   takes a framed event of ``SPACE_SESSION_ALLOWED_EVENT_TYPES`` and runs
+#:   every §24.11 step on its real payload. A framed sync chunk carries its record's
+#:   ciphertext raw (``federation/relay_event_body.py``), so ONE bound holds
+#:   live and by sync: a payload over 515,998 bytes (~503 KiB: the frame's
+#:   bound less a chunk's wrapper) is refused at the sender, and a page or
+#:   description that large with 413 where it is saved; so is a large event to a peer below
+#:   v_87 or through a GFS without ``envelope_media`` (WARNING, never
+#:   queued).
+#: * **v_88** (2026-11-08) — per-space GFS mailboxes (GFS redesign PR 2,
+#:   #1333). Never released: v_89 replaced it before any release, so no
+#:   household speaks it and nothing gates on it any more.
+#: * **v_89** (2026-11-09) — **one GFS mailbox per household, reachable by
+#:   every member** (GFS redesign PR 3). A household that reaches a space
+#:   through a GFS owns ONE anonymous mailbox at that GFS, shared by every
+#:   space it reaches there (owner decision 2026-11-09). Each household
+#:   signs a member key card (``{instance_id, identity_pk, keywrap_pk,
+#:   keywrap_sig, proto_version, rev, mailbox | null, sig_suite, sig}``) and
+#:   gives it to the host once — in the sealed redeem / ACK, else
+#:   ``SPACE_MEMBER_CARD``. The host passes the cards on to writer-seat
+#:   member households only in ``SPACE_MAILBOX_DIRECTORY`` (a bounded
+#:   snapshot to a newcomer, deltas after). A member seats a carded
+#:   household lazily, so ANY member's fan-out reaches its mailbox, and a
+#:   GFS-reached household takes a mailbox frame only from a sender whose
+#:   card it holds for that space. The directory flags GFS-reached
+#:   households (``gfs_reached``): a paired or mesh member connected to
+#:   that GFS mints its own ONE mailbox there too, so a GFS-only member
+#:   reaches it with the host offline. A member with no connection to that
+#:   GFS goes through the host as a three-hop ``SPACE_ROUTED`` sealed to
+#:   the target's key-wrap key. **Fallback**: a peer below v_89 gets no card,
+#:   no directory and no mailbox; the host keeps today's instance-addressed
+#:   relay to it. No sync-stream record change. Labelled "Every member
+#:   reaches households that reach a space through a GFS".
+#: * **v_90** (2026-11-09) — **one GFS publish mode: always anonymous**
+#:   (owner decision 2026-11-09, BREAKING, no compat path). The trusted /
+#:   strict ``SpaceFeatures.gfs_publish_mode`` is gone, with the identified
+#:   ``POST /gfs/member-publish`` and ``POST /gfs/channels/publish``, the
+#:   ``publish_mode`` on both epoch notices, the channel cert and the
+#:   identified space-media upload kinds. A seed holder delivers the
+#:   per-epoch writer group key (``writer_key``, unchanged shape) in EVERY
+#:   publicly readable space and the channel writer key in EVERY private
+#:   channel grant — only to a v_90 household holding a publishing scope —
+#:   and a member publishes ANONYMOUSLY or not at all. **Breaking**:
+#:   households below v_90 can no longer publish over the GFS; their posts
+#:   still reach members directly and followers via the host relay. No
+#:   sync-stream record change. Labelled "Posting over a GFS without naming
+#:   the household".
+#: * **v_91** (2026-11-10) — **one upload for many GFS mailboxes**. A space
+#:   event whose final bytes are the same for every member household
+#:   seated behind one GFS (``space_session`` mailbox seats) goes up ONCE
+#:   to ``POST /gfs/envelope/multi`` with the list of mailbox ids, when
+#:   that GFS proves the signed ``envelope_multi`` capability. The body is
+#:   sealed once under a fresh random key wrapped to each recipient
+#:   mailbox's key-wrap key (``mr-wrap-aesgcm-256``,
+#:   ``federation/multi_recipient.py``); its inner
+#:   envelope is signed by the sender and lists one audience tag per
+#:   intended household (``to_instance = "*:" + tags``). Only
+#:   ``MULTI_EVENT_TYPES`` are grouped; single-recipient items stay
+#:   individually sealed. **Fallback**: a member below v_91, a GFS without
+#:   ``envelope_multi``, a group of one or a failed upload gets today's
+#:   per-recipient mailbox frame. Not space-scoped, no sync-stream record
+#:   change. Labelled "Space updates reach households behind a GFS in one
+#:   upload".
+#: * **v_92** (2026-11-10) — **older space pictures arrive when a member
+#:   opens them**: the new event ``SPACE_MEDIA_WANTED`` ``{space_id, files:
+#:   [{item, name}]}`` (≤ 50 entries, ``name`` the ``sc-`` content name). A
+#:   member household that views a hashed file of a live item it holds but
+#:   whose bytes never reached it asks the space's host, then — after a
+#:   fixed wait — one trusted (admin / moderator) household at a time, at
+#:   most three providers; each answers with ordinary ``SPACE_MEDIA_BLOB``
+#:   pushes under the v_86 file gate and a per-(requester, space) budget
+#:   (``services/space_media_wanted.py``). It replaces the never-released
+#:   v_87 relay media refill, and a member's v_83 GFS on-demand ask is kept
+#:   only for a file it holds under a non-content (``sg-``) name. Every hashed file is stored under its content name on
+#:   every path (GFS-described ones too), which changes how a receiver
+#:   names streamed records' files — a ``SYNC_RECORD_LINES`` entry. With it
+#:   (no wire change): a full catch-up ships the files of the last 30 days
+#:   only, at most 200 per stream, to every member alike (GFS-reached
+#:   too), and a resume reaches back at most 30 days; while a space's host
+#:   does not answer a round's BEGIN, the member asks ONE trusted helper
+#:   for the existing ``SPACE_SYNC_RESUME`` (its own people's rows + hashed
+#:   fills). Also with it (``MIN_FOR_SYNC_ITEM_STATE``, same sync line):
+#:   the host's §25.6 stream carries the item state a lost live event
+#:   leaves behind — poll ``votes``, schedule ``responses`` /
+#:   ``finalized_slot_id``, calendar ``rsvps``, post ``reaction_stamps``,
+#:   bazaar ``bids``, a held comment's newer edit, and the new ``timetables_deleted``
+#:   resource; a v_92 receiver takes them from the host only and keeps its
+#:   own people's votes, answers, RSVPs, reactions and bids (bar what the
+#:   live rule lets another household change). Answers and RSVPs are last
+#:   writer wins (``responded_at`` / ``updated_at``, ``responses_at`` /
+#:   ``rsvps_at``: the host's read time), reaction stamps pass the live
+#:   skew + emoji rules, and every list is capped so one record fits one
+#:   chunk (``votes_partial`` / ``responses_partial`` / ``rsvps_partial``:
+#:   a cut list deletes nothing). A requester below v_92 is sent the older
+#:   record shapes.
+#:   **Fallback**: a provider below v_92 is skipped (the file waits for the
+#:   §25.6 catch-up); a helper below v_92 is never sent a resume (no
+#:   helper at v_92: wait for the host); a v_83–v_91 relay reader still
+#:   asks its GFS. Space-
+#:   scoped. Labelled "Older space pictures arrive when you open them".
+#: * **v_93** (2026-11-11) — **reactions on space posts reach every member
+#:   household** (owner decision 2026-11-11). New event
+#:   ``SPACE_POST_REACTION`` ``{space_id, post_id, user_id, emoji, action,
+#:   at}``, fanned out by the reactor's household with
+#:   ``broadcast_to_space_members`` (paired, mesh, mailbox seat — it rides a
+#:   v_91 multi frame). ``at`` is the reaction's own stamp: a receiver
+#:   applies it only over an older stamp for that (post, user, emoji) — the
+#:   v_49 stamps of migration 0075 — so apply is order-independent, a
+#:   re-delivery is a no-op and a late add never brings back a removal; the
+#:   same stamp rides the v_49 ``space_item``, so a household that gets both
+#:   applies one. The reactor must hold a live writer seat on the sender, or
+#:   a follower seat there while ``allow_subscriber_react`` is on. A person
+#:   holds five reactions per post (receivers show the five newest by
+#:   stamp; no post-wide emoji cap); a sender queues only the latest toggle
+#:   per reaction. A missed one heals from the host's v_92
+#:   ``reaction_stamps``; a removal travels only as its stamp, kept 30 days
+#:   (no sync change).
+#:   **Fallback**: a member household below v_93 is skipped — it keeps
+#:   showing only its own people's reactions (plus the host's on a
+#:   catch-up). Space-scoped. Labelled "Reactions on space posts reach
+#:   every household".
+#: * **v_94** (2026-11-12) — **one merge rule for changes to existing space
+#:   items** (owner decision 2026-11-12; ``domain/item_merge.py``): a stamp
+#:   per (item, author[, key]), the newest wins, a removal is kept as a
+#:   stamp. Poll votes move onto it: ``SPACE_POLL_VOTE_CAST`` gains ``at``
+#:   (the stamp the voter's household wrote with the selection; additive,
+#:   sent to every member household). Once a household has applied a
+#:   poll's close no vote or retraction counts there, whatever its stamp;
+#:   ``SPACE_POLL_CLOSED`` is unchanged (no stamp, it only turns on). The
+#:   §25.6 ``polls`` record toward a v_94 requester carries
+#:   ``vote_stamps`` (``{voter: [stamp, [option_id, …]]}``, ≤ 1000 voters)
+#:   in place of ``votes``: merged per voter while the poll is open; once
+#:   it is closed on the host, the host's votes are what every household
+#:   shows for other households' people (migration 0146). Sync line 94.
+#:   **Fallback**: a vote from a household below v_94 carries no
+#:   ``at`` and is stamped with its envelope's timestamp (so it is ordered
+#:   by when it was sent, never dropped); a requester below v_94 keeps
+#:   getting the ``votes`` list; a host below v_94 sends ``votes``, which a
+#:   v_94 receiver applies as before v_94 (it replaces everybody's votes
+#:   but its own people's). Space-scoped. Labelled "Poll votes count the
+#:   same in every household". Ships in the same build (no new version,
+#:   v_81..v_94 ship together): **the signing seed reaches an admin on every
+#:   path** (owner decision 2026-11-15) — ``SPACE_ADMIN_KEY_SHARE`` joins the
+#:   seat vocabulary (never a multi frame), so an admin household reached
+#:   only through a GFS holds the seed like a paired one
+#:   (:data:`FederationCapability.MIN_FOR_RELAY_ADMIN_KEY_SHARE`); the
+#:   receiver takes it only with a live admin seat of its own; the owner
+#:   host refuses seed-signed roster gossip from anyone else that keeps or
+#:   sets an admin seat (only the owner makes admins); an admin's
+#:   ``authority_epoch_echo`` carries ``seed_held`` so a lost share is
+#:   re-sent. **Fallback**: a link-seated admin below v_94 is skipped
+#:   (WARNING) and acts through the host.
+#:   same in every household". Also in this batch: ONE space cover / icon
+#:   cap for every member; an over-cap image is refused from a sender at
+#:   ``MIN_FOR_CAPPED_SPACE_IMAGES`` (v_81, the first unreleased line) and
+#:   re-encoded from the released v_80 line; the host repairs a member's
+#:   roster only on a ``roster_digest`` mismatch (``MIN_FOR_ROSTER_DIGEST``,
+#:   v_81). Wire otherwise unchanged.
+OURS: int = 94
 
 
 class FederationCapability:
@@ -1849,7 +2008,8 @@ class FederationCapability:
     #: Strict member publish (v_50): a seed holder delivers the space's
     #: per-epoch writer group key next to the writer cert, only to a v_50
     #: publish-capable household of a strict space. Older households get no
-    #: key, so their items take the host path.
+    #: key, so their items take the host path. (Historical: strict mode is
+    #: gone since v_90 — the key now goes to v_90 households only.)
     MIN_FOR_STRICT_MEMBER_PUBLISH = 50
 
     #: Private-space channels (v_51): a seed holder delivers each member
@@ -1899,6 +2059,8 @@ class FederationCapability:
     #: connected to). Below it a member gets no key in a trusted space and
     #: keeps publishing identified to its own servers. Not space-scoped (as
     #: v_50): a lagging household still publishes, through fewer servers.
+    #: (Historical: since v_90 the key, and the anonymous publish, need
+    #: :attr:`MIN_FOR_ANON_MEMBER_PUBLISH_ONLY`.)
     MIN_FOR_MULTI_GFS_PUBLISH = 57
 
     #: v_58 — a §25.6 ``members`` record's ``picture_hash: null`` is an
@@ -2038,8 +2200,9 @@ class FederationCapability:
     #: media cache) on space posts / calendar events / gallery items and
     #: their §25.6 records, toward a member household seated from an invite
     #: link at or above it (:meth:`FederationService.peer_supports`). Below
-    #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push; a catch-up
-    #: never pushes bytes to any link-joined requester).
+    #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push). Since
+    #: v_92 every member is pushed (relay frames or JSON chunks); the outbox
+    #: skips a push only while the member's GFS is known to hold the file.
     MIN_FOR_SPACE_MEDIA_REFS = 80
     #: v_81 — media chunks to a CONFIRMED direct peer ride
     #: the peer's inbox URL as one binary ``fed-media-v1`` body when no
@@ -2052,10 +2215,11 @@ class FederationCapability:
     #: a draft's new files to a host at or above it. Below it: no page file.
     MIN_FOR_PAGE_MEDIA = 82
     #: v_83 — space media on demand: a reader asks a GFS for a blob it
-    #: missed and a holder re-uploads or streams it on request. The
-    #: household-side gate: a large video is uploaded lazily (only when
-    #: wanted) toward link-joined readers at or above it; any reader below
-    #: it on that GFS keeps the eager upload.
+    #: missed and a holder re-uploads or streams it on request. Since v_92
+    #: only followers use it (a member asks with ``SPACE_MEDIA_WANTED``), so
+    #: the household side no longer reads this constant: a large video is
+    #: uploaded lazily only where no member household reads the space
+    #: through a GFS. Kept for the version history.
     MIN_FOR_SPACE_MEDIA_ON_DEMAND = 83
     #: v_84 — a host at or above it takes an "Ask to join" sealed to it over
     #: the GFS relay from a household it never paired with
@@ -2071,17 +2235,80 @@ class FederationCapability:
     #: v_86 — a household at or above it takes a hashed file of a row it
     #: holds from a trusted household (host, delegated admin, admin or
     #: moderator seat) as well as from the row's author: a trusted non-host
-    #: provider ships other people's hashed files only to it.
+    #: provider ships other people's hashed files only to it. Since v_92 no
+    #: code gates on it: a helper ships other people's files only on a
+    #: ``SPACE_MEDIA_WANTED``, which only a v_92 requester sends (kept for
+    #: history).
     MIN_FOR_TRUSTED_FILE_FILLS = 86
     #: v_87 — a household at or above it opens binary media frames from the
     #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media
     #: chunks through a GFS proving ``envelope_media``.
+    #: The same frame carries a space event too large for a JSON relay
+    #: envelope (the payload as its bytes), so this is also the gate for
+    #: large events toward a household behind a GFS.
     MIN_FOR_RELAY_MEDIA = 87
-    #: v_88 — a household at or above it opens envelopes addressed to its
-    #: per-space GFS mailbox and reads the directory entry in a sealed
-    #: redeem / ACK (GFS redesign PR 2). The gate is the entry itself: only
-    #: a v_88 household mints one, and an older one never gets one.
-    MIN_FOR_SPACE_MAILBOX = 88
+    #: v_89 — a household at or above it owns one GFS mailbox (shared by
+    #: its spaces), reads member key cards in a sealed redeem / ACK and in
+    #: ``SPACE_MEMBER_CARD`` / ``SPACE_MAILBOX_DIRECTORY``, seats carded
+    #: members lazily and takes a three-hop host ``SPACE_ROUTED``. Cards and
+    #: directories go only to a household at or above it.
+    MIN_FOR_MAILBOX_MEMBER_MESH = 89
+    #: v_90 — one GFS publish mode, always anonymous: a seed holder hands
+    #: the writer group key (publicly readable spaces) and the channel
+    #: writer key (private channels) only to a household at or above it,
+    #: and a seed holder skips its relay copy of a post only for an author
+    #: at or above it. Below it a household publishes nothing over a GFS
+    #: (members get its posts directly, followers via the host relay). Not
+    #: space-scoped: a lagging household still posts, through the host.
+    MIN_FOR_ANON_MEMBER_PUBLISH_ONLY = 90
+    #: v_91 — a household at or above it opens multi-recipient mailbox
+    #: frames (``mr_suite`` seal, audience-tagged ``to_instance``): a
+    #: sender groups its mailbox seats behind one GFS proving
+    #: ``envelope_multi`` into ONE ``POST /gfs/envelope/multi`` upload.
+    MIN_FOR_MULTI_MAILBOX = 91
+    #: v_92 — a household at or above it answers ``SPACE_MEDIA_WANTED`` (a
+    #: member's request for files of live items it holds) and, as a member,
+    #: asks with it instead of its GFS's v_83 on-demand path: a requester
+    #: names only providers at or above it, and a GFS relay reader at or
+    #: above it is no longer counted as "asks its GFS" by the uploader.
+    MIN_FOR_SPACE_MEDIA_WANTED = 92
+    #: v_92 — a §25.6 requester at or above it is streamed the item state
+    #: a lost live event leaves behind: poll votes, schedule answers and
+    #: picks, calendar RSVPs, post reaction stamps, bazaar bids and timetable
+    #: tombstones (``timetables_deleted``); below it the provider sends the
+    #: older record shapes and no ``timetables_deleted`` (it drops those
+    #: fields anyway). A ``SYNC_RECORD_LINES`` entry (92).
+    MIN_FOR_SYNC_ITEM_STATE = 92
+    #: v_93 — a member household at or above it is sent, and applies,
+    #: ``SPACE_POST_REACTION`` (a reaction on a space post, added or
+    #: removed). An older one is skipped by the fan-out.
+    MIN_FOR_SPACE_POST_REACTIONS = 93
+    #: v_94 — a §25.6 requester at or above it is streamed a poll's
+    #: ``vote_stamps`` (each voter's selection with its stamp) instead of
+    #: the ``votes`` list, and merges them by the one rule
+    #: (``domain/item_merge.py``). Live, the stamp (``at`` on
+    #: ``SPACE_POLL_VOTE_CAST``) is additive and goes to everyone. A
+    #: ``SYNC_RECORD_LINES`` entry (94).
+    MIN_FOR_ITEM_MERGE_STAMPS = 94
+    #: v_94 — a household seated from an invite link or the GFS directory
+    #: (``InstanceSource.SPACE_SESSION``) at or above it takes
+    #: ``SPACE_ADMIN_KEY_SHARE`` over the GFS relay: an admin reached only
+    #: through a GFS holds the space signing seed like any other admin
+    #: (owner decision 2026-11-15). No new version — v_81..v_94 ship
+    #: together. Below it the owner skips the share (WARNING) and the admin
+    #: acts through the host.
+    MIN_FOR_RELAY_ADMIN_KEY_SHARE = 94
+    #: v_81 (shipped with v_94, see its history entry) — a household at or
+    #: above it sends a space's cover / icon within the one cap
+    #: (``SPACE_COVER_MAX_BYTES`` / ``SPACE_ICON_MAX_BYTES``, owner decision
+    #: 2026-11-15), so an image over it from such a sender is refused. Below
+    #: it (the released v_80 line sent paired members up to 256 KiB) the
+    #: receiver re-encodes the image instead. Wire unchanged.
+    MIN_FOR_CAPPED_SPACE_IMAGES = 81
+    #: v_81 (shipped with v_94) — a member household at or above it sends a
+    #: ``roster_digest`` on every BEGIN to its host; a BEGIN without one
+    #: from it asks for no roster repair (only an older one's echo does).
+    MIN_FOR_ROSTER_DIGEST = 81
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2417,8 +2644,28 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         "Members reached through a GFS get pictures in full-size pieces",
     ),
     (
-        FederationCapability.MIN_FOR_SPACE_MAILBOX,
-        "Members reached through a GFS get an anonymous mailbox per space",
+        FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH,
+        "Every member reaches households that reach a space through a GFS",
+    ),
+    (
+        FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY,
+        "Posting over a GFS without naming the household",
+    ),
+    (
+        FederationCapability.MIN_FOR_MULTI_MAILBOX,
+        "Space updates reach households behind a GFS in one upload",
+    ),
+    (
+        FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
+        "Older space pictures arrive when you open them",
+    ),
+    (
+        FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
+        "Reactions on space posts reach every household",
+    ),
+    (
+        FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
+        "Poll votes count the same in every household",
     ),
 ]
 
@@ -2518,7 +2765,12 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_CONTENT_FILE_HASHES: "content_file_hashes",
     FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
     FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
-    FederationCapability.MIN_FOR_SPACE_MAILBOX: "space_mailboxes",
+    FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH: "mailbox_member_mesh",
+    FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY: "anonymous_gfs_posting_only",
+    FederationCapability.MIN_FOR_MULTI_MAILBOX: "multi_mailbox",
+    FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
+    FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
+    FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
 }
 
 
@@ -2636,6 +2888,18 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household gets a missing picture filled only by
         # the host, not by the space's admins and moderators.
         FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS,
+        # A behind member household's people never get an older picture
+        # that missed them when they open it (it waits for the catch-up),
+        # and a behind host or helper answers no member's request.
+        FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
+        # A behind member household's people see only their own household's
+        # reactions on the space's posts, and nobody else sees theirs.
+        FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
+        # A behind member household's poll votes are ordered by when they
+        # were sent, not when they were made, and it takes the host's vote
+        # list instead of merging it — a vote that raced another, or the
+        # poll's close, can count differently there.
+        FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
     }
 )
 

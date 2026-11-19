@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import random
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -36,7 +37,10 @@ from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.link_preview import LinkPreview
-from socialhome.domain.media_constraints import SPACE_COVER_MAX_DIMENSION
+from socialhome.domain.media_constraints import (
+    SPACE_COVER_MAX_BYTES,
+    SPACE_COVER_MAX_DIMENSION,
+)
 from socialhome.domain.post import (
     FEED_POST_MAX_IMAGES,
     Comment,
@@ -45,6 +49,7 @@ from socialhome.domain.post import (
     PostType,
 )
 from socialhome.domain.space import JoinMode, SpaceMember, SpaceType
+from socialhome.domain.space_media_fields import SPACE_MEDIA_ITEMS
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.user import UserStatus
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
@@ -67,8 +72,10 @@ from socialhome.services.federation_inbound_service import (
 )
 from socialhome.services.inbound_media_store import (
     dm_media_name,
+    media_basename,
     space_direct_media_name,
 )
+from tests.space_media_items import expected_urls, synthetic_object
 
 
 @pytest.fixture
@@ -2867,6 +2874,48 @@ async def test_a_cover_over_the_dimension_cap_is_refused(db, image_inbound):
     assert await image_inbound.covers.get("sp-img") == (old, "h-old")
 
 
+def _noisy_webp(width: int, height: int) -> bytes:
+    img = PILImage.frombytes(
+        "RGB", (width, height), random.Random(width).randbytes(width * height * 3)
+    )
+    out = io.BytesIO()
+    img.save(out, format="WEBP", quality=75)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize(("version", "stored"), [(80, True), (81, False), (94, False)])
+async def test_an_over_cap_cover_from_a_released_host_is_re_encoded(
+    db, image_inbound, version, stored
+):
+    """I4 (config-change caller): a cover over the one cap from a host below
+    v_95 (the released line sends paired members up to 256 KiB) is stored as
+    a rendition within the cap; from a v_95 host it is refused and the held
+    cover kept."""
+    old = await _seed_cover_space(db, image_inbound)
+
+    async def _supports(iid, *, min_version):
+        return version >= min_version
+
+    image_inbound.service._federation_service = SimpleNamespace(
+        own_instance_id="self-iid", space_member_supports=_supports
+    )
+    big = _noisy_webp(700, 500)
+    assert SPACE_COVER_MAX_BYTES < len(big) <= 256 * 1024
+    await image_inbound.service._on_space_config_changed(
+        _image_event(
+            cover_hash="h-new",
+            icon_hash="i-old",
+            cover_webp_base64=base64.b64encode(big).decode("ascii"),
+        ),
+    )
+    got = await image_inbound.covers.get("sp-img")
+    if stored:
+        assert got[1] == "h-new" and len(got[0]) <= SPACE_COVER_MAX_BYTES
+        assert got[0][8:12] == b"WEBP"
+    else:
+        assert got == (old, "h-old")
+
+
 async def test_a_stale_cover_change_never_lands(db, image_inbound):
     """The image rides the same last-writer-wins gate as the config it came
     with: an out-of-order older change cannot roll the picture back."""
@@ -3238,42 +3287,9 @@ async def test_config_changed_applies_owner_only_flags_on_a_member_household(
     assert space.name == "OwnerOpenedIt"
 
 
-@pytest.mark.security
-@pytest.mark.parametrize("we_host", [True, False])
-async def test_config_changed_never_takes_gfs_publish_mode_from_a_non_owner(
-    db, bus, inbound, we_host
-):
-    """v_50 SECURITY: ``gfs_publish_mode`` is the owner's alone on EVERY
-    household. A seed-holding delegated admin flipping a strict space back to
-    trusted on member mirrors would make them send identified requests to the
-    connection server — the leak strict mode prevents."""
-    kp = generate_space_keypair()
-    await _seed_signed_space(
-        db,
-        space_id="sp-strict",
-        owner_instance="owner-i",
-        space_pub_hex=kp.public_key.hex(),
-        seq=5,
-    )
-    await db.enqueue("UPDATE spaces SET gfs_publish_mode='strict' WHERE id='sp-strict'")
-    _own_instance(inbound, "owner-i" if we_host else "own-i")
-    await inbound._on_space_config_changed(
-        _signed_cfg_event(
-            space_id="sp-strict",
-            from_instance="admin-i",
-            owner_instance="owner-i",
-            sequence=9,
-            name="RenamedByAdmin",
-            seed=kp.private_key,
-            features={**_OWNER_ONLY_FEATURES_ON, "gfs_publish_mode": "trusted"},
-        )
-    )
-    space = await SqliteSpaceRepo(db).get("sp-strict")
-    assert space.features.gfs_publish_mode == "strict"
-    assert space.name == "RenamedByAdmin"
-
-
-async def test_config_changed_takes_gfs_publish_mode_from_the_owner(db, bus, inbound):
+async def test_config_changed_ignores_a_pre_v90_gfs_publish_mode(db, bus, inbound):
+    """v_90 — one mode: an older owner's config still carrying
+    ``gfs_publish_mode`` applies, and the field is simply ignored."""
     kp = generate_space_keypair()
     await _seed_signed_space(
         db,
@@ -3289,13 +3305,14 @@ async def test_config_changed_takes_gfs_publish_mode_from_the_owner(db, bus, inb
             from_instance="owner-i",
             owner_instance="owner-i",
             sequence=9,
-            name="OwnerWentStrict",
+            name="OwnerRenamed",
             seed=kp.private_key,
             features={**_OWNER_ONLY_FEATURES_ON, "gfs_publish_mode": "strict"},
         )
     )
     space = await SqliteSpaceRepo(db).get("sp-strict2")
-    assert space.features.gfs_publish_mode == "strict"
+    assert space.name == "OwnerRenamed"
+    assert not hasattr(space.features, "gfs_publish_mode")
 
 
 @pytest.mark.security
@@ -4275,6 +4292,93 @@ async def test_same_space_post_lifecycle_unchanged(db, bus, inbound, two_spaces)
     )
     assert (await _post_row(db, "post-a"))["deleted"] == 1
     assert [e.space_id for e in deleted] == ["sp-a"]
+
+
+# ── An edit that passed its gate and still wrote nothing ─────────────────
+
+
+async def _edit_that_writes_nothing(db, inbound, *, then: str):
+    """Seed ``post-a`` / ``cmt-a`` in sp-a, then deliver an edit of each whose
+    write finds the row changed under it: ``then`` is the SQL run on the row
+    at the moment of the write (the race between the gate and the edit)."""
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {"id": "post-a", "author": "u-a", "type": "text", "content": "hi"},
+            space_id="sp-a",
+        )
+    )
+    await inbound._on_space_comment_added(
+        _event(
+            FederationEventType.SPACE_COMMENT_CREATED,
+            {
+                "id": "cmt-a",
+                "post_id": "post-a",
+                "author": "u-a",
+                "type": "text",
+                "content": "reply",
+            },
+            space_id="sp-a",
+        )
+    )
+    assert (await _comment_row(db, "cmt-a"))["post_id"] == "post-a"
+    repo = inbound._space_post_repo
+
+    async def _post_raced(post_id, *_a, **_kw):
+        await db.enqueue(then.format(table="space_posts"), (post_id,))
+        return False
+
+    async def _comment_raced(comment_id, *_a, **_kw):
+        await db.enqueue(then.format(table="space_post_comments"), (comment_id,))
+        return False
+
+    repo.edit = _post_raced
+    repo.edit_comment = _comment_raced
+    # The comment first: the post's race would otherwise take its parent.
+    await inbound._on_space_comment_updated(
+        _event(
+            FederationEventType.SPACE_COMMENT_UPDATED,
+            {"id": "cmt-a", "content": "edited"},
+            space_id="sp-a",
+        )
+    )
+    await inbound._on_space_post_updated(
+        _event(
+            FederationEventType.SPACE_POST_UPDATED,
+            {"id": "post-a", "content": "edited"},
+            space_id="sp-a",
+        )
+    )
+
+
+async def test_an_edit_whose_row_is_gone_is_still_the_cross_space_warning(
+    db, inbound, two_spaces, caplog
+):
+    """No row in the gated space to hold the edit: the WARNING refusal."""
+    with caplog.at_level(logging.DEBUG):
+        await _edit_that_writes_nothing(
+            db, inbound, then="DELETE FROM {table} WHERE id=?"
+        )
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("post post-a is not in space sp-a" in m for m in warned)
+    assert any("comment cmt-a is not in space sp-a" in m for m in warned)
+    assert "not applied" not in caplog.text
+
+
+async def test_an_edit_of_a_row_deleted_meanwhile_says_so_at_debug(
+    db, inbound, two_spaces, caplog
+):
+    """The row is in the gated space but was deleted between the gate and
+    the write: a benign no-op, logged as what it is — not "not newer"."""
+    with caplog.at_level(logging.DEBUG):
+        await _edit_that_writes_nothing(
+            db, inbound, then="UPDATE {table} SET deleted=1 WHERE id=?"
+        )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    held = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
+    assert any("post post-a" in m and "deleted here" in m for m in held)
+    assert any("comment cmt-a" in m and "deleted here" in m for m in held)
+    assert "not newer" not in caplog.text
 
 
 async def test_same_space_comment_lifecycle_unchanged(db, bus, inbound, two_spaces):
@@ -5422,7 +5526,11 @@ class _GfsMediaSink:
         self.items: list[tuple] = []
         self.kept: list[dict] = []
 
-    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+    async def localize(
+        self, space_id, raw_refs, media_urls, *, item_id, origin, hashes=None
+    ):
+        #: v_85 — the hash map the handler passed (by the author's names).
+        self.hashes = hashes
         urls = [u for u in media_urls if u]
         if isinstance(raw_refs, dict):
             self.received.append((space_id, raw_refs, urls))
@@ -5680,3 +5788,140 @@ async def test_a_comments_picture_takes_its_content_name(
         "SELECT media_url FROM space_post_comments WHERE id=?", ("c-cm",)
     )
     assert row is not None and row["media_url"] == stored
+
+
+async def test_a_space_posts_hash_map_reaches_the_gfs_namer(db, bus, inbound):
+    """v_85: a hashed picture the post also describes keeps its one content
+    name — the GFS namer gets the map the envelope's signature vouches for."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("sp-h", "S", "peer-a", "owner", "aa" * 32, "global", "open"),
+    )
+    await _seat(db, "sp-h", "user-remote")
+    sink = _GfsMediaSink()
+    inbound.attach_gfs_media(sink)
+    refs = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}}
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-h",
+                "author": "user-remote",
+                "type": "image",
+                "content": "pic",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": refs,
+                "files": {"a.webp": {"h": "a" * 64}},
+                "files_suite": "sha256",
+            },
+            space_id="sp-h",
+        )
+    )
+    assert {n: fh.h for n, fh in sink.hashes.items()} == {"a.webp": "a" * 64}
+
+
+# ─── Registry tripwire: a SPACE_MEDIA_BLOB lands for every field ─────────
+
+
+class _Rows:
+    """Fake repos holding one synthetic item of each space item type."""
+
+    def __init__(self, space_id: str) -> None:
+        self.space_id = space_id
+        self.objects = {
+            r: synthetic_object(r, item_id=f"id-{r}", space_id=space_id)
+            for r in SPACE_MEDIA_ITEMS
+        }
+        # A bazaar listing rides a BAZAAR wrapper post of the same id.
+        self.wrapper = Post(
+            id="id-bazaar",
+            author="u",
+            type=PostType.BAZAAR,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        self.parent = Post(
+            id="post-1",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    async def get(self, item_id):  # posts + pages
+        if item_id == "id-posts":
+            return self.space_id, self.objects["posts"]
+        if item_id == "id-bazaar":
+            return self.space_id, self.wrapper
+        if item_id == "post-1":
+            return self.space_id, self.parent
+        return None
+
+    async def get_comment(self, item_id):
+        return self.objects["comments"] if item_id == "id-comments" else None
+
+    async def get_listing(self, item_id):
+        return self.objects["bazaar"] if item_id == "id-bazaar" else None
+
+    async def get_item(self, item_id):
+        return self.objects["gallery"] if item_id == "id-gallery" else None
+
+    async def get_album(self, album_id):
+        return SimpleNamespace(space_id=self.space_id)
+
+    async def get_event(self, item_id):
+        if item_id == "id-calendar":
+            return self.space_id, self.objects["calendar"]
+        return None
+
+    async def get_moderation_item(self, item_id):
+        return None
+
+
+class _Pages:
+    def __init__(self, rows: _Rows) -> None:
+        self._rows = rows
+
+    async def get(self, item_id):
+        return self._rows.objects["pages"] if item_id == "id-pages" else None
+
+
+@pytest.mark.parametrize("resource", sorted(SPACE_MEDIA_ITEMS))
+async def test_a_space_media_blob_lands_for_every_registered_field(
+    bus, tmp_path, resource
+):
+    rows = _Rows("sp-reg")
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=MagicMock(),
+        space_post_repo=rows,
+        space_repo=rows,
+        user_repo=MagicMock(),
+        media_dir=tmp_path,
+        gallery_repo=rows,
+        bazaar_repo=rows,
+        space_calendar_repo=rows,
+        page_repo=_Pages(rows),
+    )
+    for url in expected_urls(resource, stored_only=True):
+        name = media_basename(url)
+        assert (
+            await service._space_media_in_scope(
+                space_id="sp-reg",
+                correlation_id=f"id-{resource}",
+                filename=name,
+                known_only=True,
+                sent=name,
+            )
+            is None
+        ), url
+    assert (
+        await service._space_media_in_scope(
+            space_id="sp-reg",
+            correlation_id=f"id-{resource}",
+            filename="not-shown.webp",
+            known_only=True,
+            sent="not-shown.webp",
+        )
+        is not None
+    )

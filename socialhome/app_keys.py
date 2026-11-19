@@ -66,9 +66,9 @@ gallery_service_key: AppKey = AppKey("gallery_service")
 space_media_gfs_uploader_key: AppKey = AppKey("space_media_gfs_uploader")
 space_media_gfs_fetcher_key: AppKey = AppKey("space_media_gfs_fetcher")
 space_media_gfs_responder_key: AppKey = AppKey("space_media_gfs_responder")
-#: v_87 — asks a relay-seated host to re-push a space file that never
-#: arrived (``GET /api/media/{name}`` miss).
-relay_media_refill_key: AppKey = AppKey("relay_media_refill")
+#: v_92 — asks the host (then a trusted helper) for a space file this member
+#: household misses (``GET /api/media/{name}`` miss, ``SPACE_MEDIA_WANTED``).
+space_media_wanted_key: AppKey = AppKey("space_media_wanted")
 gallery_repo_key: AppKey = AppKey("gallery_repo")
 gallery_on_this_day_service_key: AppKey = AppKey("gallery_on_this_day_service")
 gallery_favourites_service_key: AppKey = AppKey("gallery_favourites_service")
@@ -168,8 +168,9 @@ gfs_connection_repo_key: AppKey = AppKey("gfs_connection_repo")
 #: The owner's choice of GFSs for a global space + the members' signed list.
 gfs_server_selection_service_key: AppKey = AppKey("gfs_server_selection_service")
 gfs_ws_supervisor_key: AppKey = AppKey("gfs_ws_supervisor")
-#: v_88 — this household's per-space GFS mailboxes.
+#: v_89 — this household's GFS mailboxes (one per GFS) and member directory.
 space_mailbox_service_key: AppKey = AppKey("space_mailbox_service")
+space_member_directory_key: AppKey = AppKey("space_member_directory")
 startup_announcer_key: AppKey = AppKey("startup_announcer")
 #: v_53 shared-GFS route discovery — ``probe_peer`` after a pairing confirm.
 gfs_route_discovery_key: AppKey = AppKey("gfs_route_discovery")

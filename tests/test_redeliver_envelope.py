@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 from datetime import UTC
 from typing import ClassVar
 
+import orjson
 import pytest
 
 from socialhome.app import (
@@ -75,6 +78,10 @@ class _OutboxEntry:
         #: transient for the first few attempts (see
         #: ``PAIR_WINDOW_404_ATTEMPTS``), so tests must be able to set it.
         self.attempts = attempts
+        #: Migration 0145 — a row carrying its sealed envelope references
+        #: no stored payload.
+        self.payload_id = None
+        self.space_id = None
 
 
 def _stored_envelope_json(svc, *, to_instance, msg_id="m1"):
@@ -323,6 +330,64 @@ async def test_redeliver_4xx_is_permanent(env):
         )
         outcome = await _redeliver_envelope(svc, fed_repo, entry)
         assert outcome is DeliveryOutcome.PERMANENT, (status, outcome)
+
+
+async def test_redeliver_a_duplicate_is_delivered_without_a_warning(env, caplog):
+    """Our POST timed out while the peer was still working on the envelope;
+    the retry is answered 410 with ``{"code": "REPLAY"}``: the peer holds
+    it. That is a delivery — not a "permanently rejected" row with two
+    WARNINGs for a message that arrived."""
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, gfs_relay=False)
+    svc._http_client = _StatusClient(410, body='{"error": "gone", "code": "REPLAY"}')
+    entry = _OutboxEntry(
+        id="e-dup",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+    with caplog.at_level(logging.INFO):
+        outcome = await _redeliver_envelope(svc, fed_repo, entry)
+    assert outcome is DeliveryOutcome.SUCCESS
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [
+        r.getMessage() for r in caplog.records
+    ]
+    assert (await fed_repo.get_instance(peer.id)).unreachable_since is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error": "gone"}',  # timestamp skew, or a peer older than the code
+        '{"error": "gone", "code": "EXPIRED"}',
+        '{"code": ["REPLAY"]}',
+        '["REPLAY"]',
+        "REPLAY",
+        "",
+    ],
+)
+async def test_redeliver_any_other_410_stays_permanent(env, body):
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, gfs_relay=False)
+    svc._http_client = _StatusClient(410, body=body)
+    entry = _OutboxEntry(
+        id="e-gone",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.PERMANENT
+
+
+@pytest.mark.parametrize("status", [400, 403, 409, 422])
+async def test_redeliver_the_duplicate_code_counts_only_on_a_410(env, status):
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, gfs_relay=False)
+    svc._http_client = _StatusClient(status, body='{"code": "REPLAY"}')
+    entry = _OutboxEntry(
+        id="e-other",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.PERMANENT
 
 
 async def test_redeliver_404_is_transient(env):
@@ -906,15 +971,16 @@ class _StatusResp:
 
 
 class _StatusClient:
-    def __init__(self, status=None):
+    def __init__(self, status=None, *, body='{"error": "unknown_inbox"}'):
         self._status = status
+        self._body = body
         self.posts = 0
 
     def post(self, url, **kw):
         self.posts += 1
         if self._status is None:
             raise ConnectionError("boom")
-        return _StatusResp(self._status)
+        return _StatusResp(self._status, self._body)
 
 
 def _ok_relay():
@@ -1152,11 +1218,20 @@ async def test_redeliver_does_not_follow_a_redirect_to_another_host(env):
 # ─── Unpair tombstone ────────────────────────────────────────────────────
 
 
+class _StatusBody:
+    def __init__(self, body: str) -> None:
+        self._body = body.encode()
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+
 class _StatusResp:
     def __init__(self, status, body='{"error": "unknown_inbox"}', headers=None):
         self.status = status
         self.body = body
         self.headers = headers or {}
+        self.content = _StatusBody(body)
 
     async def text(self):
         return self.body
@@ -1411,3 +1486,64 @@ async def test_unpair_throttled_with_retry_after_keeps_the_tombstone(unpair_env)
     assert outcome == RetryAfter(seconds=30.0)
     tomb = await fed_repo.get_instance(peer.id, include_unpairing=True)
     assert tomb is not None and tomb.status is PairingStatus.UNPAIRING
+
+
+# ─── Migration 0145: ref rows are sealed for their peer at send ─────────
+
+
+class _BodyClient:
+    def __init__(self, status=204):
+        self.status = status
+        self.bodies: list[str] = []
+
+    def post(self, url, **kw):
+        self.bodies.append(kw.get("data"))
+        return _StatusResp(self.status, "", None)
+
+
+async def _queued_ref(svc, peer, payload=None):
+    """Queue a ref row the way a failed ``send_event`` does."""
+    payload = payload or {"space_id": "space-1", "post_id": "p-1"}
+    await svc._outbox_repo.enqueue(
+        instance_id=peer.id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="",
+        msg_id="m-ref",
+        payload_ref=svc._outbox_payload(
+            FederationEventType.SPACE_POST_CREATED, "space-1", payload
+        ),
+    )
+    (entry,) = await svc._outbox_repo.list_due(10)
+    return entry
+
+
+async def test_redeliver_a_ref_row_seals_its_stored_payload_for_the_peer(env):
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    entry = await _queued_ref(svc, peer)
+    assert entry.payload_json == "" and entry.payload_id is not None
+    client = _BodyClient()
+    svc._http_client = client
+
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.SUCCESS
+
+    (body,) = client.bodies
+    posted = orjson.loads(body)
+    assert posted["msg_id"] == "m-ref"
+    assert posted["to_instance"] == peer.id
+    assert posted["space_id"] == "space-1"
+    assert posted["event_type"] == "space_post_created"
+    plain = svc._decrypt_payload(posted["encrypted_payload"], b"\x05" * 32)
+    assert orjson.loads(plain) == {"space_id": "space-1", "post_id": "p-1"}
+
+
+async def test_redeliver_a_ref_row_without_its_payload_is_permanent(env):
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    entry = await _queued_ref(svc, peer)
+    client = _BodyClient()
+    svc._http_client = client
+    gone = dataclasses.replace(entry, payload_id="0" * 64)
+
+    assert await _redeliver_envelope(svc, fed_repo, gone) is DeliveryOutcome.PERMANENT
+    assert client.bodies == []

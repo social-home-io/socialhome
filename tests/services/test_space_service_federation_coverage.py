@@ -9,10 +9,14 @@ a real peer connection.
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
+import random
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from PIL import Image
 
 from socialhome.crypto import (
     derive_instance_id,
@@ -24,6 +28,7 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     RemoteJoinRequestApproved,
     SpaceInviteAnswered,
+    SpaceMemberJoined,
     SpaceRemoteSeatEnded,
 )
 from socialhome.domain.federation import (
@@ -37,6 +42,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.media_constraints import SPACE_COVER_MAX_BYTES
 from socialhome.domain.space import (
     AgeRestrictedError,
     HostUnreachableError,
@@ -290,12 +296,20 @@ async def test_accept_remote_invite_happy(stack):
 
     answered: list[SpaceInviteAnswered] = []
     stack.bus.subscribe(SpaceInviteAnswered, answered.append)
+    joined: list[SpaceMemberJoined] = []
+    stack.bus.subscribe(SpaceMemberJoined, joined.append)
     await stack.svc.accept_remote_invite(
         token="tok-xyz",
         user_id=bob.user_id,
     )
 
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
+    # The invitee's household hears of its new member at once — the event
+    # that takes its fan-out seat on the space's connection servers (before,
+    # only the next reconnect did).
+    assert [(j.space_id, j.user_id, j.role) for j in joined] == [
+        ("sp-on-the-other-side", bob.user_id, "member")
+    ]
     # The invite leaves the invitee's "Needs you".
     assert [(a.space_id, a.user_id, a.accepted) for a in answered] == [
         ("sp-on-the-other-side", bob.user_id, True)
@@ -384,6 +398,93 @@ async def test_remove_remote_member_happy(stack):
         user_id="bob",
     )
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
+
+
+async def test_remove_remote_member_tells_the_household_before_its_seat_goes(
+    stack, monkeypatch
+):
+    """A household seated from the host's directory is reached at its GFS
+    mailbox, and a mailbox is found per space: on the member card its
+    ``space_instances`` row keeps, while the roster holds a live seat of it.
+    So the removal notice names its space and goes out before the seat and
+    that row are dropped. Otherwise an admin that reaches members only
+    through a GFS answered 403 "no path to invitee household" after it had
+    already dropped the seat — no gossip, no rekey."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    await stack.space_repo.add_space_instance(space.id, "peer")
+    order: list[object] = []
+
+    async def _send(**kw):
+        held = await stack.db.fetchone(
+            "SELECT 1 FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space.id, "peer"),
+        )
+        order.append(("notice", kw.get("space_id"), held is not None))
+        return DeliveryResult(instance_id="peer", ok=True)
+
+    remove = SqliteSpaceRemoteMemberRepo.remove
+
+    async def _remove(repo, *args):
+        order.append("seat dropped")
+        await remove(repo, *args)
+
+    stack.fed_svc.send_with_mesh_fallback.side_effect = _send
+    monkeypatch.setattr(SqliteSpaceRemoteMemberRepo, "remove", _remove)
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert order == [("notice", space.id, True), "seat dropped"]
+    assert (
+        await stack.db.fetchone(
+            "SELECT 1 FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space.id, "peer"),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("error", ["delivery_failed", "no_route"])
+async def test_remove_remote_member_completes_when_the_household_is_not_reached(
+    stack, error
+):
+    """Telling the household is best effort. A notice queued for an offline
+    household ("delivery_failed") counts as said; one that finds no path at
+    all is logged. Either way the removal completes — seat ended, row gone —
+    so nobody keeps a seat by being unreachable. (Any "not delivered now"
+    answer used to abort the removal with 403 after the seat was dropped
+    locally: no gossip, no rekey.)"""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    await stack.space_repo.add_space_instance(space.id, "peer")
+    stack.fed_svc.send_with_mesh_fallback.return_value = DeliveryResult(
+        instance_id="peer", ok=False, error=error
+    )
+    ended: list = []
+    stack.bus.subscribe(SpaceRemoteSeatEnded, ended.append)
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert [(e.instance_id, e.user_id) for e in ended] == [("peer", "bob")]
+    assert (
+        await stack.db.fetchone(
+            "SELECT 1 FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space.id, "peer"),
+        )
+        is None
+    )
+
+
+async def test_remove_remote_member_survives_a_send_that_raises(stack):
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    stack.fed_svc.send_with_mesh_fallback.side_effect = RuntimeError("transport")
+    ended: list = []
+    stack.bus.subscribe(SpaceRemoteSeatEnded, ended.append)
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert len(ended) == 1
 
 
 async def test_remove_remote_member_announces_the_seat_ended(stack):
@@ -1843,6 +1944,60 @@ async def test_accept_seats_the_stub_from_the_snapshot_and_expires_the_rest(stac
     assert (await stack.space_repo.get_invitation_by_token("t-other"))[
         "status"
     ] == "expired"
+
+
+class _Covers:
+    """The cover repo, recording what the accept stores."""
+
+    def __init__(self) -> None:
+        self.stored: tuple[bytes, str] | None = None
+
+    async def get(self, space_id):
+        return self.stored
+
+    async def set(self, space_id, *, bytes_webp, hash, width, height):
+        self.stored = (bytes_webp, hash)
+
+
+async def test_accept_stores_an_over_cap_cover_as_a_rendition(stack):
+    """I4 (invitation-accept caller) + the edge case: a join snapshot is
+    always taken leniently — its cover was sealed when the invitation was
+    made, maybe by a host that upgraded since — so a cover over the one
+    cap is stored as a rendition within it, never dropped."""
+    img = Image.frombytes("RGB", (700, 500), random.Random(7).randbytes(700 * 500 * 3))
+    buf = io.BytesIO()
+    img.save(buf, format="WEBP", quality=75)
+    big = buf.getvalue()
+    assert SPACE_COVER_MAX_BYTES < len(big) <= 256 * 1024
+    bob = await _user(stack, "bobcover")
+    await _snapshot_invite(
+        stack,
+        bob.user_id,
+        token="t-cover",
+        issuer="peer",
+        cover_hash="c-host",
+        cover_webp_base64=base64.b64encode(big).decode("ascii"),
+    )
+    covers = _Covers()
+    stack.svc._covers = covers
+    await stack.svc.accept_remote_invite(token="t-cover", user_id=bob.user_id)
+    assert covers.stored is not None
+    webp, hash_ = covers.stored
+    assert hash_ == "c-host" and len(webp) <= SPACE_COVER_MAX_BYTES
+    assert webp[8:12] == b"WEBP"
+
+
+async def test_the_accepts_mesh_begin_carries_the_roster_digest(stack):
+    """S1: the accept's catch-up BEGIN to a mesh-only host carries our
+    roster digest, like every member BEGIN to the host."""
+    bob = await _user(stack, "bobdigest")
+    await _snapshot_invite(stack, bob.user_id, token="t-dig", issuer="peer")
+    await stack.svc.accept_remote_invite(token="t-dig", user_id=bob.user_id)
+    kwargs = stack.fed_svc.begin_mesh_catchup_sync.await_args.kwargs
+    assert kwargs["host_instance_id"] == "peer"
+    assert kwargs["roster_digest"] == await stack.svc.roster_digest_for(
+        "sp-snap", "peer"
+    )
 
 
 async def test_accept_refuses_a_space_held_under_another_owner(stack):

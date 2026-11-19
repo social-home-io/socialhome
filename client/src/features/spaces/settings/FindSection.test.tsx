@@ -175,16 +175,11 @@ describe('FindSection — the owner and the GFS', () => {
     expect(api.patch).not.toHaveBeenCalled()
   })
 
-  it('posting through the GFS: owner of a followable public space, saves exactly the mode', async () => {
+  it('offers no GFS publish mode: members always post through a GFS anonymously (v_90)', () => {
     const sp = space({ space_type: 'public', features: { allow_subscribers: true } } as Partial<Space>)
     const view = render(<FindSection space={sp} isOwner isRemoteSpace={false} adminCount={1} onUpdate={vi.fn()} />)
-    const group = view.getByRole('radiogroup', { name: /Posting through the GFS/ })
-    fireEvent.click([...group.querySelectorAll('[role="radio"]')].find(b => b.textContent === 'Strict')!)
-    await waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/spaces/s1', { features: { gfs_publish_mode: 'strict' } }))
-  })
-
-  it('posting through the GFS is hidden where members never publish over it', () => {
-    const view = render(<FindSection space={space()} isOwner isRemoteSpace={false} adminCount={1} onUpdate={vi.fn()} />)
     expect(view.queryByRole('radiogroup', { name: /Posting through the GFS/ })).toBeNull()
+    expect(view.queryByText('Strict')).toBeNull()
+    expect(view.queryByText('Trusted')).toBeNull()
   })
 })

@@ -182,6 +182,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # sender, so a peer cannot use it to tear down a live seat.
         "revoke_space_session_if_orphaned",
         "apply_space_session_cleanup",
+        "end_space_session_if_unused",
         # The GFS mirror's post-grace re-check — no actor; the teardown it
         # runs is driven by the ABSENCE of any local member (re-read from
         # our own rows) and refuses owned / seed-held / unproven spaces.
@@ -260,6 +261,11 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # space, the delegation flag's caller and the peer's version; no
         # actor to authorize, no route reaches it.
         "share_admin_signing_seed",
+        # …and its two halves (built under the rotation lock, sent outside
+        # it) plus the re-check between them — same callers, same gates.
+        "prepare_admin_seed_share",
+        "send_admin_seed_share",
+        "admin_seed_share_still_due",
         # v_49 writer certs — a read of the roster-derived scope, and the
         # forward-secrecy rotation the private-invite handler runs on the
         # host when a household leaves. Both act on state the host already
@@ -271,14 +277,17 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # authorization is the §24.11-authenticated sender: only ITS seats
         # end. No actor, no route.
         "on_remote_member_left",
-        "send_hosted_roster_snapshots",
         "on_peer_proto_version_raised",
-        # The roster echo: the host notes what a §24.11-authenticated member
-        # household's SPACE_SYNC_BEGIN says it already holds (only for a
-        # space we host and a household seated in it — it can only spare
-        # that household its own snapshot); the member builds its own echo
-        # for the BEGIN it sends. No actor, no route.
-        "on_sync_begin_roster_echo",
+        # The roster repair: the host answers a §24.11-authenticated member
+        # household's SPACE_SYNC_BEGIN whose roster digest (or older echo)
+        # shows its mirror is wrong (only for a space we host and a
+        # household seated in it — it can only cost that household its own
+        # snapshot); the member builds its digest / echo for the BEGIN it
+        # sends. No actor, no route.
+        "on_sync_begin_roster",
+        "roster_digest_of",
+        "wait_roster_repairs",
+        "roster_digest_for",
         "roster_echo_for",
         # Internal seam the invite-redeem coordinator calls after it has
         # already consumed the token and seated the household as a member;

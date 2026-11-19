@@ -333,8 +333,7 @@ That single command runs the full sequence:
 
      What the audit currently accepts as benign (each with an
      in-source comment): STUN-server status chatter, outbox-retry
-     on briefly-unreachable peers, outbox terminal drops on HTTP
-     410 (dual-transport replay-cache hit), HTTPS-inbox transient
+     on briefly-unreachable peers, HTTPS-inbox transient
      failures during the inner-ring settle window, DTLS handshake
      timeouts on loopback (perfect-negotiation glare aborts one
      side mid-handshake, federation falls through to HTTPS-inbox),
@@ -343,6 +342,20 @@ That single command runs the full sequence:
      waits the 65 s window. If any of these patterns START coming
      with a per-step content-check failure, that's the real bug
      — the log line on its own is just the symptom.
+
+     No longer accepted: ``outbox: … returned terminal HTTP 410``
+     and ``OutboxProcessor: peer permanently rejected``. They were
+     the sender's two WARNINGs for a message the receiver already
+     held (its replay cache answered the second copy). Since #1384
+     that answer counts as delivered, so either line is a finding
+     again — a message really was refused for good.
+
+     The GFS process's own log is audited the same way. It logs
+     ``asctime LEVEL    logger: message`` rather than the households'
+     ``LEVEL:logger:message``, so until the ``gfs-admin-seed`` work its
+     WARNING / ERROR lines matched no marker and were never looked at;
+     the only accepted GFS line is its start-up "minted a new random
+     identity key" advisory. (GFS B's log is not audited.)
 
      **Expected-noise windows** (no blanket ignores). A step that
      takes a household offline, or runs a negative control, records
@@ -474,7 +487,15 @@ That single command runs the full sequence:
    ``SPACE_TASK_CREATED`` as Alice's with the approval block. **a**, **b**, **c**
    and **d** all hold the task created by Alice, **a**'s own queue row reads
    ``approved``, and **d** — a plain member household — holds no queue row
-   for the item and its log never names it.
+   for the item and its log never names it. Then the catch-up: **c** is
+   killed, Alice submits a second task and the copy queued for **c** is
+   dropped (offline past the retries); **c** restarts, its §25.6 BEGIN to
+   **b** echoes the pending items it holds (``mod_pending``) and **b**
+   re-sends the item to **c** alone — **c**'s Moderation tab lists it and
+   **b** logged the catch-up. **b** then promotes **d**'s Dave to
+   ``moderator``: **d** asks the host at once, gets the item that was
+   already pending, Dave approves it **on d**, and **a**, **b**, **c** and
+   **d** all hold the task with every queue copy ``approved``.
 
 9c2. ``space-report`` (v_45 space-scoped reports) — **b** hosts a fresh
    "Report club" with **a**'s, **c**'s and **d**'s users as remote members
@@ -548,6 +569,26 @@ That single command runs the full sequence:
    behind a backend), **b** executes and K1-signs a rename, and **c** (and
    **a**) keep **a**'s name — **c** logs ``authority signature did not
    verify against the space key — dropping``.
+
+9f-r. ``space-reaction`` (v_93, reactions on space posts reach every
+   member household) — in **b**'s space (owner **b**, members **a** and
+   **c**). Prereqs: ``up``, ``pair``, ``traffic``, ``calendar``; runs
+   standalone after them. **a** posts; **a** reacts 👍 and **c** reacts 🎉
+   → ``GET /api/spaces/{id}/feed`` shows the same two reactions on **a**,
+   **b** and **c** (``SPACE_POST_REACTION``); **a** takes its 👍 back →
+   all three show only **c**'s 🎉. In the ``all`` chain it runs right
+   after ``space-chat``. ``verify`` asserts
+   ``MIN_FOR_SPACE_POST_REACTIONS`` is v_93 and covered by ``OURS``.
+
+9f-s. ``space-poll-vote`` (v_94, one merge rule: a poll vote is merged by
+   its stamp) — in the same space. Prereqs as ``space-reaction``. **a**
+   posts a poll; **c** votes the first option, then the second → **a**,
+   **b** and **c** show **c** on the second only, and **a** and **b** hold
+   for **c**'s voter exactly the stamp **c**'s household wrote
+   (``space_polls.vote_stamps_json``). **a** closes the poll → **c**'s
+   retraction is refused (409) and the vote stays everywhere. ``verify``
+   re-reads **b** and fails when it no longer holds **c**'s vote under
+   **c**'s stamp, and pins ``MIN_FOR_ITEM_MERGE_STAMPS`` = 94.
 
 9f. ``space-chat`` (v_55, every space's members' chat) — in **b**'s
    space from ``traffic`` / ``calendar`` (owner **b**, members **a** and
@@ -713,7 +754,8 @@ mesh-member-cert → space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
-admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
+admin-revoke-rotation → rotation-offline-catchup → space-chat →
+space-reaction → space-poll-vote → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
 gfs-moment-late-delete → gfs-join-request → verify``
@@ -966,13 +1008,22 @@ python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
 python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
+python .claude/skills/federation-demo/harness.py gfs-member-mesh
+python .claude/skills/federation-demo/harness.py members-mesh-restart
+python .claude/skills/federation-demo/harness.py gfs-moderator-parity
+python .claude/skills/federation-demo/harness.py members-parity
+python .claude/skills/federation-demo/harness.py members-parity-apps
+python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
+python .claude/skills/federation-demo/harness.py gfs-follower-comment
 python .claude/skills/federation-demo/harness.py gfs-private-channel
+python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after members-mesh-restart (needs them unpaired), before gfs-multi-listing (needs them paired). By now a and d share a GFS-reached space and hold a space seat for each other: the step proves a seat is not "already paired" (202, then a source=manual row on both sides)
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
 python .claude/skills/federation-demo/harness.py gfs-private-channel-multi
+python .claude/skills/federation-demo/harness.py gfs-admin-seed   # last before verify: needs relay-pair (a ↔ d) and, for the withdrawn-listing checks, gfs-b-up; restarts a and e
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-b-down
 python .claude/skills/federation-demo/harness.py gfs-down
@@ -1043,8 +1094,9 @@ targeted ``space_subscriber_key_handoff`` reaching e's one socket and **no**
 Needs ``gfs-space-subscribe`` (d follows a's global space) and
 ``gfs-invite-link`` + ``-content`` (e holds a link-joined member seat in
 that same space). Stops **a** — the host and only seed holder — and has e
-post. e publishes the post itself (``POST /gfs/member-publish``, signed by
-its household key, authorized by its writer cert), so follower d receives
+post. e publishes the post itself (``POST /gfs/member-publish-anon``,
+signed with the space's writer group key — anonymous, the one mode since
+v_90; its writer cert rides inside the ciphertext), so follower d receives
 it decrypted while a is down; the GFS log shows the member-publish fan-out
 and never the post text. Then a restarts, catches e's post up over the
 member path and sends **no** copy to the GFS (step 12): e is v_57, the GFS
@@ -1084,25 +1136,37 @@ older follower: it clears bits 2 and 4 of d's seat (``space_subscribers
 the compressed item (e logs ``refused a compressed item``), e sent JSON
 (``suite=json``) and d still got the post. The bit is restored afterwards.
 
-### ``gfs-member-publish-strict`` — anonymous member publish (v_50)
+### ``gfs-follower-comment`` — a follower comments like a comment-only member
 
-Needs ``gfs-member-publish``. The owner a switches its global space to
-``gfs_publish_mode = "strict"`` (that rotates the content key: e gets the
-new epoch's writer group key over the relay, and the GFS gets the owner's
-notice with the mode and the writer key pin — the step waits for both).
-Then **a** and **d** are stopped and e posts: e's publisher signs ``POST
+Needs ``gfs-invite-link`` (e holds a link-joined FOLLOWER seat on a's third,
+global space). a opens the space to readers (``allow_subscribers``, left
+on: only a publicly readable space is published over a GFS), d subscribes to
+it over the GFS (left subscribed), and a turns
+``allow_subscriber_comment`` on: e gets its credentials alone — the same
+``comment`` cert and writer group key a comment-only member holds (e's
+``space_keys``). a posts; e (the follower) comments on the normal member
+path: a holds the comment, the GFS accepted e's anonymous publish (``POST
+/gfs/member-publish-anon`` 200) and d, a GFS subscriber, holds it too. a
+turns the switch off: exactly one rotation (a's content epoch + 1), and e's
+next comment is refused. The comment switch is left off (its default). Reads
+a's / e's DB (no REST bucket).
+
+### ``gfs-member-publish-strict`` — anonymous member publish (v_50; the one mode since v_90)
+
+Needs ``gfs-member-publish``. There is no publish-mode switch any more
+(v_90): the step waits until the GFS has the writer key of the space's
+current epoch pinned (the owner's notice) and e holds that key. Then **a**
+and **d** are stopped and e posts: e's publisher signs ``POST
 /gfs/member-publish-anon`` with the writer key over its cookie-less session.
 Asserts the GFS access log shows the anonymous route and no identified
 ``/gfs/member-publish``, no GFS log line about the publish names e, and the
 row the GFS stored for offline d carries no ``writer_cert`` and nothing of
 e's (instance id, identity key). d restarts, drains the queue and decrypts
-the post. An IDENTIFIED publish into the strict space — built by the harness
-with e's real household key (KEK-unwrapped from e's data dir) and e's real
-writer cert, i.e. what a v_49 or misconfigured household would send — is
-refused 403. Finally a restarts, catches the post up, and switches the space
-back to trusted (the GFS follows). ``verify`` then checks e's stored writer
-group key for the strict epoch unwraps and verifies (the v_50 tripwire).
-Polls every 3 s, backs off on 429.
+the post. The identified ``POST /gfs/member-publish`` — what a pre-v_90
+household would send — has no route (404 / 405). Finally a restarts and
+catches the post up. ``verify`` then checks e's stored writer group key for
+that epoch unwraps and verifies (the v_90 tripwire). Polls every 3 s, backs
+off on 429. (The step keeps its v_50 name so the chain order is unchanged.)
 
 ### ``gfs-private-channel`` — a private space over an opaque channel (v_51 + ``private_gfs``)
 
@@ -1138,12 +1202,12 @@ the OFF space has no channel. Polls every 3 s, backs off on 429.
 ``gfs-b-up`` boots a SECOND, independent GFS on ``127.0.0.1:18767`` (own data
 dir ``/tmp/sh-demo/gfs-b``, own identity key, public id ``gfs-b``);
 ``gfs-b-down`` stops it. ``gfs-multi-listing`` (after the rest of the gfs
-chain, before ``verify``): a and e connect to B; a creates a TRUSTED global,
+chain, before ``verify``): a and e connect to B; a creates a global,
 publicly readable space and lists it on A and B through the owner's server
 selection (``PUT /api/spaces/{id}/gfs-servers``) — both servers list
 it with the writer key pinned. a invites d (registered on A only); d holds
-the owner's signed two-server list and the writer key (v_57 hands it out in
-trusted spaces). d restarts with loopback treated as public — a
+the owner's signed two-server list and the writer key (handed to every
+v_90 writer of a publicly readable space). d restarts with loopback treated as public — a
 **harness-only** ``-c`` prelude (``_LOOPBACK_IS_PUBLIC_PRELUDE``): a member
 drops an owner-listed private address it never joined and the pinned session
 refuses non-public addresses, both on purpose, and the demo's B is on
@@ -1165,12 +1229,12 @@ so the freshness check passes on the real wire).
 ### ``gfs-private-channel-multi`` — a private channel on the owner's chosen GFSs (v_57)
 
 After ``gfs-multi-listing`` (a ↔ d paired, a and e on A and B), before
-``verify``. a creates a TRUSTED private space, turns ``private_gfs`` on and
+``verify``. a creates a private space, turns ``private_gfs`` on and
 picks **GFS A only** as its channel server (``PUT
 /api/spaces/{id}/gfs-servers``, ``mode: "channel"``); e joins through a gfs
 link, d through an internal one. The channel is registered on A — **B holds
 no row for it**, though a is connected to B. a then picks A **and** B: B gets
-the channel with its trusted-mode writer key pinned, and d stores the
+the channel with its writer key pinned, and d stores the
 owner's two-server list **and** the re-issued channel grant naming both (they
 travel separately; a d restarted between the two keeps a grant naming A only
 and publishes nothing to B). d restarts with the loopback shim, e leaves A —
@@ -1190,6 +1254,64 @@ list, e's copy of the post and that B's database never names the space.
 ``gfs-multi-listing`` waits out a full ``/api/pairing/*`` bucket (HTTP 429,
 ``Retry-After`` or a bounded backoff) when it pairs a ↔ d soon after
 ``pair``, and waits for e's socket after re-pairing it with A.
+
+### ``gfs-admin-seed`` — a GFS-only admin acts for the owner, and its seed dies with its seat (v_94)
+
+Owner rule: an admin reached only through a GFS has the same rights as a
+paired one. Runs last before ``verify`` (after ``relay-pair``; with
+``gfs-b-up`` it also covers a GFS the space was **withdrawn** from). It
+restarts a and e, so it is an ``@_offline_step``.
+
+Setup: a creates a global, publicly readable space with "Let admins act for
+me" on (``delegated_admin_authority``), listed on GFS A — and listed on GFS
+B, then withdrawn again, so B keeps a pin for a space it no longer lists
+and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
+
+1. **The seed reaches e.** e redeems a published admin link (a member
+   seat, admin pending) and a approves. e holds the seed of the key a pins
+   (e's own wrapped copy, opened with e's KEK); a logged the share, e the
+   receipt. The GFS log carries no ``space_admin_key_share`` and no seed
+   bytes, and e keeps its fan-out seat (``space_subscribers``) — also
+   after e restarts and reconnects.
+2. **e acts for the owner.** a is killed. e posts: b and d hold it, and
+   the GFS log shows an anonymous ``/gfs/member-publish-anon`` and **no**
+   ``POST /gfs/publish`` (a delegated admin is a writer to the GFS). e
+   renames the space (HTTP 200: executed on e, signed with the seed) — b
+   and d show the name. e removes b's person — d drops the seat. a comes
+   back and holds all three; its key did not move; and it tells b, which
+   drops its own copy only on its host's word.
+3. **Removed by the owner.** a removes e and rotates the key (K1 → K2). d
+   pins K2; GFS A re-pins from the owner's cert; GFS B re-pins from the
+   pin-only publish and stays withdrawn; a records K2 as what B confirmed.
+   e holds no seat. Then e plays a removed admin that **refuses to
+   forget**: the harness writes its seat and the wrapped K1 seed back into
+   e's database (the one place the step writes app state), e signs a rename
+   with K1, and d must log a refusal of that frame and keep the name.
+4. **Removed by another admin, owner away.** e joins again (admin link,
+   approval) and holds the K2 seed; a makes d's person an admin too. a is
+   killed; d removes e (HTTP 200: executed on d). a comes back, learns of
+   it — from d's roster gossip or from d re-stating the removal against a's
+   roster snapshot (#1380), whichever arrives first; the step prints which
+   — and rotates again (K2 → K3). d holds the K3 seed; both GFS pin K3;
+   a tells e, which drops its copy.
+
+**The pin probe.** "The old seed works on no GFS" is asked of each GFS
+directly: ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh
+authority signature made with the seed in question — the request only the
+space key may make, checked against the same pin as a relay, an epoch
+notice or a media upload, and read-only. e's K1 seed answers **200** on A
+and on B while e is an admin (the positive control) and **403** on both
+after step 3; after step 4 K1 and K2 answer 403 on both and d's K3 seed
+200.
+
+``verify`` (gated on the ``gfs_admin_seed`` state key) re-checks that every
+GFS pins the key a pins, that d holds its seed and the name e set, that
+the host seats e no more and e does not hold the current seed, and that both
+retired seeds are still refused.
+
+```bash
+python .claude/skills/federation-demo/harness.py gfs-admin-seed
+```
 
 ### ``gfs-fallback-switch`` — the GFS fallback for an existing pair (v_54)
 
@@ -1388,9 +1510,10 @@ The topology is what makes the content steps meaningful:
 
 - ``gfs-pair`` pairs **a**, **d** and **e** with the GFS. a and d are
   **not** QR-paired with each other (d pairs only with b; a↔d exists
-  only after the separate ``relay-pair`` step, which is not part of
-  this chain), so anything d receives from a's space can only have
-  travelled through the GFS. **c** is paired with neither and is the
+  only after ``relay-pair``, which the chain runs late — after
+  ``gfs-private-channel``, before ``gfs-b-up``), so until then anything d
+  receives from a's space travelled through the GFS or over the mesh
+  through b. **c** is paired with neither and is the
   negative control.
 - **e** is paired with *nobody* — not even by mesh. It is the only
   household for which the §D2b bootstrap redeem and the
@@ -1607,7 +1730,10 @@ Prereqs: ``gfs-space-post``. **a** turns ``delegated_admin_authority`` on
 and off on its global space — the off-flip rotates the space AUTHORITY key
 unconditionally. Asserts the GFS re-pinned from the owner's cert
 (``global_spaces.identity_public_key`` is **a**'s new key and
-``authority_cert`` is stored), then **a** posts and **d** — a subscriber
+``authority_cert`` is stored) and that **a** took the GFS's publish answer
+as the confirmation (no "did not confirm the space key" / "still pin the
+retired key" line in **a**'s log — the durable re-pin left nothing owed),
+then **a** posts and **d** — a subscriber
 still pinned to the old key — heals its pin from the GFS listing's cert and
 reads the post.
 
@@ -1701,13 +1827,14 @@ mesh-reachable from one another, so a redeem between any two of them
 takes the direct or ``SPACE_ROUTED`` branch and the bootstrap code
 never executes outside its unit tests.
 
-0. **A big cover.** a first gives the space a ~500 KiB cover (a noise
-   PNG, WebP's worst case). The ACK used to embed it verbatim, seal past
-   the 256 KiB bootstrap-blob cap, and earn a 413 from the relay — e's
-   join then timed out (504) with the token already spent on a. After
-   the redeem the step asserts e holds a WebP rendition of at most
-   ``SPACE_COVER_BOOTSTRAP_MAX_BYTES`` (64 KiB) under a's own
-   ``cover_hash``, and that a logged shrinking it.
+0. **A big cover.** a first uploads a big cover photo (a noise PNG,
+   WebP's worst case). The ACK used to embed a ~500 KiB cover verbatim,
+   seal past the 256 KiB bootstrap-blob cap, and earn a 413 from the
+   relay — e's join then timed out (504) with the token already spent on
+   a. Now the upload is stored within the one cap
+   (``SPACE_COVER_MAX_BYTES``, 64 KiB); the step asserts that, and after
+   the redeem that e holds a's cover byte-for-byte under a's own
+   ``cover_hash``.
 1. **Mint.** a mints a ``member`` link with
    ``publish_to_gfs`` — the blob is parked on the connection server's
    bulletin board and the response carries the shareable ``gfs.url``.
@@ -1760,9 +1887,11 @@ never executes outside its unit tests.
    approves it, and only then does a's ``space_remote_members`` role for
    e become ``admin`` — with **no** space signing seed
    (``spaces.identity_private_key`` stays NULL and a ships no
-   ``SPACE_ADMIN_KEY_SHARE``). A connection server pins a space's identity
-   key TOFU-immutably, so that credential could never be taken back from a
-   household whose only introduction was a public string.
+   ``SPACE_ADMIN_KEY_SHARE``): this space does not let admins act for its
+   owner (delegated admin is off), so no admin holds the seed on any path.
+   With it on, an admin reached only through the GFS gets the seed exactly
+   like a paired one (v_94), and revoking it rotates the key and re-pins
+   every GFS that lists the space.
 
    Then e — an admin on a MEMBER household, reaching a only over the
    relay — mints a ``moderator`` link on that space: the mint is forwarded
@@ -1803,16 +1932,17 @@ pending elevation.
 
 ### ``gfs-invite-link-content`` — the relay carries ordinary space traffic
 
-**Per-space mailboxes (v_88).** e reaches the space only through the GFS,
-so the step first asserts that both sides of the seat hold a per-space
-mailbox: a's ``space_instances.mailbox`` row for e carries e's signed entry
-and a's own generation, e's row for a the mirror; both mailbox ids are in
-the GFS's ``gfs_mailboxes`` with ``last_claim_at`` set (registered with a
-ticket, claimed on the anonymous socket); neither is an instance id. a's
-post then reaches e **byte-identical** (a's and e's ``space_posts.content``
-match) and the GFS log shows deliveries to ``<mailbox>`` only — no line in
-that window names e's instance id, either mailbox id, or (on a relay line)
-the space. e's reply rides a's mailbox the same way.
+**One mailbox per household (v_89).** e reaches the space only through
+the GFS, so the step first asserts that both sides hold the other's signed
+member card naming its ONE mailbox at the GFS: a's
+``space_instances.mailbox`` row for e carries ``{"card": …}`` with e's
+mailbox, e's row for a the mirror; both mailbox ids are in the GFS's
+``gfs_mailboxes`` with ``last_claim_at`` set (registered with a ticket,
+claimed on the anonymous socket); neither is an instance id. a's post then
+reaches e **byte-identical** (a's and e's ``space_posts.content`` match)
+and the GFS log shows deliveries to ``<mailbox>`` only — no line in that
+window names e's instance id, either mailbox id, or (on a relay line) the
+space. e's reply rides a's mailbox the same way.
 
 **Pictures through the GFS media cache (v_80).** The step ends with a
 ~0.5 MB photo post (``_picture_via_gfs_media_cache``): the reader holds
@@ -1862,14 +1992,15 @@ on the one wire that cannot fall back to a peer row — see below.
 
 ### ``gfs-media-on-demand`` — a picture that left the GFS cache comes back on a view (v_83)
 
-Prereqs: the chain through ``gfs-invite-link-content`` (the two photos
-``gfs-space-post`` and ``gfs-invite-link-content`` proved through the GFS
-media cache: d, a follower, holds a's space photo; e, a link-joined member,
-holds a's invite-space photo). Each blob is expired exactly as the GFS
+Prereqs: the chain through ``gfs-invite-link-content`` (the photo
+``gfs-space-post`` proved through the GFS media cache: d, a follower, holds
+a's space photo). Since v_92 only a **follower** asks its GFS on demand; a
+member household (the link-joined e) asks the host and helpers with
+``SPACE_MEDIA_WANTED`` instead (``gfs-space-healing``). The blob is expired exactly as the GFS
 store does it (``gfs_space_media`` row + ``data_dir/space_media/<blob>``
 deleted, ``gfs_space_media_demand`` upserted with ``stored_at`` as
-``_remember_left`` writes it) and the reader's own ``sg-`` copy is deleted;
-then the reader VIEWS it (``GET /api/media/<sg-name>``) — a miss everywhere
+``_remember_left`` writes it) and the reader's own copy is deleted;
+then the reader VIEWS it (``GET /api/media/<name>``) — a miss everywhere
 → ``POST /gfs/media/{blob}/wanted`` → the GFS asks the host a
 (``space_media_request``) → a re-seals and serves the ticket.
 
@@ -1877,19 +2008,200 @@ then the reader VIEWS it (``GET /api/media/<sg-name>``) — a miss everywhere
    gets the photo byte-identical; the GFS row and file are back; a logged
    exactly one ``re-uploaded on demand`` line for the blob; the admin
    overview (``/admin/api/overview`` → ``space_media``) counts +1 holder
-   request, +1 re-upload. The other reader kind, when it holds the same
-   blob (d does for the invite photo), then views it from the cache
-   (``fetched blob … from GFS``) with no new holder request.
+   request, +1 re-upload. e, when it holds the same blob, then views it
+   from the cache (``fetched blob … from GFS``) with no new holder request.
 2. **Old** (``stored_at`` 30 days ago) → stream: byte-identical again, but
    no row and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
    a logged ``streamed on demand``. Waits first until the GFS has no live
    sessions (a delivered session stays joinable ``coalesce_seconds``).
 
-Both legs run for e and for d (members and followers alike). Not
+Both legs run for the follower d. Not
 re-runnable within ~10 min (a attaches its upload authorization once per
 (GFS, blob) per ``REUPLOAD_COALESCE_S``). ``verify`` asserts
 ``MIN_FOR_SPACE_MEDIA_ON_DEMAND`` is v_83 and covered by the ``OURS``
 round-trip.
+
+### ``gfs-member-mesh`` — any member reaches a GFS-only member, host offline (v_89)
+
+Prereqs: the chain through ``gfs-invite-link-content``. d (paired with b,
+mesh-only to a) joins a's space with an ``internal`` link. The host's
+member directory (``SPACE_MAILBOX_DIRECTORY``, writer-seat households only)
+reaches both: d holds e's member card naming e's ONE mailbox and a lazy
+``space_session`` seat for e with no ``relay_via`` and no inbox; e holds
+d's card. The directory flags e as GFS-reached (``gfs_reached``), so d —
+connected to that GFS — mints its own household mailbox there as soon as
+the directory flags e, and its card goes out at once; the step waits (up to
+90 s) until e holds d's card naming it. Then a is **killed**: d — not the host —
+creates a calendar event and e must show it (d's fan-out reached e's
+mailbox); e creates one and d must show it (e's fan-out reached d's
+mailbox, no host hop). Over that window the GFS log must show
+``<mailbox>`` deliveries, no envelope / mailbox line may name an instance
+id or the space, and no line either mailbox id. a is respawned at the end (``@_offline_step``).
+
+### ``gfs-moderator-parity`` — a moderator reached only through the GFS reviews like any other
+
+Needs the gfs chain through ``gfs-member-mesh`` (a hosts ``gfs_invite_space_id``;
+d is a paired / mesh member, e GFS-only). a sets posts to ``moderated``; d's
+person posts (202 queued) and e — still a plain member household — holds
+nothing. a promotes e's person to ``moderator``: e asks the host with its
+§25.6 BEGIN (the ``mod_held`` echo, over the relay), a re-sends the item to e
+alone and logs the catch-up, e's Moderation tab lists it, e approves on its
+own household and a, d and e hold the post. Then e is killed while d's person
+posts again; after its restart e lists that item too (from its GFS mailbox or
+the host's catch-up — the step reports which) and approves it. Last, a large
+item: with pages ``moderated`` d's person creates a ~240 KiB page — more than a
+JSON envelope on the GFS relay carries; on e's next BEGIN (a role change makes
+e send it at once) a sends the item to e as one binary relay frame, e holds the
+whole text, approves, and a, d and e hold the published 240 KiB page (v_87:
+the page event crosses the relay as one binary relay frame, like the item). a
+resets the levels and e's role.
+
+### ``members-parity`` — a paired/mesh member and a GFS-only member see the same (owner acceptance gate)
+
+Prereqs: the chain through ``gfs-member-mesh`` (a hosts the link-joined
+space; **d** is a member over the paired / mesh path, **e** only through the
+GFS). It is the acceptance check for CLAUDE.md's "every space member is
+equal, whichever way their household is reached": the same actions happen
+in one space and d's and e's REST APIs must show what the household that
+acted shows — the item exists or is gone, its text, and the picture bytes
+by sha256 (each household read under the URL its own API returns). Every
+check polls (3 s, bounded timeout, 429-aware); no sleep is a check.
+
+| Action | Who acts | Compared |
+|---|---|---|
+| post with picture, edit, deletion | a | ``GET …/posts/{id}``: gone / text / picture hashes |
+| comment with picture | a | ``…/comments`` text; the picture is **SKIP** — the space comment API takes no picture |
+| reaction | d 👍, e 🎉 | reaction counts |
+| calendar event with cover | a | summary + cover hash |
+| gallery item | a (space album) | item + full and thumbnail hashes |
+| page | a | title + content |
+| 450 KiB page | d, then e | size + SHA-256 on a, d and e — over the relay's JSON envelope, one binary relay frame |
+| poll vote | d votes Pizza, e Sushi | ``…/poll`` counts |
+| catch-up | a, while d and e are killed | new post, edit, deletion after both respawn; a 450 KiB page — asserted for both, read from each member's database: e gets it as one binary relay frame in its §25.6 catch-up, d over the mesh (a re-sends the routed page after d's nack, and d's catch-up carries the record raw inside the route's seal) |
+| old picture | a, while d and e are killed | the blob is expired from the GFS cache as 30-day-old content (as ``gfs-media-on-demand``'s old leg), then both must show the picture; SKIP if a cached nothing |
+| host offline | d and e, a killed | each one's picture post on the other |
+| admin rights | a promotes e's person (GFS only), then d's (paired / mesh); each admin deletes the other member's post | role on a, d and e; the post gone on all three; the person back to member |
+| the signing seed | in the fresh private space below, a makes e's person an admin next to b | b (paired) and e (GFS only) both hold the seed of the key a pins |
+| acting for the owner | a killed; b renames the space, then e does | the name on d after each (b is on no GFS here and e is paired with nobody: no path between them without the host); on a, b and d when a is back |
+| admin removed | a takes e's admin seat away | a's key epoch rises; b holds the new seed, e none; b, d and e pin the new key |
+
+Every action is reported PASS / DIFF / SKIP in a table at the end; the step
+fails naming each DIFF with what the reference and each member showed plus
+the member's newest WARNING lines. ``verify`` (gated on the
+``members_parity`` state key) re-reads the posts it kept and deleted and
+fails if d or e differ from a. Kills households, so it is an
+``@_offline_step``.
+
+Its last action covers **"host" = the owner or the delegated admin that
+invited us** (owner decision 2026-11-13,
+``socialhome/federation/host_equivalence.py``): in a fresh private space of
+a's (``private_gfs`` + ``delegated_admin_authority`` on; e joined by a
+``gfs`` link, b by an ``internal`` link and made admin) the owner a is
+stopped, b invites **d** (a §D1b invitation) and d accepts. d must still get the member
+directory — from b, on b's own ``dir_seq`` line — with e's card. a comes
+back and lists d (so e, which takes a directory only from the owner that
+invited it, holds d's card); then a is stopped again and d and e each post
+— the other must show it,
+mailbox to mailbox — and no GFS envelope / mailbox line names an instance
+id, a mailbox id or the space.
+
+The same space carries the **admin rights** rows that need "Let admins act
+for me" (v_94: an admin reached only through a GFS is handed the signing
+seed like a paired one). a makes e's person an admin next to b: both must
+hold the seed of the key a pins (each household's own wrapped copy, read
+with its own KEK). In the owner-offline window b and then e rename the
+space — executed on the admin's own household (HTTP 200, never a forward)
+and signed with the seed — and d must show each name (b and e have no path
+to each other while the host is away: b is on no GFS at this point, e is
+paired with nobody); a, b and d show the last one once a is back. a then
+takes e's admin seat away: the key
+rotates as for any admin, b holds the new seed, e's is gone, and b, d and
+e pin the new key. ``gfs-admin-seed`` covers the removal in depth.
+
+### ``members-parity-apps`` — a space's game tables for a paired/mesh member and a GFS-only member (owner acceptance gate, games)
+
+Prereqs: ``members-parity``. Runs in the private space its last action left
+(a hosts it; **d** is a member over the paired / mesh path, seated by the
+admin b; **e** only through the GFS, joined by a ``gfs`` link) — the space
+the content actions use is a global one, and a global space never has game
+tables. The games half of the
+acceptance check for "every space member is equal, whichever way their
+household is reached". Installs the stand-in apps ``demo-table`` (3–6
+players) and ``demo-duel`` (two players) on a, d and e straight into
+``installed_apps``. Every check polls (3 s, bounded timeout, 429-aware).
+
+| Action | Who acts | Compared |
+|---|---|---|
+| games list | a allows both apps | ``GET …/games``: ``allowed_apps``, ``games_possible`` on d and e as on a |
+| table card | a opens a ``demo-table`` table | the card on d and e: app, note, host's name, players range, ``open`` |
+| seats | d and e join from the lobby | a, d and e show the same three seats (seat, name, state), each ``seated`` |
+| game started | a | ``playing`` on all three |
+| message to everyone | a, d and e, one each | the two other seats hold it (``POST /api/apps/{id}/held``), from the sender's seat |
+| sealed message | d → e's seat, e → d's seat | the receiver holds it as ``direct``; the hub a holds no plaintext (mailbox + database files) |
+| table closed | a | ``ended`` / ``closed`` on all three |
+| a duel between the members | e hosts and d joins, then d hosts and e joins | the card on the two others; ``playing`` at two seats on both; a's card reads ``playing``; a move each way; the host closes it and nobody lists it |
+| space game lobby | a opens one more table | the "Open games" strip (games list + every open table) on d and e as on a |
+| person invite | — | **NOTE**, never a failure: ``GET /api/apps/{id}/invitable`` lists paired households' people only (pairing is the consent); members who are not paired play at a space table |
+| the GFS holds nothing of a table | — | no note or message marker in ``gfs.db*`` |
+
+In the duels the hub is a member's household: d and e, paired with nobody,
+exchange ``SPACE_APP_TABLE`` / ``SPACE_APP_SESSION`` over the space. Every
+action is reported PASS / DIFF / NOTE in a table at the end; the step fails
+naming each DIFF. ``verify`` (gated on the ``members_parity_apps`` state
+key) re-checks that the closed tables stayed ended on a, d and e and that
+no GFS database file holds a note or a message.
+
+### ``members-mesh-restart`` — a large space event reaches a mesh-only member that restarts
+
+Prereqs: the chain through ``gfs-member-mesh``, and before
+``members-parity`` (a hosts the link-joined space; d is a member a reaches
+over the mesh, through b — the step fails if a holds a direct row for d:
+``members-parity``'s last action seats d with a in another space). a posts and d must show it, so a holds a fresh route
+sealed to d's ephemeral key. d is killed; a creates a **450 KiB page**,
+sealed to d's old key and taken by b; d is respawned and b delivers it. The
+restarted d cannot open it and nacks (``SPACE_ROUTE_STALE``): a's log must
+show ``retransmitted space_page_created`` naming d, and d must show the page
+(title + sha256 of its text) within 240 s. 450 KiB is over the 64 KiB up to
+which the mesh used to keep an event for its retransmit and over what one
+§25.6 sync record can be on a mesh hop, so on a build without the large
+retransmit nothing brings the page to d and the step fails. Kills d, so it
+is an ``@_offline_step``.
+
+### ``gfs-space-healing`` — a GFS-only member heals from a helper while the host is offline (v_92)
+
+Prereqs: the chain through ``gfs-member-mesh`` (d, paired with a, and e,
+reached only through the GFS, are members of a's link space and hold each
+other's member cards). a makes d's person a **moderator** and waits until
+e's roster mirror shows it — d's household is now a trusted helper.
+
+1. **Old picture, host online.** a posts a picture; e holds it under its
+   content name (``sc-…``). Every GFS media cache copy goes (the
+   ``gfs_space_media`` row + ``data_dir/space_media/<blob>`` of each blob a
+   household's ``space_media_refs`` names) and so does e's copy. e's view
+   (``GET /api/media/<sc-name>``) misses → ``SPACE_MEDIA_WANTED`` to the
+   host a only (e logs ``space media wanted: 1 file(s) of space … to <a>:
+   sent`` and nothing to d; a logs ``SPACE_MEDIA_WANTED from <e> …: 1
+   file(s) queued``) → e serves the original bytes (polled up to 90 s).
+2. **Missed event, host offline.** A second picture, held by e and by d;
+   same drop; a is **killed**, then e. d creates a calendar event and the
+   frames queued for e's mailbox at the GFS (``gfs_envelope_queue`` /
+   ``gfs_media_queue`` rows since the step's bookmark) are deleted — what a
+   full mailbox or the TTL would drop. e boots: its BEGIN to a goes
+   unanswered for ``HOST_ANSWER_WAIT_S`` (120 s) — a is now silent for e —
+   e logs ``the host did not answer within … asking trusted helper <d>``
+   and sends ``SPACE_SYNC_RESUME`` to d, which replays its own rows; e
+   shows the event (polled up to 300 s).
+3. **Old picture, host silent.** e views the second picture: the request
+   goes, a being silent, to the helper d instead of a, which logs
+   that it served e; e serves the bytes (polled up to 180 s). A helper is
+   asked only while the host is silent or unreachable.
+4. Over the whole step the GFS log shows ``<mailbox>`` deliveries and no
+   relay line names an instance id or the space, and no line either mailbox
+   id. a and e are respawned at the end (``@_offline_step``).
+
+The pictures are fresh noise PNGs: a content name follows the bytes, so a
+reused picture would already be held. Re-runnable, but each run adds a
+moderator promotion that is already in place (a no-op) and three items.
 
 ### ``gfs-relay-media`` — a picture reaches a link-joined member as binary relay frames (v_87)
 

@@ -25,7 +25,12 @@ def validate_inbound_media_meta(file_meta: dict) -> None:
     * ``size_bytes`` exceeds the protocol maximum for the MIME type.
     """
     mime = file_meta.get("mime_type", "")
-    size = int(file_meta.get("size_bytes", 0))
+    try:
+        size = int(file_meta.get("size_bytes", 0))
+    except (TypeError, ValueError) as exc:
+        # ``int(None)`` raises TypeError, which no caller catches: the
+        # attachment would pass the gate unchecked.
+        raise ValueError("Inbound media size is not a number") from exc
 
     if mime == IMAGE_OUTPUT_MIME:
         if size > IMAGE_MAX_UPLOAD_BYTES:

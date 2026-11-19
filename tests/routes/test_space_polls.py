@@ -267,11 +267,27 @@ async def _create_schedule_poll(
         {"id": "slot-A", "slot_date": "2026-05-01"},
         {"id": "slot-B", "slot_date": "2026-05-02", "start_time": "18:00"},
     ]
-    return await client.post(
+    r = await client.post(
         f"/api/spaces/{space_id}/posts/{post_id}/schedule-poll",
         json={"title": "Pizza night", "slots": slots},
         headers=_auth(client._tok),
     )
+    await _pin_slot_ids(client, post_id, "space_schedule_slots")
+    return r
+
+
+async def _pin_slot_ids(client, post_id: str, table: str) -> None:
+    """The server mints the slot ids (a caller never chooses one); the
+    tests below name the first two ``slot-A`` / ``slot-B``."""
+    rows = await client._db.fetchall(
+        f"SELECT id FROM {table} WHERE post_id=? ORDER BY position",
+        (post_id,),
+    )
+    for row, name in zip(rows, ("slot-A", "slot-B"), strict=False):
+        await client._db.enqueue(
+            f"UPDATE {table} SET id=? WHERE id=?",
+            (name, row["id"]),
+        )
 
 
 async def test_space_schedule_create_returns_shape(client):
@@ -282,7 +298,9 @@ async def test_space_schedule_create_returns_shape(client):
     data = await r.json()
     assert data["title"] == "Pizza night"
     assert data["space_id"] == "sp-polls"
-    assert [s["id"] for s in data["slots"]] == ["slot-A", "slot-B"]
+    # Minted here — never the ids the caller sent.
+    ids = [s["id"] for s in data["slots"]]
+    assert len(set(ids)) == 2 and not {"slot-A", "slot-B"} & set(ids)
 
 
 async def test_space_schedule_respond_and_summary(client):
@@ -496,3 +514,89 @@ async def test_a_vote_racing_the_post_delete_is_a_clean_404(client, monkeypatch)
     )
     assert r.status == 404
     assert await client._db.fetchall("SELECT * FROM space_poll_votes", ()) == []
+
+
+async def test_a_follower_reads_a_space_poll_but_cannot_vote(client):
+    """A follower (``subscriber`` seat) sees the poll and its tallies; a
+    vote from one is refused here — every other household would refuse it
+    too, so it would only ever count on this one."""
+    await _seed_space(client)
+    await _seed_poll(client)
+    await client._db.enqueue(
+        "UPDATE space_members SET role='subscriber' WHERE space_id='sp-polls'"
+    )
+    url = "/api/spaces/sp-polls/posts/sp-post-1/poll"
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.status == 200
+    data = await r.json()
+    assert [o["text"] for o in data["options"]] == ["Yes", "No"]
+    assert data["can_vote"] is False
+    r = await client.post(
+        f"{url}/vote", json={"option_id": "opt-y"}, headers=_auth(client._tok)
+    )
+    assert r.status == 403
+    r = await client.delete(f"{url}/vote", headers=_auth(client._tok))
+    assert r.status == 403
+    r = await client.get(url, headers=_auth(client._tok))
+    assert (await r.json())["total_votes"] == 0
+
+
+async def test_space_poll_cannot_be_replaced_or_added_by_someone_else(client):
+    """``POST …/poll`` on a post that has a poll is 409 ``POLL_EXISTS`` (a
+    poll is never edited), and only the post's author adds one (403)."""
+    await _seed_space(client)
+    await _seed_poll(client)
+    url = "/api/spaces/sp-polls/posts/sp-post-1/poll"
+    body = {"question": "Rewritten?", "options": ["Never", "Always"]}
+    r = await client.post(url, json=body, headers=_auth(client._tok))
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "POLL_EXISTS"
+    r = await client.get(url, headers=_auth(client._tok))
+    data = await r.json()
+    assert data["question"] == "Pizza?" and data["can_vote"] is True
+    assert [o["text"] for o in data["options"]] == ["Yes", "No"]
+    await _seed_post(client, post_id="sp-post-2", author="uid-someone-else")
+    r = await client.post(
+        "/api/spaces/sp-polls/posts/sp-post-2/poll",
+        json=body,
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
+    r = await client.get(
+        "/api/spaces/sp-polls/posts/sp-post-2/poll", headers=_auth(client._tok)
+    )
+    assert r.status == 404
+
+
+async def test_space_poll_retract_after_close_returns_409(client):
+    await _seed_space(client)
+    await _seed_poll(client, closed=True)
+    r = await client.delete(
+        "/api/spaces/sp-polls/posts/sp-post-1/poll/vote", headers=_auth(client._tok)
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "POLL_CLOSED"
+
+
+async def test_space_schedule_poll_cannot_be_replaced_or_added_by_someone_else(client):
+    """Like a reply poll: 409 ``POLL_EXISTS`` for a second one, 403 on
+    somebody else's post."""
+    await _seed_space(client)
+    await _seed_schedule_post(client, post_id="sp-sched-9")
+    r = await _create_schedule_poll(client, post_id="sp-sched-9")
+    assert r.status == 201
+    first = await r.json()
+    r = await _create_schedule_poll(client, post_id="sp-sched-9")
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "POLL_EXISTS"
+    r = await client.get(
+        "/api/spaces/sp-polls/schedule-polls/sp-sched-9/summary",
+        headers=_auth(client._tok),
+    )
+    assert first["title"] == "Pizza night"
+    assert [s["id"] for s in (await r.json())["slots"]] == ["slot-A", "slot-B"]
+    await _seed_post(
+        client, post_id="sp-sched-x", post_type="schedule", author="uid-someone-else"
+    )
+    r = await _create_schedule_poll(client, post_id="sp-sched-x")
+    assert r.status == 403

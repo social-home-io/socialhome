@@ -21,29 +21,36 @@ noted:
   * ``conversation_messages.media_url`` — DM media (final blob)
   * ``feed_posts.media_url`` + ``image_urls_json``
   * ``post_comments.media_url``
-  * ``space_posts.media_url`` + ``image_urls_json``
-  * ``space_post_comments.media_url``
-  * ``bazaar_listings.image_urls_json``
-  * ``gallery_items.filename`` + ``thumbnail_filename`` (bare basenames)
+  * every file field of a SPACE item — generated from the registry
+    (:func:`~socialhome.domain.space_media_fields.space_media_columns`):
+    ``space_posts`` (``media_url``, ``image_urls_json``, ``file_meta_json``
+    ``$.url``, ``link_preview_json`` ``$.thumbnail_url``),
+    ``space_post_comments.media_url``, ``space_calendar_events.cover_url``,
+    ``gallery_items.filename`` + ``thumbnail_filename`` (bare basenames),
+    ``bazaar_listings.image_urls_json``, ``space_pages.cover_image_url`` +
+    its markdown ``content``
   * ``highlight_frames.media_url``
   * ``moments.media_url``
-  * ``calendar_events.cover_url`` / ``space_calendar_events.cover_url``
-  * ``pages`` / ``space_pages`` / ``page_edit_history`` ``.cover_image_url``
+  * ``calendar_events.cover_url``
+  * ``pages`` / ``page_edit_history`` ``.cover_image_url``
     and every picture their markdown ``content`` shows (``api/media/<file>``,
     never the same path inside another URL); an open conflict side's
     ``space_page_snapshots.body``
   * ``task_attachments.url``
   * ``post_drafts.media_url``
-  * ``feed_posts`` / ``space_posts`` ``.link_preview_json`` → ``$.thumbnail_url``
-    (the re-encoded link-preview image; one file may back several posts
-    that linked the same page)
+  * ``feed_posts.link_preview_json`` → ``$.thumbnail_url`` (the re-encoded
+    link-preview image; one file may back several posts that linked the
+    same page)
+  * ``feed_posts.file_meta_json`` → ``$.url`` (a household file post's
+    attachment, while the post is live)
 
   * ``space_moderation_queue.payload_json`` of PENDING items — a queued
     post / page / event / listing publishes its media only on approval
     (up to 7 days later), so until then the payload is the reference
 
-A soft-deleted post keeps ``image_urls_json`` (only ``media_url`` is
-cleared), so a post's image list counts only while the post is live.
+A soft-deleted post keeps ``image_urls_json`` and ``file_meta_json`` (only
+``media_url`` and ``link_preview_json`` are cleared), so a post's image
+list and attachment count only while the post is live.
 
 NOT included (owned elsewhere / transient): DM ``.preview.webp`` /
 ``.part<NNNN>`` / ``.assembled`` intermediates and the ``.partial/``
@@ -54,6 +61,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Collection, Iterable
 from typing import Protocol, runtime_checkable
 
 import orjson
@@ -61,10 +69,19 @@ import orjson
 from ..db import AsyncDatabase
 from ..domain.file_hashes import is_space_content_media_name
 from ..domain.media_constraints import (
+    MEDIA_REF_PREFIX,
     SPACE_DIRECT_MEDIA_PREFIX,
     SPACE_PAGE_MEDIA_PREFIX,
+    is_gfs_space_media_name,
+    local_media_ref,
+    space_media_ref,
 )
-from ..domain.space_media_ref import page_body_media_refs, space_page_media_name
+from ..domain.space_media_fields import (
+    FieldShape,
+    page_body_media_refs,
+    space_media_columns,
+)
+from ..domain.space_media_ref import space_page_media_name
 from ..media.cleanup import media_basename
 from .base import rows_to_dicts
 
@@ -86,54 +103,208 @@ _SPACE_PAGE_HERE = f"({_HOSTED_SPACE} OR pending_base_seq IS NOT NULL)"
 _HISTORY_HERE = f"(space_id IS NULL OR {_HOSTED_SPACE})"
 _SNAPSHOT_HERE = _HOSTED_SPACE
 
+# ─── The reference set (orphan sweep, ``is_referenced``) ─────────────────
+#
+# Household rows are listed by hand; every SPACE item's file fields come
+# from the registry (:func:`space_media_columns`) with the live-row filter
+# of :data:`_SPACE_REFERENCE_LIVE` — a table missing there fails at import.
+
+#: The live-row filter of a space item table's references; a column of it
+#: may override (:data:`_SPACE_REFERENCE_LIVE_COLUMN`).
+_SPACE_REFERENCE_LIVE: dict[str, str] = {
+    "space_posts": "",
+    "space_post_comments": "",
+    "space_calendar_events": "",
+    "gallery_items": "",
+    "bazaar_listings": "",
+    "space_pages": _SPACE_PAGE_HERE,
+}
+#: A soft delete clears a post's ``media_url`` and ``link_preview_json``
+#: but keeps its image list and file attachment: those count only while
+#: the post is live.
+_SPACE_REFERENCE_LIVE_COLUMN: dict[tuple[str, str], str] = {
+    ("space_posts", "image_urls_json"): "deleted=0",
+    ("space_posts", "file_meta_json"): "deleted=0",
+}
+
+
+def _space_reference_live(table: str, col: str) -> str:
+    return _SPACE_REFERENCE_LIVE_COLUMN.get((table, col), _SPACE_REFERENCE_LIVE[table])
+
+
+def _space_reference_rows(shape: str) -> tuple[tuple[str, str, str], ...]:
+    """``(table, column, live-row filter)`` of every registry column of
+    *shape* (``one`` / ``list`` / ``markdown``)."""
+    return tuple(
+        (table, col, _space_reference_live(table, col))
+        for table, col, sql_shape in space_media_columns()
+        if sql_shape == shape
+    )
+
+
 #: ``(table, column, live-row filter)`` for single-reference columns.
 _SINGLE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("conversation_messages", "media_url", ""),
     ("feed_posts", "media_url", ""),
     ("post_comments", "media_url", ""),
-    ("space_posts", "media_url", ""),
-    ("space_post_comments", "media_url", ""),
     ("highlight_frames", "media_url", ""),
     ("moments", "media_url", ""),
-    ("gallery_items", "filename", ""),
-    ("gallery_items", "thumbnail_filename", ""),
     ("calendar_events", "cover_url", ""),
-    ("space_calendar_events", "cover_url", ""),
     ("pages", "cover_image_url", ""),
-    ("space_pages", "cover_image_url", _SPACE_PAGE_HERE),
     ("page_edit_history", "cover_image_url", _HISTORY_HERE),
     ("task_attachments", "url", ""),
     ("post_drafts", "media_url", ""),
+    *_space_reference_rows(FieldShape.ONE),
 )
 
 #: ``(table, column, live-row filter)`` for JSON arrays of references.
 _LIST_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("feed_posts", "image_urls_json", "deleted=0"),
-    ("space_posts", "image_urls_json", "deleted=0"),
-    ("bazaar_listings", "image_urls_json", ""),
+    *_space_reference_rows(FieldShape.LIST),
 )
 
 
-#: ``(table, JSON column, JSON path)`` for a reference inside a JSON object.
-#: Soft-deleting a post NULLs its ``link_preview_json``, so no live filter.
-_JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("feed_posts", "link_preview_json", "$.thumbnail_url"),
-    ("space_posts", "link_preview_json", "$.thumbnail_url"),
+#: ``(table, JSON column, JSON path, live-row filter)`` for a reference
+#: inside a JSON object. Soft-deleting a post NULLs its
+#: ``link_preview_json`` (a card needs no live filter) but keeps its
+#: ``file_meta_json`` — the attachment counts only while the post is live
+#: (:data:`_SPACE_REFERENCE_LIVE_COLUMN`).
+_JSON_FIELD_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
+    ("feed_posts", "link_preview_json", "$.thumbnail_url", ""),
+    # A household FILE post's attachment (a soft delete keeps it).
+    ("feed_posts", "file_meta_json", "$.url", "deleted=0"),
+    *(
+        (table, col, shape[len("json:") :], _space_reference_live(table, col))
+        for table, col, shape in space_media_columns()
+        if shape.startswith("json:")
+    ),
 )
 
 
-#: ``(table, key column, value expression, shape)`` — every file a space
-#: item shows, by the item's id (v_85: a holder's content-addressed names).
-_ITEM_FILE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
-    ("space_posts", "id", "media_url", "one"),
-    ("space_posts", "id", "image_urls_json", "list"),
-    ("space_posts", "id", "json_extract(link_preview_json, '$.thumbnail_url')", "one"),
-    ("space_post_comments", "id", "media_url", "one"),
-    ("space_calendar_events", "id", "cover_url", "one"),
-    ("gallery_items", "id", "filename", "one"),
-    ("gallery_items", "id", "thumbnail_filename", "one"),
-    ("bazaar_listings", "post_id", "image_urls_json", "list"),
+#: A space-album item is live while it and its album are, and it is the
+#: item's own file: never a gallery mirror of a post's media
+#: (``source_post_id``, the system "Posts" album) — that file is the post's,
+#: which the post sources already cover, so a mirror would count it twice
+#: (the catch-up's file budget, a ``SPACE_MEDIA_WANTED`` item list). The
+#: §25.6 gallery stream skips the same rows (``list_items_sync_page``).
+_GALLERY_ITEM_LIVE = (
+    "t.deleted_at IS NULL AND a.space_id IS NOT NULL AND a.deleted_at IS NULL"
+    " AND a.is_system = 0 AND t.source_post_id IS NULL"
 )
+
+#: Every file a space ITEM shows — a post (its images, its attachment, its
+#: link card's thumbnail), a comment, a calendar cover, a space-album item
+#: (thumbnail and file), a bazaar listing (by its wrapper post's id): the
+#: registry's columns (:func:`space_media_columns`) — one list for every
+#: reader by item: :meth:`SqliteMediaReferenceRepo.content_names_of_item`
+#: (v_85), :meth:`~SqliteMediaReferenceRepo.space_rows_of` and
+#: :meth:`~SqliteMediaReferenceRepo.live_item_files` (v_92
+#: ``SPACE_MEDIA_WANTED``). ``(FROM clause over the row t, item id, space,
+#: value, shape, live-row condition, owner)`` — the owner is the person the
+#: item belongs to (the catch-up file gate's owner).
+#:
+#: :data:`_SPACE_ITEM_SOURCE` holds each item table's ``(FROM, item id,
+#: space, live, owner)``; a registry table missing there fails at import.
+#: Named exclusion (:data:`_NOT_SPACE_ITEM_FILES`): pages are not items
+#: here — their files are the host's alone (v_82), read by the page paths.
+_SPACE_ITEM_SOURCE: dict[str, tuple[str, str, str, str, str]] = {
+    "space_posts": ("space_posts t", "t.id", "t.space_id", "t.deleted = 0", "t.author"),
+    "space_post_comments": (
+        "space_post_comments t LEFT JOIN space_posts p ON p.id = t.post_id",
+        "t.id",
+        "p.space_id",
+        "t.deleted = 0 AND p.deleted = 0",
+        "t.author",
+    ),
+    "space_calendar_events": (
+        "space_calendar_events t",
+        "t.id",
+        "t.space_id",
+        "t.deleted_at IS NULL",
+        "t.created_by",
+    ),
+    "gallery_items": (
+        "gallery_items t LEFT JOIN gallery_albums a ON a.id = t.album_id",
+        "t.id",
+        "a.space_id",
+        _GALLERY_ITEM_LIVE,
+        "t.uploaded_by",
+    ),
+    "bazaar_listings": (
+        "bazaar_listings t LEFT JOIN space_posts p ON p.id = t.post_id",
+        "t.post_id",
+        "t.space_id",
+        "p.deleted = 0",
+        "t.seller_user_id",
+    ),
+}
+_NOT_SPACE_ITEM_FILES: frozenset[str] = frozenset({"space_pages"})
+
+
+def _item_value(col: str, shape: str) -> tuple[str, str]:
+    """The SQL value of column *col* of the row ``t`` and its shape as an
+    item file (``one`` / ``list``)."""
+    if shape.startswith("json:"):
+        path = shape[len("json:") :]
+        return (
+            f"CASE WHEN json_valid(t.{col}) THEN json_extract(t.{col}, '{path}') END",
+            "one",
+        )
+    if shape not in ("one", "list"):
+        raise ValueError(f"no item-file shape for {col} ({shape})")
+    return f"t.{col}", shape
+
+
+def _space_item_files() -> tuple[tuple[str, str, str, str, str, str, str], ...]:
+    rows = []
+    for table, col, shape in space_media_columns():
+        if table in _NOT_SPACE_ITEM_FILES:
+            continue
+        source, key, space, live, owner = _SPACE_ITEM_SOURCE[table]
+        value, item_shape = _item_value(col, shape)
+        rows.append((source, key, space, value, item_shape, live, owner))
+    return tuple(rows)
+
+
+_SPACE_ITEM_FILES: tuple[tuple[str, str, str, str, str, str, str], ...] = (
+    _space_item_files()
+)
+
+#: ``(FROM clause over the row t, space, names-are-ours filter)`` of every
+#: registry table — what a space purge collects (:meth:`space_files`). A
+#: page's RAW names count only on the space's host (:data:`_HOSTED_SPACE`):
+#: a member's own draft still carries the HOST's names, which a hostile
+#: host could point at one of our household files — the draft's own
+#: uploads are left to the orphan sweep; a member's page-scoped ``sp-``
+#: copies come from :meth:`SqliteMediaReferenceRepo._page_names_of`.
+_SPACE_ROWS: dict[str, tuple[str, str, str]] = {
+    **{
+        t: (src, space, "")
+        for t, (src, _k, space, _l, _o) in _SPACE_ITEM_SOURCE.items()
+    },
+    "space_pages": ("space_pages t", "t.space_id", f" AND {_HOSTED_SPACE}"),
+}
+#: Registry tables that store bare basenames, not ``api/media/<file>``.
+_BARE_NAME_TABLES: frozenset[str] = frozenset({"gallery_items"})
+
+
+def _space_file(
+    raw: object, *, bare: bool, gfs_copies: Collection[str] = ()
+) -> str | None:
+    """The file name of a stored space reference *raw* when it is a
+    canonical, non-reserved space file (:func:`space_media_ref` — never a
+    DM's, a DM transient, a foreign URL or junk a legacy row kept
+    unvalidated) or one of *gfs_copies* (this space's GFS reader copies,
+    :meth:`SqliteMediaReferenceRepo.gfs_copies_in_space`), else ``None``."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    value = MEDIA_REF_PREFIX + raw if bare else raw
+    ref = space_media_ref(value)
+    if ref is not None:
+        return ref[len(MEDIA_REF_PREFIX) :]
+    local = local_media_ref(value)
+    name = local[len(MEDIA_REF_PREFIX) :] if local is not None else None
+    return name if name is not None and name in gfs_copies else None
 
 
 #: A moderation queue item still to publish its files: pending, or
@@ -157,9 +328,13 @@ _PAYLOAD_SCANS: tuple[tuple[str, str, str], ...] = (
 #: are references: a page's body, and each version in its history.
 _MARKDOWN_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("pages", "content", ""),
-    ("space_pages", "content", _SPACE_PAGE_HERE),
     ("page_edit_history", "content", _HISTORY_HERE),
+    *_space_reference_rows(FieldShape.MARKDOWN),
 )
+#: The loose ``api/media/<file>`` scan of a free-form JSON payload
+#: (:data:`_PAYLOAD_SCANS`: a held item's whole payload). Named exclusion
+#: from the one markdown pattern (``LOCAL_MEDIA_REF_RE``): it reads no
+#: markdown, and over-matching here only keeps a held file alive longer.
 _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 
 # ─── Who may reference a file (``reference_access``) ─────────────────────
@@ -195,6 +370,40 @@ _HOSTED_SEAT = (
     " WHERE hs.id = t.space_id AND hs.owner_instance_id = ii.instance_id)"
 )
 
+#: The space each space item table's row belongs to (an SQL expression
+#: over the row ``t``) — :data:`_SPACE_OF`, and the seat
+#: :data:`_ACCESS_SOURCES` checks. A registry table missing here fails at
+#: import. Named exclusion (:data:`_OWN_GALLERY_QUERIES`): ``gallery_items``
+#: — its album decides, in its own queries (:data:`_GALLERY_ACCESS_SQL`).
+_SPACE_ITEM_SPACE: dict[str, str] = {
+    "space_posts": "t.space_id",
+    "space_post_comments": (
+        "(SELECT p.space_id FROM space_posts p WHERE p.id = t.post_id)"
+    ),
+    "space_calendar_events": "t.space_id",
+    "bazaar_listings": "t.space_id",
+    "space_pages": "t.space_id",
+}
+_OWN_GALLERY_QUERIES: frozenset[str] = frozenset({"gallery_items"})
+#: Space item tables whose names are their host's choice (v_82): a seat
+#: opens their file only on the space's host (:data:`_HOSTED_SEAT`).
+_HOST_NAMED: frozenset[str] = frozenset({"space_pages"})
+
+
+def _space_access_rows() -> tuple[tuple[str, str, str, str], ...]:
+    rows = []
+    for table, col, shape in space_media_columns():
+        if table in _OWN_GALLERY_QUERIES:
+            continue
+        access = (
+            _HOSTED_SEAT
+            if table in _HOST_NAMED
+            else _SEAT.format(col=_SPACE_ITEM_SPACE[table])
+        )
+        rows.append((table, col, shape, access))
+    return tuple(rows)
+
+
 _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     (
         "conversation_messages",
@@ -208,24 +417,8 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ("feed_posts", "media_url", "one", _HOUSEHOLD),
     ("feed_posts", "image_urls_json", "list", _HOUSEHOLD),
     ("feed_posts", "link_preview_json", "json:$.thumbnail_url", _HOUSEHOLD),
+    ("feed_posts", "file_meta_json", "json:$.url", _HOUSEHOLD),
     ("post_comments", "media_url", "one", _HOUSEHOLD),
-    ("space_posts", "media_url", "one", _SEAT.format(col="t.space_id")),
-    ("space_posts", "image_urls_json", "list", _SEAT.format(col="t.space_id")),
-    (
-        "space_posts",
-        "link_preview_json",
-        "json:$.thumbnail_url",
-        _SEAT.format(col="t.space_id"),
-    ),
-    (
-        "space_post_comments",
-        "media_url",
-        "one",
-        _SEAT.format(
-            col="(SELECT p.space_id FROM space_posts p WHERE p.id = t.post_id)"
-        ),
-    ),
-    ("bazaar_listings", "image_urls_json", "list", _SEAT.format(col="t.space_id")),
     (
         "highlight_frames",
         "media_url",
@@ -237,11 +430,8 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("moments", "media_url", "one", "t.author_user_id = me.uid"),
     ("calendar_events", "cover_url", "one", _HOUSEHOLD),
-    ("space_calendar_events", "cover_url", "one", _SEAT.format(col="t.space_id")),
     ("pages", "cover_image_url", "one", _HOUSEHOLD),
     ("pages", "content", "markdown", _HOUSEHOLD),
-    ("space_pages", "cover_image_url", "one", _HOSTED_SEAT),
-    ("space_pages", "content", "markdown", _HOSTED_SEAT),
     (
         "page_edit_history",
         "cover_image_url",
@@ -256,6 +446,7 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("task_attachments", "url", "one", "t.uploaded_by = me.uid"),
     ("post_drafts", "media_url", "one", "t.username = me.uname"),
+    *_space_access_rows(),
     # The submitter's own held item (:data:`_HELD_LIVE` — the approve
     # claims the item BEFORE its apply re-checks the files for the
     # submitter). A fallback with its own rules: :data:`_HELD_SOURCE`.
@@ -279,91 +470,32 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
 _HELD_SOURCE = "space_moderation_queue"
 
 #: The LIVE rows of a space that show a file (v_83, :meth:`live_in_space`):
-#: table, column, shape, and the condition (first ``?`` = the space id).
-_LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
-    ("space_posts", "media_url", "one", "t.space_id = ? AND t.deleted = 0"),
-    ("space_posts", "image_urls_json", "list", "t.space_id = ? AND t.deleted = 0"),
-    (
-        "space_posts",
-        "link_preview_json",
-        "json:$.thumbnail_url",
-        "t.space_id = ? AND t.deleted = 0",
+#: table, column, shape, and the condition (first ``?`` = the space id) —
+#: the registry's columns with :data:`_SPACE_ITEM_LIVE_HERE`'s condition (a
+#: registry table missing there fails at import). Named exclusion:
+#: ``gallery_items`` (its own query, by album).
+_SPACE_ITEM_LIVE_HERE: dict[str, str] = {
+    "space_posts": "t.space_id = ? AND t.deleted = 0",
+    "space_post_comments": (
+        "t.deleted = 0 AND (SELECT p.space_id FROM space_posts p"
+        " WHERE p.id = t.post_id AND p.deleted = 0) = ?"
     ),
-    (
-        "space_post_comments",
-        "media_url",
-        "one",
-        (
-            "t.deleted = 0 AND (SELECT p.space_id FROM space_posts p"
-            " WHERE p.id = t.post_id AND p.deleted = 0) = ?"
-        ),
+    "bazaar_listings": (
+        "t.space_id = ? AND EXISTS (SELECT 1 FROM space_posts p"
+        " WHERE p.id = t.post_id AND p.deleted = 0)"
     ),
-    (
-        "bazaar_listings",
-        "image_urls_json",
-        "list",
-        (
-            "t.space_id = ? AND EXISTS (SELECT 1 FROM space_posts p"
-            " WHERE p.id = t.post_id AND p.deleted = 0)"
-        ),
-    ),
-    (
-        "space_calendar_events",
-        "cover_url",
-        "one",
-        "t.space_id = ? AND t.deleted_at IS NULL",
-    ),
+    "space_calendar_events": "t.space_id = ? AND t.deleted_at IS NULL",
     # A page's RAW names are our own files only on the space's host; on a
     # member household they are the host's, and only our page-scoped sp-
-    # copies count (:meth:`SqliteMediaReferenceRepo._page_names_of`).
-    (
-        "space_pages",
-        "cover_image_url",
-        "one",
-        f"t.space_id = ? AND t.deleted_at IS NULL AND {_HOSTED_SPACE}",
-    ),
-    # v_82 — every picture a live page's body shows.
-    (
-        "space_pages",
-        "content",
-        "markdown",
-        f"t.space_id = ? AND t.deleted_at IS NULL AND {_HOSTED_SPACE}",
-    ),
-)
+    # copies count (:meth:`SqliteMediaReferenceRepo._page_names_of`) — its
+    # cover and (v_82) every picture its body shows.
+    "space_pages": f"t.space_id = ? AND t.deleted_at IS NULL AND {_HOSTED_SPACE}",
+}
 
-#: v_87 — the LIVE space rows a missing file may be refilled for, with their
-#: space, creation time and the replay resource that re-ships their files
-#: (:meth:`SqliteMediaReferenceRepo.space_rows_of`): ``(FROM clause, space
-#: expr, value expr, live condition, shape, resource)``. Only resources whose
-#: replay re-ships files: posts and calendar covers here, space-album items
-#: in the method. Comments, listings and pages are left out (their replay
-#: ships no files, or the host fills them, v_82).
-_REFILL_SOURCES: tuple[tuple[str, str, str, str, str, str], ...] = (
-    ("space_posts t", "t.space_id", "t.media_url", "t.deleted = 0", "one", "posts"),
-    (
-        "space_posts t",
-        "t.space_id",
-        "t.image_urls_json",
-        "t.deleted = 0",
-        "list",
-        "posts",
-    ),
-    (
-        "space_posts t",
-        "t.space_id",
-        "json_extract(t.link_preview_json, '$.thumbnail_url')",
-        "t.deleted = 0 AND json_valid(t.link_preview_json)",
-        "one",
-        "posts",
-    ),
-    (
-        "space_calendar_events t",
-        "t.space_id",
-        "t.cover_url",
-        "t.deleted_at IS NULL",
-        "one",
-        "calendar",
-    ),
+_LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = tuple(
+    (table, col, shape, _SPACE_ITEM_LIVE_HERE[table])
+    for table, col, shape in space_media_columns()
+    if table not in _OWN_GALLERY_QUERIES
 )
 
 #: Page tables whose RAW names make a file this space's only where the
@@ -379,13 +511,7 @@ _PAGE_ROWS_HERE: dict[str, str] = {
 #: expression over the row ``t``); a table not listed is household-level
 #: (``NULL``) — never a space's content (:meth:`confined_to_space`).
 _SPACE_OF: dict[str, str] = {
-    "space_posts": "t.space_id",
-    "space_post_comments": (
-        "(SELECT p.space_id FROM space_posts p WHERE p.id = t.post_id)"
-    ),
-    "bazaar_listings": "t.space_id",
-    "space_calendar_events": "t.space_id",
-    "space_pages": "t.space_id",
+    **_SPACE_ITEM_SPACE,
     "page_edit_history": "t.space_id",
     "space_moderation_queue": "t.space_id",
 }
@@ -467,6 +593,17 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _json_list(raw: object) -> list[object]:
+    """The entries of a stored JSON array (anything else: none)."""
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        values = orjson.loads(raw)
+    except ValueError, TypeError:
+        return []
+    return values if isinstance(values, list) else []
+
+
 def _names_in_list(raw: object) -> list[str]:
     if not isinstance(raw, str) or not raw:
         return []
@@ -508,8 +645,43 @@ class AbstractMediaReferenceRepo(Protocol):
         ...
 
     async def space_rows_of(self, basename: str) -> list[tuple[str, str, str]]:
-        """``(space_id, created_at, resource)`` of every LIVE space row
-        showing *basename* (v_87 relay media refill)."""
+        """``(space_id, item_id, created_at)`` of every LIVE space item
+        showing *basename* (v_92 ``SPACE_MEDIA_WANTED``, requester side)."""
+        ...
+
+    async def live_item_files(
+        self, space_id: str, item_id: str
+    ) -> list[tuple[str, str | None]]:
+        """``(basename, owner)`` of every file the LIVE item *item_id* of
+        space *space_id* shows here (v_92 ``SPACE_MEDIA_WANTED``, provider
+        side)."""
+        ...
+
+    async def recent_item_files(
+        self, space_id: str, *, cutoff: str, limit: int
+    ) -> list[tuple[str, str, str | None, list[str]]]:
+        """``(created_at, item_id, owner, basenames)`` of the LIVE items of
+        *space_id* created at or after *cutoff* that show files, newest
+        first (the §25.6 bounded catch-up media)."""
+        ...
+
+    async def space_files(self, space_id: str) -> list[str]:
+        """Every file a row of space *space_id* names in a registry column
+        (live or not) — what a hard purge of the space may free."""
+        ...
+
+    async def gfs_copies_in_space(
+        self, space_id: str, names: Iterable[str]
+    ) -> set[str]:
+        """Those of *names* that are GFS reader copies (``sg-``) of items
+        of space *space_id* (its ``space_media_refs`` rows)."""
+        ...
+
+    async def forget_freed_gfs_copies(
+        self, space_id: str, names: Iterable[str]
+    ) -> None:
+        """Drop the ``space_media_refs`` row of each of *names* (GFS reader
+        copies of space *space_id*) that no row references any more."""
         ...
 
     async def content_names_of_item(self, item_id: str) -> list[str]:
@@ -547,10 +719,11 @@ class SqliteMediaReferenceRepo:
             )
             for r in rows_to_dicts(rows):
                 out.update(_names_in_list(r.get("v")))
-        for table, col, path in _JSON_FIELD_COLUMNS:
+        for table, col, path, live in _JSON_FIELD_COLUMNS:
             rows = await self._db.fetchall(
                 f"SELECT json_extract({col}, ?) AS v FROM {table} "
-                f"WHERE {col} IS NOT NULL AND json_valid({col})",
+                f"WHERE {col} IS NOT NULL AND json_valid({col})"
+                + (f" AND {live}" if live else ""),
                 (path,),
             )
             for r in rows_to_dicts(rows):
@@ -762,35 +935,103 @@ class SqliteMediaReferenceRepo:
         return False
 
     async def space_rows_of(self, basename: str) -> list[tuple[str, str, str]]:
-        """``(space_id, created_at, resource)`` of every LIVE space row that
-        shows *basename* — a post, a calendar cover or a space-album item not
-        deleted — with the replay resource (``posts`` / ``calendar`` /
-        ``gallery``) that re-ships the row's files. Sorted, deduplicated.
-        What a household asks its host to replay when a file pushed to it
-        through the GFS relay never arrived (v_87)."""
+        """``(space_id, item_id, created_at)`` of every LIVE space item that
+        shows *basename* (:data:`_SPACE_ITEM_FILES`: a post, a comment on a
+        live post, a calendar cover, a space-album item, a bazaar listing —
+        none deleted). Sorted, deduplicated. Which items a household names
+        when it asks for a file it does not hold (v_92
+        ``SPACE_MEDIA_WANTED``)."""
         if not basename:
             return []
         out: set[tuple[str, str, str]] = set()
-        rows = await self._db.fetchall(
-            "SELECT a.space_id AS s, i.created_at AS c FROM gallery_items i"
-            " JOIN gallery_albums a ON a.id = i.album_id"
-            " WHERE a.space_id IS NOT NULL AND i.deleted_at IS NULL"
-            " AND (i.filename = ? OR i.thumbnail_filename = ?)",
-            (basename, basename),
-        )
-        for r in rows_to_dicts(rows):
-            out.add((str(r["s"]), str(r["c"]), "gallery"))
         pattern = f"%{_like_escape(basename)}%"
-        for source, space, value, live, shape, resource in _REFILL_SOURCES:
+        for source, key, space, value, shape, live, _owner in _SPACE_ITEM_FILES:
             rows = await self._db.fetchall(
-                f"SELECT {space} AS s, t.created_at AS c, {value} AS v"
+                f"SELECT {space} AS s, {key} AS i, t.created_at AS c, {value} AS v"
                 f" FROM {source} WHERE {live} AND {value} LIKE ? ESCAPE '\\'",
                 (pattern,),
             )
             for r in rows_to_dicts(rows):
                 if r.get("s") and _hit(shape, r.get("v"), basename):
-                    out.add((str(r["s"]), str(r["c"]), resource))
+                    out.add((str(r["s"]), str(r["i"]), str(r["c"])))
         return sorted(out)
+
+    async def live_item_files(
+        self, space_id: str, item_id: str
+    ) -> list[tuple[str, str | None]]:
+        """``(basename, owner)`` of every file the LIVE item *item_id* of
+        space *space_id* shows here, each once, in source order — the space
+        checked in SQL, so an item of another space shows nothing. What a
+        provider may answer a ``SPACE_MEDIA_WANTED`` entry from (v_92)."""
+        if not space_id or not item_id:
+            return []
+        out: list[tuple[str, str | None]] = []
+        seen: set[str] = set()
+        for source, key, space, value, shape, live, owner in _SPACE_ITEM_FILES:
+            rows = await self._db.fetchall(
+                f"SELECT {value} AS v, {owner} AS o FROM {source}"
+                f" WHERE {key} = ? AND {space} = ? AND {live}",
+                (item_id, space_id),
+            )
+            for r in rows_to_dicts(rows):
+                raw = r.get("v")
+                names = (
+                    _names_in_list(raw)
+                    if shape == "list"
+                    else [n for n in (media_basename(raw),) if n]
+                )
+                who = r.get("o")
+                for name in names:
+                    if name not in seen and name not in (".", ".."):
+                        seen.add(name)
+                        out.append((name, str(who) if who else None))
+        return out
+
+    async def recent_item_files(
+        self, space_id: str, *, cutoff: str, limit: int
+    ) -> list[tuple[str, str, str | None, list[str]]]:
+        """``(created_at, item_id, owner, basenames)`` of every LIVE item of
+        *space_id* (:data:`_SPACE_ITEM_FILES`) created at or after *cutoff*
+        that shows a file, newest first (ties by item id); ``created_at``
+        normalised to SQLite's naive UTC form (stored values mix it with
+        the ISO ``T`` form). Bounded: the newest *limit* rows of each
+        source — the §25.6 catch-up media cuts them to its file budget."""
+        if not space_id or limit <= 0:
+            return []
+        items: dict[str, tuple[str, str | None, list[str]]] = {}
+        for source, key, space, value, shape, live, owner in _SPACE_ITEM_FILES:
+            rows = await self._db.fetchall(
+                f"SELECT {key} AS i, datetime(t.created_at) AS c, {owner} AS o,"
+                f" {value} AS v FROM {source}"
+                f" WHERE {space} = ? AND {live} AND {value} IS NOT NULL"
+                # Raw text first (indexable: ``idx_space_posts_created``):
+                # every stored form of a day at or after the cutoff's day
+                # sorts at or above that day — then exact across forms.
+                " AND t.created_at >= ?"
+                " AND datetime(t.created_at) >= datetime(?)"
+                " ORDER BY datetime(t.created_at) DESC LIMIT ?",
+                (space_id, cutoff[:10], cutoff, int(limit)),
+            )
+            for r in rows_to_dicts(rows):
+                raw = r.get("v")
+                names = (
+                    _names_in_list(raw)
+                    if shape == "list"
+                    else [n for n in (media_basename(raw),) if n]
+                )
+                names = [n for n in names if n not in (".", "..")]
+                if not names or not r.get("c"):
+                    continue
+                item_id = str(r["i"])
+                who = r.get("o")
+                held = items.get(item_id)
+                if held is None:
+                    items[item_id] = (str(r["c"]), str(who) if who else None, [])
+                    held = items[item_id]
+                held[2].extend(n for n in names if n not in held[2])
+        ordered = sorted(items.items(), key=lambda kv: kv[0])
+        ordered.sort(key=lambda kv: kv[1][0], reverse=True)
+        return [(c, item_id, who, names) for item_id, (c, who, names) in ordered]
 
     async def _page_names_of(self, space_id: str, *, live: bool) -> set[str]:
         """The page-scoped ``sp-`` names of the files *space_id*'s pages
@@ -824,13 +1065,97 @@ class SqliteMediaReferenceRepo:
                         names |= _names_in_markdown(raw)
         return {space_page_media_name(space_id, n) for n in names}
 
+    async def space_files(self, space_id: str) -> list[str]:
+        """Every file a row of space *space_id* names in a registry column
+        (:func:`space_media_columns`, live or not), each once — what a hard
+        purge of the space may free (``unlink_unreferenced`` still keeps a
+        file another row names). Only a canonical, non-reserved space file
+        (:func:`_space_file`); a page's raw names only on the space's host.
+        Not covered: a page's history (``page_edit_history``) and open
+        conflict sides on the host — the orphan sweep reclaims those once
+        the purge drops their rows."""
+        if not space_id:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        gfs_copies = {
+            str(r["n"])
+            for r in await self._db.fetchall(
+                "SELECT local_name AS n FROM space_media_refs WHERE space_id = ?",
+                (space_id,),
+            )
+        }
+        for table, col, shape in space_media_columns():
+            source, space, here = _SPACE_ROWS[table]
+            bare = table in _BARE_NAME_TABLES
+            value = f"t.{col}"
+            if shape.startswith("json:"):
+                value = (
+                    f"CASE WHEN json_valid(t.{col})"
+                    f" THEN json_extract(t.{col}, '{shape[len('json:') :]}') END"
+                )
+            rows = await self._db.fetchall(
+                f"SELECT {value} AS v FROM {source} WHERE {space} = ?{here}",
+                (space_id,),
+            )
+            for r in rows_to_dicts(rows):
+                raw = r.get("v")
+                refs: list[object]
+                if shape == "list":
+                    refs = list(_json_list(raw))
+                elif shape == "markdown":
+                    refs = list(page_body_media_refs(raw))
+                else:
+                    refs = [raw]
+                for ref in refs:
+                    name = _space_file(ref, bare=bare, gfs_copies=gfs_copies)
+                    if name is not None and name not in seen:
+                        seen.add(name)
+                        out.append(name)
+        for name in sorted(await self._page_names_of(space_id, live=False)):
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out
+
+    async def gfs_copies_in_space(
+        self, space_id: str, names: Iterable[str]
+    ) -> set[str]:
+        """Those of *names* that are GFS reader copies (``sg-``) of items
+        of space *space_id*: a ``space_media_refs`` row of the space names
+        them. What a post delete may free besides its space files."""
+        wanted = sorted({n for n in names if n and is_gfs_space_media_name(n)})
+        if not space_id or not wanted:
+            return set()
+        marks = ", ".join("?" for _ in wanted)
+        rows = await self._db.fetchall(
+            "SELECT local_name AS n FROM space_media_refs"
+            f" WHERE space_id = ? AND local_name IN ({marks})",
+            (space_id, *wanted),
+        )
+        return {str(r["n"]) for r in rows}
+
+    async def forget_freed_gfs_copies(
+        self, space_id: str, names: Iterable[str]
+    ) -> None:
+        """Drop the ``space_media_refs`` row of each of *names* — GFS
+        reader copies (``sg-``) of space *space_id* — that no row
+        references any more (its file was freed with the item that showed
+        it); one still shown keeps its row."""
+        for name in sorted({n for n in names if is_gfs_space_media_name(n)}):
+            if space_id and not await self._is_referenced(name):
+                await self._db.enqueue(
+                    "DELETE FROM space_media_refs WHERE space_id = ? AND local_name = ?",
+                    (space_id, name),
+                )
+
     async def content_names_of_item(self, item_id: str) -> list[str]:
         """The content-addressed (``sc-``, v_85) files item *item_id* shows
         here, each once, in source order."""
         out: list[str] = []
-        for table, key, value, shape in _ITEM_FILE_SOURCES:
+        for source, key, _space, value, shape, _live, _owner in _SPACE_ITEM_FILES:
             rows = await self._db.fetchall(
-                f"SELECT {value} AS v FROM {table} WHERE {key} = ?", (item_id,)
+                f"SELECT {value} AS v FROM {source} WHERE {key} = ?", (item_id,)
             )
             for r in rows:
                 raw = r["v"]
@@ -845,10 +1170,13 @@ class SqliteMediaReferenceRepo:
         return out
 
     async def is_referenced(self, basename: str) -> bool:
-        """``True`` when any row still points at the file ``basename``
-        (a page-scoped ``sp-`` name: when a space page here shows its file)."""
-        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX):
-            return basename in await self._page_scoped_names()
+        """``True`` when any row still points at the file ``basename`` —
+        one rule for every name: a row naming it (any table), or, for a
+        page-scoped ``sp-`` copy, a space page here showing its file."""
+        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX) and (
+            basename in await self._page_scoped_names()
+        ):
+            return True
         return await self._is_referenced(basename)
 
     async def _is_referenced(self, basename: str) -> bool:
@@ -875,10 +1203,11 @@ class SqliteMediaReferenceRepo:
             )
             if any(basename in _names_in_list(r["v"]) for r in rows):
                 return True
-        for table, col, path in _JSON_FIELD_COLUMNS:
+        for table, col, path, live in _JSON_FIELD_COLUMNS:
             rows = await self._db.fetchall(
                 f"SELECT json_extract({col}, ?) AS v FROM {table} "
-                f"WHERE {col} LIKE ? ESCAPE '\\' AND json_valid({col})",
+                f"WHERE {col} LIKE ? ESCAPE '\\' AND json_valid({col})"
+                + (f" AND {live}" if live else ""),
                 (path, pattern),
             )
             if any(media_basename(r["v"]) == basename for r in rows):

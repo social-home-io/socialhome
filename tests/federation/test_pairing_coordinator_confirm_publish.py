@@ -22,9 +22,10 @@ from socialhome.domain.events import PairingConfirmed
 from socialhome.federation.pairing_coordinator import PairingCoordinator
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from tests.pairing_fakes import SavesPendingMixin
 
 
-class _FakeRepo:
+class _FakeRepo(SavesPendingMixin):
     def __init__(self, *, local_identity: dict | None = None) -> None:
         self.instances: dict = {}
         self.pairings: dict = {}

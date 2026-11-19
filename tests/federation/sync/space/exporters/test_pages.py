@@ -4,8 +4,10 @@ the version hash and the open conflict list (v_48); a draft's
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from socialhome.domain.page import Page
-from socialhome.domain.page_version import PageConflictSide, version_hash
+from socialhome.domain.page_version import DraftBase, PageConflictSide, version_hash
 from socialhome.federation.sync.space.exporters.pages import PagesExporter
 
 
@@ -50,9 +52,6 @@ async def test_records_carry_seq_hash_and_conflict_but_no_draft_state():
 
 
 async def test_an_unacked_draft_exports_its_canonical_base_or_nothing():
-    from dataclasses import replace
-
-    from socialhome.domain.page_version import DraftBase
 
     repo = _Repo()
     repo.page = replace(repo.page, content="my draft", pending_base_seq=4)

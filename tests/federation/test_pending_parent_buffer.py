@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from socialhome.domain.events import (
     CommentAdded,
+    PollCreated,
     SpaceCommentSynced,
     SpacePostCreated,
     SpacePostSynced,
@@ -14,6 +15,7 @@ from socialhome.domain.events import (
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.federation.pending_parent_buffer import (
     PARENT_COMMENT,
+    PARENT_POLL,
     PARENT_POST,
     AwaitingParent,
     PendingParentBuffer,
@@ -284,3 +286,21 @@ async def test_an_oversized_item_is_not_held() -> None:
         label="big",
     )
     assert len(buf) == 0
+
+
+async def test_a_poll_landing_replays_the_votes_that_waited_for_it() -> None:
+    """A vote (or a close) waits for the poll of its post, not the post."""
+    bus = EventBus()
+    buf = PendingParentBuffer()
+    buf.attach_bus(bus)
+    rec = _Recorder()
+    assert _hold(buf, rec, "vote", kind=PARENT_POLL)
+    await bus.publish(SpacePostCreated(post=_post("p"), space_id="sp"))
+    assert rec.calls == []
+    # A household poll (no space) releases nothing.
+    await bus.publish(PollCreated(post_id="p", question="?", allow_multiple=False))
+    assert rec.calls == []
+    await bus.publish(
+        PollCreated(post_id="p", question="?", allow_multiple=False, space_id="sp")
+    )
+    assert rec.calls == ["vote"] and len(buf) == 0

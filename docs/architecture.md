@@ -475,7 +475,7 @@ event needs and whether the peer is reachable:
 | 1 — hot | WebRTC DataChannel `fed-v1` | Routine, real-time envelopes once the P2P channel is up. |
 | 2 — warm | WebRTC DataChannel `sync-v1` | Bulk content sync (initial sync after pairing, recovery after long offline). |
 | 3 — cold | HTTPS inbox `POST /federation/inbox/{id}` | Fallback before/while DataChannel is down, and for peers behind a blocked UDP path. |
-| 4 — no address / last resort | Connection-server envelope relay `POST {gfs}/gfs/envelope` — to the instance id, or (v_88) to the household's anonymous per-space GFS mailbox | Households seated from an invite link or a GFS "Ask to join" (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. Also the last-resort fallback for a **paired** household this household opted into the relay with (`remote_instances.gfs_relay` — set by a pairing code with a GFS reach, or later per connection by the admin, v_54), over its confirmed `peer_gfs_routes`. |
+| 4 — no address / last resort | Connection-server envelope relay `POST {gfs}/gfs/envelope` — to the instance id, or (v_89) to the household's one anonymous mailbox at that GFS | Households seated from an invite link or a GFS "Ask to join" (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. Also the last-resort fallback for a **paired** household this household opted into the relay with (`remote_instances.gfs_relay` — set by a pairing code with a GFS reach, or later per connection by the admin, v_54), over its confirmed `peer_gfs_routes`. |
 
 **Redirects.** Every outbound POST to a household inbox — tier 3 and outbox
 redelivery (a connection server never POSTs to a household: it holds no
@@ -493,20 +493,37 @@ Tier 4 is a `TransportStrategy` like the others
 selects it in two cases:
 
 - `source = space_session` — the only tier, to the connection server that
-  introduced the pair (`relay_via`). From v_88 this tier has a second
-  target: the household's **per-space GFS mailbox**. Per send,
-  `FederationTransport._mailbox_target` asks `SpaceMailboxService` for the
-  counterpart's signed mailbox entry for the envelope's space (stored in
-  `space_instances.mailbox` from the sealed redeem / ACK); when there is
-  one at v_88 or above and our connection to its GFS proved
+  introduced the pair (`relay_via`). From v_89 this tier has a second
+  target: the household's **one GFS mailbox** at that GFS, shared by every
+  space it reaches there. Per send, `FederationTransport._mailbox_target`
+  asks `GfsMailboxService` for the counterpart's verified member card
+  (stored in `space_instances.mailbox` from the sealed redeem / ACK,
+  `SPACE_MEMBER_CARD`, or the host's `SPACE_MAILBOX_DIRECTORY`); when it
+  names a mailbox at v_89 or above and our connection to that GFS proved
   `envelope_mailbox`, the envelope (or v_87 media frame) is sealed to the
   mailbox key and addressed to the mailbox id
   (`GfsRelayTransport.send_mailbox` / `send_media_mailbox`, over the
   anonymous session). Otherwise it is addressed to the instance id as
-  before. `SpaceMailboxService` also owns this household's side: the
-  KEK-wrapped mailbox root, tickets, minting at seat time, one anonymous
-  claim socket per mailbox, and unregistering a mailbox once no seat uses
-  it. See [`protocol/gfs-relay.md`](./protocol/gfs-relay.md#per-space-mailboxes-v_88).
+  before. `GfsMailboxService` also owns this household's side: the
+  KEK-wrapped mailbox root, tickets, one mailbox and one anonymous claim
+  socket per GFS (`instance_config` `gfs_mailboxes`), our signed member
+  card, and unregistering a mailbox once nothing needs it.
+  **Member directory.** `SpaceMemberDirectory` on the host passes the
+  cards it holds to the space's writer-seat member households (never
+  followers); a member seats each carded household lazily as a
+  `space_session` row with no `relay_via` (static-static keys from the
+  card's key-wrap key), so its own fan-out reaches that household's
+  mailbox. A seat is not a pairing: a pairing handshake between the
+  two keeps its pending half in memory beside the seat
+  (`federation/pending_pairing.py`) and only the confirmed pair replaces
+  the row; an unpair re-seats from the card. Such a directory seat is
+  skipped by the 30-min sync tick and
+  the capabilities fan-out, and is never sent an instance-addressed relay
+  frame: when no mailbox is reachable (no connection to that GFS, or the
+  household has none) `FederationService.send_with_mesh_fallback` sends a
+  three-hop `SPACE_ROUTED` `[member, host, member]` through the space's
+  host, sealed to the target's key-wrap key (`federation/host_hop.py`).
+  See [`protocol/gfs-relay.md`](./protocol/gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 - `source = manual` with our `gfs_relay` opt-in on — the **fallback**: RTC
   if the DataChannel is open, else the HTTPS inbox, and only when the inbox
   was not reached (network error, timeout, 5xx — never a 4xx, which is the
@@ -547,6 +564,32 @@ household's IP is still in the connection server's HTTP access log. See
 [`principles.md`](./principles.md) for that residual and the rest of the
 metadata this tier concedes.
 
+**A member behind a GFS is a member like any other.** Tier 4 is only a
+transport: a space member household reached through it gets the same
+content and the same flows as a paired or mesh-only one — the roster
+repair its sync BEGIN asks for (a snapshot only when the roster digest it
+carries is wrong), the media outbox's
+`SPACE_MEDIA_BLOB` pushes, page files it proposes, and from v_92 the same
+bounded catch-up push and `SPACE_MEDIA_WANTED` as everyone. How the bytes
+travel depends on the far end: a seat at v_87 or above whose GFS proves
+`envelope_media` takes full 512 KiB binary relay frames
+(`FederationService.relay_media_ok`); any other seat (v_80–86, or a GFS
+without `envelope_media`) takes the same push as JSON chunks of
+`RELAY_JSON_CHUNK_BYTES` through the relay. Where those small chunks would
+be the only way — a member's page proposal to such a host, a v_92 catch-up
+to such a member — the GFS media cache stays the path instead. What stays specific to it is listed, with
+a reason, in `tests/protocol/test_gfs_member_special_case_guard.py`: the
+seat itself (redeem, teardown), the transport
+(relay sizes and frames, mailboxes and multi uploads, no direct-sync
+signalling, no inbox POST), the seat's inbound vocabulary, the member
+directory, exclusions from non-space surfaces (DMs, moments, pairing) and
+the GFS media cache — a reader whose GFS keeps one is described its files
+(`media_refs`), and its push is skipped only while that cache is known to
+hold the file. The space signing seed is not an exception either: an admin
+household reached only through a GFS gets it like a paired one (v_94,
+`SPACE_ADMIN_KEY_SHARE` over the seat), and revoking it rotates the key and
+re-pins every GFS that lists the space.
+
 A tier-4 success is an **acceptance, not a delivery**: the relay answers
 a uniform `202` whether the recipient is online, offline or not one of
 its clients (anything else would be a presence oracle), so
@@ -577,12 +620,13 @@ unseals with the household's key-wrap key and routes on the sealed
 `kind`: §24.11 envelopes to the pipeline (with `RELAY_DELIVERED_VIA`
 naming our own `gfs_connections.id` for the delivering server during the
 dispatch), invite-bootstrap bodies to the redeem coordinator. A frame on
-one of our per-space mailboxes (v_88, `handle_mailbox_frame`) is opened
-with that mailbox's own key, must be a relayed §24.11 envelope (or media
-frame), and enters the pipeline with transport `TRANSPORT_GFS_MAILBOX` —
-the relay's timestamp window and opt-in gate, plus `check_mailbox_space`
-right after the parse (the envelope's `space_id` must be the mailbox's
-space or absent).
+our GFS mailbox (v_89, `handle_mailbox_frame`) is opened with that
+mailbox's own key, must be a relayed §24.11 envelope (or media frame), and
+enters the pipeline with transport `TRANSPORT_GFS_MAILBOX` — the relay's
+timestamp window and opt-in gate, plus `make_check_mailbox_sender` right
+after the parse: an envelope of a space is taken only from a member
+household of that space whose verified member card we hold, and a
+space-less `SPACE_*` envelope is refused on a mailbox.
 
 The authorize steps run **after** the replay-id is persisted, so a
 dropped envelope still answers 200 and the sender's outbox stops
@@ -671,7 +715,23 @@ Outbound envelopes go to `federation_outbox` first
 (`socialhome/repositories/outbox_repo.py`). The
 `infrastructure/outbox_processor.py` scheduler walks the table on a
 fixed cadence, picks the best transport for each peer (RTC if open,
-HTTPS otherwise), and retries with exponential backoff. Structural /
+HTTPS otherwise), and retries with exponential backoff. Since v_90 a
+failed send stores the event payload ONCE (`federation_outbox_payloads`,
+KEK-wrapped, migration 0145) with one row per recipient referencing it;
+the envelope is sealed per peer only at send time. A pass never waits for
+its deliveries: it starts them and returns, and recipients with a
+delivery in flight are *busy* (in memory) and left out of later passes
+until it ends, so each recipient's rows go one at a time in due order.
+Per-recipient sends share 8 slots, each bounded by a 120 s timeout. The
+outbox is also the **only multi-recipient sender**: a space broadcast
+writes the mailbox seats behind one GFS to it as one *multi payload* (with
+a stable `msg_id` every envelope built from it carries) and wakes it
+(`OutboxProcessor.wake`); the pass uploads the payload once per GFS — the
+body sealed once under a fresh key wrapped to each mailbox — on its own 4
+slots, so a hung peer never delays it. A throttled, timed-out or `5xx`
+upload is retried as a whole; a `4xx` refusal goes per row. A live send to
+a seat with a multi row pending is queued behind it
+([gfs-relay](protocol/gfs-relay.md#one-upload-for-many-mailboxes-v_91)). Structural /
 security-critical events have `expires_at = NULL` and never age out;
 ordinary events have a 7-day TTL (§4.4.7), and a moment's delete
 (`LONG_LIVED`, v_66) 30 days of retries on the ceiling backoff. A delivered envelope's row is
@@ -718,8 +778,13 @@ then jittered upward by up to 30 % so a throttled burst does not come back on
 one tick). A 429 still costs an attempt, so a
 peer that throttles forever is bounded exactly like an offline one —
 `MAX_ATTEMPTS`, the 7-day TTL and the per-peer pending cap — and a 429 never
-paints the household unreachable. Every other 4xx (410 replay / skew, 403
-bad signature, 400 malformed) is permanent and dropped; 404 is
+paints the household unreachable. **A 410 with `{"code": "REPLAY"}` is a
+delivery**: the peer answers that it already holds this envelope (our
+earlier POST timed out on our side while the peer was still working on
+it), so the row is marked delivered — see
+[Replay cache](#replay-cache). Every other 4xx (any other 410 — timestamp
+skew, a peer that predates the code — 403 bad signature, 400 malformed) is
+permanent and dropped; 404 is
 retried briefly for the pair-window race (`PAIR_WINDOW_404_ATTEMPTS`).
 Treating 429 as permanent once turned a single echo storm into the silent
 loss of unrelated envelopes (an `UNPAIR`, a replayed highlight).
@@ -737,7 +802,7 @@ reports it as `mesh_retry_scheduled` (not a terminal failure). While the
 FIFO exists, every later broadcast to the same member queues behind it
 instead of overtaking, so the member sees events in broadcast order. One
 task per target sends the queue in order from the head, on a private copy of
-the exact payload variant that member was sent (legacy / relay variants
+the exact payload variant that member was sent (legacy variants
 included). A delivered item is popped and the next goes; a deferrable miss
 keeps the head first and **backs off**: re-send *n* waits at least
 `MESH_DEFERRED_RETRY_BACKOFF_S[n-1]` (0 s, 60 s, 120 s, 240 s), never inside
@@ -928,6 +993,31 @@ boundary). The
 the §24.11 horizon on a slow cadence so the table doesn't grow
 unboundedly.
 
+**A duplicate is refused, and the sender is told it was one.** The HTTPS
+inbox answers a replay-cache hit with `410 {"error": "gone", "code":
+"REPLAY"}` (`federation/inbox_reply.py`) and logs it at INFO. The usual
+cause is benign: a sender's inbox POST is bounded at 10 s, so when the
+receiver is still working on the envelope the sender gives up and its
+outbox re-sends the same `msg_id` (re-signed); or the DataChannel → HTTPS
+failover delivers a second copy. A sender that reads the code counts the
+envelope as delivered (the outbox row is marked delivered, the first HTTPS
+send counts as `ok`) instead of dropping it as permanently rejected. The
+code is additive — status and `error` are unchanged, so a sender that
+predates it drops the row as before, which loses nothing — and fail-safe:
+only a 410 whose JSON body carries exactly that code counts (a binary
+media body never does). It is no oracle: the replay step runs after the
+signature step, so only an envelope signed by the paired household's
+pinned key can earn it, and a timestamp-skew 410 (decided before the
+signature) never carries it.
+
+"Already holds" means the receiver recorded the `msg_id` and owns the
+envelope from there (a handler that fails afterwards is the receiver's to
+retry). An **internal error** between the replay step and the step that
+persists the id takes the id back out of the cache: the sender is answered
+5xx, retries the same `msg_id`, and that retry is processed instead of
+being refused as a replay of an envelope that was never applied. A refusal
+(a 4xx) keeps the id — it is final for that envelope.
+
 That horizon (`crypto.REPLAY_CACHE_WINDOW`) is **25 h**, and it is set by
 the widest timestamp window any transport allows, not by the outbox's
 ~5.2 h redelivery cadence. A §D2b envelope carried by the connection
@@ -945,6 +1035,34 @@ Mutating HTTP routes accept an `Idempotency-Key` header; the
 `(user_id, key)`. Combined with the replay cache, this means
 both API callers and federation peers can retry safely.
 
+### Inbound handler retry
+
+An envelope's `msg_id` is stored in the replay cache *before* its handlers
+run, so the sender cannot deliver it again (and on the DataChannel, the GFS
+relay, a GFS mailbox and the mesh it gets no answer at all). A handler
+that then fails on a busy or locked database (`sqlite3.OperationalError`
+with SQLite's result code `SQLITE_BUSY` / `SQLITE_LOCKED`; the failing
+write did not commit) is run **once more, in place**, 1 s after the failure, after
+the receiver checked again that the sender is still a peer and that the
+post-decrypt gates (ban, deprovisioned author, archived space, writer
+seat) still pass (`federation/inbound_retry.py`, called by
+`EventDispatchRegistry.dispatch`). The replay cache is not touched. Call
+negotiation, typing, RTC signalling, the sync streams and the
+`SPACE_ROUTED` wrapper are never retried. Every handler failure that is
+final is one ERROR record naming the handler, the event type, the sending
+household and the exception class, with its traceback — the message never
+carries the payload.
+
+Limits: the whole handler runs again, so the writes it made before the
+failing one are repeated — handlers must be idempotent up to it (the ones
+checked return early on a duplicate, or upsert); any other failure (handler
+I/O, a timeout, a bug) is not retried — the handler may already have
+written something; a later event of the same
+sender arriving on another connection (a second HTTPS POST, another
+transport) can be applied before a retried one; an event waiting for its
+second try when the process restarts is lost. The space sync remains the
+heal for space content.
+
 ### Reconnect queue
 
 When a peer flips from `unreachable` → `confirmed`, the
@@ -960,7 +1078,9 @@ same lifecycle: `_stop: asyncio.Event` set in `stop()`, drained in
 `start()`, body is `while not self._stop.is_set()`. Reference
 template: `replay_cache_scheduler.py`. Schedulers cover replay-cache
 eviction, shared-GFS relay route discovery and expiry
-(`gfs_route_discovery_scheduler.py`), outbox processing, calendar reminders, page-lock expiry,
+(`gfs_route_discovery_scheduler.py`), the retry of space key re-pins and
+channel unregisters a GFS still owes after a key rotation
+(`gfs_cleanup_scheduler.py`), outbox processing, calendar reminders, page-lock expiry,
 post-draft GC, pairing-relay flush, post-rotation tasks, space
 retention, task deadlines, recurring-task spawning, password-reset-token
 GC, auth-audit-log pruning (`auth_audit_cleanup_scheduler.py` drops
@@ -1040,6 +1160,25 @@ via `with_release`. Receivers judge that block with
 holding the item checks that the release equals it in every applied field
 (`federation/moderation_approval.py`), against its own copy of the row for
 an edit.
+
+**Catch-up.** The host holds every pending item, so it repairs a reviewer
+household's copy: that household's §25.6 `SPACE_SYNC_BEGIN` to the host
+echoes what it holds by state (`mod_held`,
+`SpaceSyncScheduler.attach_moderation_echo` →
+`SpaceModerationFederation.held_echo`), and the host's
+`on_sync_begin` sends that one household the pending items it lacks or
+purged and the decisions it missed, and applies a rejection it never got
+— only for a live admin / moderator seat, rate limited and bounded. The
+host re-sends a space's pending reports on the same BEGIN, once per
+promotion (`ReportService.on_sync_begin`). Any space event too large for a JSON
+envelope on the GFS relay (a pending item, a large page, a §25.6 sync chunk
+holding one) goes to a household behind a GFS as one binary relay frame
+(the v_87 media frame, the payload as its bytes;
+`FederationService.relay_event_frame`, `RELAY_FRAME_EVENT_TYPES`), so a
+household behind a GFS keeps the size limits of local federation. A household whose person is promoted sends that
+BEGIN at once (`SpaceSyncScheduler.sync_with_host`). The queue never
+enters the §25.6 stream
+([`protocol/moderation.md`](./protocol/moderation.md#re-delivery-and-catch-up)).
 
 ### GFS cluster membership
 
@@ -1268,6 +1407,26 @@ readiness via the `media_status` field on their next list fetch
 same `_stop`/`_wake` `asyncio.Event` scheduler family as the other
 background services, with jittered exponential backoff that flips a job
 to `status='failed'` after its retry budget.
+
+### Space media fields (one registry)
+
+Which fields of a space item are files is declared once, in
+`SPACE_MEDIA_ITEMS` (`socialhome/domain/space_media_fields.py`): posts
+(`media_url`, `image_urls`, `file_meta.url`, the link card's
+`thumbnail_url`), comments, calendar covers, gallery items, bazaar listings
+and pages (cover + markdown body, plus a resolution's wire-only
+`merged_content`), each field with its shape (one / list / markdown), its
+DB column and its inbound limit. Every consumer reads it: the descriptor
+and hash-map rules (`record_media_urls`, `record_file_urls`), the send
+hooks and the `SPACE_MEDIA_BLOB` scope check (`item_media_urls`), space
+moderation (what a queued item names, its renames, the inbound sanitizer)
+and the media reference repo, whose space rows are generated from
+`space_media_columns()` with per-table condition maps (a missing condition
+fails at import; household tables stay hand-listed). One pattern,
+`LOCAL_MEDIA_REF_RE`, reads a markdown body for the signer, the repo and a
+page's renames. The same registry drives what a deleted post and a purged space free (`space_files`: only canonical, non-reserved space files and the space's own `sg-` GFS reader copies, never a DM's or a transient). Tripwire tests (`tests/domain/test_space_media_fields.py`
+plus each consumer's) fail when a file-like domain field is neither
+registered nor named as not-a-file, or a consumer misses a field.
 
 ### Host-sequenced documents (space pages, v_48)
 
@@ -2459,15 +2618,31 @@ provider streams since the lower of the two — so a household restored from
 an older file snapshot re-streams the gap on its next periodic session;
 no watermark, no echo, a changed session shape (record shape, the
 household's version, retention, its resource set) or a last full stream
-older than a day falls back to the whole window. A session is reaped only when idle,
+older than a day falls back to the whole window. A full stream's catch-up
+media is bounded on every path (the files of the last 30 days' items, ≤ 200
+per stream; older ones arrive on view). While a space's host does not answer
+a round's BEGIN, a member asks ONE trusted (admin / moderator) household
+for the bounded `SPACE_SYNC_RESUME` — that household's own people's rows
+and their files (v_92); a missing file on view goes to the host, and to a
+helper only while the host is silent or unreachable (`SPACE_MEDIA_WANTED`). A session is reaped only when idle,
 never mid-stream; see
 [`protocol/sync.md`](./protocol/sync.md#what-a-sync-streams) and
 [incremental sessions](./protocol/sync.md#incremental-sessions-change-stamps--per-household-watermark).
 Because every author is bound to the roster mirror, the mirror must heal on
 its own: the host sends a v_32 roster snapshot on seat, on a member's
-upgrade and on the periodic sync tick — on the tick only to a household
-whose last sync BEGIN did not echo the current roster version
-(`roster_echo`), and then without the removals it already holds — and a
+upgrade, and in reply to a member's sync BEGIN whose `roster_digest` (a
+SHA-256 of the live seats it mirrors, `domain/space_roster_digest.py`)
+differs from the host's for it — never on the host's own timer, so with
+gossip working a roster repair costs zero envelopes (an older household's
+`roster_echo` is answered the same way); only an admitted BEGIN counts, and
+by one rule: a mismatch gets one snapshot (the host's live seats and its
+removals of the last 30 days — every removal on a consecutive repair —
+merged entry by entry, strictly newer wins; a seat of the host's own
+household it does not name ends, any other household's seat is never
+inferred from absence) unless one went to that
+household within its cooldown — 30 min, doubling to a day on every
+consecutive mismatch — with at most two repair snapshots a minute per space
+and six host-wide, so a restart cannot burst — and a
 write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in

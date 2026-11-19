@@ -66,16 +66,8 @@ def _conn(cid: str = "c1", url: str = "https://g.test") -> GfsConnection:
     )
 
 
-def _dir(*ids: str, strict: tuple[str, ...] = ()) -> dict:
-    return {
-        "spaces": [
-            {
-                "space_id": i,
-                **({"member_publish_mode": "strict"} if i in strict else {}),
-            }
-            for i in ids
-        ]
-    }
+def _dir(*ids: str) -> dict:
+    return {"spaces": [{"space_id": i} for i in ids]}
 
 
 @pytest.fixture
@@ -85,13 +77,14 @@ def clock(monkeypatch):
     return now
 
 
-async def test_reads_the_whole_directory_with_modes(clock):
-    s = _Session(body=_dir("a", "b", strict=("b",)))
+async def test_reads_the_whole_directory(clock):
+    s = _Session(body=_dir("a", "b"))
     cache = GfsDirectoryCache(lambda: s)
-    assert await cache.directory(_conn()) == {"a": "trusted", "b": "strict"}
+    assert await cache.directory(_conn()) == frozenset({"a", "b"})
     assert await cache.lists(_conn(), "a")
-    assert await cache.mode(_conn(), "b") == "strict"
-    assert await cache.mode(_conn(), "zz") is None
+    assert not await cache.lists(_conn(), "zz")
+    # One mode (v_90): the directory keeps no publish mode.
+    assert not hasattr(cache, "mode")
     assert s.calls == ["https://g.test/gfs/spaces"]
 
 
@@ -151,7 +144,7 @@ async def test_unreadable_bodies_list_nothing(clock, session):
 
 async def test_non_string_ids_are_skipped(clock):
     s = _Session(body={"spaces": [1, {"space_id": ["a"]}, {}, {"space_id": "ok"}]})
-    assert await GfsDirectoryCache(lambda: s).directory(_conn()) == {"ok": "trusted"}
+    assert await GfsDirectoryCache(lambda: s).directory(_conn()) == frozenset({"ok"})
 
 
 async def test_transport_error_and_no_session(clock):
@@ -232,7 +225,7 @@ async def test_a_fetch_every_caller_abandoned_still_completes_quietly(clock):
     for _ in range(5):
         await asyncio.sleep(0)
     assert cache._inflight == {}
-    assert await cache.directory(_conn()) == {"a": "trusted"}
+    assert await cache.directory(_conn()) == frozenset({"a"})
     assert len(s.calls) == 1
 
 
@@ -263,10 +256,10 @@ async def test_forget_invalidates_a_download_in_flight(clock):
     await asyncio.sleep(0)
     cache.forget()
     s.gate.set()
-    assert await stale == {"old": "trusted"}  # that caller still gets it …
+    assert await stale == frozenset({"old"})  # that caller still gets it …
     assert len(cache) == 0  # … but it is not cached
     s.raw = json.dumps(_dir("new")).encode()
-    assert await cache.directory(_conn()) == {"new": "trusted"}
+    assert await cache.directory(_conn()) == frozenset({"new"})
     assert len(s.calls) == 2
 
 
@@ -281,7 +274,7 @@ async def test_the_directory_is_parsed_off_the_event_loop(clock, monkeypatch):
 
     monkeypatch.setattr(mod.asyncio, "to_thread", _spy)
     s = _Session(body=_dir("a"))
-    assert await GfsDirectoryCache(lambda: s).directory(_conn()) == {"a": "trusted"}
+    assert await GfsDirectoryCache(lambda: s).directory(_conn()) == frozenset({"a"})
     assert seen == [mod._parse_directory]
     assert mod.MAX_DIRECTORY_BODY_BYTES == 64 * 1024 * 1024
 

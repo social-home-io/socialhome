@@ -38,6 +38,7 @@ from .tasks import TasksExporter
 from .tasks_archived import TasksArchivedExporter
 from .tasks_deleted import TasksDeletedExporter
 from .timetables import TimetablesExporter
+from .timetables_deleted import TimetablesDeletedExporter
 from .zones import ZonesExporter
 from .zones_deleted import ZonesDeletedExporter
 
@@ -69,6 +70,7 @@ __all__ = [
     "TasksArchivedExporter",
     "TasksDeletedExporter",
     "TasksExporter",
+    "TimetablesDeletedExporter",
     "TimetablesExporter",
     "ZonesDeletedExporter",
     "ZonesExporter",

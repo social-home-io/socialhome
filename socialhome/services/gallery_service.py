@@ -100,6 +100,7 @@ from ..domain.space import (
     SpaceRole,
     SubscriberReadOnlyError,
 )
+from ..domain.space_media_fields import item_media_urls
 from ..federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -1123,7 +1124,7 @@ class GalleryService:
         # them (an item synced from another household may name a file
         # some other row owns). Best effort; a missing file is fine.
         await unlink_unreferenced(
-            self._media_dir, self._media_refs, [item.url, item.thumbnail_url]
+            self._media_dir, self._media_refs, item_media_urls("gallery", item)
         )
         await self._bus.publish(
             GalleryItemDeleted(

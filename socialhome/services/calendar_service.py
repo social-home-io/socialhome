@@ -29,11 +29,15 @@ from ..domain.calendar import (
     EventReminder,
     RsvpPastError,
     RSVPStatus,
+    calendar_event_to_wire_dict,
+    calendar_record,
+    clean_attendees,
+    clean_location,
     material_changes,
     validate_capacity,
 )
 from ..domain.child_protection import ProtectedCapability
-from ..domain.errors import WrongTypeError
+from ..domain.errors import NotFoundError, WrongTypeError
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -44,6 +48,12 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.relay_media_frame import (
+    SPACE_CALENDAR_ITEM_MAX_BYTES,
+    require_space_item_fits,
+    space_item_bytes,
+    space_item_too_large,
+)
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     AccessDecision,
@@ -56,6 +66,7 @@ from ..domain.space import (
     SpaceModerationItem,
     SpacePermissionError,
 )
+from ..domain.space_media_fields import item_media_urls
 from ..federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
     SPACE_POST_KIND,
@@ -66,7 +77,7 @@ from ..media_signer import strip_signature_query
 from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCalendarRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..utils.datetime import as_utc
-from ..utils.rrule import expand_rrule
+from ..utils.rrule import clean_rrule, expand_rrule
 from ..utils.timezones import is_valid_tz, parse_all_day_bound, parse_event_bound
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
@@ -162,25 +173,45 @@ def _updated_cover_url(value: str | None, stored: str | None) -> str | None:
     return _clean_cover_url(value)
 
 
-#: Upper bound on the ``location`` text so a hostile client can't push
-#: a 1 MB blob into every event row. Matches the iCal RFC 5545
-#: practical-limit guidance (line folding kicks in long before this).
-_LOCATION_MAX = 500
+def calendar_event_too_large(
+    event: CalendarEvent, *, was: CalendarEvent | None = None
+) -> bool:
+    """Whether a space calendar event — measured whole: its record as it
+    travels (:func:`~socialhome.domain.calendar.calendar_record`, every
+    field) — is over the limit every space has
+    (``SPACE_CALENDAR_ITEM_MAX_BYTES``) and larger than *was*, the event as
+    held now: an edit that makes an event stored before the limit no
+    larger is not too large."""
+    return space_item_too_large(
+        calendar_record(event),
+        limit=SPACE_CALENDAR_ITEM_MAX_BYTES,
+        was=calendar_record(was) if was is not None else None,
+    )
 
 
-def _clean_location(value: str | None) -> str | None:
-    """Normalise a location string from the client.
+def require_calendar_event_fits(
+    event: CalendarEvent, *, was: CalendarEvent | None = None
+) -> None:
+    """413 (``SPACE_ITEM_TOO_LARGE``) for :func:`calendar_event_too_large`."""
+    require_space_item_fits(
+        calendar_record(event),
+        limit=SPACE_CALENDAR_ITEM_MAX_BYTES,
+        was=calendar_record(was) if was is not None else None,
+    )
 
-    Trims surrounding whitespace, collapses an empty string to ``None``
-    (so blank input doesn't store as a literal empty value), and
-    truncates anything past :data:`_LOCATION_MAX` characters.
-    """
-    if value is None:
-        return None
-    trimmed = value.strip()
-    if not trimmed:
-        return None
-    return trimmed[:_LOCATION_MAX]
+
+def log_calendar_event_not_stored(what: str, event: CalendarEvent, source: str) -> None:
+    """The WARNING a receiver writes when it does not store a calendar
+    event over the limit (larger than its copy)."""
+    log.warning(
+        "%s from %s: calendar event %s is over the limit of its kind (%d of "
+        "%d bytes) and larger than the copy held — not stored",
+        what,
+        source,
+        event.id,
+        space_item_bytes(calendar_record(event)),
+        SPACE_CALENDAR_ITEM_MAX_BYTES,
+    )
 
 
 def _event_bound(
@@ -451,7 +482,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
     async def get_calendar(self, calendar_id: str) -> Calendar:
         result = await self._repo.get_calendar(calendar_id)
         if result is None:
-            raise KeyError(f"calendar {calendar_id!r} not found")
+            raise NotFoundError(f"calendar {calendar_id!r} not found")
         return result
 
     async def list_calendars(
@@ -474,7 +505,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
     async def delete_calendar(self, calendar_id: str) -> None:
         result = await self._repo.get_calendar(calendar_id)
         if result is None:
-            raise KeyError(f"calendar {calendar_id!r} not found")
+            raise NotFoundError(f"calendar {calendar_id!r} not found")
         await self._repo.delete_calendar(calendar_id)
 
     # ── Default-calendar seeding ─────────────────────────────────────────
@@ -658,7 +689,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
         # Validate calendar exists
         cal = await self._repo.get_calendar(calendar_id)
         if cal is None:
-            raise KeyError(f"calendar {calendar_id!r} not found")
+            raise NotFoundError(f"calendar {calendar_id!r} not found")
 
         # The tz first: a date-only bound names a day in the event's zone.
         event_tz = await self._resolve_personal_tz(
@@ -691,7 +722,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
             "cover_url": await self._openable_cover(
                 _clean_cover_url(cover_url), user_id=created_by
             ),
-            "location": _clean_location(location),
+            "location": clean_location(location),
             "tz": event_tz,
         }
 
@@ -837,7 +868,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
     async def get_event(self, event_id: str) -> CalendarEvent:
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"calendar event {event_id!r} not found")
+            raise NotFoundError(f"calendar event {event_id!r} not found")
         return result
 
     async def list_events_in_range(
@@ -856,7 +887,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
     async def delete_event(self, event_id: str) -> None:
         existing = await self._repo.get_event(event_id)
         if existing is None:
-            raise KeyError(f"calendar event {event_id!r} not found")
+            raise NotFoundError(f"calendar event {event_id!r} not found")
         cal = await self._repo.get_calendar(existing.calendar_id)
         await self._repo.delete_event(event_id)
         await self._emit(CalendarEventDeleted(event_id=event_id))
@@ -915,7 +946,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
         """
         existing = await self._repo.get_event(event_id)
         if existing is None:
-            raise KeyError(f"calendar event {event_id!r} not found")
+            raise NotFoundError(f"calendar event {event_id!r} not found")
         new_summary = (summary or existing.summary).strip()
         if not new_summary:
             raise ValueError("event summary must not be empty")
@@ -967,7 +998,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
             new_location = existing.location
         else:
             assert location is None or isinstance(location, str)
-            new_location = _clean_location(location)
+            new_location = clean_location(location)
         if attendees is not None:
             attendee_tuple, instance_for_user = await self._validate_attendees(
                 attendees,
@@ -1061,7 +1092,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
             )
         existing = await self._repo.get_event(event_id)
         if existing is None:
-            raise KeyError(f"calendar event {event_id!r} not found")
+            raise NotFoundError(f"calendar event {event_id!r} not found")
         if existing.origin != "remote_invite":
             raise ValueError(
                 "RSVPs only apply to inbound invites — local events have "
@@ -1462,7 +1493,7 @@ class SpaceCalendarService(
         created_by: str,
         description: str | None = None,
         all_day: bool = False,
-        attendees: tuple[str, ...] = (),
+        attendees: Sequence[str] | None = (),
         rrule: str | None = None,
         capacity: int | None = None,
         cover_url: str | None = None,
@@ -1506,10 +1537,36 @@ class SpaceCalendarService(
             ContentAction.CREATE,
             approved_by is None,
         )
+        # After the gate: a person without the right gets their 403 first.
+        attendees = clean_attendees(attendees)
+        rrule = clean_rrule(rrule)
         clean_cover = await self._openable_cover(
             _clean_cover_url(cover_url), user_id=created_by
         )
-        clean_location = _clean_location(location)
+        where = clean_location(location)
+        event = CalendarEvent(
+            # Owner-bound (v_36): no other household can announce this id
+            # first as its own user's event.
+            id=event_id or _mint_event_id(space_id, created_by),
+            calendar_id=space_id,  # space-scoped events use space_id as calendar_id
+            summary=summary,
+            description=description,
+            start=start_dt,
+            end=end_dt,
+            all_day=all_day,
+            attendees=attendees,
+            created_by=created_by,
+            rrule=rrule,
+            capacity=capacity,
+            cover_url=clean_cover,
+            location=where,
+            tz=event_tz,
+            # The longer spelling, so the check holds for either outcome.
+            announce_in_feed=False,
+        )
+        # After the gate above, before anything is stored or queued: the
+        # event, measured whole, within the limit every space has.
+        require_calendar_event_fits(event)
         if decision is AccessDecision.QUEUE:
             await self._submit_for_review(
                 space_id,
@@ -1528,7 +1585,7 @@ class SpaceCalendarService(
                     "rrule": rrule,
                     "capacity": capacity,
                     "cover_url": clean_cover,
-                    "location": clean_location,
+                    "location": where,
                     "tz": tz,
                     "announce_in_feed": bool(announce_in_feed),
                 },
@@ -1557,27 +1614,17 @@ class SpaceCalendarService(
                 # to the event instead (below); the route tells the creator.
                 announce_in_feed = False
                 queue_announce = refusal == "moderated"
-        event = CalendarEvent(
-            # Owner-bound (v_36): no other household can announce this id
-            # first as its own user's event.
-            id=event_id or _mint_event_id(space_id, created_by),
-            calendar_id=space_id,  # space-scoped events use space_id as calendar_id
-            summary=summary,
-            description=description,
-            start=start_dt,
-            end=end_dt,
-            all_day=all_day,
-            attendees=tuple(attendees),
-            created_by=created_by,
-            rrule=rrule,
-            capacity=capacity,
-            cover_url=clean_cover,
-            location=clean_location,
-            tz=event_tz,
-            announce_in_feed=announce_in_feed,
-        )
+        event = replace(event, announce_in_feed=announce_in_feed)
         if not await self._repo.save_event(event, space_id=space_id):
-            raise KeyError(f"calendar event {event.id!r} exists in another space")
+            # An integrity refusal, not a missing resource: the id is owned
+            # by another space (a submitted id, a collision). 404 for the
+            # caller; an operator line here.
+            log.warning(
+                "calendar: event %s exists in another space — not saved in %s",
+                event.id,
+                space_id,
+            )
+            raise NotFoundError(f"calendar event {event.id!r} exists in another space")
         saved = event
         await self._emit(CalendarEventCreated(event=saved))
         if queue_announce:
@@ -1726,7 +1773,7 @@ class SpaceCalendarService(
         """
         space = await self._spaces_or_raise().get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         if space.archived:
             raise SpaceArchivedError()
         return space
@@ -1779,7 +1826,9 @@ class SpaceCalendarService(
         """
         result = await self._repo.get_event(event_id)
         if result is None or result[0] != space_id:
-            raise KeyError(f"space calendar event {event_id!r} not found in this space")
+            raise NotFoundError(
+                f"space calendar event {event_id!r} not found in this space"
+            )
         return result[1]
 
     async def delete_event(
@@ -1824,7 +1873,9 @@ class SpaceCalendarService(
         if not await self._repo.delete_event(
             event_id, space_id=space_id, deleted_by=approved_by or actor_user_id
         ):
-            raise KeyError(f"space calendar event {event_id!r} not found in this space")
+            raise NotFoundError(
+                f"space calendar event {event_id!r} not found in this space"
+            )
         await self._emit(
             CalendarEventDeleted(
                 event_id=event_id,
@@ -1863,7 +1914,7 @@ class SpaceCalendarService(
         end: str | None = None,
         all_day: bool | None = None,
         description: str | None = None,
-        attendees: tuple[str, ...] | None = None,
+        attendees: Sequence[str] | None = None,
         rrule: str | None = None,
         capacity: int | None = None,
         clear_capacity: bool = False,
@@ -1895,6 +1946,11 @@ class SpaceCalendarService(
         new_summary = (summary if summary is not None else existing.summary).strip()
         if not new_summary:
             raise ValueError("event summary must not be empty")
+        if attendees is not None:
+            attendees = clean_attendees(attendees)
+        if rrule is not None:
+            # A blank rule clears it, as before (stored blank).
+            rrule = clean_rrule(rrule) or ""
         # The tz first: a date-only bound names a day in the event's zone.
         if tz is not None:
             if not is_valid_tz(tz):
@@ -1948,7 +2004,7 @@ class SpaceCalendarService(
             new_location = existing.location
         else:
             assert location is None or isinstance(location, str)
-            new_location = _clean_location(location)
+            new_location = clean_location(location)
         updated = replace(
             existing,
             summary=new_summary,
@@ -1965,6 +2021,10 @@ class SpaceCalendarService(
             location=new_location,
             tz=new_tz,
         )
+        # After the gate above, before anything is stored or queued: the
+        # event as it would be, measured whole. One stored before the limit
+        # can still be saved no larger.
+        require_calendar_event_fits(updated, was=existing)
         if decision is AccessDecision.QUEUE:
             # Validated above; the patch carries exactly what was sent.
             sent: dict[str, Any] = {
@@ -2009,7 +2069,16 @@ class SpaceCalendarService(
                 snapshot={k: before[k] for k in shown},
             )
         if not await self._repo.save_event(updated, space_id=space_id):
-            raise KeyError(f"calendar event {updated.id!r} not found in this space")
+            # Read in this space a moment ago, refused by the space-scoped
+            # save now: the row moved or went — an integrity line.
+            log.warning(
+                "calendar: repo refused to save event %s in space %s",
+                updated.id,
+                space_id,
+            )
+            raise NotFoundError(
+                f"calendar event {updated.id!r} not found in this space"
+            )
         await self._publish_federation_event_saved(
             space_id=space_id,
             event=updated,
@@ -2063,7 +2132,7 @@ class SpaceCalendarService(
             )
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"event {event_id!r} not found")
+            raise NotFoundError(f"event {event_id!r} not found")
         space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         # Phase E: past-event RSVP lock. Once an occurrence has *ended*
@@ -2213,7 +2282,7 @@ class SpaceCalendarService(
             raise ValueError("minutes_before must be >= 0")
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"event {event_id!r} not found")
+            raise NotFoundError(f"event {event_id!r} not found")
         _space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         fire_at_dt = occ_dt - timedelta(minutes=minutes_before)
@@ -2306,13 +2375,13 @@ class SpaceCalendarService(
         """
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"event {event_id!r} not found")
+            raise NotFoundError(f"event {event_id!r} not found")
         space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         occ_iso = occ_dt.isoformat()
         existing = await self._existing_rsvp(event_id, user_id, occ_iso)
         if existing != RSVPStatus.REQUESTED:
-            raise KeyError(
+            raise NotFoundError(
                 f"no pending request for user {user_id!r} on this occurrence",
             )
         new_status = (
@@ -2359,13 +2428,13 @@ class SpaceCalendarService(
         """Deny a pending request-to-join — removes the row entirely."""
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"event {event_id!r} not found")
+            raise NotFoundError(f"event {event_id!r} not found")
         _space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         occ_iso = occ_dt.isoformat()
         existing = await self._existing_rsvp(event_id, user_id, occ_iso)
         if existing != RSVPStatus.REQUESTED:
-            raise KeyError(
+            raise NotFoundError(
                 f"no pending request for user {user_id!r} on this occurrence",
             )
         # Reuse remove_rsvp so federation propagation + waitlist
@@ -2534,54 +2603,28 @@ class SpaceCalendarService(
         in its own copy of the payload, and is uploaded once per GFS."""
         if self._federation is None:
             return
+        fresh = _new_event_files(event, previous_cover)
         media_plan = (
             await self._plan_media_refs(
-                space_id, [event.cover_url], item_id=event.id, followers=False
+                space_id, fresh, item_id=event.id, followers=False
             )
-            if event.cover_url and event.cover_url != previous_cover
+            if fresh
             else None
         )
         per_peer = self._media_refs_per_peer(media_plan)
         extra: dict = {"per_peer": per_peer} if per_peer is not None else {}
         payload: dict = {
-            # The space this write belongs to, in the payload as well as
-            # the routing field. A mesh-relayed envelope (SPACE_ROUTED)
-            # carries no plaintext routing ``space_id`` — a relay must not
-            # learn which space is being served — so the payload's copy is
-            # the only thing the receiver's §24.11 space-writer gate can
-            # read there. Additive; older peers ignore it.
-            "space_id": space_id,
-            "event_id": event.id,
-            "calendar_id": event.calendar_id,
-            "summary": event.summary,
-            "description": event.description,
-            "start": event.start.isoformat(),
-            "end": event.end.isoformat(),
-            "all_day": event.all_day,
-            "attendees": list(event.attendees),
-            "created_by": event.created_by,
-            "rrule": event.rrule,
-            "cover_url": event.cover_url,
-            "location": event.location,
-            # IANA wall-clock anchor — additive on the wire. Old peers
-            # without this field ignore it on the inbound side.
-            "tz": event.tz,
-            # §23.15 opt-in feed mirror. The receiver's CalendarFeedBridge
-            # reads this to decide whether to mint a feed post. Absent on
-            # an older sender → the receiver defaults to True (the historic
-            # always-mirror behaviour) so events still surface there.
-            "announce_in_feed": event.announce_in_feed,
+            # The event itself in the one shape a resume replays too.
+            **calendar_event_to_wire_dict(event, space_id),
             # v_42: who made the write — receivers check it against the
             # space's ``calendar`` access level. Older peers ignore it.
             "actor_user_id": actor_user_id,
         }
-        # The per-occurrence cap (Phase C) — members enforce it on RSVPs.
-        # Additive: an older receiver ignores it, and a receiver keeps its
-        # held value when it is absent.
-        payload["capacity"] = event.capacity
         # A write released from the moderation queue names it (v_43).
         payload = with_release(payload)
-        payload = await self._with_file_hashes(payload, [event.cover_url])
+        payload = await self._with_file_hashes(
+            payload, item_media_urls("calendar", event)
+        )
         if MODERATION_BLOCK_KEY not in payload:
             await self._federation.broadcast_to_space_members(
                 space_id, evt_type, payload, **extra
@@ -2613,13 +2656,8 @@ class SpaceCalendarService(
         no bytes). One outbox row per household: N members × one picture
         (≤ the WebP cap) per cover change. Fail-soft: the event itself has
         already gone out."""
-        cover = event.cover_url
-        if (
-            self._media_sync is None
-            or self._space_repo is None
-            or not cover
-            or cover == previous_cover
-        ):
+        fresh = _new_event_files(event, previous_cover)
+        if self._media_sync is None or self._space_repo is None or not fresh:
             return
         own = self._federation.own_instance_id if self._federation is not None else ""
         try:
@@ -2631,7 +2669,7 @@ class SpaceCalendarService(
                 space_id=space_id,
                 correlation_id=event.id,
                 target_instance_ids=targets,
-                media_urls=[cover],
+                media_urls=fresh,
             )
         except Exception:
             log.exception(
@@ -2925,3 +2963,10 @@ class CalendarModerationHandler:
         if item.action == ContentAction.DELETE.value:
             return item_payload_snapshot(item) or {}
         return {k: p.get(k) for k in _EVENT_CREATE_FIELDS}
+
+
+def _new_event_files(event: CalendarEvent, previous_cover: str | None) -> list[str]:
+    """The files a space calendar event shows (the registry's
+    ``calendar`` fields — its cover) that its previous version did not
+    (*previous_cover*): an edit that keeps the cover ships no bytes."""
+    return [u for u in item_media_urls("calendar", event) if u != previous_cover]

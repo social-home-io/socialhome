@@ -45,7 +45,7 @@ from ..domain.conversation import (
     mute_until_for,
 )
 from ..domain.dm_location import normalise_location_content
-from ..domain.errors import CodedError, InvalidMediaRefError
+from ..domain.errors import CodedError, InvalidMediaRefError, NotFoundError
 from ..domain.events import (
     DmConversationCreated,
     DmMessageCreated,
@@ -55,6 +55,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.household_dashboard import ACK_EMOJI
+from ..domain.media_constraints import local_media_ref
 from ..federation import compat
 from ..federation.owner_bound_id import SPACE_CHAT_MESSAGE_KIND, mint_owner_bound_id
 from ..infrastructure.event_bus import EventBus
@@ -65,7 +66,6 @@ from ..repositories.user_repo import AbstractUserRepo
 from .dm_audience import local_audience
 from .dm_group_service import DmGroupService, clean_group_name
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
-from .inbound_media_store import local_media_ref
 from .media_ref_guard import MediaRefGuardedMixin
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
@@ -380,7 +380,7 @@ class DmService(MediaRefGuardedMixin, VisibilityMixin, ProtectionGateMixin):
             )
         remote = await get_remote(str(other_user_id))
         if remote is None:
-            raise KeyError(f"remote user {other_user_id!r} not found")
+            raise NotFoundError(f"remote user {other_user_id!r} not found")
         if remote.user_id == creator.user_id:
             raise DmSelfError()
         await self._guard_block_pair(creator.user_id, remote.user_id)
@@ -591,7 +591,7 @@ class DmService(MediaRefGuardedMixin, VisibilityMixin, ProtectionGateMixin):
         else:
             kept = [s for s in seats if not await self._seat_is_user(s, user_id)]
             if len(kept) == len(seats):
-                raise KeyError(f"user {user_id!r} is not in this group")
+                raise NotFoundError(f"user {user_id!r} is not in this group")
             seats = kept
         await self._commit_group(
             conv, local_usernames=local, remote_members=seats, name=conv.name
@@ -1589,10 +1589,10 @@ class DmService(MediaRefGuardedMixin, VisibilityMixin, ProtectionGateMixin):
         """
         msg = await self._convos.get_message(message_id)
         if msg is None or msg.deleted:
-            raise KeyError("message not found")
+            raise NotFoundError("message not found")
         conv = await self._convos.get(msg.conversation_id)
         if conv is None or conv.system_scope is not SystemChatScope.HOUSEHOLD:
-            raise KeyError("message not found")
+            raise NotFoundError("message not found")
         if await self._convos.add_reaction(message_id, as_user_id, ACK_EMOJI):
             await self._publish_reaction(msg, as_user_id, ACK_EMOJI, "add")
 
@@ -1702,7 +1702,7 @@ class DmService(MediaRefGuardedMixin, VisibilityMixin, ProtectionGateMixin):
     async def _require_user(self, username: str):
         user = await self._users.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         return user
 
     async def _guard_block_pair(self, sender_id: str, recipient_id: str) -> None:
@@ -1837,7 +1837,7 @@ class DmService(MediaRefGuardedMixin, VisibilityMixin, ProtectionGateMixin):
     ) -> Conversation:
         conv = await self._convos.get(conversation_id)
         if conv is None:
-            raise KeyError(f"conversation {conversation_id!r} not found")
+            raise NotFoundError(f"conversation {conversation_id!r} not found")
         return conv
 
     async def _require_dm_conversation(self, conversation_id: str) -> Conversation:
@@ -1845,7 +1845,7 @@ class DmService(MediaRefGuardedMixin, VisibilityMixin, ProtectionGateMixin):
         (404): it has no members to manage and nobody can leave it."""
         conv = await self._require_conversation(conversation_id)
         if conv.is_system:
-            raise KeyError(f"conversation {conversation_id!r} not found")
+            raise NotFoundError(f"conversation {conversation_id!r} not found")
         return conv
 
     async def _require_membership(
@@ -1969,7 +1969,7 @@ class DmService(MediaRefGuardedMixin, VisibilityMixin, ProtectionGateMixin):
         if msg is None or (
             conversation_id is not None and msg.conversation_id != conversation_id
         ):
-            raise KeyError(f"message {message_id!r} not found")
+            raise NotFoundError(f"message {message_id!r} not found")
         return msg
 
     # ── Federation fan-out ─────────────────────────────────────────────

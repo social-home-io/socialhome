@@ -47,7 +47,7 @@ from ..domain.conversation import (
     GroupRosterMember,
     RemoteConversationMember,
 )
-from ..domain.errors import CodedError
+from ..domain.errors import CodedError, NotFoundError
 from ..domain.events import DmConversationCreated, DmGroupRosterChanged
 from ..domain.federation import FederationEventType, InstanceSource, PairingStatus
 from ..domain.federation_capabilities import FederationCapability
@@ -228,7 +228,7 @@ class DmGroupService:
             )
         remote = await self._users.get_remote(user_id)
         if remote is None:
-            raise KeyError(f"user {user_id!r} not found")
+            raise NotFoundError(f"user {user_id!r} not found")
         instance = (
             await self._federation_repo.get_instance(remote.instance_id)
             if self._federation_repo is not None

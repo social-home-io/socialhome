@@ -1,10 +1,10 @@
-"""§27.9 release blocker (v_50): in a STRICT space nothing identifying
-reaches the connection server for a member publish, and the request is
-unlinkable to the publishing household.
+"""§27.9 release blocker (v_50; the one mode since v_90): nothing
+identifying reaches the connection server for a member publish, and the
+request is unlinkable to the publishing household.
 
 Drives a real GFS app end to end with the household's real publisher: the
-owner's notice puts the space in strict mode and pins the epoch's writer
-group key; two different member households — both holding that key — publish.
+owner's notice pins the epoch's writer group key; two different member
+households — both holding that key — publish.
 Every place the server could see or keep the item is checked: the requests it
 receives (over every session), its logs, the queued rows and the fan-out
 frames. None may carry a household id, a household key, a household
@@ -102,9 +102,6 @@ class _Gfs:
     async def payload_suite_for(self, conn, space_id, offered):
         return None  # never proved a compressed suite: JSON
 
-    async def member_publish_trusted_supported(self, conn):
-        return True
-
     async def member_publish_strict_supported(self, conn):
         return True
 
@@ -157,7 +154,7 @@ class _Spaces:
         return SimpleNamespace(
             id=space_id,
             space_type=SimpleNamespace(value="public"),
-            features=SimpleNamespace(gfs_publish_mode="strict", allow_subscribers=True),
+            features=SimpleNamespace(allow_subscribers=True),
         )
 
 
@@ -203,11 +200,10 @@ async def gfs(tmp_dir):
         )
         await fed.add_subscriber(space_id=SPACE_ID, instance_id=tc.follower.instance_id)
         await fed.mark_relay_seen(tc.follower.instance_id, at=int(time.time()))
-        # What the owner's v_50 notice establishes.
+        # What the owner's notice establishes.
         epochs = app[gfs_space_epoch_repo_key]
         now = int(time.time())
         await epochs.confirm(SPACE_ID, EPOCH, now=now)
-        await epochs.set_publish_mode(SPACE_ID, "strict", at=now)
         wkc = issue_writer_key_grant(
             space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=EPOCH
         ).writer_key_cert
@@ -252,7 +248,7 @@ async def _publish(tc, household, log) -> None:
     assert [c.id for c in accepted] == ["c"]
 
 
-async def test_nothing_identifying_reaches_the_gfs_for_a_strict_publish(gfs, caplog):
+async def test_nothing_identifying_reaches_the_gfs_for_a_member_publish(gfs, caplog):
     log: list = []
     with caplog.at_level(logging.DEBUG):
         await _publish(gfs, gfs.writer_a, log)
@@ -305,45 +301,20 @@ async def test_two_households_publish_indistinguishable_requests(gfs):
         assert leak not in json.dumps(a)
 
 
-async def test_a_trusted_space_with_a_pinned_writer_key_takes_it_just_as_blind(
-    gfs, caplog
-):
-    """v_57: the owner pins the writer key in a TRUSTED space too — the
-    server takes the anonymous publish there unchanged (no GFS-side change),
-    and it is exactly as blind as in a strict space."""
-    epochs = gfs.app_[gfs_space_epoch_repo_key]
-    await epochs.set_publish_mode(SPACE_ID, "trusted", at=int(time.time()) + 1)
-    strict = await epochs.get_strict(SPACE_ID)
-    assert strict is not None and strict.publish_mode == "trusted"
-    assert strict.writer_pk_for(EPOCH) is not None
-    log: list = []
-    with caplog.at_level(logging.DEBUG):
-        await _publish(gfs, gfs.writer_a, log)
-        await gfs.app_[gfs_member_publish_key].wait_idle()
-    queued = await gfs.app_[gfs_envelope_queue_repo_key].list_for(
-        gfs.follower.instance_id, now=0
+async def test_the_identified_publish_route_is_gone(gfs):
+    """v_90 — one mode: an older household's identified publish (household
+    id, signature, plaintext writer cert) has no route, so nothing of it is
+    relayed."""
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json={
+            "instance_id": gfs.writer_a.instance_id,
+            "target": SPACE_ID,
+            "writer_cert": {"cert_suite": "ed25519"},
+            "payload": "Y3Q",
+        },
     )
-    assert len(queued) == 1
-    assert set(queued[0].sealed) == MEMBER_PUBLISH_ANON_FRAME_KEYS
-    for blob in (json.dumps(log), json.dumps(queued[0].sealed), caplog.text):
-        for leak in (*gfs.writer_a.leaks(), *USERS, "writer_cert", '"signature"'):
-            assert leak not in blob
-
-
-async def test_an_identified_publish_into_a_strict_space_is_refused(gfs):
-    """An older (v_49) or misconfigured household's identified publish must
-    not be relayed into a strict space."""
-    from_trusted = _publisher(gfs, gfs.writer_a, [])
-    data = {
-        "epoch": EPOCH,
-        "writer_cert": (await from_trusted._writer_certs.own_cert(SPACE_ID, EPOCH))
-        .v1()
-        .to_wire(),
-        "payload": "Y3Q",
-    }
-    body = from_trusted._signed_item_body(_conn(gfs), SPACE_ID, data)
-    resp = await gfs.post("/gfs/member-publish", json=body)
-    assert resp.status == 403
+    assert resp.status in (404, 405)
     await gfs.app_[gfs_member_publish_key].wait_idle()
     assert (
         await gfs.app_[gfs_envelope_queue_repo_key].list_for(

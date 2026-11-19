@@ -40,6 +40,9 @@ export interface PollData {
   total_votes:    number
   user_vote:      string[]
   space_id:       string | null
+  /** Space polls only: ``false`` for a follower, who reads the poll but
+   *  cannot vote (the server answers 403). Absent → may vote. */
+  can_vote?:      boolean
 }
 
 interface Props {
@@ -132,7 +135,7 @@ export function PollUI({
   }
 
   const vote = async (optionId: string) => {
-    if (busy || data.closed) return
+    if (busy || data.closed || data.can_vote === false) return
     setBusy(true)
     try {
       const next = await api.post(
@@ -171,6 +174,11 @@ export function PollUI({
   // A closed poll says so once, in the pill — not "voting ended" next to
   // "Closed" ("Abstimmung beendet · Beendet") after its deadline.
   const closesIn = data.closed ? null : _formatCountdown(data.closes_at)
+  // A follower sees the results but cannot vote: the options are not
+  // pressable (the summary after a vote carries no ``can_vote`` — only a
+  // voter gets one).
+  const readOnly = data.can_vote === false
+  const readOnlyId = `sh-poll-readonly-${data.post_id}`
 
   return (
     <div class="sh-poll" role="region" aria-label={t('poll.region')}>
@@ -191,8 +199,9 @@ export function PollUI({
               type="button"
               class={`sh-poll-option ${voted ? 'sh-poll-option--voted' : ''} ${closedCls}`}
               onClick={() => void vote(opt.id)}
-              disabled={data.closed || busy}
+              disabled={data.closed || busy || readOnly}
               aria-pressed={voted}
+              aria-describedby={readOnly && !data.closed ? readOnlyId : undefined}
               aria-label={`${opt.text} — ${t(isOne(opt.vote_count) ? 'poll.votes_one' : 'poll.votes', { n: String(opt.vote_count) })}`}
             >
               <span class="sh-poll-option-bar" style={{ width: `${pct}%` }} />
@@ -209,6 +218,13 @@ export function PollUI({
           )
         })}
       </div>
+      {/* Say why the options don't respond — a follower would otherwise
+       *  tap a result row and see nothing happen. */}
+      {readOnly && !data.closed && (
+        <p class="sh-muted sh-poll-readonly" id={readOnlyId} data-testid="poll-readonly">
+          {t('poll.followers_read_only')}
+        </p>
+      )}
       <div class="sh-poll-footer">
         <span class="sh-muted">
           {t(isOne(total) ? 'poll.votes_one' : 'poll.votes', { n: String(total) })}

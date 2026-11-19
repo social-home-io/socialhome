@@ -25,9 +25,10 @@ from socialhome.federation.peer_pairing_client import (
     sign_peer_body,
 )
 from socialhome.infrastructure.key_manager import KeyManager
+from tests.pairing_fakes import SavesPendingMixin
 
 
-class _FakeRepo:
+class _FakeRepo(SavesPendingMixin):
     """In-memory ``AbstractFederationRepo`` good enough for handshake tests."""
 
     def __init__(self, local_identity: dict | None = None) -> None:

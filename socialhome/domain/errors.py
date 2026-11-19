@@ -30,6 +30,7 @@ __all__ = [
     "ImageTooLargeError",
     "ImageUnreadableError",
     "InvalidMediaRefError",
+    "NotFoundError",
     "PayloadTooLargeError",
     "SpaceNotPublishableError",
     "TierChangeRequiredError",
@@ -67,6 +68,29 @@ class CodedError(Exception):
         super().__init__(self.detail)
 
 
+class NotFoundError(CodedError, KeyError):
+    """The thing a request names is not there (or not visible to the
+    caller): a post deleted while the SPA polls its permalink, a member
+    who left, a stale id. A normal 404, answered without a log line.
+
+    Subclasses :class:`KeyError` — what these sites raised before — so
+    every existing ``except KeyError`` keeps catching it. ``what`` is the
+    internal description (ids included) for callers and tests; the client
+    only ever sees the fixed :attr:`detail`. A *bare* ``KeyError`` that
+    reaches :meth:`BaseView._iter` is still logged at WARNING: that one is
+    a programming error (a missing dict key), not a missing resource.
+    """
+
+    status = 404
+    code = "NOT_FOUND"
+    detail = "Resource not found."
+
+    def __init__(self, what: str = "") -> None:
+        super().__init__()
+        # ``str()`` / ``args`` read as the plain ``KeyError(what)`` did.
+        self.args = (what,)
+
+
 class ImageTooLargeError(CodedError):
     """An uploaded picture (avatar, cover, icon) is over the size limit."""
 
@@ -75,7 +99,13 @@ class ImageTooLargeError(CodedError):
     detail = "Upload exceeds size limit."
 
     def __init__(self, max_bytes: int) -> None:
-        super().__init__(params={"max_mb": max(1, max_bytes // (1024 * 1024))})
+        # A cap under a megabyte (a space cover / icon) is told in kB
+        # (1 kB = 1000 B) so it never reads as "under 1 MB".
+        if max_bytes < 1024 * 1024:
+            params = {"max_kb": max(1, max_bytes // 1000)}
+        else:
+            params = {"max_mb": max_bytes // (1024 * 1024)}
+        super().__init__(params=params)
 
 
 class PayloadTooLargeError(CodedError):
@@ -94,6 +124,72 @@ class PayloadTooLargeError(CodedError):
 
     def __init__(self, max_bytes: int) -> None:
         super().__init__(params={"max_mb": max(1, max_bytes // (1024 * 1024))})
+
+
+class SpaceItemTooLargeError(CodedError, ValueError):
+    """A space page, calendar event or space config over the limit of its
+    kind, measured whole (``domain/relay_media_frame.py``).
+
+    The limit is the same in every space and on every path — members are
+    equal however their household is reached — and is what one item, with
+    what others add to it later, takes to cross to any of them. Refused
+    where it is saved (413), after authorization, before anything is
+    stored.
+    """
+
+    status = 413
+    code = "SPACE_ITEM_TOO_LARGE"
+    detail = "This is too large to share with the space. Shorten it or split it up."
+
+    def __init__(self, max_bytes: int) -> None:
+        # The item's limit as a whole, in kB (1000 bytes) — what the SPA
+        # shows ("at most … kB in total").
+        super().__init__(params={"max_kb": max_bytes // 1000})
+
+
+class SpaceNameTooLongError(CodedError, ValueError):
+    """A space name over its cap (``max`` characters)."""
+
+    status = 422
+    code = "SPACE_NAME_TOO_LONG"
+    detail = "This space name is too long."
+
+    def __init__(self, max_chars: int) -> None:
+        super().__init__(params={"max": max_chars})
+
+
+class SpaceEmojiTooLongError(CodedError, ValueError):
+    """A space emoji over its cap (``max`` code points) — one emoji."""
+
+    status = 422
+    code = "SPACE_EMOJI_TOO_LONG"
+    detail = "Pick a single emoji."
+
+    def __init__(self, max_chars: int) -> None:
+        super().__init__(params={"max": max_chars})
+
+
+class CalendarRuleInvalidError(CodedError, ValueError):
+    """A recurrence rule this build cannot read, or over ``max``
+    characters."""
+
+    status = 422
+    code = "CALENDAR_RRULE_INVALID"
+    detail = "This repeat rule can't be used."
+
+    def __init__(self, max_chars: int) -> None:
+        super().__init__(params={"max": max_chars})
+
+
+class CalendarAttendeesInvalidError(CodedError, ValueError):
+    """An attendee list that is not a list of people, or over ``max``."""
+
+    status = 422
+    code = "CALENDAR_ATTENDEES_INVALID"
+    detail = "This guest list can't be used."
+
+    def __init__(self, max_attendees: int) -> None:
+        super().__init__(params={"max": max_attendees})
 
 
 class DownloadTooLargeError(CodedError):
@@ -160,10 +256,12 @@ class TranscodeQueueFullError(CodedError):
 class PageFilesNotShareableError(CodedError, ValueError):
     """A page edit adds pictures this household can't hand to the space's
     host (422 ``PAGE_FILES_NOT_SHAREABLE``): the host reaches us only through
-    a GFS relay (we were seated from an invite link), and we hold no upload
-    authorization for the space's GFS media cache (no writer key, writer
-    cert or channel grant). The words would land and the pictures would
-    stay broken for every member — the edit is refused instead (v_82)."""
+    a GFS relay (we were seated from an invite link) that carries no binary
+    media frames (a v_80–86 seat, a GFS without ``envelope_media``), and we
+    hold no upload authorization for the space's GFS media cache (no writer
+    key, writer cert or channel grant). The words would land and the
+    pictures would stay broken for every member — the edit is refused
+    instead (v_82)."""
 
     status = 422
     code = "PAGE_FILES_NOT_SHAREABLE"
@@ -226,6 +324,24 @@ class TierChangeRequiredError(SpaceNotPublishableError):
     detail = (
         "A public space is only visible to connected households. "
         "Make it global to list it on a GFS."
+    )
+
+
+class GfsKeyRotationUnsupportedError(SpaceNotPublishableError):
+    """A space whose admins may hold its signing key (delegation on, or a
+    seed shared for the current key epoch) is never listed on a GFS that
+    has not proved it re-pins the space key from the owner's cert
+    (``authority_rotation``): revoking such an admin could not be enforced
+    there (D1, owner decision 2026-11-15). Raised before anything is sent.
+    A subclass of :class:`SpaceNotPublishableError` so every caller that
+    skips an unpublishable space (re-publish, heal) skips this one too."""
+
+    status = 409
+    code = "GFS_KEY_ROTATION_UNSUPPORTED"
+    detail = (
+        "This GFS can't take a new space key, so admins acting for you "
+        "could not be revoked there. Choose another GFS, or turn off "
+        "\u201cLet admins act for me\u201d first."
     )
 
 

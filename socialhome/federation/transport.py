@@ -33,6 +33,7 @@ Security invariants:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import random
 import time
@@ -66,6 +67,7 @@ from .gfs_relay_transport import (
     RELAY_STATUS_TOO_LARGE,
 )
 from .inbound_validator import UnpairedPeerRefusedError
+from .inbox_reply import inbox_holds_envelope
 from .media_envelope import (
     MEDIA_HTTPS_CONTENT_TYPE,
     encode_media_body,
@@ -98,6 +100,14 @@ PING_INTERVAL_S: float = 30.0
 #: caller fall back to HTTPS inbox instead of unbounded SCTP queuing.
 #: 1 MiB is well above a single envelope (~10 KB) but far under the
 #: default libdatachannel message size ceiling.
+#:
+#: This gate IS the backpressure: every ``DataChannel.send`` in
+#: :class:`_RtcPeer` writes at once (``wait_for_drain=False``) and never
+#: awaits the library's drain event. That event is cleared whenever bytes are
+#: still buffered after a send and set again only when the buffer crosses the
+#: low threshold (half the HWM) from above — which a buffer of small frames
+#: never does — so a waiting send hangs forever, and with it whatever awaited
+#: it (an HTTP request broadcasting a space event right after a restart did).
 SEND_HWM_BYTES: int = 1 << 20
 
 #: How long :meth:`FederationTransport.close_peer` lets a DataChannel's
@@ -155,11 +165,16 @@ class HttpsInboxTransport:
         """POST the envelope to the remote inbox URL.
 
         Returns ``(ok, status_code)``. ``ok`` is true iff the peer
-        returned 2xx. Any network-level error returns
-        ``(False, None)`` so the caller can record a failure and
-        enqueue for retry.
+        returned 2xx — or answered that it already holds this envelope
+        (:func:`~socialhome.federation.inbox_reply.inbox_holds_envelope`:
+        a copy that went out on the DataChannel just before it closed and
+        this failover's copy of the same ``msg_id``). Any network-level
+        error returns ``(False, None)`` so the caller can record a failure
+        and enqueue for retry.
         """
-        ok, status, _retry_after = await self._post(instance, json=envelope_dict)
+        ok, status, _retry_after = await self._post(
+            instance, held_is_ok=True, json=envelope_dict
+        )
         return ok, status
 
     async def send_media(
@@ -188,10 +203,14 @@ class HttpsInboxTransport:
     async def _post(
         self,
         instance: RemoteInstance,
+        *,
+        held_is_ok: bool = False,
         **kwargs: Any,
     ) -> tuple[bool, int | None, str | None]:
         """``(ok, status, Retry-After header)``; ``(False, None, None)`` on
-        any error."""
+        any error. *held_is_ok*: the peer's "I already hold this envelope"
+        answer counts as ``ok`` (JSON envelopes only — a media body whose
+        chunk was refused has burnt its ``msg_id`` without being held)."""
         try:
             client = await self._client_once()
             async with post_to_peer(
@@ -202,7 +221,10 @@ class HttpsInboxTransport:
             ) as resp:
                 status = resp.status
                 retry_after = resp.headers.get("Retry-After") if status == 429 else None
-                return 200 <= status < 300, status, retry_after
+                ok = 200 <= status < 300 or (
+                    held_is_ok and await inbox_holds_envelope(resp)
+                )
+                return ok, status, retry_after
         except _PEER_UNREACHABLE_ERRORS as exc:
             # The peer is down, unreachable or slow — ordinary operation
             # for a household that is offline: the caller marks it
@@ -361,6 +383,14 @@ MAX_HANDSHAKE_RESTARTS: int = 2
 ICE_PRIME_TIMEOUT_S: float = 15.0
 
 
+#: How many early candidates of one peer may wait for their OFFER / ANSWER
+#: at once (:meth:`FederationTransport.on_rtc_ice`). They wait off the
+#: request that carried them, so nothing else slows a peer that keeps
+#: sending them. A handshake trickles a handful (host, server-reflexive
+#: and relay candidates per interface); past this the candidate is dropped.
+MAX_PARKED_ICE_CANDIDATES: int = 64
+
+
 class _RtcPeer:
     """One DataChannel session for one paired peer."""
 
@@ -376,6 +406,7 @@ class _RtcPeer:
         "_expected_answer_from",
         "_failed",
         "_ice_provider",
+        "_ignoring_offer",
         "_inbound",
         "_is_offerer",
         "_loop",
@@ -398,6 +429,7 @@ class _RtcPeer:
         "_teardown_task",
         "ice_generation",
         "instance_id",
+        "parked_candidates",
     )
 
     def __init__(
@@ -527,6 +559,19 @@ class _RtcPeer:
         #: Handshake restarts already spent, bounded by
         #: :data:`MAX_HANDSHAKE_RESTARTS`.
         self._restarts: int = 0
+        #: True from the moment we (impolite) ignore the remote's OFFER
+        #: because our own is still unanswered, until the ANSWER to ours
+        #: arrives. The remote trickled candidates for the OFFER it is
+        #: about to roll back, and a candidate names no negotiation: they
+        #: park in :meth:`add_ice_candidate` like any other. When one of
+        #: them times out there while this is set, it is not a loss on
+        #: OUR connection — counting it made the ANSWER restart (close) a
+        #: connection that had every candidate it needed.
+        self._ignoring_offer: bool = False
+        #: Candidates of this peer that :meth:`FederationTransport.on_rtc_ice`
+        #: has waiting on tasks of their own, bounded by
+        #: :data:`MAX_PARKED_ICE_CANDIDATES`. Kept by the transport.
+        self.parked_candidates: int = 0
 
     # ─── Transport change publication ─────────────────────────────────────
 
@@ -553,14 +598,15 @@ class _RtcPeer:
         self._is_offerer = True
         self._expected_answer_from = self.instance_id
         self._loop = asyncio.get_running_loop()
-        self._pc = rtc.PeerConnection(_build_rtc_config(self._ice_provider()))
+        pc = rtc.PeerConnection(_build_rtc_config(self._ice_provider()))
+        self._pc = pc
         # A fresh OFFER starts a clean negotiation: any candidates dropped
         # so far belonged to the PeerConnection we are replacing, so they
         # must not re-trigger recovery against this one — and we are no
         # longer waiting on anybody else's offer, we are making one.
         self._dropped_candidates = 0
         self._starved_awaiting_offer = False
-        self._channel = await self._pc.create_data_channel(CHANNEL_LABEL)
+        self._channel = await pc.create_data_channel(CHANNEL_LABEL)
         # Ask aiolibdatachannel to notify us once the buffered amount
         # drops below half the HWM — lets future refactors await
         # backpressure instead of polling. For now we just read
@@ -571,7 +617,7 @@ class _RtcPeer:
         # channel after the PC is established would force a renegotiation
         # the perfect-negotiation glare logic isn't tuned for. One idle
         # channel on a peering that never sends media is cheap.
-        self._media_channel = await self._pc.create_data_channel(
+        self._media_channel = await pc.create_data_channel(
             media_framing.CHANNEL_LABEL,
         )
         self._media_channel.set_buffered_amount_low_threshold(self._send_hwm // 2)
@@ -580,21 +626,25 @@ class _RtcPeer:
         # after the PC is established would force a renegotiation the
         # perfect-negotiation glare logic isn't tuned for. One idle channel
         # on a peering that never sends app messages is cheap.
-        self._app_channel = await self._pc.create_data_channel(
+        self._app_channel = await pc.create_data_channel(
             app_framing.CHANNEL_LABEL,
         )
         self._app_channel.set_buffered_amount_low_threshold(self._send_hwm // 2)
         # Tasks bound to the pc: auto-cancelled on pc.close().
-        self._pc.spawn_task(self._drain_channel(self._channel))
-        self._pc.spawn_task(self._drain_media_channel(self._media_channel))
-        self._pc.spawn_task(self._drain_app_channel(self._app_channel))
-        self._pc.spawn_task(self._drain_events())
+        pc.spawn_task(self._drain_channel(self._channel))
+        pc.spawn_task(self._drain_media_channel(self._media_channel))
+        pc.spawn_task(self._drain_app_channel(self._app_channel))
+        pc.spawn_task(self._drain_events())
 
-        local = await self._pc.set_local_description("offer")
+        local = await pc.set_local_description("offer")
+        if self._superseded(pc, "own OFFER"):
+            return
         await self._signaling(
             FederationEventType.FEDERATION_RTC_OFFER,
             {"sdp": local.sdp, "sdp_type": local.type},
         )
+        if self._superseded(pc, "own OFFER"):
+            return
         # Only now: start forwarding trickled ICE candidates. ``_drain_ice``
         # and the OFFER/ANSWER signaling are independent HTTPS posts to the
         # peer's inbox; if the drain task starts before the OFFER is queued,
@@ -602,7 +652,7 @@ class _RtcPeer:
         # receiver drops the candidate at the §24.12.5 buffer timeout.
         # Gathering keeps producing candidates inside libdatachannel's queue
         # until we start consuming, so deferral is lossless.
-        self._pc.spawn_task(self._drain_ice())
+        pc.spawn_task(self._drain_ice())
 
     async def accept_offer(self, *, sdp: str, from_instance: str) -> None:
         """Receive an SDP offer (answerer role) and reply with an answer.
@@ -630,6 +680,12 @@ class _RtcPeer:
                 self._making_offer,
                 self._pc.signaling_state if self._pc else None,
             )
+            # Only while the ANSWER to our own offer is outstanding
+            # (``apply_answer`` clears ``_expected_answer_from`` before it
+            # awaits, ``_making_offer`` only after): an OFFER that lands
+            # during that await must not leave the flag set for good.
+            if self._making_offer and self._expected_answer_from is not None:
+                self._ignoring_offer = True
             return
         if collision and self._polite:
             log.info(
@@ -639,18 +695,22 @@ class _RtcPeer:
             await self._close_pc()
             self._making_offer = False
 
+        self._ignoring_offer = False
         self._expected_answer_from = None  # answerer, no outstanding offer
         # Set only once the incoming OFFER is actually accepted: the
         # impolite side returns above with its own offer still pending,
         # and it is still the offerer.
         self._is_offerer = False
         self._loop = asyncio.get_running_loop()
-        self._pc = rtc.PeerConnection(_build_rtc_config(self._ice_provider()))
+        pc = rtc.PeerConnection(_build_rtc_config(self._ice_provider()))
+        self._pc = pc
 
-        self._pc.spawn_task(self._drain_incoming_channel())
-        self._pc.spawn_task(self._drain_events())
+        pc.spawn_task(self._drain_incoming_channel())
+        pc.spawn_task(self._drain_events())
 
-        await self._pc.set_remote_description(sdp, "offer")
+        await pc.set_remote_description(sdp, "offer")
+        if self._superseded(pc, "OFFER"):
+            return
         # Release any ICE candidates that arrived before the offer (or
         # during the construction of the PC). They'll have been parked
         # in :meth:`add_ice_candidate` waiting on this event.
@@ -667,11 +727,15 @@ class _RtcPeer:
         starved = self._dropped_candidates
         self._dropped_candidates = 0
         self._starved_awaiting_offer = False
-        local = await self._pc.set_local_description("answer")
+        local = await pc.set_local_description("answer")
+        if self._superseded(pc, "OFFER"):
+            return
         await self._signaling(
             FederationEventType.FEDERATION_RTC_ANSWER,
             {"sdp": local.sdp, "sdp_type": local.type},
         )
+        if self._superseded(pc, "OFFER"):
+            return
         # Only now: start forwarding trickled ICE candidates — see the
         # matching comment in :meth:`start_offer` for the wire-ordering
         # rationale. The original code spawned this task before
@@ -679,7 +743,7 @@ class _RtcPeer:
         # race the ANSWER POST and arrive at the offerer first; the
         # offerer then dropped the candidate at the buffer timeout
         # because its remote description hadn't been applied yet.
-        self._pc.spawn_task(self._drain_ice())
+        pc.spawn_task(self._drain_ice())
         # Same recovery trigger as :meth:`apply_answer`: the remote
         # description has landed on a PC that already lost candidates.
         # Deliberately at the END of the method rather than immediately
@@ -727,6 +791,9 @@ class _RtcPeer:
             )
             return False
         self._expected_answer_from = None
+        # The ANSWER ends an OFFER we ignored: the remote rolled it back
+        # to answer ours.
+        self._ignoring_offer = False
         await self._pc.set_remote_description(sdp, "answer")
         # Offerer side: flush any ICE candidates the answerer
         # trickled before we applied their SDP answer. Same
@@ -867,6 +934,14 @@ class _RtcPeer:
         (offerer); until then the candidate parks here. If the
         handshake never lands within :data:`ICE_BUFFER_TIMEOUT_S` we
         drop the candidate rather than pinning memory forever.
+
+        A drop is counted against our connection (and later restarts the
+        handshake) — except while we are ignoring the remote's glare
+        OFFER (:attr:`_ignoring_offer`): by arrival order that candidate
+        belongs to the ignored OFFER. The price: a candidate of the
+        remote's ANSWER that overtakes that ANSWER by more than the
+        timeout during glare is lost uncounted, and such a connection is
+        left to connect on what it has or to fail into its backoff.
         """
         if not candidate or self._closed:
             return
@@ -877,6 +952,22 @@ class _RtcPeer:
                     timeout=ICE_BUFFER_TIMEOUT_S,
                 )
             except TimeoutError:
+                if self._ignoring_offer:
+                    # Glare: the remote offered while our own OFFER was
+                    # still on its way, we ignored its OFFER, and this is
+                    # (by arrival order) a candidate of that OFFER. It is
+                    # not ours to lose, so it is not counted — a count
+                    # here made the ANSWER to our offer tear down the
+                    # connection it had just completed, mid-handshake
+                    # (libdatachannel then logs "DTLS alert: unknown CA",
+                    # "certificate verify failed", "Attempted to assign
+                    # DataChannels without ICE transport").
+                    log.debug(
+                        "fed RTC: ICE candidate for %s timed out while its "
+                        "OFFER is ignored (glare) — not charged to our offer",
+                        self.instance_id,
+                    )
+                    return
                 log.warning(
                     "fed RTC: ICE candidate for %s dropped — remote "
                     "description not applied within %.0fs",
@@ -1312,6 +1403,13 @@ class _RtcPeer:
     # ─── Sending ──────────────────────────────────────────────────────────
 
     @property
+    def awaits_remote_description(self) -> bool:
+        """Whether a candidate handed to :meth:`add_ice_candidate` now
+        would park (up to :data:`ICE_BUFFER_TIMEOUT_S`) instead of being
+        applied."""
+        return not self._remote_description_applied.is_set()
+
+    @property
     def is_ready(self) -> bool:
         """Whether the DataChannel is currently open."""
         return self._open.is_set() and not self._closed
@@ -1409,7 +1507,8 @@ class _RtcPeer:
         Returns ``True`` on success, ``False`` if the channel isn't
         currently open or the send buffer is over the HWM (caller
         should fall back to HTTPS inbox). Dropping under backpressure is
-        preferable to unbounded SCTP queueing.
+        preferable to unbounded SCTP queueing. The write never waits for
+        the buffer to drain (see :data:`SEND_HWM_BYTES`).
         """
         if not self.is_ready or self._channel is None:
             return False
@@ -1422,8 +1521,22 @@ class _RtcPeer:
                 self._send_hwm,
             )
             return False
+        data = orjson.dumps(envelope_dict)
+        limit = getattr(self._channel, "max_message_size", None)
+        if isinstance(limit, int) and 0 < limit < len(data):
+            # A large event (a long page) is more than one DataChannel
+            # message takes: the HTTPS inbox carries it. Not an error, and
+            # never handed to the channel to fail there.
+            log.debug(
+                "fed RTC peer %s: %d-byte frame over the channel's %d-byte "
+                "message limit — using the HTTPS inbox",
+                self.instance_id,
+                len(data),
+                limit,
+            )
+            return False
         try:
-            await self._channel.send(orjson.dumps(envelope_dict))
+            await self._channel.send(data, wait_for_drain=False)
             return True
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC send to %s failed: %s", self.instance_id, exc)
@@ -1460,7 +1573,7 @@ class _RtcPeer:
             )
             return False
         try:
-            await self._media_channel.send(frame)
+            await self._media_channel.send(frame, wait_for_drain=False)
             return True
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC media send to %s failed: %s", self.instance_id, exc)
@@ -1497,11 +1610,31 @@ class _RtcPeer:
             )
             return False
         try:
-            await self._app_channel.send(frame)
+            await self._app_channel.send(frame, wait_for_drain=False)
             return True
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC app send to %s failed: %s", self.instance_id, exc)
             return False
+
+    def _superseded(self, pc: Any, step: str) -> bool:
+        """Whether *pc* stopped being this peer's PeerConnection while the
+        handshake awaited (SDP, signalling).
+
+        :meth:`close` (unpair, retire, a spent peer replaced by
+        :meth:`FederationTransport._answering_peer` when the remote
+        re-offers), a polite rollback or a starved-answerer teardown can
+        each run during those awaits. The handshake on *pc* is then dead —
+        a newer one, if any, owns the peer — so the caller stops instead of
+        touching ``self._pc`` (``None`` or a different connection)."""
+        if self._pc is pc:
+            return False
+        log.debug(
+            "fed RTC peer %s: %s handling stopped — its PeerConnection was "
+            "closed or replaced meanwhile",
+            self.instance_id,
+            step,
+        )
+        return True
 
     async def _close_pc(self) -> None:
         """Close and discard the current PeerConnection, resetting negotiation state.
@@ -1614,12 +1747,14 @@ NEEDS_RECEIPT_EVENT_TYPES: frozenset[str] = frozenset(
 #: :meth:`FederationTransport.send_via_gfs_relay` asked to relay to a paired
 #: peer we never opted into the relay with (``RemoteInstance.gfs_relay``).
 TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED = "gfs_relay_not_enabled"
+#: v_89 — a directory seat (no ``relay_via``) with no usable GFS mailbox.
+TRANSPORT_ERROR_NO_MAILBOX = "no_mailbox"
 
 
 def _space_event_without_space(envelope_dict: dict) -> bool:
     """A ``SPACE_*`` envelope with no routing ``space_id`` (a redeem reply,
     a teardown): it never rides a mailbox — the receiver refuses one there —
-    so it goes instance-addressed (v_88)."""
+    so it goes instance-addressed."""
     return not envelope_dict.get("space_id") and str(
         envelope_dict.get("event_type") or ""
     ).startswith("space_")
@@ -1746,9 +1881,8 @@ class FederationTransport:
         #: honoured at once. ``None`` disables the relay fallback for
         #: paired peers (tests, builds with no connection server).
         self._gfs_routes = gfs_routes
-        #: v_88 — ``(instance_id, space_id | None)`` → the household's
-        #: per-space GFS mailbox for that space (its signed directory entry),
-        #: or ``None``. Asked per relay send to a ``space_session`` seat; a
+        #: v_89 — ``(instance_id, space_id | None)`` → the household's GFS
+        #: mailbox as its member card for that space names it, or ``None``. Asked per relay send to a ``space_session`` seat; a
         #: target is used only when our connection to its GFS proved
         #: ``envelope_mailbox`` (:meth:`_mailbox_target`). ``None`` → every
         #: relay send stays instance-addressed (tests, older wiring).
@@ -1821,6 +1955,7 @@ class FederationTransport:
         #: Inbound DataChannel handlers in flight. Shielded from their
         #: receive task (see :meth:`_inbound_factory`), so this set is what
         #: holds them and lets :meth:`close_all` cancel and await them.
+        #: Also the candidates :meth:`on_rtc_ice` parked off its caller.
         self._inbound_tasks: set[asyncio.Task] = set()
         #: Set once by :meth:`close_all`. Checked by
         #: :meth:`_ensure_handshake` so a ``send()`` parked on the
@@ -2105,8 +2240,8 @@ class FederationTransport:
                 )
             )
             if target is not None:
-                # v_88 — addressed to the household's mailbox for this space:
-                # the GFS sees the mailbox id, never ``instance.id``.
+                # v_89 — addressed to the household's GFS mailbox: the GFS
+                # sees the mailbox id, never ``instance.id``.
                 ok, status = await self._gfs_relay.send_mailbox(
                     instance=instance, target=target, envelope_dict=envelope_dict
                 )
@@ -2115,6 +2250,14 @@ class FederationTransport:
                     via="gfs_relay",
                     status_code=status,
                     error=None if ok else _relay_failure_reason(status),
+                )
+            if not instance.relay_via:
+                # A member seated from the host's directory (v_89) and no
+                # mailbox to reach it at: never the instance-addressed relay
+                # (it would show the GFS two households that never met
+                # there) — the caller goes through the host instead.
+                return _TransportSendResult(
+                    ok=False, via="gfs_relay", error=TRANSPORT_ERROR_NO_MAILBOX
                 )
             ok, status = await self._gfs_relay.send(
                 instance=instance,
@@ -2141,31 +2284,59 @@ class FederationTransport:
             error=TRANSPORT_ERROR_NO_ROUTE,
         )
 
-    async def send_mailbox_only(
-        self, *, instance: RemoteInstance, envelope_dict: dict
-    ) -> _TransportSendResult:
-        """Deliver ``envelope_dict`` to *instance*'s mailbox for its space
-        (v_88) or not at all — never the instance-addressed relay, which
-        names both households. For mailbox updates sent right after an
-        anonymous register / claim."""
-        target = (
-            None
-            if _space_event_without_space(envelope_dict) or self._gfs_relay is None
-            else await self._mailbox_target(
-                instance, envelope_dict.get("space_id"), media=False
-            )
-        )
-        if target is None or self._gfs_relay is None:
-            return _TransportSendResult(ok=False, via="gfs_relay", error="no_mailbox")
-        ok, status = await self._gfs_relay.send_mailbox(
-            instance=instance, target=target, envelope_dict=envelope_dict
-        )
-        return _TransportSendResult(
-            ok=ok,
-            via="gfs_relay",
-            status_code=status,
-            error=None if ok else _relay_failure_reason(status),
-        )
+    async def mailbox_reachable(
+        self, instance: RemoteInstance, space_id: str | None
+    ) -> bool:
+        """Whether an envelope of *space_id* to *instance* would go to its
+        GFS mailbox (v_89) — the host-hop decision for a directory seat."""
+        return await self._mailbox_target(instance, space_id, media=False) is not None
+
+    # ── v_91: one upload for many mailboxes ──────────────────────────────
+
+    async def multi_mailbox_target(
+        self,
+        instance: RemoteInstance,
+        space_id: str,
+        *,
+        caps: dict[str, int] | None = None,
+    ) -> MailboxTarget | None:
+        """*instance*'s GFS mailbox for *space_id* when a multi-recipient
+        upload can reach it (v_90): a :data:`InstanceSource.SPACE_SESSION`
+        seat whose mailbox sits on a GFS of ours that proved
+        ``envelope_mailbox`` and ``envelope_multi``. ``None`` → the caller
+        sends to it per recipient. *caps*, when given, caches
+        :meth:`multi_capacity` by GFS URL across the calls of one pass (one
+        broadcast, one outbox drain), so each GFS is probed once. Never
+        raises."""
+        if instance.source is not InstanceSource.SPACE_SESSION:
+            return None
+        target = await self._mailbox_target(instance, space_id, media=False)
+        if target is None:
+            return None
+        cap = caps.get(target.gfs_url) if caps is not None else None
+        if cap is None:
+            cap = await self.multi_capacity(target.gfs_url)
+            if caps is not None:
+                caps[target.gfs_url] = cap
+        return target if cap >= 1 else None
+
+    async def multi_capacity(self, gfs_url: str) -> int:
+        """Most mailbox ids one upload to the GFS at *gfs_url* may name;
+        ``0`` when no connection of ours there proved ``envelope_multi``."""
+        if self._gfs_relay is None:
+            return 0
+        return await self._gfs_relay.multi_capacity(gfs_url)
+
+    async def send_multi_mailbox(
+        self, *, to: list[tuple[MailboxTarget, dict]], body: dict
+    ) -> tuple[bool, int | None, float | None]:
+        """Hand ONE multi-recipient frame — *body* plus one key wrap per
+        target in *to* (all on one GFS) — to the relay: ``(ok, status,
+        retry_after_s)``. Same never-raise contract as the relay's
+        ``send``."""
+        if self._gfs_relay is None:
+            return False, None, None
+        return await self._gfs_relay.send_multi_mailbox(to=to, body=body)
 
     async def send_via_gfs_url(
         self,
@@ -2361,7 +2532,12 @@ class FederationTransport:
         if self._gfs_relay is None:
             return False, None
         media_body = encode_media_body(header_dict, payload_bytes)
-        if instance.source is InstanceSource.SPACE_SESSION:
+        if (
+            instance.source is InstanceSource.SPACE_SESSION
+            # As for a JSON envelope: a space event that names no space
+            # never rides a mailbox (the receiver refuses one there).
+            and not _space_event_without_space(header_dict)
+        ):
             target = await self._mailbox_target(
                 instance, header_dict.get("space_id"), media=True
             )
@@ -2374,14 +2550,59 @@ class FederationTransport:
             media_body=media_body,
         )
 
+    async def relay_frame_ready(
+        self, instance: RemoteInstance, *, event_type: str, space_id: str | None
+    ) -> bool:
+        """Whether an *event_type* event of *space_id* too large for a JSON
+        relay envelope can go to *instance* as one binary relay frame
+        (v_87): a household reached only through a GFS, whose mailbox sits
+        on a GFS of ours that proved ``envelope_media`` — or, with no
+        mailbox for it, whose own relay (``relay_via``) did. The same
+        choice :meth:`send_media_relay` makes. The peer's version is the
+        caller's check. Never raises."""
+        if (
+            self._gfs_relay is None
+            or instance.source is not InstanceSource.SPACE_SESSION
+        ):
+            return False
+        routing = {"event_type": event_type, "space_id": space_id}
+        if (
+            not _space_event_without_space(routing)
+            and await self._mailbox_target(instance, space_id, media=True) is not None
+        ):
+            return True
+        return await self._gfs_relay.media_ready(instance)
+
+    async def send_event_frame(
+        self,
+        *,
+        instance: RemoteInstance,
+        header_dict: dict,
+        payload_bytes: bytes,
+    ) -> _TransportSendResult:
+        """Deliver one event as a binary relay frame (v_87): the frame of
+        :meth:`send_media_relay`, its bytes the event's sealed payload.
+        The result reads like :meth:`send_via_gfs_relay`'s — ``ok`` is the
+        relay's acceptance; too large is permanent, throttled waitable."""
+        ok, status = await self.send_media_relay(
+            instance=instance, header_dict=header_dict, payload_bytes=payload_bytes
+        )
+        return _TransportSendResult(
+            ok=ok,
+            via="gfs_relay",
+            status_code=status,
+            error=None if ok else _relay_failure_reason(status),
+        )
+
     async def _mailbox_target(
         self, instance: RemoteInstance, space_id: object, *, media: bool
     ) -> MailboxTarget | None:
         """The mailbox an envelope of *space_id* (``None`` = space-less: any
-        shared space's) goes to for *instance* (v_88), or ``None`` — no
-        resolver, no entry, an entry below v_88, or a GFS of ours that did
-        not prove ``envelope_mailbox`` (and ``envelope_media`` for *media*).
-        ``None`` means today's instance-addressed relay. Never raises."""
+        shared space's) goes to for *instance* (v_89), or ``None`` — no
+        resolver, no card with a mailbox, or a GFS of ours that did not
+        prove ``envelope_mailbox`` (and ``envelope_media`` for *media*).
+        ``None`` means the instance-addressed relay for a seat with a
+        ``relay_via``, nothing for a directory seat. Never raises."""
         if self._mailbox_targets is None or self._gfs_relay is None:
             return None
         space = space_id if isinstance(space_id, str) and space_id else None
@@ -2641,14 +2862,54 @@ class FederationTransport:
         in :meth:`_RtcPeer.add_ice_candidate`. The §24.11 pipeline has
         already authenticated the sender by signature, so the stub
         peer can't be a DoS vector against unpaired instance_ids.
+
+        Returns once the candidate is applied — or, when it has to wait
+        for its description, as soon as it is parked (at most
+        :data:`MAX_PARKED_ICE_CANDIDATES` per peer).
         """
+        if self._closing:
+            return
         peer = await self._answering_peer(from_instance)
         if peer is None:
             return
-        await peer.add_ice_candidate(
+        if (
+            peer.awaits_remote_description
+            and peer.parked_candidates >= MAX_PARKED_ICE_CANDIDATES
+        ):
+            log.warning(
+                "fed RTC: ICE candidate for %s dropped — %d already wait for "
+                "its OFFER / ANSWER",
+                from_instance,
+                peer.parked_candidates,
+            )
+            return
+        applying = peer.add_ice_candidate(
             candidate=str(payload.get("candidate") or ""),
             sdp_mid=str(payload.get("sdp_mid") or "0"),
         )
+        if not peer.awaits_remote_description:
+            await applying
+            return
+        # The candidate has to wait for its OFFER / ANSWER. It waits on a
+        # task of its own, never on the caller: the caller is the inbox
+        # request (or the DataChannel receive loop) that carried it, and
+        # holding that for up to ``ICE_BUFFER_TIMEOUT_S`` blocks the very
+        # description it waits for. The sender's POST times out after
+        # 10 s, its outbox stalls our rows for the pass, and an OFFER
+        # queued behind its candidates (the outbox orders by a jittered
+        # retry time, not by send order) arrives 30 s late — just after
+        # the candidates were dropped. That, not slow signalling, is what
+        # made handshakes after an outage lose candidates and restart.
+        task = asyncio.create_task(applying, name=f"fed-rtc-ice[{from_instance}]")
+        self._inbound_tasks.add(task)
+        peer.parked_candidates += 1
+        task.add_done_callback(functools.partial(self._parked_candidate_done, peer))
+
+    def _parked_candidate_done(self, peer: _RtcPeer, task: asyncio.Task) -> None:
+        self._inbound_tasks.discard(task)
+        peer.parked_candidates -= 1
+        if not task.cancelled() and task.exception() is not None:
+            log.warning("fed RTC: a parked ICE candidate failed: %r", task.exception())
 
     async def _answering_peer(self, from_instance: str) -> _RtcPeer | None:
         """The peer an inbound OFFER / ICE candidate from *from_instance*
@@ -2920,10 +3181,15 @@ class FederationTransport:
         The latch is one-way: this runs on ``on_cleanup``, and a
         ``send()`` parked on the ICE-primed gate must not be able to
         rebuild a peer behind it — see :meth:`_ensure_handshake`.
+
+        Nothing is announced (``announce=False``): the household is going
+        down, its WebSockets are already closed, and the database closes
+        right after this returns — a ``PeerTransportChanged`` published
+        from here ran its subscribers against the closed database.
         """
         self._closing = True
         for peer in list(self._peers.values()):
-            peer.close()
+            peer.close(announce=False)
         self._peers.clear()
         tasks = list(self._inbound_tasks)
         for task in tasks:

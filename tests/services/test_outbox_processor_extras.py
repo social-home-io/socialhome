@@ -45,8 +45,8 @@ class _FakeRepo:
         self.failed: list[str] = []
         self.rescheduled: list[tuple[str, str, int]] = []
 
-    async def list_due(self, limit=50):
-        return self.pending[:limit]
+    async def list_due(self, limit=50, *, exclude=()):
+        return [e for e in self.pending if e.instance_id not in exclude][:limit]
 
     async def mark_delivered(self, eid):
         self.delivered.append(eid)

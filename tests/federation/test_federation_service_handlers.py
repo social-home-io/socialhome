@@ -59,6 +59,7 @@ def svc():
     s._transport = None
     s._call_signaling = None
     s._sync_manager = None
+    s._sync_begin_admitted = None
     s._space_sync_service = None
     s._space_sync_receiver = None
     # #648 — the mesh BEGIN path drops the cached route to the requester
@@ -439,6 +440,46 @@ async def test_handle_space_sync_begin_accepted_no_prefer_direct(svc):
     await asyncio.sleep(0)
     assert record.transport_mode == "https"
     svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
+
+
+@pytest.mark.parametrize(("accepted", "called"), [(True, True), (False, False)])
+async def test_only_an_admitted_begin_reaches_the_roster_repair(svc, accepted, called):
+    """Review C1: the roster repair runs only for a BEGIN the S-6 / S-8
+    admission let in — never for one refused (rate limited, too many
+    sessions), so a member cannot buy a snapshot per BEGIN past 5/h."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=accepted,
+            next_event=None
+            if accepted
+            else FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+            next_payload=None if accepted else {"reason": "rate_limited"},
+        ),
+    )
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(sync_id="s", rtc=None, transport_mode="rtc")
+    )
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_initial = AsyncMock()
+    seen: list = []
+
+    async def _admitted(event):
+        seen.append(event)
+
+    svc.attach_sync_begin_admitted(_admitted)
+    event = _event(
+        "SPACE_SYNC_BEGIN",
+        {"sync_id": "s", "space_id": "sp", "sync_mode": "incremental"},
+        space_id="sp",
+    )
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ):
+        await svc._handle_space_sync_begin(event)
+        await asyncio.sleep(0)
+    assert (seen == [event]) is called
+    assert bool(seen) is called
 
 
 @pytest.mark.parametrize(
@@ -882,6 +923,7 @@ def _solicited(svc, *, provider="peer-1", space_id="sp"):
             provider_instance_id=provider,
             sync_mode="incremental",
             have_seq=41,
+            roster_digest=None,
         ),
     )
 
@@ -1493,6 +1535,42 @@ async def test_handle_space_sync_answer_happy(svc):
         )
     )
     svc._sync_manager.apply_answer.assert_awaited_once()
+
+
+async def test_a_sync_closed_during_the_answer_is_a_debug_line(svc, caplog):
+    """The session closed while the provider applied the answer (the
+    requester gave up, the reaper ran): ``ConnectionError``, which must not
+    reach the dispatch registry's ``log.error`` with a traceback."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.apply_answer = AsyncMock(
+        side_effect=ConnectionError("sync session closed")
+    )
+    caplog.set_level("DEBUG", logger="socialhome.federation.federation_service")
+    await svc._handle_space_sync_answer(
+        _event("SPACE_SYNC_ANSWER", {"sync_id": "s1", "sdp_answer": "a"})
+    )
+    (rec,) = [r for r in caplog.records if "closed during handshake" in r.message]
+    assert rec.levelname == "DEBUG"
+
+
+async def test_a_sync_closed_during_the_offer_sends_no_answer(svc, caplog):
+    svc._sync_manager = MagicMock()
+    _solicited(svc)
+    svc._sync_manager.apply_offer = AsyncMock(
+        side_effect=ConnectionError("sync session closed")
+    )
+    caplog.set_level("DEBUG", logger="socialhome.federation.federation_service")
+    with patch.object(FederationService, "send_event", new_callable=AsyncMock) as send:
+        await svc._handle_space_sync_offer(
+            _event(
+                "SPACE_SYNC_OFFER",
+                {"sync_id": "s1", "sdp_offer": "sdp-x", "ice_servers": []},
+                space_id="sp",
+            )
+        )
+    send.assert_not_awaited()
+    (rec,) = [r for r in caplog.records if "closed during handshake" in r.message]
+    assert rec.levelname == "DEBUG"
 
 
 # ─── _handle_space_sync_ice ────────────────────────────────────────
@@ -2107,7 +2185,9 @@ async def test_handle_space_sync_chunk_refuses_an_unpinned_session(svc):
 # ─── A provider at capacity defers our sync (restart catch-up) ────────
 
 
-@pytest.mark.parametrize("reason", ["too_many_sessions", "node_capacity"])
+@pytest.mark.parametrize(
+    "reason", ["too_many_sessions", "node_capacity", "rate_limited"]
+)
 async def test_handle_direct_failed_at_capacity_defers_our_request(svc, reason):
     """A provider caps concurrent syncs per household (S-6). A household
     that restarts and asks one host for more spaces than the cap used to
@@ -2134,6 +2214,9 @@ async def test_handle_direct_failed_at_capacity_defers_our_request(svc, reason):
     published = svc._bus.publish.await_args.args[0]
     assert isinstance(published, SpaceSyncDeferred)
     assert (published.space_id, published.provider_instance_id) == ("sp", "host")
+    # The host's own refusal travels with it: every one is its answer (v_92
+    # trigger 10); the scheduler retries only a capacity refusal.
+    assert published.reason == reason
     svc._sync_manager.forget_sync_request.assert_called_once_with("s1")
     svc._sync_manager.trigger_relay_sync.assert_not_awaited()
 
@@ -2152,6 +2235,7 @@ async def test_a_deferred_periodic_sync_stays_incremental(svc):
             created_at=0,
             sync_mode="incremental",
             have_seq=41,
+            roster_digest=None,
         )
     )
     svc._sync_manager.forget_sync_request = MagicMock()
@@ -2169,9 +2253,9 @@ async def test_a_deferred_periodic_sync_stays_incremental(svc):
 
 @pytest.mark.parametrize(
     ("reason", "sender"),
-    [("rate_limited", "host"), ("too_many_sessions", "someone-else")],
+    [("tier3_abort", "host"), ("too_many_sessions", "someone-else")],
 )
-async def test_handle_direct_failed_defers_only_a_capacity_answer_from_our_provider(
+async def test_handle_direct_failed_defers_only_a_refusal_from_our_provider(
     svc, reason, sender
 ):
     svc._sync_manager = MagicMock()
@@ -2340,3 +2424,22 @@ async def test_the_sentinel_marks_the_stream_ended(svc):
             )
         )
     assert record.sentinel_landed
+
+
+@pytest.mark.parametrize("raw", [False, True])
+async def test_send_with_mesh_fallback_hands_the_raw_body_choice_to_the_route(svc, raw):
+    """Whether the target reads a raw sealed body is the caller's knowledge
+    (a §25.6 provider knows its requester's version); the mesh route only
+    carries it to ``send_routed``, on the first try and on the retry."""
+    _unpair(svc)
+    send_routed = _attach_mesh(svc, target="mesh-member")
+    send_routed.side_effect = [ConnectionError("hop gone"), "route-2"]
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id="mesh-member",
+        event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        payload={"sync_id": "s", "chunk": "{}"},
+        space_id="sp",
+        routed_raw_body=raw,
+    )
+    assert result.ok
+    assert [c.kwargs["raw_body_ok"] for c in send_routed.await_args_list] == [raw, raw]

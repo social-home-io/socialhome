@@ -8,6 +8,8 @@ from socialhome.domain.federation import (
     ARCHIVED_ALLOWED_REMOVAL_TYPES,
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
+    MULTI_EVENT_TYPES,
+    MULTI_SEND_EXCLUDED_EVENT_TYPES,
     PAIRING_EVENTS,
     SPACE_READER_EVENT_TYPES,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
@@ -382,3 +384,93 @@ def test_pending_kind_names_each_handshake():
         key_self_to_remote="",
     )
     assert pending_kind(provisional) == "request"
+
+
+# ─── v_91: multi-recipient frames ────────────────────────────────────────
+
+
+def test_multi_event_types_are_the_seat_vocabulary_minus_the_exclusions():
+    assert MULTI_EVENT_TYPES == (
+        SPACE_SESSION_ALLOWED_EVENT_TYPES - MULTI_SEND_EXCLUDED_EVENT_TYPES
+    )
+    assert MULTI_SEND_EXCLUDED_EVENT_TYPES <= SPACE_SESSION_ALLOWED_EVENT_TYPES
+
+
+def test_single_recipient_key_and_routing_types_never_ride_a_multi_frame():
+    for t in (
+        FederationEventType.SPACE_MAILBOX_DIRECTORY,
+        FederationEventType.SPACE_MEMBER_CARD,
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_KEY_EXCHANGE_ACK,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_ROUTED,
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        FederationEventType.SPACE_SESSION_CLEANUP,
+        FederationEventType.SPACE_SYNC_CHUNK,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        FederationEventType.BAZAAR_THREAD_MESSAGE,
+    ):
+        assert t in MULTI_SEND_EXCLUDED_EVENT_TYPES
+        assert t not in MULTI_EVENT_TYPES
+
+
+def test_space_content_rides_multi_frames():
+    for t in (
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_COMMENT_CREATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        FederationEventType.SPACE_MEMBER_JOINED,
+    ):
+        assert t in MULTI_EVENT_TYPES
+
+
+# ─── v_92: SPACE_MEDIA_WANTED ────────────────────────────────────────────
+
+
+def test_space_media_wanted_rides_a_seat_one_household_at_a_time():
+    """A member seated from an invite link (mailbox seat) asks for files
+    too, so the type is in the seat vocabulary; it names ONE provider, so it
+    never rides a multi frame; it lands nothing, so a follower's request is
+    not a write (the provider re-checks membership)."""
+    t = FederationEventType.SPACE_MEDIA_WANTED
+    assert t.value == "space_media_wanted"
+    assert t in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    assert t in MULTI_SEND_EXCLUDED_EVENT_TYPES
+    assert t not in MULTI_EVENT_TYPES
+    assert t in SPACE_READER_EVENT_TYPES
+    assert t not in SPACE_WRITE_EVENT_TYPES
+
+
+# ─── v_93: SPACE_POST_REACTION ───────────────────────────────────────────
+
+
+def test_space_post_reaction_is_member_content_on_every_path():
+    """A reaction on a space post is space content: a member seated from an
+    invite link sends and takes it (seat vocabulary), identical bytes go to
+    every member household (it rides a multi frame — apply is ordered by the
+    reaction's own stamp, not by arrival), and it is a write (a follower-only
+    household's is refused unless the space opts followers in; an archived
+    space takes none — it is no ``*_DELETED`` removal)."""
+    t = FederationEventType.SPACE_POST_REACTION
+    assert t.value == "space_post_reaction"
+    assert t in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    assert t not in MULTI_SEND_EXCLUDED_EVENT_TYPES
+    assert t in MULTI_EVENT_TYPES
+    assert t in SPACE_WRITE_EVENT_TYPES
+    assert t not in SPACE_READER_EVENT_TYPES
+    assert t not in ARCHIVED_ALLOWED_REMOVAL_TYPES
+
+
+# ─── v_94: the signing seed reaches an admin on every path ───────────────
+
+
+def test_admin_key_share_reaches_a_gfs_only_admin_one_household_at_a_time():
+    """Every space admin is equal, whichever way its household is reached
+    (owner decision 2026-11-15): an admin seated from an invite link or the
+    GFS directory takes the space signing seed too, so the type is in the
+    seat vocabulary. It is key material for ONE household, so it never rides
+    a multi frame, whose body every listed household can read."""
+    t = FederationEventType.SPACE_ADMIN_KEY_SHARE
+    assert t in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    assert t in MULTI_SEND_EXCLUDED_EVENT_TYPES
+    assert t not in MULTI_EVENT_TYPES

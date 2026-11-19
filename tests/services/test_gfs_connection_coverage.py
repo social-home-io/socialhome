@@ -170,6 +170,9 @@ class _StubSpaceRepo:
     def __init__(self, space_id: str) -> None:
         self._space_id = space_id
 
+    async def get_seed_shared_epoch(self, space_id: str) -> int | None:
+        return None  # no seed shared with an admin household
+
     async def get(self, space_id: str):
         from socialhome.domain.space import (
             JoinMode,

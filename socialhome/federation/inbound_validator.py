@@ -59,6 +59,8 @@ import orjson
 from ..domain.errors import WrongTypeError
 from ..domain.federation import (
     ARCHIVED_ALLOWED_REMOVAL_TYPES,
+    MULTI_EVENT_TYPES,
+    PENDING_KIND_APPROVAL,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     SPACE_WRITE_EVENT_TYPES,
     FederationEvent,
@@ -66,9 +68,19 @@ from ..domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    is_space_seat,
+    pending_kind,
+)
+from ..domain.pairing_events import (
+    CONFIRMS_PAIRING_EVENT_TYPES,
+    ENDS_PAIRING_EVENT_TYPES,
 )
 from ..domain.space import WRITER_ROLES, SpaceRole
 from .host_equivalence import acts_as_host
+from .multi_recipient import (
+    MULTI_TO_INSTANCE,
+    multi_audience_includes,
+)
 from .space_scope import archive_refusal
 
 if TYPE_CHECKING:
@@ -84,10 +96,10 @@ TIMESTAMP_SKEW_SECONDS = 300
 #: Set on :attr:`InboundContext.transport` by the relay dispatch seam.
 TRANSPORT_GFS_RELAY = "gfs_relay"
 
-#: Transport label for an envelope that arrived on one of OUR per-space GFS
-#: mailboxes (v_88, GFS redesign PR 2). The same relay, addressed to an
+#: Transport label for an envelope that arrived on OUR GFS mailbox (v_89,
+#: one per GFS, shared by our spaces). The same relay, addressed to an
 #: anonymous mailbox instead of our instance id: it gets the relay's
-#: timestamp window and gates, plus :func:`make_check_mailbox_space`.
+#: timestamp window and gates, plus :func:`make_check_mailbox_sender`.
 TRANSPORT_GFS_MAILBOX = "gfs_mailbox"
 
 #: Every transport that is the GFS relay (queued, so up to a day old).
@@ -140,6 +152,21 @@ class UnpairedPeerRefusedError(ValueError):
     """
 
 
+class ReplayDetectedError(ValueError):
+    """An envelope whose ``msg_id`` the replay cache already holds.
+
+    Raised by :func:`make_check_replay`, which runs after the signature
+    step: the sender is a paired household whose key signed this envelope,
+    and we have seen that envelope before — a retry of a delivery whose
+    answer it never got (its POST timed out while we were still working on
+    it), or the DataChannel → HTTPS failover's second copy. Nothing is
+    applied twice. The type lets the inbox route answer it as "already
+    held" (:mod:`socialhome.federation.inbox_reply`) instead of as a
+    refusal; its text still starts ``Replay detected`` for every caller
+    that reads the message.
+    """
+
+
 # ─── Validation context ─────────────────────────────────────────────────
 
 
@@ -169,6 +196,14 @@ class InboundContext:
     #: Resolved RemoteInstance wrapper (populated by ``lookup_instance``).
     instance: Any = None
 
+    #: The sender's approved pairing kept BESIDE its space seat, when the
+    #: lookup resolved the seat row by the sender's id (relay, mailbox,
+    #: DataChannel) and such a half exists. The envelope is the seat's
+    #: unless it turns out to be the pairing's — an event a seat may not
+    #: send, or a payload that opens only under the pairing's keys
+    #: (:func:`_take_staged`).
+    staged_alt: Any = None
+
     #: Fully validated FederationEvent (populated by ``decrypt_and_parse``).
     event: FederationEvent | None = None
 
@@ -176,6 +211,11 @@ class InboundContext:
     #: want to return early without dispatching). Always set through
     #: :func:`drop`, so it is always :data:`ACCEPTED_RESPONSE`.
     early_response: dict | None = None
+
+    #: Takes this envelope's id back out of the replay cache. Set by the
+    #: replay step, cleared once the id is persisted; the pipeline calls it
+    #: when a step in between fails with an internal error.
+    replay_undo: Callable[[], None] | None = None
 
     #: Why a step dropped the event (see :func:`drop`). Server-side only —
     #: it is logged and read by tests, never put on the wire.
@@ -187,10 +227,20 @@ class InboundContext:
     #: the bytes may legitimately be up to a day old.
     transport: str = ""
 
-    #: v_88 — the space of the mailbox that delivered these bytes (only
-    #: with :data:`TRANSPORT_GFS_MAILBOX`). A frame on that mailbox may
-    #: carry that space's envelopes or space-less ones, nothing else.
-    mailbox_space_id: str | None = None
+    #: v_91 — a multi-recipient frame our mailbox opened (its wrap under our
+    #: mailbox key, then the body; set by the mailbox leg, never by a wire
+    #: field). Its payload is taken as-is — the body seal covered it — and
+    #: an unencrypted payload is refused everywhere else; see
+    #: :func:`make_check_multi_recipient`.
+    multi_frame: bool = False
+
+    #: A binary relay frame's sealed bytes and the frame suite its body
+    #: named (set by the relay media leg, never by a wire field). For a
+    #: framed event (v_87) the relay pipeline opens them into the event's
+    #: payload straight after the header's decrypt, so every later step
+    #: judges the real payload.
+    frame_payload: bytes = b""
+    frame_suite: str | None = None
 
 
 #: Middleware shape: async callable that takes context + raises or returns.
@@ -204,6 +254,7 @@ DROP_DEPROVISIONED_AUTHOR = "deprovisioned-author"
 DROP_SUBSCRIBER_WRITE = "subscriber-write"
 DROP_HELD_AWAITING_SEAT = "awaiting-seat"
 DROP_ARCHIVED_SPACE = "archived-space"
+DROP_PAIRING_CANCELLED = "pairing-cancelled"
 
 #: The one body every accepted envelope gets — dispatched OR dropped by a
 #: gate. A distinct body per drop reason (``archived-space``,
@@ -231,10 +282,34 @@ class _InboxInstance:
     inbound pipeline while also providing a ``from_instance`` attribute
     for cross-checking the ``from_instance`` field in the envelope."""
 
-    __slots__ = ("_inst",)
+    __slots__ = ("_inst", "_staged")
 
-    def __init__(self, inst: RemoteInstance) -> None:
+    def __init__(self, inst: RemoteInstance, *, staged: bool = False) -> None:
         self._inst = inst
+        self._staged = staged
+
+    @property
+    def staged(self) -> bool:
+        """Whether this is a pending pairing kept BESIDE the household's
+        space seat (:class:`~socialhome.federation.pending_pairing
+        .PendingPairings`) instead of in its row. The row still says
+        "confirmed seat", so what may arrive under the half's keys is held
+        to :func:`make_check_staged_half`, and an approval's envelope goes
+        on only once it has confirmed the pairing
+        (:func:`make_confirm_relay_approval`)."""
+        return self._staged
+
+    @property
+    def local_inbox_id(self) -> str:
+        """Our inbox id of this row / half — what names the handshake an
+        envelope was read under (:func:`make_confirm_relay_approval`)."""
+        return self._inst.local_inbox_id
+
+    @property
+    def pending_kind(self) -> str | None:
+        """Which handshake a pending half is (``code`` / ``request`` /
+        ``approval``) — read by :func:`make_check_staged_half`."""
+        return pending_kind(self._inst)
 
     @property
     def from_instance(self) -> str:
@@ -243,6 +318,12 @@ class _InboxInstance:
     @property
     def remote_identity_pk(self) -> str:
         return self._inst.remote_identity_pk
+
+    @property
+    def relay_via(self) -> str | None:
+        """The seat's relay — empty for a member seated from a host's
+        directory (v_89, ``make_check_relay_opt_in``)."""
+        return self._inst.relay_via
 
     @property
     def remote_pq_identity_pk(self) -> str | None:
@@ -374,6 +455,7 @@ def make_lookup_instance_by_id(
     *,
     repo,
     unpaired_recently: Callable[[str], bool] | None = None,
+    staged_for: Callable[[str], RemoteInstance | None] | None = None,
 ) -> InboundStep:
     """Step 2 (WebRTC): resolve RemoteInstance by instance_id.
 
@@ -418,6 +500,13 @@ def make_lookup_instance_by_id(
         # Wrap in the same shape the HTTPS inbox lookup returns so the
         # remaining pipeline steps (sig verify, decrypt) work unchanged.
         ctx.instance = _InboxInstance(instance)
+        if staged_for is not None and is_space_seat(instance):
+            # ``staged_for`` (``PendingPairings.keyed_for``): the approved
+            # pairing waiting beside this seat, if any. Its household has
+            # one id and, here, two sets of keys.
+            half = staged_for(instance.id)
+            if half is not None:
+                ctx.staged_alt = _InboxInstance(half, staged=True)
 
     return lookup_instance_by_id
 
@@ -451,7 +540,32 @@ def make_check_timestamp() -> InboundStep:
     return check_timestamp
 
 
-def make_check_peer_class() -> InboundStep:
+def _take_staged(ctx: InboundContext) -> None:
+    """The envelope is the approved pairing's, not the seat's: go on with
+    the half kept beside the seat (:attr:`InboundContext.staged_alt`).
+
+    Over the GFS relay that pairing must itself be a relay pairing (its
+    code had a GFS reach, so OUR half holds the opt-in) — the rule
+    :func:`make_check_relay_opt_in` applies to a paired peer's row."""
+    half = ctx.staged_alt
+    ctx.staged_alt = None
+    if (
+        ctx.transport in RELAY_TRANSPORTS
+        and getattr(half, "gfs_relay", False) is not True
+    ):
+        log.info(
+            "inbound: refusing a relayed %r under the keys of a pending "
+            "pairing without a GFS reach",
+            ctx.envelope.get("event_type"),
+        )
+        raise ValueError("GFS relay is not enabled for this peer")
+    ctx.instance = half
+
+
+def make_check_peer_class(
+    *,
+    may_abort: Callable[[str], bool] | None = None,
+) -> InboundStep:
     """Step 2b: hold a space-scoped peer to the space vocabulary (§D2b).
 
     Runs straight after the instance lookup — the first point at which
@@ -480,6 +594,24 @@ def make_check_peer_class() -> InboundStep:
         event_type = FederationEventType(raw_type)
         if event_type in SPACE_SESSION_ALLOWED_EVENT_TYPES:
             return
+        sender = getattr(ctx.instance, "from_instance", "")
+        if (
+            event_type is FederationEventType.PAIRING_ABORT
+            and may_abort is not None
+            and may_abort(sender)
+        ):
+            # The one pairing event a seat may send, and only while a
+            # pairing code's half is kept beside it
+            # (``PendingPairings.has_code_half``): the household cancelled
+            # the handshake. It travels as the seat's own traffic so it
+            # arrives however the two reach each other; its handler
+            # cancels only the half of the code it names.
+            return
+        if ctx.staged_alt is not None:
+            # Not something a seat sends: it can only be the approved
+            # pairing's (the signature and the pairing's keys decide).
+            _take_staged(ctx)
+            return
         # INFO, not WARNING: an older peer that still sends a type we now
         # refuse is a normal, expected rejection, and this surface is
         # reachable by anyone holding an invite link. Type + sender only
@@ -497,6 +629,39 @@ def make_check_peer_class() -> InboundStep:
     return check_peer_class
 
 
+def make_check_staged_half() -> InboundStep:
+    """Step 2b': a pending pairing kept beside a space seat is read under
+    its keys only when it is an **approval**
+    (:func:`~socialhome.domain.federation.pending_kind`).
+
+    The household's row is still its seat — "confirmed" to every handler —
+    so the half's keys must not open the door a row's ``pending_*`` status
+    keeps shut. An approval is a pairing our people approved that waits
+    for the other household's first envelope under the new keys (a
+    trust-relay approval; a pairing code after our admin entered it): that
+    envelope confirms the pair before dispatch, or is refused
+    (:func:`make_confirm_relay_approval`). A pairing code nobody verified
+    and our own keyless request open nothing.
+
+    Refused like an unknown inbox. Runs straight after the lookup, before
+    any crypto. A no-op for every row.
+    """
+
+    async def check_staged_half(ctx: InboundContext) -> None:
+        inst = ctx.instance
+        if getattr(inst, "staged", False) is not True:
+            return
+        if getattr(inst, "pending_kind", None) == PENDING_KIND_APPROVAL:
+            return
+        log.info(
+            "inbound: refusing %r under the keys of an unconfirmed pairing",
+            ctx.envelope.get("event_type"),
+        )
+        raise ValueError(f"No instance found for inbox_id={ctx.inbox_id!r}")
+
+    return check_staged_half
+
+
 def make_check_relay_opt_in() -> InboundStep:
     """Step 2c: a paired peer may reach us over the GFS relay only if WE
     opted into the relay with it.
@@ -512,7 +677,8 @@ def make_check_relay_opt_in() -> InboundStep:
     A household seated from an invite link
     (:data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`)
     is relay-only by construction and is left to
-    :func:`make_check_peer_class`. Live wires (RTC, HTTPS inbox) are not
+    :func:`make_check_peer_class` (and, for a seat made from a host's member
+    directory, :func:`make_check_mailbox_sender`). Live wires (RTC, HTTPS inbox) are not
     touched. Runs straight after the lookup, before any crypto.
     """
 
@@ -538,26 +704,105 @@ def make_check_relay_opt_in() -> InboundStep:
     return check_relay_opt_in
 
 
-def make_check_mailbox_space() -> InboundStep:
-    """Step 1b (v_88): a frame that arrived on one of our per-space GFS
-    mailboxes (:data:`TRANSPORT_GFS_MAILBOX`) may carry an envelope of THAT
-    mailbox's space, or a space-less one — nothing else.
+def make_check_multi_recipient(*, own_instance_id: str) -> InboundStep:
+    """Step 1b (v_91): hold ``to_instance = "*…"`` to multi-recipient frames.
 
-    A mailbox is handed to one household for one space; an envelope of
-    another space on it is either a bug or someone using the address to
-    reach us about something it was not given for. Runs straight after the
-    parse (``space_id`` is a signed routing field — the signature step later
-    proves the sender wrote it), before any lookup or crypto. Fails closed:
-    a mailbox frame with no recorded space is refused."""
+    A multi-recipient envelope is addressed to the member households its
+    sender listed (``"*:" + tags``, :func:`~socialhome.federation
+    .multi_recipient.multi_audience_includes`) inside a body sealed under
+    a key wrapped to their mailboxes, its payload as-is, so:
 
-    async def check_mailbox_space(ctx: InboundContext) -> None:
+    * outside a multi frame (every RTC, HTTPS and ordinary relay frame) any
+      ``to_instance`` starting with ``"*"`` is refused — the star must not
+      ride a path that never opened a wrap;
+    * in one (:attr:`InboundContext.multi_frame`, set by the mailbox leg
+      after the wrap and body opened), the
+      frame must have come over our mailbox, carry an event type of
+      :data:`~socialhome.domain.federation.MULTI_EVENT_TYPES`, list OUR tag
+      in its signed audience (a recipient cannot re-push a captured frame
+      to a household the sender left out) and name its space (the payload's
+      own ``space_id`` must match it, :func:`make_decrypt_and_parse`).
+
+    Straight after the JSON parse: field compares and one hash, before any
+    lookup.
+    """
+
+    async def check_multi_recipient(ctx: InboundContext) -> None:
+        to_instance = ctx.envelope.get("to_instance")
+        star = isinstance(to_instance, str) and to_instance.startswith(
+            MULTI_TO_INSTANCE
+        )
+        if not ctx.multi_frame:
+            if star:
+                raise ValueError(
+                    "a multi-recipient envelope outside a multi-recipient frame"
+                )
+            return
         if ctx.transport != TRANSPORT_GFS_MAILBOX:
+            raise ValueError("a multi-recipient frame rides a mailbox only")
+        try:
+            event_type = FederationEventType(ctx.envelope.get("event_type"))
+        except ValueError:
+            raise ValueError(
+                "a multi-recipient frame of an unknown event type"
+            ) from None
+        if event_type not in MULTI_EVENT_TYPES:
+            raise ValueError(
+                f"{event_type.value!r} never rides a multi-recipient frame"
+            )
+        if not multi_audience_includes(to_instance, own_instance_id):
+            # Type only — never the tags or a mailbox.
+            log.info(
+                "inbound: refusing a %r multi-recipient envelope not addressed "
+                "to this household",
+                event_type.value,
+            )
+            raise ValueError("multi-recipient envelope not addressed to us")
+        space_id = ctx.envelope.get("space_id")
+        if not isinstance(space_id, str) or not space_id:
+            raise ValueError("multi-recipient envelope names no space")
+
+    return check_multi_recipient
+
+
+def make_check_mailbox_sender(
+    allowed: Callable[[], Callable[[str, str], Awaitable[bool]] | None],
+) -> InboundStep:
+    """Step 2a (v_89): a frame that arrived on our GFS mailbox
+    (:data:`TRANSPORT_GFS_MAILBOX`) — or on the instance-addressed relay from
+    a household seated from a host's directory — is taken only from a sender
+    whose verified member card we hold for the envelope's space.
+
+    Our ONE mailbox serves every space we reach through that GFS, and every
+    writer member of those spaces may send to it — so the address alone
+    authorizes nothing. ``allowed()`` returns the member directory's check
+    ``(sender, space_id) -> bool``: we are in the space and hold the
+    sender's card for it (the host's from the ACK, a member's from the
+    host's directory, a joiner's from its redeem). Runs straight after the
+    instance lookup (``from_instance`` and ``space_id`` are signed routing
+    fields — the signature step later proves the sender wrote them), before
+    any crypto. A space-less ``SPACE_*`` envelope never rides a mailbox (senders
+    send those instance-addressed); a space-less other event (the
+    capabilities exchange) goes on to the ordinary seat checks. Fails
+    closed: no check wired → refused."""
+
+    async def check_mailbox_sender(ctx: InboundContext) -> None:
+        on_mailbox = ctx.transport == TRANSPORT_GFS_MAILBOX
+        # A household seated from a host's directory (a ``space_session``
+        # row with no relay of its own) is held to the same card check on
+        # the instance-addressed relay — it must not skip the gate by
+        # addressing our instance id instead of our mailbox.
+        directory_seat = (
+            ctx.transport == TRANSPORT_GFS_RELAY
+            and getattr(ctx.instance, "source", None) is InstanceSource.SPACE_SESSION
+            and not getattr(ctx.instance, "relay_via", None)
+        )
+        if not on_mailbox and not directory_seat:
             return
         space_id = ctx.envelope.get("space_id")
         if space_id in (None, ""):
-            # Space-less: only non-space traffic (the capabilities exchange)
-            # may ride a mailbox; a ``SPACE_*`` event must name its space
-            # (senders send a space-less one instance-addressed).
+            if not on_mailbox:
+                return  # space-less: the seat vocabulary judges it
             if str(ctx.envelope.get("event_type") or "").startswith("space_"):
                 log.info(
                     "inbound: refusing a space-less %r envelope on a mailbox",
@@ -565,15 +810,23 @@ def make_check_mailbox_space() -> InboundStep:
                 )
                 raise ValueError("a space event on a mailbox must name its space")
             return
-        if not ctx.mailbox_space_id or space_id != ctx.mailbox_space_id:
-            # Type only — never the space ids or the mailbox.
+        sender = ctx.envelope.get("from_instance")
+        check = allowed()
+        if (
+            check is None
+            or not isinstance(sender, str)
+            or not isinstance(space_id, str)
+            or not await check(sender, space_id)
+        ):
+            # Type only — never the space id or the mailbox.
             log.info(
-                "inbound: refusing a %r envelope of another space on a mailbox",
+                "inbound: refusing a %r envelope on a mailbox from a sender "
+                "with no card for its space",
                 ctx.envelope.get("event_type"),
             )
-            raise ValueError("envelope is not for this mailbox's space")
+            raise ValueError("no member card of this sender for this space")
 
-    return check_mailbox_space
+    return check_mailbox_sender
 
 
 def make_check_unpairing(
@@ -630,9 +883,17 @@ def make_check_unpairing(
     return check_unpairing
 
 
+def _known_event_type(raw: object) -> FederationEventType | None:
+    try:
+        return FederationEventType(raw)
+    except ValueError:
+        return None
+
+
 def make_confirm_relay_approval(
     *,
-    on_contact: Callable[[str], Awaitable[None]],
+    on_contact: Callable[[str, str], Awaitable[object]],
+    on_cancel: Callable[[str, str], Awaitable[object]] | None = None,
 ) -> InboundStep:
     """Step 6b: an approved trust-relay pair confirms on the requester's
     first authenticated envelope.
@@ -652,7 +913,18 @@ def make_confirm_relay_approval(
     (:func:`~socialhome.domain.federation.pending_kind`); a pairing-code
     half-pair (``pending_received``) is confirmed only by this household's
     own verification step, never by anything the pending peer sends.
-    Fail-soft: a promotion error is logged and the envelope proceeds.
+    ``on_contact`` returns whether the pair is confirmed now.
+
+    An approval in the row is fail-soft: a promotion error is logged and
+    the envelope proceeds (the row says ``pending_sent`` to every handler).
+    An approval kept beside a space seat (``ctx.instance.staged``) fails
+    CLOSED: the row for that household is still its seat, so every handler
+    would take the sender for a confirmed household — unless the pair IS
+    confirmed (by this envelope, or by another of the requester's that got
+    here first), the envelope is refused with the answer an unknown inbox
+    gets. That refusal is final for this envelope (its id is in the replay
+    cache by now): it happens only when our admin withdrew the approval,
+    or it expired, between the lookup and this step.
     """
 
     async def confirm_relay_approval(ctx: InboundContext) -> None:
@@ -662,14 +934,43 @@ def make_confirm_relay_approval(
         if not getattr(inst, "remote_identity_pk", ""):
             return
         sender = getattr(inst, "from_instance", "")
+        # The handshake this envelope was verified and decrypted under.
+        inbox_id = str(getattr(inst, "local_inbox_id", "") or "")
+        staged = getattr(inst, "staged", False) is True
+        event_type = _known_event_type(ctx.envelope.get("event_type"))
+        if event_type in ENDS_PAIRING_EVENT_TYPES:
+            # The peer cancelled (or unpaired): never a confirmation. A
+            # row approval is left to the event's handler, which drops the
+            # pending row. A half beside a seat has no row of its own —
+            # the handlers would act on the SEAT — so it is cancelled here
+            # (exactly the half these keys belong to) and the envelope is
+            # answered without a dispatch.
+            if staged:
+                if on_cancel is not None:
+                    await on_cancel(sender, inbox_id)
+                drop(ctx, DROP_PAIRING_CANCELLED)
+            return
+        confirmed: object = False
         try:
-            await on_contact(sender)
+            # Fail closed: only an event the peer sends once ITS side is
+            # confirmed proves that (``domain.pairing_events``). A
+            # handshake message, or a type nobody classified, confirms
+            # nothing.
+            if event_type in CONFIRMS_PAIRING_EVENT_TYPES:
+                confirmed = await on_contact(sender, inbox_id)
         except Exception:
             log.warning(
                 "inbound: could not confirm the approved pairing with %s",
                 sender,
                 exc_info=True,
             )
+        if staged and confirmed is not True:
+            log.info(
+                "inbound: refusing %r from %s — its approved pairing did not confirm",
+                ctx.envelope.get("event_type"),
+                sender,
+            )
+            raise ValueError(f"No instance found for inbox_id={ctx.inbox_id!r}")
 
     return confirm_relay_approval
 
@@ -698,7 +999,6 @@ def make_verify_signature(*, encoder) -> InboundStep:
         claimed_from = data["from_instance"]
         if claimed_from != signer_id:
             raise ValueError("Invalid envelope signature")
-        remote_pk = bytes.fromhex(ctx.instance.remote_identity_pk)
         # Reconstruct the signed bytes (envelope without the signatures map).
         # CANONICAL FIELD ORDER — must stay byte-identical to the order in
         # FederationService.send_event and resign_for_redelivery (the signer
@@ -716,16 +1016,29 @@ def make_verify_signature(*, encoder) -> InboundStep:
             "sig_suite": data["sig_suite"],
         }
         envelope_bytes = orjson.dumps(envelope_for_verify)
-        remote_pq_pk_hex = getattr(ctx.instance, "remote_pq_identity_pk", None)
-        pq_pk = bytes.fromhex(remote_pq_pk_hex) if remote_pq_pk_hex else None
-        if not encoder.verify_signatures_all(
-            envelope_bytes,
-            suite=data["sig_suite"],
-            signatures=data["signatures"],
-            ed_public_key=remote_pk,
-            pq_public_key=pq_pk,
-        ):
-            raise ValueError("Invalid envelope signature")
+
+        def _verifies(instance: Any) -> bool:
+            pq_hex = getattr(instance, "remote_pq_identity_pk", None)
+            return bool(
+                encoder.verify_signatures_all(
+                    envelope_bytes,
+                    suite=data["sig_suite"],
+                    signatures=data["signatures"],
+                    ed_public_key=bytes.fromhex(instance.remote_identity_pk),
+                    pq_public_key=bytes.fromhex(pq_hex) if pq_hex else None,
+                )
+            )
+
+        if _verifies(ctx.instance):
+            return
+        if ctx.staged_alt is not None and _verifies(ctx.staged_alt):
+            # Not under the seat row's keys (a seat holds no post-quantum
+            # key), but under those of the approved pairing beside it: a
+            # hybrid-suite pairing's envelope on a transport that knows
+            # the sender only by its id.
+            _take_staged(ctx)
+            return
+        raise ValueError("Invalid envelope signature")
 
     return verify_signature
 
@@ -741,9 +1054,10 @@ def make_check_replay(*, replay_cache) -> InboundStep:
             from_instance=from_instance,
             now=datetime.now(UTC),
         ):
-            raise ValueError(
+            raise ReplayDetectedError(
                 f"Replay detected: msg_id={msg_id!r} from={from_instance!r}",
             )
+        ctx.replay_undo = lambda: replay_cache.forget(msg_id)
 
     return check_replay
 
@@ -751,25 +1065,53 @@ def make_check_replay(*, replay_cache) -> InboundStep:
 def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
     """Steps 6+7: decrypt payload + parse inner JSON → FederationEvent."""
 
-    async def decrypt_and_parse(ctx: InboundContext) -> None:
-        data = ctx.envelope
+    def _open_payload(instance: Any, encrypted_payload: Any) -> str:
         try:
-            session_key = key_manager.decrypt(ctx.instance.key_remote_to_self)
+            session_key = key_manager.decrypt(instance.key_remote_to_self)
         except Exception as exc:
             raise ValueError(f"Failed to decrypt session key: {exc}") from exc
-
         try:
-            decrypted_json = encoder.decrypt_payload(
-                data["encrypted_payload"],
-                session_key,
-            )
+            return encoder.decrypt_payload(encrypted_payload, session_key)
         except Exception as exc:
             raise ValueError(f"Failed to decrypt payload: {exc}") from exc
+
+    async def decrypt_and_parse(ctx: InboundContext) -> None:
+        data = ctx.envelope
+        if ctx.multi_frame:
+            # v_91: one body for every recipient, sealed whole under the
+            # body key its wrap delivered — the payload inside is as-is.
+            decrypted_json = data["encrypted_payload"]
+            if not isinstance(decrypted_json, str):
+                raise ValueError("multi-recipient payload is not a JSON string")
+        else:
+            try:
+                decrypted_json = _open_payload(ctx.instance, data["encrypted_payload"])
+            except ValueError:
+                if ctx.staged_alt is None:
+                    raise
+                # Not the seat's keys. The sender is seated AND we approved
+                # a pairing with it: this is its first word under the
+                # pairing's keys, on a transport that knows it only by its
+                # id — or it is nothing we can read.
+                half = ctx.staged_alt
+                decrypted_json = _open_payload(half, data["encrypted_payload"])
+                _take_staged(ctx)
 
         try:
             inner = loads(decrypted_json)
         except Exception as exc:
             raise ValueError(f"Decrypted payload is not valid JSON: {exc}") from exc
+
+        if (
+            ctx.multi_frame
+            and isinstance(inner, dict)
+            and "space_id" in inner
+            and inner["space_id"] != data.get("space_id")
+        ):
+            # v_91: the payload must name the space the signed envelope
+            # names — a payload pointing elsewhere is refused before any
+            # handler reads it. Never the space ids in the log.
+            raise ValueError("multi-recipient payload names another space")
 
         ctx.event = FederationEvent(
             msg_id=data["msg_id"],
@@ -861,6 +1203,7 @@ def make_persist_replay(*, federation_repo) -> InboundStep:
 
     async def persist_replay(ctx: InboundContext) -> None:
         await federation_repo.insert_replay_id(ctx.envelope["msg_id"])
+        ctx.replay_undo = None
 
     return persist_replay
 
@@ -1134,14 +1477,16 @@ def make_check_space_writer(
     bytes, is a refusal. Tombstones are still read, so a household we
     KICKED is refused, never held.
 
-    The single exception is ``SPACE_COMMENT_CREATED`` when the space has
-    ``allow_subscriber_comment`` on AND the payload's author names a LIVE
-    ``subscriber`` seat of that same household — the author is bound to a
-    real row, so the flag cannot be used to smuggle the spoof back in. It
-    is the same admin opt-in that decides what a LOCAL subscriber may do.
-    Its sibling ``allow_subscriber_react`` has no inbound surface at all:
-    space reactions are not federated events (they ride the local row and
-    the §25.6 sync snapshot), so there is nothing here to gate.
+    The exceptions (:data:`_SUBSCRIBER_OPT_INS`) are
+    ``SPACE_COMMENT_CREATED`` — and the author's own
+    ``SPACE_COMMENT_UPDATED`` / ``SPACE_COMMENT_DELETED`` — when the space
+    has ``allow_subscriber_comment`` on, and (v_93) ``SPACE_POST_REACTION``
+    when it has
+    ``allow_subscriber_react`` on — each only when the payload's acting
+    user names a LIVE ``subscriber`` seat of that same household: the user
+    is bound to a real row, so a flag cannot be used to smuggle the spoof
+    back in. They are the same admin opt-ins that decide what a LOCAL
+    subscriber may do, and neither covers the other's event.
 
     An **unresolvable ``space_id``** (neither the routing field nor the
     payload names one) is refused. Every writer we ship sets the routing
@@ -1217,14 +1562,13 @@ def make_check_space_writer(
             )
             drop(ctx, DROP_HELD_AWAITING_SEAT)
             return
-        if (
-            event.event_type is FederationEventType.SPACE_COMMENT_CREATED
-            and await _subscriber_comment_allowed(
-                space_repo=space_repo,
-                space_id=space_id,
-                live_seats=live,
-                author_user_id=str(payload.get("author") or ""),
-            )
+        opt_in = _SUBSCRIBER_OPT_INS.get(event.event_type)
+        if opt_in is not None and await _subscriber_opt_in_allowed(
+            space_repo=space_repo,
+            space_id=space_id,
+            live_seats=live,
+            author_user_id=str(payload.get(opt_in[0]) or ""),
+            flag=opt_in[1],
         ):
             return
         log.warning(
@@ -1263,19 +1607,35 @@ async def _sender_hosts_space(
         return False
 
 
-async def _subscriber_comment_allowed(
+#: The opt-ins out of the Follower refusal: event type → (the payload field
+#: naming the acting user, the ``SpaceFeatures`` flag that admits a
+#: follower). The same admin toggles that decide what a LOCAL follower may
+#: do.
+_SUBSCRIBER_OPT_INS: dict[FederationEventType, tuple[str, str]] = {
+    FederationEventType.SPACE_COMMENT_CREATED: ("author", "allow_subscriber_comment"),
+    #: A follower's edit / delete of its own comment follows the same switch
+    #: (the handler checks the comment is the sending household's own).
+    FederationEventType.SPACE_COMMENT_UPDATED: ("author", "allow_subscriber_comment"),
+    FederationEventType.SPACE_COMMENT_DELETED: ("author", "allow_subscriber_comment"),
+    #: v_93 — a follower's reaction on a space post.
+    FederationEventType.SPACE_POST_REACTION: ("user_id", "allow_subscriber_react"),
+}
+
+
+async def _subscriber_opt_in_allowed(
     *,
     space_repo,
     space_id: str,
     live_seats: list,
     author_user_id: str,
+    flag: str,
 ) -> bool:
-    """The one opt-in out of the Follower refusal — see the step's docstring.
+    """An opt-in out of the Follower refusal — see the step's docstring.
 
-    Both halves are required: the space's ``allow_subscriber_comment``
-    flag, and an author bound to a LIVE ``subscriber`` seat of the sending
-    household. Without the binding the flag would re-open the author-spoof
-    hole the gate exists to close.
+    Both halves are required: the space's ``flag`` (``allow_subscriber_
+    comment`` / ``allow_subscriber_react``), and an acting user bound to a
+    LIVE ``subscriber`` seat of the sending household. Without the binding
+    the flag would re-open the author-spoof hole the gate exists to close.
     """
     if not author_user_id:
         return False
@@ -1297,7 +1657,7 @@ async def _subscriber_comment_allowed(
             exc_info=True,
         )
         return False
-    return bool(space is not None and space.features.allow_subscriber_comment)
+    return bool(space is not None and getattr(space.features, flag, False) is True)
 
 
 async def run_post_decrypt_gates(
@@ -1345,6 +1705,14 @@ class InboundPipeline:
     ``ValueError`` the pipeline aborts immediately (the caller converts
     the error into an HTTP 400/403). If a step sets
     ``ctx.early_response`` the remaining steps are skipped.
+
+    An **internal error** (anything but ``ValueError``) between the replay
+    step and the step that persists the id takes the id back out of the
+    replay cache: the sender is answered 5xx and retries the same
+    ``msg_id``, and that retry must be taken — not refused as a replay of
+    an envelope that was never applied (it used to be dropped by the
+    sender as permanently rejected). A refusal (``ValueError``) keeps the
+    id: it is final for that envelope.
     """
 
     __slots__ = ("_steps",)
@@ -1355,8 +1723,16 @@ class InboundPipeline:
     async def run(self, ctx: InboundContext) -> dict:
         """Execute every step. Returns ``{"status": "ok"}`` or the
         early-response dict set by a step."""
-        for step in self._steps:
-            await step(ctx)
-            if ctx.early_response is not None:
-                return ctx.early_response
+        try:
+            for step in self._steps:
+                await step(ctx)
+                if ctx.early_response is not None:
+                    return ctx.early_response
+        except ValueError:
+            raise
+        except BaseException:
+            if ctx.replay_undo is not None:
+                ctx.replay_undo()
+                ctx.replay_undo = None
+            raise
         return {"status": "ok"}

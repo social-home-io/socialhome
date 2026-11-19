@@ -394,11 +394,19 @@ truth; the panel follows it.
   media chunks reach relay-seated members at mesh size as binary relay
   frames (`\x00SHR`, 512 KiB chunks) when their GFS proves `envelope_media`
   and they are at v_87 (`FederationService.relay_media_ok`); otherwise
-  bulky bytes respect the JSON relay's tighter cap (`relay_payload`,
-  `RELAY_MAX_ENVELOPE_BYTES`, `RELAY_JSON_CHUNK_BYTES`) instead of skipping
-  relay-seated members.
+  bulky bytes respect the JSON relay's tighter cap
+  (`RELAY_MAX_ENVELOPE_BYTES`, `RELAY_JSON_CHUNK_BYTES`; a space's cover /
+  icon has ONE cap for every member, `SPACE_COVER_MAX_BYTES` /
+  `SPACE_ICON_MAX_BYTES`) instead of skipping relay-seated members.
   Only **followers** (subscribers) may get a subset, decided per feature
   and written down there — never a member role.
+- **"Host" for content and sync means `acts_as_host`** — the owner or the
+  delegated admin household that invited this household
+  (`federation/host_equivalence.py`: `acts_as_host`, `acting_hosts`,
+  `serves_as_host`). A new host check uses those helpers, never a
+  comparison with `owner_instance_id`, unless the action is owner-only
+  (GFS list, config, dissolve, age gate) —
+  `tests/federation/test_host_notion_guard.py` lists the allowed ones.
 - GPS coordinates: truncate to 4 decimal places before any storage or
   transmission — `round(float(lat), 4)`, never raw device precision.
 - **People's locations are never shared by design.** A person's or a
@@ -424,6 +432,9 @@ truth; the panel follows it.
   - A *global* space may carry an owner-chosen place pin, used only to sort
     Discover by distance on the viewer's side; joining does not check it.
     Never default it to the household's home.
+- **No random delays for GFS unlinkability.** Never add jitter, waits or
+  quiet windows to hide timing between identified and anonymous GFS traffic:
+  the same IP links them anyway ([principles](docs/principles.md#no-random-delays-for-gfs-unlinkability)).
 - WebSocket auth uses `?token=` (unavoidable for browser WS). Tokens leak
   into access logs and browser history — never log the full `/api/ws` query
   string; operators must redact tokens.

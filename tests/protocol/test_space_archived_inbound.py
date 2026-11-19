@@ -91,6 +91,13 @@ from .test_space_routed_security import (
     _seal,
 )
 
+
+async def _no_row(_instance_id: str) -> None:
+    """The routed handler asks for a hop's row (v_89 host-hop seat check):
+    nobody here is a ``space_session`` seat."""
+    return
+
+
 pytestmark = pytest.mark.security
 
 FET = FederationEventType
@@ -616,7 +623,7 @@ async def _route_a_post(app, db, *, post_id: str) -> list:
     target_priv, target_pub = routed_crypto.generate_ephemeral_keypair()
     handler = SpaceRoutedHandler(
         federation_service=fed,  # type: ignore[arg-type]
-        federation_repo=SimpleNamespace(),  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(get_instance=_no_row),  # type: ignore[arg-type]
         event_dispatcher=_dispatch,
         target_eph_lookup=lambda pub: target_priv if pub == target_pub else None,
     )

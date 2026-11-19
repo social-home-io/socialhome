@@ -170,6 +170,19 @@ _OFFLINE_PEER_NOISE: tuple[str, ...] = (
     # between ``is_ready`` and the write, and the frame fell back to HTTPS
     # ("fed RTC send to <iid> failed: cannot send on a closed channel").
     "failed: cannot send on a closed channel",
+    # A space picture's chunk pushed to a household that is down (e.g.
+    # ``members-parity``: d posts a picture while host a is stopped) — the
+    # route is in cooldown; the household gets it after it is back.
+    "space-media-sync: chunk ",
+    # A relay handing a ``SPACE_ROUTE_STALE`` nack back toward an origin
+    # that was stopped after it sent the routed envelope (``members-parity``
+    # stops host a several times while d reaches it through b): the nack is
+    # best-effort and has nowhere to go.
+    "SPACE_ROUTE_STALE route_id=",
+    # ``federated-moderation``: a member submits while a moderator household
+    # is down — the submission to it is not delivered (the host catches
+    # that household up on its next sync).
+    "did not reach reviewer household ",
 )
 
 #: libdatachannel / libjuice status lines while a peer's process dies, or
@@ -232,10 +245,13 @@ def _open_noise_window(
     names: list[str],
     native: tuple[str, ...] = (),
     offline: bool = False,
+    from_start: bool = False,
 ) -> list[int]:
     """Open one window per witness household (never ``about`` itself),
-    starting at the witness's current log line. Returns the window ids for
-    :func:`_close_noise_windows`.
+    starting at the witness's current log line — or, with ``from_start``, at
+    the top of its current ``log.txt`` (a witness that was just respawned
+    may have logged the expected line before the step could open the
+    window). Returns the window ids for :func:`_close_noise_windows`.
 
     ``offline`` marks a window opened because ``about`` was killed: the
     step's end closes it only once ``about`` has been respawned — a
@@ -250,6 +266,7 @@ def _open_noise_window(
             names=names,
             native=native,
             offline=offline,
+            from_start=from_start,
         )
 
 
@@ -262,6 +279,7 @@ def _open_noise_window_locked(
     names: list[str],
     native: tuple[str, ...],
     offline: bool,
+    from_start: bool = False,
 ) -> list[int]:
     windows = _load_noise_windows()
     gens = _log_generations()
@@ -279,7 +297,7 @@ def _open_noise_window_locked(
                 "offline": offline,
                 "witness": witness,
                 "generation": gens.get(witness, 0),
-                "start": _log_line_count(witness),
+                "start": 0 if from_start else _log_line_count(witness),
                 "end": None,
                 "named": list(named),
                 "names": list(names),
@@ -482,6 +500,36 @@ def _raw_request(
             return exc.code, {"_raw": raw}
 
 
+def _space_feed_all(port: int, token: str, space_id: str) -> tuple[int, Any]:
+    """A space's whole feed, newest first: ``(200, rows)``, or the first
+    non-200 ``(status, body)``.
+
+    ``GET /api/spaces/{id}/feed`` answers one page (20 posts, at most 50
+    with ``limit``). A check that looks for an EARLY post of a long chain
+    in the first page fails once later steps have posted enough into the
+    same space — which the full GFS chain does by ``verify`` — although
+    the household holds the post. Walks ``before`` until a short page.
+    """
+    rows: list[dict] = []
+    seen: set[str] = set()
+    before = ""
+    for _ in range(40):
+        url = f"http://127.0.0.1:{port}/api/spaces/{space_id}/feed?limit=50"
+        if before:
+            url += "&before=" + urllib.parse.quote(before)
+        status, body = _request(url, token=token)
+        if status != 200:
+            return status, body
+        page = body if isinstance(body, list) else (body.get("posts") or [])
+        fresh = [r for r in page if r.get("id") not in seen]
+        rows.extend(fresh)
+        seen.update(r.get("id") for r in fresh)
+        if len(page) < 50 or not fresh or not page[-1].get("created_at"):
+            break
+        before = page[-1]["created_at"]
+    return 200, rows
+
+
 def _must(
     label: str, status: int, body: Any, *, ok: tuple[int, ...] = (200, 201, 204)
 ) -> Any:
@@ -678,6 +726,22 @@ def _log_lines_matching(label: str, needle: str, *, offset: int = 0) -> list[str
     return [line for line in text.splitlines() if needle in line]
 
 
+def _await_log_lines(
+    label: str, needle: str, *, offset: int = 0, timeout: float = 30.0
+) -> list[str]:
+    """:func:`_log_lines_matching`, polled each second until a line shows
+    up or ``timeout`` passes (then ``[]``). For evidence of a path that
+    races another one: since v_89 a member's post reaches a GFS-seated
+    member over its mailbox AND over the private channel, in either order,
+    so the item can land before the channel frame is logged."""
+    deadline = time.monotonic() + timeout
+    while True:
+        lines = _log_lines_matching(label, needle, offset=offset)
+        if lines or time.monotonic() >= deadline:
+            return lines
+        time.sleep(1.0)
+
+
 def _all_log_lines_matching(label: str, needle: str) -> list[str]:
     """Lines containing ``needle`` across every log ``label`` has written
     this run — the ones earlier processes left (``log.<n>.txt``, kept by
@@ -744,7 +808,8 @@ def _spawn(label: str, port: int, *, extra_env: dict | None = None) -> int:
         **os.environ,
         "SH_MODE": "standalone",
         "SH_CONFIG": str(d / "socialhome.toml"),
-        "SH_LOG_LEVEL": "INFO",
+        # ``SH_DEMO_LOG_LEVEL=DEBUG`` for an investigation run.
+        "SH_LOG_LEVEL": os.environ.get("SH_DEMO_LOG_LEVEL", "INFO"),
     }
     if extra_env:
         env.update(extra_env)
@@ -1427,10 +1492,10 @@ def _gfs_cluster_mailbox_tickets(urls: list[str]) -> None:
             ticket = tickets._tickets[-1]
             spent.append(b64url_encode(ticket))
             root = new_mailbox_root()
-            first = derive_mailbox_keys(root, gfs_id, "ticket-space-1", 0)
+            first = derive_mailbox_keys(root, gfs_id, 786800)
             await register_mailbox(http, urls[1], first, gfs_id, tickets=tickets)
             print("  a ticket from node 0 registered a new mailbox on node 1 ✓")
-            second = derive_mailbox_keys(root, gfs_id, "ticket-space-2", 0)
+            second = derive_mailbox_keys(root, gfs_id, 937300)
             body = build_register_body(second, gfs_id, ticket=ticket)
             async with http.post(f"{urls[0]}/gfs/mailbox/register", json=body) as r:
                 err = (await r.json()).get("error")
@@ -1484,7 +1549,7 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
         raise SystemExit(f"gfs-cluster: /gfs/info has no envelope_mailbox → {code}")
     gfs_id = info["gfs_instance_id"]
     household = _gfs_cluster_register(urls[0], "tickets")
-    keys = derive_mailbox_keys(new_mailbox_root(), gfs_id, "demo-space", 0)
+    keys = derive_mailbox_keys(new_mailbox_root(), gfs_id, 413420)
     sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "bWFpbGJveA"}
 
     async def _post(http: aiohttp.ClientSession, *, json=None, data=None) -> None:
@@ -1607,7 +1672,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
         else:
             raise SystemExit("gfs-cluster: the extra node never joined the cluster")
         time.sleep(2.0)
-        keys = derive_mailbox_keys(new_mailbox_root(), id_0, "demo-space-x", 0)
+        keys = derive_mailbox_keys(new_mailbox_root(), id_0, 849570)
         household = _gfs_cluster_register(all_urls[0], "tickets")
         sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "b3RoZXItaWQ"}
 
@@ -2789,7 +2854,6 @@ def _gfs_cluster_channel_media(
         gfs_instance_id=gfs_id,
         ts=datetime.now(timezone.utc).isoformat(),
         epoch=epoch,
-        publish_mode="trusted",
     )
     code, resp = _request(
         f"{urls[1]}/gfs/channels/epoch", method="POST", body=notice.to_wire()
@@ -6002,8 +6066,8 @@ def _check_writer_key_on_e(state: dict, failures: list[str], cap) -> None:
         kek = KeyManager.from_data_dir(_instance_dir("e"))
         if not pin or not row or row[0][0] is None:
             failures.append(
-                f"e: holds no writer key for strict epoch {epoch} (v_"
-                f"{int(cap.MIN_FOR_STRICT_MEMBER_PUBLISH)})"
+                f"e: holds no writer key for epoch {epoch} (v_"
+                f"{int(cap.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY)})"
             )
             return
         raw = kek.decrypt(
@@ -6279,9 +6343,9 @@ def cmd_gfs_invite_link() -> None:
        decision, 2026-09-19 — a link can leak, so admin is never granted
        straight through); a sees the pending elevation, approves it, and
        only then is e's household an admin on the host — still with no
-       signing seed, which a link-joined admin must never hold (the
-       connection server pins a space's identity key TOFU-immutably, so
-       that credential could never be taken back). e, now an admin on a
+       signing seed: this space does not let admins act for its owner, so
+       no admin holds it on any path (with that on, a GFS-only admin gets it
+       like a paired one, v_94). e, now an admin on a
        member household, mints a moderator link there: forwarded to a (v_52),
        minted in a's table, redeemed by b into a moderator seat; e lists the
        host's links and revokes a second one (gone from a's table); e's
@@ -6335,11 +6399,12 @@ def cmd_gfs_invite_link() -> None:
             "would not be exercised. Re-run from a clean 'up'.",
         )
 
-    # 0b. Give the space a BIG cover. A 1200 px WebP is dimension-capped,
-    #     not byte-capped, and the ACK used to embed it verbatim: a ~500 KiB
-    #     cover sealed past the 256 KiB bootstrap-blob cap, the relay
+    # 0b. Upload a BIG cover photo. The ACK used to embed a ~500 KiB cover
+    #     verbatim: sealed past the 256 KiB bootstrap-blob cap, the relay
     #     answered 413, and e's join timed out (504) after a had already
-    #     spent the token and seated e.
+    #     spent the token and seated e. Since the one space-image cap (owner
+    #     decision 2026-11-15) the upload is stored within it, so every
+    #     member — e behind the GFS included — gets the same cover.
     s, cover = _upload_file(
         f"{a_base}/api/spaces/{space_id}/cover",
         token=a["token"],
@@ -6355,10 +6420,13 @@ def cmd_gfs_invite_link() -> None:
         (space_id,),
     )
     host_cover_len = host_cover[0][0] if host_cover else 0
-    if host_cover_len < 400 * 1024:
+    from socialhome.domain.media_constraints import SPACE_COVER_MAX_BYTES
+
+    if not 0 < host_cover_len <= SPACE_COVER_MAX_BYTES:
         raise SystemExit(
-            f"gfs-invite-link: a's stored cover is {host_cover_len} bytes — the "
-            "step needs a ~500 KiB one to prove the join survives a big cover.",
+            f"gfs-invite-link: a's stored cover is {host_cover_len} bytes — "
+            f"an upload must be stored within SPACE_COVER_MAX_BYTES "
+            f"({SPACE_COVER_MAX_BYTES}).",
         )
     print(f"  a's space has a {host_cover_len // 1024} KiB cover")
 
@@ -6503,34 +6571,33 @@ def cmd_gfs_invite_link() -> None:
     # per-user role field, so reading one off it is always ``None``.
     print(f"  e's /api/spaces shows {mine.get('name')!r} (role member) ✓")
 
-    # 5b. The big cover did not sink the join, and e still got art: a
-    #     size-bounded WebP rendition under a's own cover hash.
+    # 5b. The big cover did not sink the join, and e got the very cover
+    #     every member gets: a's bytes, under a's own cover hash.
     e_cover = _rows(
         "e",
         "SELECT bytes_webp, hash FROM space_covers WHERE space_id = ?",
         (space_id,),
     )
     a_hash = _rows("a", "SELECT cover_hash FROM spaces WHERE id = ?", (space_id,))
+    a_cover = _rows(
+        "a",
+        "SELECT bytes_webp FROM space_covers WHERE space_id = ?",
+        (space_id,),
+    )
     if not e_cover or e_cover[0][0][8:12] != b"WEBP":
         raise SystemExit(
             "gfs-invite-link: e holds no WebP cover for the space — the ACK "
-            "shipped none (the big cover should ship as a smaller rendition).",
+            "shipped none.",
         )
-    if len(e_cover[0][0]) > 64 * 1024 or e_cover[0][1] != a_hash[0][0]:
+    if e_cover[0][0] != a_cover[0][0] or e_cover[0][1] != a_hash[0][0]:
         raise SystemExit(
-            f"gfs-invite-link: e's cover is {len(e_cover[0][0])} bytes under "
-            f"hash {e_cover[0][1]!r} — expected <= 64 KiB "
-            "(SPACE_COVER_BOOTSTRAP_MAX_BYTES) under a's hash "
-            f"{a_hash[0][0]!r}.",
-        )
-    if not _log_lines_matching("a", "shipping a", offset=a_off):
-        raise SystemExit(
-            "gfs-invite-link: a never logged shrinking the cover for the ACK "
-            "('space snapshot: cover … shipping a N-byte rendition').",
+            f"gfs-invite-link: e's cover ({len(e_cover[0][0])} bytes, hash "
+            f"{e_cover[0][1]!r}) is not a's ({len(a_cover[0][0])} bytes, hash "
+            f"{a_hash[0][0]!r}) — every member gets the same cover.",
         )
     print(
-        f"  e got a {len(e_cover[0][0]) // 1024} KiB rendition of the "
-        f"{host_cover_len // 1024} KiB cover under a's hash ✓",
+        f"  e got a's {len(e_cover[0][0]) // 1024} KiB cover byte-for-byte "
+        "under a's hash ✓",
     )
 
     # 6. The relay stayed a relay (#677). The routing envelope is
@@ -6774,10 +6841,10 @@ def cmd_gfs_invite_link() -> None:
             f"e is {host_role!r}, expected 'admin'",
         )
     print("  a approved the elevation — e's household is now admin on the host ✓")
-    # …and NOT the signing seed. An admin met through a public link
-    # manages the space through SPACE_REMOTE_ADMIN_ACTION; the seed is a
-    # credential nobody could take back, because the connection server
-    # pins a space's identity key TOFU-immutably on first publish.
+    # …and NOT the signing seed: this space does not let admins act for
+    # its owner (delegated admin off), so no admin holds the seed on any
+    # path and e manages the space through SPACE_REMOTE_ADMIN_ACTION. (With
+    # delegation on, a GFS-only admin gets it like a paired one, v_94.)
     seed_rows = _rows(
         "e",
         "SELECT identity_private_key FROM spaces WHERE id = ?",
@@ -6786,8 +6853,8 @@ def cmd_gfs_invite_link() -> None:
     if seed_rows and seed_rows[0][0]:
         raise SystemExit(
             "gfs-invite-link: e holds the space SIGNING SEED for the "
-            "admin-link space — a household that walked in off a public link "
-            "must never get authority that cannot be revoked.",
+            "admin-link space although that space does not let admins act "
+            "for its owner (delegated admin is off).",
         )
     shared = _log_lines_matching(
         "a", "space_admin_key_share", offset=a_off
@@ -7166,50 +7233,44 @@ def _assert_moderator_seat(label: str, inst: dict, space_id: str) -> None:
 # ─── Step: gfs-invite-link-content ─────────────────────────────────────────
 
 
+def _card_on(label: str, space_id: str, instance_id: str) -> dict | None:
+    """The member card *label* holds for *instance_id* in *space_id* (v_89:
+    ``space_instances.mailbox`` JSON ``{"card": …}``), or ``None``."""
+    rows = _rows(
+        label,
+        "SELECT mailbox FROM space_instances WHERE space_id = ? AND instance_id = ?",
+        (space_id, instance_id),
+    )
+    if not rows or not rows[0][0]:
+        return None
+    card = json.loads(rows[0][0]).get("card")
+    return card if isinstance(card, dict) else None
+
+
 def _gfs_invite_mailboxes(state: dict, space_id: str) -> tuple[str, str]:
-    """v_88 — both sides of the link-joined pair hold a per-space mailbox
-    entry for the other, both mailboxes are registered and claimed at the
-    GFS, and neither is an instance id. Returns ``(e's mailbox id, a's)``."""
+    """v_89 — the link-joined pair each hold the other's signed member card,
+    each naming that household's ONE mailbox at the GFS (registered and
+    claimed), never an instance id. Returns ``(e's mailbox id, a's)``."""
     a = state["instances"]["a"]
     e = state["instances"]["e"]
     deadline = time.time() + 30
-    a_rows: list = []
-    e_rows: list = []
+    on_a = on_e = None
     while time.time() < deadline:
-        a_rows = _rows(
-            "a",
-            "SELECT mailbox FROM space_instances WHERE space_id = ? "
-            "AND instance_id = ?",
-            (space_id, e["instance_id"]),
-        )
-        e_rows = _rows(
-            "e",
-            "SELECT mailbox FROM space_instances WHERE space_id = ? "
-            "AND instance_id = ?",
-            (space_id, a["instance_id"]),
-        )
-        if a_rows and a_rows[0][0] and e_rows and e_rows[0][0]:
+        on_a = _card_on("a", space_id, e["instance_id"])
+        on_e = _card_on("e", space_id, a["instance_id"])
+        if on_a and on_a.get("mailbox") and on_e and on_e.get("mailbox"):
             break
         time.sleep(0.5)
     else:
         raise SystemExit(
-            "gfs-invite-link-content: no per-space mailbox on the seat "
-            f"(a: {a_rows!r}, e: {e_rows!r}) — v_88 mailboxes were not minted.",
+            "gfs-invite-link-content: no member card with a mailbox on the seat "
+            f"(a holds {on_a!r}, e holds {on_e!r}) — v_89 mailboxes were not minted.",
         )
-    on_a = json.loads(a_rows[0][0])
-    on_e = json.loads(e_rows[0][0])
-    if not (on_a.get("peer") and on_a.get("own") and on_e.get("peer") and on_e.get("own")):
-        raise SystemExit(
-            f"gfs-invite-link-content: a half-built mailbox pair: a={on_a!r} e={on_e!r}",
-        )
-    e_mailbox = on_a["peer"]["mailbox_id"]
-    a_mailbox = on_e["peer"]["mailbox_id"]
-    if on_a["peer"]["instance_id"] != e["instance_id"] or on_e["peer"]["instance_id"] != a["instance_id"]:
-        raise SystemExit("gfs-invite-link-content: a mailbox entry names the wrong household")
-    if e_mailbox in (e["instance_id"], a["instance_id"]) or a_mailbox in (
-        e["instance_id"],
-        a["instance_id"],
-    ):
+    if on_a["instance_id"] != e["instance_id"] or on_e["instance_id"] != a["instance_id"]:
+        raise SystemExit("gfs-invite-link-content: a member card names the wrong household")
+    e_mailbox = on_a["mailbox"]["mailbox_id"]
+    a_mailbox = on_e["mailbox"]["mailbox_id"]
+    if {e_mailbox, a_mailbox} & {e["instance_id"], a["instance_id"]}:
         raise SystemExit("gfs-invite-link-content: a mailbox id equals an instance id")
     deadline = time.time() + 30
     claimed: list = []
@@ -7227,7 +7288,7 @@ def _gfs_invite_mailboxes(state: dict, space_id: str) -> tuple[str, str]:
             "gfs-invite-link-content: the GFS holds "
             f"{len(claimed)} of the 2 mailboxes registered and claimed.",
         )
-    print("  e and a each minted, registered and claimed a mailbox for the space ✓")
+    print("  e and a each minted, registered and claimed ONE mailbox ✓")
     return e_mailbox, a_mailbox
 
 
@@ -7277,9 +7338,9 @@ def cmd_gfs_invite_link_content() -> None:
     a_base = f"http://127.0.0.1:{a['port']}"
     e_base = f"http://127.0.0.1:{e['port']}"
 
-    # 0. v_88 — e reaches this space only through the GFS, so the seat
-    #    minted, registered and claimed a per-space mailbox on both sides,
-    #    and each side holds the other's signed entry.
+    # 0. v_89 — e reaches this space only through the GFS, so both sides
+    #    minted, registered and claimed their ONE mailbox at the GFS, and
+    #    each holds the other's signed member card naming it.
     e_mailbox, a_mailbox = _gfs_invite_mailboxes(state, space_id)
 
     gfs_off = _gfs_log_size()
@@ -7322,7 +7383,7 @@ def cmd_gfs_invite_link_content() -> None:
             "— the post did not arrive byte-identical.",
         )
 
-    # 2. It really went through the relay — to e's MAILBOX (v_88): the GFS
+    # 2. It really went through the relay — to e's MAILBOX (v_89): the GFS
     #    delivered envelopes to a mailbox in that window and logged e's
     #    instance id on none of them. (The GFS logs a mailbox as
     #    ``<mailbox>`` and never its id; the blob is opaque.)
@@ -7332,7 +7393,7 @@ def cmd_gfs_invite_link_content() -> None:
     if not to_mailbox:
         raise SystemExit(
             "gfs-invite-link-content: the GFS delivered nothing to a mailbox "
-            "while a's post reached e — the v_88 mailbox was not used. Check "
+            "while a's post reached e — the v_89 mailbox was not used. Check "
             f"{GFS_DIR / 'log.txt'}.",
         )
     if to_e:
@@ -7375,12 +7436,12 @@ def cmd_gfs_invite_link_content() -> None:
             f"expected {reply!r}",
         )
     print("  a received e's reply over the relay ✓")
-    # v_88 — the reply rode a's mailbox for the space too.
+    # v_89 — the reply rode a's mailbox too.
     reply_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
     if [line for line in reply_lines if a["instance_id"] in line]:
         raise SystemExit(
             "gfs-invite-link-content: the GFS logged a's instance id for the "
-            "reply — e should address a's mailbox for this space.",
+            "reply — e should address a's mailbox.",
         )
 
     # 4. An epoch rotation must re-key a link-joined member too.
@@ -7561,9 +7622,12 @@ def _picture_via_gfs_media_cache(
     post = _must(f"{step}: {author} posts the photo", s, post, ok=(201,))
     _await_space_post(state, reader, space_id, post["id"])
     src = _instance_dir(author) / "media" / filename
-    # The reader keeps the file under ITS OWN name (``sg-…``, bound to the
-    # household that delivered the post) and the stored post names that —
-    # a member naming the same file in another item gets another name.
+    # v_92: a hashed file keeps ONE content name (``sc-…``, from the space
+    # and the bytes' hash) on every path, the GFS-described one included —
+    # so every member stores it under the same name and any of them can
+    # serve it (``SPACE_MEDIA_WANTED``). A file with no hash (a public
+    # post a follower reads) keeps the reader's own ``sg-…`` name. The
+    # stored post names that.
     deadline = time.time() + timeout
     refs: list = []
     while time.time() < deadline and not refs:
@@ -7578,8 +7642,11 @@ def _picture_via_gfs_media_cache(
     if not refs:
         raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {filename}")
     blob_id, suite, _epoch, blob_size, local_name = refs[0]
-    if not local_name.startswith("sg-"):
-        raise SystemExit(f"{step}: {reader} keeps {filename} as {local_name!r}, not its own sg- name")
+    if not local_name.startswith(("sc-", "sg-")):
+        raise SystemExit(
+            f"{step}: {reader} keeps {filename} as {local_name!r}, neither a "
+            "content (sc-) nor a GFS (sg-) name"
+        )
     shown = _rows(
         reader,
         "SELECT 1 FROM space_posts WHERE id = ? AND image_urls_json LIKE ?",
@@ -7626,10 +7693,606 @@ def _picture_via_gfs_media_cache(
         f"holds it for the space ✓"
     )
     print(
-        f"  {reader} fetched it from the GFS media cache as its own "
+        f"  {reader} fetched it from the GFS media cache as "
         f"{local_name[:15]}…, byte-identical ({size} bytes) ✓"
     )
     return filename
+
+
+# ─── Step: gfs-member-mesh ─────────────────────────────────────────────────
+
+
+@_offline_step
+def cmd_gfs_member_mesh() -> None:
+    """v_89 — any member reaches a GFS-only member, with the host offline.
+
+    Prereqs: the gfs chain through ``gfs-invite-link-content`` (e holds a
+    link-joined seat in a's global space; a, d and e are clients of the GFS).
+
+    1. d (paired with a) joins a's space with an ``internal`` link.
+    2. The host's member directory reaches both: d holds e's member card
+       (naming e's ONE mailbox) and a lazy ``space_session`` seat for e with
+       no address of its own; e holds d's card (it checks every sender on
+       its mailbox against the cards it holds). The directory flags e as
+       GFS-reached, so d — connected to that GFS — mints its OWN household
+       mailbox there and its card (naming it) reaches e through the host.
+    3. a goes OFFLINE. d — a non-host member — creates a calendar event in
+       the space; e must show it. No host involved: d's fan-out reached e's
+       mailbox directly. Then e creates one and d must show it: e's fan-out
+       reached d's mailbox, no host hop.
+    4. The GFS log over that window shows mailbox deliveries; no envelope or
+       mailbox line names an instance id or the space, and no line names
+       e's mailbox id.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
+    a = state["instances"]["a"]
+    d = state["instances"]["d"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    d_base = f"http://127.0.0.1:{d['port']}"
+    e_base = f"http://127.0.0.1:{e['port']}"
+    step = "gfs-member-mesh"
+
+    # 1. d joins with an internal link (d is paired with a).
+    s, link = _request(
+        f"{a_base}/api/spaces/{space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "member", "uses": 1, "via": "internal"},
+    )
+    link = _must(f"{step}: a mints an internal member link", s, link, ok=(201,))
+    s, joined = _request(
+        f"{d_base}/api/spaces/join",
+        token=d["token"],
+        method="POST",
+        body=_join_body_from_blob(_decode_invite_blob(link["code"])),
+        timeout=40.0,
+    )
+    _must(f"{step}: d redeems the internal link", s, joined, ok=(200, 201))
+    print("  d (paired with a) joined a's space ✓")
+
+    # 2. The directory: cards + lazy seats on both sides. d mints its own
+    #    mailbox when the directory flags e as GFS-reached; its card goes to
+    #    the host at once and the host's delta carries it to e.
+    deadline = time.time() + 90
+    on_d = on_e = None
+    while time.time() < deadline:
+        on_d = _card_on("d", space_id, e["instance_id"])
+        on_e = _card_on("e", space_id, d["instance_id"])
+        if on_d and on_d.get("mailbox") and on_e and on_e.get("mailbox"):
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"{step}: the host's directory did not reach both members "
+            f"(d holds {on_d!r} for e, e holds {on_e!r} for d)",
+        )
+    e_mailbox = on_d["mailbox"]["mailbox_id"]
+    d_mailbox = on_e["mailbox"]["mailbox_id"]
+    seat = _rows(
+        "d",
+        "SELECT source, relay_via, remote_inbox_url FROM remote_instances "
+        "WHERE id = ?",
+        (e["instance_id"],),
+    )
+    if not seat or seat[0][0] != "space_session" or seat[0][1] or seat[0][2]:
+        raise SystemExit(f"{step}: d has no address-less lazy seat for e: {seat!r}")
+    print("  d holds e's card + a lazy seat; e holds d's card, with d's mailbox ✓")
+
+    # 3. The host goes offline; d (not the host) creates an event.
+    gfs_off = _gfs_log_size()
+    _kill_household("a", a)
+    try:
+        summary = f"Member-to-member evening {time.time_ns()}"
+        s, ev = _request(
+            f"{d_base}/api/spaces/{space_id}/calendar/events",
+            token=d["token"],
+            method="POST",
+            body={
+                "summary": summary,
+                "start": "2027-03-01T18:00:00+00:00",
+                "end": "2027-03-01T20:00:00+00:00",
+                "tz": "Europe/Berlin",
+            },
+        )
+        ev = _must(f"{step}: d creates a calendar event", s, ev, ok=(201,))
+        seen = None
+        deadline = time.time() + 60
+        while time.time() < deadline and seen is None:
+            s, events = _request(
+                f"{e_base}/api/spaces/{space_id}/calendar/events"
+                "?start=2027-03-01T00:00:00Z&end=2027-03-02T00:00:00Z",
+                token=e["token"],
+            )
+            rows = (
+                events if isinstance(events, list) else (events or {}).get("events")
+            ) or []
+            seen = next((x for x in rows if x.get("id") == ev["id"]), None)
+            if seen is None:
+                time.sleep(1.0)
+        if seen is None or seen.get("summary") != summary:
+            raise SystemExit(
+                f"{step}: e never showed d's event with the host offline — "
+                "a member's fan-out did not reach the GFS-only member",
+            )
+        print("  host a offline; d created an event and e shows it ✓")
+
+        # 3b. e (GFS-only) creates one; paired d must show it — e's fan-out
+        #     reaches d's own mailbox, the host is not needed. v_90: e's
+        #     fan-out has TWO mailbox recipients behind this GFS (host a's
+        #     and d's), so it goes up as ONE multi-recipient upload.
+        summary_e = f"GFS-only member's evening {time.time_ns()}"
+        multi_off = _gfs_log_size()
+        s, ev_e = _request(
+            f"{e_base}/api/spaces/{space_id}/calendar/events",
+            token=e["token"],
+            method="POST",
+            body={
+                "summary": summary_e,
+                "start": "2027-03-01T18:00:00+00:00",
+                "end": "2027-03-01T20:00:00+00:00",
+                "tz": "Europe/Berlin",
+            },
+        )
+        ev_e = _must(f"{step}: e creates a calendar event", s, ev_e, ok=(201,))
+        seen = None
+        deadline = time.time() + 60
+        while time.time() < deadline and seen is None:
+            s, events = _request(
+                f"{d_base}/api/spaces/{space_id}/calendar/events"
+                "?start=2027-03-01T00:00:00Z&end=2027-03-02T00:00:00Z",
+                token=d["token"],
+            )
+            rows = (
+                events if isinstance(events, list) else (events or {}).get("events")
+            ) or []
+            seen = next((x for x in rows if x.get("id") == ev_e["id"]), None)
+            if seen is None:
+                time.sleep(1.0)
+        if seen is None or seen.get("summary") != summary_e:
+            raise SystemExit(
+                f"{step}: d never showed e's event with the host offline — "
+                "the GFS-only member's fan-out did not reach d's mailbox",
+            )
+        print("  host a offline; e created an event and paired d shows it ✓")
+
+        # 3c. v_91 — that event went up ONCE for both mailboxes: one multi
+        #     frame queued for 2 of 2 mailboxes (a's waits, d's drained).
+        multi = _gfs_log_lines_matching(
+            "multi frame queued for", offset=multi_off
+        )
+        if len(multi) != 1 or "for 2 of 2 mailboxes" not in multi[0]:
+            raise SystemExit(
+                f"{step}: e's event did not go up as ONE multi-recipient "
+                f"upload for both mailboxes (GFS lines: {multi!r})"
+            )
+        print("  e's event went up ONCE for 2 mailboxes (v_91 multi upload) ✓")
+
+        # 4. What the GFS saw. The identified sockets log their own household
+        #    (a going down); the relay's envelope / mailbox lines name nobody.
+        env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
+        if not [line for line in env_lines if "<mailbox>" in line]:
+            raise SystemExit(f"{step}: the GFS delivered nothing to a mailbox")
+        named = (a["instance_id"], d["instance_id"], e["instance_id"], space_id)
+        leaked = [
+            line
+            for line in _gfs_log_lines_matching("", offset=gfs_off)
+            if e_mailbox in line
+            or d_mailbox in line
+            or (
+                ("gfs.envelope" in line or "mailbox" in line)
+                and any(x in line for x in named)
+            )
+        ]
+        if leaked:
+            raise SystemExit(
+                f"{step}: a GFS relay line names an instance id, a mailbox id "
+                f"or the space: {leaked[:3]!r}"
+            )
+        print(
+            "  the GFS logged mailbox deliveries and no instance id, mailbox id "
+            "or space ✓"
+        )
+    finally:
+        _respawn(state, "a")
+    # 5. v_91 — the host was offline during e's multi upload; its mailbox
+    #    reference waited at the GFS. Back online, a shows e's event.
+    seen = None
+    deadline = time.time() + 90
+    while time.time() < deadline and seen is None:
+        s, events = _request(
+            f"{a_base}/api/spaces/{space_id}/calendar/events"
+            "?start=2027-03-01T00:00:00Z&end=2027-03-02T00:00:00Z",
+            token=a["token"],
+        )
+        rows = (
+            events if isinstance(events, list) else (events or {}).get("events")
+        ) or []
+        seen = next((x for x in rows if x.get("id") == ev_e["id"]), None)
+        if seen is None:
+            time.sleep(1.0)
+    if seen is None:
+        raise SystemExit(
+            f"{step}: host a never showed e's event after coming back — the "
+            "multi frame queued for its mailbox was not delivered",
+        )
+    print("  host a back online and shows e's event from its mailbox ✓")
+    print(f"{step}: ok")
+
+
+# ─── Step: gfs-space-healing ───────────────────────────────────────────────
+
+
+def _make_unique_png(width: int = 96, height: int = 64) -> bytes:
+    """A small noise PNG no earlier run made: a content-named (``sc-``) file
+    is named after its bytes, so a reused picture would already be held."""
+    import io
+    import random
+
+    from PIL import Image
+
+    rng = random.Random(time.time_ns())
+    img = Image.frombytes("RGB", (width, height), rng.randbytes(width * height * 3))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _space_post_file(label: str, post_id: str) -> str:
+    """The file name ``label``'s copy of space post ``post_id`` shows (its
+    first picture), or ``""``."""
+    rows = _rows(
+        label, "SELECT image_urls_json FROM space_posts WHERE id = ?", (post_id,)
+    )
+    if not rows or not rows[0][0]:
+        return ""
+    urls = json.loads(rows[0][0]) or []
+    return str(urls[0]).rsplit("/", 1)[-1].split("?", 1)[0] if urls else ""
+
+
+def _forget_gfs_copies(local_name: str) -> int:
+    """Drop every GFS media cache copy of ``local_name`` the households know
+    (``space_media_refs`` blob ids → ``gfs_space_media`` row + blob file),
+    exactly as the store's expiry drops one; how many blobs went."""
+    blobs: set[str] = set()
+    for label in ("a", "d", "e"):
+        for (blob_id,) in _rows(
+            label,
+            "SELECT blob_id FROM space_media_refs WHERE local_name = ?",
+            (local_name,),
+        ):
+            if blob_id:
+                blobs.add(str(blob_id))
+    for blob_id in blobs:
+        _gfs_write("DELETE FROM gfs_space_media WHERE blob_id = ?", (blob_id,))
+        (GFS_DIR / "space_media" / blob_id).unlink(missing_ok=True)
+    return len(blobs)
+
+
+@_offline_step
+def cmd_gfs_space_healing() -> None:
+    """v_92 — a GFS-only member heals from the host, then from a helper
+    while the host is offline.
+
+    Prereqs: the gfs chain through ``gfs-member-mesh`` (e holds a
+    link-joined seat in a's space reached only through the GFS; d, paired
+    with a, is a member too and holds its own mailbox; each holds the
+    other's member card).
+
+    1. a makes d's person a **moderator**; e's roster mirror shows it (d's
+       household is now a trusted helper for e).
+    2. **Old picture, host online.** a posts a picture; e shows it. The file
+       leaves the GFS media cache (row + blob, as the store's expiry drops
+       it) and e's own copy goes. e views it (``GET /api/media/<sc-name>``):
+       a miss → ``SPACE_MEDIA_WANTED`` to the host a → a ships it (push) →
+       e holds it byte-identical.
+    3. **Missed event, host OFFLINE.** a posts a second picture; d and e
+       hold it; the same expiry on the GFS and on e. a is killed, then e;
+       d creates a calendar event; the frames queued for e's mailbox at the
+       GFS are dropped (what a full mailbox or the TTL would do). e boots:
+       its BEGIN to a goes unanswered for ``HOST_ANSWER_WAIT_S`` — the host
+       is now silent for e — and e asks ONE helper, d, for a
+       ``SPACE_SYNC_RESUME``; d replays its own rows → e shows the event.
+    4. **Old picture, host offline.** e views the second picture: the
+       request goes — a being silent — to the helper d instead of a;
+       d's log shows it served e, and e holds the bytes. (While a answers,
+       a helper is never asked.)
+    5. The GFS log over the whole step: mailbox deliveries, and no line
+       names an instance id, a mailbox id or the space.
+
+    a and e are respawned at the end whatever happened.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    a = state["instances"]["a"]
+    d = state["instances"]["d"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    d_base = f"http://127.0.0.1:{d['port']}"
+    e_base = f"http://127.0.0.1:{e['port']}"
+    step = "gfs-space-healing"
+    on_d = _card_on("d", space_id, e["instance_id"])
+    on_e = _card_on("e", space_id, d["instance_id"])
+    if not (on_d and on_d.get("mailbox") and on_e and on_e.get("mailbox")):
+        raise SystemExit(f"{step}: d and e hold no member cards — run 'gfs-member-mesh'")
+    e_mailbox = on_d["mailbox"]["mailbox_id"]
+    d_mailbox = on_e["mailbox"]["mailbox_id"]
+    gfs_off = _gfs_log_size()
+
+    def _poll(what: str, check, timeout: float) -> Any:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            got = check()
+            if got:
+                return got
+            time.sleep(1.0)
+        raise SystemExit(f"{step}: {what} within {timeout:.0f} s")
+
+    def _post_picture(label: str) -> tuple[str, bytes]:
+        s, up = _upload_file(
+            f"{a_base}/api/media/upload",
+            token=a["token"],
+            filename=f"healing-{label}.png",
+            content=_make_unique_png(),
+            content_type="image/png",
+        )
+        up = _must(f"{step}: a uploads the {label} picture", s, up, ok=(200, 201))
+        s, post = _request(
+            f"{a_base}/api/spaces/{space_id}/posts",
+            token=a["token"],
+            method="POST",
+            body={"type": "image", "image_urls": [up["url"]]},
+        )
+        post = _must(f"{step}: a posts the {label} picture", s, post, ok=(201,))
+        return post["id"], (_instance_dir("a") / "media" / up["filename"]).read_bytes()
+
+    def _held(label: str, post_id: str, original: bytes) -> str:
+        name = _space_post_file(label, post_id)
+        path = _instance_dir(label) / "media" / name if name else None
+        if path is not None and path.is_file() and path.read_bytes() == original:
+            return name
+        return ""
+
+    def _view_until(post_id: str, original: bytes, timeout: float) -> tuple[str, int]:
+        """e views the picture; its first view must miss. Polls the view
+        until e serves the original bytes; returns (name, first status)."""
+        name = _space_post_file("e", post_id)
+        url = f"{e_base}/api/media/{name}"
+        first, _ = _http_get_bytes(url, token=e["token"], timeout=60.0)
+        if first == 200:
+            raise SystemExit(f"{step}: e still served {name[:15]}… after its copy went")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s, body = _http_get_bytes(url, token=e["token"], timeout=60.0)
+            if s == 200 and body == original:
+                return name, first
+            time.sleep(2.0)
+        raise SystemExit(
+            f"{step}: e never served {name[:15]}… byte-identical within "
+            f"{timeout:.0f} s (first view HTTP {first}). Check "
+            f"{_log_path('e')}, {_log_path('a')}, {_log_path('d')}."
+        )
+
+    # 1. d's person becomes a moderator; e's roster mirror carries it.
+    s, body = _request(
+        f"{a_base}/api/spaces/{space_id}/remote-members/{d['instance_id']}/{d['user_id']}",
+        token=a["token"],
+        method="PATCH",
+        body={"role": "moderator"},
+    )
+    _must(f"{step}: a promotes d's person to moderator", s, body)
+    _poll(
+        "e's roster mirror did not show d's person as moderator",
+        lambda: _rows(
+            "e",
+            "SELECT 1 FROM space_remote_members WHERE space_id = ? AND user_id = ?"
+            " AND instance_id = ? AND role = 'moderator' AND tombstoned = 0",
+            (space_id, d["user_id"], d["instance_id"]),
+        ),
+        90.0,
+    )
+    print("  d's person is a moderator; e's roster mirror shows it ✓")
+
+    a_down = e_down = False
+    try:
+        # 2. Old picture, host online → the host serves it.
+        post1, pic1 = _post_picture("first")
+        _await_space_post(state, "e", space_id, post1)
+        name1 = _poll(
+            "e did not hold the first picture", lambda: _held("e", post1, pic1), 90.0
+        )
+        if not name1.startswith("sc-"):
+            raise SystemExit(f"{step}: e holds the picture as {name1!r}, not a content name")
+        # d too, before the GFS copies go (it may read the GFS cache copy).
+        _poll(
+            "d did not hold the first picture",
+            lambda: _held("d", post1, pic1),
+            90.0,
+        )
+        dropped = _forget_gfs_copies(name1)
+        (_instance_dir("e") / "media" / name1).unlink()
+        a_off, e_off = _log_size("a"), _log_size("e")
+        _, first = _view_until(post1, pic1, 90.0)
+        asked = _log_lines_matching("e", f"to {a['instance_id']}: sent", offset=e_off)
+        helper_asked = _log_lines_matching(
+            "e", f"to {d['instance_id']}:", offset=e_off
+        )
+        served = _log_lines_matching(
+            "a", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=a_off
+        )
+        if not asked or not [x for x in served if "1 file(s) queued" in x]:
+            raise SystemExit(
+                f"{step}: no SPACE_MEDIA_WANTED round-trip with the host "
+                f"(e: {asked!r}, a: {served!r})"
+            )
+        if helper_asked:
+            raise SystemExit(
+                f"{step}: e asked the helper d while the host answered: "
+                f"{helper_asked!r}"
+            )
+        print(
+            f"  old picture {name1[:15]}… (GFS copies dropped: {dropped}, e's copy "
+            f"gone): e's view → HTTP {first}, SPACE_MEDIA_WANTED to the host a "
+            "only, a served it, e holds it byte-identical ✓"
+        )
+
+        # 3. A second picture both hold, gone from the GFS and from e; then
+        # the host goes offline.
+        post2, pic2 = _post_picture("second")
+        _await_space_post(state, "e", space_id, post2)
+        name2 = _poll(
+            "e did not hold the second picture", lambda: _held("e", post2, pic2), 90.0
+        )
+        # d's name may differ from e's: a member that got the post first as
+        # the public GFS copy (no hash map) keeps its own ``sg-`` name; the
+        # provider still matches it by the bytes' content name.
+        d_name2 = _poll(
+            "d (the helper) did not hold the second picture",
+            lambda: _held("d", post2, pic2),
+            90.0,
+        )
+        dropped = _forget_gfs_copies(name2)
+        (_instance_dir("e") / "media" / name2).unlink()
+        _kill_household("a", a)
+        a_down = True
+
+        # A missed event while the host is offline → a helper resume.
+        _kill_household("e", e)
+        e_down = True
+        top = _gfs_rows("SELECT COALESCE(MAX(id), 0) FROM gfs_envelope_queue")[0][0]
+        top_media = _gfs_rows("SELECT COALESCE(MAX(id), 0) FROM gfs_media_queue")[0][0]
+        summary = f"Missed while the host was away {time.time_ns()}"
+        s, ev = _request(
+            f"{d_base}/api/spaces/{space_id}/calendar/events",
+            token=d["token"],
+            method="POST",
+            body={
+                "summary": summary,
+                "start": "2027-04-01T18:00:00+00:00",
+                "end": "2027-04-01T20:00:00+00:00",
+                "tz": "Europe/Berlin",
+            },
+        )
+        ev = _must(f"{step}: d creates a calendar event", s, ev, ok=(201,))
+        _poll(
+            "d's fan-out queued nothing for e's mailbox",
+            lambda: _gfs_rows(
+                "SELECT 1 FROM gfs_envelope_queue WHERE to_instance = ? AND id > ?",
+                (e_mailbox, top),
+            ),
+            60.0,
+        )
+        time.sleep(5.0)  # let the rest of d's fan-out land before the drop
+        n_env = _gfs_rows(
+            "SELECT COUNT(*) FROM gfs_envelope_queue WHERE to_instance = ? AND id > ?",
+            (e_mailbox, top),
+        )[0][0]
+        _gfs_write(
+            "DELETE FROM gfs_envelope_queue WHERE to_instance = ? AND id > ?",
+            (e_mailbox, top),
+        )
+        _gfs_write(
+            "DELETE FROM gfs_media_queue WHERE to_instance = ? AND id > ?",
+            (e_mailbox, top_media),
+        )
+        print(f"  e offline; d created an event; its {n_env} frame(s) for e's mailbox dropped ✓")
+        _respawn(state, "e")
+        e_down = False
+        seen = None
+        t0 = time.time()
+        deadline = t0 + 300
+        while time.time() < deadline and seen is None:
+            s, events = _request(
+                f"{e_base}/api/spaces/{space_id}/calendar/events"
+                "?start=2027-04-01T00:00:00Z&end=2027-04-02T00:00:00Z",
+                token=e["token"],
+            )
+            rows = (
+                events if isinstance(events, list) else (events or {}).get("events")
+            ) or []
+            seen = next((x for x in rows if x.get("id") == ev["id"]), None)
+            if seen is None:
+                time.sleep(2.0)
+        if seen is None or seen.get("summary") != summary:
+            raise SystemExit(
+                f"{step}: e never showed d's missed event within 300 s with the "
+                f"host offline. Check {_log_path('e')} and {_log_path('d')}."
+            )
+        fallback = [
+            x
+            for x in _log_lines_matching("e", "the host did not answer within")
+            if d["instance_id"] in x and space_id in x
+        ]
+        if not fallback:
+            raise SystemExit(
+                f"{step}: e shows the event, but its log names no helper fallback "
+                "to d — it did not come from the helper resume"
+            )
+        print(
+            f"  e back (host still offline): its BEGIN to a went unanswered, it "
+            f"asked the helper d for a resume and shows d's missed event after "
+            f"{time.time() - t0:.0f} s ✓"
+        )
+
+        # 4. Old picture, host silent → the helper d serves it.
+        d_off, e_off = _log_size("d"), _log_size("e")
+        t0 = time.time()
+        _, first = _view_until(post2, pic2, 180.0)
+        took = time.time() - t0
+        to_d = _log_lines_matching(
+            "e", f"to {d['instance_id']}: sent", offset=e_off
+        )
+        served = [
+            x
+            for x in _log_lines_matching(
+                "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
+            )
+            if "1 file(s) queued" in x
+        ]
+        if not to_d or not served:
+            raise SystemExit(
+                f"{step}: the helper d did not serve e's request with the host "
+                f"silent (e asked d: {to_d!r}; d served: {served!r})"
+            )
+        print(
+            f"  host a silent; old picture {name2[:15]}… (GFS copies dropped: "
+            f"{dropped}; d holds it as {d_name2[:15]}…): e's view → HTTP {first}, "
+            f"a being silent, it asked the helper d instead, which served it; "
+            f"byte-identical after {took:.0f} s ✓"
+        )
+
+        # 5. What the GFS saw over the whole step.
+        env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
+        if not [x for x in env_lines if "<mailbox>" in x]:
+            raise SystemExit(f"{step}: the GFS delivered nothing to a mailbox")
+        named = (a["instance_id"], d["instance_id"], e["instance_id"], space_id)
+        leaked = [
+            x
+            for x in _gfs_log_lines_matching("", offset=gfs_off)
+            if e_mailbox in x
+            or d_mailbox in x
+            or (("gfs.envelope" in x or "mailbox" in x) and any(n in x for n in named))
+        ]
+        if leaked:
+            raise SystemExit(
+                f"{step}: a GFS relay line names an instance id, a mailbox id or "
+                f"the space: {leaked[:3]!r}"
+            )
+        print(
+            "  the GFS logged mailbox deliveries and no instance id, mailbox id "
+            "or space ✓"
+        )
+    finally:
+        if a_down:
+            _respawn(state, "a")
+        if e_down:
+            _respawn(state, "e")
+    print(f"{step}: ok")
 
 
 # ─── Step: gfs-relay-media ─────────────────────────────────────────────────
@@ -7672,24 +8335,34 @@ def cmd_gfs_relay_media() -> None:
 
     def _restart(env_extra: dict[str, str] | None) -> None:
         offset = _gfs_log_size()
+        # The restart keeps the GFS's data dir, so what earlier steps
+        # recorded about it (``global_space_id`` …) still holds — carry it
+        # over, or every later step that reads it refuses to run.
+        kept = dict(_load().get("gfs") or {})
         cmd_gfs_down()
         cmd_gfs_up(env_extra=env_extra)
+        fresh = _load()
+        fresh["gfs"] = {**kept, **(fresh.get("gfs") or {})}
+        _save(fresh)
         _wait_for_gfs_ws_since(a_iid, offset=offset, timeout=90.0)
         _wait_for_gfs_ws_since(e_iid, offset=offset, timeout=90.0)
-        # v_88: the pair's two mailbox claims come back too — each after its
-        # own 0-60 s jitter — before anything is sent (a queued media frame
-        # is drained without a log line the check below could read).
+        # v_89: EVERY household's mailbox claim comes back too — after its
+        # reconnect backoff — before anything is sent (a queued media frame is drained without a log line the
+        # check below could read). Not just the pair's: a paired member of
+        # the space (d) holds one at this GFS too, and its claim coming back
+        # first must not stand in for e's.
+        want = max(2, _mailboxes_held())
         deadline = time.time() + 150.0
         while time.time() < deadline:
             claims = _gfs_log_lines_matching(
                 "gfs.ws.register: instance=<mailbox>", offset=offset
             )
-            if len(claims) >= 2:
+            if len(claims) >= want:
                 break
             time.sleep(1.0)
         else:
             raise SystemExit(
-                f"{step}: the pair's mailbox claims did not come back within "
+                f"{step}: {want} mailbox claims did not come back within "
                 "150 s of the GFS restart"
             )
 
@@ -7748,13 +8421,20 @@ def cmd_gfs_relay_media() -> None:
                             break
             time.sleep(1.0)
         if got != src:
+            # What a still has queued for the photo, per recipient.
+            outbox = _rows(
+                "a",
+                "SELECT target_instance_id, status, attempts, last_error, "
+                "next_attempt_at FROM space_media_outbox ORDER BY created_at",
+            )
+            print(f"  a's space media outbox: {outbox!r}")
             raise SystemExit(
                 f"{step}: e never held a's {len(src)}-byte photo byte-identical "
                 f"(as {local!r}, {len(got)} bytes) within 120 s — no media through "
                 "the relay."
             )
-        # v_88 — e reaches this space only through the GFS, so the frames
-        # go to e's per-space MAILBOX: the GFS logs ``<mailbox>`` and must
+        # v_89 — e reaches this space only through the GFS, so the frames
+        # go to e's MAILBOX: the GFS logs ``<mailbox>`` and must
         # name e's instance id on none of them.
         pushed = _gfs_log_lines_matching(
             "media delivered to live socket <mailbox>", offset=gfs_off
@@ -7815,8 +8495,8 @@ def cmd_gfs_media_on_demand() -> None:
     (``GfsSpaceMediaStore._drop`` + ``_remember_left``): the
     ``gfs_space_media`` row and the file ``data_dir/space_media/<blob>`` go,
     and ``gfs_space_media_demand`` remembers when the cache had stored it.
-    The reader's own copy (``sg-…``) is deleted too, so a VIEW
-    (``GET /api/media/<sg-name>``) misses, finds no GFS holding the blob and
+    The reader's own copy is deleted too, so a VIEW
+    (``GET /api/media/<name>``) misses, finds no GFS holding the blob and
     asks ``POST /gfs/media/{blob}/wanted``; the GFS asks the host a over its
     socket (``space_media_request``), a re-seals the file deterministically
     and serves the ticket.
@@ -7829,11 +8509,12 @@ def cmd_gfs_media_on_demand() -> None:
        +1 re-upload. The OTHER reader kind (follower ↔ link-joined member),
        when it holds the same blob, then views it too: straight from the
        cache (``fetched blob … from GFS``), no new holder request. Run for
-       e (invite photo) and d (space photo).
+       the follower d (space photo); since v_92 a member household asks the
+       host and helpers instead (``gfs-space-healing``).
     2. **Old → stream, nothing stored.** ``stored_at`` 30 days ago: the
        reader still gets the bytes byte-identical, but the GFS has NO row
        and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
-       a logged ``streamed on demand``. Run for e and d.
+       a logged ``streamed on demand``. Run for d.
 
     Not re-runnable within ~10 min: a attaches its upload authorization to
     a cache request at most once per (GFS, blob) per ``REUPLOAD_COALESCE_S``.
@@ -7841,12 +8522,11 @@ def cmd_gfs_media_on_demand() -> None:
     state = _load()
     if not state or not _gfs_alive(state):
         raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
-    invite_photo = state.get("gfs_invite_photo")
     space_photo = state.get("gfs_space_photo")
-    if not invite_photo or not space_photo:
+    if not space_photo:
         raise SystemExit(
-            "run 'gfs-space-post' and 'gfs-invite-link-content' first — this step "
-            "needs the photos they proved through the GFS media cache"
+            "run 'gfs-space-post' first — this step needs the photo it proved "
+            "through the GFS media cache"
         )
     gfs = f"http://127.0.0.1:{GFS_PORT}"
     step = "gfs-media-on-demand"
@@ -7921,10 +8601,10 @@ def cmd_gfs_media_on_demand() -> None:
             time.sleep(0.5)
         raise SystemExit(f"{step}: {what} within {timeout:.0f} s")
 
-    cases = [
-        ("e", invite_photo, "d", "the link-joined member"),
-        ("d", space_photo, "e", "the follower"),
-    ]
+    # v_92: only a FOLLOWER asks its GFS on demand. A member household
+    # (the link-joined e) asks the space's host and helpers with
+    # ``SPACE_MEDIA_WANTED`` instead — ``gfs-space-healing`` proves that.
+    cases = [("d", space_photo, "e", "the follower")]
     blobs: dict[str, tuple[str, str, bytes]] = {}
     for reader, photo, _other, _kind in cases:
         ref = _ref(reader, photo)
@@ -8035,15 +8715,16 @@ def cmd_gfs_media_on_demand() -> None:
 
     print(
         f"{step}: ok (fresh → one re-upload, then a plain cache read; old → "
-        "streamed, nothing stored; link-joined member e and follower d alike)"
+        "streamed, nothing stored; the follower d)"
     )
 
 
 
 @_offline_step
 def cmd_gfs_member_publish() -> None:
-    """v_49 trusted-mode member publish: a link-joined member posts while
-    the HOST is offline, and the space's followers still get it live.
+    """v_49 member publish (anonymous — the one mode since v_90): a
+    link-joined member posts while the HOST is offline, and the space's
+    followers still get it live.
 
     Prereqs: ``gfs-space-subscribe`` (d follows a's global space over the
     GFS) and ``gfs-invite-link`` (+ ``-content``) — e holds a link-joined
@@ -8053,14 +8734,15 @@ def cmd_gfs_member_publish() -> None:
     1. Stop **a** — the host, the only seed holder. Before v_49 nothing e
        posted could reach a follower now: only a seed holder could put an
        item on the relay.
-    2. e posts and publishes the post ITSELF — ``POST /gfs/member-publish``,
-       signed by e's household key, authorized by e's writer cert.
+    2. e posts and publishes the post ITSELF — ``POST
+       /gfs/member-publish-anon``, signed with the space's writer group key
+       (e's writer cert rides inside the ciphertext).
     3. d (a follower that is NOT a member) receives the post decrypted
        within the poll window. The GFS log shows the member-publish fan-out
        for the space, and no line carries the post text.
     4. Restart a. a receives e's post over the normal member path (the
        relay envelope queue) and sends NO copy to the GFS (step 12): e is
-       v_57, the GFS proved member publish and ``space_item_followers``,
+       v_90, the GFS proved member publish and ``space_item_followers``,
        and every follower there reads ``space_item``.
     5. d holds exactly ONE copy of e's post.
 
@@ -8162,7 +8844,7 @@ def cmd_gfs_member_publish() -> None:
     #     no other path ever carried them to a follower.
     second_id, edited = _member_publish_items(state, space_id, post_id, gfs_off)
 
-    # 4. The host comes back. Step 12: e is a v_57 household that published
+    # 4. The host comes back. Step 12: e is a v_90 household that published
     #    the post itself to every listed GFS, the GFS proved member publish
     #    and ``space_item_followers``, and every follower there (d) said it
     #    reads ``space_item`` — so a sends NO copy of e's post to that GFS
@@ -8573,18 +9255,18 @@ def _moderation_outcomes_reach_followers(state: dict, space_id: str) -> None:
 
 @_offline_step
 def cmd_gfs_member_publish_strict() -> None:
-    """v_50 strict (anonymous) member publish: the owner switches the space
-    to strict, and a link-joined member's post reaches a follower over the
-    GFS while the host is offline — with nothing identifying on the wire.
+    """Anonymous member publish — the one mode since v_90 (the step keeps
+    its v_50 name for the chain): a link-joined member's post reaches a
+    follower over the GFS while the host is offline, with nothing
+    identifying on the wire, and the identified route is gone.
 
     Prereqs: ``gfs-member-publish`` (and everything it needs) — a is back
     up, e holds a writer seat in a's global space, d follows it.
 
     Sequence:
-    1. a (the owner) PATCHes ``features.gfs_publish_mode = "strict"``. That
-       rotates the content key: e gets the new epoch's writer GROUP key with
-       its cert (over the relay — e is paired with nobody), and the GFS gets
-       the owner's notice with ``publish_mode`` + the ``writer_key_cert``.
+    1. Wait until the GFS has the writer key of the space's current epoch
+       pinned (the owner's notice) and e holds that key (no publish-mode
+       switch any more: every publicly readable space has one).
     2. Stop **a** (host) and **d** (so the GFS has to STORE the item for d).
     3. e posts. Its publisher signs ``POST /gfs/member-publish-anon`` with
        the writer key, over its cookie-less session.
@@ -8594,25 +9276,16 @@ def cmd_gfs_member_publish_strict() -> None:
        of e's (instance id, identity key).
     5. Restart d: it drains the queue and decrypts e's post (the cert came
        from inside the ciphertext).
-    6. An IDENTIFIED publish into the strict space — signed with e's real
-       household key and e's real writer cert, exactly what a v_49 or
-       misconfigured household would send — is refused (403).
-    7. Restart a, switch the space back to trusted (the chain's later steps
-       expect it), and record the strict epoch for ``verify``'s v_50 check.
+    6. The identified ``POST /gfs/member-publish`` — what a pre-v_90
+       household would send — has no route any more (404 / 405).
+    7. Restart a and record the epoch for ``verify``'s writer-key check.
 
     Polls every 3 s; backs off on 429. GFS / household logs are bookmarked
     before each respawn.
     """
-    import base64 as _b64
     import json as _json
-    from dataclasses import replace as _replace
-    from datetime import datetime as _dt
-    from datetime import timezone as _tz
 
-    from socialhome.crypto import b64url_encode, sign_ed25519
-    from socialhome.domain.gfs_member_publish import MemberPublishRequest
-    from socialhome.domain.writer_cert import WriterCert
-    from socialhome.infrastructure.key_manager import KeyManager
+    from socialhome.crypto import b64url_encode
 
     state = _load()
     if not state or not _gfs_alive(state):
@@ -8625,28 +9298,12 @@ def cmd_gfs_member_publish_strict() -> None:
     a = state["instances"]["a"]
     d = state["instances"]["d"]
     e = state["instances"]["e"]
-    a_base = f"http://127.0.0.1:{a['port']}"
     gfs_base = state["gfs"]["base_url"]
     e_iid = e["instance_id"]
     e_pk_hex = _rows("e", "SELECT identity_public_key FROM instance_identity")[0][0]
     e_leaks = (e_iid, e_pk_hex, b64url_encode(bytes.fromhex(e_pk_hex)))
 
-    def _patch_mode(mode: str) -> None:
-        for _attempt in range(4):
-            st, body = _request(
-                f"{a_base}/api/spaces/{space_id}",
-                token=a["token"],
-                method="PATCH",
-                body={"features": {"gfs_publish_mode": mode}},
-            )
-            if st != 429:
-                break
-            time.sleep(15.0)
-        _must(f"a sets gfs_publish_mode={mode}", st, body)
-
-    # 1. The owner goes strict; wait for the GFS pin and e's writer key.
-    _patch_mode("strict")
-    print("  a switched the space to strict (owner-only setting) ✓")
+    # 1. The GFS pin and e's writer key for the current epoch.
     deadline = time.monotonic() + 90.0
     epoch = None
     gfs_row: list = []
@@ -8657,8 +9314,7 @@ def cmd_gfs_member_publish_strict() -> None:
         )
         epoch = latest[0][0] if latest else None
         gfs_row = _gfs_rows(
-            "SELECT member_publish_mode, writer_key_epoch FROM global_spaces"
-            " WHERE space_id=?",
+            "SELECT writer_key_epoch FROM global_spaces WHERE space_id=?",
             (space_id,),
         )
         e_key = _rows(
@@ -8667,21 +9323,18 @@ def cmd_gfs_member_publish_strict() -> None:
             " AND writer_key IS NOT NULL",
             (space_id, epoch),
         )
-        if gfs_row and gfs_row[0] == ("strict", epoch) and e_key:
+        if gfs_row and gfs_row[0] == (epoch,) and e_key:
             break
         time.sleep(3.0)
     else:
         raise SystemExit(
-            f"gfs-member-publish-strict: after the switch, GFS row={gfs_row!r} "
-            f"(want ('strict', {epoch})) and e's writer key for epoch {epoch} "
+            f"gfs-member-publish-strict: GFS writer-key pin={gfs_row!r} (want "
+            f"epoch {epoch}) and e's writer key for epoch {epoch} "
             f"present={bool(e_key)} within 90 s. Check "
             f"{_instance_dir('a') / 'log.txt'} for 'GFS epoch notice' and "
             f"{_instance_dir('e') / 'log.txt'} for 'writer key'."
         )
-    print(
-        f"  GFS: mode=strict, writer key pinned for epoch {epoch}; e holds the "
-        "writer key for it ✓"
-    )
+    print(f"  GFS: writer key pinned for epoch {epoch}; e holds it (one mode) ✓")
 
     # 2. Host and follower offline (d must get the item from the GFS queue).
     _kill_household("a", a)
@@ -8689,14 +9342,14 @@ def cmd_gfs_member_publish_strict() -> None:
     gfs_off = _gfs_log_size()
 
     # 3. e posts.
-    content = f"Strict: posted anonymously with the host offline — {time.time_ns()}"
+    content = f"Anonymous: posted with the host offline — {time.time_ns()}"
     st, post = _e_request(
         state,
         "POST",
         f"/api/spaces/{space_id}/posts",
         {"type": "text", "content": content},
     )
-    post_id = _must("e posts in the strict space", st, post, ok=(201,))["id"]
+    post_id = _must("e posts in the space", st, post, ok=(201,))["id"]
 
     # 4. What the GFS saw and stored.
     deadline = time.monotonic() + 60.0
@@ -8728,16 +9381,13 @@ def cmd_gfs_member_publish_strict() -> None:
     print(
         f"  the GFS took e's item on the anonymous route ({anon_lines[-1].strip()}) ✓"
     )
-    identified = [
-        line
-        for line in _gfs_log_lines_matching(
-            "POST /gfs/member-publish HTTP", offset=gfs_off
-        )
-    ]
+    identified = list(
+        _gfs_log_lines_matching("POST /gfs/member-publish HTTP", offset=gfs_off)
+    )
     if identified:
         raise SystemExit(
             f"gfs-member-publish-strict: an IDENTIFIED member publish reached the "
-            f"GFS in strict mode: {identified[:1]!r}"
+            f"GFS: {identified[:1]!r}"
         )
     about = [
         line
@@ -8776,55 +9426,26 @@ def cmd_gfs_member_publish_strict() -> None:
         "SELECT content FROM space_posts WHERE id = ?",
         (post_id,),
         lambda rows: bool(rows) and rows[0][0] == content,
-        what=f"d never decrypted e's strict-mode post {post_id}",
+        what=f"d never decrypted e's anonymous post {post_id}",
         timeout=90.0,
     )
     print("  d (follower) drained and decrypted e's anonymous post ✓")
 
-    # 6. An identified publish into the strict space is refused — signed with
-    #    e's real household key and real writer cert (what a v_49 or
-    #    misconfigured household would send). The harness reads e's seed
-    #    (KEK-unwrapped from e's own data dir) only to build the request.
-    kek = KeyManager.from_data_dir(_instance_dir("e"))
-    wrapped = _rows("e", "SELECT identity_private_key FROM instance_identity")[0][0]
-    e_seed = kek.decrypt(wrapped)
-    cert_row = _rows(
-        "e",
-        "SELECT writer_cert FROM space_keys WHERE space_id=? AND epoch=?",
-        (space_id, epoch),
-    )
-    cert = WriterCert.from_wire(_json.loads(cert_row[0][0])).v1()
-    st, info = _request(f"{gfs_base}/gfs/info")
-    _must("GFS /gfs/info", st, info)
-    req = MemberPublishRequest(
-        instance_id=e_iid,
-        gfs_instance_id=str(info["gfs_instance_id"]),
-        ts=_dt.now(_tz.utc).isoformat(),
-        signature="",
-        target=space_id,
-        epoch=int(epoch),
-        writer_cert=cert,
-        payload=_b64.urlsafe_b64encode(os.urandom(48)).decode().rstrip("="),
-    )
-    req = _replace(
-        req, signature=b64url_encode(sign_ed25519(e_seed, req.signing_bytes()))
-    )
-    ref_off = _gfs_log_size()
+    # 6. The identified route is gone (v_90): what a pre-v_90 household
+    #    would send has nowhere to go.
     st, body = _request(
-        f"{gfs_base}/gfs/member-publish", method="POST", body=req.to_wire()
+        f"{gfs_base}/gfs/member-publish",
+        method="POST",
+        body={"instance_id": e_iid, "target": space_id, "epoch": int(epoch)},
     )
-    if st != 403:
+    if st not in (404, 405):
         raise SystemExit(
-            f"gfs-member-publish-strict: an identified publish into the strict "
-            f"space answered HTTP {st} {body!r}, expected 403"
+            f"gfs-member-publish-strict: the identified route answered HTTP {st} "
+            f"{body!r}, expected 404 / 405 (gone since v_90)"
         )
-    why = _gfs_log_lines_matching("strict mode", offset=ref_off)
-    print(
-        "  an identified publish (e's real key + cert) into the strict space is "
-        f"refused 403{' — ' + why[-1].split(':', 3)[-1].strip() if why else ''} ✓"
-    )
+    print(f"  the identified POST /gfs/member-publish is gone (HTTP {st}) ✓")
 
-    # 7. a back, space back to trusted, record for verify.
+    # 7. a back; record for verify.
     a_off = _log_size("a")
     new_a = _spawn("a", a["port"])
     state["instances"]["a"]["pid"] = new_a
@@ -8833,27 +9454,11 @@ def cmd_gfs_member_publish_strict() -> None:
     print(f"  a respawned: pid={new_a} (log bookmark {a_off})")
     _await_space_post(state, "a", space_id, post_id)
     print("  a (host) caught e's post up over the member path ✓")
-    _patch_mode("trusted")
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        row = _gfs_rows(
-            "SELECT member_publish_mode FROM global_spaces WHERE space_id=?",
-            (space_id,),
-        )
-        if row and row[0][0] == "trusted":
-            break
-        time.sleep(3.0)
-    else:
-        raise SystemExit(
-            "gfs-member-publish-strict: the GFS never learned the switch back to "
-            "trusted within 60 s"
-        )
-    print("  a switched the space back to trusted; the GFS followed ✓")
     state["gfs_member_publish_strict_epoch"] = int(epoch)
     _save(state)
     print(
-        "gfs-member-publish-strict: ok (anonymous member publish in a strict "
-        "space; identified refused)"
+        "gfs-member-publish-strict: ok (anonymous member publish, the one mode; "
+        "the identified route is gone)"
     )
 
 
@@ -8999,6 +9604,175 @@ def _ensure_gfs_client(state: dict, label: str) -> None:
     _wait_for_gfs_ws(info["instance_id"])
 
 
+def cmd_gfs_follower_comment() -> None:
+    """Followers are members with a read-only role (owner decision
+    2026-11-17): a follower household comments under the space's switch,
+    with the same cert and writer key a comment-only member holds.
+
+    Prereqs: ``gfs-invite-link`` — e holds a link-joined FOLLOWER seat on a's
+    third (global) space (``gfs_invite_follower_space_id``).
+
+    Sequence:
+    0. a opens the space to readers (``allow_subscribers``, left on): only a
+       publicly readable space is published over a GFS. d subscribes to it
+       over the GFS (left subscribed).
+    1. a turns ``allow_subscriber_comment`` on. e gets its credentials alone
+       (a snapshot with no roster entry): a ``comment`` cert and the writer
+       group key (e's ``space_keys``).
+    2. a posts; e receives it.
+    3. e comments — the normal member path: a (a member household) holds
+       the comment, e publishes it anonymously over the GFS (``POST
+       /gfs/member-publish-anon`` 200), and d — a GFS subscriber with no
+       seat, subscribed in step 0 — holds it too.
+    4. a turns the switch off: ONE rotation (a's content epoch moves on), and
+       e's next comment is refused — at e, or a never holds it. The comment
+       switch is left off (its default).
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run the gfs chain through 'gfs-invite-link' first")
+    space_id = state.get("gfs_invite_follower_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-invite-link' first (it seats e as a follower)")
+    a = state["instances"]["a"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+
+    def _features(what: str, **features: bool) -> None:
+        s, patched = _request(
+            f"{a_base}/api/spaces/{space_id}",
+            token=a["token"],
+            method="PATCH",
+            body={"features": features},
+        )
+        _must(what, s, patched, ok=(200,))
+
+    def _epoch() -> int:
+        rows = _rows(
+            "a", "SELECT MAX(epoch) FROM space_keys WHERE space_id = ?", (space_id,)
+        )
+        return int(rows[0][0])
+
+    # 0–1. Readers (d subscribes over the GFS), then the switch: e's
+    #      credentials arrive alone.
+    _features("a opens the follower space to readers", allow_subscribers=True)
+    d = state["instances"]["d"]
+    d_base = f"http://127.0.0.1:{d['port']}"
+    deadline = time.monotonic() + 60.0
+    sub: object = None
+    while time.monotonic() < deadline:
+        _request(f"{d_base}/api/public_spaces/refresh", token=d["token"], method="POST")
+        time.sleep(3.0)
+        s, sub = _request(
+            f"{d_base}/api/spaces/{space_id}/subscribe", token=d["token"], method="POST"
+        )
+        if s == 200 and isinstance(sub, dict) and sub.get("subscribed"):
+            break
+    else:
+        raise SystemExit(
+            f"gfs-follower-comment: d could not subscribe to the space over "
+            f"the GFS within 60 s (last answer {sub!r})"
+        )
+    print("  d reads the space through the GFS (a subscriber, no seat) ✓")
+    _features("a turns follower comments on", allow_subscriber_comment=True)
+    rows = _poll_rows(
+        "e",
+        "SELECT writer_cert FROM space_keys WHERE space_id = ? "
+        "AND writer_cert IS NOT NULL AND writer_key IS NOT NULL "
+        "ORDER BY epoch DESC LIMIT 1",
+        (space_id,),
+        bool,
+        what="e never stored its comment cert and writer key",
+    )
+    scope = json.loads(rows[0][0]).get("scope")
+    if scope != "comment":
+        raise SystemExit(
+            f"gfs-follower-comment: e stored a {scope!r} cert, expected the "
+            "'comment' cert a comment-only member holds"
+        )
+    print("  switch on: e holds a comment cert and the writer key ✓")
+
+    # 2.
+    s, post = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": f"Followers may comment — {time.time_ns()}"},
+    )
+    post_id = _must("a posts in the follower space", s, post, ok=(201,))["id"]
+    _await_space_post(state, "e", space_id, post_id)
+    _await_space_post(state, "d", space_id, post_id)
+
+    def _comment(text: str) -> tuple[int, object]:
+        return _e_request(
+            state,
+            "POST",
+            f"/api/spaces/{space_id}/posts/{post_id}/comments",
+            {"content": text},
+        )
+
+    def _a_holds(comment_id: str) -> bool:
+        return bool(
+            _rows("a", "SELECT 1 FROM space_post_comments WHERE id = ?", (comment_id,))
+        )
+
+    # 3. The normal member path: direct to a, and over the GFS to d.
+    gfs_off = _gfs_log_size()
+    st, body = _comment(f"A follower's comment — {time.time_ns()}")
+    first = _must("e (a follower) comments", st, body, ok=(200, 201))["id"]
+    _poll_rows(
+        "a",
+        "SELECT 1 FROM space_post_comments WHERE id = ?",
+        (first,),
+        bool,
+        what="a never held e's follower comment",
+    )
+    _poll_rows(
+        "d",
+        "SELECT 1 FROM space_post_comments WHERE id = ?",
+        (first,),
+        bool,
+        what="d (a GFS subscriber) never held e's follower comment",
+    )
+    anon = [
+        line
+        for line in _gfs_log_lines_matching("/gfs/member-publish-anon", offset=gfs_off)
+        if "POST" in line and '" 200 ' in line
+    ]
+    if not anon:
+        raise SystemExit(
+            "gfs-follower-comment: the GFS log shows no accepted anonymous "
+            "publish for e's comment"
+        )
+    print("  e's comment reached a directly and d over the GFS ✓")
+
+    # 4. Switch off: one rotation, and the next comment is refused.
+    before = _epoch()
+    _features("a turns follower comments off", allow_subscriber_comment=False)
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and _epoch() <= before:
+        time.sleep(1.0)
+    after = _epoch()
+    if after != before + 1:
+        raise SystemExit(
+            f"gfs-follower-comment: switch off moved a's content epoch "
+            f"{before} → {after}, expected exactly one rotation"
+        )
+    time.sleep(5.0)
+    st, body = _comment(f"After the switch went off — {time.time_ns()}")
+    third = body.get("id") if isinstance(body, dict) else None
+    time.sleep(10.0)
+    if third and _a_holds(third):
+        raise SystemExit(
+            "gfs-follower-comment: a holds e's comment made after follower "
+            "comments were turned off"
+        )
+    print(
+        "gfs-follower-comment: ok (switch on → comment cert + writer key, the "
+        "comment reached a and the GFS subscriber d; switch off → one rotation "
+        f"(epoch {before} → {after}), e's next comment refused, HTTP {st})"
+    )
+
+
 @_offline_step
 def cmd_gfs_private_channel() -> None:
     """v_51 + the owner's ``private_gfs`` option: a PRIVATE space whose owner
@@ -9115,6 +9889,18 @@ def cmd_gfs_private_channel() -> None:
             "one (e and b), never the owner a."
         )
     print("  the GFS seats both members e and b (never the owner a) ✓")
+    # e's own fan-out reaches b through the host hop, sealed to b's card from
+    # a's directory: e must hold it before a goes away. (A delta of b's card
+    # landing between the parts of e's first snapshot used to be dropped,
+    # and a did not answer again before e's next sync.)
+    _poll_rows(
+        "e",
+        "SELECT mailbox FROM space_instances WHERE space_id = ? AND instance_id = ?",
+        (space_id, b["instance_id"]),
+        lambda r: bool(r) and bool(r[0][0]) and '"card"' in r[0][0],
+        what="e never took b's member card from a's directory",
+    )
+    print("  e holds b's member card from the host's directory ✓")
 
     # 4. Host offline; b (paired, publish-only) posts; e gets it live.
     e_off = _log_size("e")
@@ -9135,7 +9921,7 @@ def cmd_gfs_private_channel() -> None:
         lambda r: bool(r) and r[0][0] == b_content,
         what=f"e never received b's post {b_post_id} while a was down",
     )
-    if not _log_lines_matching(
+    if not _await_log_lines(
         "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
     ):
         raise SystemExit(
@@ -9162,7 +9948,7 @@ def cmd_gfs_private_channel() -> None:
         lambda r: bool(r) and r[0][0] == content,
         what=f"b never received e's post {post_id} live while a was down",
     )
-    if not _log_lines_matching(
+    if not _await_log_lines(
         "b", f"gfs.relay.received: channel={channel_id}", offset=b_off
     ):
         raise SystemExit(
@@ -10080,13 +10866,13 @@ def cmd_gfs_multi_listing() -> None:
     ``gfs-b-up``. Runs after the rest of the gfs chain (it moves e off A for
     a while and restarts a and d), before ``verify``.
 
-    1. a and e connect to B. a creates a TRUSTED global space, publicly
+    1. a and e connect to B. a creates a global space, publicly
        readable, and lists it on A and on B (owner selection, ``PUT
        /api/spaces/{id}/gfs-servers``). Both servers
        list it and pin the epoch's writer key (the first-listing notice).
     2. a invites d (paired, registered on A only); d accepts. d holds the
-       owner's signed list naming A and B, and the writer key (trusted
-       space, v_57).
+       owner's signed list naming A and B, and the writer key (every v_90
+       writer of a publicly readable space).
     3. d restarts with loopback treated as public (the demo's B is on
        127.0.0.1 — see :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`).
     4. e leaves A, discovers the space on B and follows it there only.
@@ -10112,7 +10898,7 @@ def cmd_gfs_multi_listing() -> None:
         base64.urlsafe_b64encode(bytes.fromhex(d_pk)).decode().rstrip("="),
     )
 
-    # 1. a and e connect to B; a lists a new trusted global space on A and B.
+    # 1. a and e connect to B; a lists a new global space on A and B.
     a_b = _pair_with(state, "a", b_url)
     e_b = _pair_with(state, "e", b_url)
     print(f"  a and e connected to GFS B ({b_url}) ✓")
@@ -10223,7 +11009,7 @@ def cmd_gfs_multi_listing() -> None:
         "SELECT 1 FROM space_keys WHERE space_id=? AND writer_key IS NOT NULL",
         (space_id,),
         bool,
-        what="d never got the writer key of the trusted space (v_57)",
+        what="d never got the writer key of the space (v_90)",
         timeout=90.0,
     )
     print("  d joined: holds the owner's list (A + B) and the writer key ✓")
@@ -10370,7 +11156,7 @@ def cmd_gfs_multi_listing() -> None:
 
 
 def _check_multi_listing(state: dict, failures: list[str]) -> None:
-    """v_57 tripwire for ``verify``: d still holds the trusted space's writer
+    """v_57 tripwire for ``verify``: d still holds the space's writer
     key and the owner's two-server list; e still holds d's post."""
     info = state["gfs_multi_listing"]
     space_id = info["space_id"]
@@ -10379,7 +11165,7 @@ def _check_multi_listing(state: dict, failures: list[str]) -> None:
         "SELECT 1 FROM space_keys WHERE space_id=? AND writer_key IS NOT NULL",
         (space_id,),
     ):
-        failures.append("d: no writer key for the trusted multi-GFS space (v_57)")
+        failures.append("d: no writer key for the multi-GFS space (v_57 / v_90)")
     rows = _rows("d", "SELECT gfs_servers FROM spaces WHERE id=?", (space_id,))
     if not rows or not rows[0][0] or rows[0][0].count("inbox_url") != 2:
         failures.append("d: the owner's GFS list does not name both servers")
@@ -10461,8 +11247,8 @@ def cmd_gfs_private_channel_multi() -> None:
     2. e joins through a gfs link, d (paired) through an internal one. a
        registers the channel on A — B holds NO row for it, though a is
        connected to B and B can carry channels.
-    3. a picks **A and B**. B now holds the channel, its trusted-mode writer
-       key pinned (v_57); d holds the owner's two-server list.
+    3. a picks **A and B**. B now holds the channel, its writer key pinned;
+       d holds the owner's two-server list.
     4. d restarts with loopback treated as public (B is on 127.0.0.1, see
        :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`). e leaves A — it now reaches the
        channel over B only — and holds its seat on B.
@@ -10588,11 +11374,10 @@ def cmd_gfs_private_channel_multi() -> None:
                 f"gfs-private-channel-multi: owner choice answered {body!r}"
             )
         _poll_gfs_b_rows(
-            "SELECT writer_key_pk FROM gfs_channels WHERE channel_id=? "
-            "AND publish_mode='trusted'",
+            "SELECT writer_key_pk FROM gfs_channels WHERE channel_id=?",
             (channel_id,),
             lambda r: bool(r) and bool(r[0][0]),
-            what="GFS B never got the channel with its trusted writer key pinned",
+            what="GFS B never got the channel with its writer key pinned",
         )
         _poll_rows(
             "d",
@@ -10616,7 +11401,7 @@ def cmd_gfs_private_channel_multi() -> None:
             timeout=90.0,
         )
         print(
-            "  the channel lives on A and B (writer key pinned, trusted); d holds "
+            "  the channel lives on A and B (writer key pinned); d holds "
             "the two-server list and the grant naming both ✓"
         )
 
@@ -10672,7 +11457,7 @@ def cmd_gfs_private_channel_multi() -> None:
             what=f"e never received d's post {post_id} over GFS B",
             timeout=90.0,
         )
-        if not _log_lines_matching(
+        if not _await_log_lines(
             "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
         ):
             raise SystemExit(
@@ -10948,6 +11733,13 @@ def cmd_relay_pair() -> None:
     # already in place" and fall through to the assertions, so re-running
     # the step after a flake is actually possible (it was not: every
     # retry died here).
+    #
+    # Only a real pairing answers that. In the GFS chain a and d already
+    # share a space when this step runs and hold a space seat for each
+    # other (a confirmed ``space_session`` row): that is NOT a pairing, the
+    # request must go through (202), and the assertions below demand a
+    # ``manual`` row — a seat reads "confirmed" too, which is how this step
+    # once passed without pairing anybody.
     already_paired = s == 422 and "already paired" in str(_resp)
     if already_paired:
         print("  a ↔ d already trust-relay paired — re-checking assertions")
@@ -11032,14 +11824,19 @@ def cmd_relay_pair() -> None:
             _must(f"connections({label})", s, conns)
             match = [c for c in conns if c["instance_id"] == peer]
             last = match
-            if match and match[0]["status"] == "confirmed":
+            if (
+                match
+                and match[0]["status"] == "confirmed"
+                and match[0].get("source") == "manual"
+            ):
                 confirmed = True
                 pv = int(match[0].get("proto_version") or 1)
                 if pv >= 2:
                     break
         if not confirmed:
             raise SystemExit(
-                f"{label} → {peer[:8]}: expected confirmed, got {last!r}",
+                f"{label} → {peer[:8]}: expected a confirmed pairing "
+                f"(source=manual), got {last!r}",
             )
         if pv < 2:
             raise SystemExit(
@@ -11698,6 +12495,74 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_86 trusted file fills gate in place ✓")
+    # v_89 — member cards + the host's member directory + one GFS mailbox per
+    # household: cards and directories go only to a household at >= v_89,
+    # so the OURS round-trip above is what proves every pair takes them.
+    if int(_Cap.MIN_FOR_MAILBOX_MEMBER_MESH) != 89 or _OURS < 89:
+        failures.append(
+            "MIN_FOR_MAILBOX_MEMBER_MESH moved off v_89 (or OURS fell below it) "
+            "— members would never reach a household that reaches a space "
+            "through a GFS"
+        )
+    else:
+        print("  v_89 member mesh (cards, directory, one mailbox) gate in place ✓")
+    # v_91 — one multi-recipient upload for the mailbox seats behind one GFS:
+    # a seat joins a group only at >= v_91, so the OURS round-trip above is
+    # what proves every pair opens a multi frame.
+    if int(_Cap.MIN_FOR_MULTI_MAILBOX) != 91 or _OURS < 91:
+        failures.append(
+            "MIN_FOR_MULTI_MAILBOX moved off v_91 (or OURS fell below it) — "
+            "households behind a GFS would never get one upload for many"
+        )
+    else:
+        print("  v_91 multi-recipient mailbox upload gate in place ✓")
+    # v_92 — SPACE_MEDIA_WANTED: a member asks only providers at >= v_92, so
+    # the OURS round-trip above is what proves every pair answers it.
+    if int(_Cap.MIN_FOR_SPACE_MEDIA_WANTED) != 92 or _OURS < 92:
+        failures.append(
+            "MIN_FOR_SPACE_MEDIA_WANTED moved off v_92 (or OURS fell below it) — "
+            "members would never get an older space picture on view"
+        )
+    else:
+        print("  v_92 SPACE_MEDIA_WANTED gate in place ✓")
+    # v_93 — SPACE_POST_REACTION: the fan-out skips a member household below
+    # v_93, so the OURS round-trip above is what proves every pair is sent
+    # it; ``space-reaction`` proves the reactions converge on the real wire.
+    if int(_Cap.MIN_FOR_SPACE_POST_REACTIONS) != 93 or _OURS < 93:
+        failures.append(
+            "MIN_FOR_SPACE_POST_REACTIONS moved off v_93 (or OURS fell below "
+            "it) — reactions on space posts would stay in their household"
+        )
+    else:
+        print("  v_93 SPACE_POST_REACTION gate in place ✓")
+    # v_94 — one merge rule: a §25.6 requester at >= v_94 is streamed a
+    # poll's vote stamps instead of the vote list, and the stamp on
+    # SPACE_POLL_VOTE_CAST is additive (no gate). ``space-poll-vote`` sent a
+    # stamped vote from c; the host b must still hold it under c's stamp.
+    sent = state.get("poll_vote")
+    if sent:
+        held = _rows(
+            "b",
+            "SELECT vote_stamps_json FROM space_polls WHERE post_id=?",
+            (sent["post_id"],),
+        )
+        entry = (json.loads(held[0][0]) if held and held[0][0] else {}).get(
+            sent["voter"]
+        )
+        if entry != sent["entry"]:
+            failures.append(
+                f"v_94: b holds {entry!r} for c's poll vote, c stamped "
+                f"{sent['entry']!r} — the vote was not merged by its stamp"
+            )
+        else:
+            print("  v_94 b holds c's poll vote under c's own stamp ✓")
+    if int(_Cap.MIN_FOR_ITEM_MERGE_STAMPS) != 94 or _OURS < 94:
+        failures.append(
+            "MIN_FOR_ITEM_MERGE_STAMPS moved off v_94 (or OURS fell below it) "
+            "— a poll's votes would be replaced by the host's list again"
+        )
+    else:
+        print("  v_94 item merge stamps gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
@@ -11732,8 +12597,8 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_56 space-sync series rows gate in place ✓")
-    # v_57 — members publish to every GFS on the owner's list (writer key in
-    # trusted spaces, anonymous to servers they never joined). The OURS
+    # v_57 — members publish to every GFS on the owner's list (anonymous to
+    # servers they never joined; since v_90 the only member publish). The OURS
     # round-trip above proves every pair advertises >= v_57. Pin it, and when
     # ``gfs-multi-listing`` ran, check what it left behind.
     # v_64 — a public moment's sealed, signed ``sent_at``: followers refuse a
@@ -12117,10 +12982,20 @@ def cmd_verify() -> None:
     if int(_Cap.MIN_FOR_MULTI_GFS_PUBLISH) != 57 or _OURS < 57:
         failures.append(
             "MIN_FOR_MULTI_GFS_PUBLISH moved off v_57 (or OURS fell below it) — "
-            "members would get no writer key in a trusted space"
+            "members would publish to fewer listed GFSs"
         )
     else:
         print("  v_57 multi-GFS member publish gate in place ✓")
+    # v_90 — one GFS publish mode, always anonymous: the writer key goes to
+    # every v_90 publisher and no identified publish exists. The OURS
+    # round-trip above proves every pair advertises >= v_90; pin the gate.
+    if int(_Cap.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY) != 90 or _OURS < 90:
+        failures.append(
+            "MIN_FOR_ANON_MEMBER_PUBLISH_ONLY moved off v_90 (or OURS fell below "
+            "it) — members would get no writer key and publish nothing over a GFS"
+        )
+    else:
+        print("  v_90 one anonymous GFS publish mode gate in place ✓")
     if state.get("gfs_multi_listing"):
         before = len(failures)
         _check_multi_listing(state, failures)
@@ -12828,9 +13703,15 @@ def cmd_verify() -> None:
             )
             _must(f"connections({viewer})", s, conns)
             match = [c for c in conns if c["instance_id"] == peer]
-            if not match or match[0]["status"] != "confirmed":
+            if (
+                not match
+                or match[0]["status"] != "confirmed"
+                # A space seat reads "confirmed" too and is no pairing.
+                or match[0].get("source") != "manual"
+            ):
                 failures.append(
-                    f"{viewer}: relay-paired peer {peer[:8]} missing or not confirmed",
+                    f"{viewer}: relay-paired peer {peer[:8]} missing or not "
+                    f"a confirmed pairing (source=manual)",
                 )
                 continue
             print(f"  {viewer} ↔ {peer[:8]} confirmed via trust relay ✓")
@@ -13575,10 +14456,7 @@ def cmd_verify() -> None:
             for k in ("gfs_space_post_id", "gfs_space_rotated_post_id")
             if k in state
         }
-        s, body = _request(
-            f"http://127.0.0.1:{d['port']}/api/spaces/{gfs_space_id}/feed",
-            token=d["token"],
-        )
+        s, body = _space_feed_all(d["port"], d["token"], gfs_space_id)
         if s != 200:
             failures.append(
                 f"d: GET /api/spaces/{gfs_space_id}/feed failed: HTTP {s}",
@@ -13629,10 +14507,7 @@ def cmd_verify() -> None:
         if "gfs_space_admin_post_id" in state:
             admin_pid = state["gfs_space_admin_post_id"]
             admin_uid = state["instances"]["a"]["user_id"]
-            s, body = _request(
-                f"http://127.0.0.1:{d['port']}/api/spaces/{gfs_space_id}/feed",
-                token=d["token"],
-            )
+            s, body = _space_feed_all(d["port"], d["token"], gfs_space_id)
             if s != 200:
                 failures.append(
                     f"d: GET /api/spaces/{gfs_space_id}/feed failed: HTTP {s}",
@@ -13823,11 +14698,11 @@ def cmd_verify() -> None:
             )
             if seed and seed[0][0]:
                 failures.append(
-                    f"e: holds the signing seed for {il_admin} — an admin met "
-                    "through a public link must never hold space authority",
+                    f"e: holds the signing seed for {il_admin} although that "
+                    "space does not let admins act for its owner",
                 )
             else:
-                print("  e's link-admin seat still carries no signing seed ✓")
+                print("  e's link-admin seat carries no seed (delegation off) ✓")
         if not il_space:
             failures.append("gfs-invite-link state is incoherent (no space id)")
     else:
@@ -14045,6 +14920,36 @@ def cmd_verify() -> None:
             else:
                 print("  v_69 e holds a's reaction totals that came through the GFS ✓")
 
+    # 13z. members-parity (owner acceptance gate): the posts it left read the
+    #     same on d (paired / mesh) and e (GFS-only) as on the host a.
+    if state.get("members_parity"):
+        before = len(failures)
+        _check_members_parity(state, failures)
+        if len(failures) == before:
+            print("  members-parity: d and e still match the host on every post ✓")
+    else:
+        print("  (members-parity check skipped — run 'members-parity')")
+    if state.get("members_parity_apps"):
+        before = len(failures)
+        _check_members_parity_apps(state, failures)
+        if len(failures) == before:
+            print("  members-parity-apps: the tables stayed closed, the GFS saw none ✓")
+    else:
+        print("  (members-parity-apps check skipped — run 'members-parity-apps')")
+
+    # 13z. gfs-admin-seed: the pins every GFS holds, and the removed
+    #     admin's seeds still refused.
+    if state.get("gfs_admin_seed"):
+        before = len(failures)
+        _check_gfs_admin_seed(state, failures)
+        if len(failures) == before:
+            print(
+                "  gfs-admin-seed: every GFS pins the owner's key; the removed "
+                "admin's seeds are refused ✓"
+            )
+    else:
+        print("  (gfs-admin-seed check skipped — run 'gfs-admin-seed')")
+
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
     #    Anything we can't account for (i.e. doesn't match the
@@ -14102,16 +15007,6 @@ _LOG_BENIGN: tuple[str, ...] = (
     # close-only, close mid-gathering and double close give 0. Unchanged
     # upstream through libjuice 1.7.4. Narrow to this exact message.
     "juice: Invalid socket",
-    # Outbox terminal-drop on HTTP 410: by design when dual-transport
-    # delivery (perfect-negotiation RTC + HTTPS-inbox fallback)
-    # causes the second arrival to hit the receiver's replay cache.
-    # The outbox correctly gives up after the 410. A regression
-    # would look like the SAME ``msg_id`` being dropped without the
-    # receiver ever processing it — but the per-step content checks
-    # in ``cmd_verify`` (e.g. "c received a→c DM") catch that case,
-    # so this log line on its own is benign.
-    "OutboxProcessor: peer permanently rejected",
-    "returned terminal HTTP 410",
     # HTTPS-inbox transient failure during the inner-ring handshake
     # window. Pairs with the outbox-retry path above; the outbox
     # observes the error, reschedules, and the eventual delivery
@@ -14159,19 +15054,25 @@ _LOG_BENIGN: tuple[str, ...] = (
     # harness audit. A different webrtc_ice WARNING (e.g. ICE
     # gathering failure, bad TURN credentials) would still surface.
     "WebRTC: no TURN server configured",
-    # The harness's OWN negative control in the ``gfs-*`` chain. Both
-    # ``cmd_gfs_space_post`` step 5 and ``cmd_verify`` 13c ask **c** — a
-    # household that is deliberately not a member, not a subscriber and not
-    # GFS-paired — for the global space's feed, to prove the §"non-member
-    # households MUST NOT see space content" rule on the real wire. c does not
-    # hold that space, so ``SpaceFeedView`` maps a ``KeyError`` to 404 and
-    # ``BaseView`` logs the mapping at WARNING. The 404 IS the expected
-    # outcome; the assertion that matters (c holds no ``space_posts`` row and
-    # its feed exposes neither post) runs regardless. Only fires when the
-    # opt-in GFS chain is run in the same session as ``verify``.
-    "SpaceFeedView: KeyError surfaced from handler",
+    # The demo GFS starts on an empty data dir, so it mints its identity key
+    # and says where it stored it — operator advice, once per ``gfs-up``.
+    "GFS: minted a new random identity key",
     # Earlier entries removed because the underlying conditions
     # were fixed upstream (instead of permanently allowlisted):
+    # * ``OutboxProcessor: peer permanently rejected`` /
+    #   ``outbox: … returned terminal HTTP 410`` — the sender's two
+    #   WARNINGs for a message the receiver ALREADY HELD: its second copy
+    #   (the DataChannel failover, or a retry after the 10 s inbox timeout)
+    #   hit the replay cache and was answered with the generic 410. Since
+    #   #1384 that answer carries ``code: REPLAY`` and counts as delivered
+    #   (INFO). Either line now means a message really was refused for good
+    #   (see :data:`_LOG_NEVER_BENIGN` for the second one).
+    # * ``SpaceFeedView: KeyError surfaced from handler`` /
+    #   ``SpacePostItemView: KeyError surfaced from handler`` — a space or
+    #   post that is not there (c asking for a space it does not hold, a
+    #   deleted post's permalink) was a bare ``KeyError`` that ``BaseView``
+    #   logged at WARNING. Services raise ``NotFoundError`` now: a quiet
+    #   404. The line coming back means a real programming error.
     # * ``FederationEventType.FEDERATION_RTC_ICE`` /
     #   ``rtcAddRemoteCandidate: runtime failure`` /
     #   ``Got a remote candidate without remote description``
@@ -14186,6 +15087,12 @@ _LOG_BENIGN: tuple[str, ...] = (
     #   genuine libdatachannel failure still trips the audit.
 )
 
+#: Lines a fix made impossible in a clean run, but that a BROADER needle in
+#: :data:`_LOG_BENIGN` would still hide: ``outbox: `` (the retry warning)
+#: also matches the terminal drop. A block with one of these is never
+#: taken as benign noise (an expected-noise window can still name it).
+_LOG_NEVER_BENIGN: tuple[str, ...] = ("returned terminal HTTP 410",)
+
 #: Substrings that — when they appear — are real signal worth
 #: surfacing. These are the patterns an exception traceback or an
 #: explicit ``log.error`` / ``log.warning`` produces.
@@ -14194,6 +15101,11 @@ _LOG_INTERESTING: tuple[str, ...] = (
     "ERROR:",
     "WARNING:",
     "Exception:",
+    # The GFS process logs ``%(asctime)s %(levelname)-8s %(name)s: …``
+    # (:func:`cmd_gfs_up`), not the households' ``LEVEL:logger:`` — without
+    # these two its WARNING and ERROR lines were never looked at.
+    " WARNING  socialhome.",
+    " ERROR    socialhome.",
 )
 
 
@@ -14229,7 +15141,9 @@ def _audit_logs(state: dict) -> list[str]:
         for lineno, header, block_text in _split_log_into_numbered_blocks(text):
             if not any(marker in header for marker in _LOG_INTERESTING):
                 continue
-            if any(needle in block_text for needle in _LOG_BENIGN):
+            if not any(n in block_text for n in _LOG_NEVER_BENIGN) and any(
+                needle in block_text for needle in _LOG_BENIGN
+            ):
                 continue
             if _expected_in_window(lineno, block_text, windows):
                 continue
@@ -17669,6 +18583,229 @@ def cmd_space_chat() -> None:
     print("space-chat: ok")
 
 
+def cmd_space_reaction() -> None:
+    """Reactions on a space post reach every member household (v_93).
+
+    Prereqs: ``traffic`` + ``calendar`` (Beta's private space — Beta the
+    owner, Alpha and Gamma remote members). Runs standalone after them.
+
+    1. a posts in the space; b and c hold the post.
+    2. **Add.** a reacts 👍 and c reacts 🎉; a, b and c all show
+       ``{👍: [a's user], 🎉: [c's user]}`` (``SPACE_POST_REACTION``).
+    3. **Remove.** a takes its 👍 back; a, b and c all show only c's 🎉.
+    4. **v_93.** ``OURS`` is at least ``MIN_FOR_SPACE_POST_REACTIONS``.
+    """
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("space_id")
+    if not space_id:
+        raise SystemExit("run 'traffic' and 'calendar' first — needs Beta's space")
+    inst = state["instances"]
+    a, c = inst["a"], inst["c"]
+    step = "space-reaction"
+    posts = f"/api/spaces/{space_id}/posts"
+
+    def base(info: dict) -> str:
+        return f"http://127.0.0.1:{info['port']}"
+
+    s, post = _request(
+        base(a) + posts,
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": f"react to me {secrets.token_hex(3)}"},
+    )
+    post_id = _must(f"{step}: a posts", s, post, ok=(201,))["id"]
+    for label in ("b", "c"):
+        _await_space_post(state, label, space_id, post_id)
+
+    def shown(label: str) -> dict:
+        s, body = _request(
+            f"{base(inst[label])}/api/spaces/{space_id}/feed",
+            token=inst[label]["token"],
+        )
+        feed = body if isinstance(body, list) else ((body or {}).get("posts") or [])
+        seen = next((p for p in feed if p.get("id") == post_id), None) if s == 200 else None
+        return {k: sorted(v) for k, v in ((seen or {}).get("reactions") or {}).items()}
+
+    def converge(what: str, want: dict) -> None:
+        deadline = time.time() + 45.0
+        got: dict = {}
+        while time.time() < deadline:
+            got = {label: shown(label) for label in ("a", "b", "c")}
+            if all(v == want for v in got.values()):
+                print(f"  {what}: a, b and c all show {want} ✓")
+                return
+            time.sleep(1.0)
+        raise SystemExit(f"{step}: {what} — wanted {want!r} everywhere, got {got!r}")
+
+    for info, emoji, label in ((a, "👍", "a"), (c, "🎉", "c")):
+        s, body = _request(
+            f"{base(info)}{posts}/{post_id}/reactions",
+            token=info["token"],
+            method="POST",
+            body={"emoji": emoji},
+        )
+        _must(f"{step}: {label} reacts {emoji}", s, body, ok=(201,))
+    converge("add", {"👍": [a["user_id"]], "🎉": [c["user_id"]]})
+
+    s, body = _request(
+        f"{base(a)}{posts}/{post_id}/reactions/{urllib.parse.quote('👍')}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must(f"{step}: a takes its reaction back", s, body, ok=(200, 204))
+    converge("remove", {"🎉": [c["user_id"]]})
+
+    if _OURS < _Cap.MIN_FOR_SPACE_POST_REACTIONS:
+        raise SystemExit(
+            f"{step}: OURS={_OURS} < MIN_FOR_SPACE_POST_REACTIONS="
+            f"{_Cap.MIN_FOR_SPACE_POST_REACTIONS}"
+        )
+    print(f"{step}: ok")
+
+
+def cmd_space_poll_vote() -> None:
+    """A stamped poll vote crosses households and merges by its stamp (v_94).
+
+    Prereqs: ``traffic`` + ``calendar`` (Beta's private space — Beta the
+    owner, Alpha and Gamma remote members). Runs standalone after them.
+
+    1. a posts a poll in the space; a, b and c hold it with the same
+       option ids (``SPACE_POLL_CREATED``).
+    2. **Vote.** c votes the first option, then switches to the second
+       (``SPACE_POLL_VOTE_CAST`` with ``at``). a, b and c all show c on the
+       second option only.
+    3. **The stamp round-trips.** b (the host) and a hold, for c's voter,
+       exactly the stamp c's household wrote
+       (``space_polls.vote_stamps_json``) — the receivers merged by the
+       sender's stamp, not by arrival. Recorded in ``state.json`` so
+       ``verify`` re-checks it on b at the end of the chain.
+    4. **Nothing after the close.** a closes the poll; once b and c hold the
+       close, c's retraction is refused where it is made (409) and the vote
+       stays on all three.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("space_id")
+    if not space_id:
+        raise SystemExit("run 'traffic' and 'calendar' first — needs Beta's space")
+    inst = state["instances"]
+    a, c = inst["a"], inst["c"]
+    step = "space-poll-vote"
+    posts = f"/api/spaces/{space_id}/posts"
+
+    def base(info: dict) -> str:
+        return f"http://127.0.0.1:{info['port']}"
+
+    s, post = _request(
+        base(a) + posts,
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": f"which one {secrets.token_hex(3)}"},
+    )
+    post_id = _must(f"{step}: a posts", s, post, ok=(201,))["id"]
+    poll_url = f"{posts}/{post_id}/poll"
+    s, made = _request(
+        base(a) + poll_url,
+        token=a["token"],
+        method="POST",
+        body={"question": "Which one?", "options": ["First", "Second"]},
+    )
+    options = [o["id"] for o in _must(f"{step}: a adds a poll", s, made, ok=(201,))["options"]]
+
+    def wait(what: str, check, timeout: float = 45.0):
+        deadline = time.time() + timeout
+        got = None
+        while time.time() < deadline:
+            got = check()
+            if got:
+                return got
+            time.sleep(1.0)
+        raise SystemExit(f"{step}: timed out waiting for {what} (last: {got!r})")
+
+    def held_options(label: str) -> list[str]:
+        return [
+            r[0]
+            for r in _rows(
+                label,
+                "SELECT id FROM space_poll_options WHERE post_id=? ORDER BY position",
+                (post_id,),
+            )
+        ]
+
+    wait(
+        "the poll on a, b and c",
+        lambda: all(held_options(label) == options for label in "abc"),
+    )
+
+    def stamp_of(label: str) -> list | None:
+        rows = _rows(
+            label,
+            "SELECT vote_stamps_json FROM space_polls WHERE post_id=?",
+            (post_id,),
+        )
+        raw = rows[0][0] if rows else None
+        return (json.loads(raw) if raw else {}).get(c["user_id"])
+
+    def votes(label: str) -> list[str]:
+        return sorted(
+            r[0]
+            for r in _rows(
+                label,
+                "SELECT v.option_id FROM space_poll_votes v"
+                " JOIN space_poll_options o ON o.id = v.option_id"
+                " WHERE o.post_id=? AND v.voter_user_id=?",
+                (post_id, c["user_id"]),
+            )
+        )
+
+    for option in options:
+        s, body = _request(
+            f"{base(c)}{poll_url}/vote",
+            token=c["token"],
+            method="POST",
+            body={"option_id": option},
+        )
+        _must(f"{step}: c votes", s, body, ok=(200, 201, 204))
+    mine = stamp_of("c")
+    if not mine or mine[1] != [options[1]]:
+        raise SystemExit(f"{step}: c holds no stamp for its own vote: {mine!r}")
+    wait(
+        "c's stamped vote on a and b",
+        lambda: all(
+            stamp_of(label) == mine and votes(label) == [options[1]] for label in "ab"
+        ),
+    )
+    print(f"  a, b and c hold c's vote under c's own stamp {mine[0]} ✓")
+    state["poll_vote"] = {"post_id": post_id, "voter": c["user_id"], "entry": mine}
+    _save(state)
+
+    s, body = _request(f"{base(a)}{poll_url}/close", token=a["token"], method="POST")
+    _must(f"{step}: a closes the poll", s, body, ok=(200, 204))
+    wait(
+        "the close on b and c",
+        lambda: all(
+            _rows(label, "SELECT closed FROM space_polls WHERE post_id=?", (post_id,))
+            == [(1,)]
+            for label in "bc"
+        ),
+    )
+    s, body = _request(f"{base(c)}{poll_url}/vote", token=c["token"], method="DELETE")
+    if s != 409:
+        raise SystemExit(f"{step}: a retraction after the close → {s} {body!r}")
+    if any(votes(label) != [options[1]] for label in "abc"):
+        raise SystemExit(f"{step}: the closed poll's vote moved")
+    print("  after the close c's retraction is refused and the vote stays ✓")
+    print(f"{step}: ok")
+
+
 def cmd_bazaar_ask() -> None:
     """"Ask the seller" from the listing (v_74).
 
@@ -18741,6 +19878,28 @@ def _backdate_moment(label: str, moment_id: str, *, minutes: int) -> None:
         conn.close()
 
 
+def _next_mesh_checkpoint_min(label: str, moment_id: str) -> int:
+    """Minutes to backdate ``moment_id`` on ``label`` so the household's next
+    mesh totals checkpoint (+10 min, then +6 h) comes due at its next tick.
+    A checkpoint that already passed in real time was taken (and counted the
+    reactions of then): the GFS chain runs ``verify`` more than 10 min after
+    ``traffic`` made the moment, so backdating to +10 min re-arms nothing and
+    the new reaction's totals would wait for +6 h."""
+    rows = _rows(label, "SELECT created_at FROM moments WHERE id=?", (moment_id,))
+    created = datetime.fromisoformat(rows[0][0]) if rows and rows[0][0] else None
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_s = (
+        (datetime.now(timezone.utc) - created).total_seconds()
+        if created is not None
+        else 0.0
+    )
+    for offset_s in (600, 6 * 3600):
+        if age_s < offset_s - 30:
+            return offset_s // 60 + 1
+    raise SystemExit(f"{label}: moment {moment_id!r} is past its +6 h checkpoint")
+
+
 def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
     """v_69: d reacts 🔥 to c's moment (it reaches c two hops back, v_67);
     c's +10 min checkpoint is brought forward and its signed totals must
@@ -18772,7 +19931,8 @@ def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
     want = _rows(
         "c", "SELECT COUNT(*) FROM moment_reactions WHERE moment_id=?", (moment_id,)
     )[0][0]
-    _backdate_moment("c", moment_id, minutes=11)
+    minutes = _next_mesh_checkpoint_min("c", moment_id)
+    _backdate_moment("c", moment_id, minutes=minutes)
 
     def _totals(label: str) -> dict | None:
         rows = _rows(
@@ -18818,6 +19978,23 @@ def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
             "away; d's API shows them ✓"
         )
     return failures
+
+
+def _mailboxes_held() -> int:
+    """How many GFS mailboxes the households hold (v_89: one per household
+    per GFS; the demo runs one GFS)."""
+    n = 0
+    for label in ("a", "b", "c", "d", "e"):
+        try:
+            rows = _rows(
+                label,
+                "SELECT value FROM instance_config WHERE key = 'gfs_mailboxes'",
+            )
+        except Exception:
+            continue
+        if rows and rows[0][0]:
+            n += len((json.loads(rows[0][0]) or {}).get("boxes") or {})
+    return n
 
 
 def _rows(label: str, sql: str, params: tuple = ()) -> list[tuple]:
@@ -19511,7 +20688,8 @@ def cmd_gfs_authority_rotate() -> None:
     1. a turns ``delegated_admin_authority`` on, then off — the off-flip
        rotates the space authority key unconditionally.
     2. Assert the GFS re-pinned: ``global_spaces.identity_public_key`` is a's
-       new key and ``authority_cert`` is stored.
+       new key and ``authority_cert`` is stored — and that a took the GFS's
+       publish answer as the confirmation (no re-pin left owed).
     3. a posts; d (still pinned to the old key) must heal its pin from the
        GFS listing's cert and read the post.
     """
@@ -19554,6 +20732,19 @@ def cmd_gfs_authority_rotate() -> None:
         timeout=30.0,
     )
     print(f"  GFS re-pinned {space_id} to K2={k2[:12]}… from the owner cert ✓")
+    # Durable re-pin: the owner counts the re-pin only because the GFS
+    # ANSWERED the new key to the publish. Had it named another key or
+    # none, a would have logged the re-pin as owed (and kept retrying).
+    if _log_contains("a", f"did not confirm the space key for {space_id}"):
+        raise SystemExit(
+            "gfs-authority-rotate: a logged that the GFS did not confirm the "
+            "re-pin — the publish answer no longer names the pinned key"
+        )
+    if _log_contains("a", "still pin the retired key of space " + space_id):
+        raise SystemExit(
+            "gfs-authority-rotate: a's rotation ended with a re-pin still owed"
+        )
+    print("  the GFS confirmed the new pin in its publish answer; nothing owed ✓")
     time.sleep(8)  # the K2-signed subscriber key re-seal reaches d
     content = f"Post after the authority rotation — {time.time_ns()}"
     s, post = _request(
@@ -20588,6 +21779,7 @@ def cmd_space_report() -> None:
     print("space-report: ok")
 
 
+@_offline_step
 def cmd_federated_moderation() -> None:
     """Federated moderation (v_43): "Reviewed" across households.
 
@@ -20609,9 +21801,19 @@ def cmd_federated_moderation() -> None:
     4. **d — a plain member household — never received the pending
        item**: no ``space_moderation_queue`` row for it in d's DB, and the
        item id never appears in d's log.
+    5. **A moderator household that was offline catches up.** c is killed;
+       Alice submits a second task; the copy a queued for c is dropped
+       (c stayed away past a's retries). c restarts: its §25.6 BEGIN to
+       the host b echoes the pending items it holds (``mod_pending``:
+       none), b re-sends the item to c alone, and c's Moderation tab lists
+       it.
+    6. **A household promoted later gets what is already pending.** b
+       makes Dave (d) a moderator. d asks the host as soon as it applies
+       the promotion; b re-sends the still-pending item to d; Dave sees it
+       and approves it on d; a, b, c and d all hold the second task.
 
-    Beta then resets the level, demotes Carol and the space stays (its
-    own, so no earlier step's assertions change).
+    Beta then resets the level, demotes Carol and Dave and the space stays
+    (its own, so no earlier step's assertions change).
     """
     state = _load()
     if not state:
@@ -20825,6 +22027,156 @@ def cmd_federated_moderation() -> None:
         raise SystemExit("federated-moderation: d's log mentions the pending item")
     print("  d (plain member) never received the pending item ✓")
 
+    # 5. c — the moderator household — is offline during a submission and
+    #    past the submitter's retries: the host catches it up on c's next
+    #    §25.6 BEGIN (the ``mod_pending`` echo).
+    d = inst["d"]
+
+    def _queue_lists(label: str, wanted: str) -> bool:
+        v = inst[label]
+        s, items = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/moderation",
+            token=v["token"],
+        )
+        return s == 200 and any(i.get("id") == wanted for i in items)
+
+    def _caught_up(label: str, offset: int) -> bool:
+        return _log_contains(
+            "b",
+            f"moderation: caught {inst[label]['instance_id']} up on space {space_id}",
+            offset=offset,
+        )
+
+    _kill_household("c", c)
+    t0 = _rows("a", "SELECT datetime('now', '-2 seconds')")[0][0]
+    b_log_before = _log_size("b")
+    late_title = f"Water the plants {int(time.time())}"
+    s, queued = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
+        token=a["token"],
+        method="POST",
+        body={"title": late_title},
+    )
+    if s != 202 or not (queued or {}).get("queued"):
+        raise SystemExit(
+            f"federated-moderation: a's second task -> {s} {queued!r} "
+            "(expected 202 queued)"
+        )
+    late_id = queued["item_id"]
+    _wait_for(
+        "b's Moderation tab to list the second item",
+        lambda: _queue_lists("b", late_id),
+        timeout=60.0,
+    )
+    # c stayed away past a's retries: whatever a or b queued for c since
+    # (the direct envelope or a mesh-routed copy) is dropped.
+    lost = 0
+    for label in ("a", "b"):
+        con = sqlite3.connect(_instance_dir(label) / "socialhome.db", timeout=10)
+        try:
+            cur = con.execute(
+                "DELETE FROM federation_outbox WHERE instance_id=? AND status='pending'"
+                " AND event_type IN ('space_moderation_submitted', 'space_routed')"
+                " AND created_at >= ?",
+                (c["instance_id"], t0),
+            )
+            lost += cur.rowcount
+            con.commit()
+        finally:
+            con.close()
+    print(f"  c offline missed Alice's second item ({lost} queued envelope(s) dropped)")
+    new_pid = _spawn("c", c["port"])
+    state["instances"]["c"]["pid"] = new_pid
+    _save(state)
+    _wait_ready(c["port"])
+    print(f"  c respawned: pid={new_pid}")
+    _wait_for(
+        "c's Moderation tab to list the item it missed (host catch-up)",
+        lambda: _queue_lists("c", late_id),
+        timeout=240.0,
+    )
+    if not _caught_up("c", b_log_before):
+        raise SystemExit(
+            "federated-moderation: c holds the missed item, but the host b "
+            "never logged a catch-up for c — it arrived some other way"
+        )
+    print("  c caught up after one sync: the host re-sent the pending item ✓")
+
+    # 6. d's person is promoted AFTER the item was submitted: d asks the
+    #    host at once and gets the items already pending.
+    if _rows("d", "SELECT 1 FROM space_moderation_queue WHERE id=?", (late_id,)):
+        raise SystemExit(
+            "federated-moderation: plain member household d holds the second item"
+        )
+    b_log_before = _log_size("b")
+    d_role_url = (
+        f"{b_base}/api/spaces/{space_id}/remote-members/"
+        f"{d['instance_id']}/{d['user_id']}"
+    )
+    s, body = _request(
+        d_role_url, token=b["token"], method="PATCH", body={"role": "moderator"}
+    )
+    _must("promote dave to moderator", s, body)
+    _wait_for(
+        "d to hold dave's moderator seat", lambda: _local_role("d") == "moderator"
+    )
+    _wait_for(
+        "d's Moderation tab to list the item submitted before the promotion",
+        lambda: _queue_lists("d", late_id),
+        timeout=90.0,
+    )
+    if not _caught_up("d", b_log_before):
+        raise SystemExit(
+            "federated-moderation: d holds the pending item, but the host b "
+            "never logged a catch-up for d"
+        )
+    print("  d (promoted later) sees the item that was already pending ✓")
+    s, body = _request(
+        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/moderation/{late_id}/approve",
+        token=d["token"],
+        method="POST",
+        body={},
+    )
+    _must("d: dave approves on his own household", s, body)
+    if body.get("status") != "publishing":
+        raise SystemExit(
+            f"federated-moderation: d's approve -> {body!r} (expected 'publishing')"
+        )
+
+    def _late_task_by(label: str) -> str | None:
+        v = inst[label]
+        s, rows = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
+            token=v["token"],
+        )
+        hit = (
+            next((t for t in rows if t.get("title") == late_title), None)
+            if s == 200
+            else None
+        )
+        return hit.get("created_by") if hit else None
+
+    for label in ("a", "b", "c", "d"):
+        _wait_for(
+            f"{label} to hold the task dave approved",
+            lambda label=label: _late_task_by(label) == a["user_id"],
+            timeout=90.0,
+        )
+    for label in ("a", "b", "c", "d"):
+        _wait_for(
+            f"{label}'s row of the second item to read approved",
+            lambda label=label: (
+                _rows(
+                    label,
+                    "SELECT status FROM space_moderation_queue WHERE id=?",
+                    (late_id,),
+                )
+                == [("approved",)]
+            ),
+            timeout=60.0,
+        )
+    print("  dave approved on d; a, b, c and d hold the task, every copy approved ✓")
+
     _request(
         f"{b_base}/api/spaces/{space_id}",
         token=b["token"],
@@ -20837,6 +22189,7 @@ def cmd_federated_moderation() -> None:
         method="PATCH",
         body={"role": "member"},
     )
+    _request(d_role_url, token=b["token"], method="PATCH", body={"role": "member"})
     state["federated_moderation_space_id"] = space_id
     _save(state)
     print("federated-moderation: ok")
@@ -22660,6 +24013,3276 @@ def cmd_local_community() -> None:
     print("local-community: ok")
 
 
+# ─── Step: members-parity ──────────────────────────────────────────────────
+
+#: The two members ``members-parity`` compares: d reaches a's space over the
+#: paired / mesh path, e only through the GFS (joined by link).
+_PARITY_MEMBERS: tuple[str, ...] = ("d", "e")
+#: The calendar day the step's events sit on (a fixed future day).
+_PARITY_DAY = ("2027-04-01T00:00:00Z", "2027-04-02T00:00:00Z")
+#: A page too large for a JSON envelope on the GFS relay (~191 KiB) that
+#: one binary relay frame carries (v_87).
+_PARITY_BIG_PAGE_BYTES = 450 * 1024
+
+
+def _parity_get(state: dict, label: str, path: str) -> tuple[int, Any]:
+    """GET ``path`` as ``label``'s admin, waiting out a 429 (the default
+    bucket is 60/min per user per first two path segments, so every
+    ``/api/spaces/…`` read shares one)."""
+    inst = state["instances"][label]
+    for _attempt in range(8):
+        s, body = _request(
+            f"http://127.0.0.1:{inst['port']}{path}", token=inst["token"]
+        )
+        if s != 429:
+            return s, body
+        time.sleep(8.0)
+    return s, body
+
+
+def _parity_media(state: dict, label: str, url: str | None, cache: dict) -> str | None:
+    """sha256 (16 hex) of the bytes ``label`` serves for media ``url`` — the
+    URL as ``label``'s own API returned it, so each household is read under
+    its own name for the file. ``HTTP <code>`` when it serves none."""
+    if not url:
+        return None
+    key = (label, url.split("?", 1)[0])
+    if key in cache:
+        return cache[key]
+    inst = state["instances"][label]
+    path = url if url.startswith("/") else "/" + url
+    if "://" in url:
+        path = "/" + url.split("://", 1)[1].split("/", 1)[1]
+    s, raw = _http_get_bytes(
+        f"http://127.0.0.1:{inst['port']}{path}", token=inst["token"], timeout=60.0
+    )
+    if s != 200:
+        return f"HTTP {s}"
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()[:16]
+    cache[key] = digest
+    return digest
+
+
+def _parity_post(
+    state: dict,
+    label: str,
+    space_id: str,
+    post_id: str,
+    cache: dict,
+    *,
+    comments: bool = False,
+) -> dict:
+    """What ``label``'s API shows for a space post: gone, or its text, the
+    hash of each picture, reaction counts and (opt.) its comments."""
+    s, p = _parity_get(state, label, f"/api/spaces/{space_id}/posts/{post_id}")
+    if s == 404:
+        return {"exists": False}
+    if s != 200 or not isinstance(p, dict):
+        return {"error": f"HTTP {s}"}
+    urls = list(p.get("image_urls") or [])
+    if p.get("media_url"):
+        urls.append(p["media_url"])
+    snap = {
+        "exists": True,
+        "content": p.get("content"),
+        "pictures": [_parity_media(state, label, u, cache) for u in urls],
+        "reactions": {k: len(v) for k, v in sorted((p.get("reactions") or {}).items())},
+    }
+    if comments:
+        s, got = _parity_get(
+            state, label, f"/api/spaces/{space_id}/posts/{post_id}/comments"
+        )
+        rows = got if isinstance(got, list) else (got or {}).get("comments") or []
+        snap["comments"] = (
+            sorted(
+                (
+                    c.get("content") or "",
+                    _parity_media(state, label, c.get("media_url"), cache),
+                )
+                for c in rows
+                if not c.get("deleted")
+            )
+            if s == 200
+            else f"HTTP {s}"
+        )
+    return snap
+
+
+def _parity_event(
+    state: dict, label: str, space_id: str, event_id: str, cache: dict
+) -> dict:
+    s, got = _parity_get(
+        state,
+        label,
+        f"/api/spaces/{space_id}/calendar/events?start={_PARITY_DAY[0]}&end={_PARITY_DAY[1]}",
+    )
+    if s != 200:
+        return {"error": f"HTTP {s}"}
+    rows = (got if isinstance(got, list) else (got or {}).get("events")) or []
+    ev = next((x for x in rows if x.get("id") == event_id), None)
+    if ev is None:
+        return {"exists": False}
+    return {
+        "exists": True,
+        "summary": ev.get("summary"),
+        "cover": _parity_media(state, label, ev.get("cover_url"), cache),
+    }
+
+
+def _parity_gallery(
+    state: dict, label: str, album_id: str, item_id: str, cache: dict
+) -> dict:
+    s, got = _parity_get(state, label, f"/api/gallery/albums/{album_id}/items")
+    if s == 404:
+        return {"exists": False}
+    if s != 200:
+        return {"error": f"HTTP {s}"}
+    rows = got if isinstance(got, list) else (got or {}).get("items") or []
+    item = next((x for x in rows if x.get("id") == item_id), None)
+    if item is None:
+        return {"exists": False}
+    return {
+        "exists": True,
+        "caption": item.get("caption"),
+        "picture": _parity_media(state, label, item.get("url"), cache),
+        "thumbnail": _parity_media(state, label, item.get("thumbnail_url"), cache),
+    }
+
+
+def _parity_page(
+    state: dict, label: str, space_id: str, page_id: str, _cache: dict
+) -> dict:
+    s, got = _parity_get(state, label, f"/api/spaces/{space_id}/pages/{page_id}")
+    if s == 404:
+        return {"exists": False}
+    if s != 200 or not isinstance(got, dict):
+        return {"error": f"HTTP {s}"}
+    return {"exists": True, "title": got.get("title"), "content": got.get("content")}
+
+
+def _parity_big_page(
+    state: dict, label: str, space_id: str, page_id: str, _cache: dict
+) -> dict:
+    """A large page as ``label`` shows it: its size and SHA-256 (the text
+    itself would flood the report), so "the same" means byte-identical."""
+    view = _parity_page(state, label, space_id, page_id, _cache)
+    content = view.pop("content", None)
+    if isinstance(content, str):
+        raw = content.encode()
+        view["bytes"] = len(raw)
+        view["sha256"] = hashlib.sha256(raw).hexdigest()
+    return view
+
+
+def _db_page_view(label: str, page_id: str) -> dict:
+    """A page as ``label``'s database holds it: title, size and SHA-256 of
+    its text. For a household that may not hold it yet — a REST GET of a
+    page it lacks logs a WARNING the log audit would flag."""
+    rows = _rows(
+        label,
+        "SELECT title, content FROM space_pages WHERE id=? AND deleted_at IS NULL",
+        (page_id,),
+    )
+    if not rows:
+        return {"exists": False}
+    title, content = rows[0]
+    raw = (content or "").encode()
+    return {
+        "exists": True,
+        "title": title,
+        "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _parity_create_big_page(
+    state: dict, label: str, space_id: str, tag: str
+) -> tuple[str, dict]:
+    """``label`` creates a ~450 KiB page — over the GFS relay's JSON
+    envelope (~191 KiB), under one binary relay frame (v_87). Returns its
+    id and what every household must show."""
+    text = secrets.token_hex(_PARITY_BIG_PAGE_BYTES // 2)
+    title = f"Parity large page by {label} {tag}"
+    s, page = _inst_request(
+        state,
+        label,
+        "POST",
+        f"/api/spaces/{space_id}/pages",
+        {"title": title, "content": text},
+    )
+    page = _must(
+        f"members-parity: {label} creates a 450 KiB page", s, page, ok=(200, 201)
+    )
+    return page["id"], {
+        "exists": True,
+        "title": title,
+        "bytes": len(text),
+        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
+
+
+def _parity_poll(
+    state: dict, label: str, space_id: str, post_id: str, _cache: dict
+) -> dict:
+    s, got = _parity_get(state, label, f"/api/spaces/{space_id}/posts/{post_id}/poll")
+    if s == 404:
+        return {"exists": False}
+    if s != 200 or not isinstance(got, dict):
+        return {"error": f"HTTP {s}"}
+    return {
+        "exists": True,
+        "question": got.get("question"),
+        "votes": [
+            (o.get("text"), o.get("vote_count")) for o in got.get("options") or []
+        ],
+    }
+
+
+def _parity_role(
+    state: dict, label: str, space_id: str, user_id: str, _cache: dict
+) -> dict:
+    s, got = _parity_get(state, label, f"/api/spaces/{space_id}/members")
+    if s != 200:
+        return {"error": f"HTTP {s}"}
+    rows = got if isinstance(got, list) else (got or {}).get("members") or []
+    return {
+        "role": next((m.get("role") for m in rows if m.get("user_id") == user_id), None)
+    }
+
+
+def _parity_compare(
+    state: dict,
+    results: list[tuple[str, str, str]],
+    action: str,
+    snap,
+    *,
+    ref: str,
+    want: dict | None = None,
+    timeout: float = 90.0,
+    members: tuple[str, ...] = _PARITY_MEMBERS,
+) -> bool:
+    """Poll until each of ``members`` (default :data:`_PARITY_MEMBERS`) shows
+    the same as ``ref`` (the household that acted, or the host) — and, when given,
+    ``want`` is a subset of it. Records PASS or DIFF (naming what each
+    member showed, plus each lagging member's newest WARNING lines) in
+    ``results``. Never raises: every action is reported."""
+    offsets = {m: _log_size(m) for m in members}
+    cache: dict = {}
+    deadline = time.monotonic() + timeout
+    views: dict[str, dict] = {}
+    while True:
+        views = {label: snap(label, cache) for label in {ref, *members}}
+        expected = views[ref]
+        ok_ref = want is None or all(expected.get(k) == v for k, v in want.items())
+        if ok_ref and all(views[m] == expected for m in members):
+            results.append((action, "PASS", f"{' = '.join(members)} = {ref}: {expected}"))
+            print(f"  {action}: {' and '.join(members)} match ✓")
+            return True
+        if time.monotonic() > deadline:
+            break
+        time.sleep(3.0)
+    lines = [
+        f"{ref} (reference) shows {views[ref]}" + ("" if ok_ref else f", want {want}")
+    ]
+    for m in members:
+        if views[m] != views[ref]:
+            lines.append(f"{m} shows {views[m]}")
+            warn = _log_lines_matching(m, "WARNING", offset=offsets[m])[-3:]
+            lines += [f"    {m} log: {w.strip()[:240]}" for w in warn]
+    detail = "\n    ".join(lines)
+    results.append((action, "DIFF", detail))
+    print(f"  {action}: DIFF after {timeout:.0f} s\n    {detail}")
+    return False
+
+
+def _parity_upload(state: dict, label: str, size: tuple[int, int]) -> str:
+    inst = state["instances"][label]
+    s, up = _upload_file(
+        f"http://127.0.0.1:{inst['port']}/api/media/upload",
+        token=inst["token"],
+        filename="parity.png",
+        content=_make_noisy_png(*size),
+        content_type="image/png",
+        timeout=60.0,
+    )
+    return _must(f"members-parity: {label} uploads a picture", s, up, ok=(200, 201))[
+        "url"
+    ]
+
+
+def _parity_post_picture(state: dict, label: str, space_id: str, text: str) -> str:
+    url = _parity_upload(state, label, (400, 300))
+    s, post = _inst_request(
+        state,
+        label,
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "image", "content": text, "image_urls": [url]},
+    )
+    return _must(f"members-parity: {label} posts a picture", s, post, ok=(201,))["id"]
+
+
+def _parity_post_text(state: dict, label: str, space_id: str, text: str) -> str:
+    s, post = _inst_request(
+        state,
+        label,
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": text},
+    )
+    return _must(f"members-parity: {label} posts", s, post, ok=(201,))["id"]
+
+
+def _parity_expire_new_blobs(space_id: str, since: int) -> list[str]:
+    """Expire every GFS cache blob of ``space_id`` stored since ``since`` as
+    OLD content, exactly as ``gfs-media-on-demand``'s old leg does
+    (``GfsSpaceMediaStore._drop`` + ``_remember_left``, ``stored_at`` 30
+    days back). Returns the blob ids."""
+    rows = _gfs_rows(
+        "SELECT blob_id, scope_kind, scope_id FROM gfs_space_media"
+        " WHERE scope_id = ? AND created_at >= ?",
+        (space_id, since),
+    )
+    now = int(time.time())
+    for blob_id, scope_kind, scope_id in rows:
+        _gfs_write("DELETE FROM gfs_space_media WHERE blob_id = ?", (blob_id,))
+        (GFS_DIR / "space_media" / blob_id).unlink(missing_ok=True)
+        _gfs_write(
+            "INSERT INTO gfs_space_media_demand(blob_id, scope_kind, scope_id,"
+            " stored_at, touched_at) VALUES(?,?,?,?,?)"
+            " ON CONFLICT(blob_id, scope_kind, scope_id) DO UPDATE SET"
+            " stored_at = excluded.stored_at, touched_at = excluded.touched_at,"
+            " requests = 0, window_start = 0",
+            (blob_id, scope_kind, scope_id, now - 30 * 86_400, now),
+        )
+    return [r[0] for r in rows]
+
+
+def _dir_seq_on(label: str, space_id: str, instance_id: str) -> int:
+    """The ``dir_seq`` of the member directory ``label`` took from
+    ``instance_id`` for ``space_id`` (kept on that issuer's
+    ``space_instances.mailbox`` row), or 0."""
+    rows = _rows(
+        label,
+        "SELECT mailbox FROM space_instances WHERE space_id = ? AND instance_id = ?",
+        (space_id, instance_id),
+    )
+    if not rows or not rows[0][0]:
+        return 0
+    seq = json.loads(rows[0][0]).get("dir_seq")
+    return seq if isinstance(seq, int) else 0
+
+
+def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> None:
+    """"Host" means the owner OR the delegated admin that invited us (owner
+    decision 2026-11-13, ``federation/host_equivalence.py``).
+
+    A fresh private space of a's (``private_gfs`` and
+    ``delegated_admin_authority`` on): e joins by a ``gfs`` link (GFS-only),
+    b (QR-paired with a) by an ``internal`` link and is made admin (it gets
+    the space seed).
+
+    1. The owner a goes OFFLINE. b invites **d** (a §D1b invitation) and d
+       accepts: d is seated by the delegated admin. d must still get the member directory
+       — from b, on b's own version line — and with it e's card.
+    2. a comes back: it lists d (b passed d's card on, or d's own card
+       reached it), so e — which takes a directory only from the owner that
+       invited it — holds d's card.
+    3. a goes OFFLINE again. d posts and e must show it; e posts and d must
+       show it: each reaches the other's GFS mailbox, no host involved.
+    4. The GFS log over that window names no instance id, no mailbox id and
+       not the space on any envelope / mailbox line.
+    """
+    step = "members-parity (admin's invitee)"
+    admin, guest = "b", "d"
+    a, adm, inv, e = (state["instances"][x] for x in ("a", admin, guest, "e"))
+    a_base = f"http://127.0.0.1:{a['port']}"
+    tag = time.time_ns()
+    s, space = _inst_request(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Acting host {tag}",
+            "space_type": "private",
+            "join_mode": "invite_only",
+            "emoji": "🪑",
+        },
+    )
+    space_id = _must(f"{step}: a creates a private space", s, space, ok=(201,))["id"]
+    # ``members-parity-apps`` plays in this space: a global space (the one
+    # the content actions above use) never has game tables.
+    state["members_parity_private_space_id"] = space_id
+    _save(state)
+    s, cur = _inst_request(state, "a", "GET", f"/api/spaces/{space_id}")
+    feats = dict(_must(f"{step}: a reads the space", s, cur).get("features") or {})
+    feats["private_gfs"] = True
+    feats["delegated_admin_authority"] = True
+    s, body = _inst_request(
+        state, "a", "PATCH", f"/api/spaces/{space_id}", {"features": feats}
+    )
+    _must(f"{step}: a turns private_gfs + delegation on", s, body, ok=(200,))
+    _join_private_link(state, "e", space_id, a_base, via="gfs")
+    _join_private_link(state, admin, space_id, a_base, via="internal")
+    time.sleep(10)  # let the capability exchange settle (seed share is gated)
+    s, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}/remote-members/{adm['instance_id']}/{adm['user_id']}",
+        {"role": "admin"},
+    )
+    _must(f"{step}: a makes {admin}'s person an admin", s, body, ok=(200,))
+    deadline = time.time() + 90
+    seed: list[tuple] = []
+    held = None
+    while time.time() < deadline:
+        seed = _rows(
+            admin,
+            "SELECT identity_private_key IS NOT NULL FROM spaces WHERE id = ?",
+            (space_id,),
+        )
+        held = _card_on(admin, space_id, e["instance_id"])
+        if seed and seed[0][0] and held and held.get("mailbox"):
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"{step}: {admin} never became a delegated admin holding the space "
+            f"seed and e's card (seed row {seed!r}, e's card {held!r})"
+        )
+    print(f"  {admin} is a delegated admin (seed held) of a fresh private space ✓")
+
+    # 1. Owner offline: the guest is seated by the admin and gets the
+    #    directory.
+    _kill_household("a", a)
+    try:
+        # A §D1b invitation: a delegated admin issues it itself (a LINK it
+        # mints is forwarded to the host, so it needs the owner online).
+        s, invite = _inst_request(
+            state,
+            admin,
+            "POST",
+            f"/api/spaces/{space_id}/remote-invites",
+            {
+                "invitee_instance_id": inv["instance_id"],
+                "invitee_user_id": inv["user_id"],
+            },
+        )
+        _must(f"{step}: {admin} invites {guest} (owner offline)", s, invite, ok=(201,))
+        time.sleep(4)
+        _accept_remote_invite(state, guest, space_id)
+        invited = _rows(
+            guest, "SELECT invited_by_instance FROM spaces WHERE id = ?", (space_id,)
+        )
+        if not invited or invited[0][0] != adm["instance_id"]:
+            raise SystemExit(
+                f"{step}: {guest}'s stub does not name {admin} as its inviting "
+                f"admin: {invited!r}"
+            )
+        deadline = time.time() + 120
+        on_guest = None
+        seq = 0
+        while time.time() < deadline:
+            on_guest = _card_on(guest, space_id, e["instance_id"])
+            seq = _dir_seq_on(guest, space_id, adm["instance_id"])
+            if on_guest and on_guest.get("mailbox") and seq > 0:
+                break
+            time.sleep(1.0)
+        ok = bool(on_guest and on_guest.get("mailbox") and seq > 0)
+        results.append(
+            (
+                "admin's invitee: the directory with the owner offline",
+                "PASS" if ok else "DIFF",
+                ""
+                if ok
+                else f"{guest} holds {on_guest!r} for e, dir_seq from {admin} = {seq}",
+            )
+        )
+        print(
+            f"  owner a offline; {guest} (seated by admin {admin}) "
+            + (
+                f"holds e's card from {admin}'s directory (dir_seq {seq}) ✓"
+                if ok
+                else "got NO directory ✗"
+            )
+        )
+    finally:
+        _respawn(state, "a")
+
+    # 2. The owner is back: it lists the guest, so e (the owner's invitee)
+    #    holds the guest's card with its mailbox.
+    deadline = time.time() + 180
+    on_e = on_guest = None
+    while time.time() < deadline:
+        on_e = _card_on("e", space_id, inv["instance_id"])
+        on_guest = _card_on(guest, space_id, e["instance_id"])
+        if on_e and on_e.get("mailbox") and on_guest and on_guest.get("mailbox"):
+            break
+        time.sleep(1.0)
+    else:
+        results.append(
+            (
+                "admin's invitee: the owner lists it",
+                "DIFF",
+                f"e holds {on_e!r} for {guest}, {guest} holds {on_guest!r} for e",
+            )
+        )
+        return
+    results.append(("admin's invitee: the owner lists it", "PASS", ""))
+    print(f"  owner a back: it lists {guest}, e holds {guest}'s card ✓")
+
+    # 2b. e is made an admin as well: an admin reached only through the
+    #     GFS holds the signing seed exactly like the paired one (v_94).
+    e_role_url = (
+        f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    )
+    s, body = _inst_request(state, "a", "PATCH", e_role_url, {"role": "admin"})
+    pin = _space_col("a", space_id, "identity_public_key")
+    both = s == 200 and _parity_wait(
+        lambda: all(_seed_pin(_space_seed(x, space_id)) == pin for x in (admin, "e")),
+        timeout=120.0,
+    )
+    results.append(
+        (
+            f"admin: the signing seed — {admin} (paired) and e (GFS only)",
+            "PASS" if both else "DIFF",
+            ""
+            if both
+            else f"a's PATCH → HTTP {s} {body!r}; a pins {str(pin)[:12]}…, "
+            + ", ".join(
+                f"{x} holds {(_seed_pin(_space_seed(x, space_id)) or 'no seed')[:12]}"
+                for x in (admin, "e")
+            ),
+        )
+    )
+    print(
+        f"  {admin} (paired) and e (GFS only) are admins: "
+        + ("both hold the signing seed ✓" if both else "the seeds DIFFER ✗")
+    )
+    # Both edit on a synced view (an edit from a stale ``config_sequence``
+    # loses last-writer-wins against the owner's own).
+    _parity_wait(
+        lambda: all(
+            (_space_col(x, space_id, "config_sequence") or 0)
+            >= (_space_col("a", space_id, "config_sequence") or 0)
+            for x in (admin, "e")
+        ),
+        timeout=60.0,
+    )
+    guest_mailbox = on_e["mailbox"]["mailbox_id"]
+    e_mailbox = on_guest["mailbox"]["mailbox_id"]
+    last_name = ""
+
+    # 3. Owner offline again: the guest and e exchange a post. The GFS log
+    #    is read from AFTER the owner stopped: while a is up (it just came
+    #    back) a paired household's relay fallback may still reach it
+    #    instance-addressed, which is not what this window is about.
+    _kill_household("a", a)
+    gfs_off = _gfs_log_size()
+    try:
+        for author, reader in ((guest, "e"), ("e", guest)):
+            text = f"Acting-host post by {author} {tag}"
+            pid = _parity_post_text(state, author, space_id, text)
+            _parity_compare(
+                state,
+                results,
+                f"admin's invitee, owner offline: {author}'s post on {reader}",
+                lambda label, cache, pid=pid: _parity_post(
+                    state, label, space_id, pid, cache
+                ),
+                ref=author,
+                want={"exists": True, "content": text},
+                members=(reader,),
+                timeout=120.0,
+            )
+        # 3b. Each admin acts for the owner: a rename, executed on its own
+        #     household and signed with the seed. The member d (paired with
+        #     b, on the GFS with e) must show it. b and e have no path to
+        #     each other while the host is away — b is on no GFS at this
+        #     point of the chain and e is paired with nobody — so each
+        #     admin's view of the other's rename is compared once a is back.
+        for acting in (admin, "e"):
+            name = f"Renamed by {acting}, owner offline {tag}"
+            last_name = name
+            s, body = _inst_request(
+                state, acting, "PATCH", f"/api/spaces/{space_id}", {"name": name}
+            )
+            if s != 200:
+                results.append(
+                    (
+                        f"admin, owner offline: {acting} renames the space",
+                        "DIFF",
+                        f"{acting}'s PATCH → HTTP {s} {body!r} (200 = executed "
+                        "on its own household)",
+                    )
+                )
+                continue
+            _parity_compare(
+                state,
+                results,
+                f"admin, owner offline: {acting} renames the space",
+                lambda label, cache: _parity_space_name(state, label, space_id),
+                ref=acting,
+                want={"name": name},
+                members=(guest,),
+                timeout=120.0,
+            )
+        # 4. What the GFS saw.
+        named = (
+            a["instance_id"],
+            adm["instance_id"],
+            inv["instance_id"],
+            e["instance_id"],
+            space_id,
+        )
+        leaked = [
+            line
+            for line in _gfs_log_lines_matching("", offset=gfs_off)
+            if guest_mailbox in line
+            or e_mailbox in line
+            or (
+                ("gfs.envelope" in line or "mailbox" in line)
+                and any(x in line for x in named)
+            )
+        ]
+        results.append(
+            (
+                "admin's invitee: the GFS log names nobody",
+                "DIFF" if leaked else "PASS",
+                f"{leaked[:3]!r}" if leaked else "",
+            )
+        )
+    finally:
+        _respawn(state, "a")
+
+    # 5. The owner is back: it holds what the admins did while it was away,
+    #    and so does the admin that had no path to the other one.
+    if last_name:
+        _parity_compare(
+            state,
+            results,
+            "admin: the owner and both admins hold the last rename when it is back",
+            lambda label, cache: _parity_space_name(state, label, space_id),
+            ref="e",
+            want={"name": last_name},
+            members=("a", admin, guest),
+            timeout=180.0,
+        )
+
+    # 6. a takes e's admin seat away: the space key rotates like for any
+    #    admin — the remaining admin b holds the new seed, e none, and
+    #    every member pins the new key.
+    epoch = _space_col("a", space_id, "authority_key_epoch") or 0
+    # b's rename from the owner-offline window was signed with the key this
+    # rotation retires, and it reaches e only now, through the host (the two
+    # have no other path). Arriving after e adopted the new key it is
+    # refused there — the stated residual of a rotation (an old-key edit
+    # still in flight is refused and not retried); e's own later rename is
+    # the name everybody holds. Expected on e, for exactly that edit; the
+    # window closes with the step's tail.
+    _open_noise_window(
+        about=admin,
+        reason=f"{step}: {admin}'s old-key rename reaches e after the rotation",
+        witnesses=("e",),
+        named=("authority signature did not verify against the space key",),
+        names=[f"SPACE_CONFIG_CHANGED for {space_id} from {adm['instance_id']}"],
+    )
+    s, body = _inst_request(state, "a", "PATCH", e_role_url, {"role": "member"})
+
+    def _rotated() -> bool:
+        new_pin = _space_col("a", space_id, "identity_public_key")
+        return (
+            (_space_col("a", space_id, "authority_key_epoch") or 0) > epoch
+            and new_pin != pin
+            and _seed_pin(_space_seed(admin, space_id)) == new_pin
+            and _space_seed("e", space_id) is None
+            and all(
+                _space_col(x, space_id, "identity_public_key") == new_pin
+                for x in (admin, guest, "e")
+            )
+        )
+
+    rotated = s == 200 and _parity_wait(_rotated, timeout=180.0)
+    results.append(
+        (
+            "admin removed: the key rotates, the removed admin's seed is gone",
+            "PASS" if rotated else "DIFF",
+            ""
+            if rotated
+            else f"a's PATCH → HTTP {s} {body!r}; a pins "
+            f"{str(_space_col('a', space_id, 'identity_public_key'))[:12]}… at "
+            f"epoch {_space_col('a', space_id, 'authority_key_epoch')} (was "
+            f"{str(pin)[:12]}… at {epoch}); "
+            + ", ".join(
+                f"{x} pins "
+                f"{str(_space_col(x, space_id, 'identity_public_key'))[:12]}… and "
+                f"holds {(_seed_pin(_space_seed(x, space_id)) or 'no seed')[:12]}"
+                for x in (admin, guest, "e")
+            ),
+        )
+    )
+    print(
+        "  a took e's admin seat away: "
+        + (
+            f"the key rotated, {admin} holds the new seed, e none ✓"
+            if rotated
+            else "the rotation did NOT converge ✗"
+        )
+    )
+
+
+def _parity_wait(check, *, timeout: float, interval: float = 2.0) -> bool:
+    """Poll ``check()`` until it is truthy; ``False`` after ``timeout`` —
+    never raises, so the action lands in the results table."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if check():
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(interval)
+
+
+def _parity_space_name(state: dict, label: str, space_id: str) -> dict:
+    s, got = _parity_get(state, label, f"/api/spaces/{space_id}")
+    return {"name": (got or {}).get("name")} if s == 200 else {"error": f"HTTP {s}"}
+
+
+#: How long ``gfs-moderator-parity`` waits for the large item on e after
+#: the role change that makes e ask the host.
+_LARGE_ITEM_WAIT_S: float = 240.0
+
+
+@_offline_step
+def cmd_gfs_moderator_parity() -> None:
+    """A moderator reached ONLY through the GFS reviews like any other
+    (every member is equal on every path).
+
+    Prereqs: the gfs chain through ``gfs-member-mesh`` — a hosts the
+    link-joined space (``gfs_invite_space_id``); **d** is a member over the
+    paired / mesh path, **e** only through the GFS relay.
+
+    1. a sets posts to ``moderated``. d's person (a plain member) posts: 202
+       queued; the host a holds the item, e — a plain member household —
+       does not.
+    2. **Promoted later.** a makes e's person a ``moderator``. e asks the
+       host as soon as it applies the promotion (its §25.6 BEGIN carries the
+       ``mod_held`` echo, over the relay); a re-sends the item that was
+       already pending to e alone; e's Moderation tab lists it and a logged
+       the catch-up. e approves it on its own household; a, d and e hold
+       the post, authored by d's person.
+    3. **Offline during a submission.** e is killed; d's person posts
+       again (queued); e restarts and its Moderation tab lists the item —
+       from the GFS mailbox or from the host's catch-up, whichever came
+       first (reported). e approves; a, d and e hold the post.
+    4. **A large item.** With pages ``moderated`` too, d's person creates a
+       page of ~240 KiB — more than a JSON envelope on the GFS relay
+       carries. e's next BEGIN to the host echoes what it holds (a role
+       change makes e send it at once); a sends the item to e as one
+       binary relay frame (logged by a's catch-up);
+       e's Moderation tab lists it with the whole text, e approves, and a
+       and d hold the page (the published page itself reaches e with its
+       next sync: the relay's general size limit for any large write).
+
+    a then puts posts and pages back to ``open`` and e's person back to
+    ``member``.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    step = "gfs-moderator-parity"
+    a, d, e = (state["instances"][x] for x in ("a", "d", "e"))
+    role_url = (
+        f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    )
+
+    def local_role(label: str) -> str | None:
+        rows = _rows(
+            label,
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, state["instances"][label]["user_id"]),
+        )
+        return rows[0][0] if rows else None
+
+    def queue_lists(label: str, item_id: str) -> bool:
+        st, items = _inst_request(
+            state, label, "GET", f"/api/spaces/{space_id}/moderation"
+        )
+        return st == 200 and any(i.get("id") == item_id for i in items)
+
+    def holds_post(label: str, post_id: str, text: str) -> bool:
+        rows = _rows(
+            label,
+            "SELECT content, author FROM space_posts WHERE id=? AND deleted=0",
+            (post_id,),
+        )
+        return bool(rows) and rows[0] == (text, d["user_id"])
+
+    def submit(text: str) -> tuple[str, str]:
+        st, queued = _inst_request(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/posts",
+            {"type": "text", "content": text},
+        )
+        if st != 202 or not (queued or {}).get("queued"):
+            raise SystemExit(
+                f"{step}: d's post under Reviewed -> {st} {queued!r} "
+                "(expected 202 queued)"
+            )
+        return queued["item_id"], queued["target_id"]
+
+    def approve_on_e(item_id: str, post_id: str, text: str) -> None:
+        st, body = _inst_request(
+            state,
+            "e",
+            "POST",
+            f"/api/spaces/{space_id}/moderation/{item_id}/approve",
+            {},
+        )
+        body = _must(f"{step}: e approves on its own household", st, body)
+        if body.get("status") != "publishing":
+            raise SystemExit(f"{step}: e's approve -> {body!r} (expected 'publishing')")
+        for label in ("a", "d", "e"):
+            _poll(
+                f"{label} to hold the post e approved",
+                lambda label=label: holds_post(label, post_id, text),
+                timeout=120.0,
+                interval=2.0,
+            )
+
+    if local_role("e") != "member":
+        raise SystemExit(f"{step}: e's person is {local_role('e')!r}, expected member")
+    _set_posts_access(state, space_id, "moderated")
+    _poll(
+        "d to see posts reviewed",
+        lambda: (
+            _rows("d", "SELECT posts_access FROM spaces WHERE id=?", (space_id,))
+            == [("moderated",)]
+        ),
+        timeout=60.0,
+    )
+    try:
+        # 1 + 2. Submitted first, e promoted afterwards.
+        text = f"Reviewed over the relay {time.time_ns()}"
+        item_id, post_id = submit(text)
+        _poll(
+            "the host a to list d's item",
+            lambda: queue_lists("a", item_id),
+            timeout=60.0,
+            interval=2.0,
+        )
+        if _rows("e", "SELECT 1 FROM space_moderation_queue WHERE id=?", (item_id,)):
+            raise SystemExit(f"{step}: plain member household e holds the pending item")
+        a_log = _log_size("a")
+        st, body = _inst_request(state, "a", "PATCH", role_url, {"role": "moderator"})
+        _must(f"{step}: a promotes e's person to moderator", st, body)
+        _poll(
+            "e to hold its moderator seat",
+            lambda: local_role("e") == "moderator",
+            timeout=90.0,
+            interval=2.0,
+        )
+        _poll(
+            "e's Moderation tab to list the item submitted before its promotion",
+            lambda: queue_lists("e", item_id),
+            timeout=180.0,
+            interval=3.0,
+        )
+        needle = f"moderation: caught {e['instance_id']} up on space {space_id}"
+        if not _log_contains("a", needle, offset=a_log):
+            raise SystemExit(
+                f"{step}: e holds the pending item but the host a never logged "
+                "a catch-up for e"
+            )
+        print("  e (GFS only, promoted later) sees the item already pending ✓")
+        approve_on_e(item_id, post_id, text)
+        print("  e approved on its own household; a, d and e hold d's post ✓")
+
+        # 3. e offline during a submission.
+        _kill_household("e", e)
+        a_log = _log_size("a")
+        try:
+            text = f"Reviewed while e was away {time.time_ns()}"
+            item_id, post_id = submit(text)
+            _poll(
+                "the host a to list d's second item",
+                lambda: queue_lists("a", item_id),
+                timeout=60.0,
+                interval=2.0,
+            )
+        finally:
+            _respawn(state, "e")
+        _poll(
+            "e's Moderation tab to list the item it was offline for",
+            lambda: queue_lists("e", item_id),
+            timeout=300.0,
+            interval=3.0,
+        )
+        via = "the host's catch-up" if _log_contains("a", needle, offset=a_log) else (
+            "its GFS mailbox"
+        )
+        print(f"  e (offline during the submission) sees the item — from {via} ✓")
+        approve_on_e(item_id, post_id, text)
+        print("  e approved it; a, d and e hold d's second post ✓")
+
+        # 4. A large item: over the JSON relay envelope, as one relay frame.
+        st, body = _inst_request(
+            state,
+            "a",
+            "PATCH",
+            f"/api/spaces/{space_id}",
+            {"features": {"pages_access": "moderated"}, "force": True},
+        )
+        _must(f"{step}: a: pages_access=moderated", st, body)
+        _poll(
+            "d to see pages reviewed",
+            lambda: (
+                _rows("d", "SELECT pages_access FROM spaces WHERE id=?", (space_id,))
+                == [("moderated",)]
+            ),
+            timeout=60.0,
+        )
+        _poll(
+            "e to see pages reviewed",
+            lambda: (
+                _rows("e", "SELECT pages_access FROM spaces WHERE id=?", (space_id,))
+                == [("moderated",)]
+            ),
+            timeout=60.0,
+        )
+        big = secrets.token_hex(120 * 1024)
+        a_log = _log_size("a")
+        st, queued = _inst_request(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/pages",
+            {"title": f"Big page {time.time_ns()}", "content": big},
+        )
+        if st != 202 or not (queued or {}).get("queued"):
+            raise SystemExit(
+                f"{step}: d's 240 KiB page under Reviewed -> {st} "
+                f"{str(queued)[:200]!r} (expected 202 queued)"
+            )
+        big_item, page_id = queued["item_id"], queued["target_id"]
+        _poll(
+            "the host a to list d's large item",
+            lambda: queue_lists("a", big_item),
+            timeout=60.0,
+            interval=2.0,
+        )
+        # e's next BEGIN to the host brings it. The periodic one comes
+        # every 30 minutes; a role change makes e ask at once — a takes
+        # e's moderator seat away and gives it back.
+        for role in ("member", "moderator"):
+            st, body = _inst_request(state, "a", "PATCH", role_url, {"role": role})
+            _must(f"{step}: a sets e's person to {role}", st, body)
+            _poll(
+                f"e to hold the {role} seat",
+                lambda role=role: local_role("e") == role,
+                timeout=90.0,
+                interval=2.0,
+            )
+        _poll(
+            "e's Moderation tab to list the large item",
+            lambda: queue_lists("e", big_item),
+            timeout=_LARGE_ITEM_WAIT_S,
+            interval=5.0,
+        )
+        held = _rows(
+            "e",
+            "SELECT payload_json FROM space_moderation_queue WHERE id=?",
+            (big_item,),
+        )
+        if not held or json.loads(held[0][0]).get("content") != big:
+            raise SystemExit(f"{step}: e holds the large item without its whole text")
+        if not _log_contains("a", needle, offset=a_log):
+            raise SystemExit(
+                f"{step}: e holds the large item but the host a never logged a "
+                "catch-up for e"
+            )
+        print("  e (GFS only) holds the 240 KiB item (one binary relay frame) ✓")
+        st, body = _inst_request(
+            state,
+            "e",
+            "POST",
+            f"/api/spaces/{space_id}/moderation/{big_item}/approve",
+            {},
+        )
+        _must(f"{step}: e approves the large page", st, body)
+        # v_87 — the PUBLISHED page is an ordinary 240 KiB page event: e
+        # gets it like a and d, as one binary relay frame.
+        for label in ("a", "d", "e"):
+            _poll(
+                f"{label} to hold the large page",
+                lambda label=label: (
+                    _rows(
+                        label,
+                        "SELECT content FROM space_pages WHERE id=?"
+                        " AND deleted_at IS NULL",
+                        (page_id,),
+                    )
+                    == [(big,)]
+                ),
+                timeout=180.0,
+                interval=3.0,
+            )
+        print("  e approved it; a, d and e (GFS only) hold the 240 KiB page ✓")
+    finally:
+        _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
+        _inst_request(
+            state,
+            "a",
+            "PATCH",
+            f"/api/spaces/{space_id}",
+            {"features": {"pages_access": "open"}, "force": True},
+        )
+        _set_posts_access(state, space_id, "open")
+    _poll(
+        "e's person to be a member again",
+        lambda: local_role("e") == "member",
+        timeout=90.0,
+        interval=2.0,
+    )
+    print(f"{step}: ok")
+
+
+@_offline_step
+def cmd_members_parity() -> None:
+    """Owner acceptance gate: every space member is equal, whichever way its
+    household is reached (CLAUDE.md, owner decision 2026-11-06).
+
+    Prereqs: the gfs chain through ``gfs-member-mesh`` — a hosts the
+    link-joined space (``gfs_invite_space_id``); **d** is a member over the
+    paired / mesh path, **e** only through the GFS (joined by link, paired
+    with nobody). The same actions happen in the space and both members'
+    REST APIs must show the same as the household that acted: the item
+    exists or is gone, its text, and the picture bytes by sha256 (each read
+    under the URL its own API returns). Every check polls with a bounded
+    timeout; every action is reported, PASS or DIFF, and the step fails at
+    the end naming each difference.
+
+    Actions: a post with a picture, its edit, a comment (with a picture —
+    reported SKIP while the space comment API takes no picture), reactions
+    from both members, a calendar event with a cover, a gallery item, a
+    page, poll votes from both members, a deletion; catch-up (d and e
+    offline while a posts, edits and deletes, then back); an old picture
+    (posted while both are offline, then expired from the GFS cache as
+    30-day-old content, the way ``gfs-media-on-demand`` does); host offline
+    (a stopped; d and e each post a picture, the other must get it); admin
+    rights (a promotes e's person to admin, e deletes d's post, both see it
+    gone; e is put back to member at the end); the delegated admin's
+    invitee (:func:`_parity_admin_invitee`: in a fresh private space d is
+    seated by admin b while a is offline, still gets the member directory,
+    and exchanges a post with GFS-only e with a offline again).
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    s, _sp = _parity_get(state, "d", f"/api/spaces/{space_id}")
+    if s != 200:
+        raise SystemExit(
+            f"members-parity: d is not a member of {space_id} (HTTP {s}) — run "
+            "'gfs-member-mesh' first"
+        )
+    a, d, e = (state["instances"][x] for x in ("a", "d", "e"))
+    results: list[tuple[str, str, str]] = []
+    tag = time.time_ns()
+
+    def post_view(post_id: str, comments: bool = False):
+        return lambda label, cache: _parity_post(
+            state, label, space_id, post_id, cache, comments=comments
+        )
+
+    # 1. A post with a picture.
+    text = f"Parity post {tag}"
+    post_id = _parity_post_picture(state, "a", space_id, text)
+    _parity_compare(
+        state,
+        results,
+        "post with picture",
+        post_view(post_id),
+        ref="a",
+        want={"exists": True, "content": text},
+    )
+
+    # 2. Its edit.
+    edited = f"Parity post, edited {tag}"
+    s, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}/posts/{post_id}",
+        {"content": edited},
+    )
+    _must("members-parity: a edits its post", s, body, ok=(200,))
+    _parity_compare(
+        state, results, "edit", post_view(post_id), ref="a", want={"content": edited}
+    )
+
+    # 3. A comment with a picture. The space comment API takes text only
+    #    (``SpacePostCommentView`` reads ``content`` and ``parent_id``), so
+    #    the picture half cannot be produced over REST; the text is compared.
+    pic = _parity_upload(state, "a", (200, 150))
+    comment = f"Parity comment {tag}"
+    s, body = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/posts/{post_id}/comments",
+        {"content": comment, "media_url": pic},
+    )
+    body = _must("members-parity: a comments", s, body, ok=(201,))
+    if body.get("media_url"):
+        results.append(
+            (
+                "comment picture",
+                "NOTE",
+                "the API now keeps a comment picture — compare it",
+            )
+        )
+    else:
+        results.append(
+            (
+                "comment picture",
+                "SKIP",
+                "POST /api/spaces/{id}/posts/{pid}/comments takes no picture (media_url dropped)",
+            )
+        )
+    _parity_compare(
+        state,
+        results,
+        "comment",
+        post_view(post_id, comments=True),
+        ref="a",
+        want={"comments": [(comment, None)]},
+    )
+
+    # 4. A reaction from each member.
+    for label, emoji in (("d", "👍"), ("e", "🎉")):
+        s, body = _inst_request(
+            state,
+            label,
+            "POST",
+            f"/api/spaces/{space_id}/posts/{post_id}/reactions",
+            {"emoji": emoji},
+        )
+        _must(f"members-parity: {label} reacts", s, body, ok=(200, 201, 204))
+    _parity_compare(
+        state,
+        results,
+        "reaction",
+        post_view(post_id),
+        ref="a",
+        want={"reactions": {"🎉": 1, "👍": 1}},
+    )
+
+    # 5. A calendar event with a cover picture.
+    cover = _parity_upload(state, "a", (480, 270))
+    summary = f"Parity evening {tag}"
+    s, ev = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/calendar/events",
+        {
+            "summary": summary,
+            "start": "2027-04-01T18:00:00+00:00",
+            "end": "2027-04-01T20:00:00+00:00",
+            "tz": "Europe/Berlin",
+            "cover_url": cover,
+        },
+    )
+    ev = _must("members-parity: a creates an event", s, ev, ok=(201,))
+    _parity_compare(
+        state,
+        results,
+        "calendar event with cover",
+        lambda label, cache: _parity_event(state, label, space_id, ev["id"], cache),
+        ref="a",
+        want={"exists": True, "summary": summary},
+    )
+
+    # 6. A gallery item in a space album.
+    s, album = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/gallery/albums",
+        {"name": f"Parity album {tag}", "description": "members-parity"},
+    )
+    album = _must("members-parity: a creates a space album", s, album, ok=(201,))
+    s, item = _upload_file(
+        f"http://127.0.0.1:{a['port']}/api/gallery/albums/{album['id']}/items",
+        token=a["token"],
+        filename="gallery.png",
+        content=_make_noisy_png(320, 240),
+        content_type="image/png",
+        timeout=60.0,
+    )
+    item = _must("members-parity: a uploads a gallery item", s, item, ok=(200, 201))
+    _parity_compare(
+        state,
+        results,
+        "gallery item",
+        lambda label, cache: _parity_gallery(
+            state, label, album["id"], item["id"], cache
+        ),
+        ref="a",
+        want={"exists": True},
+    )
+
+    # 7. A page.
+    title = f"Parity page {tag}"
+    s, page = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/pages",
+        {"title": title, "content": "Who brings what.\n\n- bread\n- cheese"},
+    )
+    page = _must("members-parity: a creates a page", s, page, ok=(200, 201))
+    _parity_compare(
+        state,
+        results,
+        "page",
+        lambda label, cache: _parity_page(state, label, space_id, page["id"], cache),
+        ref="a",
+        want={"exists": True, "title": title},
+    )
+
+    # 7b. v_87 — a ~450 KiB page, created by the paired member d and by the
+    #     GFS-only member e: a, d and e show it byte-identical. e's goes to
+    #     the host, and d's reaches e, as one binary relay frame each.
+    for author in _PARITY_MEMBERS:
+        big_id, big_want = _parity_create_big_page(state, author, space_id, tag)
+        _parity_compare(
+            state,
+            results,
+            f"450 KiB page by {author}",
+            lambda label, cache, big_id=big_id: _parity_big_page(
+                state, label, space_id, big_id, cache
+            ),
+            ref=author,
+            want=big_want,
+            timeout=180.0,
+            members=("a", *_PARITY_MEMBERS),
+        )
+
+    # 8. A poll; each member votes.
+    s, poll = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {
+            "type": "poll",
+            "content": f"Parity poll {tag}",
+            "poll": {"question": "Where?", "options": ["Pizza", "Sushi"]},
+        },
+    )
+    poll = _must("members-parity: a posts a poll", s, poll, ok=(201,))
+
+    def poll_view(label, cache):
+        return _parity_poll(state, label, space_id, poll["id"], cache)
+
+    for label, index in (("d", 0), ("e", 1)):
+        deadline = time.monotonic() + 60
+        options: list = []
+        while time.monotonic() < deadline and not options:
+            s, got = _parity_get(
+                state, label, f"/api/spaces/{space_id}/posts/{poll['id']}/poll"
+            )
+            options = (got or {}).get("options") or [] if s == 200 else []
+            if not options:
+                time.sleep(3.0)
+        if not options:
+            results.append(
+                ("poll vote", "DIFF", f"{label} never showed a's poll (last HTTP {s})")
+            )
+            continue
+        s, body = _inst_request(
+            state,
+            label,
+            "POST",
+            f"/api/spaces/{space_id}/posts/{poll['id']}/poll/vote",
+            {"option_id": options[index]["id"]},
+        )
+        if s not in (200, 201, 204):
+            results.append(("poll vote", "DIFF", f"{label}'s vote → HTTP {s} {body!r}"))
+    _parity_compare(
+        state,
+        results,
+        "poll vote",
+        poll_view,
+        ref="a",
+        want={"votes": [("Pizza", 1), ("Sushi", 1)]},
+    )
+
+    # 9. A deletion.
+    s, body = _inst_request(
+        state, "a", "DELETE", f"/api/spaces/{space_id}/posts/{post_id}"
+    )
+    _must("members-parity: a deletes its post", s, body, ok=(200, 204))
+    _parity_compare(
+        state, results, "deletion", post_view(post_id), ref="a", want={"exists": False}
+    )
+
+    # 10 + 11. Catch-up and an old picture: d and e offline while a posts,
+    #     edits and deletes; the picture leaves the GFS cache as OLD content
+    #     before they come back.
+    keep = _parity_post_text(state, "a", space_id, f"Parity catch-up, to edit {tag}")
+    gone = _parity_post_text(state, "a", space_id, f"Parity catch-up, to delete {tag}")
+    for pid in (keep, gone):
+        _parity_compare(
+            state,
+            results,
+            "catch-up setup",
+            post_view(pid),
+            ref="a",
+            want={"exists": True},
+        )
+    for label in _PARITY_MEMBERS:
+        _kill_household(label, state["instances"][label])
+    old_pic = old_new = None
+    try:
+        since = int(time.time()) - 1
+        fresh = _parity_post_text(state, "a", space_id, f"Parity catch-up, new {tag}")
+        catch_edit = f"Parity catch-up, edited while away {tag}"
+        s, body = _inst_request(
+            state,
+            "a",
+            "PATCH",
+            f"/api/spaces/{space_id}/posts/{keep}",
+            {"content": catch_edit},
+        )
+        _must("members-parity: a edits while d, e are away", s, body, ok=(200,))
+        s, body = _inst_request(
+            state, "a", "DELETE", f"/api/spaces/{space_id}/posts/{gone}"
+        )
+        _must("members-parity: a deletes while d, e are away", s, body, ok=(200, 204))
+        old_text = f"Parity old picture {tag}"
+        old_pic = _parity_post_picture(state, "a", space_id, old_text)
+        deadline = time.monotonic() + 60
+        expired: list[str] = []
+        while time.monotonic() < deadline and not expired:
+            time.sleep(2.0)
+            expired = _parity_expire_new_blobs(space_id, since)
+        old_new = expired
+        print(f"  expired {len(expired)} GFS cache blob(s) as 30-day-old content")
+        # v_87 — a 450 KiB page they both missed: the catch-up carries it
+        # (to e as a §25.6 chunk in one binary relay frame). Last in the
+        # window, so it sits behind the small events on the way to d.
+        away_page, away_want = _parity_create_big_page(state, "a", space_id, tag)
+    finally:
+        for label in _PARITY_MEMBERS:
+            _respawn(state, label)
+    _parity_compare(
+        state,
+        results,
+        "catch-up: new post",
+        post_view(fresh),
+        ref="a",
+        want={"exists": True},
+        timeout=180.0,
+    )
+    # Both members miss it while away and must hold it after: e through its
+    # §25.6 catch-up in one binary relay frame, d over the mesh (a re-sends
+    # the routed page once d's nack says it restarted, and d's catch-up
+    # carries the record raw inside the route's seal). Read from each
+    # member's database: a GET of a page it lacks would log a WARNING.
+    _parity_compare(
+        state,
+        results,
+        "catch-up: 450 KiB page",
+        lambda label, cache: (
+            _parity_big_page(state, label, space_id, away_page, cache)
+            if label == "a"
+            else _db_page_view(label, away_page)
+        ),
+        ref="a",
+        want=away_want,
+        timeout=180.0,
+    )
+    _parity_compare(
+        state,
+        results,
+        "catch-up: edit",
+        post_view(keep),
+        ref="a",
+        want={"content": catch_edit},
+        timeout=120.0,
+    )
+    _parity_compare(
+        state,
+        results,
+        "catch-up: deletion",
+        post_view(gone),
+        ref="a",
+        want={"exists": False},
+        timeout=120.0,
+    )
+    if old_new:
+        _parity_compare(
+            state,
+            results,
+            "old picture (left the GFS cache)",
+            post_view(old_pic),
+            ref="a",
+            want={"exists": True, "content": old_text},
+            timeout=180.0,
+        )
+    else:
+        results.append(
+            (
+                "old picture (left the GFS cache)",
+                "SKIP",
+                "a stored no blob in the GFS cache within 60 s while both members were "
+                "offline, so there was nothing to expire",
+            )
+        )
+        _parity_compare(
+            state,
+            results,
+            "catch-up: picture",
+            post_view(old_pic),
+            ref="a",
+            want={"exists": True},
+            timeout=180.0,
+        )
+
+    # 12. Host offline: a stopped; each member posts a picture, the other
+    #     member must get it (no host hop).
+    host_posts: list[tuple[str, str, str]] = []
+    _kill_household("a", a)
+    try:
+        for author in _PARITY_MEMBERS:
+            text = f"Parity host-offline post by {author} {tag}"
+            pid = _parity_post_picture(state, author, space_id, text)
+            host_posts.append((author, pid, text))
+            _parity_compare(
+                state,
+                results,
+                f"host offline: {author}'s post",
+                post_view(pid),
+                ref=author,
+                want={"exists": True, "content": text},
+                timeout=120.0,
+            )
+    finally:
+        _respawn(state, "a")
+    # 12b. The host is back: it must hold what the members posted while it
+    #      was away BEFORE anything stops it again. d reaches a over the
+    #      mesh; a restarted host nacks a routed envelope sealed to its old
+    #      key and d retransmits ONCE — a second restart inside that retry
+    #      (the later actions stop a again) would cost the post until the
+    #      next periodic sync, and ``verify`` would read too early.
+    for author, pid, text in host_posts:
+        _parity_compare(
+            state,
+            results,
+            f"host back: {author}'s post on the host",
+            post_view(pid),
+            ref=author,
+            want={"exists": True, "content": text},
+            members=("a",),
+            timeout=180.0,
+        )
+
+    # 13. Admin rights, the same for an admin on either path: a promotes
+    #     the person (e — GFS only; then d — paired / mesh) and that admin
+    #     deletes the OTHER member's post.
+    for adm, other in (("e", "d"), ("d", "e")):
+        adm_inst = state["instances"][adm]
+        role_url = (
+            f"/api/spaces/{space_id}/remote-members/"
+            f"{adm_inst['instance_id']}/{adm_inst['user_id']}"
+        )
+
+        def role_view(label, cache, user_id=adm_inst["user_id"]):
+            return _parity_role(state, label, space_id, user_id, cache)
+
+        s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "admin"})
+        if s != 200:
+            results.append(
+                (f"admin ({adm}): promotion", "DIFF", f"a's PATCH → HTTP {s} {body!r}")
+            )
+            continue
+        try:
+            _parity_compare(
+                state,
+                results,
+                f"admin ({adm}): promotion",
+                role_view,
+                ref="a",
+                want={"role": "admin"},
+            )
+            victim_text = f"Parity post for admin {adm} to remove {tag}"
+            victim = _parity_post_text(state, other, space_id, victim_text)
+            # The host a and the admin must hold the post BEFORE the admin
+            # deletes it: d reaches a over the mesh, which re-routes after
+            # a restart, so a delete could otherwise reach a first — a
+            # holds it and re-runs every gate on replay
+            # (``test_direct_the_replay_runs_every_gate_again``), by which
+            # time the person would no longer be an admin.
+            held = _parity_compare(
+                state,
+                results,
+                f"admin ({adm}): {other}'s post",
+                post_view(victim),
+                ref=other,
+                want={"exists": True, "content": victim_text},
+                members=("a", adm),
+                timeout=120.0,
+            )
+            s, body = (
+                _inst_request(
+                    state, adm, "DELETE", f"/api/spaces/{space_id}/posts/{victim}"
+                )
+                if held
+                else (0, f"not sent: {other}'s post never reached a and {adm}")
+            )
+            if s not in (200, 202, 204):
+                results.append(
+                    (
+                        f"admin ({adm}): deletes {other}'s post",
+                        "DIFF",
+                        f"{adm}'s DELETE → HTTP {s} {body!r}",
+                    )
+                )
+            else:
+                _parity_compare(
+                    state,
+                    results,
+                    f"admin ({adm}): deletes {other}'s post",
+                    post_view(victim),
+                    ref="a",
+                    want={"exists": False},
+                    timeout=120.0,
+                )
+        finally:
+            # Only now — the delete has landed on a, d and e (or timed out)
+            # — is the person put back to member.
+            s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
+            print(f"  {adm}'s person back to member: HTTP {s}")
+        _parity_compare(
+            state,
+            results,
+            f"admin ({adm}): back to member",
+            role_view,
+            ref="a",
+            want={"role": "member"},
+        )
+
+    # 14. "Host" = the owner or the delegated admin that invited us: d,
+    #     seated by admin b in a fresh space while a is offline.
+    _parity_admin_invitee(_load(), results)
+
+    state = _load()
+    state["members_parity"] = {
+        "space_id": space_id,
+        "deleted": [post_id, gone],
+        "kept": [fresh, keep] + [pid for _a, pid, _t in host_posts],
+    }
+    _save(state)
+
+    print("\nmembers-parity results (d = paired/mesh member, e = GFS-only member):")
+    for action, verdict, _detail in results:
+        print(f"  {verdict:5} {action}")
+    diffs = [r for r in results if r[1] == "DIFF"]
+    if diffs:
+        raise SystemExit(
+            "members-parity: d and e differ on "
+            + "; ".join(f"{a_} — {det}" for a_, _v, det in diffs)
+        )
+    print("members-parity: ok")
+
+
+# ─── Step: members-parity-apps ─────────────────────────────────────────────
+
+#: The stand-in apps ``members-parity-apps`` installs (the demo has no
+#: catalog; the table routes never load a bundle): a table of 3–6 and a
+#: two-player duel.
+_PARITY_APPS: dict[str, tuple[str, str]] = {
+    "demo-table": (
+        "Demo table",
+        '{"entry": "index.html", "icon": null, "capabilities":'
+        ' ["storage", "people", "federation"], "players": {"min": 3, "max": 6},'
+        ' "tables": true}',
+    ),
+    "demo-duel": (
+        "Demo duel",
+        '{"entry": "index.html", "icon": null, "capabilities":'
+        ' ["storage", "people", "federation"], "players": {"min": 2, "max": 2},'
+        ' "tables": true}',
+    ),
+}
+#: What of a table's card every household must agree on.
+_PARITY_CARD_KEYS = ("closed", "card", "app_id", "note", "host_name", "players")
+
+
+def _parity_games(state: dict, label: str, space_id: str) -> dict:
+    """``label``'s ``GET /api/spaces/{id}/games`` (``{"error"}`` when refused)."""
+    s, body = _parity_get(state, label, f"/api/spaces/{space_id}/games")
+    return body if s == 200 and isinstance(body, dict) else {"error": f"HTTP {s}"}
+
+
+def _parity_table(state: dict, label: str, space_id: str, sid: str) -> dict:
+    """One table of the space as ``label`` shows it, reduced to what every
+    household must agree on: the card (app, note, host's name, players
+    range, open / full / playing / closed) and — once ``label`` sits there —
+    the roster (seat, name, seated or not) and the game's state. A closed
+    table a household has nobody at is no longer listed: ``closed`` covers
+    both. Left out on purpose: ``host_is_local`` / ``is_local`` /
+    ``household`` (they differ by design) and the card's seat count (a
+    household with nobody at the table gets it at most every 10 minutes)."""
+    listing = _parity_games(state, label, space_id)
+    if "error" in listing:
+        return listing
+    card = next((t for t in listing.get("tables", []) if t["session_id"] == sid), None)
+    if card is None:
+        return {"closed": True}
+    group = card.get("group")
+    out: dict = {
+        "closed": card["state"] == "closed",
+        "card": card["state"],
+        "app_id": card["app_id"],
+        "note": card["note"],
+        "host_name": card["host_name"],
+        "players": (card["min"], card["max"]),
+    }
+    if group:
+        out["game"] = group["state"]
+        out["my_state"] = group["my_state"]
+        out["seats"] = sorted(
+            (p["seat"], p["name"], p["state"]) for p in group.get("players", [])
+        )
+    return out
+
+
+def _parity_lobby(state: dict, label: str, space_id: str) -> dict:
+    """What the space's "Open games" strip lists for ``label``: the games
+    list and every table that is not closed (id, app, note, card state)."""
+    listing = _parity_games(state, label, space_id)
+    if "error" in listing:
+        return listing
+    return {
+        "allowed_apps": sorted(listing.get("allowed_apps") or []),
+        "games_possible": listing.get("games_possible"),
+        "tables": sorted(
+            (t["session_id"], t["app_id"], t["note"], t["state"])
+            for t in listing.get("tables", [])
+            if t["state"] != "closed"
+        ),
+    }
+
+
+def _parity_show(
+    results: list[tuple[str, str, str]],
+    action: str,
+    snap,
+    want: dict,
+    *,
+    members: tuple[str, ...],
+    timeout: float = 90.0,
+) -> bool:
+    """Poll until every one of ``members`` shows ``want`` (a subset of its
+    ``snap(label)``). Records PASS or DIFF like :func:`_parity_compare` —
+    for the checks with no household to compare with (a message every
+    other seat must hold). Never raises."""
+    offsets = {m: _log_size(m) for m in members}
+    deadline = time.monotonic() + timeout
+    views: dict[str, dict] = {}
+
+    def ok(m: str) -> bool:
+        return all(views[m].get(k) == v for k, v in want.items())
+
+    while True:
+        views = {m: snap(m) for m in members}
+        if all(ok(m) for m in members):
+            results.append((action, "PASS", f"{', '.join(members)}: {want}"))
+            print(f"  {action}: {' and '.join(members)} ✓")
+            return True
+        if time.monotonic() > deadline:
+            break
+        time.sleep(3.0)
+    lines = [f"want {want}"]
+    for m in members:
+        if not ok(m):
+            lines.append(f"{m} shows {views[m]}")
+            warn = _log_lines_matching(m, "WARNING", offset=offsets[m])[-3:]
+            lines += [f"    {m} log: {w.strip()[:240]}" for w in warn]
+    detail = "\n    ".join(lines)
+    results.append((action, "DIFF", detail))
+    print(f"  {action}: DIFF after {timeout:.0f} s\n    {detail}")
+    return False
+
+
+def cmd_members_parity_apps() -> None:
+    """Owner acceptance gate, games: a space's game tables work the same
+    for every member, whichever way its household is reached (CLAUDE.md).
+
+    Prereqs: ``members-parity``. Runs in the private space its last action
+    left (``members_parity_private_space_id``: a hosts it, **d** is a member
+    over the paired / mesh path — seated by the admin b —, **e** only
+    through the GFS, joined by a ``gfs`` link) — the space the content
+    actions use is a global one, and a global space never has game tables.
+    Installs the stand-in apps ``demo-table``
+    (3–6 players) and ``demo-duel`` (two players) on a, d and e straight
+    into ``installed_apps``. Every check polls with a bounded timeout and
+    is reported PASS or DIFF (NOTE for what is by design); the step fails
+    at the end naming each difference.
+
+    1. **The games list.** a allows both apps; d's and e's Games section
+       must list what a's does.
+    2. **A table of three, hosted by a.** a opens a ``demo-table`` table:
+       d and e show the same card. Both join from the space's lobby: a, d
+       and e show the same three seats. a starts: all three show the game
+       playing. Each seat sends a message to everyone — the two others
+       hold it; d whispers to e's seat and e to d's (sealed to that seat,
+       relayed by the hub a): the receiver holds it, a holds no plaintext.
+       a closes the table: all three show it closed.
+    3. **A two-player game between the two members.** e opens a
+       ``demo-duel`` table — a and d show its card; d joins and the duel
+       starts on both; each sends the other a move; e closes it. Then the
+       same with d as the host and e joining. The hub is a member's
+       household: d and e talk over the space, paired with nobody.
+    4. **The lobby.** With a fresh open table of a's, the "Open games"
+       strip lists the same on d and e as on a.
+    5. **Inviting a person** (``GET /api/apps/{id}/invitable``) is not a
+       space surface: it offers the people of *paired* households only
+       (pairing is the consent; in a space pressing Join is — D7). The
+       step reports whom a is offered and never fails on it.
+    Nothing of a table is readable on the GFS (the notes and the message
+    markers are searched in its database files).
+    """
+    import sqlite3
+
+    state = _load()
+    space_id = (state or {}).get("members_parity_private_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'members-parity' first")
+    step = "members-parity-apps"
+    for label in _PARITY_MEMBERS:
+        s, _sp = _parity_get(state, label, f"/api/spaces/{space_id}")
+        if s != 200:
+            raise SystemExit(
+                f"{step}: {label} is not a member of {space_id} (HTTP {s}) — run "
+                "the gfs chain through 'members-parity' first"
+            )
+    inst = state["instances"]
+    everyone = ("a", *_PARITY_MEMBERS)
+    for label in everyone:
+        con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
+        try:
+            for app_id, (name, manifest) in _PARITY_APPS.items():
+                con.execute(
+                    "INSERT OR IGNORE INTO installed_apps(app_id, name, version,"
+                    " enabled, manifest_json, bundle_path, bundle_sha256,"
+                    " source_url, installed_at) VALUES(?, ?, '1', 1, ?, ?,"
+                    " 'demo', 'demo', '2026-10-31')",
+                    (app_id, name, manifest, f"apps/{app_id}/1"),
+                )
+            con.commit()
+        finally:
+            con.close()
+    results: list[tuple[str, str, str]] = []
+    tag = secrets.token_hex(5)
+    markers: list[str] = []
+    sealed: list[str] = []
+
+    def games(label: str, path: str = "", *, method: str = "POST", body=None):
+        return _inst_request(
+            state, label, method, f"/api/spaces/{space_id}/games{path}", body
+        )
+
+    def group_api(label: str, app_id: str, path: str, body=None):
+        node = inst[label]
+        return _request(
+            f"http://127.0.0.1:{node['port']}/api/apps/{app_id}{path}",
+            token=node["token"],
+            method="POST",
+            body=body,
+        )
+
+    def table(sid: str):
+        return lambda label, _cache=None: _parity_table(state, label, space_id, sid)
+
+    def card(sid: str):
+        return lambda label, _cache=None: {
+            k: v for k, v in table(sid)(label).items() if k in _PARITY_CARD_KEYS
+        }
+
+    def do(action: str, s: int, body, ok=(200, 201)) -> bool:
+        """An action's own answer: a refusal is a DIFF, not a crash."""
+        if s in ok:
+            return True
+        results.append((action, "DIFF", f"HTTP {s} {body!r}"))
+        print(f"  {action}: DIFF — HTTP {s} {body!r}")
+        return False
+
+    held: dict[str, list[dict]] = {m: [] for m in everyone}
+
+    def mailbox(label: str, app_id: str) -> list[dict]:
+        # The mailbox hands a message over once: keep what it gave.
+        s, body = group_api(label, app_id, "/held")
+        if s == 200:
+            held[label].extend((body or {}).get("group_messages", []))
+        return held[label]
+
+    def seat_of(label: str, sid: str) -> int:
+        listing = _parity_games(state, label, space_id)
+        mine = next(
+            (t for t in listing.get("tables", []) if t["session_id"] == sid), {}
+        )
+        return int((mine.get("group") or {}).get("me") or 0)
+
+    def message(
+        action: str,
+        sender: str,
+        app_id: str,
+        sid: str,
+        receivers: tuple[str, ...],
+        *,
+        to: str | None = None,
+    ) -> None:
+        """``sender`` sends a group message — to everyone, or sealed to
+        ``to``'s seat — and each of ``receivers`` must hold it."""
+        marker = f"PARITY-{sender}-{secrets.token_hex(6)}"
+        markers.append(marker)
+        body: dict = {"data": {"move": marker}}
+        if to is not None:
+            sealed.append(marker)
+            body["to"] = [seat_of(to, sid)]
+        s, sent = group_api(sender, app_id, f"/groups/{sid}/messages", body)
+        if not do(action, s, sent):
+            return
+
+        def snap(label: str) -> dict:
+            hit = next(
+                (m for m in mailbox(label, app_id) if m["data"] == {"move": marker}),
+                None,
+            )
+            return {
+                "got": hit is not None,
+                "direct": bool(hit and hit["direct"]),
+                "from_seat": hit["from_seat"] if hit else None,
+            }
+
+        _parity_show(
+            results,
+            action,
+            snap,
+            {"got": True, "direct": to is not None, "from_seat": seat_of(sender, sid)},
+            members=receivers,
+        )
+
+    # 1. The games list.
+    s, body = games(
+        "a", "/allowed", method="PUT", body={"allowed_apps": sorted(_PARITY_APPS)}
+    )
+    _must(f"{step}: a sets the games list", s, body)
+    _parity_compare(
+        state,
+        results,
+        "games list",
+        lambda label, _c: {
+            k: v
+            for k, v in _parity_lobby(state, label, space_id).items()
+            if k != "tables"
+        },
+        ref="a",
+        want={"allowed_apps": sorted(_PARITY_APPS), "games_possible": True},
+    )
+
+    # 2. A table of three, hosted by a.
+    note = f"Parity table {tag}"
+    markers.append(note)
+    s, opened = games("a", body={"app_id": "demo-table", "note": note})
+    opened = _must(f"{step}: a opens a table", s, opened, ok=(201,))
+    sid = opened["table"]["session_id"]
+    sessions = [sid]
+    _parity_compare(
+        state,
+        results,
+        "table card (hosted by a)",
+        card(sid),
+        ref="a",
+        want={"card": "open", "note": note, "players": (3, 6)},
+    )
+    for label in _PARITY_MEMBERS:
+        s, body = games(label, f"/{sid}/join")
+        do(f"{label} joins a's table", s, body)
+    _parity_compare(
+        state,
+        results,
+        "seats at a's table",
+        table(sid),
+        ref="a",
+        want={"game": "lobby", "my_state": "seated"},
+    )
+    seats = table(sid)("a").get("seats") or []
+    three = [(n, st) for n, _name, st in seats] == [
+        (n, "seated") for n in (1, 2, 3)
+    ]
+    results.append(
+        ("three seats at a's table", "PASS" if three else "DIFF", f"a shows {seats!r}")
+    )
+    s, body = group_api("a", "demo-table", f"/groups/{sid}/start")
+    if do("a starts the table", s, body):
+        _parity_compare(
+            state,
+            results,
+            "game started",
+            table(sid),
+            ref="a",
+            want={"game": "playing", "card": "playing"},
+        )
+        for sender in everyone:
+            message(
+                f"message to everyone from {sender}",
+                sender,
+                "demo-table",
+                sid,
+                tuple(m for m in everyone if m != sender),
+            )
+        for sender, to in (("d", "e"), ("e", "d")):
+            message(
+                f"sealed message {sender} → {to}",
+                sender,
+                "demo-table",
+                sid,
+                (to,),
+                to=to,
+            )
+        # The hub relayed the sealed messages as ciphertext.
+        mailbox("a", "demo-table")
+        a_bytes = b"".join(
+            p.read_bytes() for p in _instance_dir("a").glob("socialhome.db*")
+        )
+        leaked = [
+            m for m in sealed if m in json.dumps(held["a"]) or m.encode() in a_bytes
+        ]
+        results.append(
+            (
+                "the hub a holds no sealed message",
+                "DIFF" if leaked else "PASS",
+                f"readable on a: {leaked!r}",
+            )
+        )
+    s, body = games("a", f"/{sid}/close")
+    if do("a closes the table", s, body):
+        _parity_compare(
+            state,
+            results,
+            "table closed",
+            table(sid),
+            ref="a",
+            want={"closed": True, "game": "ended"},
+        )
+
+    # 3. A two-player game between the two members, each hosting once.
+    for host, guest in (("e", "d"), ("d", "e")):
+        who = f"{host}'s duel"
+        note = f"Parity duel {host} {tag}"
+        markers.append(note)
+        s, opened = games(host, body={"app_id": "demo-duel", "note": note})
+        if not do(f"{host} opens a duel", s, opened, ok=(201,)):
+            continue
+        duel = opened["table"]["session_id"]
+        sessions.append(duel)
+        _parity_compare(
+            state,
+            results,
+            f"table card ({who})",
+            card(duel),
+            ref=host,
+            want={"card": "open", "note": note, "players": (2, 2)},
+            members=tuple(m for m in everyone if m != host),
+        )
+        s, body = games(guest, f"/{duel}/join")
+        if do(f"{guest} joins {who}", s, body):
+            # Two seats: the duel starts at once (D11).
+            _parity_compare(
+                state,
+                results,
+                f"{who} is playing",
+                table(duel),
+                ref=host,
+                want={"game": "playing", "my_state": "seated"},
+                members=(guest,),
+            )
+            _parity_show(
+                results,
+                f"a's card of {who} reads playing",
+                table(duel),
+                {"card": "playing"},
+                members=("a",),
+            )
+            message(f"move {guest} → {host} ({who})", guest, "demo-duel", duel, (host,))
+            message(f"move {host} → {guest} ({who})", host, "demo-duel", duel, (guest,))
+        s, body = games(host, f"/{duel}/close")
+        if do(f"{host} closes {who}", s, body):
+            _parity_show(
+                results, f"{who} closed", table(duel), {"closed": True}, members=everyone
+            )
+
+    # 4. The lobby: one more open table of a's; the strip reads the same.
+    note = f"Parity lobby {tag}"
+    markers.append(note)
+    s, opened = games("a", body={"app_id": "demo-duel", "note": note})
+    if do("a opens a table for the lobby", s, opened, ok=(201,)):
+        lobby = opened["table"]["session_id"]
+        sessions.append(lobby)
+        _parity_compare(
+            state,
+            results,
+            "space game lobby",
+            lambda label, _c: _parity_lobby(state, label, space_id),
+            ref="a",
+            want={"allowed_apps": sorted(_PARITY_APPS)},
+        )
+        listed = _parity_lobby(state, "a", space_id).get("tables") or []
+        if not any(t[0] == lobby for t in listed):
+            results.append(
+                ("space game lobby", "DIFF", f"a's lobby lacks its own table: {listed!r}")
+            )
+        s, body = games("a", f"/{lobby}/close")
+        if do("a closes the lobby table", s, body):
+            _parity_show(
+                results,
+                "lobby table closed",
+                table(lobby),
+                {"closed": True},
+                members=everyone,
+            )
+
+    # 5. Inviting a person is a pairing surface, not a space one.
+    s, sheet = _parity_get(state, "a", "/api/apps/demo-duel/invitable")
+    people = (sheet or {}).get("people", []) if s == 200 else []
+    offered = {
+        m: any(p["instance_id"] == inst[m]["instance_id"] for p in people)
+        for m in _PARITY_MEMBERS
+    }
+    results.append(
+        (
+            "person invite (a's invite sheet)",
+            "NOTE",
+            f"HTTP {s}; offers d: {offered['d']}, e: {offered['e']} — the sheet "
+            "lists paired households' people only (pairing is the consent); "
+            "members who are not paired play at a space table",
+        )
+    )
+
+    # Nothing of a table is readable on the GFS.
+    gfs_bytes = b"".join(p.read_bytes() for p in GFS_DIR.glob("gfs.db*") if p.is_file())
+    on_gfs = [m for m in markers if m.encode() in gfs_bytes]
+    results.append(
+        (
+            "the GFS holds nothing of a table",
+            "DIFF" if on_gfs else "PASS",
+            f"{len(markers)} notes and messages searched; readable: {on_gfs!r}",
+        )
+    )
+
+    state = _load()
+    state["members_parity_apps"] = {
+        "space_id": space_id,
+        "sessions": sessions,
+        "markers": markers,
+    }
+    _save(state)
+
+    print(f"\n{step} results (d = paired/mesh member, e = GFS-only member):")
+    for action, verdict, detail in results:
+        print(f"  {verdict:5} {action}" + (f" — {detail}" if verdict == "NOTE" else ""))
+    diffs = [r for r in results if r[1] == "DIFF"]
+    if diffs:
+        raise SystemExit(
+            f"{step}: d and e differ on "
+            + "; ".join(f"{a_} — {det}" for a_, _v, det in diffs)
+        )
+    print(f"{step}: ok")
+
+
+def _check_members_parity_apps(state: dict, failures: list[str]) -> None:
+    """``verify`` hook: every table ``members-parity-apps`` closed is still
+    ended on a, d and e (where held), and no GFS database file holds a
+    table's note or a message."""
+    mpa = state["members_parity_apps"]
+    for sid in mpa["sessions"]:
+        for label in ("a", *_PARITY_MEMBERS):
+            rows = _rows(
+                label,
+                "SELECT state FROM app_group_sessions WHERE session_id = ?",
+                (sid,),
+            )
+            if rows and rows[0][0] != "ended":
+                failures.append(
+                    f"members-parity-apps: {label} shows closed table {sid} as "
+                    f"{rows[0][0]!r}"
+                )
+    gfs_bytes = b"".join(p.read_bytes() for p in GFS_DIR.glob("gfs.db*") if p.is_file())
+    for marker in mpa["markers"]:
+        if marker.encode() in gfs_bytes:
+            failures.append(
+                f"members-parity-apps: {marker!r} is readable in the GFS's database"
+            )
+
+
+def _check_members_parity(state: dict, failures: list[str]) -> None:
+    """``verify`` hook: the posts ``members-parity`` left still read the same
+    on d and e as on the host a (kept ones there, deleted ones gone)."""
+    mp = state["members_parity"]
+    space_id = mp["space_id"]
+    for kind, ids in (("kept", mp["kept"]), ("deleted", mp["deleted"])):
+        for pid in ids:
+            cache: dict = {}
+            views = {
+                label: _parity_post(state, label, space_id, pid, cache)
+                for label in ("a", *_PARITY_MEMBERS)
+            }
+            if views["a"].get("exists") != (kind == "kept"):
+                failures.append(
+                    f"members-parity: a shows {kind} post {pid} as {views['a']}"
+                )
+            for m in _PARITY_MEMBERS:
+                if views[m] != views["a"]:
+                    failures.append(
+                        f"members-parity: {m} shows {kind} post {pid} as {views[m]}, "
+                        f"a as {views['a']}"
+                    )
+
+
+#: ``members-mesh-restart``: the page's text, 450 KiB — over the 64 KiB up to
+#: which the mesh used to keep an event for its one retransmit, and over the
+#: ~433 KB a §25.6 sync record can be on one mesh hop, so only the live
+#: event's retransmit can bring it to the restarted member.
+_MESH_RESTART_PAGE_BYTES: int = 450 * 1024
+
+
+@_offline_step
+def cmd_members_mesh_restart() -> None:
+    """A large space event reaches a mesh-only member that restarts.
+
+    Prereqs: the gfs chain through ``gfs-member-mesh``, before
+    ``members-parity`` (a hosts the link-joined space, d is a member reached
+    over the mesh through b; ``members-parity`` ends by seating d with a).
+
+    1. a posts in the space and d must show it: a holds a fresh route to d,
+       sealed to d's ephemeral key.
+    2. d is killed. a creates a 450 KiB page: sealed to d's old key, taken
+       by b, which delivers it once d is back. d is respawned.
+    3. The restarted d cannot open it and nacks (``SPACE_ROUTE_STALE``); a
+       must retransmit the page to d (asserted in a's log) and d must show
+       it (title + sha256 of its text).
+
+    Fails on a build that kept only events up to 64 KiB for the retransmit:
+    the page is too large for one §25.6 sync record over the mesh, so
+    nothing else brings it to d.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    step = "members-mesh-restart"
+    a, d = state["instances"]["a"], state["instances"]["d"]
+    if d["instance_id"] in _peer_ids(a, confirmed_only=True):
+        raise SystemExit(
+            f"{step}: needs d reached from a over the mesh, but a holds a direct"
+            " row for d (paired or seated) — run it before 'members-parity'"
+        )
+    tag = time.time_ns()
+
+    # 1. A fresh route a → d.
+    warm = _parity_post_text(state, "a", space_id, f"Mesh restart, warm-up {tag}")
+    _poll(
+        f"{step}: d shows a's warm-up post",
+        lambda: (
+            _parity_get(state, "d", f"/api/spaces/{space_id}/posts/{warm}")[0] == 200
+        ),
+        timeout=120.0,
+        interval=3.0,
+    )
+    print("  d shows a's warm-up post (route a → d is fresh) ✓")
+
+    # 2. d away while a creates the page.
+    text = secrets.token_hex(_MESH_RESTART_PAGE_BYTES // 2)
+    title = f"Mesh restart, large page {tag}"
+    a_log = _log_size("a")
+    _kill_household("d", d)
+    try:
+        s, page = _inst_request(
+            state,
+            "a",
+            "POST",
+            f"/api/spaces/{space_id}/pages",
+            {"title": title, "content": text},
+        )
+        page = _must(f"{step}: a creates a 450 KiB page", s, page, ok=(200, 201))
+    finally:
+        _respawn(state, "d")
+
+    # 3. d nacks, a retransmits, d holds the page.
+    want = {
+        "exists": True,
+        "title": title,
+        "bytes": len(text),
+        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
+
+    # From d's database: a GET of a page it lacks would log a WARNING.
+    def _d_page() -> bool:
+        return _db_page_view("d", page["id"]) == want
+
+    _poll(f"{step}: d shows the 450 KiB page", _d_page, timeout=240.0, interval=3.0)
+    print("  d shows the 450 KiB page (title + sha256) ✓")
+    resent = [
+        line
+        for line in _log_lines_matching(
+            "a", "retransmitted space_page_created", offset=a_log
+        )
+        if d["instance_id"] in line
+    ]
+    if not resent:
+        raise SystemExit(
+            f"{step}: d shows the page, but a's log has no retransmit of it to "
+            f"{d['instance_id']} — the check did not exercise the mesh's nack "
+            f"(see {_log_path('a')})"
+        )
+    print(
+        f"  a retransmitted the page to d after d's nack ✓ ({resent[0].strip()[:120]})"
+    )
+    print(f"{step}: ok")
+
+
+# ─── Step: gfs-admin-seed (v_94) ───────────────────────────────────────────
+
+
+def _space_seed(label: str, space_id: str) -> bytes | None:
+    """The space signing seed ``label`` holds for ``space_id``, unwrapped
+    with that household's own KEK (``<data_dir>/.kek_salt``, bound to the
+    space id) — or ``None``. Read-only: the harness plays the household
+    reading its own disk, which is exactly what a removed admin that
+    refuses to forget can do."""
+    from socialhome.infrastructure.key_manager import KeyManager
+
+    rows = _rows(
+        label, "SELECT identity_private_key FROM spaces WHERE id=?", (space_id,)
+    )
+    if not rows or not rows[0][0]:
+        return None
+    kek = KeyManager.from_data_dir(_instance_dir(label))
+    return kek.decrypt(rows[0][0], associated_data=space_id.encode("utf-8"))
+
+
+def _seed_pin(seed: bytes | None) -> str | None:
+    """The authority key (hex) a seed signs for."""
+    from socialhome.crypto import ed25519_public_key
+
+    return ed25519_public_key(seed).hex() if seed else None
+
+
+def _authority_probe(gfs_url: str, space_id: str, seed: bytes) -> int:
+    """Ask the GFS at ``gfs_url`` something only the space key may ask:
+    ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh authority
+    signature made with ``seed``. 200 — that GFS takes this key as the
+    space authority (the same pin its relay, epoch notices and media
+    uploads are checked against); 403 — it does not. Read-only: nothing is
+    relayed to anybody."""
+    from socialhome.authority_sig import (
+        AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
+        sign_authority_event,
+    )
+
+    ts = datetime.now(timezone.utc).isoformat()
+    sig = sign_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
+        space_id=space_id,
+        payload={"space_id": space_id, "ts": ts},
+        space_seed=seed,
+    )
+    query = urllib.parse.urlencode({"ts": ts, "summary": "1", **sig})
+    status, _body = _request(f"{gfs_url}/gfs/spaces/{space_id}/subscribers?{query}")
+    return status
+
+
+def _gfs_pin(rows_of: Any, space_id: str) -> tuple[str, bool, bool] | None:
+    """``(pinned key, holds a cert, withdrawn)`` of ``space_id`` on a GFS
+    (``rows_of``: :func:`_gfs_rows` or :func:`_gfs_b_rows`)."""
+    rows = rows_of(
+        "SELECT identity_public_key, authority_cert IS NOT NULL, withdrawn"
+        " FROM global_spaces WHERE space_id=?",
+        (space_id,),
+    )
+    return (rows[0][0], bool(rows[0][1]), bool(rows[0][2])) if rows else None
+
+
+def _admin_seed_servers(state: dict) -> list[tuple[str, str, Any]]:
+    """``(name, base url, rows reader)`` of every GFS the step checks: A,
+    and B (which the space is withdrawn from) while ``gfs-b-up`` runs."""
+    servers: list[tuple[str, str, Any]] = [
+        ("A", f"http://127.0.0.1:{GFS_PORT}", _gfs_rows)
+    ]
+    if _gfs_b_alive(state):
+        servers.append(("B (withdrawn)", state["gfs_b"]["base_url"], _gfs_b_rows))
+    return servers
+
+
+def _admin_seed_join_as_admin(
+    state: dict, space_id: str, step: str, *, as_member: Any = None
+) -> None:
+    """e redeems a published ADMIN link of a's and a approves the elevation
+    (an admin link seats a member; the owner's approval makes the admin —
+    and, with "Let admins act for me" on, hands e the signing seed).
+    ``as_member`` runs in between, while e is still a plain member."""
+    e = state["instances"]["e"]
+    s, link = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/invite-tokens",
+        {
+            "role": "admin",
+            "uses": 1,
+            "publish_to_gfs": state["gfs"]["pairings"]["a"]["id"],
+        },
+    )
+    link = _must(f"{step}: a mints an admin link", s, link, ok=(201,))
+    s, joined = _request(
+        f"http://127.0.0.1:{e['port']}/api/spaces/join",
+        token=e["token"],
+        method="POST",
+        body=_join_body_from_blob(_decode_invite_blob(link["code"])),
+        timeout=40.0,
+    )
+    joined = _must(f"{step}: e redeems the admin link", s, joined, ok=(200, 201))
+    if joined.get("role") != "member" or joined.get("pending_role") != "admin":
+        raise SystemExit(
+            f"{step}: e's admin redeem answered {joined!r} — expected a member "
+            "seat with the admin role pending the owner's approval"
+        )
+
+    def _elevation() -> str | None:
+        st, pending = _inst_request(
+            state, "a", "GET", f"/api/spaces/{space_id}/join-requests"
+        )
+        if st != 200:
+            return None
+        ids = [r["id"] for r in pending if r.get("requested_role") == "admin"]
+        return ids[0] if ids else None
+
+    elevation = _poll("a to list e's admin request", _elevation, timeout=30.0)
+    if as_member is not None:
+        as_member()
+    s, body = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/join-requests/{elevation}/approve",
+        {},
+    )
+    _must(f"{step}: a approves e as an admin", s, body, ok=(200, 201))
+    _poll(
+        "e's person to hold the admin seat",
+        lambda: (
+            _rows(
+                "e",
+                "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, e["user_id"]),
+            )
+            == [("admin",)]
+        ),
+        timeout=90.0,
+        interval=2.0,
+    )
+
+
+def _admin_seed_await_seed(label: str, space_id: str, pin: str, step: str) -> bytes:
+    """Wait until ``label`` holds the seed of the key ``pin``; returns it."""
+
+    def _held() -> bytes | None:
+        seed = _space_seed(label, space_id)
+        return seed if _seed_pin(seed) == pin else None
+
+    try:
+        return _poll(f"{label} to hold the seed of {pin[:12]}…", _held, timeout=120.0)
+    except SystemExit:
+        raise SystemExit(
+            f"{step}: {label} never held the signing seed of the key the owner "
+            f"pins ({pin[:12]}…): it holds "
+            f"{(_seed_pin(_space_seed(label, space_id)) or 'none')[:12]}. Check "
+            f"{_log_path('a')} for 'delegated-admin:' and {_log_path(label)} for "
+            "'SPACE_ADMIN_KEY_SHARE'."
+        ) from None
+
+
+def _admin_seed_await_rotation(
+    state: dict,
+    space_id: str,
+    *,
+    old_pin: str,
+    old_epoch: int,
+    members: tuple[str, ...],
+    step: str,
+    timeout: float = 120.0,
+) -> tuple[str, int]:
+    """The owner a moved the space key off ``old_pin``; every one of
+    ``members`` pins the new key at a's epoch, and so does every GFS —
+    the one that lists the space and the one it was withdrawn from.
+    Returns ``(new pin, epoch)``."""
+    new_pin = _poll(
+        "a to rotate the space authority key",
+        lambda: (
+            _space_col("a", space_id, "identity_public_key")
+            if (_space_col("a", space_id, "authority_key_epoch") or 0) > old_epoch
+            else None
+        ),
+        timeout=timeout,
+        interval=2.0,
+    )
+    if new_pin == old_pin:
+        raise SystemExit(f"{step}: a's epoch rose but its pin did not move")
+    epoch = _space_col("a", space_id, "authority_key_epoch")
+    for label in members:
+        _poll(
+            f"{label} to pin {new_pin[:12]}… at epoch {epoch}",
+            lambda label=label: (
+                _space_col(label, space_id, "identity_public_key") == new_pin
+                and _space_col(label, space_id, "authority_key_epoch") == epoch
+            ),
+            timeout=120.0,
+            interval=2.0,
+        )
+    for name, _url, rows_of in _admin_seed_servers(state):
+        try:
+            _poll(
+                f"GFS {name} to pin {new_pin[:12]}…",
+                lambda rows_of=rows_of: (
+                    (pin := _gfs_pin(rows_of, space_id)) is not None
+                    and pin[0] == new_pin
+                    and pin[1]
+                ),
+                timeout=60.0,
+                interval=2.0,
+            )
+        except SystemExit:
+            raise SystemExit(
+                f"{step}: GFS {name} still pins {_gfs_pin(rows_of, space_id)!r} "
+                f"for the space after a rotated to {new_pin[:12]}… — the removed "
+                f"admin's key still works there. Check {_log_path('a')} for "
+                "'re-pin' / 'pin-only'."
+            ) from None
+    if _gfs_b_alive(state):
+        pin = _gfs_pin(_gfs_b_rows, space_id)
+        if pin is None or not pin[2]:
+            raise SystemExit(
+                f"{step}: the re-pin listed the space on GFS B again ({pin!r}) — "
+                "a withdrawn listing must stay withdrawn"
+            )
+        owed = _rows(
+            "a",
+            "SELECT pinned_key FROM gfs_withdrawn_listings WHERE space_id=?",
+            (space_id,),
+        )
+        if owed != [(new_pin,)]:
+            raise SystemExit(
+                f"{step}: a records {owed!r} as what GFS B confirmed, not the "
+                f"new key {new_pin[:12]}…"
+            )
+    if _log_contains("a", "still pin the retired key of space " + space_id):
+        raise SystemExit(f"{step}: a's rotation ended with a re-pin still owed")
+    print(
+        f"  a rotated to {new_pin[:12]}… (epoch {epoch}); "
+        f"{', '.join(members)} and GFS "
+        f"{' + '.join(n for n, _u, _r in _admin_seed_servers(state))} pin it ✓"
+    )
+    return new_pin, epoch
+
+
+def _admin_seed_probe(
+    state: dict, space_id: str, seed: bytes, *, want: int, whose: str, step: str
+) -> None:
+    """``seed`` is taken (``want`` 200) or refused (403) as the space
+    authority by every GFS that holds a pin for the space."""
+    for name, url, _rows_of in _admin_seed_servers(state):
+        got = _authority_probe(url, space_id, seed)
+        if got != want:
+            raise SystemExit(
+                f"{step}: GFS {name} answered HTTP {got} to a request signed "
+                f"with {whose} (expected {want})"
+            )
+    names = " + ".join(n for n, _u, _r in _admin_seed_servers(state))
+    verdict = "takes" if want == 200 else "refuses"
+    print(f"  GFS {names} {verdict} a request signed with {whose} ✓")
+
+
+def _admin_seed_seat_gone(state: dict, space_id: str, step: str) -> None:
+    """e's household learned of its removal: none of its people holds a
+    seat in the space any more."""
+    e = state["instances"]["e"]
+    _poll(
+        "e to drop its seat in the space",
+        lambda: (
+            not _rows(
+                "e",
+                "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, e["user_id"]),
+            )
+        ),
+        timeout=120.0,
+        interval=2.0,
+    )
+    s, _body = _inst_request(
+        state, "e", "PATCH", f"/api/spaces/{space_id}", {"name": "Taken over"}
+    )
+    if s in (200, 202):
+        raise SystemExit(
+            f"{step}: e, removed from the space, still got HTTP {s} for a rename"
+        )
+
+
+def _admin_seed_respawn_owner() -> None:
+    """Bring the owner a back — once the GFS's channel-register budget has
+    room again. A reconnecting owner re-registers its private-space
+    channels, and the GFS takes 10 registers a minute per address
+    (``CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP``); every demo household is
+    127.0.0.1, and this step restarts a twice in quick succession after the
+    steps before it created several channels — the second reconnect would
+    be answered 429 (a WARNING on a; the next heal registers them). So wait
+    out the minute since the last register the GFS logged."""
+    stamps = [
+        line.split(" ", 2)[1].split(",", 1)[0]
+        for line in _gfs_log_lines_matching("POST /gfs/channels/register")
+    ]
+    if stamps:
+        now = datetime.now()
+        try:
+            last = datetime.strptime(stamps[-1], "%H:%M:%S").replace(
+                year=now.year, month=now.month, day=now.day
+            )
+        except ValueError:
+            last = now
+        wait = 62.0 - (now - last).total_seconds()
+        if 0.0 < wait <= 62.0:
+            print(f"  waiting {wait:.0f} s for the GFS's channel-register budget")
+            time.sleep(wait)
+    _respawn(_load(), "a")
+
+
+def _admin_seed_refuses_to_forget(
+    state: dict, space_id: str, kept: dict, members: tuple[str, ...], step: str
+) -> None:
+    """e as a removed admin that refuses to forget. Its household dropped
+    the seat when it was told of the removal; the harness writes that seat
+    (and the wrapped seed, and the space as not-dissolved) back into e's
+    database — the one place this step writes app state, because a removed
+    household that keeps acting is exactly the threat the rotation answers.
+    e's rename is then executed on e and signed with the RETIRED key; none
+    of ``members`` may take it, and each must have refused e's frame (at
+    the mailbox gate — e's member card is gone with its seat — as a
+    household it no longer knows, or at the signature). e's database is put
+    back afterwards."""
+    e = state["instances"]["e"]
+    names = {label: _space_col(label, space_id, "name") for label in ("e", *members)}
+    db = _instance_dir("e") / "socialhome.db"
+
+    def _write(statements: list[tuple[str, tuple]]) -> None:
+        conn = sqlite3.connect(db, timeout=10)
+        try:
+            for sql, params in statements:
+                conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    seat = kept["seat"]
+    _write(
+        [
+            (
+                f"INSERT OR REPLACE INTO space_members({', '.join(seat)})"
+                f" VALUES({', '.join('?' for _ in seat)})",
+                tuple(seat.values()),
+            ),
+            (
+                "UPDATE spaces SET dissolved=0, identity_private_key=? WHERE id=?",
+                (kept["wrapped_seed"], space_id),
+            ),
+        ]
+    )
+    offsets = {label: _log_size(label) for label in members}
+    forged = _open_noise_window(
+        about="e",
+        reason=f"{step}: the removed admin's old-key rename is refused",
+        witnesses=members,
+        named=("authority signature did not verify against the space key",),
+        names=[f"SPACE_CONFIG_CHANGED for {space_id} from {e['instance_id']}"],
+    )
+    try:
+        hijack = f"Taken over {time.time_ns()}"
+        s, body = _inst_request(
+            state, "e", "PATCH", f"/api/spaces/{space_id}", {"name": hijack}
+        )
+        if s != 200 or _space_col("e", space_id, "name") != hijack:
+            raise SystemExit(
+                f"{step}: e (seat and retired seed written back) did not execute "
+                f"its rename (HTTP {s} {body!r}) — the refusals below would "
+                "prove nothing"
+            )
+        # Where the frame is turned away depends on what else the member
+        # shares with e: its card for the space is gone with its seat (the
+        # mailbox gate); with no other shared space the member dropped e's
+        # whole space-scoped seat (an unknown household); a frame that got
+        # past both fails the signature.
+        refusals = (
+            (
+                "on a mailbox from a sender with no card for its space",
+                "no member card",
+            ),
+            (
+                f"envelope from {e['instance_id']}: No instance found",
+                "a household it no longer knows",
+            ),
+            (
+                f"SPACE_CONFIG_CHANGED for {space_id} from {e['instance_id']}: "
+                "authority signature did not verify",
+                "signature",
+            ),
+        )
+        how: dict[str, str] = {}
+
+        def _refused() -> bool:
+            for label in members:
+                for needle, name in refusals:
+                    if _log_contains(label, needle, offset=offsets[label]):
+                        how[label] = name
+            return len(how) == len(members)
+
+        try:
+            _poll("the members to refuse e's old-key rename", _refused, timeout=60.0)
+        except SystemExit:
+            raise SystemExit(
+                f"{step}: e signed a rename with its retired seed, but not every "
+                f"member logged a refusal of it (saw {how!r}, want {members!r}) — "
+                "nothing shows the frame arrived and was turned away"
+            ) from None
+        time.sleep(5.0)
+        for label in members:
+            got = _space_col(label, space_id, "name")
+            if got != names[label]:
+                raise SystemExit(
+                    f"{step}: {label} took the removed admin's old-key rename "
+                    f"({got!r})"
+                )
+        print(
+            "  e (seat + retired seed written back) signed a rename with K1: "
+            + ", ".join(f"{k} refused it ({v})" for k, v in sorted(how.items()))
+            + " ✓"
+        )
+    finally:
+        _close_noise_windows(forged)
+        _write(
+            [
+                (
+                    "DELETE FROM space_members WHERE space_id=? AND user_id=?",
+                    (space_id, e["user_id"]),
+                ),
+                (
+                    "UPDATE spaces SET dissolved=1, name=? WHERE id=?",
+                    (names["e"], space_id),
+                ),
+            ]
+        )
+
+
+@_offline_step
+def cmd_gfs_admin_seed() -> None:
+    """An admin reached ONLY through a GFS acts for the owner like a paired
+    one — and stops being able to the moment it is removed (v_94; owner
+    rule: admins reached only through a GFS have the same rights).
+
+    Prereqs: the gfs chain (a, d, e on GFS A; e paired with nobody) and
+    ``relay-pair`` (a ↔ d). With ``gfs-b-up`` it also covers a GFS the space
+    was WITHDRAWN from. Runs last, before ``verify`` (it restarts a and e).
+
+    Setup. a creates a global, publicly readable space with "Let admins act
+    for me" on (``delegated_admin_authority``), listed on GFS A — and, when
+    GFS B runs, listed there too and withdrawn again, so B keeps a pin for a
+    space it no longer lists. b and d (paired with a) join by invitation.
+
+    1. **The seed reaches e.** e redeems a published admin link (a member
+       seat, admin pending) and a approves. e holds the signing seed of the
+       key a pins; a logged the share and e the receipt. The GFS log carries
+       no ``space_admin_key_share``. e keeps the fan-out seat on the GFS
+       (``space_subscribers``) it took as a plain member the moment it
+       joined — also after it restarts and reconnects.
+    2. **e acts for the owner.** a is stopped. e posts: b and d hold it, and
+       the GFS got an anonymous member publish and no authority-signed
+       ``POST /gfs/publish`` at all (a delegated admin is a writer to the
+       GFS). e renames the space (executed on e, signed with the seed):
+       b and d show the new name. e removes b's person: d drops b's
+       seat (b itself drops its copy only on its host's word: a tells it
+       once it is back). A request signed with e's seed is taken by
+       every GFS that pins the space (the positive control for step 3).
+       a comes back and holds e's post, the new name and b's removal.
+    3. **Removed by the owner.** a removes e. a rotates the space key; d
+       pins the new key; GFS A re-pins from the owner's cert and so does
+       GFS B, which stays withdrawn. e holds no seat, and a request signed
+       with the seed e was handed is refused (403) by both servers. Then e
+       plays a removed admin that refuses to forget
+       (:func:`_admin_seed_refuses_to_forget`): with its seat and the
+       retired seed written back, it signs a rename with the old key — d
+       refuses the frame and keeps the name.
+    4. **Removed by another admin while the owner is away.** e joins again
+       (admin link, approval) and holds the NEW seed; a makes d's person an
+       admin too (d holds it as well). a is stopped; d removes e (executed
+       on d; e drops its own copy only on its host's word — a tells it
+       once it is back). a comes back, learns of the removal — from d's
+       roster gossip
+       or from d re-stating it against a's roster snapshot, whichever
+       arrives first (reported) — and rotates again. d, the remaining
+       admin, holds the newest seed; both GFS pin the newest key; both of
+       e's old seeds are refused by both, d's is taken.
+
+    ``verify`` (gated on the ``gfs_admin_seed`` state key) re-checks the
+    pins and that both retired seeds are still refused.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    step = "gfs-admin-seed"
+    a, b, d, e = (state["instances"][x] for x in ("a", "b", "d", "e"))
+    if d["instance_id"] not in _peer_ids(a, confirmed_only=True):
+        raise SystemExit(f"{step}: a and d are not paired — run 'relay-pair' first")
+    # b reads its GFS mailbox like d and e: with the owner offline that is
+    # the only way e (paired with nobody) reaches it.
+    _ensure_gfs_client(state, "b")
+    for inst in (a, d, e):
+        _wait_for_gfs_ws(inst["instance_id"], timeout=90.0)
+    tag = time.time_ns()
+    a_a_id = state["gfs"]["pairings"]["a"]["id"]
+
+    # Setup: the space, listed on A (and withdrawn from B).
+    s, space = _inst_request(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Admin seed lab {tag}",
+            "description": "v_94: an admin reached only through a GFS",
+            "space_type": "global",
+            "gfs_ids": [a_a_id],
+            # Invite-only (the default): the listing carries no join contact
+            # and no cert, so the rotations below show every household that
+            # saw the listing a bare other key — which is no conflict
+            # (``federation/join_contact_pin.py``; ``verify``'s log audit
+            # would flag the WARNING).
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must(f"{step}: a creates the space", s, space, ok=(201,))["id"]
+    s, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True, "delegated_admin_authority": True}},
+    )
+    _must(f"{step}: a lets admins act for it, publicly readable", s, body, ok=(200,))
+    k1 = _space_col("a", space_id, "identity_public_key")
+    _poll(
+        "GFS A to list the space",
+        lambda: (pin := _gfs_pin(_gfs_rows, space_id)) is not None and pin[0] == k1,
+        timeout=60.0,
+        interval=2.0,
+    )
+    if _gfs_b_alive(state):
+        a_b = _gfs_connection_to(state, "a", state["gfs_b"]["base_url"])
+        _wait_gfs_connected(state, "a", state["gfs_b"]["base_url"])
+        for wanted, listed_on_b in (([a_a_id, a_b["id"]], True), ([a_a_id], False)):
+            s, body = _inst_request(
+                state,
+                "a",
+                "PUT",
+                f"/api/spaces/{space_id}/gfs-servers",
+                {"gfs_ids": wanted},
+            )
+            _must(f"{step}: a lists the space on {len(wanted)} GFS", s, body)
+            _poll(
+                "GFS B to " + ("list the space" if listed_on_b else "hide it"),
+                lambda listed_on_b=listed_on_b: (
+                    (pin := _gfs_pin(_gfs_b_rows, space_id)) is not None
+                    and pin[0] == k1
+                    and pin[2] is not listed_on_b
+                ),
+                timeout=60.0,
+                interval=2.0,
+            )
+        _poll(
+            "a to record the withdrawn listing with the key GFS B confirmed",
+            lambda: (
+                _rows(
+                    "a",
+                    "SELECT pinned_key FROM gfs_withdrawn_listings WHERE space_id=?",
+                    (space_id,),
+                )
+                == [(k1,)]
+            ),
+            timeout=30.0,
+        )
+        print(
+            f"  space {space_id[:8]}… listed on GFS A, withdrawn from GFS B "
+            f"(both pin K1={k1[:12]}…) ✓"
+        )
+    else:
+        print(
+            f"  space {space_id[:8]}… listed on GFS A (K1={k1[:12]}…); GFS B is "
+            "not running — the withdrawn-listing checks are skipped"
+        )
+    for label, inst in (("b", b), ("d", d)):
+        s, inv = _inst_request(
+            state,
+            "a",
+            "POST",
+            f"/api/spaces/{space_id}/remote-invites",
+            {
+                "invitee_instance_id": inst["instance_id"],
+                "invitee_user_id": inst["user_id"],
+            },
+        )
+        _must(f"{step}: a invites {label}", s, inv, ok=(201,))
+    time.sleep(4)
+    for label in ("b", "d"):
+        _accept_remote_invite(state, label, space_id)
+
+    # 1. The seed reaches e.
+    a_off = _log_size("a")
+    gfs_off = _gfs_log_size()
+    seat_sql = "SELECT 1 FROM space_subscribers WHERE space_id=? AND instance_id=?"
+    seat_of_e = (space_id, e["instance_id"])
+
+    def _check_seat(what: str) -> None:
+        """e must hold its fan-out seat for the space on the GFS."""
+        try:
+            _poll_gfs_rows(seat_sql, seat_of_e, bool, what=what)
+        except SystemExit as exc:
+            raise SystemExit(f"{step}: {exc}") from None
+
+    def _reconnect_and_check_seat(what: str) -> None:
+        """e restarts and must take its seat again when its GFS socket
+        connects."""
+        now = _load()
+        _kill_household("e", now["instances"]["e"])
+        _respawn(now, "e")
+        _check_seat(what)
+
+    _admin_seed_join_as_admin(
+        state,
+        space_id,
+        step,
+        # No restart: the redeem itself takes the seat (the joiner side
+        # publishes ``SpaceMemberJoined``).
+        as_member=lambda: _check_seat(
+            "e, a plain member, took no fan-out seat on the GFS when it "
+            "joined (it must not wait for its next reconnect)"
+        ),
+    )
+    state = _load()
+    e = state["instances"]["e"]
+    seed1 = _admin_seed_await_seed("e", space_id, k1, step)
+    shared = f"sharing space signing seed for {space_id} to admin household "
+    if not _log_contains("a", shared + e["instance_id"], offset=a_off):
+        raise SystemExit(f"{step}: a never logged the seed share to e")
+    stored = f"stored delegated-admin signing seed for {space_id}"
+    if not _log_contains("e", stored):
+        raise SystemExit(f"{step}: e never logged the receipt of the seed")
+    print(f"  e (GFS only) holds the signing seed of K1={k1[:12]}… ✓")
+    leaked = [
+        line
+        for line in _gfs_log_lines_matching("", offset=gfs_off)
+        if "admin_key_share" in line.lower()
+        or base64.urlsafe_b64encode(seed1).decode().rstrip("=") in line
+        or seed1.hex() in line
+    ]
+    if leaked:
+        raise SystemExit(f"{step}: the GFS log names the seed share: {leaked[:2]!r}")
+    text0 = f"From the new admin {tag}"
+    s, post = _inst_request(
+        state,
+        "e",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": text0},
+    )
+    _must(f"{step}: e posts", s, post, ok=(201,))
+    if not _gfs_rows(seat_sql, seat_of_e):
+        raise SystemExit(
+            f"{step}: e lost its fan-out seat on the GFS when it was handed "
+            "the seed — the GFS can tell which household holds it"
+        )
+    _reconnect_and_check_seat(
+        "e, holding the seed, did not take its fan-out seat again on its "
+        "reconnect — the GFS can tell which household holds the seed"
+    )
+    state = _load()
+    e = state["instances"]["e"]
+    if _seed_pin(_space_seed("e", space_id)) != k1:
+        raise SystemExit(f"{step}: e lost the seed over its restart")
+    print(
+        "  the GFS log names no seed share; e keeps the fan-out seat it held "
+        "as a plain member, also after it reconnects ✓"
+    )
+    for label in ("b", "d"):
+        _poll(
+            f"{label} to hold e's card and e's first post",
+            lambda label=label: (
+                (card := _card_on(label, space_id, e["instance_id"])) is not None
+                and card.get("mailbox")
+                and _rows(
+                    label,
+                    "SELECT 1 FROM space_posts WHERE id=? AND deleted=0",
+                    (post["id"],),
+                )
+            ),
+            timeout=120.0,
+            interval=2.0,
+        )
+    # e edits on a synced view (an edit made from a stale ``config_sequence``
+    # loses last-writer-wins against the owner's own).
+    _poll(
+        "e to hold a's config",
+        lambda: (
+            (_space_col("e", space_id, "config_sequence") or 0)
+            >= (_space_col("a", space_id, "config_sequence") or 0)
+        ),
+        timeout=60.0,
+    )
+
+    # 2. e acts for the owner, a offline.
+    new_name = f"Renamed by the GFS-only admin {tag}"
+    text1 = f"While the owner is away {tag}"
+    _kill_household("a", _load()["instances"]["a"])
+    try:
+        gfs_off = _gfs_log_size()
+        s, post1 = _inst_request(
+            state,
+            "e",
+            "POST",
+            f"/api/spaces/{space_id}/posts",
+            {"type": "text", "content": text1},
+        )
+        post1 = _must(f"{step}: e posts with a offline", s, post1, ok=(201,))
+        for label in ("b", "d"):
+            _poll(
+                f"{label} to hold e's post (a offline)",
+                lambda label=label: (
+                    _rows(
+                        label,
+                        "SELECT content FROM space_posts WHERE id=? AND deleted=0",
+                        (post1["id"],),
+                    )
+                    == [(text1,)]
+                ),
+                timeout=120.0,
+                interval=2.0,
+            )
+        gfs_lines = _gfs_log_lines_matching("POST /gfs/", offset=gfs_off)
+        if not any("/gfs/member-publish-anon" in line for line in gfs_lines):
+            raise SystemExit(
+                f"{step}: e's post never reached the GFS as an anonymous "
+                "member publish"
+            )
+        signed = [line for line in gfs_lines if "POST /gfs/publish " in line]
+        if signed:
+            raise SystemExit(
+                f"{step}: with the owner offline the GFS got an authority-signed "
+                f"relay for a post — only a seed holder sends one: {signed[:2]!r}"
+            )
+        print(
+            "  a offline: e's post reached b and d; the GFS saw an anonymous "
+            "member publish and no authority-signed relay ✓"
+        )
+        s, body = _inst_request(
+            state, "e", "PATCH", f"/api/spaces/{space_id}", {"name": new_name}
+        )
+        if s != 200 or _space_col("e", space_id, "name") != new_name:
+            raise SystemExit(
+                f"{step}: e's rename with the owner offline → HTTP {s} {body!r} "
+                "(expected 200: executed on e and signed with the seed)"
+            )
+        for label in ("b", "d"):
+            _poll(
+                f"{label} to show e's rename (a offline)",
+                lambda label=label: _space_col(label, space_id, "name") == new_name,
+                timeout=120.0,
+                interval=2.0,
+            )
+        print("  a offline: e renamed the space; b and d show the new name ✓")
+        s, body = _inst_request(
+            state,
+            "e",
+            "DELETE",
+            f"/api/spaces/{space_id}/remote-members/{b['instance_id']}/{b['user_id']}",
+        )
+        _must(f"{step}: e removes b's person with a offline", s, body, ok=(200,))
+        _poll(
+            "d to drop b's seat (a offline)",
+            lambda: (
+                (row := _remote_member_row("d", space_id, b["user_id"])) is not None
+                and int(row.get("tombstoned") or 0) == 1
+            ),
+            timeout=120.0,
+            interval=2.0,
+        )
+        print("  a offline: e removed b's person; d dropped the seat ✓")
+        _admin_seed_probe(
+            state, space_id, seed1, want=200, whose="e's seed (K1)", step=step
+        )
+    finally:
+        _admin_seed_respawn_owner()
+    _poll(
+        "a to hold e's post, rename and removal of b",
+        lambda: (
+            _space_col("a", space_id, "name") == new_name
+            and _rows("a", "SELECT 1 FROM space_posts WHERE id=?", (post1["id"],))
+            and (row := _remote_member_row("a", space_id, b["user_id"])) is not None
+            and int(row.get("tombstoned") or 0) == 1
+        ),
+        timeout=180.0,
+        interval=3.0,
+    )
+    if _space_col("a", space_id, "identity_public_key") != k1:
+        raise SystemExit(
+            f"{step}: a rotated the space key although no admin was removed"
+        )
+    print("  a back: it holds e's post, the new name and b's removal ✓")
+    # A household drops its own copy of a space only on its host's word (b
+    # was invited by a, not by e): a, back and holding e's removal of b,
+    # tells b itself.
+    b_gone = _parity_wait(
+        lambda: (
+            not _rows(
+                "b",
+                "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, b["user_id"]),
+            )
+        ),
+        timeout=120.0,
+    )
+    if not b_gone:
+        raise SystemExit(
+            f"{step}: b still holds its seat in the space 120 s after its host "
+            "a came back holding e's removal of it — the host never told it"
+        )
+    print("  b lost the space once its host a was back and told it ✓")
+
+    # 3. Removed by the owner.
+    epoch1 = _space_col("a", space_id, "authority_key_epoch") or 0
+    e_url = f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    conn = sqlite3.connect(_instance_dir("e") / "socialhome.db")
+    try:
+        conn.row_factory = sqlite3.Row
+        kept = {
+            "seat": dict(
+                conn.execute(
+                    "SELECT * FROM space_members WHERE space_id=? AND user_id=?",
+                    (space_id, e["user_id"]),
+                ).fetchone()
+            ),
+            "wrapped_seed": conn.execute(
+                "SELECT identity_private_key FROM spaces WHERE id=?", (space_id,)
+            ).fetchone()[0],
+        }
+    finally:
+        conn.close()
+    s, body = _inst_request(state, "a", "DELETE", e_url)
+    _must(f"{step}: a removes e", s, body, ok=(200,))
+    k2, epoch2 = _admin_seed_await_rotation(
+        state, space_id, old_pin=k1, old_epoch=epoch1, members=("d",), step=step
+    )
+    _admin_seed_seat_gone(state, space_id, step)
+    _admin_seed_probe(
+        state, space_id, seed1, want=403, whose="e's old seed (K1)", step=step
+    )
+    on_disk = _seed_pin(_space_seed("e", space_id))
+    print(
+        "  e holds no seat"
+        + (
+            "; the retired K1 seed is still on its disk"
+            if on_disk == k1
+            else " and no seed"
+        )
+        + " ✓"
+    )
+    _admin_seed_refuses_to_forget(state, space_id, kept, ("d",), step)
+
+    # 4. Removed by another admin while the owner is away.
+    _admin_seed_join_as_admin(state, space_id, step)
+    seed2 = _admin_seed_await_seed("e", space_id, k2, step)
+    s, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}/remote-members/{d['instance_id']}/{d['user_id']}",
+        {"role": "admin"},
+    )
+    _must(f"{step}: a makes d's person an admin", s, body, ok=(200,))
+    _admin_seed_await_seed("d", space_id, k2, step)
+    _poll(
+        "d to hold e's admin seat and card",
+        lambda: (
+            (row := _remote_member_row("d", space_id, e["user_id"])) is not None
+            and int(row.get("tombstoned") or 0) == 0
+            and row.get("role") == "admin"
+            and (card := _card_on("d", space_id, e["instance_id"])) is not None
+            and card.get("mailbox")
+        ),
+        timeout=120.0,
+        interval=2.0,
+    )
+    print(f"  e is an admin again and holds the K2={k2[:12]}… seed; so does d ✓")
+    _kill_household("a", _load()["instances"]["a"])
+    try:
+        d_off = _log_size("d")
+        s, body = _inst_request(state, "d", "DELETE", e_url)
+        _must(f"{step}: d removes e with a offline", s, body, ok=(200,))
+        _poll(
+            "d to drop e's seat",
+            lambda: (
+                (row := _remote_member_row("d", space_id, e["user_id"])) is not None
+                and int(row.get("tombstoned") or 0) == 1
+            ),
+            timeout=30.0,
+        )
+        print("  a offline: d (admin) removed e on its own household ✓")
+    finally:
+        _admin_seed_respawn_owner()
+    # d rekeyed the content when it removed e, signed with K2. a first hears
+    # of the removal and retires K2 — so d's rekey, when it reaches a after
+    # that, is refused there (the stated residual of a rotation: an old-key
+    # rekey still in flight is refused and not retried; a's own rotation
+    # brings the next content key). Expected on a, for exactly that rekey.
+    _open_noise_window(
+        about="d",
+        reason=f"{step}: d's old-key rekey reaches the owner after its rotation",
+        witnesses=("a",),
+        named=("authority signature did not verify against the space key",),
+        names=[f"SPACE_KEY_EXCHANGE_REKEY for {space_id} from {d['instance_id']}"],
+        from_start=True,
+    )
+    k3, _epoch3 = _admin_seed_await_rotation(
+        state,
+        space_id,
+        old_pin=k2,
+        old_epoch=epoch2,
+        members=("d",),
+        step=step,
+        timeout=300.0,
+    )
+    row = _remote_member_row("a", space_id, e["user_id"])
+    if row is None or int(row.get("tombstoned") or 0) != 1:
+        raise SystemExit(f"{step}: a rotated but still seats e: {row!r}")
+    restated = _log_contains(
+        "d", f"re-stating the removal of {e['user_id']}@", offset=d_off
+    )
+    print(
+        "  a back: it learned of d's removal of e — "
+        + (
+            "d re-stated it against a's roster snapshot"
+            if restated
+            else "from d's roster gossip"
+        )
+        + " — and rotated ✓"
+    )
+    seed3 = _admin_seed_await_seed("d", space_id, k3, step)
+    print(f"  d, the remaining admin, holds the K3={k3[:12]}… seed ✓")
+    # As for b above: e drops its own copy only on its host's word, and d
+    # is not e's host — a tells it once it applied d's removal. Whatever
+    # seed e still has on disk is K2, refused below.
+    e_gone = _parity_wait(
+        lambda: (
+            not _rows(
+                "e",
+                "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, e["user_id"]),
+            )
+        ),
+        timeout=120.0,
+    )
+    if not e_gone:
+        raise SystemExit(
+            f"{step}: e still holds its seat in the space 120 s after its host "
+            "a came back and applied d's removal of it — the host never told it"
+        )
+    print("  e lost the space once its host a was back and told it ✓")
+    for seed, whose in ((seed1, "e's first seed (K1)"), (seed2, "e's second seed (K2)")):
+        _admin_seed_probe(state, space_id, seed, want=403, whose=whose, step=step)
+    _admin_seed_probe(
+        state, space_id, seed3, want=200, whose="d's seed (K3)", step=step
+    )
+    # d's rekey for a must have left d's outbox — taken or refused, it has
+    # arrived — and the window then closes with the step's tail (a retry
+    # may land a little later than the row's last state shows).
+    _poll(
+        "d's rekey for a to leave d's outbox",
+        lambda: (
+            "space_key_exchange_rekey" not in _outbox_events("d", a["instance_id"])
+        ),
+        timeout=300.0,
+        interval=2.0,
+    )
+
+    state = _load()
+    state["gfs_admin_seed"] = {
+        "space_id": space_id,
+        "name": new_name,
+        "retired_seeds": [seed1.hex(), seed2.hex()],
+    }
+    _save(state)
+    print(
+        f"{step}: ok (a GFS-only admin acted for the owner; removed, its seed "
+        "works on no GFS)"
+    )
+
+
+def _check_gfs_admin_seed(state: dict, failures: list[str]) -> None:
+    """``verify`` hook for ``gfs-admin-seed``: every GFS still pins the key
+    the owner pins, d (the remaining admin) holds its seed, e holds no seat
+    and both seeds e was handed are still refused."""
+    info = state["gfs_admin_seed"]
+    space_id = info["space_id"]
+    pin = _space_col("a", space_id, "identity_public_key")
+    if _seed_pin(_space_seed("e", space_id)) == pin:
+        failures.append("gfs-admin-seed: e, removed, holds the seed of a's key")
+    if _seed_pin(_space_seed("d", space_id)) != pin:
+        failures.append("gfs-admin-seed: d no longer holds the seed of a's key")
+    if _space_col("d", space_id, "name") != info["name"]:
+        failures.append("gfs-admin-seed: d lost the name the GFS-only admin set")
+    seat = _remote_member_row("a", space_id, state["instances"]["e"]["user_id"])
+    if seat is None or int(seat.get("tombstoned") or 0) != 1:
+        failures.append(f"gfs-admin-seed: the host a seats e again: {seat!r}")
+    for name, url, rows_of in _admin_seed_servers(state):
+        held = _gfs_pin(rows_of, space_id)
+        if held is None or held[0] != pin:
+            failures.append(
+                f"gfs-admin-seed: GFS {name} pins {held!r}, a pins {str(pin)[:12]}…"
+            )
+        for seed_hex in info["retired_seeds"]:
+            got = _authority_probe(url, space_id, bytes.fromhex(seed_hex))
+            if got != 403:
+                failures.append(
+                    f"gfs-admin-seed: GFS {name} answered HTTP {got} to a "
+                    "request signed with a seed of the removed admin"
+                )
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -22818,6 +27441,14 @@ def main() -> None:
         # d holds nothing. Late in the chain: it seats d as a follower in
         # the space the earlier steps assert member counts on.
         cmd_space_chat()
+        # ``space-reaction`` (v_93): in the same space a and c react to a
+        # post of a's and a takes its reaction back — a, b and c show the
+        # same reactions after each change.
+        cmd_space_reaction()
+        # ``space-poll-vote`` (v_94): in the same space a posts a poll, c
+        # votes twice; a and b hold c's vote under c's own stamp, and after
+        # a's close nothing moves it.
+        cmd_space_poll_vote()
         # ``bazaar-ask`` (v_74): in the same space b turns the Bazaar on, c
         # lists a lamp, a (paired with c) asks and lands in the normal DM,
         # d (follower) is refused; a, b, c see each other at >= v_74.

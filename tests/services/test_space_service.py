@@ -6,6 +6,7 @@ import asyncio
 import base64
 import dataclasses
 import io
+import itertools
 import logging
 import os
 import random
@@ -15,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 from PIL import Image
 
@@ -26,6 +28,8 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.errors import (
+    ImageTooLargeError,
+    ImageUnreadableError,
     InvalidMediaRefError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
@@ -34,6 +38,8 @@ from socialhome.domain.events import (
     PeerProtoVersionRaised,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
+    SpaceDelegationBlocked,
+    SpaceJoinRequested,
     SpaceMemberJoined,
     SpaceModerationQueued,
     SpacePostCreated,
@@ -45,17 +51,21 @@ from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
 )
+from socialhome.domain.federation import FederationEventType as _RosterFET
 from socialhome.domain.federation_capabilities import (
     FederationCapability,
     space_feature_keys_missing_below,
 )
+from socialhome.domain.federation_retention import roster_snapshot_key_prefix
 from socialhome.domain.media_constraints import (
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
+    SPACE_COVER_MAX_BYTES,
+    SPACE_ICON_MAX_BYTES,
 )
-from socialhome.domain.post import PostType
+from socialhome.domain.post import FileMeta, PostType
+from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES as _CFG_MAX
 from socialhome.domain.space import (
     AlreadyMemberError,
     ContentAction,
@@ -78,11 +88,18 @@ from socialhome.domain.space import (
     SpacePermissionError,
     SpaceRole,
     SpaceType,
+    mirrorable_remote_role,
 )
 from socialhome.domain.space_app_table import SpaceAppNotAllowedError
 from socialhome.domain.space_key import SpaceKey
+from socialhome.domain.space_roster_digest import (
+    ROSTER_DIGEST_SUITE_SHA256,
+    roster_digest,
+    roster_digest_wire,
+)
 from socialhome.domain.writer_cert import WriterCert, WriterEntitlement
 from socialhome.domain.writer_key import WriterKeyGrant
+from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -91,6 +108,7 @@ from socialhome.federation.owner_bound_id import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.media import image_processor as ip_mod
 from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
@@ -100,18 +118,29 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import space_service as ss_mod
 from socialhome.services.child_protection_service import ChildProtectionService
 from socialhome.services.gfs_connection_service import GfsConnectionError
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_moderation_service import SpaceModerationService
 from socialhome.services.space_post_moderation import PostModerationHandler
 from socialhome.services.space_service import (
+    ROSTER_SNAPSHOT_PART_BYTES,
     SPACE_CATEGORIES,
     SpaceService,
+    UnfittableImages,
+    apply_space_cover_from_metadata,
+    apply_space_icon_from_metadata,
+    apply_space_images_from_config_change,
     build_space_snapshot_for_federation,
+    config_item_bytes,
     keep_local_space_state,
     normalize_category,
+    sender_caps_space_images,
+    space_metadata_fields,
+    stub_space_from_metadata,
 )
+from socialhome.services.space_service import config_within_limit as _within
 from socialhome.services.space_writer_cert_service import (
     SpaceWriterCertService,
 )
@@ -920,6 +949,12 @@ class _RecordingModerationFederation:
         self.submitted.append((item.id, list(targets)))
 
     async def send_decided(self, space, item, **kwargs) -> None:
+        return None
+
+    def forget_household(self, space_id, instance_id) -> None:
+        return None
+
+    async def check_reaches_host(self, space, item) -> None:
         return None
 
     async def display_name(self, space_id, user_id):
@@ -2265,6 +2300,39 @@ async def test_space_reactions(stack):
     assert "👍" not in r2.reactions
 
 
+async def test_a_space_reaction_no_other_household_would_take_is_rejected(stack):
+    """v_93: receivers take an emoji of at most 32 characters, so a longer
+    one would show in this household only."""
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    with pytest.raises(ValueError, match="emoji"):
+        await stack.space_svc.add_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji="x" * 33
+        )
+
+
+async def test_a_reaction_stays_put_in_an_archived_space(stack):
+    """v_93: an archived space is read-only to peers too — they refuse a
+    reaction's removal like its add, so neither is taken here."""
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    await stack.space_svc.add_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji="👍"
+    )
+    await stack.space_svc.archive_space(s.id, actor_username="anna")
+    for change in (stack.space_svc.add_reaction, stack.space_svc.remove_reaction):
+        with pytest.raises(SpacePermissionError, match="(?i)archiv"):
+            await change(p.id, space_id=s.id, user_id=anna.user_id, emoji="👍")
+    held = await stack.space_post_repo.get(p.id)
+    assert held[1].reactions == {"👍": frozenset({anna.user_id})}
+
+
 async def test_space_reaction_empty_rejected(stack):
     """Empty emoji raises ValueError."""
     anna = await stack.provision_user("anna")
@@ -2385,6 +2453,84 @@ async def test_space_delete_comment_non_admin_rejected(stack):
     )
     with pytest.raises(PermissionError):
         await stack.space_svc.delete_comment(c.id, actor_user_id=carl.user_id)
+
+
+async def _follower_with_a_comment(stack):
+    """A local follower of a space whose comment switch is on, their own
+    comment, and the switch turned off again."""
+    anna = await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (s.id,)
+    )
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=s.id,
+            user_id=fan.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-11-17T00:00:00+00:00",
+        )
+    )
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=fan.user_id, content="hi"
+    )
+    return s, anna, fan, c
+
+
+async def test_a_follower_edits_or_deletes_its_comment_only_under_the_switch(stack):
+    """One rule for a comment, its edit and its delete: the author's seat
+    must hold the comment right (a follower's is the space's switch). The
+    local path let a follower edit or delete its own comment with the switch
+    off — every other household refuses that change, so the copies diverged
+    (and on the host it went out as the host's). A moderator's delete is
+    content authority and still works."""
+    s, anna, fan, c = await _follower_with_a_comment(stack)
+    # Switch on: both work for the follower's own comment.
+    edited = await stack.space_svc.edit_comment(
+        c.id, editor_user_id=fan.user_id, new_content="hello"
+    )
+    assert edited.content == "hello"
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=0 WHERE id=?", (s.id,)
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.edit_comment(
+            c.id, editor_user_id=fan.user_id, new_content="again"
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.delete_comment(c.id, actor_user_id=fan.user_id)
+    held = await stack.space_post_repo.get_comment(c.id)
+    assert held is not None and not held.deleted and held.content == "hello"
+    # The owner still removes it.
+    await stack.space_svc.delete_comment(c.id, actor_user_id=anna.user_id)
+    held = await stack.space_post_repo.get_comment(c.id)
+    assert held is not None and held.deleted
+
+
+async def test_an_author_without_a_seat_cannot_change_their_comment(stack):
+    """The same rule as writing one: no seat, no comment right — every
+    other household would refuse the change anyway."""
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=bob.user_id, content="hi"
+    )
+    await stack.space_repo.delete_member(s.id, bob.user_id)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.edit_comment(
+            c.id, editor_user_id=bob.user_id, new_content="again"
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.delete_comment(c.id, actor_user_id=bob.user_id)
 
 
 async def test_space_list_feed(stack):
@@ -3372,16 +3518,14 @@ async def test_dissolve_hard_deletes_content_and_unlinks_media(tmp_dir):
     )
 
     # Sanity: media is collectable + files present pre-dissolve.
-    assert set(await post_repo.list_space_media_urls(space.id)) == {
-        "api/media/pic.webp",
-        "api/media/img2.webp",
-    }
-    assert set(await gallery.list_space_item_filenames(space.id)) == {
+    refs = SqliteMediaReferenceRepo(db)
+    assert set(await refs.space_files(space.id)) == {
+        "pic.webp",
+        "img2.webp",
         "gal.webp",
         "galthumb.webp",
+        "baz.webp",
     }
-
-    assert await bazaar.list_space_media_urls(space.id) == ["api/media/baz.webp"]
 
     await svc.dissolve_space(space.id, actor_username="anna")
 
@@ -3395,9 +3539,7 @@ async def test_dissolve_hard_deletes_content_and_unlinks_media(tmp_dir):
     # Space + all content rows gone (cascade).
     with pytest.raises(SpacePermissionError):
         await svc.list_feed(space.id, viewer_user_id=anna.user_id)
-    assert await post_repo.list_space_media_urls(space.id) == []
-    assert await gallery.list_space_item_filenames(space.id) == []
-    assert await bazaar.list_space_media_urls(space.id) == []
+    assert await refs.space_files(space.id) == []
     assert await space_repo.get(space.id) is None
 
     # Every owned media file unlinked; the unrelated file survives.
@@ -3724,6 +3866,149 @@ async def test_apply_space_icon_from_metadata_persists_bytes(stack):
         icon_repo=repo3,
     )
     assert repo3.saved is None
+
+
+@pytest.mark.parametrize(
+    ("what", "cap", "dims"),
+    [
+        ("cover", SPACE_COVER_MAX_BYTES, (1200, 800)),
+        ("icon", SPACE_ICON_MAX_BYTES, (256, 256)),
+    ],
+)
+async def test_a_peers_image_over_the_one_cap_is_not_stored(
+    stack, caplog, what, cap, dims
+):
+    """Item 3: a cover / icon over the one cap from another household is
+    refused on every inbound path — the join snapshot (invitation accept,
+    invite-link and join-request ACKs all seat through
+    ``seat_join_stub`` → ``apply_space_*_from_metadata``) and an applied
+    ``SPACE_CONFIG_CHANGED`` (live and the config catch-up). The image
+    already held stays, and a WARNING says why."""
+    held = _noise_webp(32, 32)
+    big = _noise_webp(*dims)
+    assert len(big) > cap
+    meta = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(big).decode("ascii"),
+    }
+    apply = (
+        apply_space_cover_from_metadata
+        if what == "cover"
+        else apply_space_icon_from_metadata
+    )
+    repo = _RecordingImageRepo(held)
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        stored = await apply("sp-x", meta=meta, **{f"{what}_repo": repo})
+    assert stored is False
+    assert repo.sets == [] and repo.webp == held
+    assert "over the" in caplog.text
+    repo = _RecordingImageRepo(held)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    previous = dataclasses.replace(space, cover_hash="old", icon_hash="old")
+    await apply_space_images_from_config_change(
+        "sp-x",
+        meta=meta,
+        previous=previous,
+        cover_repo=repo if what == "cover" else None,
+        icon_repo=repo if what == "icon" else None,
+    )
+    assert repo.sets == [] and repo.webp == held
+    # At the cap: stored.
+    fits = _noise_webp(64, 64)
+    assert len(fits) <= cap
+    repo = _RecordingImageRepo(held)
+    ok = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(fits).decode("ascii"),
+    }
+    assert await apply("sp-x", meta=ok, **{f"{what}_repo": repo})
+    assert repo.sets == [fits]
+
+
+@pytest.mark.parametrize(
+    ("what", "cap", "dims"),
+    [
+        ("cover", SPACE_COVER_MAX_BYTES, (700, 500)),
+        ("icon", SPACE_ICON_MAX_BYTES, (256, 256)),
+    ],
+)
+async def test_a_released_v80_hosts_big_image_is_stored_as_a_rendition(
+    stack, caplog, what, cap, dims
+):
+    """Rollout (owner decision 2026-11-15): a host on the released v_80
+    line sends a paired member covers of up to 256 KiB. Its image over the
+    cap is not refused — re-encoded here, off the event loop, and the
+    rendition (within the cap) stored, at INFO. A current host's over-cap
+    image is still refused, and the held one kept."""
+
+    async def _released():
+        return False
+
+    async def _current():
+        return True
+
+    big = _noise_webp(*dims)
+    assert cap < len(big) <= 256 * 1024
+    meta = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(big).decode("ascii"),
+    }
+    apply = (
+        apply_space_cover_from_metadata
+        if what == "cover"
+        else apply_space_icon_from_metadata
+    )
+    repo = _RecordingImageRepo(_noise_webp(32, 32))
+    with caplog.at_level(logging.INFO, logger="socialhome.services.space_service"):
+        assert await apply(
+            "sp-x", meta=meta, sender_caps=_released, **{f"{what}_repo": repo}
+        )
+    (stored,) = repo.sets
+    assert len(stored) <= cap and repo.hash == "new"
+    assert Image.open(io.BytesIO(stored)).format == "WEBP"
+    assert "re-encoded" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # The config-change path the same way.
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    previous = dataclasses.replace(space, cover_hash="old", icon_hash="old")
+    repo = _RecordingImageRepo(_noise_webp(32, 32))
+    await apply_space_images_from_config_change(
+        "sp-x",
+        meta=meta,
+        previous=previous,
+        cover_repo=repo if what == "cover" else None,
+        icon_repo=repo if what == "icon" else None,
+        sender_caps=_released,
+    )
+    assert len(repo.sets) == 1 and len(repo.sets[0]) <= cap
+    # From a current host: refused, the held image kept.
+    held = _noise_webp(32, 32)
+    repo = _RecordingImageRepo(held)
+    assert not await apply(
+        "sp-x", meta=meta, sender_caps=_current, **{f"{what}_repo": repo}
+    )
+    assert repo.sets == [] and repo.webp == held
+
+
+async def test_which_senders_cap_their_space_images():
+    """The released v_80 line ships images over the cap; every later build
+    caps them (``MIN_FOR_CAPPED_SPACE_IMAGES`` = v_81 — v_81–v_94 are
+    unreleased and ship together). An unknown version reads as the released
+    line (the lenient path)."""
+    fed = MagicMock()
+    versions = {"v80": 80, "v81": 81, "cur": 94}
+
+    async def _supports(iid, *, min_version):
+        return versions.get(iid, 0) >= min_version
+
+    fed.space_member_supports = _supports
+    assert await sender_caps_space_images(fed, "cur") is True
+    assert await sender_caps_space_images(fed, "v81") is True
+    assert await sender_caps_space_images(fed, "v80") is False
+    assert await sender_caps_space_images(fed, "unknown") is False
+    assert await sender_caps_space_images(None, "cur") is True
 
 
 async def test_allowed_post_types_federate_via_space_meta(stack):
@@ -4226,6 +4511,9 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
+        "Poll votes count the same in every household",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -4268,6 +4556,9 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
+        "Poll votes count the same in every household",
     )
 
 
@@ -4339,6 +4630,9 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
+        "Poll votes count the same in every household",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -4408,6 +4702,9 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
+        "Poll votes count the same in every household",
     )
     assert "Apps that work across households" not in c.lagging_features
     assert "Apps that reach the right person" not in c.lagging_features
@@ -5415,7 +5712,6 @@ async def test_a_follower_household_is_kicked_like_any_member(stack):
     from socialhome.domain.federation import (
         DeliveryResult,
         FederationEventType,
-        InstanceSource,
     )
 
     await stack.provision_user("anna")
@@ -5470,8 +5766,6 @@ async def test_space_session_cleanup_without_a_purger_drops_nothing(stack):
     """Unwired, the seat is never dropped by a bare row delete that would
     leave its queued envelopes behind."""
     from unittest.mock import MagicMock
-
-    from socialhome.domain.federation import InstanceSource
 
     fed_repo = MagicMock()
     fed_repo.get_instance = AsyncMock(
@@ -6328,6 +6622,7 @@ async def test_accept_remote_invite_kicks_mesh_catchup_sync(stack):
     fed.begin_mesh_catchup_sync.assert_awaited_once_with(
         space_id=space_id,
         host_instance_id=host_instance,
+        roster_digest=await stack.space_svc.roster_digest_for(space_id, host_instance),
     )
 
 
@@ -7906,19 +8201,13 @@ async def test_a_non_owner_admin_cannot_consume_an_admin_elevation(stack):
     assert (await stack.space_repo.get_member(space.id, b.user_id)).role == "admin"
 
 
-async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
-    """A household met through an invite link over a connection server
-    (``InstanceSource.SPACE_SESSION``) never receives the signing seed, even
-    when delegation is on and the owner approves its admin elevation. The
-    GFS pins the space authority key TOFU-immutably, so there is no rotation
-    on a later kick — a link-joined admin acts through the host, it does not
-    sign locally. This holds now that an admin/mod elevation is approved
-    through ``set_remote_member_role``.
-    """
-    from unittest.mock import AsyncMock, MagicMock
-
-    from socialhome.domain.federation import InstanceSource
-    from socialhome.domain.space import SpaceFeatures, SpaceRole
+async def _relay_admin_space(stack, *, supports=None, result=None, role="admin"):
+    """An owned, delegation-ON space with one remote member ``ru1`` on the
+    household ``relay-peer`` — seated from an invite link / the GFS
+    directory (``InstanceSource.SPACE_SESSION``). ``supports`` decides
+    ``peer_supports(min_version)``; ``result`` is the send's outcome."""
+    from socialhome.domain.federation import DeliveryResult, InstanceSource
+    from socialhome.domain.space import SpaceFeatures
 
     await stack.provision_user("anna")
     space = await stack.space_svc.create_space(
@@ -7927,6 +8216,14 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
         features=SpaceFeatures(delegated_admin_authority=True),
     )
     fed = _seed_share_fed()
+    if supports is not None:
+        fed.peer_supports = AsyncMock(
+            side_effect=lambda _iid, *, min_version: supports(min_version)
+        )
+    if result is not None:
+        fed.send_with_mesh_fallback = AsyncMock(
+            return_value=DeliveryResult(instance_id="relay-peer", **result)
+        )
     stack.space_svc._federation = fed
     fed_repo = MagicMock()
     fed_repo.get_instance = AsyncMock(
@@ -7940,7 +8237,31 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
         user_id="ru1",
         user_pk=None,
         display_name=None,
+        role=role,
     )
+    return space, fed
+
+
+def _seed_shares(fed) -> list[dict]:
+    from socialhome.domain.federation import FederationEventType
+
+    return [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ADMIN_KEY_SHARE
+    ]
+
+
+async def test_promote_relay_only_admin_shares_the_signing_seed(stack):
+    """Every space admin is equal, whichever way its household is reached
+    (owner decision 2026-11-15): an admin household seated from an invite
+    link / the GFS directory (``InstanceSource.SPACE_SESSION``) gets the
+    signing seed when the owner promotes it in a delegation-ON space —
+    the same share, suite and path as a paired admin. Revocation is the
+    v_44 rotation, which reaches such households and re-pins every GFS."""
+    from socialhome.domain.space import SpaceRole
+
+    space, fed = await _relay_admin_space(stack, role="member")
     await stack.space_svc.set_remote_member_role(
         space.id,
         actor_username="anna",
@@ -7948,10 +8269,169 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
         user_id="ru1",
         role=SpaceRole.ADMIN,
     )
-    # The role change still federates…
     fed.broadcast_to_space_members.assert_awaited()
-    # …but NO seed share went out to the relay-only household.
-    fed.send_with_mesh_fallback.assert_not_awaited()
+    shares = _seed_shares(fed)
+    assert len(shares) == 1
+    assert shares[0]["to_instance_id"] == "relay-peer"
+    p = shares[0]["payload"]
+    assert p["seed_suite"] == "ed25519-seed"
+    assert base64.urlsafe_b64decode(
+        p["space_seed"]
+    ) == await stack.space_repo.get_space_seed(space.id)
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is not None
+
+
+async def test_relay_admin_below_v94_is_skipped_with_a_warning(stack, caplog):
+    """A link-seated admin household below
+    ``MIN_FOR_RELAY_ADMIN_KEY_SHARE`` (a released v_80 build) refuses the
+    type at its peer-class gate: no share is sent, nothing is marked, and
+    the owner says so at WARNING (the admin acts through the host)."""
+    from socialhome.domain.space import SpaceRole
+
+    space, fed = await _relay_admin_space(
+        stack,
+        supports=lambda v: v < FederationCapability.MIN_FOR_RELAY_ADMIN_KEY_SHARE,
+        role="member",
+    )
+    with caplog.at_level(logging.WARNING):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="anna",
+            instance_id="relay-peer",
+            user_id="ru1",
+            role=SpaceRole.ADMIN,
+        )
+    assert _seed_shares(fed) == []
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is None
+    assert "relay-peer" in caplog.text and "v_94" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error", ["not_confirmed", "no_route", "route_cooldown", "host_hop_unavailable"]
+)
+async def test_a_seed_share_that_cannot_go_out_leaves_no_shared_mark(stack, error):
+    """A definitive non-delivery (no seat, no route, no host hop) put no seed
+    anywhere, so it does not count as shared."""
+    space, _fed = await _relay_admin_space(stack, result={"ok": False, "error": error})
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is None
+
+
+async def test_a_queued_seed_share_counts_as_shared(stack):
+    """A share the outbox (or a host hop) queued may still land — the mark
+    means "a seed may be out", which is what makes a later revocation
+    rotate even with delegation off by then."""
+    space, _fed = await _relay_admin_space(
+        stack, result={"ok": False, "error": "delivery_failed"}
+    )
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is not None
+
+
+async def test_no_seed_share_while_a_listing_gfs_cannot_rotate_the_key(stack, caplog):
+    """D1 (owner decision 2026-11-15): while a GFS that holds state tied to
+    the space's current authority key cannot be brought onto a new key
+    (e.g. it never proved ``authority_rotation``), no admin household —
+    paired or GFS-only — gets the seed: its revocation could not be
+    enforced there."""
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+    gfs.authority_key_revocable = AsyncMock(return_value=False)
+    stack.space_svc._gfs = gfs
+    with caplog.at_level(logging.WARNING):
+        await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert _seed_shares(fed) == []
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is None
+    gfs.authority_key_revocable.assert_awaited_once_with(space.id)
+    assert "revocation" in caplog.text
+
+
+async def test_seed_share_goes_out_when_every_gfs_can_rotate_the_key(stack):
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+    gfs.authority_key_revocable = AsyncMock(return_value=True)
+    stack.space_svc._gfs = gfs
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert len(_seed_shares(fed)) == 1
+
+
+async def test_seed_share_rechecks_the_admin_seat_right_before_sending(stack):
+    """A share that waited (a GFS probe, an echo-triggered re-share) while
+    the owner revoked that household must not hand it the seed: the seat
+    and the delegation are checked again right before the send."""
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+
+    async def kicked_while_probing(_space_id):
+        await stack.space_svc._remote_members.set_role(
+            space.id, "relay-peer", "ru1", "member"
+        )
+        return True
+
+    gfs.authority_key_revocable = kicked_while_probing
+    stack.space_svc._gfs = gfs
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert _seed_shares(fed) == []
+
+
+async def test_seed_share_never_goes_out_with_delegation_turned_off_meanwhile(stack):
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+
+    async def delegation_off_while_probing(_space_id):
+        current = await stack.space_repo.get(space.id)
+        await stack.space_repo.save(
+            replace(
+                current,
+                features=replace(current.features, delegated_admin_authority=False),
+            )
+        )
+        return True
+
+    gfs.authority_key_revocable = delegation_off_while_probing
+    stack.space_svc._gfs = gfs
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert _seed_shares(fed) == []
+
+
+async def test_seed_share_with_no_gfs_wired_skips_the_gfs_gate(stack):
+    space, fed = await _relay_admin_space(stack)
+    stack.space_svc._gfs = None
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert len(_seed_shares(fed)) == 1
+
+
+async def test_a_seed_share_that_raises_counts_as_out(stack):
+    """Whether a raising send left is unknown: counted as shared."""
+    space, fed = await _relay_admin_space(stack)
+    fed.send_with_mesh_fallback = AsyncMock(side_effect=RuntimeError("boom"))
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is not None
+
+
+async def test_seed_share_never_pairs_a_seed_with_another_key(stack):
+    """A rotation that swaps the key between the share's reads must not
+    ship the new seed under the old key / cert: the share is skipped (the
+    rotation re-shares to the remaining admins itself)."""
+    space, fed = await _relay_admin_space(stack)
+    other = generate_identity_keypair()
+    repo = stack.space_svc._spaces
+    real_get_seed = repo.get_space_seed
+
+    async def seed_then_rotate(space_id):
+        seed = await real_get_seed(space_id)
+        await repo.rotate_authority_key(
+            space_id,
+            public_key_hex=other.public_key.hex(),
+            seed=other.private_key,
+            key_epoch=space.authority_key_epoch + 1,
+        )
+        repo.get_space_seed = real_get_seed
+        return seed
+
+    repo.get_space_seed = seed_then_rotate
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert _seed_shares(fed) == []
 
 
 async def test_list_pending_join_requests_resolves_applicant_display_names(stack):
@@ -8040,6 +8520,112 @@ async def _seat(remote, space_id, instance_id, user_id, role="member"):
     )
 
 
+async def test_an_admin_elevation_is_one_request_per_household_and_person(stack):
+    """A pending admin elevation is keyed on (household, user id), never
+    on the user id alone — the other household chooses that. Somebody
+    holding a leaked admin link who redeems first under a victim's user id
+    must not swallow the victim's own request: both are filed, each with
+    its household, a repeat from the same household still files nothing
+    new, and approving one leaves the other pending and its seat a member.
+    """
+    _owner, space, _fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-attacker", "u-victim")
+    await _seat(remote, space.id, "peer-victim", "u-victim")
+    for household in ("peer-attacker", "peer-victim", "peer-attacker"):
+        await stack.space_svc.file_admin_elevation_request(
+            space.id, "u-victim", remote_instance_id=household
+        )
+
+    rows = await stack.space_svc.list_pending_join_requests(
+        space.id, actor_username="hosty"
+    )
+    assert sorted(r["remote_applicant_instance_id"] for r in rows) == [
+        "peer-attacker",
+        "peer-victim",
+    ]
+    assert {r["requested_role"] for r in rows} == {SpaceRole.ADMIN.value}
+
+    mine = next(r for r in rows if r["remote_applicant_instance_id"] == "peer-victim")
+    await stack.space_svc.approve_join_request(mine["id"], actor_username="hosty")
+
+    assert (await remote.get(space.id, "peer-victim", "u-victim")).role == "admin"
+    assert (await remote.get(space.id, "peer-attacker", "u-victim")).role == "member"
+    left = await stack.space_svc.list_pending_join_requests(
+        space.id, actor_username="hosty"
+    )
+    assert [r["remote_applicant_instance_id"] for r in left] == ["peer-attacker"]
+
+
+async def test_two_concurrent_admin_redeems_from_one_household_file_one_request(
+    stack,
+):
+    """Two redeems of an admin link by one household at the same moment
+    both pass the "already on file?" read; the unique index (migration
+    0148) lets one insert through, and the admins are told once. A local
+    member's two concurrent redeems likewise."""
+    _owner, space, _fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-far", "u-far")
+    bob = await stack.provision_user("bob")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id,
+            user_id=bob.user_id,
+            role=SpaceRole.MEMBER,
+            joined_at="2026-01-01T00:00:00",
+        )
+    )
+    filed: list[SpaceJoinRequested] = []
+
+    async def _grab(event: SpaceJoinRequested) -> None:
+        filed.append(event)
+
+    stack.bus.subscribe(SpaceJoinRequested, _grab)
+
+    await asyncio.gather(
+        *(
+            stack.space_svc.file_admin_elevation_request(
+                space.id, "u-far", remote_instance_id="peer-far"
+            )
+            for _ in range(4)
+        ),
+        *(
+            stack.space_svc.file_admin_elevation_request(space.id, bob.user_id)
+            for _ in range(4)
+        ),
+    )
+
+    rows = await stack.space_repo.list_pending_join_requests(space.id)
+    assert sorted(
+        (r["remote_applicant_instance_id"] or "", r["user_id"]) for r in rows
+    ) == [
+        ("", bob.user_id),
+        ("peer-far", "u-far"),
+    ]
+    assert sorted(e.request_id for e in filed) == sorted(r["id"] for r in rows)
+
+
+async def test_a_local_admin_elevation_does_not_hide_a_remote_one(stack):
+    """A local member's pending elevation and another household's under
+    the same user id are two requests, whichever is filed first."""
+    owner, space, _fed, remote = await _hosted_space_with_seats(stack)
+    bob = await stack.provision_user("bob")
+    tok = await stack.space_repo.create_invite_token(
+        space.id, owner.user_id, uses=1, role=SpaceRole.ADMIN.value
+    )
+    await stack.space_svc.accept_invite_token(tok, user_id=bob.user_id)
+    await _seat(remote, space.id, "peer-far", bob.user_id)
+    await stack.space_svc.file_admin_elevation_request(
+        space.id, bob.user_id, remote_instance_id="peer-far"
+    )
+    await stack.space_svc.file_admin_elevation_request(space.id, bob.user_id)
+
+    rows = await stack.space_repo.list_pending_join_requests(space.id)
+    assert sorted(r["remote_applicant_instance_id"] or "" for r in rows) == [
+        "",
+        "peer-far",
+    ]
+
+
 async def test_a_new_member_household_is_sent_one_signed_roster_snapshot(stack):
     """After seating, the host sends the joiner its whole roster in ONE
     event — every seat but the joiner's own household's, local owner
@@ -8115,6 +8701,61 @@ async def test_roster_snapshot_entries_are_signed_off_the_event_loop(
     )
     assert len(threads) == 2
     assert threading.get_ident() not in threads
+
+
+async def test_a_roster_of_a_thousand_seats_goes_in_parts_a_gfs_member_can_take(stack):
+    """One event with every seat of a large space passed what a household
+    behind a GFS takes. The snapshot goes in parts — each an ordinary
+    ``SPACE_ROSTER_SNAPSHOT`` (entries are signed and merged one by one, so
+    the receiver is unchanged), each small enough for a JSON envelope on the
+    relay — and the member ends with every seat. Only the last part says
+    what the roster is complete up to."""
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    for n in range(1000):
+        await _seat(remote, space.id, f"peer-{n % 400}", f"u-{n:04d}")
+    await _seat(remote, space.id, "peer-gfs", "u-gfs")
+    fed.send_with_mesh_fallback.reset_mock()
+    assert await stack.space_svc.send_roster_snapshot(
+        space.id, to_instance_id="peer-gfs"
+    )
+    payloads = [
+        c.kwargs["payload"]
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs["event_type"] is _RosterFET.SPACE_ROSTER_SNAPSHOT
+    ]
+    assert len(payloads) > 3
+    seats = [e["payload"]["user_id"] for p in payloads for e in p["entries"]]
+    assert len(seats) == len(set(seats))
+    assert {f"u-{n:04d}" for n in range(1000)} <= set(seats)
+    for payload in payloads:
+        assert payload["space_id"] == space.id
+        entries = payload["entries"]
+        # The entries plus the list's brackets and commas.
+        assert (
+            len(orjson.dumps(entries)) <= ROSTER_SNAPSHOT_PART_BYTES + len(entries) + 1
+        )
+        # Encrypted and base64'ed inside the envelope, next to its fields.
+        assert len(orjson.dumps(payload)) * 4 // 3 + 4096 < RELAY_MAX_ENVELOPE_BYTES
+    # Every part names its send, its place and the version: the receiver
+    # notes the roster complete only once it applied them all.
+    assert {p["roster_version"] for p in payloads} == {payloads[0]["roster_version"]}
+    assert len({p["snapshot_id"] for p in payloads}) == 1
+    assert [p["part"] for p in payloads] == list(range(len(payloads)))
+    assert {p["parts"] for p in payloads} == {len(payloads)}
+
+
+async def test_a_small_roster_is_still_one_snapshot_event(stack):
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    for n in range(20):
+        await _seat(remote, space.id, f"peer-{n}", f"u-{n}")
+    await _seat(remote, space.id, "peer-new", "u-new")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
+    [(_to, entries)] = _snapshots(fed, to="peer-new")
+    assert len(entries) >= 21
+    payload = fed.send_with_mesh_fallback.await_args_list[-1].kwargs["payload"]
+    assert "roster_version" in payload
+    assert not {"snapshot_id", "part", "parts"} & set(payload)
 
 
 async def test_an_invite_link_redeem_sends_no_snapshot(stack):
@@ -8230,31 +8871,6 @@ async def test_a_kick_before_the_accept_reaches_the_joiner_as_a_removal(stack):
     assert entry["payload"]["member_version"] > invite_version
 
 
-async def test_the_periodic_refresh_skips_link_joined_households(stack):
-    """Timed envelopes to a household seated from an invite link would ride
-    the connection-server relay — new traffic metadata for it."""
-    from socialhome.domain.federation import InstanceSource
-
-    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
-    await _seat(remote, space.id, "peer-direct", "u-d")
-    await _seat(remote, space.id, "peer-link", "u-l")
-    for inst in ("peer-direct", "peer-link"):
-        await stack.space_repo.add_space_instance(space.id, inst)
-
-    async def _get_instance(iid):
-        source = (
-            InstanceSource.SPACE_SESSION
-            if iid == "peer-link"
-            else InstanceSource.MANUAL
-        )
-        return SimpleNamespace(id=iid, source=source)
-
-    stack.space_svc._federation_repo.get_instance = _get_instance
-    sent = await stack.space_svc.send_hosted_roster_snapshots()
-    assert sent == 1
-    assert [to for to, _ in _snapshots(fed)] == ["peer-direct"]
-
-
 async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
     from socialhome.domain.events import PeerProtoVersionRaised
 
@@ -8273,22 +8889,38 @@ async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
     assert len(_snapshots(fed)) == 1
 
 
-def _begin_with_echo(space_id: str, sender: str, echo: object):
+def _begin(space_id: str, sender: str, **fields):
+    """A member household's SPACE_SYNC_BEGIN with *fields*."""
     return FederationEvent(
         msg_id="m-begin",
         event_type=FederationEventType.SPACE_SYNC_BEGIN,
         from_instance=sender,
         to_instance="self",
         timestamp="2026-10-22T00:00:00+00:00",
-        payload={"sync_id": "s", "space_id": space_id, "roster_echo": echo},
+        payload={"sync_id": "s", "space_id": space_id, **fields},
         space_id=space_id,
     )
 
 
-async def _members_with_households(stack, n: int):
+def _begin_with_echo(space_id: str, sender: str, echo: object):
+    return _begin(space_id, sender, roster_echo=echo)
+
+
+async def _digest_begin(stack, space, sender, *, digest=None, cert_epoch=None):
+    """A BEGIN carrying *sender*'s roster digest — by default the one the
+    host computes for it (its mirror is right)."""
+    row = await stack.space_repo.get(space.id)
+    if digest is None:
+        digest = await stack.space_svc.roster_digest_of(row, sender)
+    return _begin(
+        space.id, sender, roster_digest=roster_digest_wire(digest, cert_epoch)
+    )
+
+
+async def _members_with_households(stack, n: int, *, source=None):
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     stack.space_svc._federation_repo.get_instance = AsyncMock(
-        return_value=SimpleNamespace(source=None)
+        return_value=SimpleNamespace(source=source)
     )
     insts = [f"peer-{i}" for i in range(n)]
     for i, inst in enumerate(insts):
@@ -8297,100 +8929,627 @@ async def _members_with_households(stack, n: int):
     return space, fed, remote, insts
 
 
-async def test_an_unchanged_roster_is_sent_once_not_every_tick(stack):
-    """15 member households, 48 periodic ticks a day, roster unchanged.
-    Before: 15 × 48 = 720 snapshots a day (every seat, every time). Now the
-    first tick sends 15; each household then echoes the version it applied
-    on its next sync BEGIN, and the remaining 47 ticks send nothing."""
-    space, fed, _remote, insts = await _members_with_households(stack, 15)
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 15
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    for inst in insts:
-        _to, payload = next(
-            (c.kwargs["to_instance_id"], c.kwargs["payload"])
-            for c in fed.send_with_mesh_fallback.await_args_list
-            if c.kwargs["to_instance_id"] == inst
-        )
-        assert payload["roster_version"] == current
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(
-                space.id,
-                inst,
-                {"roster_version": payload["roster_version"], "cert_epoch": None},
-            )
-        )
-    for _ in range(47):
-        assert await stack.space_svc.send_hosted_roster_snapshots() == 0
-    assert len(_snapshots(fed)) == 15
+def test_the_host_runs_no_roster_timer():
+    """Blocker 1: no snapshot on the host's own timer — a household that
+    never sends a BEGIN (a follower-only household of a global space) gets
+    nothing periodic, only seat / upgrade snapshots and live gossip."""
+    assert not hasattr(SpaceService, "send_hosted_roster_snapshots")
 
 
-async def test_a_roster_change_is_sent_again(stack):
-    space, _fed, remote, insts = await _members_with_households(stack, 2)
-    await stack.space_svc.send_hosted_roster_snapshots()
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    for inst in insts:
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(
-                space.id, inst, {"roster_version": current, "cert_epoch": None}
-            )
+async def test_the_digest_is_what_a_snapshot_leaves_on_the_member(stack):
+    """The host's digest for a household is exactly the digest of the live
+    seats a snapshot to it carries, as the member mirrors them (the
+    owner's ``owner`` mirrored as ``member``)."""
+    space, fed, remote, _insts = await _members_with_households(stack, 3)
+    await _seat(remote, space.id, "peer-1", "u-admin", role="admin")
+    await _seat(remote, space.id, "peer-2", "u-gone")
+    await remote.remove(space.id, "peer-2", "u-gone")
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    (_to, entries) = _snapshots(fed, to="peer-0")[-1]
+    mirrored = [
+        (
+            e["payload"]["instance_id"],
+            e["payload"]["user_id"],
+            mirrorable_remote_role(e["payload"]["role"]),
         )
-    await _seat(remote, space.id, "peer-0", "u-extra")
-    space_row = await stack.space_repo.get(space.id)
+        for e in entries
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_JOINED.value
+    ]
+    row = await stack.space_repo.get(space.id)
+    assert roster_digest(mirrored) == await stack.space_svc.roster_digest_of(
+        row, "peer-0"
+    )
+
+
+@pytest.mark.parametrize("source", [None, "space_session"])
+async def test_a_member_whose_mirror_is_right_is_sent_nothing(stack, source):
+    """No change → 0 envelopes, whatever the path the household is reached
+    by (paired, or seated from an invite link over the GFS relay)."""
+
+    space, fed, _remote, insts = await _members_with_households(
+        stack, 3, source=InstanceSource(source) if source else None
+    )
+    for _ in range(48):
+        for inst in insts:
+            await stack.space_svc.on_sync_begin_roster(
+                await _digest_begin(stack, space, inst)
+            )
+    assert _snapshots(fed) == []
+
+
+class _Clock:
+    """The roster repair's monotonic clock, moved by hand."""
+
+    def __init__(self, monkeypatch) -> None:
+
+        self.now = 1000.0
+        monkeypatch.setattr(ss_mod, "_monotonic", lambda: self.now)
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+async def _answer(stack, event) -> None:
+    """Hand *event* to the repair (an admitted BEGIN) and let the repair
+    snapshot it schedules go out."""
+    await stack.space_svc.on_sync_begin_roster(event)
+    await stack.space_svc.wait_roster_repairs()
+
+
+def _certs(epoch: int | None):
+    certs = MagicMock()
+    certs.cert_epoch_for_peer = AsyncMock(return_value=epoch)
+    certs.cert_for_peer = AsyncMock(
+        return_value=None if epoch is None else {"epoch": epoch}
+    )
+    certs.writer_key_for_peer = AsyncMock(return_value=None)
+    certs.channel_grant_for_peer = AsyncMock(return_value=None)
+    certs.issue_for_instance = AsyncMock(side_effect=AssertionError("signed"))
+    return certs
+
+
+async def test_a_missed_gossip_gets_exactly_one_snapshot(stack, monkeypatch):
+    """A household whose digest differs gets ONE snapshot in reply to its
+    BEGIN; the other household, whose mirror is right, nothing."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 2)
+    for _ in range(3):
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+    await _answer(stack, await _digest_begin(stack, space, "peer-1"))
+    assert [to for to, _ in _snapshots(fed)] == ["peer-0"]
+
+
+async def _gossip_a_change(stack, space, remote, user: str) -> None:
+    """A roster change on the host (a seat joins, gossip goes out): its
+    ``roster_sequence`` moves."""
+    await _seat(remote, space.id, "peer-x", user)
     await stack.space_svc._emit_member_roster_gossip(
-        space_row,
-        user_id="u-extra",
-        instance_id="peer-0",
-        display_name="E",
+        await stack.space_repo.get(space.id),
+        user_id=user,
+        instance_id="peer-x",
+        display_name=user,
         user_pk=None,
         role="member",
         tombstoned=False,
     )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 2
 
 
-async def test_a_household_that_never_echoes_keeps_getting_the_snapshot(stack):
-    """An older member household sends no echo: it is healed every tick, as
-    before — nothing is skipped on a guess."""
-    _space, fed, _remote, _insts = await _members_with_households(stack, 1)
+async def test_fifty_random_digests_in_half_an_hour_buy_one_snapshot(
+    stack, monkeypatch
+):
+    """Review C1(b): a member varying its digest on every BEGIN gets ONE
+    repair per cooldown, whatever it claims."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    for _ in range(50):
+        await _answer(
+            stack,
+            await _digest_begin(stack, space, "peer-0", digest=os.urandom(32).hex()),
+        )
+        clock.advance(30)
+    assert len(_snapshots(fed)) == 1
+
+
+async def test_a_begin_without_a_digest_from_a_current_member_asks_nothing(
+    stack, monkeypatch
+):
+    """S1: from a household at or above the digest line
+    (``MIN_FOR_ROSTER_DIGEST``) a BEGIN without a digest means "no repair
+    asked" — never "send everything"."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
     for _ in range(3):
-        assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    assert len(_snapshots(fed)) == 3
+        await _answer(stack, _begin(space.id, "peer-0"))
+    assert _snapshots(fed) == []
+    asked = [c.kwargs["min_version"] for c in fed.space_member_supports.await_args_list]
+    assert FederationCapability.MIN_FOR_ROSTER_DIGEST in asked
 
 
-async def test_a_stale_echo_or_a_missing_writer_cert_is_sent_again(stack):
-    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current - 1, "cert_epoch": None}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    # Version right, but the household lacks the writer cert we would issue.
-    certs = MagicMock()
-    certs.cert_for_peer = AsyncMock(return_value={"epoch": 7})
-    certs.writer_key_for_peer = AsyncMock(return_value=None)
-    certs.channel_grant_for_peer = AsyncMock(return_value=None)
-    stack.space_svc._writer_certs = certs
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current, "cert_epoch": 6}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current, "cert_epoch": 7}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 0
-
-
-async def test_tombstones_a_household_already_holds_are_not_resent(stack):
-    """A snapshot to a household that echoed version R carries no removal
-    at or below R — it applied a full snapshot holding every one of them.
-    A removal after R, and a household without an echo, get them all."""
+async def test_consecutive_mismatches_in_an_active_space_double_the_cooldown(
+    stack, monkeypatch, caplog
+):
+    """Round 5 (was the round-4 port of finding 1): snapshots are lost while
+    gossip keeps reaching the member, so its digest moves on every BEGIN.
+    Every CONSECUTIVE mismatch answered with a sent snapshot doubles the
+    cooldown (30 min, 1 h, 2 h … a day), whether or not the digest moved —
+    an unhealable mismatch in an active space cannot cost a snapshot every
+    30 min forever. No WARNING."""
+    clock = _Clock(monkeypatch)
     space, fed, remote, _insts = await _members_with_households(stack, 1)
+    sent_at: list[float] = []
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        for step in range(48 * 3):  # 3 days, a change and a BEGIN every 30 min
+            await _gossip_a_change(stack, space, remote, f"u-c{step}")
+            before = len(_snapshots(fed))
+            await _answer(
+                stack,
+                await _digest_begin(stack, space, "peer-0", digest=f"{step:064x}"),
+            )
+            if len(_snapshots(fed)) > before:
+                sent_at.append(clock.now)
+            clock.advance(30 * 60)
+    gaps = [round((b - a) / 3600, 1) for a, b in itertools.pairwise(sent_at)]
+    assert gaps == [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 24.0]
+    assert not caplog.records
+
+
+async def test_rev_v80_active_space_is_answered_every_cooldown_without_a_warning(
+    stack, monkeypatch, caplog
+):
+    """Round-4 finding 2 (reviewer repro): a released v_80 household in an
+    active space applies every snapshot (its echo reaches the version sent)
+    and is answered again after each roster change — never called drift,
+    never backed off."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    fed.space_member_supports = AsyncMock(
+        side_effect=lambda iid, *, min_version: min_version < 81
+    )
+    await _gossip_a_change(stack, space, remote, "u-a")
+    await _answer(stack, _begin(space.id, "peer-0"))  # no echo yet: everything
+    assert len(_snapshots(fed)) == 1
+    applied = int((await stack.space_repo.get(space.id)).roster_sequence)
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        for step in range(8):  # 4 h, one roster change per 30 min
+            clock.advance(15 * 60)
+            await _gossip_a_change(stack, space, remote, f"u-b{step}")
+            clock.advance(15 * 60)
+            echo = {"roster_version": applied, "cert_epoch": None}
+            await _answer(stack, _begin_with_echo(space.id, "peer-0", echo))
+            applied = int((await stack.space_repo.get(space.id)).roster_sequence)
+    assert len(_snapshots(fed)) == 1 + 8
+    assert not caplog.records
+
+
+async def test_rev_busy_space_member_without_gossip_is_repaired_at_once(
+    stack, monkeypatch
+):
+    """Round-4 finding 3 (reviewer repro): in a space whose roster moves
+    every 5 min, a member whose gossip never arrives is repaired on its
+    first BEGIN (there is no grace keyed on the host's latest change); while
+    it keeps answering the SAME wrong digest the cooldown doubles to a day."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    sent_at: list[float] = []
+    for step in range(48 * 3):  # 3 days of 30 min, a change every 5 min
+        await _gossip_a_change(stack, space, remote, f"u-d{step}")
+        clock.advance(5 * 60)
+        if step % 6 == 5:
+            before = len(_snapshots(fed))
+            await _answer(
+                stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+            )
+            if len(_snapshots(fed)) > before:
+                sent_at.append(clock.now)
+    assert sent_at and sent_at[0] == 1000.0 + 30 * 60
+    gaps = [b - a for a, b in itertools.pairwise(sent_at)]
+    assert gaps == sorted(gaps) and max(gaps) <= 24 * 60 * 60 + 30 * 60
+    assert len(sent_at) <= 8
+
+
+async def test_the_cooldown_doubles_and_starts_over_on_a_match(stack, monkeypatch):
+    """B: 30 min, then — on every consecutive mismatch answered with a sent
+    snapshot — 1 h, 2 h … capped at a day; a matching digest puts it back
+    at 30 min."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    async def wrong(digest="0" * 64):
+        await _answer(stack, await _digest_begin(stack, space, "peer-0", digest=digest))
+
+    await wrong()
+    assert len(_snapshots(fed)) == 1
+    clock.advance(30 * 60)
+    await wrong("1" * 64)  # another wrong digest: resent, the cooldown now 1 h
+    assert len(_snapshots(fed)) == 2
+    clock.advance(59 * 60)
+    await wrong()
+    assert len(_snapshots(fed)) == 2
+    clock.advance(60)
+    await wrong()  # cooldown now 2 h
+    assert len(_snapshots(fed)) == 3
+    for _ in range(10):
+        clock.advance(24 * 60 * 60)
+        await wrong()
+    assert len(_snapshots(fed)) == 13  # capped at one a day
+    await _answer(stack, await _digest_begin(stack, space, "peer-0"))  # it matches
+    clock.advance(24 * 60 * 60)
+    await wrong()
+    clock.advance(30 * 60)
+    await wrong()  # back at 30 min
+    assert len(_snapshots(fed)) == 15
+
+
+async def test_a_snapshot_that_did_not_go_out_waits_a_retry_without_doubling(
+    stack, monkeypatch
+):
+    """Finding 5 / round 5: a snapshot built but not sent waits
+    ``ROSTER_REPAIR_RETRY_S`` (no build on every BEGIN, no doubling); one
+    that fails before it is built (a household below the snapshot line)
+    records nothing and costs no budget."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    real = fed.send_with_mesh_fallback
+    fed.send_with_mesh_fallback = AsyncMock(side_effect=RuntimeError("down"))
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    fed.send_with_mesh_fallback = real
+    clock.advance(ss_mod.ROSTER_REPAIR_RETRY_S - 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert _snapshots(fed) == []
+    clock.advance(120)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert len(_snapshots(fed)) == 1
+    assert stack.space_svc._roster_repairs[space.id]["peer-0"].cooldown == (
+        ss_mod.ROSTER_REPAIR_COOLDOWN_S
+    )
+    supports = fed.space_member_supports
+    fed.space_member_supports = AsyncMock(return_value=False)
+    budget = stack.space_svc._roster_budget
+    used = dict(budget._windows)
+    await _answer(stack, await _digest_begin(stack, space, "peer-1", digest="0" * 64))
+    assert "peer-1" not in stack.space_svc._roster_repairs[space.id]
+    assert budget._windows == used
+    fed.space_member_supports = supports
+
+
+async def _another_hosted_space(stack, fed, remote, name: str, households: list[str]):
+    space = await stack.space_svc.create_space(owner_username="hosty", name=name)
+    for i, inst in enumerate(households):
+        await _seat(remote, space.id, inst, f"u-{name}-{i}")
+        await stack.space_repo.add_space_instance(space.id, inst)
+    return space
+
+
+async def test_one_space_cannot_starve_the_others_repairs(stack, monkeypatch):
+    """C / round 5: at most ``ROSTER_REPAIR_PER_SPACE_PER_MINUTE`` repair
+    snapshots a minute for one space and ``ROSTER_REPAIR_PER_MINUTE``
+    across all — twenty mismatched households in one space (sybil
+    followers of a public space, a restart) leave room for every other
+    space. A household held back asks again on its next BEGIN."""
+    clock = _Clock(monkeypatch)
+    big, fed, remote, insts = await _members_with_households(stack, 20)
+    others = [
+        await _another_hosted_space(stack, fed, remote, f"o{n}", [f"q-{n}"])
+        for n in range(5)
+    ]
+    for inst in insts:
+        await _answer(stack, await _digest_begin(stack, big, inst, digest="0" * 64))
+    assert len(_snapshots(fed)) == ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    for n, other in enumerate(others):
+        await _answer(
+            stack, await _digest_begin(stack, other, f"q-{n}", digest="0" * 64)
+        )
+    sent = [to for to, _ in _snapshots(fed)]
+    assert len(sent) == ss_mod.ROSTER_REPAIR_PER_MINUTE  # the global cap
+    assert sum(to.startswith("q-") for to in sent) == (
+        ss_mod.ROSTER_REPAIR_PER_MINUTE - ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    )
+    clock.advance(61)
+    for inst in insts:
+        await _answer(stack, await _digest_begin(stack, big, inst, digest="0" * 64))
+    assert len(_snapshots(fed)) == (
+        ss_mod.ROSTER_REPAIR_PER_MINUTE + ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    )
+
+
+async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
+    stack, monkeypatch
+):
+    """N6, folded into the one rule: the digest right but the writer-cert
+    epoch not the one we would send is a mismatch — one snapshot carrying
+    only the credentials (the roster matched), read without signing a cert
+    to decide."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    certs = _certs(7)
+    stack.space_svc._writer_certs = certs
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=7))
+    assert _snapshots(fed) == []
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=6))
+    (_to, entries) = _snapshots(fed, to="peer-0")[-1]
+    assert entries == []
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert payload["writer_cert"] == {"epoch": 7}
+    clock.advance(30 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=8))
+    assert len(_snapshots(fed)) == 2
+    certs.issue_for_instance.assert_not_awaited()
+
+
+async def test_a_snapshot_carries_the_tombstones_of_the_last_30_days(stack):
+    """Round 5: the host's own removals ride a repair snapshot with their
+    version and signature — those at most ``ROSTER_TOMBSTONE_WINDOW_S``
+    old (``removed_at``); older ones stay on the host only."""
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    for user, age_days in (("u-recent", 1), ("u-old", 31)):
+        await _seat(remote, space.id, "peer-x", user)
+        await remote.remove(space.id, "peer-x", user)
+        await stack.db.enqueue(
+            "UPDATE space_remote_members SET removed_at=datetime('now', ?) "
+            "WHERE space_id=? AND user_id=?",
+            (f"-{age_days} days", space.id, user),
+        )
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    left = {
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to="peer-0")[-1][1]
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    }
+    assert left == {"u-recent"}
+
+
+def _left_users(fed, to="peer-0"):
+    return {
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to=to)[-1][1]
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    }
+
+
+async def test_a_member_offline_31_days_is_healed_on_the_second_repair(
+    stack, monkeypatch
+):
+    """SF1 (round 5 review): a kick older than the tombstone window — the
+    member was offline 31 days, its LEFT gossip left the outbox after 7 —
+    rides the next, consecutive repair: a repair that follows one which
+    did not heal carries EVERY tombstone, so a kicked household never stays
+    live (and fed space content) forever."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    await _seat(remote, space.id, "peer-k", "u-kicked")
+    await remote.remove(space.id, "peer-k", "u-kicked")
+    await stack.db.enqueue(
+        "UPDATE space_remote_members SET removed_at=datetime('now', '-31 days') "
+        "WHERE space_id=? AND user_id='u-kicked'",
+        (space.id,),
+    )
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert "u-kicked" not in _left_users(fed)
+    clock.advance(30 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert "u-kicked" in _left_users(fed)
+
+
+async def test_a_match_shortens_a_long_cooldown_back_to_30_minutes(stack, monkeypatch):
+    """SF2: at the day cap a matching digest starts the cooldown over — a
+    new miss 30 min after the last snapshot is answered, not 23 h later."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    async def wrong():
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+
+    for _ in range(8):  # up to the day cap
+        await wrong()
+        clock.advance(24 * 60 * 60)
+    sent = len(_snapshots(fed))
+    await wrong()  # a snapshot with a day's cooldown
+    assert len(_snapshots(fed)) == sent + 1
+    clock.advance(10 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0"))  # it matches
+    clock.advance(21 * 60)
+    await wrong()  # 31 min after the last snapshot
+    assert len(_snapshots(fed)) == sent + 2
+
+
+@pytest.mark.parametrize(
+    "where", ["roster_snapshot_entries", "channel_grant_for_peer", "parts"]
+)
+async def test_a_failed_build_waits_the_retry(stack, monkeypatch, caplog, where):
+    """NOTE 5: an exception while the snapshot is built (after the budget
+    was charged) is a WARNING and a built-not-sent snapshot: it waits
+    ``ROSTER_REPAIR_RETRY_S``, it does not ask again on every BEGIN."""
+    clock = _Clock(monkeypatch)
+    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    if where == "roster_snapshot_entries":
+        monkeypatch.setattr(
+            SpaceService, "roster_snapshot_entries", lambda *a, **kw: _boom()
+        )
+    elif where == "parts":
+        monkeypatch.setattr(ss_mod, "roster_snapshot_parts", _boom)
+    else:
+        certs = _certs(None)
+        certs.channel_grant_for_peer = AsyncMock(side_effect=RuntimeError("boom"))
+        stack.space_svc._writer_certs = certs
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    rec = stack.space_svc._roster_repairs[space.id]["peer-0"]
+    assert rec.until == clock.now + ss_mod.ROSTER_REPAIR_RETRY_S
+
+
+async def test_sent_version_is_the_version_the_snapshot_carried(stack, monkeypatch):
+    """NOTE 7: a roster change between the BEGIN and the build — the record
+    holds the ``roster_version`` the snapshot carried."""
+    _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    stale = await stack.space_repo.get(space.id)
+    await _gossip_a_change(stack, space, remote, "u-late")
+    await stack.space_svc._repair_roster(
+        stale, "peer-0", right=False, took=False, known_version=None
+    )
+    await stack.space_svc.wait_roster_repairs()
+    carried = fed.send_with_mesh_fallback.await_args_list[-1].kwargs["payload"][
+        "roster_version"
+    ]
+    assert carried > int(stale.roster_sequence)
+    assert stack.space_svc._roster_repairs[space.id]["peer-0"].sent_version == carried
+
+
+async def test_a_re_issued_left_is_carried_with_a_fresh_removed_at(stack):
+    """NOTE 7: a seat removed long ago, re-tombstoned at a newer version (a
+    re-seat and a new kick through gossip) carries a fresh ``removed_at`` —
+    the re-issued LEFT rides the next snapshot."""
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    await _seat(remote, space.id, "peer-x", "u-x")
+    await remote.remove(space.id, "peer-x", "u-x")
+    await stack.db.enqueue(
+        "UPDATE space_remote_members SET removed_at=datetime('now', '-40 days') "
+        "WHERE space_id=? AND user_id='u-x'",
+        (space.id,),
+    )
+    old = await remote.get_including_tombstones(space.id, "peer-x", "u-x")
+    assert await remote.apply_member_event(
+        space_id=space.id,
+        user_id="u-x",
+        instance_id="peer-x",
+        display_name="X",
+        user_pk=None,
+        role="member",
+        member_version=old.member_version + 5,
+        tombstoned=True,
+    )
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    assert "u-x" in _left_users(fed)
+
+
+async def test_a_new_snapshot_drops_every_queued_part_of_an_older_one(stack):
+    """M2: a newer snapshot with fewer parts would leave the older send's
+    higher parts queued — every queued part to that household for that
+    space is dropped before the new one goes."""
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    order: list[str] = []
+    fed.drop_queued_with_key_prefix = AsyncMock(
+        side_effect=lambda *a, **kw: order.append("drop") or 0
+    )
+    real_send = fed.send_with_mesh_fallback
+
+    async def _send(**kw):
+        order.append("send")
+        return await real_send(**kw)
+
+    fed.send_with_mesh_fallback = _send
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    fed.drop_queued_with_key_prefix.assert_awaited_once_with(
+        "peer-0", roster_snapshot_key_prefix(space.id)
+    )
+    assert order[0] == "drop" and "send" in order
+
+
+async def test_the_repair_memory_holds_thousands_of_pairs(stack, monkeypatch):
+    """I4 / N8: bounded by live seats, indexed by space — 5000 member
+    households answered once are each held back."""
+    _Clock(monkeypatch)
+    monkeypatch.setattr(ss_mod, "ROSTER_REPAIR_PER_MINUTE", 10**6)
+    monkeypatch.setattr(ss_mod, "ROSTER_REPAIR_PER_SPACE_PER_MINUTE", 10**6)
+    svc = stack.space_svc
+    sent: list[str] = []
+
+    async def _send(
+        space_id, *, to_instance_id, known_version=None, charge=None, **_kw
+    ):
+        assert charge is not None and charge(7)
+        sent.append(to_instance_id)
+        return True
+
+    monkeypatch.setattr(
+        SpaceService, "send_roster_snapshot", lambda self, *a, **kw: _send(*a, **kw)
+    )
+    space = SimpleNamespace(id="sp", roster_sequence=7)
+    for _round in range(2):
+        for i in range(5000):
+            await svc._repair_roster(
+                space,  # type: ignore[arg-type]
+                f"peer-{i}",
+                right=False,
+                took=False,
+                known_version=None,
+            )
+        await svc.wait_roster_repairs()
+    assert len(sent) == 5000
+    assert len(svc._roster_repairs["sp"]) == 5000
+
+
+async def test_the_repair_memory_forgets_leavers_and_dissolved_spaces(
+    stack, monkeypatch
+):
+    """N8: pruned per space — a household that left on the space's next
+    BEGIN, a dissolved space at once (its cached seats too)."""
+    _Clock(monkeypatch)
+    space, _fed, _remote, insts = await _members_with_households(stack, 2)
+    await _answer(stack, await _digest_begin(stack, space, insts[0], digest="0" * 64))
+    assert insts[0] in stack.space_svc._roster_repairs[space.id]
+    await stack.space_repo.remove_space_instance(space.id, insts[0])
+    await _answer(stack, await _digest_begin(stack, space, insts[1]))
+    assert insts[0] not in stack.space_svc._roster_repairs.get(space.id, {})
+    await _answer(stack, await _digest_begin(stack, space, insts[1], digest="0" * 64))
+    assert stack.space_svc._roster_repairs[space.id]
+    assert space.id in stack.space_svc._roster_seats_cache
+    await stack.space_svc.dissolve_space(space.id, actor_username="hosty")
+    assert space.id not in stack.space_svc._roster_repairs
+    assert space.id not in stack.space_svc._roster_seats_cache
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"suite": [], "digest": "a" * 64},
+        {"suite": "rd9-" + "x" * 5000, "digest": "a"},
+        {"suite": "rd1-sha256", "digest": "x"},
+        {"suite": "rd1-sha256", "digest": "a" * 64, "cert_epoch": 2**64},
+    ],
+)
+async def test_a_refused_digest_is_logged_once_an_hour_and_repairs_nothing(
+    stack, caplog, monkeypatch, raw
+):
+    """N5 / round 4: an unknown suite, a suite that is not a string (it used
+    to raise TypeError — an ERROR per BEGIN) or a malformed digest repairs
+    nothing, falls back to nothing, and is logged at WARNING at most once
+    per (space, household) an hour, with the sender's text cut short."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            await _answer(stack, _begin(space.id, "peer-0", roster_digest=raw))
+        clock.advance(61 * 60)
+        await _answer(stack, _begin(space.id, "peer-0", roster_digest=raw))
+    refused = [r for r in caplog.records if "refused" in r.getMessage()]
+    assert len(refused) == 2
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+    assert all(len(r.getMessage()) < 300 for r in refused)
+    assert _snapshots(fed) == []
+
+
+async def test_an_older_household_keeps_the_echo_rule(stack, monkeypatch):
+    """v_80 (released, below the digest line) sends only ``roster_echo``:
+    nothing while it echoes the current roster; a stale echo gets every
+    live seat without the removals at or below it; no echo at all the whole
+    roster — each at most once per cooldown."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    fed.space_member_supports = AsyncMock(
+        side_effect=lambda iid, *, min_version: min_version < 81  # a v_80 member
+    )
     space_row = await stack.space_repo.get(space.id)
     for user in ("u-gone-1", "u-gone-2"):
         await _seat(remote, space.id, "peer-x", user)
@@ -8405,11 +9564,9 @@ async def test_tombstones_a_household_already_holds_are_not_resent(stack):
             tombstoned=True,
         )
     echoed = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": echoed, "cert_epoch": None}
-        )
-    )
+    echo = {"roster_version": echoed, "cert_epoch": None}
+    await _answer(stack, _begin_with_echo(space.id, "peer-0", echo))
+    assert _snapshots(fed) == []
     await _seat(remote, space.id, "peer-x", "u-gone-3")
     await remote.remove(space.id, "peer-x", "u-gone-3")
     await stack.space_svc._emit_member_roster_gossip(
@@ -8421,37 +9578,67 @@ async def test_tombstones_a_household_already_holds_are_not_resent(stack):
         role="member",
         tombstoned=True,
     )
-    await stack.space_svc.send_hosted_roster_snapshots()
+    await _answer(stack, _begin_with_echo(space.id, "peer-0", echo))
+    entries = _snapshots(fed, to="peer-0")[-1][1]
     left = [
         e["payload"]["user_id"]
-        for e in _snapshots(fed, to="peer-0")[-1][1]
+        for e in entries
         if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
     ]
     assert left == ["u-gone-3"]
-    # A household with no echo gets every removal.
-    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
-    left_new = sorted(
+    assert "u-0" not in {e["payload"]["user_id"] for e in entries}  # its own
+    assert any(e["payload"]["role"] == "owner" for e in entries)
+    # No echo at all: the whole roster — after the cooldown.
+    await _answer(stack, _begin(space.id, "peer-0"))
+    assert len(_snapshots(fed, to="peer-0")) == 1
+    clock.advance(30 * 60)
+    await _answer(stack, _begin(space.id, "peer-0"))
+    left_all = sorted(
         e["payload"]["user_id"]
-        for e in _snapshots(fed, to="peer-new")[-1][1]
+        for e in _snapshots(fed, to="peer-0")[-1][1]
         if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
     )
-    assert left_new == ["u-gone-1", "u-gone-2", "u-gone-3"]
+    assert left_all == ["u-gone-1", "u-gone-2", "u-gone-3"]
+    assert len(_snapshots(fed, to="peer-0")) == 2
 
 
-async def test_an_echo_from_a_non_member_or_for_a_space_we_do_not_host_is_ignored(
+async def test_a_begin_from_a_non_member_or_for_a_space_we_do_not_host_is_ignored(
     stack,
 ):
-    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
-    for space_id, sender, echo in (
-        (space.id, "stranger", {"roster_version": 1, "cert_epoch": None}),
-        ("unknown-space", "peer-0", {"roster_version": 1, "cert_epoch": None}),
-        (space.id, "peer-0", {"roster_version": "x"}),
-        (space.id, "peer-0", "junk"),
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    for event in (
+        _begin(space.id, "stranger"),
+        _begin("unknown-space", "peer-0"),
+        _begin_with_echo(space.id, "peer-0", {"roster_version": "x"}),
+        _begin_with_echo(space.id, "peer-0", {"roster_version": 1, "cert_epoch": "x"}),
     ):
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(space_id, sender, echo)
-        )
-    assert stack.space_svc._roster_heard == {}
+        await stack.space_svc.on_sync_begin_roster(event)
+    assert _snapshots(fed) == []
+
+
+async def test_the_members_digest_is_of_the_mirror_it_holds(stack):
+    """Member side: the digest of every live seat it mirrors outside its
+    own household, only toward the space's host."""
+    sid, _uid = await _seat_remote_space_with_posts_access(
+        stack, actor="mia", posts_access=SpaceFeatureAccess.OPEN
+    )
+    remote = await _wire_remote_members(stack)
+    stack.space_svc._remote_members = remote
+    await _seat(remote, sid, "inst-remote-owner", "u-owner")
+    await _seat(remote, sid, "peer-z", "u-z", role="admin")
+    await _seat(remote, sid, stack.iid, "u-self")
+    await _seat(remote, sid, "peer-z", "u-gone")
+    await remote.remove(sid, "peer-z", "u-gone")
+    got = await stack.space_svc.roster_digest_for(sid, "inst-remote-owner")
+    assert got == {
+        "suite": ROSTER_DIGEST_SUITE_SHA256,
+        "digest": roster_digest(
+            [("inst-remote-owner", "u-owner", "member"), ("peer-z", "u-z", "admin")]
+        ),
+        "cert_epoch": None,
+    }
+    assert await stack.space_svc.roster_digest_for(sid, "peer-z") is None
+    assert await stack.space_svc.roster_digest_for("no-space", "x") is None
 
 
 async def test_the_members_echo_is_what_it_applied_from_the_host(stack):
@@ -8482,16 +9669,6 @@ async def test_only_the_host_sends_a_roster_snapshot(stack):
 # ─── Snapshot image bounds ─────────────────────────────────────────────
 
 
-class _ImageRepo:
-    """In-memory stand-in for the cover / icon repo (``get`` only)."""
-
-    def __init__(self, webp: bytes) -> None:
-        self.webp = webp
-
-    async def get(self, space_id: str):
-        return self.webp, "h"
-
-
 def _noise_webp(width: int, height: int) -> bytes:
     img = Image.frombytes(
         "RGB",
@@ -8501,6 +9678,143 @@ def _noise_webp(width: int, height: int) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="WEBP", quality=75)
     return buf.getvalue()
+
+
+class _RecordingImageRepo:
+    """The cover / icon repo, recording what is stored."""
+
+    def __init__(self, webp: bytes | None = None) -> None:
+        self.webp = webp
+        self.hash = "h"
+        self.sets: list[bytes] = []
+
+    async def get(self, space_id: str):
+        return None if self.webp is None else (self.webp, self.hash)
+
+    async def set(self, space_id, *, bytes_webp, hash, width, height):
+        self.webp, self.hash = bytes_webp, hash
+        self.sets.append(bytes_webp)
+
+    async def replace_bytes_if_hash(self, space_id, *, bytes_webp, hash):
+        if self.webp is None or self.hash != hash:
+            return False
+        self.webp = bytes_webp
+        self.sets.append(bytes_webp)
+        return True
+
+    async def clear(self, space_id):
+        self.webp = None
+
+
+def _noise_png(width: int, height: int) -> bytes:
+    img = Image.frombytes(
+        "RGB", (width, height), random.Random(width).randbytes(width * height * 3)
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("setter", "attr", "cap"),
+    [
+        ("set_cover", "_covers", SPACE_COVER_MAX_BYTES),
+        ("set_icon", "_icons", SPACE_ICON_MAX_BYTES),
+    ],
+)
+async def test_an_uploaded_cover_or_icon_is_stored_within_the_one_cap(
+    stack, setter, attr, cap
+):
+    """Owner decision 2026-11-15: ONE cap per image kind, enforced where
+    it is set — a large photo is re-encoded to a WebP within it, so every
+    member, however reached, gets the same image. Never an error for an
+    ordinary photo."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    repo = _RecordingImageRepo()
+    setattr(stack.space_svc, attr, repo)
+    raw = _noise_png(2400, 1600)
+    assert len(raw) > cap
+    await getattr(stack.space_svc, setter)(
+        space.id, actor_username="anna", raw_bytes=raw
+    )
+    (stored,) = repo.sets
+    assert len(stored) <= cap
+    assert Image.open(io.BytesIO(stored)).format == "WEBP"
+
+
+async def test_an_upload_nothing_fits_is_a_cap_error_not_unreadable(stack, monkeypatch):
+    """Minor: when not even the smallest rendition fits the cap, the owner
+    is told the image is too large (422 IMAGE_TOO_LARGE) — honest, not
+    IMAGE_UNREADABLE. Decodable images practically always fit."""
+
+    async def _never(self, data, max_bytes, **kw):
+        return None
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _never)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    stack.space_svc._covers = _RecordingImageRepo()
+    with pytest.raises(ImageTooLargeError) as err:
+        await stack.space_svc.set_cover(
+            space.id, actor_username="anna", raw_bytes=_noise_png(120, 80)
+        )
+    # N10: the real cap, in kB — not "under 1 MB".
+    assert err.value.params == {"max_kb": SPACE_COVER_MAX_BYTES // 1000}
+
+
+async def test_an_upload_over_the_source_pixel_cap_is_refused_before_decoding(
+    stack, monkeypatch
+):
+    """Minor: the set-time thumbnail is bounded by
+    ``SPACE_IMAGE_MAX_SOURCE_PIXELS`` (checked on the header, before any
+    pixel is decoded), like a profile picture."""
+    monkeypatch.setattr(ss_mod, "SPACE_IMAGE_MAX_SOURCE_PIXELS", 100)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    stack.space_svc._covers = _RecordingImageRepo()
+    with pytest.raises(ImageUnreadableError):
+        await stack.space_svc.set_cover(
+            space.id, actor_username="anna", raw_bytes=_noise_png(120, 80)
+        )
+
+
+async def test_a_pre_cap_cover_that_cannot_fit_is_not_retried_every_send(
+    stack, monkeypatch
+):
+    """Minor: a cover stored before the cap that cannot be made to fit is
+    left out (nothing stored) and remembered per (space, version), so the
+    next send does not re-encode it again."""
+    calls: list[int] = []
+
+    async def _never(self, data, max_bytes, **kw):
+        calls.append(len(data))
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _never)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c-unfit", icon_hash=None)
+    covers = _RecordingImageRepo(_noise_webp(1200, 800))
+    covers.hash = "c-unfit"
+    # N12: the memory is the sender's own (instance state), not a module
+    # global — a fresh one starts empty.
+    memory = UnfittableImages()
+    for _ in range(3):
+        snap = await build_space_snapshot_for_federation(
+            space,
+            space_repo=stack.space_repo,
+            remote_member_repo=None,
+            user_repo=stack.space_svc._users,
+            own_instance_id=stack.iid,
+            cover_repo=covers,
+            unfittable=memory,
+        )
+        assert "cover_webp_base64" not in snap
+    assert len(calls) == 1
+    assert covers.sets == []
+    assert (space.id, "cover", "c-unfit") in memory
+    assert not hasattr(ss_mod, "_UNFITTABLE")
+    assert isinstance(stack.space_svc._unfittable, UnfittableImages)
 
 
 async def _snapshot_with_images(stack, cover: bytes, icon: bytes, **kw):
@@ -8513,8 +9827,8 @@ async def _snapshot_with_images(stack, cover: bytes, icon: bytes, **kw):
         remote_member_repo=None,
         user_repo=stack.space_svc._users,
         own_instance_id=stack.iid,
-        cover_repo=_ImageRepo(cover),
-        icon_repo=_ImageRepo(icon),
+        cover_repo=_RecordingImageRepo(cover),
+        icon_repo=_RecordingImageRepo(icon),
         **kw,
     )
 
@@ -8531,41 +9845,96 @@ async def test_snapshot_bounds_a_big_cover_and_icon(stack, caplog):
     it used to ship verbatim and overflow the envelope carrying it."""
     # 400 px: a stored icon is 256 px, but the bound must hold regardless.
     cover, icon = _noise_webp(1200, 800), _noise_webp(400, 400)
-    assert len(cover) > SPACE_COVER_SNAPSHOT_MAX_BYTES
-    assert len(icon) > SPACE_ICON_SNAPSHOT_MAX_BYTES
+    assert len(cover) > SPACE_COVER_MAX_BYTES
+    assert len(icon) > SPACE_ICON_MAX_BYTES
     with caplog.at_level(logging.INFO, logger="socialhome.services.space_service"):
         snap = await _snapshot_with_images(stack, cover, icon)
     shipped_cover = base64.b64decode(snap["cover_webp_base64"])
     shipped_icon = base64.b64decode(snap["icon_webp_base64"])
-    assert len(shipped_cover) <= SPACE_COVER_SNAPSHOT_MAX_BYTES
-    assert len(shipped_icon) <= SPACE_ICON_SNAPSHOT_MAX_BYTES
+    assert len(shipped_cover) <= SPACE_COVER_MAX_BYTES
+    assert len(shipped_icon) <= SPACE_ICON_MAX_BYTES
     assert Image.open(io.BytesIO(shipped_cover)).format == "WEBP"
     assert "shipping a" in caplog.text
 
 
-async def test_snapshot_honours_caller_bounds(stack):
-    cover, icon = _noise_webp(400, 300), _noise_webp(128, 128)
-    snap = await _snapshot_with_images(
-        stack,
-        cover,
-        icon,
-        cover_max_bytes=20 * 1024,
-        icon_max_bytes=4 * 1024,
+async def test_a_cover_stored_over_the_cap_is_replaced_by_the_rendition_sent(
+    stack,
+):
+    """Item 5: a cover saved before the one cap is over it. The first send
+    that carries it (a cover change, a join, an invite) ships a rendition
+    within the cap — what every member, GFS-reached included, gets — and
+    keeps that rendition (same version tag), so it is re-encoded once."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c", icon_hash="i")
+    big = _noise_webp(1200, 800)
+    assert len(big) > SPACE_COVER_MAX_BYTES
+    covers = _RecordingImageRepo(big)
+    covers.hash = "c"
+    icons = _RecordingImageRepo(_noise_webp(32, 32))
+    snap = await build_space_snapshot_for_federation(
+        space,
+        space_repo=stack.space_repo,
+        remote_member_repo=None,
+        user_repo=stack.space_svc._users,
+        own_instance_id=stack.iid,
+        cover_repo=covers,
+        icon_repo=icons,
     )
-    assert len(base64.b64decode(snap["cover_webp_base64"])) <= 20 * 1024
-    assert len(base64.b64decode(snap["icon_webp_base64"])) <= 4 * 1024
+    shipped = base64.b64decode(snap["cover_webp_base64"])
+    assert len(shipped) <= SPACE_COVER_MAX_BYTES
+    assert covers.sets == [shipped] and covers.hash == "c"
+    assert icons.sets == []  # within the cap: untouched
 
 
-async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog):
-    """Undecodable bytes over the bound, or a bound nothing fits under, leave
+@pytest.mark.parametrize("change", ["replace", "clear"])
+async def test_a_cover_change_during_the_re_encode_is_not_undone(
+    stack, monkeypatch, change
+):
+    """I2: the re-encode of a pre-cap cover runs in a thread; a set_cover or
+    clear_cover meanwhile must not be overwritten by the old version's
+    rendition (compare-and-set on the version tag)."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c", icon_hash=None)
+    covers = _RecordingImageRepo(_noise_webp(1200, 800))
+    covers.hash = "c"
+    real_fit = ip_mod.ImageProcessor.fit_within
+
+    async def _fit_with_a_change(self, data, max_bytes, **kw):
+        out = await real_fit(self, data, max_bytes, **kw)
+        if change == "replace":
+            covers.webp, covers.hash = b"RIFFnew-cover", "c2"
+        else:
+            covers.webp = None
+        return out
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _fit_with_a_change)
+    await build_space_snapshot_for_federation(
+        space,
+        space_repo=stack.space_repo,
+        remote_member_repo=None,
+        user_repo=stack.space_svc._users,
+        own_instance_id=stack.iid,
+        cover_repo=covers,
+    )
+    if change == "replace":
+        assert (covers.webp, covers.hash) == (b"RIFFnew-cover", "c2")
+    else:
+        assert covers.webp is None
+    assert covers.sets == []
+
+
+async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog, monkeypatch):
+    """Undecodable bytes over the cap, or a cap nothing fits under, leave
     the image out (WARNING) — the rest of the snapshot still ships."""
+    monkeypatch.setattr(ss_mod, "SPACE_COVER_MAX_BYTES", 16)
+    monkeypatch.setattr(ss_mod, "SPACE_ICON_MAX_BYTES", 16)
     with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
         snap = await _snapshot_with_images(
             stack,
             b"not a webp" * 10,
             _noise_webp(128, 128),
-            cover_max_bytes=16,
-            icon_max_bytes=16,
         )
     assert "cover_webp_base64" not in snap
     assert "icon_webp_base64" not in snap
@@ -9680,6 +11049,7 @@ async def _remote_seat_space(stack, *, supports=True):
         return True
 
     fed.peer_supports = AsyncMock(side_effect=_supports)
+    fed.space_member_supports = AsyncMock(side_effect=_supports)
     stack.space_svc._federation = fed
     remote = await _wire_remote_members(stack)
     await remote.add(
@@ -9734,6 +11104,23 @@ async def test_an_admin_role_change_carries_no_legacy_payload(stack):
     )
     [changed] = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_ROLE_CHANGED)
     assert changed.kwargs.get("legacy_payload") is None
+
+
+async def test_a_mesh_only_members_household_can_become_a_moderator(stack):
+    """A member household the host is not paired with (reached over the
+    mesh or a directory seat) is judged by the version it claimed as a
+    space member, not by a pairing row it does not have — every member is
+    equal whichever way their household is reached."""
+    space, fed, remote = await _remote_seat_space(stack)
+    fed.peer_supports = AsyncMock(return_value=False)  # no paired row
+    await stack.space_svc.set_remote_member_role(
+        space.id,
+        actor_username="anna",
+        instance_id="peer-x",
+        user_id="ru1",
+        role="moderator",
+    )
+    assert (await remote.get(space.id, "peer-x", "ru1")).role == "moderator"
 
 
 async def test_promoting_a_user_whose_household_is_behind_is_refused(stack):
@@ -10394,7 +11781,6 @@ async def _cert_space(stack, *, version: int = 49):
     """A hosted space with a content epoch, a v_``version`` federation double
     and a REAL :class:`SpaceWriterCertService` over the stack's repos.
     Returns ``(space, fed, remote, peer_pk)``."""
-
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     keys = SqliteSpaceKeyRepo(stack.db)
     await keys.save(SpaceKey(space_id=space.id, epoch=0, content_key_hex="k"))
@@ -10581,7 +11967,6 @@ async def _rekeys(stack, monkeypatch):
 async def test_a_scope_reducing_remote_role_change_rotates(stack, monkeypatch):
     """write → comment: the household's old write cert must die with the
     epoch, so the content key rotates."""
-
     space, _fed, remote, _pks = await _cert_space(stack)
     await stack.db.enqueue(
         "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (space.id,)
@@ -10696,6 +12081,110 @@ async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
     ]
     assert [k["to_instance_id"] for k in sent] == ["peer-a"]
     assert _cert_of(sent[0]["payload"]).scope == "comment"
+
+
+async def test_comment_rights_on_sends_followers_their_credentials_alone(stack):
+    """Owner decision 2026-11-17 — followers are members with a read-only
+    role: turning "followers may comment" on gives each follower household
+    the SAME ``comment`` cert a comment-only member holds, in a snapshot
+    with NO roster entry (it used to be the whole roster to every follower
+    household — ~5.5 MB each at 11 000 seats). It never drops a roster
+    snapshot still queued for that household."""
+    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    fed.send_with_mesh_fallback.reset_mock()
+    fed.drop_queued_with_key_prefix = AsyncMock(return_value=0)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ]
+    assert [k["to_instance_id"] for k in sent] == ["peer-a"]
+    assert sent[0]["payload"]["entries"] == []
+    assert _cert_of(sent[0]["payload"]).scope == "comment"
+    fed.drop_queued_with_key_prefix.assert_not_awaited()
+
+
+async def test_a_gain_and_a_loss_in_one_change_rotate_once(stack, monkeypatch):
+    """One rule for every role: a change that takes a right from one
+    household and gives one to another rotates ONCE — the rekey carries
+    every household its new cert — and sends no separate credentials."""
+    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    # The access-level change consults the space's peer versions.
+    stack.space_svc._federation_repo.list_instances_in_space = AsyncMock(
+        return_value=[]
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(
+            allow_subscriber_comment=True,
+            posts_access=SpaceFeatureAccess.ADMIN_ONLY,
+        ),
+    )
+    assert rekeys == [space.id]
+    assert [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ] == []
+
+
+async def test_comment_rights_off_rotates_only_if_a_household_loses_a_right(
+    stack, monkeypatch
+):
+    """A household with a member seat next to its follower seat keeps its
+    cert when "followers may comment" goes off: nobody's entitlement
+    shrinks, so nothing rotates."""
+    space, _fed, remote, _pks = await _cert_space(stack, version=94)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-a", "u-a2", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == []
+
+
+async def test_the_react_switch_changes_no_cert_and_sends_only_the_config(
+    stack, monkeypatch
+):
+    """The react right has no cert of its own (a ``comment`` cert carries
+    reactions, for members and followers alike): toggling it rotates
+    nothing and sends no credentials — the config event is all."""
+    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    fed.send_with_mesh_fallback.reset_mock()
+    for on in (True, False):
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="hosty",
+            features=SpaceFeatures(allow_subscriber_react=on),
+        )
+    assert rekeys == []
+    assert [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ] == []
 
 
 # ─── v_49: a member household's leave reaches the host ────────────────────
@@ -10984,8 +12473,12 @@ async def _removal_with_member_gfs(stack, member_gfs):
             raise member_gfs
         return 1
 
+    async def _seat(space_id):
+        order.append("own seat")
+
     gfs = AsyncMock()
     gfs.announce_epoch = AsyncMock(side_effect=_announce)
+    gfs.channel_rekey_sent = AsyncMock(side_effect=_seat)
     stack.space_svc.attach_space_crypto_service(space_crypto)
     stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
     stack.space_svc.attach_member_gfs(gfs)
@@ -10999,6 +12492,18 @@ async def _removal_with_member_gfs(stack, member_gfs):
 async def test_a_rotation_sends_the_gfs_epoch_notice_before_rekey_and_reseal(stack):
     space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
     gfs.announce_epoch.assert_awaited_once_with(space.id)
+    # A rotating admin's own channel seat is renewed once its rekey went
+    # out — when the members renew theirs — never right after the notice.
+    gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
+    assert order == ["notice", "rekey", "own seat", "reseal"]
+
+
+async def test_a_failing_own_seat_renewal_never_breaks_the_rotation(stack):
+    space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
+    gfs.channel_rekey_sent = AsyncMock(side_effect=RuntimeError("boom"))
+    order.clear()
+    await stack.space_svc._rotate_and_distribute_space_key(space.id)
+    gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
     assert order == ["notice", "rekey", "reseal"]
 
 
@@ -11006,7 +12511,7 @@ async def test_a_failing_epoch_notice_never_breaks_the_rotation(stack):
     space, bob, order, _gfs = await _removal_with_member_gfs(
         stack, RuntimeError("gfs down")
     )
-    assert order == ["notice", "rekey", "reseal"]
+    assert order == ["notice", "rekey", "own seat", "reseal"]
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
 
 
@@ -11059,7 +12564,7 @@ async def test_opening_posts_does_not_rotate_but_re_issues(stack, monkeypatch):
     rekeys = await _rekeys(stack, monkeypatch)
     snapshots: list[str] = []
 
-    async def _snapshot(self, space_id, *, to_instance_id):
+    async def _snapshot(self, space_id, *, to_instance_id, credentials_only=False):
         snapshots.append(to_instance_id)
 
     monkeypatch.setattr(type(stack.space_svc), "send_roster_snapshot", _snapshot)
@@ -11169,80 +12674,26 @@ async def test_comment_and_post_events_name_the_actor_and_the_author(stack):
     )
 
 
-# ─── v_50: strict mode — the owner setting and the writer group key ──────
+# ─── The writer group key: one anonymous GFS publish mode (v_90) ─────────
+
+_V90 = FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY
 
 
-async def _strict(stack, space_id: str) -> None:
+async def _readable(stack, space_id: str) -> None:
+    """A publicly readable space — every one has a writer key (v_90)."""
     await stack.db.enqueue(
-        "UPDATE spaces SET gfs_publish_mode='strict' WHERE id=?", (space_id,)
+        "UPDATE spaces SET space_type='global', allow_subscribers=1 WHERE id=?",
+        (space_id,),
     )
 
 
-async def test_switching_to_strict_rotates_the_content_key(stack, monkeypatch):
-    space, _fed, _remote, _pks = await _cert_space(stack, version=50)
-    rekeys = await _rekeys(stack, monkeypatch)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(gfs_publish_mode="strict"),
-    )
-    assert (await stack.space_repo.get(space.id)).features.gfs_publish_mode == "strict"
-    assert rekeys == [space.id]
+async def test_space_features_have_no_publish_mode():
+    assert not hasattr(SpaceFeatures(), "gfs_publish_mode")
 
 
-async def test_switching_back_to_trusted_tells_the_gfs_without_rotating(
-    stack, monkeypatch
-):
-    space, _fed, _remote, _pks = await _cert_space(stack, version=50)
-    await _strict(stack, space.id)
-    rekeys = await _rekeys(stack, monkeypatch)
-    member_gfs = SimpleNamespace(
-        announce_epoch=AsyncMock(return_value=1),
-        channel_space=AsyncMock(return_value=False),
-    )
-    stack.space_svc.attach_member_gfs(member_gfs)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(gfs_publish_mode="trusted"),
-    )
-    assert rekeys == []
-    member_gfs.announce_epoch.assert_awaited_once_with(space.id)
-
-
-async def test_switching_back_to_trusted_rotates_a_private_channel_space(
-    stack, monkeypatch
-):
-    """v_51: a private space's channel takes a mode change only with an
-    epoch raise, so the switch back to trusted rotates there too."""
-    space, _fed, _remote, _pks = await _cert_space(stack, version=51)
-    await _strict(stack, space.id)
-    rekeys = await _rekeys(stack, monkeypatch)
-    member_gfs = SimpleNamespace(
-        announce_epoch=AsyncMock(return_value=1),
-        channel_space=AsyncMock(return_value=True),
-    )
-    stack.space_svc.attach_member_gfs(member_gfs)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(gfs_publish_mode="trusted"),
-    )
-    assert rekeys == [space.id]
-
-
-async def test_an_unchanged_mode_does_nothing(stack, monkeypatch):
-    space, _fed, _remote, _pks = await _cert_space(stack, version=50)
-    rekeys = await _rekeys(stack, monkeypatch)
-    await stack.space_svc.update_config(
-        space.id, actor_username="hosty", features=SpaceFeatures(bazaar=False)
-    )
-    assert rekeys == []
-
-
-async def test_strict_roster_snapshot_carries_the_writer_key(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=50)
-    await _strict(stack, space.id)
+async def test_readable_roster_snapshot_carries_the_writer_key(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
+    await _readable(stack, space.id)
     await _seat(remote, space.id, "peer-a", "u-a")
     assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
     payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
@@ -11250,17 +12701,17 @@ async def test_strict_roster_snapshot_carries_the_writer_key(stack):
     assert grant.epoch == _cert_of(payload).epoch == 0
 
 
-async def test_trusted_roster_snapshot_carries_no_writer_key(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=50)
+async def test_an_unreadable_space_roster_snapshot_carries_no_writer_key(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
     await _seat(remote, space.id, "peer-a", "u-a")
     assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
     payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
     assert "writer_cert" in payload and "writer_key" not in payload
 
 
-async def test_strict_rekey_delivers_the_new_writer_key_only_to_publishers(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=50)
-    await _strict(stack, space.id)
+async def test_rekey_delivers_the_new_writer_key_only_to_publishers(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
+    await _readable(stack, space.id)
     await _seat(remote, space.id, "peer-a", "u-a")
     await _seat(remote, space.id, "peer-b", "u-b", role=SpaceRole.SUBSCRIBER.value)
     stack.space_svc._space_crypto = SpaceContentEncryption(
@@ -11278,11 +12729,11 @@ async def test_strict_rekey_delivers_the_new_writer_key_only_to_publishers(stack
     assert "writer_key" not in call.args[2]
 
 
-async def test_strict_rotation_tells_the_gfs_before_the_members(stack):
+async def test_rotation_tells_the_gfs_before_the_members(stack):
     """mint (derived) → GFS notice with the pin → member rekey: the pin is at
     the GFS before any member can sign at the new epoch."""
-    space, fed, _remote, _pks = await _cert_space(stack, version=50)
-    await _strict(stack, space.id)
+    space, fed, _remote, _pks = await _cert_space(stack, version=_V90)
+    await _readable(stack, space.id)
     order: list[str] = []
 
     async def _announce(space_id):
@@ -11303,48 +12754,33 @@ async def test_strict_rotation_tells_the_gfs_before_the_members(stack):
     assert order[:2] == ["gfs", "members"]
 
 
-async def test_a_forwarded_config_edit_cannot_change_the_mode(stack, monkeypatch):
-    """A remote admin's forwarded ``update_config`` runs AS THE OWNER on the
-    host — the mode is pinned there like ``allow_subscribers``; the rest of
-    the edit applies."""
-    space, _fed, _remote, _pks = await _cert_space(stack, version=50)
+async def test_a_forwarded_config_edit_naming_a_mode_changes_nothing_else(
+    stack, monkeypatch
+):
+    """A pre-v_90 admin's forwarded ``update_config`` may still name
+    ``gfs_publish_mode``: it is ignored, the rest applies, nothing rotates."""
+    space, _fed, _remote, _pks = await _cert_space(stack, version=_V90)
     rekeys = await _rekeys(stack, monkeypatch)
     feats = {"gfs_publish_mode": "strict", "bazaar": False}
     await stack.space_svc.apply_approved_admin_action(
         space.id, action="update_config", params={"features": feats}
     )
     got = (await stack.space_repo.get(space.id)).features
-    assert got.gfs_publish_mode == "trusted"
     assert got.bazaar is False
     assert rekeys == []
 
 
-async def test_an_upgrade_to_v50_delivers_the_writer_key(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=50)
-    await _strict(stack, space.id)
+async def test_an_upgrade_to_v90_delivers_the_writer_key(stack):
+    """Re-sent at the upgrade, so the member publishes over the GFS without
+    waiting for the next rotation."""
+    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
+    await _readable(stack, space.id)
     await _seat(remote, space.id, "peer-a", "u-a")
     await stack.space_repo.add_space_instance(space.id, "peer-a")
     await stack.space_svc.on_peer_proto_version_raised(
-        PeerProtoVersionRaised(instance_id="peer-a", old_version=49, new_version=50)
-    )
-    kw = fed.send_with_mesh_fallback.await_args.kwargs
-    assert kw["to_instance_id"] == "peer-a"
-    assert "writer_key" in kw["payload"]
-
-
-async def test_an_upgrade_to_v57_delivers_the_writer_key_in_a_trusted_space(stack):
-    """v_57: a trusted, publicly readable space hands its writers the key
-    too — re-sent at the upgrade, so the member publishes to every listed GFS
-    without waiting for the next rotation."""
-    space, fed, remote, _pks = await _cert_space(stack, version=57)
-    await stack.db.enqueue(
-        "UPDATE spaces SET space_type='global', allow_subscribers=1 WHERE id=?",
-        (space.id,),
-    )
-    await _seat(remote, space.id, "peer-a", "u-a")
-    await stack.space_repo.add_space_instance(space.id, "peer-a")
-    await stack.space_svc.on_peer_proto_version_raised(
-        PeerProtoVersionRaised(instance_id="peer-a", old_version=56, new_version=57)
+        PeerProtoVersionRaised(
+            instance_id="peer-a", old_version=_V90 - 1, new_version=_V90
+        )
     )
     kw = fed.send_with_mesh_fallback.await_args.kwargs
     assert kw["to_instance_id"] == "peer-a"
@@ -11352,10 +12788,11 @@ async def test_an_upgrade_to_v57_delivers_the_writer_key_in_a_trusted_space(stac
 
 
 async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
-    """v_57: a trusted global space that just became publicly readable gets
-    a writer key at once — the owner's epoch notice pins it at its GFSs and
-    the member households' roster snapshots carry it (no rotation needed)."""
-    space, fed, remote, _pks = await _cert_space(stack, version=57)
+    """A global space that just became publicly readable gets a writer key
+    at once — the owner's epoch notice pins it at its GFSs and each member
+    household gets it with its credentials alone, no roster entry (no
+    rotation needed)."""
+    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
     await stack.db.enqueue(
         "UPDATE spaces SET space_type='global', allow_subscribers=0 WHERE id=?",
         (space.id,),
@@ -11381,14 +12818,15 @@ async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
         if c.kwargs.get("to_instance_id") == "peer-a"
     ]
     assert any("writer_key" in kw["payload"] for kw in sent)
+    # Its credentials alone — never the whole roster to every household.
+    assert all(kw["payload"]["entries"] == [] for kw in sent)
 
 
-async def test_a_trusted_space_sends_no_writer_key_below_v57(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=56)
-    await stack.db.enqueue(
-        "UPDATE spaces SET space_type='global', allow_subscribers=1 WHERE id=?",
-        (space.id,),
-    )
+async def test_no_writer_key_below_v90(stack):
+    """BREAKING (v_90): a v_57..v_89 household no longer gets the key, so it
+    publishes nothing over a GFS (its posts take the host path)."""
+    space, fed, remote, _pks = await _cert_space(stack, version=_V90 - 1)
+    await _readable(stack, space.id)
     await _seat(remote, space.id, "peer-a", "u-a")
     assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
     payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
@@ -11761,3 +13199,410 @@ def test_an_older_households_snapshot_leaves_the_games_list_alone():
         we_host=False,
     )
     assert newer.features.allowed_apps == ()
+
+
+async def test_a_space_reaction_event_carries_the_stamp_that_was_stored(stack):
+    """v_93: the stamp other households order the reaction by is the one
+    written with it here — and a free-text "emoji" is refused."""
+    from socialhome.domain.events import PostReactionChanged
+    from socialhome.domain.space_item import stamp_to_db
+
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    seen: list[PostReactionChanged] = []
+
+    async def _on(event: PostReactionChanged) -> None:
+        seen.append(event)
+
+    stack.bus.subscribe(PostReactionChanged, _on)
+    for change in (stack.space_svc.add_reaction, stack.space_svc.remove_reaction):
+        await change(p.id, space_id=s.id, user_id=anna.user_id, emoji="👍")
+        stamps = await stack.space_post_repo.list_reaction_stamps([p.id])
+        assert (
+            stamp_to_db(seen[-1].occurred_at)
+            == (stamps[p.id][f"{anna.user_id}\x00👍"][0])
+        )
+    assert seen[0].occurred_at < seen[1].occurred_at
+    with pytest.raises(ValueError, match="emoji"):
+        await stack.space_svc.add_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji="nice"
+        )
+
+
+@pytest.mark.parametrize("emoji", ["x" * 33, "", "   "])
+async def test_removing_a_reaction_no_household_would_take_is_refused(stack, emoji):
+    """v_93: a removal is held to the length rule every receiver applies —
+    nothing is stamped and nothing is sent for one they would all refuse.
+    An old free-text reaction (≤ 32 characters) can still be removed."""
+    from socialhome.domain.events import PostReactionChanged
+
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    seen: list[PostReactionChanged] = []
+
+    async def _on(event: PostReactionChanged) -> None:
+        seen.append(event)
+
+    stack.bus.subscribe(PostReactionChanged, _on)
+    with pytest.raises(ValueError, match="32"):
+        await stack.space_svc.remove_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji=emoji
+        )
+    assert seen == []
+    assert await stack.space_post_repo.list_reaction_stamps([p.id]) == {}
+    await stack.space_svc.remove_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji="nice"
+    )
+    assert len(seen) == 1
+
+
+# ── The receiver rule for a space's config ───────────────────────────────
+
+
+def _cfg(**over) -> Space:
+    return replace(
+        Space(
+            id="sp-cfg",
+            name="Club",
+            owner_instance_id="h" * 32,
+            owner_username="anna",
+            identity_public_key="ab" * 32,
+            config_sequence=1,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        ),
+        **over,
+    )
+
+
+def test_config_within_limit_takes_a_config_that_fits():
+    space = _cfg(description="d" * 1000)
+    assert _within(space, held=None, source="t") is space
+
+
+def test_config_within_limit_with_nothing_held_drops_the_text(caplog):
+    caplog.set_level(logging.WARNING)
+    space = _cfg(description="d" * _CFG_MAX, about_markdown="a")
+    kept = _within(space, held=None, source="SPACE_CREATED from x")
+    assert (kept.description, kept.about_markdown, kept.name) == (None, None, "Club")
+    assert "its settings apply" in caplog.text
+
+
+def test_config_within_limit_keeps_the_held_text_and_takes_the_settings():
+    held = _cfg(description="h", about_markdown="about")
+    space = replace(
+        held,
+        name="Renamed",
+        description="d" * _CFG_MAX,
+        join_mode=JoinMode.OPEN,
+    )
+    kept = _within(space, held=held, source="t")
+    assert (kept.name, kept.description, kept.about_markdown, kept.join_mode) == (
+        "Renamed",
+        "h",
+        "about",
+        JoinMode.OPEN,
+    )
+
+
+def test_a_config_without_its_texts_always_fits():
+    """Everything but the description and the about text is bounded where
+    it is read, far below the limit — so keeping the held texts always
+    brings a config within it (no "settings alone too large" case)."""
+    meta = {
+        "name": "\x01" * 10_000,
+        "emoji": "🏡" * 10_000,
+        "owner_username": "o" * 10_000,
+        "identity_public_key": "k" * 10_000,
+        "tz": "x" * 10_000,
+        "cover_hash": "c" * 10_000,
+        "icon_hash": "i" * 10_000,
+        "category": "c" * 10_000,
+        "features": {
+            "allowed_post_types": [f"t{n}" * 30 for n in range(10_000)],
+            "allowed_apps": [f"a{n}" for n in range(10_000)],
+        },
+        "retention_exempt_types": ["x" * 100] * 10_000,
+    }
+    space = stub_space_from_metadata("s" * 32, host_instance_id="h" * 32, meta=meta)
+    assert config_item_bytes(space) < 16 * 1024
+
+
+def test_a_config_stamp_never_grows_a_stored_config():
+    """A delegated admin's signed ``config_hlc`` of 300,000 digits (or a
+    sequence past 64 bits) is bounded where the config is parsed — the
+    stored config never carries it, and a later joiner's snapshot of it
+    always fits."""
+    meta = {
+        "name": "S",
+        "identity_public_key": "k" * 64,
+        "config_sequence": 2,
+        "config_hlc": "9" * 300_000,
+        "roster_sequence": 10**30,
+        "owner_username": "o" * 10_000,
+        "tz": "Not/AZone" * 1000,
+        "cover_hash": "c" * 10_000,
+    }
+    space = stub_space_from_metadata("sp", host_instance_id="own", meta=meta)
+    assert space.config_hlc == "0-0"
+    assert space.roster_sequence == 0
+    assert len(space.owner_username) <= 128 and len(space.cover_hash or "") <= 128
+    assert space.tz == "UTC"
+    orjson.dumps(space_metadata_fields(space))  # a 64-bit-safe int
+    for big in (1e23, 2**64, -1, True, "7"):
+        bounded = stub_space_from_metadata(
+            "sp", host_instance_id="own", meta={**meta, "config_sequence": big}
+        )
+        assert 0 <= bounded.config_sequence < 2**63
+        orjson.dumps(space_metadata_fields(bounded))
+
+
+def test_a_config_measures_the_same_whatever_its_counters():
+    """The local save, the receivers and the host measure one number for
+    the same config: the counters are measured at their widest."""
+    small = _cfg(description="d")
+    grown = replace(small, config_sequence=2**62, roster_sequence=2**62)
+    grown = replace(grown, config_hlc=f"{2**62}-{2**62}")
+    assert config_item_bytes(small) == config_item_bytes(grown)
+
+
+def test_no_larger_holds_only_for_a_config_stored_over_the_limit():
+    """Within the limit the rule is strict; the "no larger" exception is
+    only for a config that was stored over the limit before it existed."""
+    held = _cfg(description="d" * (_CFG_MAX - 2000))
+    over = replace(held, description="d" * (_CFG_MAX + 10))
+    assert _within(over, held=held, source="t").description == held.description
+    legacy = _cfg(description="o" * (_CFG_MAX + 5000))
+    same = replace(legacy, name="Clux", config_sequence=99)
+    assert _within(same, held=legacy, source="t") is same
+
+
+async def test_a_share_under_the_rotation_lock_never_mints_a_lost_seed(stack):
+    """``mint=False`` (the rotation's and the echo re-share's callers hold
+    the per-space rotation lock): a seed that went missing is NOT re-minted
+    — re-minting a rotated key runs a rotation, which would wait on that
+    same lock forever."""
+    space, fed = await _relay_admin_space(stack)
+    await stack.space_repo.clear_space_seed(space.id)
+    await stack.space_svc.share_admin_signing_seed(
+        space, instance_id="relay-peer", mint=False
+    )
+    assert _seed_shares(fed) == []
+    assert await stack.space_repo.get_space_seed(space.id) is None
+
+
+async def test_deleting_a_file_post_removes_its_attachment(stack, tmp_dir):
+    """A post's attached file (``file_meta.url``) is one of its files (the
+    registry's ``posts`` fields): deleting the post unlinks it when no
+    other row names it."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    (media_dir / "doc.pdf").write_bytes(b"%PDF")
+    p = await svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.FILE,
+        file_meta=FileMeta(
+            url="api/media/doc.pdf",
+            mime_type="application/pdf",
+            original_name="doc.pdf",
+            size_bytes=4,
+        ),
+    )
+    assert (media_dir / "doc.pdf").exists()
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert not (media_dir / "doc.pdf").exists()
+
+
+async def test_deleting_a_post_never_unlinks_a_reserved_attachment(stack, tmp_dir):
+    """A legacy synced post whose attachment names a DM's (``dm-``) file
+    — never validated — must not take that file with it on delete."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    dm = "dm-0123456789abcdef0123456789abcdef01234567.pdf"
+    (media_dir / dm).write_bytes(b"%PDF")
+    p = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    meta = orjson.dumps(
+        {
+            "url": f"api/media/{dm}",
+            "mime_type": "application/pdf",
+            "original_name": "d.pdf",
+            "size_bytes": 4,
+        }
+    ).decode()
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='file', file_meta_json=? WHERE id=?",
+        (meta, p.id),
+    )
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert (media_dir / dm).exists()
+
+
+async def test_deleting_a_post_removes_its_gfs_reader_copies(stack, tmp_dir):
+    """A post a GFS reader household holds names its pictures by their
+    ``sg-`` reader copies: deleting it frees the copies this space's
+    ``space_media_refs`` map — never one mapped to another space."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    other = await svc.create_space(owner_username="anna", name="O")
+    own = "sg-" + "a1" * 20 + ".webp"
+    foreign = "sg-" + "b2" * 20 + ".webp"
+    for name in (own, foreign):
+        (media_dir / name).write_bytes(b"x")
+    p = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{own}", f"api/media/{foreign}"]).decode(), p.id),
+    )
+    await stack.db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (own, space.id, "c" * 64, p.id),
+    )
+    await stack.db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (foreign, other.id, "d" * 64, "p9"),
+    )
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert not (media_dir / own).exists()
+    assert (media_dir / foreign).exists()
+
+
+async def test_a_freed_gfs_reader_copy_takes_its_descriptor_row_with_it(stack, tmp_dir):
+    """The ``space_media_refs`` row of an ``sg-`` copy a post delete freed
+    goes too (nothing names the file any more); a copy another item still
+    shows keeps both its file and its row."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    freed = "sg-" + "c3" * 20 + ".webp"
+    shared = "sg-" + "d4" * 20 + ".webp"
+    for name in (freed, shared):
+        (media_dir / name).write_bytes(b"x")
+    p1 = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    p2 = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="y"
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{freed}", f"api/media/{shared}"]).decode(), p1.id),
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{shared}"]).decode(), p2.id),
+    )
+    for name, blob in ((freed, "e" * 64), (shared, "f" * 64)):
+        await stack.db.enqueue(
+            "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id,"
+            " suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?,"
+            " 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+            (name, space.id, blob, p1.id),
+        )
+    await svc.delete_post(p1.id, actor_user_id=a.user_id)
+    rows = await stack.db.fetchall("SELECT local_name FROM space_media_refs")
+    assert {r["local_name"] for r in rows} == {shared}
+    assert not (media_dir / freed).exists() and (media_dir / shared).exists()
+
+
+async def test_a_blocked_delegation_is_told_to_the_owner_once_a_day(stack):
+    """SF3: when D1 refuses the seed, the owner is told (a notice event) —
+    once per space per day, however many admins' echoes retry it."""
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+    gfs.authority_key_revocable = AsyncMock(return_value=False)
+    stack.space_svc._gfs = gfs
+    told: list = []
+    stack.bus.subscribe(SpaceDelegationBlocked, told.append)
+    for _ in range(3):
+        assert not await stack.space_svc.share_admin_signing_seed(
+            space, instance_id="relay-peer"
+        )
+    assert [e.space_id for e in told] == [space.id]
+    assert _seed_shares(fed) == []
+
+
+async def test_a_share_built_earlier_is_not_due_after_a_rotation_or_demotion(stack):
+    """The re-check a caller runs right before sending a share it built
+    under the rotation lock (SF4)."""
+    space, _fed = await _relay_admin_space(stack)
+    prepared = await stack.space_svc.prepare_admin_seed_share(
+        space, instance_id="relay-peer"
+    )
+    assert prepared is not None
+    assert await stack.space_svc.admin_seed_share_still_due(
+        prepared, instance_id="relay-peer"
+    )
+    await stack.space_svc._remote_members.set_role(
+        space.id, "relay-peer", "ru1", "member"
+    )
+    assert not await stack.space_svc.admin_seed_share_still_due(
+        prepared, instance_id="relay-peer"
+    )
+    await stack.space_svc._remote_members.set_role(
+        space.id, "relay-peer", "ru1", "admin"
+    )
+    other = generate_identity_keypair()
+    await stack.space_svc._spaces.rotate_authority_key(
+        space.id,
+        public_key_hex=other.public_key.hex(),
+        seed=other.private_key,
+        key_epoch=space.authority_key_epoch + 1,
+    )
+    assert not await stack.space_svc.admin_seed_share_still_due(
+        prepared, instance_id="relay-peer"
+    )

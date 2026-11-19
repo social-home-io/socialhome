@@ -218,6 +218,21 @@ class FederationEventType(str, enum.Enum):
     #: receiver persists the bytes to their local ``media_path``
     #: under the same filename so the existing relative URL resolves.
     SPACE_MEDIA_BLOB = "space_media_blob"
+    #: v_92 — a member household asks ONE provider (the space's host, then a
+    #: trusted admin / moderator household) for files of live items it holds
+    #: but whose bytes never reached it: ``{space_id, files: [{item, name}]}``
+    #: (≤ 50 entries; ``name`` is the ``sc-`` content name). The answer is
+    #: ordinary ``SPACE_MEDIA_BLOB`` pushes (``services/space_media_wanted``).
+    SPACE_MEDIA_WANTED = "space_media_wanted"
+    #: v_93 — a member's reaction on a space post, added or removed, to
+    #: every member household: ``{space_id, post_id, user_id, emoji, action:
+    #: "add" | "remove", at}`` (all inside the encrypted payload). ``at`` is
+    #: the reactor's action time; a receiver applies it only when newer than
+    #: the stamp it holds for that (post, user, emoji)
+    #: (``space_posts.reaction_stamps_json``), so apply is order-independent
+    #: and a late add never brings back a removed reaction. The reactor is
+    #: seated on the sender. See ``docs/protocol/spaces.md``.
+    SPACE_POST_REACTION = "space_post_reaction"
     SPACE_COMMENT_CREATED = "space_comment_created"
     SPACE_COMMENT_UPDATED = "space_comment_updated"
     SPACE_COMMENT_DELETED = "space_comment_deleted"
@@ -401,12 +416,16 @@ class FederationEventType(str, enum.Enum):
     #: ``space_id`` travels in plaintext.
     SPACE_AUTHORITY_ROTATED = "space_authority_rotated"
     SPACE_SESSION_CLEANUP = "space_session_cleanup"
-    #: v_88 — a household reached only through a GFS tells its counterpart
-    #: in ONE space (routing ``space_id``) where its mailbox for that space
-    #: now is: a new signed entry, or ``null`` = "lost, use the
-    #: instance-addressed relay until further notice". Encrypted payload
-    #: ``{"mailbox": entry | null}``.
-    SPACE_MAILBOX_UPDATED = "space_mailbox_updated"
+    #: v_89 — a member household gives the space's host its signed member
+    #: key card (identity + key-wrap keys, its ONE mailbox at the space's
+    #: GFS or none). Routing ``space_id``; encrypted payload ``{"card"}``.
+    SPACE_MEMBER_CARD = "space_member_card"
+    #: v_89 — the host's member directory for one space, to WRITER-seat
+    #: member households only (never followers): ``{"cards": [card…],
+    #: "removed": [instance_id…], "snapshot": bool}`` in the encrypted
+    #: payload; one bounded snapshot to a newcomer, deltas after that.
+    #: Taken from the space's host only.
+    SPACE_MAILBOX_DIRECTORY = "space_mailbox_directory"
 
     # ── Space sync ──
     SPACE_SYNC_BEGIN = "space_sync_begin"
@@ -697,15 +716,20 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: Teardown of the space-scoped relationship itself (§D2b): the
         #: side that drops its row tells the other to drop its own.
         FederationEventType.SPACE_SESSION_CLEANUP,
-        #: v_88 — where this pair's mailbox for the space now is (or that it
-        #: was lost). Affects only the pair's own row.
-        FederationEventType.SPACE_MAILBOX_UPDATED,
+        #: v_89 — a member's card to the host, and the host's member
+        #: directory (taken from the space's host only). Each card is
+        #: self-certifying; neither grants a right.
+        FederationEventType.SPACE_MEMBER_CARD,
+        FederationEventType.SPACE_MAILBOX_DIRECTORY,
         # ── Content ──
         #: The space's own posts, comments and every pillar rendered
         #: inside it. This is what "joined the space" means.
         FederationEventType.SPACE_POST_CREATED,
         FederationEventType.SPACE_POST_UPDATED,
         FederationEventType.SPACE_POST_DELETED,
+        #: v_93 — reactions on the space's posts: every member household
+        #: sees the same counts, whichever way it is reached.
+        FederationEventType.SPACE_POST_REACTION,
         FederationEventType.SPACE_COMMENT_CREATED,
         FederationEventType.SPACE_COMMENT_UPDATED,
         FederationEventType.SPACE_COMMENT_DELETED,
@@ -786,6 +810,10 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: The bytes ``SPACE_POST_CREATED`` / the gallery referenced by
         #: URL. Without them a member renders broken images.
         FederationEventType.SPACE_MEDIA_BLOB,
+        #: v_92 — a link-joined member asks its host (or a trusted helper)
+        #: for files of items it holds, and a link-joined admin / moderator
+        #: may be asked. The provider re-checks membership.
+        FederationEventType.SPACE_MEDIA_WANTED,
         # ── Content-key epochs ──
         #: The per-space AES key handshake and its rotations. Excluded from
         #: this set, a member decrypts nothing after the first rekey.
@@ -797,6 +825,14 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: later authority-signed event. Authorized by the owner household's
         #: own signature on the cert, never by the sender's class.
         FederationEventType.SPACE_AUTHORITY_ROTATED,
+        #: The space signing seed for a delegated admin (v_22). Every space
+        #: admin is equal, whichever way its household is reached (owner
+        #: decision 2026-11-15): an admin seated from an invite link or the
+        #: GFS directory takes it too. Authorized by the handler, never by the
+        #: sender's class: only from the acting host, only into a space whose
+        #: local copy delegates, only by a household holding a live admin
+        #: seat, and only a seed that is the private half of the pinned key.
+        FederationEventType.SPACE_ADMIN_KEY_SHARE,
         # ── Catch-up sync (§25.6) ──
         #: The chunked backfill that populates a fresh seat. The RTC
         #: *signalling* half of sync (``SPACE_SYNC_OFFER`` / ``_ANSWER`` /
@@ -815,14 +851,23 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: (``NODE_PARTITION_*``, ``INSTANCE_SYNC_STATUS``) are about the
         #: whole household and stay out.
         FederationEventType.SPACE_PARTITION_GAP,
-        # ── Routing: NOTHING ──
+        # ── Routing: the host hop only ──
         #: A link-joined household is never a mesh hop (``_mesh_capable_peers``
-        #: excludes it), so none of ``SPACE_FIND_ROUTE`` / ``SPACE_ROUTE_FOUND``
-        #: / ``SPACE_ROUTED`` / ``SPACE_ROUTE_STALE`` has any meaning coming
-        #: from one. ``SPACE_ROUTE_FOUND`` carries ``path`` — every relay
-        #: household's id — so answering a stranger's probe would hand them a
-        #: map of our social graph; a route-stale nack from a peer we never
-        #: route through is noise at best.
+        #: excludes it), so ``SPACE_FIND_ROUTE`` / ``SPACE_ROUTE_FOUND`` /
+        #: ``SPACE_ROUTE_STALE`` have no meaning coming from one
+        #: (``SPACE_ROUTE_FOUND`` carries ``path`` — every relay household's
+        #: id — so answering a stranger's probe would hand them a map of our
+        #: social graph) — nor going to one: a host hop is sealed to the
+        #: target's static key-wrap key, so nothing on it goes stale, and no
+        #: household nacks or forwards a nack to a seat
+        #: (``SpaceRoutedHandler``). ``SPACE_ROUTED`` is let through for ONE
+        #: shape only (v_89, :mod:`socialhome.federation.host_hop`): a three-hop
+        #: ``[member, host, member]`` route of one space, between two member
+        #: households whose cards the host holds — so a member with no
+        #: connection to a GFS still reaches a household that reaches the
+        #: space only through it. Every other shape from this peer class is
+        #: dropped by ``SpaceRoutedHandler``.
+        FederationEventType.SPACE_ROUTED,
         # ── Joining a SECOND space from the same household ──
         #: Once the pair exists, ``request_redeem`` takes the direct-peer
         #: branch, so a second invite token from this household rides the
@@ -837,14 +882,80 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 )
 #: Deliberately **excluded**, for the record: every DM / presence / call /
 #: highlight / moment / user-sync / pairing / public-directory type (none of
-#: it is space federation); ``SPACE_ADMIN_KEY_SHARE`` (handing the space
-#: seed to a household that walked in off a link is never right);
-#: ``SPACE_JOIN_REQUEST*`` (they are already a member);
+#: it is space federation); ``SPACE_JOIN_REQUEST*`` (they are already a member);
 #: ``SPACE_PRIVATE_INVITE*`` and ``SPACE_INVITE*`` (§D1b social invites);
 #: ``SPACE_CREATED`` (the shared space is seated by the redeem ACK — a
 #: ``SPACE_CREATED`` from this peer class would seat an unrelated one);
 #: ``SPACE_SUBSCRIBER_KEY_HANDOFF`` (a GFS relay frame, never a §24.11
 #: envelope); and the four mesh-routing types above.
+
+
+#: v_91 — the members of :data:`SPACE_SESSION_ALLOWED_EVENT_TYPES` that never
+#: ride a multi-recipient mailbox frame (one body sealed once, its key
+#: wrapped to many member households' mailboxes). A multi frame is for an event
+#: whose identical bytes every listed member household may read; these are
+#: addressed to ONE household, carry key material, negotiate a pairwise
+#: stream, or route — a receiver refuses any of them inside a multi frame.
+MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        # ── Single recipient by design ──
+        #: The host's member directory and a member's card: per-household
+        #: (the directory is filtered per recipient, the card goes to the
+        #: host only).
+        FederationEventType.SPACE_MAILBOX_DIRECTORY,
+        FederationEventType.SPACE_MEMBER_CARD,
+        #: Host → the kicked household / → the requesting admin / → the
+        #: reporter; member → host admin commands.
+        FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+        FederationEventType.SPACE_INVITE_LINK_FORWARD_RESULT,
+        FederationEventType.SPACE_REPORT_ANSWERED,
+        FederationEventType.SPACE_REMOTE_ADMIN_KICK,
+        FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
+        #: v_92 — a member's file request goes to ONE provider.
+        FederationEventType.SPACE_MEDIA_WANTED,
+        #: Pairwise teardown of one space session.
+        FederationEventType.SPACE_SESSION_CLEANUP,
+        #: A private seller ↔ asker thread, and an offer to the seller only.
+        FederationEventType.BAZAAR_THREAD_MESSAGE,
+        FederationEventType.BAZAAR_OFFER_MADE,
+        #: Invite-token redeem and its answer: one household, one token.
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY,
+        # ── Key material ──
+        #: The content-key handshake and rekey are sealed to one household;
+        #: a multi frame opens under the very key they deliver.
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_KEY_EXCHANGE_ACK,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        #: The space signing seed: for ONE admin household, never a body
+        #: every listed household can read.
+        FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        # ── Pairwise streams ──
+        #: Catch-up backfill to one newcomer and its acks/flow control, the
+        #: config catch-up answer, and partition repair between two peers.
+        FederationEventType.SPACE_CONFIG_CATCH_UP,
+        FederationEventType.SPACE_SYNC_BEGIN,
+        FederationEventType.SPACE_SYNC_CHUNK,
+        FederationEventType.SPACE_SYNC_CHUNK_ACK,
+        FederationEventType.SPACE_SYNC_RESUME,
+        FederationEventType.SPACE_SYNC_COMPLETE,
+        FederationEventType.SPACE_SYNC_REQUEST_MORE,
+        FederationEventType.SPACE_SYNC_REJECTED,
+        FederationEventType.SPACE_PARTITION_GAP,
+        # ── Not one space's content ──
+        #: Mesh routing (an inner envelope sealed to one target) and the
+        #: per-peer protocol version, which names no space.
+        FederationEventType.SPACE_ROUTED,
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+    }
+)
+
+#: v_91 — the event types a multi-recipient frame may carry (the sender
+#: groups only these; the receiver refuses any other inside one).
+MULTI_EVENT_TYPES: frozenset[FederationEventType] = (
+    SPACE_SESSION_ALLOWED_EVENT_TYPES - MULTI_SEND_EXCLUDED_EVENT_TYPES
+)
 
 
 #: Space-content **writes** — every event type that mutates content inside
@@ -888,6 +999,10 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_POST_CREATED,
         FederationEventType.SPACE_POST_UPDATED,
         FederationEventType.SPACE_POST_DELETED,
+        #: v_93 — a reaction changes a post's shared state. A follower-only
+        #: household's is refused, bar the ``allow_subscriber_react`` opt-in
+        #: (``check_space_writer``); an archived space takes none.
+        FederationEventType.SPACE_POST_REACTION,
         #: The WebP / WebM / file bytes a post or gallery item points at.
         #: A write: it lands rows in the local media store, and shipping
         #: it is how a sender puts content bytes on our disk.
@@ -1068,7 +1183,8 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_AUTHORITY_ROTATED,
         FederationEventType.SPACE_SUBSCRIBER_KEY_HANDOFF,
         FederationEventType.SPACE_SESSION_CLEANUP,
-        FederationEventType.SPACE_MAILBOX_UPDATED,
+        FederationEventType.SPACE_MEMBER_CARD,
+        FederationEventType.SPACE_MAILBOX_DIRECTORY,
         # ── §25.6 catch-up sync. A reader syncs the same way a member
         #    does; what the chunks may CONTAIN is the exporter's call on
         #    the sending side, not this gate's. ──
@@ -1085,6 +1201,11 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_SYNC_REQUEST_MORE,
         FederationEventType.SPACE_SYNC_REJECTED,
         FederationEventType.SPACE_PARTITION_GAP,
+        #: v_92 — a request for the files of items the asker already holds:
+        #: it lands nothing on the provider (the answer is the provider's own
+        #: ``SPACE_MEDIA_BLOB``), and the provider re-checks membership. Only
+        #: member households send it; a follower reads through the GFS.
+        FederationEventType.SPACE_MEDIA_WANTED,
         # ── Directory + moderation ──
         FederationEventType.SPACE_DIRECTORY_SYNC,
         #: A report is *about* content, not content: the whole point is
@@ -1582,6 +1703,12 @@ class DeliveryResult:
     #: Set on the :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` path (the remaining
     #: negative-cooldown window); ``None`` everywhere else.
     retry_after_s: float | None = None
+    #: ``True`` (with ``ok=False`` and :data:`DELIVERY_ERROR_QUEUED`) when
+    #: nothing failed: the outbox ordering gate holds this live send behind
+    #: the seat's pending rows (``FederationService._must_queue_behind``).
+    #: It is in the durable outbox and goes out in order — a caller with its
+    #: own retry (the space picture sync) must not send it again.
+    held_in_order: bool = False
 
 
 def is_relay_only(
@@ -1652,6 +1779,35 @@ def pending_kind(instance: RemoteInstance) -> str | None:
             return PENDING_KIND_APPROVAL
         return PENDING_KIND_REQUEST
     return None
+
+
+def is_space_seat(instance: RemoteInstance | None) -> bool:
+    """Whether *instance* is a live space seat: a confirmed
+    :data:`InstanceSource.SPACE_SESSION` row. Pure, no I/O.
+
+    A seat is NOT a pairing. Two households that share a space hold one
+    for each other so the space's own events flow; it says nothing about
+    the people having chosen each other. Every pairing check asks this
+    (or :func:`is_paired`) instead of reading ``status`` alone — a bare
+    ``status is CONFIRMED`` took a seat for "already paired" and made
+    pairing over a shared space impossible.
+    """
+    return (
+        instance is not None
+        and instance.status is PairingStatus.CONFIRMED
+        and instance.source is InstanceSource.SPACE_SESSION
+    )
+
+
+def is_paired(instance: RemoteInstance | None) -> bool:
+    """Whether *instance* is a confirmed pairing the people approved (QR
+    or trust relay) — a confirmed row that is not a space seat
+    (:func:`is_space_seat`). Pure, no I/O."""
+    return (
+        instance is not None
+        and instance.status is PairingStatus.CONFIRMED
+        and instance.source is not InstanceSource.SPACE_SESSION
+    )
 
 
 @dataclass(slots=True, frozen=True)

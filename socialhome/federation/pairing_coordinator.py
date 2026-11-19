@@ -15,6 +15,22 @@ The flow is three steps:
 
 The coordinator is stateless apart from its dependencies (federation
 repo + key manager + own identity public key).
+
+**Pairing with a household we share a space with.** The row for such a
+household is a space seat (a confirmed ``space_session`` row) whose keys
+carry the space. Our pending half — the scanner's from :meth:`accept`, the
+code owner's from :meth:`handle_peer_accept` — is then kept beside the seat
+instead of written over it
+(:class:`~socialhome.federation.pending_pairing.PendingPairings`, the same
+rule the trust relay follows): the space keeps flowing while the people
+compare the code, a cancelled or expired handshake leaves the seat as it
+was. A seat is replaced only on proof that the other household is in:
+the scanner replaces its seat on the code owner's signed peer-confirm
+(:meth:`handle_peer_confirm`); the code owner, after its admin entered the
+code (:meth:`confirm`), keeps its seat until the scanner's first envelope
+under the code's keys arrives — a household that replaced its seat while
+the other one cancelled, restarted or never got the peer-confirm would
+have lost the space between the two.
 """
 
 from __future__ import annotations
@@ -42,6 +58,7 @@ from ..domain.events import (
 from ..domain.federation import (
     PAIRING_REACH_GFS,
     PAIRING_REACH_URL,
+    PENDING_KIND_CODE,
     FederationEventType,
     GfsNotConnectedError,
     GfsNotSharedError,
@@ -49,6 +66,7 @@ from ..domain.federation import (
     PairingSession,
     PairingStatus,
     RemoteInstance,
+    pending_kind,
 )
 from ..domain.federation_capabilities import OURS
 from ..infrastructure.event_bus import EventBus
@@ -64,6 +82,7 @@ from .pairing_gfs_reach import (
     verified_peer_keywrap,
 )
 from .peer_pairing_client import PeerPairingResult, _canonical_body_bytes
+from .pending_pairing import PendingPairings
 from .transport import https_failure_is_relayable
 
 if TYPE_CHECKING:
@@ -74,6 +93,12 @@ log = logging.getLogger(__name__)
 
 #: Pairing QR token lifetime (seconds).
 PAIRING_TTL_SECONDS = 300
+
+#: How long the code owner, whose admin entered the code over a space
+#: seat, waits for the scanner's first envelope under the code's keys
+#: before its half is forgotten (the scanner sends one as soon as it
+#: confirms; its outbox retries for hours when we are unreachable).
+PEER_HELLO_WAIT_SECONDS = 24 * 3600
 
 #: Length of the SAS verification code (digits).
 SAS_DIGITS = 6
@@ -105,6 +130,20 @@ def _home_fields(local: dict | None, *, share_home: bool) -> dict:
     }
 
 
+def _stated_version(proto_version: object) -> int | None:
+    """The protocol version a peer stated in its code / signed accept, as
+    far as we may rely on it: a newer peer states a version we can't know
+    the meaning of, so everything up to our own. ``None`` for anything
+    that is not a version."""
+    if (
+        isinstance(proto_version, int)
+        and not isinstance(proto_version, bool)
+        and proto_version >= 1
+    ):
+        return min(proto_version, OURS)
+    return None
+
+
 def _require_fields(data: dict, *fields: str) -> None:
     """Raise ``ValueError`` if any of ``fields`` are missing from ``data``."""
     missing = [f for f in fields if f not in data]
@@ -123,6 +162,7 @@ class PairingCoordinator:
         "_own_pq_pk",
         "_own_sig_suite",
         "_peer_pairing_client",
+        "_pending",
         "_repo",
     )
 
@@ -134,8 +174,11 @@ class PairingCoordinator:
         own_pq_pk: bytes | None = None,
         own_sig_suite: str = DEFAULT_SUITE,
         bus: EventBus | None = None,
+        pending_pairings: PendingPairings | None = None,
     ) -> None:
         self._repo = federation_repo
+        #: Where our pending half lives: the row, or beside a space seat.
+        self._pending = pending_pairings or PendingPairings(federation_repo)
         self._key_manager = key_manager
         self._own_identity_pk = own_identity_pk
         self._own_pq_pk = own_pq_pk
@@ -471,7 +514,6 @@ class PairingCoordinator:
         peer_pq_alg = qr_payload.get("pq_algorithm")
         negotiated = negotiate(self._own_sig_suite, peer_suite)
 
-        existing = await self._repo.get_instance(peer_instance_id)
         # Persist a provisional RemoteInstance. Mirror the QR's
         # optional ``home_lat`` / ``home_lon`` onto the row at 4dp
         # precision (same rule the schema enforces). The peer-confirm
@@ -506,18 +548,16 @@ class PairingCoordinator:
                 else None
             ),
         )
-        await self._repo.save_instance(remote_inst)
-        await self._apply_share_home(existing, peer_instance_id, share_home)
-        if gfs_reach:
-            # Before anything is sent: the relayed confirm and every
-            # relayed envelope from A must find the opt-in already set.
-            await self._seat_relay(
-                peer_instance_id,
-                gfs_connection_id=shared_conn_id,
-                proto_version=qr_payload.get("proto_version"),
-            )
-        else:
-            await self._clear_stale_relay(peer_instance_id)
+        # Before anything is sent: the relayed confirm and every relayed
+        # envelope from A must find the opt-in already set.
+        await self._save_pending(
+            remote_inst,
+            token=token,
+            relay=gfs_reach,
+            gfs_connection_id=shared_conn_id,
+            proto_version=qr_payload.get("proto_version"),
+            clear_stale_relay=not gfs_reach,
+        )
 
         # Tell A we accepted. A has a PairingSession but no RemoteInstance
         # yet — delivering our identity + dh keys in this plaintext
@@ -574,6 +614,111 @@ class PairingCoordinator:
             "own_dh_pk": own_dh_kp.public_key.hex(),
         }
 
+    async def _confirm_over_seat(
+        self, session: PairingSession, half: RemoteInstance
+    ) -> RemoteInstance:
+        """Our admin entered the code for a household we hold a space seat
+        for. The code is used up and the scanner is told (the same signed
+        peer-confirm) — but OUR seat stays until the scanner's first
+        envelope under the code's keys proves it confirmed too
+        (``make_confirm_relay_approval``): the half now waits as an
+        approval. Returns it (still pending).
+
+        A scanner that answers the peer-confirm with a refusal is no
+        longer waiting (it cancelled, restarted, or the code expired
+        there): our half is dropped, the seat is untouched, and the admin
+        is told to start again. No answer at all (the GFS relay never
+        gives one; an unreachable inbox) leaves the half waiting."""
+        token = session.token
+        route = self._pending.staged_route(half.id)
+        waiting = await self._pending.await_peer(
+            half.id,
+            inbox_id=session.own_local_inbox_id,
+            token=token,
+            ttl_s=PEER_HELLO_WAIT_SECONDS,
+        )
+        if waiting is None:
+            raise ValueError("No pending pairing for this token")
+        await self._repo.delete_pairing(token)
+        if self._peer_pairing_client is not None:
+            result = await self._deliver(
+                FederationEventType.PAIRING_PEER_CONFIRM,
+                {
+                    "token": token,
+                    "instance_id": derive_instance_id(self._own_identity_pk),
+                },
+                peer_inbox_url=half.remote_inbox_url,
+                peer_instance_id=half.id,
+                peer_keywrap_pk=half.remote_keywrap_pk if half.gfs_relay else None,
+                gfs_connection_id=route,
+            )
+            if (
+                not result.ok
+                and result.status_code is not None
+                and 400 <= result.status_code < 500
+            ):
+                await self._pending.cancel(half.id, token=token)
+                raise ValueError(
+                    "The other household is no longer waiting for this "
+                    "pairing — start again with a new code."
+                )
+            if not result.ok:
+                log.warning(
+                    "peer-confirm delivery failed (status=%s, err=%s) — our "
+                    "seat stays until the other household answers",
+                    result.status_code,
+                    result.error,
+                )
+        log.info("Pairing code entered for %s — waiting for it to confirm", half.id)
+        return waiting
+
+    async def probe_routes(self, instance: RemoteInstance) -> None:
+        """A GFS-reach pair just confirmed: hand it to route discovery."""
+        if instance.gfs_relay and self._gfs_reach is not None:
+            await self._gfs_reach.probe(instance.id)
+
+    async def _save_pending(
+        self,
+        pending: RemoteInstance,
+        *,
+        token: str,
+        relay: bool,
+        gfs_connection_id: str | None,
+        proto_version: object,
+        clear_stale_relay: bool,
+    ) -> None:
+        """Store our pending half of the handshake and its per-pair
+        choices: ``share_home`` (on *pending*), and for a GFS-reach pairing
+        (*relay*) the relay opt-in, the bootstrap route
+        (*gfs_connection_id*) and the version the peer stated.
+
+        Normally that is the row plus the targeted setters (a re-pair over
+        an existing row must set them explicitly — ``save_instance`` never
+        overwrites a local opt-in). Over a space seat nothing is written:
+        the half waits beside the seat carrying all of it, the route is
+        seeded when the pair confirms, and the seat's own opt-ins and
+        routes stay the seat's.
+        """
+        existing = await self._repo.get_instance(pending.id)
+        stated = _stated_version(proto_version) if relay else None
+        staged = await self._pending.save(
+            replace(pending, proto_version=stated) if stated else pending,
+            ttl_s=PAIRING_TTL_SECONDS,
+            gfs_route=gfs_connection_id if relay else None,
+            token=token,
+        )
+        if staged:
+            return
+        await self._apply_share_home(existing, pending.id, pending.share_home)
+        if relay:
+            await self._seat_relay(
+                pending.id,
+                gfs_connection_id=gfs_connection_id,
+                proto_version=proto_version,
+            )
+        elif clear_stale_relay:
+            await self._clear_stale_relay(pending.id)
+
     async def _apply_share_home(
         self,
         existing: RemoteInstance | None,
@@ -614,16 +759,9 @@ class PairingCoordinator:
                 gfs_connection_id,
                 now=datetime.now(UTC).isoformat(),
             )
-        if (
-            isinstance(proto_version, int)
-            and not isinstance(proto_version, bool)
-            and proto_version >= 1
-        ):
-            # A newer peer states a version we can't know the meaning
-            # of; what we may rely on is everything up to our own.
-            await self._repo.set_proto_version(
-                peer_instance_id, min(proto_version, OURS)
-            )
+        stated = _stated_version(proto_version)
+        if stated is not None:
+            await self._repo.set_proto_version(peer_instance_id, stated)
 
     async def _clear_stale_relay(self, peer_instance_id: str) -> None:
         """A classic ``url`` pairing means no GFS: switch off a relay opt-in
@@ -807,7 +945,9 @@ class PairingCoordinator:
             peer_instance_id = derive_instance_id(
                 bytes.fromhex(peer_identity_pk_hex),
             )
-            existing = await self._repo.get_instance(peer_instance_id)
+            # Our half of this pairing (pending or confirmed) — a space
+            # seat for the household is not one.
+            existing = await self._pending.get(peer_instance_id)
             if existing is not None:
                 return {
                     "ok": True,
@@ -886,7 +1026,6 @@ class PairingCoordinator:
         negotiated = negotiate(self._own_sig_suite, peer_suite)
 
         now = datetime.now(UTC)
-        existing = await self._repo.get_instance(peer_instance_id)
         remote_inst = RemoteInstance(
             id=peer_instance_id,
             display_name=str(body.get("display_name") or peer_instance_id[:8]),
@@ -916,25 +1055,23 @@ class PairingCoordinator:
                 else None
             ),
         )
-        await self._repo.save_instance(remote_inst)
-        await self._apply_share_home(existing, peer_instance_id, session.share_home)
-        if peer_keywrap_pk is not None:
-            # Before the SAS reaches our admin: the relayed confirm path
-            # and B's first relayed envelopes need the opt-in in place.
-            # Seed the bootstrap route only when B provably reads that
-            # server: the accept came through it, or B has no address (the
-            # scanner refuses a code it cannot answer through the GFS).
-            # A URL scanner may not be on G at all — a route there would
-            # turn every fallback into a silent 202 and tell G B's id;
-            # route discovery finds the shared servers instead.
-            b_on_gfs = relayed_via is not None or not peer_inbox_url
-            await self._seat_relay(
-                peer_instance_id,
-                gfs_connection_id=session.relay_via if b_on_gfs else None,
-                proto_version=body.get("proto_version"),
-            )
-        elif session.relay_via is None:
-            await self._clear_stale_relay(peer_instance_id)
+        # Before the SAS reaches our admin: the relayed confirm path and
+        # B's first relayed envelopes need the opt-in in place. Seed the
+        # bootstrap route only when B provably reads that server: the
+        # accept came through it, or B has no address (the scanner refuses
+        # a code it cannot answer through the GFS). A URL scanner may not
+        # be on G at all — a route there would turn every fallback into a
+        # silent 202 and tell G B's id; route discovery finds the shared
+        # servers instead.
+        b_on_gfs = relayed_via is not None or not peer_inbox_url
+        await self._save_pending(
+            remote_inst,
+            token=token,
+            relay=peer_keywrap_pk is not None,
+            gfs_connection_id=session.relay_via if b_on_gfs else None,
+            proto_version=body.get("proto_version"),
+            clear_stale_relay=session.relay_via is None,
+        )
 
         # Update the PairingSession with peer data + SAS so ``confirm``
         # (called later when the admin enters the SAS) can proceed.
@@ -1036,7 +1173,9 @@ class PairingCoordinator:
                 "peer-confirm instance_id does not match stored identity_pk",
             )
 
-        instance = await self._repo.get_instance(claimed_instance_id)
+        # Our half of the pairing — the row, or the half kept beside a
+        # space seat; never the seat itself.
+        instance = await self._pending.get(claimed_instance_id)
         if instance is None:
             raise ValueError(
                 f"RemoteInstance not found for instance_id={claimed_instance_id!r}",
@@ -1069,11 +1208,21 @@ class PairingCoordinator:
             # don't re-write the row. Safe replay.
             return {"ok": True, "instance_id": claimed_instance_id, "replay": True}
 
-        # One transaction: consume the session and flip the row, only while
-        # it is still pending. A cancel that committed first leaves neither
-        # — the confirm is refused and nothing is resurrected.
+        if (
+            pending_kind(instance) != PENDING_KIND_CODE
+            or instance.local_inbox_id != session.own_local_inbox_id
+        ):
+            # Our half for this household is not this code's: another
+            # handshake took its place (a trust-relay request or approval,
+            # a newer code). The token never vouched for THOSE keys.
+            raise ValueError("No pending pairing for this token")
+
+        # One transaction: consume the session and flip the row (or
+        # replace the space seat our half waited beside), only while it is
+        # still pending. A cancel that committed first leaves neither — the
+        # confirm is refused and nothing is resurrected.
         confirmed = replace(instance, status=PairingStatus.CONFIRMED)
-        if not await self._repo.promote_pending_instance(confirmed, token=token):
+        if not await self._pending.promote(confirmed, token=token):
             raise ValueError("No pending pairing for this token")
 
         if self._bus is not None:
@@ -1113,19 +1262,31 @@ class PairingCoordinator:
             bytes.fromhex(session.peer_identity_pk),
         )
 
-        instance = await self._repo.get_instance(peer_instance_id)
+        instance = await self._pending.get(peer_instance_id)
         if instance is None:
             raise ValueError(
                 f"RemoteInstance not found for peer_instance_id={peer_instance_id!r}"
             )
 
+        if (
+            pending_kind(instance) != PENDING_KIND_CODE
+            or instance.local_inbox_id != session.own_local_inbox_id
+        ):
+            # The code the admin compared covers the half the code made —
+            # never a trust-relay request or approval, or a newer code's
+            # half, that replaced it meanwhile (other keys, another address).
+            raise ValueError("No pending pairing for this token")
+        if self._pending.staged(peer_instance_id) is not None:
+            return await self._confirm_over_seat(session, instance)
+
         # Flip the row and consume the session in ONE transaction, only
         # while the row is still pending: a cancel that committed first
         # leaves neither, and this confirm is refused rather than writing
         # the row back. Every stored field is kept (``replace``), including
-        # the coords carried via the peer-accept body.
+        # the coords carried via the peer-accept body. A half kept beside
+        # a space seat replaces the seat the same way.
         confirmed = replace(instance, status=PairingStatus.CONFIRMED)
-        if not await self._repo.promote_pending_instance(confirmed, token=token):
+        if not await self._pending.promote(confirmed, token=token):
             raise ValueError("No pending pairing for this token")
 
         # Tell B we confirmed. Signature is verifiable by B using the

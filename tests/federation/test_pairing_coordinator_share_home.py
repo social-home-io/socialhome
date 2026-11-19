@@ -33,6 +33,7 @@ from socialhome.domain.federation import (
 from socialhome.federation.pairing_coordinator import PairingCoordinator
 from socialhome.federation.peer_pairing_client import sign_peer_body
 from socialhome.infrastructure.key_manager import KeyManager
+from tests.pairing_fakes import SavesPendingMixin
 
 _HOME = {
     "instance_id": "self",
@@ -42,7 +43,7 @@ _HOME = {
 }
 
 
-class _FakeRepo:
+class _FakeRepo(SavesPendingMixin):
     def __init__(self, local_identity: dict | None = None) -> None:
         self.instances: dict = {}
         self.pairings: dict = {}
@@ -79,6 +80,21 @@ class _FakeRepo:
 
     async def get_local_identity(self):
         return self._local_identity
+
+    async def promote_pending_instance(self, inst, *, token=None):
+        row = self.instances.get(inst.id)
+        if row is None or row.status is PairingStatus.CONFIRMED:
+            return False
+        self.pairings.pop(token, None)
+        self.instances[inst.id] = inst
+        return True
+
+    async def upgrade_seat_instance(self, inst, *, token=None):
+        """Mirrors the SQLite repo: the pairing's own opt-ins replace the
+        seat's."""
+        self.pairings.pop(token, None)
+        self.instances[inst.id] = inst
+        return True
 
 
 class _RecordingClient:
@@ -208,9 +224,8 @@ async def test_a_share_home_key_planted_in_the_code_is_ignored():
 
 
 async def test_scanning_over_an_existing_row_applies_the_choice():
-    """A household met through an invite link already has a row
-    (``share_home`` off); pairing for real applies the admin's choice
-    although the upsert keeps local opt-ins."""
+    """A re-scan over a pending row of ours (``share_home`` off) applies
+    the admin's new choice although the upsert keeps local opt-ins."""
     repo = _FakeRepo(_HOME)
     coord, _ = _coordinator(repo)
     qr = _qr("tok-existing")
@@ -223,13 +238,53 @@ async def test_scanning_over_an_existing_row_applies_the_choice():
         key_remote_to_self="",
         remote_inbox_url="",
         local_inbox_id="x",
-        status=PairingStatus.CONFIRMED,
-        source=InstanceSource.SPACE_SESSION,
+        status=PairingStatus.PENDING_RECEIVED,
         share_home=False,
     )
     await coord.accept(qr, "https://beta.example/inbox", share_home=True)
     assert repo.instances[iid].share_home is True
     assert repo.share_home_writes == [(iid, True)]
+
+
+async def test_scanning_over_a_space_seat_applies_the_choice_only_on_confirm():
+    """A household we share a space with has a seat row (``share_home``
+    off). The scan must not touch it — the people have not paired yet —
+    and the confirmed pairing then carries the admin's choice."""
+    repo = _FakeRepo(_HOME)
+    coord, _ = _coordinator(repo)
+    qr = _qr("tok-seat")
+    iid = qr["instance_id"]
+    seat = repo.instances[iid] = RemoteInstance(
+        id=iid,
+        display_name="",
+        remote_identity_pk=qr["identity_pk"],
+        key_self_to_remote="seat-out",
+        key_remote_to_self="seat-in",
+        remote_inbox_url="",
+        local_inbox_id="x",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+        share_home=False,
+    )
+
+    accepted = await coord.accept(qr, "https://beta.example/inbox", share_home=True)
+
+    assert repo.instances[iid] is seat
+    assert repo.share_home_writes == []
+
+    waiting = await coord.confirm("tok-seat", accepted["verification_code"])
+
+    # The code is verified here; the seat stays until the other household
+    # is provably in (its first envelope under the code's keys).
+    assert waiting.status is PairingStatus.PENDING_SENT
+    assert repo.instances[iid] is seat and repo.share_home_writes == []
+
+    assert await coord._pending.promote(
+        replace(waiting, status=PairingStatus.CONFIRMED)
+    )
+    row = repo.instances[iid]
+    assert row.source is InstanceSource.MANUAL and row.share_home is True
+    assert row.local_inbox_id == accepted["local_inbox_id"]
 
 
 # ── The initiator's row (peer-accept received) ────────────────────────

@@ -14,6 +14,27 @@ harmless.
 On the ``__complete__`` sentinel the receiver publishes
 :class:`SpaceSyncComplete` so admin UI + realtime layers see the
 catch-up finished.
+
+This module keeps the chunk path (verify, decrypt, admit, dispatch) and
+the per-record authorship dispatch. The per-resource persist and
+authorship rules live in one mixin per resource family, composed into
+:class:`SpaceSyncReceiver`:
+
+* :mod:`.receive_members` — ``members``, ``member_pictures``, ``bans``
+* :mod:`.receive_posts` — ``posts``, ``comments``, ``polls`` + tombstones
+* :mod:`.receive_tasks` — ``task_lists``, ``tasks``, ``tasks_archived``
+* :mod:`.receive_pages` — ``pages`` (v_48 versions), ``pages_deleted``
+* :mod:`.receive_stickies` — ``stickies`` + tombstones
+* :mod:`.receive_calendar` — ``calendar``, RSVPs, ``schedules``
+* :mod:`.receive_gallery` — ``gallery`` albums / items + tombstones
+* :mod:`.receive_bazaar` — ``bazaar`` listings (FAQ, bids)
+* :mod:`.receive_zones` — ``space_zones`` + tombstones
+* :mod:`.receive_timetables` — ``timetables`` + tombstones
+
+:mod:`.receiver_base` holds the slots they read and the cross-resource
+helpers (who is the host, the live authorship rules, v_80 media names);
+:mod:`.stream_health` the per-stream bookkeeping (:class:`HeldBack`,
+:class:`StreamHealth`).
 """
 
 from __future__ import annotations
@@ -22,106 +43,18 @@ import logging
 import pathlib
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
-from datetime import UTC, datetime
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
 import orjson as _orjson
 
 from ....crypto import derive_instance_id
-from ....domain.bazaar_faq import (
-    BAZAAR_FAQ_MAX_ENTRIES_EVER,
-    BazaarFaqEntry,
-    entry_from_wire,
-)
-from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
-from ....domain.events import (
-    CalendarEventDeleted,
-    CommentDeleted,
-    GalleryAlbumDeleted,
-    GalleryItemDeleted,
-    PageDeleted,
-    PostDeleted,
-    RemoteSpaceMemberBanned,
-    SpaceCommentSynced,
-    SpaceMemberProfileUpdated,
-    SpacePostSynced,
-    SpaceSyncComplete,
-    TaskDeleted,
-    TaskListDeleted,
-    TimetableSaved,
-)
-from ....domain.federation import FederationEvent, FederationEventType
-from ....domain.federation_capabilities import FederationCapability
-from ....domain.file_hashes import parse_file_hashes
-from ....domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
-from ....domain.media_constraints import CAPTION_MAX
-from ....domain.page import Page
-from ....domain.post import (
-    BAZAAR_MAX_IMAGES,
-    FEED_POST_MAX_IMAGES,
-    MAX_DISTINCT_REACTIONS_PER_POST,
-    BazaarListing,
-    BazaarMode,
-    BazaarStatus,
-    Comment,
-    CommentType,
-    FileMeta,
-    Post,
-    PostType,
-)
-from ....domain.space import (
-    ContentAction,
-    SpaceMember,
-    SpaceRole,
-    SpaceZone,
-    parse_have_seq,
-    validate_zone_color,
-    validate_zone_coord,
-    validate_zone_icon,
-    validate_zone_name,
-    validate_zone_radius,
-)
-from ....domain.space_media_ref import (
-    MEDIA_REFS_FIELD,
-    SpaceMediaLocalization,
-    page_media_urls,
-    post_media_urls,
-)
-from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
-from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
-from ....domain.timetable import (
-    Timetable,
-    drop_invalid_icons,
-    from_wire_dict,
-    remote_version_refusal,
-    validate,
-)
+from ....domain.events import SpaceSyncComplete
+from ....domain.federation import FederationEvent
+from ....domain.space import ContentAction, parse_have_seq
 from ....infrastructure.event_bus import EventBus
-from ....media.cleanup import unlink_unreferenced
-from ....media.profile_picture import (
-    PROFILE_PICTURE_MAX_DIMENSION,
-    reencode_peer_picture,
-)
-from ....services.inbound_media_store import (
-    local_media_ref,
-    space_media_ref,
-    space_media_refs,
-    verbatim_local_media_ref,
-)
-from ....services.link_preview_service import (
-    space_wire_link_preview,
-)
-from ....services.page_conflict_service import PageMode, canonical_from_wire
-from ....services.space_media_names import SpaceMediaNamer, comment_media_ref
-from ....services.space_service import (
-    apply_inviter_reproof,
-    apply_owner_statement_from_metadata,
-)
+from ....services.space_media_names import SpaceMediaNamer
+from ....services.space_service import apply_inviter_reproof
 from ....services.space_writer_households import holds_member_seat
-from ....utils.timezones import coerce_tz
-from ...host_equivalence import touches_owner_household
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -134,9 +67,6 @@ from ...owner_bound_id import (
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
-    OwnerBinding,
-    check_owner_bound_id,
-    is_owner_bound,
     owner_bound_id_refused,
 )
 from ...space_scope import archive_refusal
@@ -147,6 +77,18 @@ from .exporter import (
     SENTINEL_RESOURCE,
     parse_chunk,
 )
+from .receive_bazaar import BazaarMixin
+from .receive_calendar import CalendarMixin
+from .receive_gallery import GalleryMixin
+from .receive_members import MembersMixin
+from .receive_pages import PagesMixin
+from .receive_posts import PostsMixin
+from .receive_stickies import StickiesMixin
+from .receive_tasks import TasksMixin
+from .receive_timetables import TimetablesMixin
+from .receive_zones import ZonesMixin
+from .receiver_base import ReceiverBase, _GfsMediaSink, _sync_event
+from .stream_health import HeldBack, HeldBackStreaks, StreamHealth
 
 if TYPE_CHECKING:
     from ....federation.space_authorship import SpaceAuthorship
@@ -178,287 +120,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-#: Streams whose health is tracked at once (bounded: a stream whose
-#: sentinel never comes is evicted oldest-first).
-MAX_TRACKED_STREAMS: int = 256
-
-
-class HeldBack:
-    """Records of one sync chunk refused only **for now** — they would land
-    on a later stream, so the chunk does not count as applied and the
-    stream is reported unclean (:class:`StreamHealth`); the provider keeps
-    its watermark and the next periodic session streams them again,
-    instead of the daily full pass.
-
-    Only a refusal that a later stream can turn into a write counts: a
-    record naming a user this space has no record of at all yet (the
-    roster gossip seating them trails the stream — the same race the live
-    path holds a write for), a tombstone / item whose parent is not held
-    here at all yet. (A persist that failed where the caller logs rather
-    than raises — the gallery album / item writes — is :meth:`fail`: an
-    unclean chunk, never a hold.) A refusal by rule (held already, deleted here, a user
-    known but not seated on the provider, another space's id) would be
-    refused again and is not counted — it must not keep every stream
-    unclean."""
-
-    __slots__ = ("count", "failed")
-
-    def __init__(self) -> None:
-        self.count = 0
-        #: A persist failed (logged by its caller rather than raised): the
-        #: chunk is unclean outright, never a forgivable hold.
-        self.failed = False
-
-    def add(self, n: int = 1) -> None:
-        self.count += n
-
-    def fail(self) -> None:
-        self.failed = True
-
-
-#: Consecutive streams from one provider for one space that may be unclean
-#: ONLY because records were held back (:class:`HeldBack`). The next one is
-#: reported clean: a record that never lands (a parent this household will
-#: never hold, an author it will never learn) must not keep every periodic
-#: session unclean — the provider would never confirm, and past the daily
-#: full-pass interval every 30-minute session would be a full stream.
-HELD_BACK_LIMIT: int = 3
-
-#: The same bound for a row that fails to persist on every stream (a gallery
-#: row the database refuses for good): higher, since a failure may be a
-#: passing lock — but a permanently broken row must not force a full
-#: re-stream on every session forever either. Logged at WARNING.
-PERSIST_FAILURE_LIMIT: int = 10
-
-
-class StreamVerdict(StrEnum):
-    """How a §25.6 stream ended here."""
-
-    CLEAN = "clean"
-    #: Every chunk arrived and was stored, but records were held back for
-    #: a retry (:class:`HeldBack`) — unclean, bounded by
-    #: :data:`HELD_BACK_LIMIT`.
-    HELD_BACK = "held_back"
-    #: Every chunk arrived, but a row failed to persist where its caller
-    #: logs rather than raises (a gallery album / item write) — unclean,
-    #: bounded by :data:`PERSIST_FAILURE_LIMIT`.
-    PERSIST_FAILED = "persist_failed"
-    UNCLEAN = "unclean"
-
-
-class _Stream:
-    """One stream's tally (module-local)."""
-
-    __slots__ = (
-        "archived",
-        "failed",
-        "held",
-        "indices",
-        "opaque",
-        "pending",
-        "persist_failed",
-        "plain",
-    )
-
-    def __init__(self) -> None:
-        #: Chunks stored that carry no index (an older provider).
-        self.plain = 0
-        #: Chunks of a resource we do not know and could not even open (a
-        #: newer provider's): dropped by rule, counted with no index.
-        self.opaque = 0
-        #: Distinct ``chunk_index`` values of the chunks stored (v_56): a
-        #: chunk delivered twice counts once, so a duplicate cannot stand
-        #: in for a chunk that was lost.
-        self.indices: set[int] = set()
-        self.failed = False
-        self.held = False
-        self.persist_failed = False
-        self.pending = 0
-        #: The space's archive flag when the stream's first chunk landed —
-        #: ``None`` until then (see :meth:`StreamHealth.archive_changed`).
-        self.archived: bool | None = None
-
-
-class StreamHealth:
-    """Whether every chunk of a §25.6 stream was applied here.
-
-    The requester tells the provider with ``SPACE_SYNC_COMPLETE {clean}``;
-    only a clean stream advances the provider's incremental-sync watermark.
-    A stream is clean when its sentinel names how many chunks the provider
-    sent (``chunk_count``), exactly that many distinct chunks were
-    **stored** here — counted once a chunk's records are persisted, never on
-    arrival, and by their signed ``chunk_index`` (v_56) so a duplicate
-    cannot mask a lost chunk —, none failed to decrypt / parse / persist or
-    held a record back for a retry, and none is still waiting for its epoch
-    key. Anything else — a chunk lost on the way, a persist that raised or
-    is still running, a tampered chunk, a record refused only for now, an
-    older provider that sends no count — is unclean, so the next periodic
-    session re-streams it rather than the provider skipping rows this
-    household never stored.
-
-    Counting on arrival made the verdict depend on chunks being persisted
-    one after another: relayed chunks are separate inbound events, so the
-    sentinel can be handled while an earlier chunk still persists — and
-    that persist may yet fail.
-    """
-
-    __slots__ = ("_finished", "_streams")
-
-    def __init__(self) -> None:
-        self._streams: OrderedDict[str, _Stream] = OrderedDict()
-        #: Streams whose verdict was given: a chunk finishing after its
-        #: sentinel changes nothing, and must not open a new entry.
-        self._finished: OrderedDict[str, None] = OrderedDict()
-
-    def _entry(self, sync_id: str) -> _Stream | None:
-        if sync_id in self._finished:
-            return None
-        entry = self._streams.get(sync_id)
-        if entry is None:
-            entry = self._streams[sync_id] = _Stream()
-            while len(self._streams) > MAX_TRACKED_STREAMS:
-                self._streams.popitem(last=False)
-        return entry
-
-    def begun(self, sync_id: str) -> bool:
-        """Has the stream been seen (or finished) already?"""
-        return sync_id in self._streams or sync_id in self._finished
-
-    def begin(self, sync_id: str, *, archived: bool) -> None:
-        """Note the space's archive flag as the stream's first chunk lands."""
-        entry = self._entry(sync_id)
-        if entry is not None and entry.archived is None:
-            entry.archived = archived
-
-    def archive_changed(self, sync_id: str, *, archived: bool) -> bool:
-        """Did the space's archive flag change while the stream ran? Read
-        at the sentinel, before :meth:`finish`. A stream that saw no chunk
-        recorded nothing it could have refused."""
-        entry = self._streams.get(sync_id)
-        return (
-            entry is not None
-            and entry.archived is not None
-            and entry.archived != archived
-        )
-
-    def applied(self, sync_id: str, index: object = None) -> None:
-        """A chunk's records are stored (or refused for good)."""
-        entry = self._entry(sync_id)
-        if entry is None:
-            return
-        if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
-            entry.indices.add(index)
-        else:
-            entry.plain += 1
-
-    def opaque(self, sync_id: str) -> None:
-        """A chunk of an unknown resource that could not be opened: dropped
-        by rule (forward compatibility), its index unknowable — counted
-        apart, so it fills no slot but its own."""
-        entry = self._entry(sync_id)
-        if entry is not None:
-            entry.opaque += 1
-
-    def persist_failed(self, sync_id: str, index: object = None) -> None:
-        """A chunk arrived but a row of it failed to persist (logged by its
-        caller rather than raised)."""
-        self.applied(sync_id, index)
-        entry = self._entry(sync_id)
-        if entry is not None:
-            entry.persist_failed = True
-
-    def held(self, sync_id: str, index: object = None) -> None:
-        """A chunk stored all but records held back for a retry."""
-        self.applied(sync_id, index)
-        entry = self._entry(sync_id)
-        if entry is not None:
-            entry.held = True
-
-    def failed(self, sync_id: str) -> None:
-        entry = self._entry(sync_id)
-        if entry is not None:
-            entry.failed = True
-
-    def stashed(self, sync_id: str) -> None:
-        entry = self._entry(sync_id)
-        if entry is not None:
-            entry.pending += 1
-
-    def resolved(self, sync_id: str) -> None:
-        entry = self._streams.get(sync_id)
-        if entry is not None and entry.pending > 0:
-            entry.pending -= 1
-
-    def finish(self, sync_id: str, chunk_count: object) -> StreamVerdict:
-        """End the stream and give its verdict."""
-        entry = self._streams.pop(sync_id, None) or _Stream()
-        self._finished[sync_id] = None
-        while len(self._finished) > MAX_TRACKED_STREAMS:
-            self._finished.popitem(last=False)
-        if not isinstance(chunk_count, int) or isinstance(chunk_count, bool):
-            return StreamVerdict.UNCLEAN
-        # A numbered stream (v_56) counts its distinct indices only: an
-        # unnumbered chunk in it (none should be) cannot stand in for one.
-        stored = (len(entry.indices) if entry.indices else entry.plain) + entry.opaque
-        if entry.failed or entry.pending or stored != chunk_count:
-            return StreamVerdict.UNCLEAN
-        if entry.persist_failed:
-            return StreamVerdict.PERSIST_FAILED
-        return StreamVerdict.HELD_BACK if entry.held else StreamVerdict.CLEAN
-
-
-class HeldBackStreaks:
-    """Consecutive held-back-only verdicts per (space, provider), bounded by
-    :data:`HELD_BACK_LIMIT`, and consecutive persist-failure verdicts,
-    bounded by :data:`PERSIST_FAILURE_LIMIT` (see there). Any other verdict
-    breaks a run. In memory: a restart starts the count over — at worst
-    that many more unclean sessions."""
-
-    __slots__ = ("_streaks", "_warned")
-
-    def __init__(self) -> None:
-        self._streaks: OrderedDict[tuple[str, str, str], int] = OrderedDict()
-        self._warned: OrderedDict[tuple[str, str, str], None] = OrderedDict()
-
-    def clean(self, verdict: StreamVerdict, space_id: str, provider: str) -> bool:
-        """Whether to report the stream clean."""
-        kinds = {
-            StreamVerdict.HELD_BACK: HELD_BACK_LIMIT,
-            StreamVerdict.PERSIST_FAILED: PERSIST_FAILURE_LIMIT,
-        }
-        # "In a row": any verdict breaks the other kinds' runs.
-        for kind in kinds:
-            if kind is not verdict:
-                self._streaks.pop((space_id, provider, kind.value), None)
-        if verdict is StreamVerdict.CLEAN:
-            return True
-        limit = kinds.get(verdict)
-        if limit is None:
-            return False
-        key = (space_id, provider, verdict.value)
-        streak = self._streaks.pop(key, 0) + 1
-        if streak < limit:
-            self._streaks[key] = streak
-            while len(self._streaks) > MAX_TRACKED_STREAMS:
-                self._streaks.popitem(last=False)
-            return False
-        if key not in self._warned:
-            self._warned[key] = None
-            while len(self._warned) > MAX_TRACKED_STREAMS:
-                self._warned.popitem(last=False)
-            log.warning(
-                "sync: %d streams in a row from %s for space %s %s — taking "
-                "them as refused and reporting this stream clean",
-                streak,
-                provider,
-                space_id,
-                "held records back that never landed"
-                if verdict is StreamVerdict.HELD_BACK
-                else "failed to store the same rows",
-            )
-        return True
-
-
 class ChatSyncSink(Protocol):
     """Where streamed space-chat messages (v_55) go — the space-chat inbound
     handlers, which apply each record with the live create rule."""
@@ -475,58 +136,23 @@ class ChatSyncSink(Protocol):
     ) -> None: ...
 
 
-class _GfsMediaSink(Protocol):
-    """Where a streamed record's ``media_refs`` go (v_80) — the GFS media
-    fetcher: names the record's files for this household, keeps the rows."""
-
-    async def localize(
-        self,
-        space_id: str,
-        raw_refs: object,
-        media_urls: list[str],
-        *,
-        item_id: str,
-        origin: str,
-    ) -> SpaceMediaLocalization: ...
-
-    def localize_as_shown(
-        self,
-        space_id: str,
-        raw_refs: object,
-        media_urls: list[str],
-        *,
-        item_id: str,
-        origin: str,
-    ) -> SpaceMediaLocalization: ...
-
-    async def keep(self, loc: SpaceMediaLocalization) -> Any: ...
+class _HostHeard(Protocol):
+    def heard(self, space_id: str) -> None: ...
 
 
-def _parse_iso(value: Any) -> datetime:
-    if isinstance(value, str) and value:
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            pass
-    return datetime.now(UTC)
-
-
-def _sync_event(space_id: str, resource: str, provider: str) -> FederationEvent:
-    """The stand-in envelope a §25.6 record is judged under: the live-event
-    authorship rules (``SpaceAuthorship``) read its ``from_instance`` — the
-    provider household the chunk came from — and its ``space_id``."""
-    return FederationEvent(
-        msg_id=f"sync:{space_id}:{resource}",
-        event_type=FederationEventType.SPACE_SYNC_CHUNK,
-        from_instance=provider,
-        to_instance="",
-        timestamp="",
-        payload={},
-        space_id=space_id,
-    )
-
-
-class SpaceSyncReceiver:
+class SpaceSyncReceiver(
+    MembersMixin,
+    PostsMixin,
+    TasksMixin,
+    PagesMixin,
+    StickiesMixin,
+    CalendarMixin,
+    GalleryMixin,
+    BazaarMixin,
+    ZonesMixin,
+    TimetablesMixin,
+    ReceiverBase,
+):
     """Persist inbound space-sync chunks."""
 
     __slots__ = (
@@ -542,6 +168,7 @@ class SpaceSyncReceiver:
         "_gallery_repo",
         "_gfs_media",
         "_health",
+        "_host_contact",
         "_legacy_album_deletes",
         "_media_dir",
         "_media_names",
@@ -606,6 +233,9 @@ class SpaceSyncReceiver:
         #: handlers, which run each through the live create rule. ``None``
         #: drops the resource (see :meth:`attach_chat_sink`).
         self._chat_sink: ChatSyncSink | None = None
+        #: v_92 — told when the household acting as a space's host answers
+        #: (:meth:`attach_host_contact`). ``None``: nobody is told.
+        self._host_contact: _HostHeard | None = None
         self._health = StreamHealth()
         self._streaks = HeldBackStreaks()
         #: Ids of other households' system albums seen in a stream — never
@@ -660,67 +290,26 @@ class SpaceSyncReceiver:
         the pictures."""
         self._gfs_media = fetcher
 
-    async def _localize_record(
-        self,
-        space_id: str,
-        record: dict[str, Any],
-        item_id: str,
-        urls: list[str],
-        *,
-        provider: str,
-        takes_descriptor: bool,
-        held: list[str] | None = None,
-        from_host: bool = False,
-    ) -> SpaceMediaLocalization:
-        """v_80 — this household's names for a streamed item's files kept
-        in a GFS media cache, bound to the household that streamed it.
-
-        The record's descriptor counts only when *takes_descriptor*: the
-        record creates the item here, or it is the host's stream. A member
-        household streaming an item this household already holds can't
-        attach its own blobs to it (#1309 re-review 2) — the item keeps the
-        names it has here. Apply before the item is saved; keep the rows
-        (:meth:`_keep_media`) only once it was.
-
-        Under those, every file takes its direct name as the provider
-        delivers it (:class:`SpaceMediaNamer`, *held* — what the stored row
-        shows already): the provider's §25.6 catch-up ships the bytes under
-        the same names. v_85: a record's ``files`` hash map counts only from
-        the host (*from_host*, ``_acts_as_host``) — which vouches for its
-        rows whole and may hash content from before v_85 from its own copy
-        (owner decision B); another provider's map is ignored (legacy
-        names)."""
-        direct = self._media_names.localize(
-            space_id,
-            provider,
-            urls,
-            held=held or (),
-            hashes=parse_file_hashes(record) if from_host else None,
-        )
-        if self._gfs_media is None:
-            return direct
-        return SpaceMediaNamer.combine(
-            direct,
-            await self._gfs_media.localize(
-                space_id,
-                record.get(MEDIA_REFS_FIELD) if takes_descriptor else None,
-                urls,
-                item_id=item_id,
-                origin=provider,
-            ),
-        )
-
     def attach_media_names(self, namer: SpaceMediaNamer) -> None:
         """Wire the shared namer (it knows this household's instance id)."""
         self._media_names = namer
 
-    async def _keep_media(self, media: SpaceMediaLocalization) -> None:
-        if self._gfs_media is not None:
-            await self._gfs_media.keep(media)
-
     def attach_chat_sink(self, sink: ChatSyncSink) -> None:
         """Wire where streamed space-chat messages (v_55) are applied."""
         self._chat_sink = sink
+
+    def attach_host_contact(self, contact: _HostHeard) -> None:
+        """Wire the v_92 host contact (:mod:`.host_contact`): every signed
+        chunk of a space this household verifies from the household acting
+        as its host here (``_acts_as_host``) marks the space heard — the
+        ``__complete__`` sentinel of an empty incremental session included,
+        the only answer a quiet space sends. The scheduler falls back to a
+        trusted helper while the host stays silent."""
+        self._host_contact = contact
+
+    async def _note_host_answer(self, space_id: str, provider: str) -> None:
+        if self._host_contact is not None and await self._is_host(space_id, provider):
+            self._host_contact.heard(space_id)
 
     async def _record_applied(
         self, space_id: str, provider: str, snapshot_seq: object
@@ -899,6 +488,9 @@ class SpaceSyncReceiver:
                 resource,
             )
             return
+        # v_92: a verified chunk (or sentinel) of the space's acting host is
+        # its answer to our BEGIN — the host is not silent.
+        await self._note_host_answer(space_id, from_instance)
 
         # Sentinel path — publish end-of-stream + return.
         if resource == SENTINEL_RESOURCE:
@@ -965,7 +557,7 @@ class SpaceSyncReceiver:
                 sync_id=sync_id,
                 ciphertext=ciphertext,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — every branch below handles or logs it
             # ``decrypt_chunk`` raises ``RuntimeError`` with
             # ``"missing epoch"`` in the message when the receiver
             # hasn't imported this epoch's key yet (#122). When a
@@ -985,7 +577,6 @@ class SpaceSyncReceiver:
                     epoch,
                     sync_id,
                     resource,
-                    exc_info=True,
                 )
 
                 async def _redeliver() -> None:
@@ -1138,162 +729,6 @@ class SpaceSyncReceiver:
             )
         return held_back
 
-    async def _apply_picture_resets(
-        self,
-        space_id: str,
-        records: list[dict[str, Any]],
-        *,
-        provider: str,
-    ) -> None:
-        """Drop the per-space picture of a member whose ``members`` record
-        says they have none (``picture_hash`` present and ``null``) — a
-        reset this household missed while offline, which the
-        ``member_pictures`` resource cannot tell (it skips seats with no
-        picture). The live ``SPACE_MEMBER_PROFILE_UPDATED`` rule: only the
-        member's own household — the provider holds their seat
-        (:meth:`SpaceAuthorship.acts_for`, any role) — decides; the owner's
-        view of another household's member is second-hand. And only from a
-        provider at
-        :attr:`~FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC`
-        (an older one's ``null`` may be its pre-#910 roster-upsert wipe).
-        Never for our own people, whose pictures are authored here. A
-        non-null provider hash is never taken (it is untrusted;
-        ``member_pictures`` ships and re-hashes the bytes), and a record
-        without the key (an older shape, or a seat the provider holds
-        bytes but no hash for) says nothing."""
-        reset = [
-            uid
-            for r in records
-            if "picture_hash" in r
-            and r["picture_hash"] is None
-            and (uid := str(r.get("user_id") or ""))
-        ]
-        if not reset or self._authorship is None or self._peer_version is None:
-            return
-        if await self._peer_version(provider) < (
-            FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC
-        ):
-            return
-        ours = set(await self._space_repo.list_local_member_user_ids(space_id))
-        held = (
-            await self._profile_picture_repo.list_member_picture_user_ids(space_id)
-            if self._profile_picture_repo is not None
-            else set()
-        )
-        event = _sync_event(space_id, "members", provider)
-        for uid in reset:
-            if uid in ours:
-                continue
-            seat = await self._space_repo.get_member(space_id, uid)
-            if seat is None or (seat.picture_hash is None and uid not in held):
-                continue
-            if not await self._authorship.acts_for(event, space_id, uid, any_role=True):
-                continue
-            if uid in held and self._profile_picture_repo is not None:
-                await self._profile_picture_repo.clear_member_picture(space_id, uid)
-            if seat.picture_hash is not None:
-                await self._space_repo.set_member_profile(
-                    space_id, uid, picture_hash=None
-                )
-                await self._publish_member_picture(
-                    space_id, seat, picture_hash=None, provider=provider
-                )
-            log.info(
-                "space sync: %s reset %s's per-space picture in %s — dropped "
-                "the stale copy held here",
-                provider,
-                uid,
-                space_id,
-            )
-
-    async def _publish_member_picture(
-        self,
-        space_id: str,
-        seat: SpaceMember,
-        *,
-        picture_hash: str | None,
-        provider: str,
-    ) -> None:
-        """Tell open clients a catch-up changed ``seat``'s per-space picture
-        — the event the live path publishes, so the realtime frame and the
-        SPA's member cache follow. ``origin_instance_id`` is the provider:
-        the per-space profile federation outbound never fans a change
-        applied from another household back out (no echo). Called only when
-        the seat's hash actually changed, so a catch-up that re-ships every
-        picture nudges once per changed member, never per record."""
-        await self._bus.publish(
-            SpaceMemberProfileUpdated(
-                space_id=space_id,
-                user_id=seat.user_id,
-                space_display_name=seat.space_display_name,
-                picture_hash=picture_hash,
-                origin_instance_id=provider,
-            )
-        )
-
-    async def _keep_owner_statement(self, space_id: str, statement: object) -> None:
-        if not isinstance(statement, dict):
-            return
-        space = await self._space_repo.get(space_id)
-        if space is None:
-            return
-        try:
-            await apply_owner_statement_from_metadata(
-                self._space_repo,
-                space_id,
-                meta={
-                    "owner_statement": statement,
-                    "identity_public_key": space.identity_public_key,
-                },
-                owner_instance_id=space.owner_instance_id,
-                authority_key_epoch=space.authority_key_epoch,
-            )
-        except Exception:  # pragma: no cover — defensive
-            log.exception("sync: keeping the owner statement for %s failed", space_id)
-
-    async def _spare_owner_people(
-        self,
-        resource: str,
-        space_id: str,
-        records: list[dict[str, Any]],
-        provider: str,
-    ) -> list[dict[str, Any]]:
-        """Roster and ban records from a provider that is NOT the owner — a
-        trusted inviting admin, whose stream is otherwise taken like the
-        host's (migration 0093) — never touch the owner household's people
-        (the owner seat or any seat the owner's household holds) and never
-        name anybody ``owner``. Only the owner decides about its own."""
-        if resource not in ("members", "bans") or not records:
-            return records
-        space = await self._space_repo.get(space_id)
-        if space is None or space.owner_instance_id == provider:
-            return records
-        seat_repo = self._authorship.seat_repo if self._authorship else None
-        kept: list[dict[str, Any]] = []
-        for r in records:
-            if resource == "members" and str(r.get("role") or "") == (
-                SpaceRole.OWNER.value
-            ):
-                continue
-            if await touches_owner_household(
-                self._space_repo,
-                seat_repo,
-                space,
-                user_id=str(r.get("user_id") or ""),
-            ):
-                continue
-            kept.append(r)
-        if len(kept) != len(records):
-            log.warning(
-                "space sync: dropped %d %s record(s) from non-owner %s for %s — "
-                "they named the owner household's people",
-                len(records) - len(kept),
-                resource,
-                provider,
-                space_id,
-            )
-        return kept
-
     async def _persist(
         self,
         resource: str,
@@ -1306,223 +741,21 @@ class SpaceSyncReceiver:
         """Persist admitted records of ``resource``. A record that cannot
         land only for now is counted in ``held_back``."""
         if resource == "members":
-            for r in records:
-                await self._space_repo.save_member(
-                    SpaceMember(
-                        space_id=space_id,
-                        user_id=str(r.get("user_id") or ""),
-                        role=str(r.get("role") or "member"),
-                        joined_at=str(r.get("joined_at") or ""),
-                        history_visible_from=r.get("history_visible_from"),
-                        location_share_enabled=bool(
-                            r.get("location_share_enabled", False)
-                        ),
-                        space_display_name=r.get("space_display_name"),
-                    )
-                )
+            await self._persist_members(space_id, records)
         elif resource == "member_pictures":
-            # F6: persist per-member avatar bytes so the SPA stops
-            # rendering broken <img> for every existing member after a
-            # fresh joiner's catch-up. Skip silently if the receiver
-            # was assembled without a profile_picture_repo (older
-            # deployments).
-            if self._profile_picture_repo is None:
-                log.debug(
-                    "received %d member_picture records — no "
-                    "profile_picture_repo wired, skipping",
-                    len(records),
-                )
-                return
-            # Our own people's per-space pictures are authored here — a
-            # provider's copy never replaces them.
-            ours = set(await self._space_repo.list_local_member_user_ids(space_id))
-            for r in records:
-                uid = str(r.get("user_id") or "")
-                pic_b64 = r.get("picture_webp_base64")
-                if not uid or not pic_b64 or uid in ours:
-                    log.debug(
-                        "member_picture record for %s/%s skipped (missing "
-                        "field, or one of our people)",
-                        space_id,
-                        uid,
-                    )
-                    continue
-                # Re-encoded exactly like the live profile events, so a
-                # provider cannot plant arbitrary bytes (SVG, HTML, a
-                # polyglot) in the blob table; the hash is our own digest
-                # of the re-encoded bytes — never the provider's
-                # ``picture_hash`` (it is untrusted).
-                try:
-                    webp, local_hash = await reencode_peer_picture(pic_b64)
-                except ValueError:
-                    log.warning(
-                        "space sync: refused member_picture from %s for %s/%s "
-                        "— not a decodable image",
-                        provider,
-                        space_id,
-                        uid,
-                    )
-                    continue
-                await self._profile_picture_repo.set_member_picture(
-                    space_id,
-                    uid,
-                    bytes_webp=webp,
-                    hash=local_hash,
-                    width=PROFILE_PICTURE_MAX_DIMENSION,
-                    height=PROFILE_PICTURE_MAX_DIMENSION,
-                )
-                # Point the seat at the blob we hold (the ``members``
-                # resource never sets ``picture_hash`` — it only clears a
-                # reset one), so the picture renders — a no-op for someone
-                # not seated here.
-                seat = await self._space_repo.get_member(space_id, uid)
-                await self._space_repo.set_member_profile(
-                    space_id, uid, picture_hash=local_hash
-                )
-                if seat is not None and seat.picture_hash != local_hash:
-                    await self._publish_member_picture(
-                        space_id, seat, picture_hash=local_hash, provider=provider
-                    )
+            await self._persist_member_pictures(space_id, records, provider=provider)
         elif resource == "bans":
-            for r in records:
-                user_id = str(r.get("user_id") or "")
-                banned_by = str(r.get("banned_by") or "")
-                if not user_id or not banned_by:
-                    continue
-                # ``ban_member`` drops a seated member's row: tell the bus,
-                # exactly like the host's live ban (``_on_banned``), so the
-                # seat's dependents (space chat, GFS subscriber seats)
-                # follow. A ban of someone not seated here is no change.
-                seated = await self._space_repo.get_member(space_id, user_id)
-                await self._space_repo.ban_member(
-                    space_id=space_id,
-                    user_id=user_id,
-                    banned_by=banned_by,
-                    reason=r.get("reason"),
-                )
-                if seated is not None:
-                    await self._bus.publish(
-                        RemoteSpaceMemberBanned(
-                            space_id=space_id, user_id=user_id, banned_by=banned_by
-                        )
-                    )
+            await self._persist_bans(space_id, records)
         elif resource == "posts":
-            from_host = await self._is_host(space_id, provider)
-            for r in records:
-                post = _post_from_record(r)
-                if post is None:
-                    continue
-                # A post deleted here stays deleted: the provider may have
-                # missed the delete, or the delete overtook the create (a
-                # v_49 member-published delete leaves a soft-deleted row
-                # under the id). ``save`` would upsert it live again.
-                held_post = await self._space_post_repo.get(post.id)
-                if held_post is not None and held_post[1].deleted:
-                    log.debug("sync: post %s was deleted here — skipped", post.id)
-                    continue
-                if held_post is not None:
-                    # Keep what this household holds of the row's shared
-                    # state: its reactions (ordered by the stamps written
-                    # with them — a provider's snapshot would wipe relayed
-                    # ones and the stamps would then refuse the copy that
-                    # could restore them) and its comment count.
-                    post = replace(
-                        post,
-                        reactions=held_post[1].reactions,
-                        comment_count=held_post[1].comment_count,
-                    )
-                media = await self._localize_record(
-                    space_id,
-                    r,
-                    post.id,
-                    post_media_urls(post),
-                    provider=provider,
-                    takes_descriptor=held_post is None or from_host,
-                    held=(
-                        post_media_urls(held_post[1]) if held_post is not None else None
-                    ),
-                    from_host=from_host,
-                )
-                post = media.post(post)
-                if await self._space_post_repo.save(space_id, post) is None:
-                    log.warning(
-                        "space sync: post %s already exists in another space "
-                        "— refusing the write for %s",
-                        post.id,
-                        space_id,
-                    )
-                    continue
-                await self._keep_media(media)
-                # Derived local state only (the system album's mirror of its
-                # media) — no notification, no fan-out.
-                await self._bus.publish(SpacePostSynced(post=post, space_id=space_id))
+            await self._persist_posts(space_id, records, provider=provider)
         elif resource == "posts_deleted":
             await self._persist_post_tombstones(records, space_id, provider=provider)
         elif resource == "comments_deleted":
             await self._persist_comment_tombstones(records, space_id, provider=provider)
         elif resource == "comments":
-            # An older provider streamed its deleted comments as comment
-            # records (content cleared, ``deleted: true``); stored, one read
-            # as a live empty comment. From the host such a record is the
-            # delete it stands for — applied as a ``comments_deleted``
-            # tombstone; from anyone else it is dropped (a member's deletes
-            # travel as tombstones, judged by the live rule).
-            gone = [r for r in records if r.get("deleted")]
-            if gone and await self._is_host(space_id, provider):
-                await self._persist_comment_tombstones(
-                    gone, space_id, provider=provider
-                )
-            comments_from_host = await self._is_host(space_id, provider)
-            for r in records:
-                if r.get("deleted"):
-                    continue
-                comment = _comment_from_record(r)
-                if comment is None:
-                    continue
-                # v_85 — a hashed picture takes its content name (the
-                # host's hashes only); a raw content name never lands.
-                comment = replace(
-                    comment,
-                    media_url=comment_media_ref(
-                        space_id,
-                        comment.media_url,
-                        parse_file_hashes(r) if comments_from_host else None,
-                    ),
-                )
-                if await self._space_post_repo.add_comment(comment, space_id=space_id):
-                    # History, not news: only replies held for this comment
-                    # (the parent-wait buffer) follow it.
-                    await self._bus.publish(
-                        SpaceCommentSynced(comment=comment, space_id=space_id)
-                    )
-                    continue
-                # Not inserted: an id held here already (a member-relayed
-                # copy, or a delete's tombstone) stays as it is …
-                if await self._space_post_repo.get_comment(comment.id) is not None:
-                    log.debug("sync: comment %s is held here — skipped", comment.id)
-                else:  # … anything else targets a post outside this space.
-                    log.warning(
-                        "space sync: comment %s targets post %s outside space "
-                        "%s — refusing the write",
-                        comment.id,
-                        comment.post_id,
-                        space_id,
-                    )
+            await self._persist_comments(space_id, records, provider=provider)
         elif resource == "task_lists":
-            for r in records:
-                lst = task_list_from_wire_dict(r)
-                if lst is None or not lst.created_by:
-                    continue
-                if await self._space_task_repo.is_list_deleted(
-                    lst.id, space_id=space_id
-                ):
-                    # Deleted here — a provider that missed the delete
-                    # still streams it; the tombstone wins (its id is never
-                    # reused), and its own tombstone stream will tell it.
-                    log.debug("sync: task list %s was deleted here — skipped", lst.id)
-                    continue
-                if not await self._space_task_repo.save_list(lst, space_id=space_id):
-                    _log_sync_refusal("task list", lst.id, space_id)
+            await self._persist_task_lists(space_id, records)
         elif resource == "task_lists_deleted":
             await self._persist_task_list_tombstones(
                 records, space_id, provider=provider
@@ -1530,111 +763,21 @@ class SpaceSyncReceiver:
         elif resource == "tasks_deleted":
             await self._persist_task_tombstones(records, space_id, provider=provider)
         elif resource in ("tasks", "tasks_archived"):
-            for r in records:
-                # A member household may only add ids not held here (see
-                # ``_admit``), but the host's chunks are taken whole and
-                # upsert over rows we hold — so merge onto the held row of
-                # THIS space, or a v39 host's chunk (no ``priority``, the
-                # fields its inbound lost sent as null) would wipe the
-                # priority / labels / due date / archive every tick.
-                rid = str(r.get("id") or r.get("task_id") or "")
-                if rid and await self._space_task_repo.is_task_deleted(
-                    rid, space_id=space_id
-                ):
-                    # Deleted here — a provider that missed the delete still
-                    # streams it; the tombstone wins (its id is never
-                    # reused), and its own tombstone stream will tell it.
-                    log.debug("sync: task %s was deleted here — skipped", rid)
-                    continue
-                held = await self._space_task_repo.get(rid) if rid else None
-                existing = held[1] if held is not None and held[0] == space_id else None
-                task = task_from_wire_dict(r, existing=existing)
-                if task is not None and await self._space_task_repo.is_list_deleted(
-                    task.list_id, space_id=space_id
-                ):
-                    log.debug(
-                        "sync: task %s is filed under list %s, deleted here — skipped",
-                        task.id,
-                        task.list_id,
-                    )
-                    continue
-                if task is not None and not await self._space_task_repo.save(
-                    task, space_id=space_id
-                ):
-                    _log_sync_refusal("task", task.id, space_id)
+            await self._persist_tasks(space_id, records)
         elif resource == "pages_deleted":
             await self._persist_page_tombstones(records, space_id, provider=provider)
         elif resource == "pages":
-            for r in records:
-                page = _page_from_record(r, space_id)
-                if page is None:
-                    continue
-                if await self._page_repo.is_page_deleted(
-                    page.id, space_id=space_id
-                ) and not await self._is_host_version(space_id, provider, r):
-                    # Deleted here — a provider that missed the delete still
-                    # streams it; the tombstone wins (its id is never
-                    # reused), and its own tombstone stream will tell it.
-                    # Only the host's version may revive a tombstone, and
-                    # only one the host never confirmed (the engine's call).
-                    log.debug("sync: page %s was deleted here — skipped", page.id)
-                    continue
-                if await self._apply_page_version(page, r, space_id, provider):
-                    continue
-                if not await self._page_repo.save(page, space_id=space_id):
-                    _log_sync_refusal("page", page.id, space_id)
+            await self._persist_pages(space_id, records, provider=provider)
         elif resource == "stickies_deleted":
             await self._persist_sticky_tombstones(records, space_id, provider=provider)
         elif resource == "stickies":
-            for r in records:
-                sticky = _sticky_from_record(r, space_id)
-                if sticky is None:
-                    continue
-                if await self._sticky_repo.is_deleted(sticky.id, space_id=space_id):
-                    # Deleted here — a provider that missed the delete still
-                    # streams it; the tombstone wins (its id is never
-                    # reused), and its own tombstone stream will tell it.
-                    log.debug("sync: sticky %s was deleted here — skipped", sticky.id)
-                    continue
-                if not await self._sticky_repo.save(sticky, space_id=space_id):
-                    _log_sync_refusal("sticky", sticky.id, space_id)
+            await self._persist_stickies(space_id, records)
         elif resource == "calendar_deleted":
             await self._persist_calendar_tombstones(
                 records, space_id, provider=provider
             )
         elif resource == "calendar":
-            from_host = await self._is_host(space_id, provider)
-            for r in records:
-                event = _calendar_from_record(r, provider=provider)
-                if event is None:
-                    continue
-                if await self._space_calendar_repo.is_event_deleted(
-                    event.id, space_id=space_id
-                ):
-                    log.debug("sync: event %s was deleted here — skipped", event.id)
-                    continue
-                held_event = await self._space_calendar_repo.get_event(event.id)
-                media = await self._localize_record(
-                    space_id,
-                    r,
-                    event.id,
-                    [event.cover_url] if event.cover_url else [],
-                    provider=provider,
-                    takes_descriptor=held_event is None or from_host,
-                    held=(
-                        [held_event[1].cover_url]
-                        if held_event is not None and held_event[1].cover_url
-                        else None
-                    ),
-                    from_host=from_host,
-                )
-                event = replace(event, cover_url=media.url(event.cover_url))
-                if not await self._space_calendar_repo.save_event(
-                    event, space_id=space_id
-                ):
-                    _log_sync_refusal("calendar event", event.id, space_id)
-                    continue
-                await self._keep_media(media)
+            await self._persist_calendar(space_id, records, provider=provider)
         elif resource == "gallery_albums_deleted":
             await self._persist_album_tombstones(records, space_id, provider=provider)
         elif resource == "gallery_items_deleted":
@@ -1642,73 +785,13 @@ class SpaceSyncReceiver:
                 records, space_id, provider=provider, held_back=held_back
             )
         elif resource == "gallery":
-            # Albums first, then items — preserve the exporter's order.
-            from_host = await self._is_host(space_id, provider)
-            recount: set[str] = set()
-            for r in records:
-                kind = r.get("kind")
-                if kind == "album":
-                    if await self._persist_album(
-                        r, space_id, from_host=from_host, held_back=held_back
-                    ):
-                        recount.add(str(r["id"]))
-                elif kind == "item" and await self._persist_gallery_item(
-                    r, space_id, held_back, from_host=from_host, provider=provider
-                ):
-                    recount.add(str(r.get("album_id") or ""))
-            # The album's count is what this household holds — the provider's
-            # figure counts the provider's rows, and a sync item lands without
-            # a bump — so it is recounted, whatever order the album record,
-            # its items and their tombstones were applied in.
-            for album_id in sorted(recount):
-                await self._gallery_repo.recount_items(album_id)
-        elif resource == "polls":
-            # v1: polls ride along with posts (Post.poll field). The
-            # standalone polls stream is informational — nothing to
-            # persist here yet.
-            log.debug(
-                "received %d poll records — skipped (see Post.poll)", len(records)
+            await self._persist_gallery(
+                space_id, records, provider=provider, held_back=held_back
             )
+        elif resource == "polls":
+            await self._persist_polls(records, space_id, provider=provider)
         elif resource == "schedules":
-            # F5: schedule-poll meta + slot defs catch up so a remote
-            # member's slot picker isn't empty after a §25.6 sync. The
-            # wrapper post (PostType.SCHEDULE) was already persisted
-            # above by the ``posts`` exporter, so the FK to
-            # ``space_posts(id)`` is satisfied.
-            if self._poll_repo is None:
-                log.debug(
-                    "received %d schedule records — no poll_repo wired, skipping",
-                    len(records),
-                )
-                return
-            for r in records:
-                post_id = str(r.get("post_id") or "")
-                title = str(r.get("title") or "")
-                slots = r.get("slots") or []
-                if not post_id or not title or not slots:
-                    log.debug("schedule record missing required field: %r", r)
-                    continue
-                try:
-                    if not await self._poll_repo.create_schedule_poll_in_space(
-                        space_id=space_id,
-                        post_id=post_id,
-                        title=title,
-                        deadline=r.get("deadline"),
-                        slots=list(slots),
-                    ):
-                        log.warning(
-                            "space sync: schedule poll %s is not a post of "
-                            "space %s — refusing the write",
-                            post_id,
-                            space_id,
-                        )
-                except Exception as exc:  # pragma: no cover
-                    log.debug(
-                        "schedule catch-up create failed for post=%s: %s",
-                        post_id,
-                        exc,
-                        exc_info=True,
-                    )
+            await self._persist_schedules(space_id, records, provider=provider)
         elif resource in (
             "space_zones",
             "space_zones_deleted",
@@ -1727,97 +810,13 @@ class SpaceSyncReceiver:
         elif resource == "space_zones_deleted":
             await self._persist_zone_tombstones(records, space_id, provider=provider)
         elif resource == "space_zones":
-            # §23.8.7: per-space zone catalogue. Receiver may be
-            # configured without a zone repo (older deployments) — in
-            # that case skip rather than error.
-            if self._zone_repo is None:
-                log.debug(
-                    "received %d zone records — no zone_repo wired, skipping",
-                    len(records),
-                )
-                return
-            for r in records:
-                zone = _zone_from_record(r, space_id, provider=provider)
-                if zone is None:
-                    continue
-                if await self._zone_repo.is_deleted(zone.id, space_id=space_id):
-                    log.debug("sync: zone %s was deleted here — skipped", zone.id)
-                    continue
-                if "icon" not in r:
-                    # An older provider (pre-icon) streams no ``icon`` key:
-                    # keep the stored icon rather than wiping it.
-                    stored_zone = await self._zone_repo.get(zone.id)
-                    if stored_zone is not None and stored_zone.space_id == space_id:
-                        zone = replace(zone, icon=stored_zone.icon)
-                if not await self._zone_repo.upsert(zone, space_id=space_id):
-                    log.warning(
-                        "space sync: zone %s already exists in another space "
-                        "— refusing the write for %s",
-                        zone.id,
-                        space_id,
-                    )
+            await self._persist_zones(space_id, records, provider=provider)
         elif resource == "bazaar":
-            # F4: catch-up bazaar listings so a new joiner sees the
-            # full listing card (mode / price / photos / status) — not
-            # just the wrapper post's caption. The wrapper post was
-            # already persisted by the ``posts`` resource above, so
-            # the BazaarListing FK to space_posts(id) is satisfied.
-            if self._bazaar_repo is None:
-                log.debug(
-                    "received %d bazaar records — no bazaar_repo wired, skipping",
-                    len(records),
-                )
-                return
-            bazaar_from_host = await self._is_host(space_id, provider)
-            for r in records:
-                listing = _bazaar_listing_from_record(r, space_id)
-                if listing is not None:
-                    # The provider ships the photos (catch-up): its names.
-                    held_listing = await self._bazaar_repo.get_listing(listing.post_id)
-                    names = self._media_names.localize(
-                        space_id,
-                        provider,
-                        list(listing.image_urls),
-                        held=(
-                            list(held_listing.image_urls)
-                            if held_listing is not None
-                            else ()
-                        ),
-                        # v_85 — the host's hashes only.
-                        hashes=parse_file_hashes(r) if bazaar_from_host else None,
-                    )
-                    listing = replace(
-                        listing,
-                        image_urls=tuple(names.url(u) or u for u in listing.image_urls),
-                    )
-                    try:
-                        if not await self._bazaar_repo.save_listing(
-                            listing, space_id=space_id
-                        ):
-                            log.warning(
-                                "space sync: bazaar listing %s is not a post of "
-                                "space %s — refusing the write",
-                                listing.post_id,
-                                space_id,
-                            )
-                        else:
-                            await _apply_bazaar_faq(
-                                self._bazaar_repo, listing.post_id, r.get("faq")
-                            )
-                    except Exception as exc:
-                        # FK / CHECK violation (anchor post missing,
-                        # unknown mode). A listing the joiner cannot store
-                        # is a listing the joiner never sees, so this is a
-                        # WARNING, not DEBUG — until the posts exporter
-                        # shipped anchor posts it fired for every
-                        # unannounced listing, on every joiner, unseen.
-                        log.warning(
-                            "bazaar catch-up save_listing failed for post_id=%s: %s",
-                            listing.post_id,
-                            exc,
-                            exc_info=True,
-                        )
-
+            await self._persist_bazaar(space_id, records, provider=provider)
+        elif resource == "timetables_deleted":
+            await self._persist_timetable_tombstones(
+                records, space_id, provider=provider
+            )
         elif resource == "timetables":
             await self._persist_timetables(records, space_id, provider=provider)
         elif resource == "chat_messages_deleted":
@@ -1838,945 +837,6 @@ class SpaceSyncReceiver:
                 )
                 or 0
             )
-
-    async def _persist_timetables(
-        self, records: list[dict[str, Any]], space_id: str, *, provider: str
-    ) -> None:
-        """Space timetables (v_39): each record is a domain wire dict,
-        parsed and validated like the live event; applied last-writer-wins
-        (a stale copy, a deleted id or another space's id is a no-op)."""
-        if self._timetable_repo is None:
-            log.debug(
-                "received %d timetable records — no timetable_repo wired, skipping",
-                len(records),
-            )
-            return
-        for r in records:
-            tt = _timetable_from_record(r, space_id)
-            if tt is None:
-                continue
-            held = await self._timetable_repo.get(tt.id)
-            refusal = remote_version_refusal(
-                tt.version,
-                held[1].version if held is not None and held[0] == space_id else None,
-            )
-            if refusal is not None:
-                log.warning(
-                    "space sync: timetable %s for %s — %s; skipped",
-                    tt.id,
-                    space_id,
-                    refusal,
-                )
-                continue
-            if await self._timetable_repo.apply_remote(tt, space_id=space_id):
-                await self._bus.publish(
-                    TimetableSaved(
-                        timetable=tt, space_id=space_id, origin_instance_id=provider
-                    )
-                )
-
-    async def _persist_post_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed post deletes (``posts_deleted``).
-
-        A post held live here in this space is soft-deleted — content
-        cleared, the row kept as its tombstone — and ``PostDeleted`` is
-        published as for a live ``SPACE_POST_DELETED`` (its origin the
-        provider, so nothing is re-broadcast). A member household's records
-        were admitted only under the live rule (:meth:`_authored_record`).
-
-        From the **host**, an id we never held gets the soft-deleted row a
-        delete that overtook its create leaves (v_49), so a stale copy
-        another household streams later cannot create it — but only when
-        the id is owner-bound to its ``author`` in THIS space (post ids are
-        global: a stub for another space's id would block that space's real
-        post here). A legacy (unbound) or mismatched id is skipped.
-        Refusals are summarised once per chunk.
-        """
-        space = await self._space_repo.get(space_id)
-        from_host = await self._acts_as_host(space, provider)
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            post_id = str(r.get("id") or r.get("post_id") or "")
-            if not post_id:
-                continue
-            # A moderator removal names its moderator (migration 0084); the
-            # author's own delete names nobody.
-            moderator = (
-                str(r.get("actor_user_id") or "") or None
-                if r.get("moderated")
-                else None
-            )
-            held = await self._space_post_repo.get(post_id)
-            if held is not None:
-                if held[0] != space_id:
-                    cross_space.append(post_id)
-                elif not held[1].deleted and await self._space_post_repo.soft_delete(
-                    post_id, space_id=space_id, moderated_by=moderator
-                ):
-                    await self._bus.publish(
-                        PostDeleted(
-                            post_id=post_id,
-                            space_id=space_id,
-                            origin_instance_id=provider,
-                            author_user_id=held[1].author,
-                        )
-                    )
-                continue
-            if not from_host:
-                continue
-            author = str(r.get("author") or "")
-            if (
-                check_owner_bound_id(
-                    SPACE_POST_KIND, post_id, space_id=space_id, owner_user_id=author
-                )
-                is not OwnerBinding.VALID
-            ):
-                unbound += 1
-                continue
-            try:
-                # The post's own type: a stub of a retention-exempt type
-                # stays exempt here.
-                post_type = PostType(str(r.get("type") or "text"))
-            except ValueError:
-                post_type = PostType.TEXT
-            saved = await self._space_post_repo.save(
-                space_id,
-                Post(
-                    id=post_id,
-                    author=author,
-                    type=post_type,
-                    created_at=_parse_iso(r.get("created_at")),
-                    deleted=True,
-                    moderated=bool(r.get("moderated")),
-                ),
-            )
-            if saved is not None and moderator is not None:
-                await self._space_post_repo.soft_delete(
-                    post_id, space_id=space_id, moderated_by=moderator
-                )
-        _log_tombstone_refusals("post", provider, space_id, cross_space, unbound)
-
-    async def _persist_comment_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed comment deletes (``comments_deleted``).
-
-        A comment held live here on a post of this space is soft-deleted,
-        its post's comment count lowered and ``CommentDeleted`` published —
-        what a live ``SPACE_COMMENT_DELETED`` does. A member household's
-        records were admitted only under the live rule
-        (:meth:`_authored_record`).
-
-        From the **host**, an id we never held gets a soft-deleted row on
-        its post — only when the id is owner-bound to its ``author`` in THIS
-        space and the post is held here in this space (the insert checks
-        it), so a stale copy streamed later cannot create the comment.
-        """
-        space = await self._space_repo.get(space_id)
-        from_host = await self._acts_as_host(space, provider)
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            comment_id = str(r.get("id") or r.get("comment_id") or "")
-            if not comment_id:
-                continue
-            held = await self._space_post_repo.get_comment(comment_id)
-            if held is not None:
-                parent = await self._space_post_repo.get(held.post_id)
-                if parent is None or parent[0] != space_id:
-                    cross_space.append(comment_id)
-                elif (
-                    not held.deleted
-                    and await self._space_post_repo.soft_delete_comment(
-                        comment_id, space_id=space_id
-                    )
-                ):
-                    await self._space_post_repo.decrement_comment_count(
-                        held.post_id, space_id=space_id
-                    )
-                    await self._bus.publish(
-                        CommentDeleted(
-                            post_id=held.post_id,
-                            comment_id=comment_id,
-                            space_id=space_id,
-                            origin_instance_id=provider,
-                            author_user_id=held.author,
-                        )
-                    )
-                continue
-            if not from_host:
-                continue
-            author = str(r.get("author") or "")
-            post_id = str(r.get("post_id") or "")
-            if (
-                not post_id
-                or check_owner_bound_id(
-                    SPACE_COMMENT_KIND,
-                    comment_id,
-                    space_id=space_id,
-                    owner_user_id=author,
-                )
-                is not OwnerBinding.VALID
-            ):
-                unbound += 1
-                continue
-            if not await self._space_post_repo.add_comment(
-                Comment(
-                    id=comment_id,
-                    post_id=post_id,
-                    author=author,
-                    type=CommentType.TEXT,
-                    created_at=_parse_iso(r.get("created_at")),
-                    deleted=True,
-                ),
-                space_id=space_id,
-            ):
-                unbound += 1  # its post is not held here in this space
-        _log_tombstone_refusals("comment", provider, space_id, cross_space, unbound)
-
-    async def _persist_task_list_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed list deletes (``task_lists_deleted``).
-
-        A list held live here in this space is tombstoned (``deleted_by``
-        from the record's ``actor_user_id``); its tasks are tombstoned with
-        it (the list-tombstone trigger, 0069 / 0071), and ``TaskListDeleted`` is published as
-        for a live ``SPACE_TASK_LIST_DELETED``. A member household's records
-        were admitted only for such lists (:meth:`_authored_record`).
-
-        From the **host**, an id we never held gets a stub tombstone, so a
-        stale copy another household streams later cannot create it — but
-        only when the id is owner-bound to its ``created_by`` in THIS
-        space. List ids are global: a stub for another space's id would
-        block that space's real list here forever. A legacy (unbound) or
-        mismatched id is skipped; one already a tombstone is not rewritten.
-        Refusals are summarised once per chunk.
-        """
-        space = await self._space_repo.get(space_id)
-        from_host = await self._acts_as_host(space, provider)
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            list_id = str(r.get("id") or r.get("list_id") or "")
-            if not list_id:
-                continue
-            deleted_by = str(r.get("actor_user_id") or "")
-            held = await self._space_task_repo.get_list(list_id)
-            if held is not None:
-                if held[0] != space_id:
-                    cross_space.append(list_id)
-                elif await self._space_task_repo.delete_list(
-                    list_id, space_id=space_id, deleted_by=deleted_by
-                ):
-                    await self._bus.publish(
-                        TaskListDeleted(
-                            list_id=list_id,
-                            space_id=space_id,
-                            origin_instance_id=provider,
-                        )
-                    )
-                continue
-            if not from_host or await self._space_task_repo.is_list_deleted(
-                list_id, space_id=space_id
-            ):
-                continue
-            created_by = str(r.get("created_by") or "")
-            if (
-                check_owner_bound_id(
-                    SPACE_TASK_LIST_KIND,
-                    list_id,
-                    space_id=space_id,
-                    owner_user_id=created_by,
-                )
-                is not OwnerBinding.VALID
-            ):
-                unbound += 1
-                continue
-            await self._space_task_repo.tombstone_list(
-                list_id, space_id=space_id, created_by=created_by, deleted_by=deleted_by
-            )
-        if cross_space:
-            log.warning(
-                "space sync: %d task list tombstone(s) from %s for %s name a "
-                "list held in another space — refused: %s",
-                len(cross_space),
-                provider,
-                space_id,
-                ", ".join(cross_space[:5]),
-            )
-        if unbound:
-            log.info(
-                "space sync: %d task list tombstone(s) from %s for %s name a "
-                "list never held here whose id is not bound to this space — "
-                "no stub recorded",
-                unbound,
-                provider,
-                space_id,
-            )
-
-    async def _persist_task_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed single-task deletes (``tasks_deleted``).
-
-        A task held live here in this space is tombstoned (``deleted_by``
-        from the record's ``actor_user_id``) and ``TaskDeleted`` is
-        published as for a live ``SPACE_TASK_DELETED``. A member
-        household's records were admitted only for such tasks
-        (:meth:`_authored_record`).
-
-        From the **host**, an id we never held gets a stub tombstone, so a
-        stale copy another household streams later cannot create it — but
-        only when the id is owner-bound to its ``created_by`` in THIS space
-        (task ids are global: a stub for another space's id would block
-        that space's real task here forever), and only under a list live
-        here in this space (``space_tasks.list_id`` is a FK). A task under
-        a list tombstoned here needs nothing: the list's delete already
-        tombstoned every task of it (0071 trigger) and keeps new ones out. Refusals are summarised
-        once per chunk.
-        """
-        space = await self._space_repo.get(space_id)
-        from_host = await self._acts_as_host(space, provider)
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            task_id = str(r.get("id") or r.get("task_id") or "")
-            if not task_id:
-                continue
-            deleted_by = str(r.get("actor_user_id") or "")
-            held = await self._space_task_repo.get(task_id)
-            if held is not None:
-                if held[0] != space_id:
-                    cross_space.append(task_id)
-                elif await self._space_task_repo.delete(
-                    task_id, space_id=space_id, deleted_by=deleted_by
-                ):
-                    await self._bus.publish(
-                        TaskDeleted(
-                            task_id=task_id,
-                            list_id=held[1].list_id,
-                            space_id=space_id,
-                            origin_instance_id=provider,
-                        )
-                    )
-                continue
-            if not from_host or await self._space_task_repo.is_task_deleted(
-                task_id, space_id=space_id
-            ):
-                continue
-            list_id = str(r.get("list_id") or "")
-            if not list_id or await self._space_task_repo.is_list_deleted(
-                list_id, space_id=space_id
-            ):
-                continue  # gone with its list; the list tombstone wins
-            created_by = str(r.get("created_by") or "")
-            if (
-                check_owner_bound_id(
-                    SPACE_TASK_KIND,
-                    task_id,
-                    space_id=space_id,
-                    owner_user_id=created_by,
-                )
-                is not OwnerBinding.VALID
-            ):
-                unbound += 1
-                continue
-            if not await self._space_task_repo.tombstone(
-                task_id,
-                space_id=space_id,
-                list_id=list_id,
-                created_by=created_by,
-                deleted_by=deleted_by,
-            ):
-                unbound += 1  # its list is not held live in this space
-        if cross_space:
-            log.warning(
-                "space sync: %d task tombstone(s) from %s for %s name a task "
-                "held in another space — refused: %s",
-                len(cross_space),
-                provider,
-                space_id,
-                ", ".join(cross_space[:5]),
-            )
-        if unbound:
-            log.info(
-                "space sync: %d task tombstone(s) from %s for %s name a task "
-                "never held here whose id is not bound to this space, or "
-                "whose list is not held here — no stub recorded",
-                unbound,
-                provider,
-                space_id,
-            )
-
-    async def _persist_page_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed page deletes (``pages_deleted``).
-
-        A page held live here in this space is tombstoned (``deleted_by``
-        from the record's ``actor_user_id``) exactly as a live
-        ``SPACE_PAGE_DELETED`` does — confirmed (final) when the host
-        streams it, or when we are the host (which then re-broadcasts the
-        delete); unconfirmed from another member. The host's record also
-        confirms a tombstone of our own. A member household's records were
-        admitted only for pages held live here (:meth:`_authored_record`).
-
-        From the **host**, an id we never held gets a stub tombstone, so a
-        stale copy another household streams or replays later cannot
-        create it — but only when the id is owner-bound to its
-        ``created_by`` in THIS space (page ids are global: a stub for
-        another space's id would block that space's real page here).
-        Refusals are summarised once per chunk.
-        """
-        space = await self._space_repo.get(space_id)
-        from_host = await self._acts_as_host(space, provider)
-        is_host = (
-            space is not None
-            and self._page_conflicts is not None
-            and space.owner_instance_id == self._page_conflicts.own_instance_id
-        )
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            page_id = str(r.get("id") or r.get("page_id") or "")
-            if not page_id:
-                continue
-            deleted_by = str(r.get("actor_user_id") or "")
-            held = await self._page_repo.get(page_id)
-            if held is not None:
-                if held.space_id != space_id:
-                    cross_space.append(page_id)
-                elif self._page_conflicts is not None:
-                    deleted = await self._page_conflicts.delete_page(
-                        space_id, page_id, deleted_by=deleted_by, from_instance=provider
-                    )
-                    if deleted and space is not None and is_host:
-                        # The host accepted a member's delete it had missed:
-                        # it decides, so it tells every member household.
-                        await self._bus.publish(
-                            PageDeleted(
-                                page_id=page_id,
-                                space_id=space_id,
-                                actor_user_id=deleted_by,
-                            )
-                        )
-                else:
-                    await self._page_repo.delete(
-                        page_id,
-                        space_id=space_id,
-                        deleted_by=deleted_by,
-                        confirmed=from_host,
-                    )
-                continue
-            if await self._page_repo.is_page_deleted(page_id, space_id=space_id):
-                if from_host:
-                    # The host stands behind our own (unconfirmed) delete.
-                    await self._page_repo.confirm_delete(page_id, space_id=space_id)
-                continue
-            if not from_host:
-                continue
-            created_by = str(r.get("created_by") or "")
-            if (
-                check_owner_bound_id(
-                    SPACE_PAGE_KIND,
-                    page_id,
-                    space_id=space_id,
-                    owner_user_id=created_by,
-                )
-                is not OwnerBinding.VALID
-            ):
-                unbound += 1
-                continue
-            await self._page_repo.tombstone(
-                page_id, space_id=space_id, created_by=created_by, deleted_by=deleted_by
-            )
-        if cross_space:
-            log.warning(
-                "space sync: %d page tombstone(s) from %s for %s name a page "
-                "held in another space — refused: %s",
-                len(cross_space),
-                provider,
-                space_id,
-                ", ".join(cross_space[:5]),
-            )
-        if unbound:
-            log.info(
-                "space sync: %d page tombstone(s) from %s for %s name a page "
-                "never held here whose id is not bound to this space — no "
-                "stub recorded",
-                unbound,
-                provider,
-                space_id,
-            )
-
-    async def _persist_sticky_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed sticky deletes (``stickies_deleted``, migration
-        0085).
-
-        A sticky held live here in this space is tombstoned (``deleted_by``
-        from the record's ``actor_user_id``), as a live
-        ``SPACE_STICKY_DELETED`` does. A member household's records were
-        admitted only under the live rule (:meth:`_authored_record`). From
-        the **host**, an id never held here gets a stub tombstone — only
-        when the id is owner-bound to its ``author`` in THIS space (sticky
-        ids are global: a stub for another space's id would block that
-        space's real sticky here). Refusals are summarised once per chunk.
-        """
-        from_host = await self._is_host(space_id, provider)
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            sticky_id = str(r.get("id") or r.get("sticky_id") or "")
-            if not sticky_id:
-                continue
-            deleted_by = str(r.get("actor_user_id") or "")
-            held = await self._sticky_repo.get(sticky_id)
-            if held is not None:
-                if held.space_id != space_id:
-                    cross_space.append(sticky_id)
-                else:
-                    await self._sticky_repo.delete(
-                        sticky_id, space_id=space_id, deleted_by=deleted_by
-                    )
-                continue
-            if not from_host or await self._sticky_repo.is_deleted(
-                sticky_id, space_id=space_id
-            ):
-                continue
-            author = str(r.get("author") or "")
-            if not _bound_here(SPACE_STICKY_KIND, sticky_id, space_id, author):
-                unbound += 1
-                continue
-            await self._sticky_repo.tombstone(
-                sticky_id,
-                space_id=space_id,
-                author=author,
-                created_at=str(r.get("created_at") or ""),
-                deleted_by=deleted_by,
-            )
-        _log_tombstone_refusals("sticky", provider, space_id, cross_space, unbound)
-
-    async def _persist_calendar_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed calendar-event deletes (``calendar_deleted``,
-        migration 0085).
-
-        An event held live here in this space is tombstoned — its RSVPs and
-        reminders go with it — and ``CalendarEventDeleted`` is published as
-        for a live ``SPACE_CALENDAR_EVENT_DELETED`` (the feed bridge removes
-        the event's announcement post). A member household's records were
-        admitted only under the live rule. From the **host**, an id never
-        held here gets a stub tombstone when the id is owner-bound to its
-        ``created_by`` in THIS space.
-        """
-        from_host = await self._is_host(space_id, provider)
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            event_id = str(r.get("id") or r.get("event_id") or "")
-            if not event_id:
-                continue
-            deleted_by = str(r.get("actor_user_id") or "")
-            held = await self._space_calendar_repo.get_event(event_id)
-            if held is not None:
-                if held[0] != space_id:
-                    cross_space.append(event_id)
-                elif await self._space_calendar_repo.delete_event(
-                    event_id, space_id=space_id, deleted_by=deleted_by
-                ):
-                    await self._bus.publish(
-                        CalendarEventDeleted(event_id=event_id, space_id=space_id)
-                    )
-                continue
-            if not from_host or await self._space_calendar_repo.is_event_deleted(
-                event_id, space_id=space_id
-            ):
-                continue
-            created_by = str(r.get("created_by") or "")
-            if not _bound_here(
-                SPACE_CALENDAR_EVENT_KIND, event_id, space_id, created_by
-            ):
-                unbound += 1
-                continue
-            await self._space_calendar_repo.tombstone_event(
-                event_id,
-                space_id=space_id,
-                created_by=created_by,
-                created_at=str(r.get("created_at") or ""),
-                deleted_by=deleted_by,
-            )
-        _log_tombstone_refusals(
-            "calendar event", provider, space_id, cross_space, unbound
-        )
-
-    async def _persist_album_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed gallery-album deletes (``gallery_albums_deleted``,
-        migration 0085).
-
-        A user album held live here in this space is tombstoned with its
-        items (the 0085 trigger), their files unlinked unless another row
-        still names them, and ``GalleryAlbumDeleted`` published — what a
-        live ``SPACE_GALLERY_ALBUM_DELETED`` does (its origin the provider,
-        so nothing is re-broadcast). A member household's records were
-        admitted only under the live rule. From the **host**, an id never
-        held here gets a stub tombstone when the id is owner-bound to its
-        ``owner_user_id`` in THIS space.
-        """
-        from_host = await self._is_host(space_id, provider)
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            album_id = str(r.get("id") or r.get("album_id") or "")
-            if not album_id:
-                continue
-            deleted_by = await self._vetted_actor(r, space_id, provider, from_host)
-            held = await self._gallery_repo.get_album(album_id)
-            if held is not None:
-                if held.space_id != space_id or held.is_system:
-                    cross_space.append(album_id)
-                    continue
-                media = await self._gallery_repo.list_album_media(album_id)
-                if await self._gallery_repo.delete_album_in_space(
-                    album_id, space_id=space_id, deleted_by=deleted_by
-                ):
-                    await unlink_unreferenced(self._media_dir, self._media_refs, media)
-                    await self._bus.publish(
-                        GalleryAlbumDeleted(
-                            album_id=album_id,
-                            space_id=space_id,
-                            owner_id=held.owner_user_id,
-                            origin_instance_id=provider,
-                        )
-                    )
-                continue
-            if not from_host or await self._gallery_repo.is_album_deleted(
-                album_id, space_id=space_id
-            ):
-                continue
-            owner = str(r.get("owner_user_id") or "")
-            if not _bound_here(GALLERY_ALBUM_KIND, album_id, space_id, owner):
-                unbound += 1
-                continue
-            await self._gallery_repo.tombstone_album(
-                album_id,
-                space_id=space_id,
-                owner_user_id=owner,
-                created_at=str(r.get("created_at") or ""),
-                deleted_by=deleted_by,
-            )
-        _log_tombstone_refusals(
-            "gallery album", provider, space_id, cross_space, unbound
-        )
-
-    async def _persist_item_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-        held_back: HeldBack,
-    ) -> None:
-        """Apply streamed gallery-item deletes (``gallery_items_deleted``,
-        migration 0085).
-
-        An item held live here in an album of this space is tombstoned, its
-        album's count lowered, its files unlinked unless another row still
-        names them, and ``GalleryItemDeleted`` published — what a live
-        ``SPACE_GALLERY_ITEM_DELETED`` does. A member household's records
-        were admitted only under the live rule. From the **host**, an id
-        never held here gets a stub tombstone when the id is owner-bound to
-        its ``uploaded_by`` in THIS space and its album is held live here in
-        this space (``album_id`` is a FK); under an album tombstoned here it
-        needs nothing — the album's tombstone covers it. An album not held
-        here at all yet (the chunks applied out of order — ``gallery`` after
-        this one) holds the stub back for the next stream
-        (:class:`HeldBack`) instead of dropping the delete.
-        """
-        from_host = await self._is_host(space_id, provider)
-        cross_space: list[str] = []
-        unbound = 0
-        for r in records:
-            item_id = str(r.get("id") or r.get("item_id") or "")
-            if not item_id:
-                continue
-            deleted_by = await self._vetted_actor(r, space_id, provider, from_host)
-            held = await self._gallery_repo.get_item(item_id)
-            if held is not None:
-                if await self._gallery_repo.delete_item_in_space(
-                    item_id, space_id=space_id, deleted_by=deleted_by
-                ):
-                    await unlink_unreferenced(
-                        self._media_dir,
-                        self._media_refs,
-                        [held.url, held.thumbnail_url],
-                    )
-                    await self._bus.publish(
-                        GalleryItemDeleted(
-                            item_id=item_id,
-                            album_id=held.album_id,
-                            space_id=space_id,
-                            origin_instance_id=provider,
-                        )
-                    )
-                else:
-                    cross_space.append(item_id)
-                continue
-            if not from_host or await self._gallery_repo.is_item_deleted(
-                item_id, space_id=space_id
-            ):
-                continue
-            uploader = str(r.get("uploaded_by") or "")
-            album_id = str(r.get("album_id") or "")
-            if not album_id or await self._gallery_repo.is_album_deleted(
-                album_id, space_id=space_id
-            ):
-                continue  # gone with its album; the album tombstone wins
-            if not _bound_here(GALLERY_ITEM_KIND, item_id, space_id, uploader):
-                unbound += 1
-                continue
-            if await self._gallery_repo.tombstone_item(
-                item_id,
-                space_id=space_id,
-                album_id=album_id,
-                uploaded_by=uploader,
-                created_at=str(r.get("created_at") or ""),
-                deleted_by=deleted_by,
-            ):
-                continue
-            if (
-                await self._gallery_repo.get_album(album_id) is None
-                and album_id not in self._foreign_system_albums
-            ):
-                held_back.add()  # its album has not reached us yet
-            else:
-                unbound += 1  # its album is another space's
-        _log_tombstone_refusals(
-            "gallery item", provider, space_id, cross_space, unbound
-        )
-
-    async def _persist_zone_tombstones(
-        self,
-        records: list[dict[str, Any]],
-        space_id: str,
-        *,
-        provider: str,
-    ) -> None:
-        """Apply streamed zone deletes (``space_zones_deleted``, migration
-        0085): a zone held live here in this space is tombstoned, as a live
-        ``SPACE_ZONE_DELETED`` does. A member household's records were
-        admitted only from an admin household (the live rule).
-
-        No stub for a zone never held here: zone ids are not owner-bound
-        (``z_<random>``), so nothing proves an id is this space's — a stub
-        could squat another space's zone. A stale copy a household streams
-        later lands, and the host's next tombstone stream removes it.
-        """
-        if self._zone_repo is None:
-            return
-        from_host = await self._is_host(space_id, provider)
-        cross_space: list[str] = []
-        for r in records:
-            zone_id = str(r.get("id") or r.get("zone_id") or "")
-            if not zone_id:
-                continue
-            held = await self._zone_repo.get(zone_id)
-            if held is None:
-                continue
-            if held.space_id != space_id:
-                cross_space.append(zone_id)
-                continue
-            await self._zone_repo.delete(
-                zone_id,
-                space_id=space_id,
-                deleted_by=await self._vetted_actor(r, space_id, provider, from_host),
-            )
-        _log_tombstone_refusals("zone", provider, space_id, cross_space, 0)
-
-    async def _vetted_actor(
-        self, r: dict[str, Any], space_id: str, provider: str, from_host: bool
-    ) -> str:
-        """The ``actor_user_id`` a gallery / zone tombstone may record as its
-        ``deleted_by``. Those live delete rules judge the household, not an
-        actor, so a record naming a stranger is not refused — but from a
-        member household the name is kept only when the provider speaks for
-        that user (seated on it, as ``_writer_delete_admits`` requires for
-        stickies / events); otherwise the delete is recorded as nobody's.
-        The host's stream is taken whole, like every host record."""
-        actor = str(r.get("actor_user_id") or "")
-        if not actor or from_host:
-            return actor
-        if self._authorship is None:
-            return ""
-        event = _sync_event(space_id, "actor", provider)
-        if await self._authorship.acts_for(event, space_id, actor, any_role=True):
-            return actor
-        return ""
-
-    async def _page_seq_hints(
-        self, records: list[dict[str, Any]], space_id: str, *, provider: str
-    ) -> None:
-        """On the **host**: a member household's ``pages`` records carry
-        the ``seq`` it mirrors. A host restored from a backup raises its seq
-        floor to it, so its next own edit lands above every version members
-        hold — they take it. Only the number is read (the highest per page
-        in the chunk), only for live pages held here, and only from a
-        **writer** household seated in the space; the content is never
-        taken this way (and the admission drops the records right after).
-        :meth:`PageConflictService.raise_floor` bounds each raise and rate
-        limits them per provider, page and day."""
-        engine = self._page_conflicts
-        if engine is None or not records or self._authorship is None:
-            return
-        mode, host = await engine.mode(space_id)
-        if mode is not PageMode.HOST or not provider or provider == host:
-            return
-        highest: dict[str, int] = {}
-        for r in records:
-            page_id = str(r.get("id") or r.get("page_id") or "")
-            seq = r.get("seq")
-            if (
-                not page_id
-                or not isinstance(seq, int)
-                or isinstance(seq, bool)
-                or seq <= 0
-            ):
-                continue
-            highest[page_id] = max(seq, highest.get(page_id, 0))
-        if not highest:
-            return
-        event = _sync_event(space_id, "pages", provider)
-        if not await self._authorship.writes_here(event, space_id):
-            return
-        for page_id, seq in highest.items():
-            await engine.raise_floor(space_id, page_id, seq, provider=provider)
-
-    async def _acts_as_host(self, space: Any, provider: str) -> bool:
-        """``provider`` hosts the space HERE: its owner, or the delegated
-        admin household that invited us while delegation is on
-        (:mod:`socialhome.federation.host_equivalence`) — whose chunks are
-        then taken whole, like the owner's. Without an authorship binder
-        (no seat repo) only the owner counts."""
-        if space is None or not provider:
-            return False
-        if space.owner_instance_id == provider:
-            return True
-        if self._authorship is None:
-            return False
-        return await self._authorship.acts_as_host(space, provider)
-
-    async def _is_host(self, space_id: str, provider: str) -> bool:
-        """Is ``provider`` the household hosting ``space_id``?"""
-        space = await self._space_repo.get(space_id)
-        return await self._acts_as_host(space, provider)
-
-    async def _is_host_version(
-        self, space_id: str, provider: str, r: dict[str, Any]
-    ) -> bool:
-        """Is ``r`` a host version (``seq``) streamed by the space's host?"""
-        if "seq" not in r or not provider:
-            return False
-        space = await self._space_repo.get(space_id)
-        return await self._acts_as_host(space, provider)
-
-    async def _apply_page_version(
-        self, page: Page, r: dict[str, Any], space_id: str, provider: str
-    ) -> bool:
-        """v_48 host-sequenced pages. ``True`` when handled here:
-
-        * on the **host** every page record is ignored — it is the pages'
-          sequencer; a member's new page reaches it as a create proposal,
-          never as an unsequenced row it would hold but never broadcast;
-        * a record streamed by the space's host carrying ``seq`` is the
-          host's version: mirrored by ``seq`` (newer applies, older never
-          reverts) — even when we have not seen the host's v_48
-          capabilities yet;
-        * any other record never updates a page held here and lands
-          unsequenced (``seq`` 0 — a member cannot forge the host's order);
-        * under a pre-v_48 host a record without ``seq`` is taken as before.
-        """
-        engine = self._page_conflicts
-        if engine is None:
-            return False
-        mode, host = await engine.mode(space_id)
-        if mode is PageMode.HOST:
-            return True
-        if host and provider == host and "seq" in r:
-            version = canonical_from_wire(r)
-            if version is None:
-                log.warning(
-                    "space sync: page %s in %s — malformed host version; skipped",
-                    page.id,
-                    space_id,
-                )
-                return True
-            await engine.mirror(space_id=space_id, page_id=page.id, version=version)
-            if self._gfs_media is not None and version.has_state:
-                # v_82: a link-joined requester keeps the page's files
-                # under the names the page shows (sync line 82).
-                await self._keep_media(
-                    self._gfs_media.localize_as_shown(
-                        space_id,
-                        r.get(MEDIA_REFS_FIELD),
-                        [
-                            *page_media_urls(version.cover_image_url, version.content),
-                            *(
-                                u
-                                for side in version.conflict
-                                for u in page_media_urls(
-                                    side.cover_image_url, side.content
-                                )
-                            ),
-                        ],
-                        item_id=page.id,
-                        origin=provider,
-                    )
-                )
-            return True
-        if mode is PageMode.LEGACY:
-            return False
-        held = await self._page_repo.get_space_page(page.id, space_id=space_id)
-        return held is not None
 
     # ─── Who may stream what (§24.11 authorship) ─────────────────────
 
@@ -2908,290 +968,95 @@ class SpaceSyncReceiver:
                     event, space_id, str(r.get("user_id") or ""), any_role=True
                 )
             case "posts":
-                if not rid or await self._space_post_repo.get(rid) is not None:
-                    return False
-                return await self._may_author(
-                    held_back, event, space_id, str(r.get("author") or "")
+                return await self._authored_post(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "posts_deleted":
-                # The live SPACE_POST_DELETED rule
-                # (``FederationInboundService._owned_post_mutation_allowed``):
-                # a post held live here IN THIS SPACE, removed by its
-                # author's household or one with content authority (host /
-                # admin / moderator seat — ``may_mutate``), then the space's
-                # ``posts`` level for the delete, for the user who made it:
-                # a moderator removal names its moderator
-                # (``actor_user_id``, migration 0084) — who must be seated
-                # on the provider and pass ``moderates_as`` /
-                # ``admin_as`` there, as the live event's actor does; the
-                # author's own delete names nobody and counts as the
-                # author's when the provider speaks for the author. A
-                # removal recorded before 0084 names nobody: from a
-                # moderator household it passes only an ``OPEN`` level (the
-                # host's own stream carries it regardless).
-                rid = rid or str(r.get("post_id") or "")
-                held_post = await self._space_post_repo.get(rid) if rid else None
-                if (
-                    held_post is None
-                    or held_post[0] != space_id
-                    or held_post[1].deleted
-                ):
-                    return False
-                author = held_post[1].author
-                if not await auth.may_mutate(event, space_id, author):
-                    return False
-                actor = (
-                    str(r.get("actor_user_id") or "") or None
-                    if r.get("moderated")
-                    else None
-                )
-                if actor is None and await auth.acts_for(
-                    event, space_id, author, any_role=True
-                ):
-                    actor = author
-                return await auth.access_admits(
-                    event,
-                    space_id,
-                    "posts",
-                    ContentAction.DELETE,
-                    actor=actor,
-                    row_owner=author,
-                    quiet=True,
+                return await self._authored_post_delete(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "comments_deleted":
-                # The live SPACE_COMMENT_DELETED rule
-                # (``_owned_comment_mutation_allowed``): a comment held live
-                # here on a post of THIS SPACE, removed by its author's
-                # household or one with content authority.
-                rid = rid or str(r.get("comment_id") or "")
-                held_comment = (
-                    await self._space_post_repo.get_comment(rid) if rid else None
+                return await self._authored_comment_delete(
+                    auth, space_id, rid, r, event, held_back
                 )
-                if held_comment is None or held_comment.deleted:
-                    return False
-                parent = await self._space_post_repo.get(held_comment.post_id)
-                if parent is None or parent[0] != space_id:
-                    return False
-                return await auth.may_mutate(event, space_id, held_comment.author)
             case "comments":
-                if not rid or await self._space_post_repo.get_comment(rid) is not None:
-                    return False
-                return await self._may_author(
-                    held_back,
-                    event,
-                    space_id,
-                    str(r.get("author") or ""),
-                    subscriber_comment=True,
+                return await self._authored_comment(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "task_lists":
-                # A member household only adds owner-bound lists (minted by
-                # every v_40 sender); a legacy (pre-v_40) list id is taken
-                # from the host alone, whose chunks never reach here — so a
-                # member can't squat a list id another space holds.
-                if not rid or not is_owner_bound(rid):
-                    return False
-                if await self._space_task_repo.get_list(rid) is not None:
-                    return False
-                if await self._space_task_repo.is_list_deleted(rid, space_id=space_id):
-                    return False  # deleted here; the tombstone wins
-                return await self._may_author(
-                    held_back, event, space_id, str(r.get("created_by") or "")
+                return await self._authored_task_list(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "task_lists_deleted":
-                # The live SPACE_TASK_LIST_DELETED rule
-                # (:meth:`_writer_delete_admits`) for a list held live here
-                # IN THIS SPACE.
-                rid = rid or str(r.get("list_id") or "")
-                held = await self._space_task_repo.get_list(rid) if rid else None
-                if held is None or held[0] != space_id:
-                    return False
-                return await self._writer_delete_admits(
-                    event, space_id, "tasks", r, row_owner=held[1].created_by
+                return await self._authored_task_list_delete(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "tasks_deleted":
-                # The live SPACE_TASK_DELETED rule for a task held live here
-                # IN THIS SPACE.
-                rid = rid or str(r.get("task_id") or "")
-                held_task = await self._space_task_repo.get(rid) if rid else None
-                if held_task is None or held_task[0] != space_id:
-                    return False
-                return await self._writer_delete_admits(
-                    event, space_id, "tasks", r, row_owner=held_task[1].created_by
+                return await self._authored_task_delete(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "tasks" | "tasks_archived":
-                if not rid or await self._space_task_repo.get(rid) is not None:
-                    return False
-                if await self._space_task_repo.is_task_deleted(rid, space_id=space_id):
-                    return False  # deleted here; the tombstone wins
-                return await self._may_author(
-                    held_back, event, space_id, str(r.get("created_by") or "")
+                return await self._authored_task(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "pages_deleted":
-                # The live SPACE_PAGE_DELETED rule: a writer household
-                # removes a page held live here IN THIS SPACE, if the
-                # space's ``pages`` level admits the delete for the user who
-                # made it (``actor_user_id``), who must be seated on the
-                # provider. Refusals are counted in :meth:`_admit`.
-                rid = rid or str(r.get("page_id") or "")
-                held_page = await self._page_repo.get(rid) if rid else None
-                if held_page is None or held_page.space_id != space_id:
-                    return False
-                return await self._writer_delete_admits(
-                    event, space_id, "pages", r, row_owner=held_page.created_by
+                return await self._authored_page_delete(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "pages":
-                if not rid or await self._page_repo.get(rid) is not None:
-                    return False
-                if await self._page_repo.is_page_deleted(rid, space_id=space_id):
-                    return False  # deleted here; the tombstone wins
-                creator = str(r.get("created_by") or "")
-                if creator:
-                    return await self._may_author(held_back, event, space_id, creator)
-                return await auth.writes_here(event, space_id)
+                return await self._authored_page(
+                    auth, space_id, rid, r, event, held_back
+                )
             case "stickies_deleted":
-                # The live SPACE_STICKY_DELETED rule
-                # (``_collaborative_write_allowed``, feature ``stickies``)
-                # for a sticky held live here IN THIS SPACE.
-                held_sticky = await self._sticky_repo.get(rid) if rid else None
-                if held_sticky is None or held_sticky.space_id != space_id:
-                    return False
-                return await self._writer_delete_admits(
-                    event, space_id, "stickies", r, row_owner=held_sticky.author
+                return await self._authored_sticky_delete(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "stickies":
-                if not rid or await self._sticky_repo.get(rid) is not None:
-                    return False
-                if await self._sticky_repo.is_deleted(rid, space_id=space_id):
-                    return False  # deleted here; the tombstone wins
-                return await self._may_author(
-                    held_back,
-                    event,
-                    space_id,
-                    str(r.get("author") or r.get("created_by") or ""),
+                return await self._authored_sticky(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "calendar_deleted":
-                # The live SPACE_CALENDAR_EVENT_DELETED rule (feature
-                # ``calendar``) for an event held live here IN THIS SPACE.
-                held_event = (
-                    await self._space_calendar_repo.get_event(rid) if rid else None
-                )
-                if held_event is None or held_event[0] != space_id:
-                    return False
-                return await self._writer_delete_admits(
-                    event,
-                    space_id,
-                    "calendar",
-                    r,
-                    row_owner=held_event[1].created_by,
+                return await self._authored_calendar_delete(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "calendar":
-                if (
-                    not rid
-                    or await self._space_calendar_repo.get_event(rid) is not None
-                ):
-                    return False
-                if await self._space_calendar_repo.is_event_deleted(
-                    rid, space_id=space_id
-                ):
-                    return False  # deleted here; the tombstone wins
-                return await self._may_author(
-                    held_back, event, space_id, str(r.get("created_by") or "")
+                return await self._authored_calendar(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "gallery_albums_deleted":
-                # The live SPACE_GALLERY_ALBUM_DELETED rule
-                # (``_gallery_album_mutable``): a user album held live here
-                # IN THIS SPACE, deleted by its owner's household or one
-                # with settings authority (host / admin — not a moderator).
-                held_album = await self._gallery_repo.get_album(rid) if rid else None
-                if (
-                    held_album is None
-                    or held_album.space_id != space_id
-                    or held_album.is_system
-                ):
-                    return False
-                return await auth.may_mutate(
-                    event, space_id, held_album.owner_user_id or "", settings=True
+                return await self._authored_album_delete(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "gallery_items_deleted":
-                # The live SPACE_GALLERY_ITEM_DELETED rule: an item held live
-                # here in an album of THIS SPACE, deleted by its uploader's
-                # household or one with content authority.
-                held_item = await self._gallery_repo.get_item(rid) if rid else None
-                if held_item is None:
-                    return False
-                item_album = await self._gallery_repo.get_album(held_item.album_id)
-                if item_album is None or item_album.space_id != space_id:
-                    return False
-                return await auth.may_mutate(event, space_id, held_item.uploaded_by)
+                return await self._authored_item_delete(
+                    auth, space_id, rid, r, event, held_back
+                )
             case "gallery":
-                if r.get("kind") == "album":
-                    if r.get("is_system"):
-                        return False
-                    if not rid or await self._gallery_repo.get_album(rid) is not None:
-                        return False  # a member household only adds albums
-                    if await self._gallery_repo.is_album_deleted(
-                        rid, space_id=space_id
-                    ):
-                        return False  # deleted here; the tombstone wins
-                    owner = str(r.get("owner_user_id") or r.get("owner_id") or "")
-                    if await auth.acts_for(event, space_id, owner):
-                        return True
-                    if await auth.trails_seat(space_id, owner):
-                        held_back.add()
-                    return False
-                if not rid or await self._gallery_repo.get_item(rid) is not None:
-                    return False
-                if await self._gallery_repo.is_item_deleted(rid, space_id=space_id):
-                    return False  # deleted here; the tombstone wins
-                return await self._may_author(
-                    held_back,
-                    event,
-                    space_id,
-                    str(r.get("uploaded_by") or r.get("uploader") or ""),
+                return await self._authored_gallery(
+                    auth, space_id, rid, r, event, held_back
                 )
+            case "polls" | "timetables_deleted":
+                # v_92 — the host's alone: a poll's votes, closure and
+                # options are everybody's (no member household may set
+                # them by stream), and a timetable tombstone does not name
+                # the moderator who made it, so no live rule could judge a
+                # member household's copy.
+                return False
             case "schedules":
-                post_id = str(r.get("post_id") or "")
-                if self._poll_repo is None or not post_id:
-                    return False
-                if await self._poll_repo.get_schedule_meta(post_id) is not None:
-                    return False
-                return await self._anchor_author_ok(event, space_id, post_id)
-            case "space_zones_deleted":
-                # The live SPACE_ZONE_DELETED rule: an admin household
-                # (zones are admin-only) removes a zone held live here IN
-                # THIS SPACE.
-                held_zone = (
-                    await self._zone_repo.get(rid)
-                    if rid and self._zone_repo is not None
-                    else None
+                return await self._authored_schedule(
+                    auth, space_id, rid, r, event, held_back
                 )
-                if held_zone is None or held_zone.space_id != space_id:
-                    return False
-                return await auth.is_admin_household(event, space_id)
+            case "space_zones_deleted":
+                return await self._authored_zone_delete(
+                    auth, space_id, rid, r, event, held_back
+                )
             case "space_zones":
-                if (
-                    rid
-                    and self._zone_repo is not None
-                    and await self._zone_repo.is_deleted(rid, space_id=space_id)
-                ):
-                    return False  # deleted here; the tombstone wins
-                return await auth.is_admin_household(event, space_id)
+                return await self._authored_zone(
+                    auth, space_id, rid, r, event, held_back
+                )
             case "timetables":
-                # Moderator-only, per user, like the live event: the
-                # household moderates and the recorded editor is its admin;
-                # a timetable new here also names a creator it speaks for.
-                if self._timetable_repo is None or not rid:
-                    return False
-                if not await auth.is_admin_household(event, space_id):
-                    return False
-                if not await auth.admin_as(
-                    event, space_id, str(r.get("updated_by") or "")
-                ):
-                    return False
-                if await self._timetable_repo.get(rid) is not None:
-                    return True
-                return await self._may_author(
-                    held_back, event, space_id, str(r.get("created_by") or "")
+                return await self._authored_timetable(
+                    auth, space_id, rid, r, event, held_back
                 )
             case "chat_messages" | "chat_messages_deleted":
                 # Judged record by record by the chat sink with the live
@@ -3200,351 +1065,10 @@ class SpaceSyncReceiver:
                 # skipped), whoever streams it.
                 return True
             case "bazaar":
-                post_id = str(r.get("post_id") or "")
-                if self._bazaar_repo is None or not post_id:
-                    return False
-                if await self._bazaar_repo.get_listing(post_id) is not None:
-                    return False
-                got = await self._space_post_repo.get(post_id)
-                seller = str(r.get("seller_user_id") or "")
-                if got is None or got[1].author != seller:
-                    return False
-                return await self._may_author(held_back, event, space_id, seller)
-        return False
-
-    async def _may_author(
-        self,
-        held_back: HeldBack,
-        event: FederationEvent,
-        space_id: str,
-        user_id: str,
-        **kwargs: Any,
-    ) -> bool:
-        """:meth:`SpaceAuthorship.may_author` for a record a member household
-        adds — and, when it is refused because this space has no record of
-        ``user_id`` at all yet (the roster gossip seating them trails the
-        stream), the record is held back: the stream must not count as
-        clean, or the provider's watermark would skip it until the daily
-        full pass."""
-        assert self._authorship is not None
-        if await self._authorship.may_author(event, space_id, user_id, **kwargs):
-            return True
-        if await self._authorship.trails_seat(space_id, user_id):
-            held_back.add()
-        return False
-
-    async def _writer_delete_admits(
-        self,
-        event: FederationEvent,
-        space_id: str,
-        feature: str,
-        r: dict[str, Any],
-        *,
-        row_owner: str,
-    ) -> bool:
-        """The live delete rule of the collaborative features (tasks, task
-        lists, pages, stickies, calendar events —
-        ``_collaborative_write_allowed`` for ``ContentAction.DELETE``) for a
-        streamed tombstone of a row held live here: a **writer** household
-        removes it, if the space's ``feature`` level admits the delete for
-        the user who made it (``actor_user_id``, the tombstone's
-        ``deleted_by``), who must be seated on the provider. Refusals are
-        counted in :meth:`_admit`'s one summary line (``quiet``), not logged
-        per record on every scheduler tick."""
-        auth = self._authorship
-        assert auth is not None
-        if not await auth.writes_here(event, space_id):
-            return False
-        actor = str(r.get("actor_user_id") or "") or None
-        if actor is not None and not await auth.acts_for(
-            event, space_id, actor, any_role=True
-        ):
-            return False
-        return await auth.access_admits(
-            event,
-            space_id,
-            feature,
-            ContentAction.DELETE,
-            actor=actor,
-            row_owner=row_owner,
-            quiet=True,
-        )
-
-    async def _anchor_author_ok(
-        self, event: FederationEvent, space_id: str, post_id: str
-    ) -> bool:
-        assert self._authorship is not None
-        got = await self._space_post_repo.get(post_id)
-        if got is None or got[0] != space_id:
-            return False
-        return await self._authorship.may_author(event, space_id, got[1].author)
-
-    def _legacy_album_deleted(self, space_id: str, album_id: str) -> bool:
-        return self._legacy_album_deletes is not None and (
-            self._legacy_album_deletes.is_deleted(space_id, album_id)
-        )
-
-    async def _persist_album(
-        self,
-        record: dict[str, Any],
-        space_id: str,
-        *,
-        from_host: bool,
-        held_back: HeldBack,
-    ) -> bool:
-        """Create a streamed album — or, held here already in this space for
-        the same owner, take the **host's** edits of it (name, description,
-        cover; the host's copy is the one the space converges on, as for
-        every host record). ``True`` when the album is held here in this
-        space afterwards, so its item count is recounted. A member
-        household's record only ever adds an album (:meth:`_admit`)."""
-        if self._legacy_album_deleted(
-            space_id, str(record["id"])
-        ) or await self._gallery_repo.is_album_deleted(
-            str(record["id"]), space_id=space_id
-        ):
-            log.debug("sync: gallery album %s was deleted here — skipped", record["id"])
-            return False
-        if record.get("is_system"):
-            ours = await self._gallery_repo.get_system_album(space_id)
-            if ours is not None and ours.id != str(record["id"]):
-                # Every household mints its own system ("Posts") album, so a
-                # provider's is never stored here once we hold ours (the
-                # partial unique index). Remember its id: an item or
-                # tombstone naming it can never land — a refusal by rule,
-                # never a hold.
-                self._foreign_system_albums[str(record["id"])] = None
-                while len(self._foreign_system_albums) > MAX_TRACKED_STREAMS:
-                    self._foreign_system_albums.popitem(last=False)
-                return False
-        # The album lands in the space this sync stream was gated for —
-        # never the record's own ``space_id`` (another space, or NULL =
-        # the household gallery), which is just untrusted payload.
-        album = _album_from_record(record, space_id)
-        if (
-            check_owner_bound_id(
-                GALLERY_ALBUM_KIND,
-                album.id,
-                space_id=space_id,
-                owner_user_id=album.owner_user_id,
-            )
-            is OwnerBinding.MISMATCH
-        ):
-            # An owner-bound id commits to its creator; a record naming
-            # anyone else is a claim on another household's album.
-            log.warning(
-                "sync: gallery album id %s is not bound to %r in space %s — skipped",
-                album.id,
-                album.owner_user_id,
-                space_id,
-            )
-            return False
-        held = await self._gallery_repo.get_album(album.id)
-        if held is not None:
-            if held.space_id != space_id or held.owner_user_id != album.owner_user_id:
-                log.warning(
-                    "sync: gallery album %s is held for another space or owner "
-                    "— refusing the write for %s",
-                    album.id,
-                    space_id,
+                return await self._authored_bazaar(
+                    auth, space_id, rid, r, event, held_back
                 )
-                return False
-            if from_host and not held.is_system:
-                # An idempotent re-apply changes no synced column, so it
-                # stamps nothing (migration 0086) — no echo.
-                await self._gallery_repo.update_album_in_space(
-                    album.id,
-                    {
-                        "name": album.name,
-                        "description": album.description,
-                        "cover_item_id": album.cover_item_id,
-                    },
-                    space_id=space_id,
-                )
-            return True
-        try:
-            await self._gallery_repo.create_album(album)
-        except Exception:
-            # NOT a duplicate: ``create_album`` is already
-            # ``ON CONFLICT DO NOTHING``, so a redelivered album is silent
-            # at the SQL layer and never reaches here. The previous comment
-            # claimed otherwise and the blanket ``pass`` hid the real
-            # failure for as long as gallery sync has existed — a remotely
-            # owned album violated ``owner_user_id REFERENCES users``, so a
-            # member household got the image bytes and no rows (#650).
-            # Anything landing here is worth seeing.
-            log.warning(
-                "sync: persisting gallery album %s (space=%s) failed",
-                album.id,
-                album.space_id,
-                exc_info=True,
-            )
-            held_back.fail()  # a failed persist: the stream is not clean
-            return False
-        return True
-
-    async def _take_host_item_edit(
-        self, held: GalleryItem, streamed: GalleryItem, space_id: str
-    ) -> None:
-        """Apply the host's caption / day taken / album of an item held here
-        (v_79), under the live ``SPACE_GALLERY_ITEM_UPDATED`` limits: a value
-        the local rules refuse is skipped, never stored. The repo keeps the
-        item, and any move, inside this space's live user albums."""
-        patch: dict = {}
-        caption = streamed.caption
-        if caption is None or (
-            isinstance(caption, str) and len(caption.strip()) <= CAPTION_MAX
-        ):
-            patch["caption"] = (caption or "").strip() or None
-        try:
-            patch["taken_at"] = valid_taken_day(streamed.taken_at)
-        except ValueError:
-            pass
-        patch = {k: v for k, v in patch.items() if getattr(held, k) != v}
-        to_album = streamed.album_id if streamed.album_id != held.album_id else None
-        if not patch and to_album is None:
-            return  # nothing the local rules take differs
-        if (
-            await self._gallery_repo.edit_item_in_space(
-                held.id, space_id=space_id, patch=patch, to_album_id=to_album
-            )
-            is None
-        ):
-            log.debug(
-                "sync: the host's edit of gallery item %s not applied in %s",
-                held.id,
-                space_id,
-            )
-
-    async def _persist_gallery_item(
-        self,
-        record: dict[str, Any],
-        space_id: str,
-        held_back: HeldBack,
-        *,
-        from_host: bool = False,
-        provider: str = "",
-    ) -> bool:
-        """Store a streamed item — or, held here already in this space, take
-        the **host's** caption, day taken and album (v_79: a space photo is
-        edited in place, and the host's copy is the one the space converges
-        on, as for albums). ``True`` when it landed in an album of this
-        space (its count is then recounted)."""
-        album_id = str(record.get("album_id") or "")
-        if self._legacy_album_deleted(
-            space_id, album_id
-        ) or await self._gallery_repo.is_album_deleted(album_id, space_id=space_id):
-            return False  # its album was deleted here; so was the item
-        if await self._gallery_repo.is_item_deleted(
-            str(record["id"]), space_id=space_id
-        ):
-            log.debug("sync: gallery item %s was deleted here — skipped", record["id"])
-            return False
-        item = GalleryItem(
-            id=str(record["id"]),
-            album_id=album_id,
-            uploaded_by=str(record.get("uploaded_by") or record.get("uploader") or ""),
-            item_type=str(record.get("item_type") or "photo"),
-            # Only the canonical local ``api/media/<name>`` shape is stored.
-            url=space_media_ref(record.get("url")) or "",
-            thumbnail_url=space_media_ref(record.get("thumbnail_url")) or "",
-            width=int(record.get("width") or 0),
-            height=int(record.get("height") or 0),
-            duration_s=record.get("duration_s"),
-            caption=record.get("caption"),
-            taken_at=record.get("taken_at") or record.get("day_taken"),
-            sort_order=int(record.get("sort_order") or 0),
-            created_at=record.get("created_at"),
-        )
-        held = (
-            await self._gallery_repo.get_item(item.id)
-            if from_host or self._gfs_media is not None
-            else None
-        )
-        if held is not None and not from_host:
-            # Held here already: a member's stream adds nothing to it (the
-            # insert below is a no-op) — and never its own media_refs.
-            held_elsewhere = held
-            held = None
-        else:
-            held_elsewhere = None
-        if held is not None:
-            held_album = await self._gallery_repo.get_album(held.album_id)
-            if held_album is None or held_album.space_id != space_id:
-                # The id is held here for another space or the household
-                # gallery: the record is not this space's to edit (nor does
-                # it land — an id is never reused).
-                log.warning(
-                    "sync: gallery item %s is held outside space %s here "
-                    "— refusing the write",
-                    item.id,
-                    space_id,
-                )
-                return False
-            if _item_edited(held, item):
-                await self._take_host_item_edit(held, item, space_id)
-            return True
-        # v_80 — a NEW item's files take this household's names for the
-        # copies in the GFS media cache (bound to the streaming household).
-        media = await self._localize_record(
-            space_id,
-            record,
-            item.id,
-            [u for u in (item.thumbnail_url, item.url) if u],
-            provider=provider,
-            takes_descriptor=held_elsewhere is None,
-            from_host=from_host,
-        )
-        item = replace(
-            item,
-            url=media.url(item.url) or "",
-            thumbnail_url=media.url(item.thumbnail_url) or "",
-        )
-        try:
-            # ``bump_count=False``: the caller recounts the album once the
-            # chunk is in. The album must belong to this sync's space.
-            if await self._gallery_repo.create_item_in_space(
-                item, space_id=space_id, bump_count=False
-            ):
-                if held_elsewhere is None:
-                    await self._keep_media(media)
-                return True
-            if (
-                await self._gallery_repo.get_album(album_id) is None
-                and album_id not in self._foreign_system_albums
-            ):
-                # Its album is not here yet (a chunk applied out of order):
-                # a later stream lands it — not a refusal.
-                held_back.add()
-                return False
-            log.warning(
-                "sync: gallery item %s names album %s outside space %s "
-                "— refusing the write",
-                item.id,
-                item.album_id,
-                space_id,
-            )
-        except Exception:
-            # Same reasoning as ``_persist_album``: redelivery is handled in
-            # SQL, so a failure here is real (a missing parent album, a bad
-            # record) and must not be silent — nor count as stored.
-            log.warning(
-                "sync: persisting gallery item %s (album=%s) failed",
-                item.id,
-                item.album_id,
-                exc_info=True,
-            )
-            held_back.fail()
         return False
-
-
-def _item_edited(held: GalleryItem, streamed: GalleryItem) -> bool:
-    """The host's record of a held item differs in an editable field."""
-    return (
-        held.album_id != streamed.album_id
-        or held.caption != streamed.caption
-        or held.taken_at != streamed.taken_at
-    )
 
 
 #: ``resource → (id kind, owner fields in precedence order)`` for the sync
@@ -3567,6 +1091,7 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "gallery_albums_deleted": (GALLERY_ALBUM_KIND, ("owner_user_id",)),
     "gallery_items_deleted": (GALLERY_ITEM_KIND, ("uploaded_by",)),
     "timetables": (SPACE_TIMETABLE_KIND, ("created_by",)),
+    "timetables_deleted": (SPACE_TIMETABLE_KIND, ("created_by",)),
     "chat_messages": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
     "chat_messages_deleted": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
 }
@@ -3600,438 +1125,3 @@ def _claims_bound_id(resource: str, space_id: str, r: dict[str, Any]) -> bool:
         owner_user_id=owner,
         context=f"space sync ({resource})",
     )
-
-
-def _bound_here(kind: str, row_id: str, space_id: str, owner: str) -> bool:
-    """Is ``row_id`` owner-bound to ``owner`` in ``space_id``? The condition
-    for a host stub of an id never held here: ids are global, so a stub for
-    another space's id (or a legacy, unbound one) would block a real row."""
-    return (
-        check_owner_bound_id(kind, row_id, space_id=space_id, owner_user_id=owner)
-        is OwnerBinding.VALID
-    )
-
-
-def _log_tombstone_refusals(
-    what: str, provider: str, space_id: str, cross_space: list[str], unbound: int
-) -> None:
-    """One summary per chunk of the tombstone records that were refused."""
-    if cross_space:
-        log.warning(
-            "space sync: %d %s tombstone(s) from %s for %s name a %s held in "
-            "another space — refused: %s",
-            len(cross_space),
-            what,
-            provider,
-            space_id,
-            what,
-            ", ".join(cross_space[:5]),
-        )
-    if unbound:
-        log.info(
-            "space sync: %d %s tombstone(s) from %s for %s name a %s never "
-            "held here whose id is not bound to this space (or, for a "
-            "comment / gallery item, whose post / album is not held here) — "
-            "no stub recorded",
-            unbound,
-            what,
-            provider,
-            space_id,
-            what,
-        )
-
-
-def _log_sync_refusal(what: str, row_id: str, space_id: str) -> None:
-    """WARNING for a sync record the scoped repo refused: the id belongs
-    to another space (or, for a task, its list is not in this space)."""
-    log.warning(
-        "space sync: %s %s is not writable in space %s — refusing the write",
-        what,
-        row_id,
-        space_id,
-    )
-
-
-# ─── Record → domain helpers ────────────────────────────────────────
-
-
-def _album_from_record(record: dict[str, Any], space_id: str) -> GalleryAlbum:
-    """The album a sync record describes, filed under ``space_id``."""
-    return GalleryAlbum(
-        id=str(record["id"]),
-        space_id=space_id,
-        owner_user_id=(
-            # System albums have no human owner; carry NULL.
-            None
-            if record.get("is_system")
-            else (
-                str(record.get("owner_user_id") or record.get("owner_id") or "") or None
-            )
-        ),
-        name=str(record.get("name") or ""),
-        description=record.get("description"),
-        cover_item_id=record.get("cover_item_id"),
-        item_count=int(record.get("item_count") or 0),
-        retention_exempt=bool(record.get("retention_exempt", False)),
-        is_system=bool(record.get("is_system", False)),
-        created_at=record.get("created_at"),
-    )
-
-
-def _post_from_record(r: dict[str, Any]) -> Post | None:
-    post_id = r.get("id")
-    author = r.get("author")
-    if not post_id or not author:
-        return None
-    try:
-        post_type = PostType(str(r.get("type") or "text"))
-    except ValueError:
-        post_type = PostType.TEXT
-    file_meta_dict = r.get("file_meta")
-    file_meta = None
-    if isinstance(file_meta_dict, dict):
-        try:
-            file_meta = FileMeta(**file_meta_dict)
-        except TypeError:
-            file_meta = None
-    return Post(
-        id=str(post_id),
-        author=str(author),
-        type=post_type,
-        created_at=_parse_iso(r.get("created_at")),
-        content=r.get("content"),
-        # Media references only in the local-upload shape.
-        media_url=space_media_ref(r.get("media_url")),
-        comment_count=int(r.get("comment_count") or 0),
-        pinned=bool(r.get("pinned", False)),
-        deleted=bool(r.get("deleted", False)),
-        edited_at=_parse_iso(r.get("edited_at")) if r.get("edited_at") else None,
-        moderated=bool(r.get("moderated", False)),
-        file_meta=file_meta,
-        # An unannounced listing / event anchor must stay out of the
-        # joiner's feed exactly as it is out of the provider's.
-        hidden_from_feed=bool(r.get("hidden_from_feed", False)),
-        # The post's image gallery — the media bytes that follow are
-        # matched against these names. Local-upload references, feed-capped.
-        image_urls=space_media_refs(r.get("image_urls"), limit=FEED_POST_MAX_IMAGES),
-        # The author-built link card (never re-fetched here), re-validated.
-        link_preview=space_wire_link_preview(r.get("link_preview")),
-        # A joiner sees the reactions the provider holds (a held post keeps
-        # its own — see the ``posts`` branch).
-        reactions=_reactions_from_record(r.get("reactions")),
-    )
-
-
-def _reactions_from_record(raw: object) -> dict[str, frozenset[str]]:
-    """The exporter's ``{emoji: [user_id, …]}``, malformed entries dropped,
-    capped at the per-post distinct-emoji maximum."""
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, frozenset[str]] = {}
-    for emoji, users in raw.items():
-        if len(out) >= MAX_DISTINCT_REACTIONS_PER_POST:
-            break
-        if not isinstance(emoji, str) or not emoji or not isinstance(users, list):
-            continue
-        ids = frozenset(u for u in users if isinstance(u, str) and u)
-        if ids:
-            out[emoji] = ids
-    return out
-
-
-def _comment_from_record(r: dict[str, Any]) -> Comment | None:
-    if not r.get("id") or not r.get("post_id") or not r.get("author"):
-        return None
-    try:
-        comment_type = CommentType(str(r.get("type") or "text"))
-    except ValueError:
-        comment_type = CommentType.TEXT
-    return Comment(
-        id=str(r["id"]),
-        post_id=str(r["post_id"]),
-        author=str(r["author"]),
-        type=comment_type,
-        created_at=_parse_iso(r.get("created_at")),
-        parent_id=r.get("parent_id"),
-        content=r.get("content"),
-        media_url=local_media_ref(r.get("media_url")),
-    )
-
-
-def _page_from_record(r: dict[str, Any], space_id: str) -> Page | None:
-    if not r.get("id") or not r.get("title"):
-        return None
-    return Page(
-        id=str(r["id"]),
-        title=str(r["title"]),
-        content=str(r.get("content") or ""),
-        created_by=str(r.get("created_by") or ""),
-        created_at=str(r.get("created_at") or ""),
-        updated_at=str(r.get("updated_at") or ""),
-        space_id=space_id or r.get("space_id"),
-        cover_image_url=r.get("cover_image_url"),
-    )
-
-
-def _sticky_from_record(r: dict[str, Any], space_id: str) -> Sticky | None:
-    if not r.get("id") or not r.get("author"):
-        return None
-    # Shared sticky field rules: a non-hex colour (rendered as CSS) is
-    # replaced, coordinates clamped, content sanitised + capped.
-    fields = coerce_peer_sticky(
-        content=r.get("content"),
-        color=r.get("color"),
-        position_x=r.get("position_x"),
-        position_y=r.get("position_y"),
-    )
-    if not fields.content:
-        return None
-    if fields.truncated:
-        log.warning(
-            "space sync: sticky %s in space %s — content over %d characters, truncated",
-            r["id"],
-            space_id,
-            MAX_STICKY_CONTENT_LENGTH,
-        )
-    return Sticky(
-        id=str(r["id"]),
-        author=str(r["author"]),
-        content=fields.content,
-        color=fields.color,
-        position_x=fields.position_x,
-        position_y=fields.position_y,
-        created_at=str(r.get("created_at") or ""),
-        updated_at=str(r.get("updated_at") or ""),
-        space_id=space_id or r.get("space_id"),
-    )
-
-
-def _zone_from_record(
-    r: dict[str, Any], space_id: str, *, provider: str
-) -> SpaceZone | None:
-    """Reconstruct a :class:`SpaceZone` from an exporter chunk record.
-
-    Lenient: skip the row rather than raising if a malformed record
-    leaks into the chunk. The federation layer has already verified
-    the envelope signature, so the worst case is a peer with a buggy
-    catalogue — log and drop the offending row, keep the others.
-
-    Name, colour and icon pass the same validation as the local API
-    (§23.8.7) — a refused row is a WARNING naming the space and the
-    provider, never the name.
-    """
-    zone_id = r.get("id")
-    if not zone_id or not r.get("name"):
-        return None
-    try:
-        name = validate_zone_name(r.get("name"))
-        color = validate_zone_color(r.get("color"))
-        # Same geometry rules as the local API: finite, in range, 4 dp
-        # (CLAUDE.md GPS rule), radius 25 m – 50 km.
-        latitude = validate_zone_coord(r.get("latitude"), name="latitude", limit=90)
-        longitude = validate_zone_coord(r.get("longitude"), name="longitude", limit=180)
-        radius_m = validate_zone_radius(r.get("radius_m"))
-        icon = validate_zone_icon(r.get("icon"))
-    except ValueError as exc:
-        log.warning(
-            "space sync from %s: zone %s in space %s refused — %s",
-            provider,
-            str(zone_id)[:64],
-            space_id,
-            exc,
-        )
-        return None
-    return SpaceZone(
-        id=str(zone_id),
-        space_id=space_id or str(r.get("space_id") or ""),
-        name=name,
-        latitude=latitude,
-        longitude=longitude,
-        radius_m=radius_m,
-        color=color,
-        icon=icon,
-        created_by=str(r.get("created_by") or ""),
-        created_at=str(r.get("created_at") or ""),
-        updated_at=str(r.get("updated_at") or ""),
-    )
-
-
-def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent | None:
-    """A ``calendar`` record as the event row it streams — read like the
-    live ``SPACE_CALENDAR_EVENT_*`` payload, rule and all: a record that
-    dropped ``rrule`` / ``cover_url`` / ``location`` / ``announce_in_feed``
-    upserted a member's copy of a series into a one-off event and wiped the
-    rest, on every stream.
-
-    An id of the form ``<event id>@<its own start>`` is not a row: it is
-    an occurrence an older provider expanded a series into (one record per
-    occurrence, ten years either side of its clock). The series streams as
-    its own row; storing its occurrences would duplicate it as one-off
-    events, so they are skipped."""
-    rid = str(r.get("id") or "")
-    if (
-        not rid
-        or is_occurrence_id(rid, str(r.get("start") or ""))
-        or not r.get("calendar_id")
-        or not r.get("summary")
-        or not r.get("created_by")
-    ):
-        return None
-    start = _parse_iso(r.get("start"))
-    end = _parse_iso(r.get("end"))
-    rrule = r.get("rrule")
-    location = r.get("location")
-    return CalendarEvent(
-        id=rid,
-        calendar_id=str(r["calendar_id"]),
-        summary=str(r["summary"]),
-        start=start,
-        end=end,
-        created_by=str(r["created_by"]),
-        description=r.get("description"),
-        all_day=bool(r.get("all_day", False)),
-        attendees=tuple(str(a) for a in (r.get("attendees") or ())),
-        mirrored_from=r.get("mirrored_from"),
-        rrule=rrule if isinstance(rrule, str) and rrule else None,
-        capacity=coerce_capacity(r.get("capacity")),
-        # Rendered as ``<img src>`` for every member: only a local media
-        # reference — a third-party URL would leak their IPs.
-        cover_url=(
-            cover
-            if (cover := verbatim_local_media_ref(r.get("cover_url")))
-            and space_media_ref(cover)
-            else None
-        ),
-        location=location if isinstance(location, str) and location else None,
-        # IANA wall-clock anchor — validated as on the live event; an older
-        # peer omits it and gets ``"UTC"``.
-        tz=coerce_tz(r.get("tz"), context=f"space sync calendar from {provider}"),
-        # §23.15 opt-in feed mirror; absent on an older provider → True, the
-        # live event's default.
-        announce_in_feed=bool(r.get("announce_in_feed", True)),
-    )
-
-
-async def _apply_bazaar_faq(
-    repo: AbstractBazaarRepo, listing_post_id: str, items: object
-) -> None:
-    """A ``bazaar`` record's questions and answers (``faq``, v_75), taken
-    entry by entry under the live rule (newer ``rev`` wins, a removal is
-    final, ≤ 10 live): removals first, so a full listing makes room before
-    the entries that replaced them. A malformed entry is skipped; past
-    :data:`_FAQ_RECORD_MAX_ITEMS` the record is refused (a listing never
-    holds more entries than that, live and removed together)."""
-    if items is None:
-        return  # an older provider
-    if not isinstance(items, list) or len(items) > _FAQ_RECORD_MAX_ITEMS:
-        log.warning(
-            "space sync: bazaar listing %s carries a malformed faq — skipped",
-            listing_post_id,
-        )
-        return
-    entries: list[BazaarFaqEntry] = []
-    for item in items:
-        try:
-            entries.append(entry_from_wire(listing_post_id, item))
-        except ValueError:
-            log.warning(
-                "space sync: bazaar listing %s: malformed faq entry skipped",
-                listing_post_id,
-            )
-    entries.sort(key=lambda e: (not e.removed, e.rev))
-    for entry in entries:
-        await repo.apply_faq_entry(entry)
-
-
-#: The most ``faq`` items one §25.6 ``bazaar`` record may carry: every
-#: entry a listing ever holds, all its removal markers included (so a late
-#: joiner never takes a stale edit of a removed entry).
-_FAQ_RECORD_MAX_ITEMS = BAZAAR_FAQ_MAX_ENTRIES_EVER
-
-
-def _bazaar_listing_from_record(
-    r: dict[str, Any],
-    space_id: str,
-) -> BazaarListing | None:
-    """Reconstruct a :class:`BazaarListing` from an exporter chunk record.
-
-    Lenient: missing required fields or unknown mode/status → log + skip
-    the row. The wrapper post must already be persisted (FK to
-    space_posts.id); if it isn't, ``save_listing`` will raise IntegrityError
-    and the caller catches it.
-    """
-    post_id = r.get("post_id")
-    seller = r.get("seller_user_id")
-    mode_raw = r.get("mode")
-    title = r.get("title")
-    if not post_id or not seller or not mode_raw or title is None:
-        log.debug("bazaar record missing required field: %r", r)
-        return None
-    try:
-        mode = BazaarMode(str(mode_raw))
-        status = BazaarStatus(str(r.get("status") or "active"))
-    except ValueError:
-        log.debug(
-            "bazaar record unknown mode/status: mode=%r status=%r",
-            mode_raw,
-            r.get("status"),
-        )
-        return None
-    return BazaarListing(
-        post_id=str(post_id),
-        space_id=str(r.get("space_id") or space_id),
-        seller_user_id=str(seller),
-        mode=mode,
-        title=str(title),
-        end_time=str(r.get("end_time") or ""),
-        currency=str(r.get("currency") or "USD"),
-        status=status,
-        created_at=str(r.get("created_at") or ""),
-        description=r.get("description"),
-        image_urls=space_media_refs(r.get("image_urls"), limit=BAZAAR_MAX_IMAGES),
-        price=r.get("price"),
-        start_price=r.get("start_price"),
-        step_price=r.get("step_price"),
-        winner_user_id=r.get("winner_user_id"),
-        winning_price=r.get("winning_price"),
-        sold_at=r.get("sold_at"),
-    )
-
-
-def _timetable_from_record(r: dict[str, Any], space_id: str) -> Timetable | None:
-    """A synced timetable record, or ``None`` (logged at WARNING) when it is
-    malformed, out of bounds, carries assignees, or its id is not bound to
-    its creator in this space — space timetables are owner-bound from their
-    first release, so a legacy-shaped id is refused too."""
-    try:
-        tt = drop_invalid_icons(from_wire_dict(r))
-        validate(tt)
-    except Exception as exc:  # hostile input: never raise out of the stream
-        log.warning(
-            "space sync: unusable timetable record for %s — skipped: %.200s",
-            space_id,
-            exc,
-            exc_info=True,
-        )
-        return None
-    if tt.assignees:
-        log.warning(
-            "space sync: timetable %s for %s names assignees — skipped",
-            tt.id,
-            space_id,
-        )
-        return None
-    if (
-        check_owner_bound_id(
-            SPACE_TIMETABLE_KIND, tt.id, space_id=space_id, owner_user_id=tt.created_by
-        )
-        is not OwnerBinding.VALID
-    ):
-        log.warning(
-            "space sync: timetable id %s is not bound to %r in space %s — skipped",
-            tt.id,
-            tt.created_by,
-            space_id,
-        )
-        return None
-    return tt

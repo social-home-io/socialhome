@@ -1069,6 +1069,13 @@ class ReplayCache:
         self._seen[msg_id] = current
         return False
 
+    def forget(self, msg_id: str) -> None:
+        """Drop one id recorded by :meth:`seen` — for an envelope that then
+        hit an internal error before its id was persisted, so the sender's
+        retry is taken instead of refused as a replay (see
+        :class:`~socialhome.federation.inbound_validator.InboundPipeline`)."""
+        self._seen.pop(msg_id, None)
+
     def prune(self, *, now: datetime | None = None) -> None:
         self._prune(now if now is not None else datetime.now(UTC))
 

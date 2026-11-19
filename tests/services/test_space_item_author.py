@@ -11,6 +11,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
     sign_ed25519,
 )
+from socialhome.domain.file_hashes import FileHash
 from socialhome.services.space_item_author import (
     ITEM_AUTHOR_SIG_SUITE_ED25519,
     UnsupportedItemAuthorSigSuite,
@@ -18,7 +19,10 @@ from socialhome.services.space_item_author import (
     item_signing_bytes,
     verify_signed_item_inner,
 )
-from socialhome.services.space_public_author import author_signing_bytes
+from socialhome.services.space_public_author import (
+    author_signing_bytes,
+    verified_file_hashes,
+)
 
 KP = generate_identity_keypair()
 USER = derive_user_id(KP.public_key, "bob")
@@ -143,3 +147,20 @@ def test_the_domain_differs_from_the_post_author_signature():
 
 def test_a_non_dict_is_refused():
     assert not verify_signed_item_inner("x")  # type: ignore[arg-type]
+
+
+def test_a_comments_file_hashes_ride_outside_the_item_bytes():
+    """A comment's picture hashes ride under the author's separate
+    ``files_sig``, bound to the comment (``item_target``): the main item
+    bytes — what an older household verifies — are unchanged."""
+
+    plain = _inner(comment_type="image", media_url="api/media/x.webp")
+    signed = _inner(
+        comment_type="image",
+        media_url="api/media/x.webp",
+        file_hashes={"x.webp": FileHash("e" * 64)},
+    )
+    assert signed["author_sig"] == plain["author_sig"]
+    assert verify_signed_item_inner(signed)
+    assert verified_file_hashes(signed) == {"x.webp": FileHash("e" * 64)}
+    assert verified_file_hashes(dict(signed, item_target="c-2")) == {}

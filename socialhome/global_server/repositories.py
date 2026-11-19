@@ -45,7 +45,7 @@ from .domain import (
     GfsSpaceEpoch,
     GfsSpaceMedia,
     GfsSpaceMediaDemand,
-    GfsSpaceStrictState,
+    GfsSpaceWriterKeys,
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GfsUserPicture,
@@ -1598,9 +1598,6 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         authority_cert=_load_cert(row.get("authority_cert")),
         authority_rotation_seq=int(row.get("authority_rotation_seq") or 0),
         withdrawn=bool(row.get("withdrawn") or 0),
-        member_publish_mode=(
-            "strict" if row.get("member_publish_mode") == "strict" else "trusted"
-        ),
         place_lat=row.get("place_lat"),
         place_lon=row.get("place_lon"),
         place_radius_km=row.get("place_radius_km"),
@@ -3175,6 +3172,21 @@ POOL_MAILBOX: str = "mailbox"
 #: can never block a recipient's first envelopes.
 QUEUE_RESERVE_ROWS: int = 20
 QUEUE_RESERVE_BYTES: int = 64 * 1024
+#: What one REFERENCE row of a multi-recipient frame (GFS migration 0031)
+#: adds to its pool's running total ON TOP of its wrap (its
+#: ``sealed_json``) — the body itself counts once. Without a row cost a tiny
+#: body could park any number of reference rows under a pool that only ever
+#: saw the body. MUST match the literal in the 0031 triggers
+#: (``tests/global_server/test_migration_0031_envelope_bodies.py`` pins
+#: both).
+REF_ROW_BYTES: int = 64
+#: A queued row's byte charge against its recipient's caps — the same
+#: expression the 0029 / 0031 total triggers use for a plain row. A
+#: reference row's ``size_bytes`` is its body's size plus its wrap's, so it
+#: charges the full frame its mailbox receives.
+_HELD_BYTES_SQL: str = (
+    "CASE WHEN size_bytes > 0 THEN size_bytes ELSE LENGTH(sealed_json) END"
+)
 
 
 @runtime_checkable
@@ -3195,6 +3207,19 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         ceiling_bytes: int | None = None,
         mailbox_pool: bool = False,
     ) -> bool: ...
+
+    async def enqueue_multi(
+        self,
+        recipients: list[tuple[str, str]],
+        body_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+        ceiling_bytes: int,
+    ) -> list[str]: ...
 
     async def list_for(
         self,
@@ -3315,14 +3340,7 @@ class SqliteGfsEnvelopeQueueRepo:
         """
 
         def _run(conn) -> bool:
-            row = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(LENGTH(sealed_json)), 0) "
-                "FROM gfs_envelope_queue "
-                "WHERE to_instance=? AND frame_type=? AND expires_at > ?",
-                (to_instance, frame_type, created_at),
-            ).fetchone()
-            count = int(row[0] or 0)
-            total_bytes = int(row[1] or 0)
+            count, total_bytes = self._held(conn, to_instance, frame_type, created_at)
             if count >= max_per_recipient:
                 return False
             if total_bytes + len(sealed_json) > max_bytes_per_recipient:
@@ -3357,6 +3375,132 @@ class SqliteGfsEnvelopeQueueRepo:
         return await self._db.transact(_run)
 
     @staticmethod
+    def _held(conn, to_instance: str, frame_type: str, now: int) -> tuple[int, int]:
+        """``(rows, bytes)`` *to_instance* holds unexpired in *frame_type*.
+
+        Summed from ``size_bytes`` (:data:`_HELD_BYTES_SQL`, the triggers'
+        expression for a plain row), so a reference
+        row of a multi frame (GFS migration 0031) charges its recipient the
+        FULL body although it holds no copy — no cap can be bypassed by
+        addressing a frame to many mailboxes at once."""
+        row = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM({_HELD_BYTES_SQL}), 0) "
+            "FROM gfs_envelope_queue "
+            "WHERE to_instance=? AND frame_type=? AND expires_at > ?",
+            (to_instance, frame_type, now),
+        ).fetchone()
+        return int(row[0] or 0), int(row[1] or 0)
+
+    @staticmethod
+    def _held_many(conn, recipients: list[str], now: int) -> dict[str, tuple[int, int]]:
+        """:meth:`_held` of the ``envelope`` frames of every recipient in
+        *recipients*, in ONE grouped query (a multi upload names up to 500).
+        A recipient holding nothing is absent from the result."""
+        marks = ",".join("?" * len(recipients))
+        rows = conn.execute(
+            f"SELECT to_instance, COUNT(*), COALESCE(SUM({_HELD_BYTES_SQL}), 0) "
+            "FROM gfs_envelope_queue "
+            f"WHERE to_instance IN ({marks}) AND frame_type='envelope'"
+            " AND expires_at > ? GROUP BY to_instance",
+            (*recipients, now),
+        ).fetchall()
+        return {r[0]: (int(r[1] or 0), int(r[2] or 0)) for r in rows}
+
+    async def enqueue_multi(
+        self,
+        recipients: list[tuple[str, str]],
+        body_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+        ceiling_bytes: int,
+    ) -> list[str]:
+        """Queue ONE multi-recipient frame (v_91) — *body_json* for every
+        ``(mailbox, wrap_json)`` in *recipients* that has room; return the
+        mailboxes admitted, in order (a repeated mailbox keeps its first wrap).
+
+        One transaction. The body is stored once (``gfs_envelope_bodies``,
+        GFS migration 0031) — and only when at least one recipient is
+        admitted — and each admitted recipient gets a reference row
+        (``sealed_json`` = ITS wrap, ``size_bytes`` = body + wrap,
+        ``body_id``) in the mailbox pool. Per recipient the usual tail-drop
+        caps apply, charging the full body plus its wrap: a recipient at its
+        row or byte cap is skipped, the others are not. The pool is charged
+        the body ONCE plus :data:`REF_ROW_BYTES` and its wrap per admitted
+        reference (what the triggers count): under the pool total every
+        recipient that passed its caps is admitted; past it only those under
+        their reserve (:meth:`_pool_admits`), within *ceiling_bytes*.
+        Nothing is evicted. The body is freed by a trigger when its last
+        reference goes."""
+        size = len(body_json)
+
+        def _cost(fits: list[tuple[str, str, int, int]]) -> int:
+            # The pool sees the body once, then per reference its row cost
+            # and its wrap.
+            return size + sum(REF_ROW_BYTES + len(f[1]) for f in fits)
+
+        def _run(conn) -> list[str]:
+            wraps: dict[str, str] = {}
+            for to, wrap_json in recipients:
+                wraps.setdefault(to, wrap_json)
+            held_by = self._held_many(conn, list(wraps), created_at)
+            fits: list[tuple[str, str, int, int]] = []
+            for to, wrap_json in wraps.items():
+                count, held = held_by.get(to, (0, 0))
+                if (
+                    count >= max_per_recipient
+                    or held + size + len(wrap_json) > max_bytes_per_recipient
+                ):
+                    continue
+                fits.append((to, wrap_json, count, held))
+            if not fits:
+                return []
+            total = self._pool_total(conn, "envelope", POOL_MAILBOX)
+            if total + _cost(fits) > max_total_bytes:
+                conn.execute(
+                    "DELETE FROM gfs_envelope_queue WHERE pool=? AND expires_at <= ?"
+                    " AND frame_type='envelope'",
+                    (POOL_MAILBOX, created_at),
+                )
+                total = self._pool_total(conn, "envelope", POOL_MAILBOX)
+            if total + _cost(fits) > max_total_bytes:
+                fits = [
+                    f
+                    for f in fits
+                    if f[2] < QUEUE_RESERVE_ROWS and f[3] < QUEUE_RESERVE_BYTES
+                ]
+                if not fits or total + _cost(fits) > ceiling_bytes:
+                    return []
+            body_id = conn.execute(
+                "INSERT INTO gfs_envelope_bodies(sealed_json, size_bytes,"
+                " created_at, expires_at) VALUES(?,?,?,?)",
+                (body_json, size, created_at, expires_at),
+            ).lastrowid
+            conn.executemany(
+                "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
+                " created_at, expires_at, frame_type, size_bytes, pool, body_id)"
+                " VALUES(?, ?, ?, ?, 'envelope', ?, ?, ?)",
+                [
+                    (
+                        to,
+                        wrap_json,
+                        created_at,
+                        expires_at,
+                        size + len(wrap_json),
+                        POOL_MAILBOX,
+                        body_id,
+                    )
+                    for to, wrap_json, _count, _held in fits
+                ],
+            )
+            return [f[0] for f in fits]
+
+        return await self._db.transact(_run)
+
+    @staticmethod
     def _pool_total(conn, queue: str, pool: str) -> int:
         row = conn.execute(
             "SELECT bytes FROM gfs_queue_totals WHERE queue=? AND pool=?",
@@ -3366,15 +3510,23 @@ class SqliteGfsEnvelopeQueueRepo:
 
     async def recompute_pool_totals(self) -> None:
         """Drift repair (hourly maintenance): set every running total to the
-        sum of its unexpired-or-not rows, exactly what the triggers keep."""
+        sum of its unexpired-or-not rows, exactly what the triggers keep —
+        a multi frame's body counted once in the mailbox pool, each of its
+        reference rows :data:`REF_ROW_BYTES` plus its wrap (GFS migration
+        0031)."""
 
         def _run(conn) -> None:
             conn.execute(
                 "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("
-                "CASE WHEN q.size_bytes > 0 THEN q.size_bytes"
+                "CASE WHEN q.body_id IS NOT NULL THEN ? + LENGTH(q.sealed_json)"
+                " WHEN q.size_bytes > 0 THEN q.size_bytes"
                 " ELSE LENGTH(q.sealed_json) END), 0) FROM gfs_envelope_queue q"
-                " WHERE q.frame_type='envelope' AND q.pool = gfs_queue_totals.pool)"
-                " WHERE queue='envelope'"
+                " WHERE q.frame_type='envelope'"
+                " AND q.pool = gfs_queue_totals.pool)"
+                " + CASE WHEN pool = ? THEN (SELECT COALESCE(SUM(b.size_bytes), 0)"
+                " FROM gfs_envelope_bodies b) ELSE 0 END"
+                " WHERE queue='envelope'",
+                (REF_ROW_BYTES, POOL_MAILBOX),
             )
             conn.execute(
                 "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("
@@ -3447,11 +3599,19 @@ class SqliteGfsEnvelopeQueueRepo:
         loop: a household reconnecting between two sweeps must not receive a
         blob whose TTL has already run out.
         """
+        # A multi frame's reference row (``body_id``, GFS migration 0031)
+        # holds only its wrap; the sealed dict is the one stored body plus
+        # that wrap, composed here at push time.
         rows = await self._db.fetchall(
-            "SELECT id, to_instance, sealed_json, created_at, expires_at, "
-            "frame_type "
-            "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ? "
-            "ORDER BY created_at ASC, id ASC",
+            "SELECT q.id AS id, q.to_instance AS to_instance,"
+            " q.sealed_json AS sealed_json, q.body_id AS body_id,"
+            " b.sealed_json AS body_json,"
+            " q.created_at AS created_at, q.expires_at AS expires_at,"
+            " q.frame_type AS frame_type "
+            "FROM gfs_envelope_queue q"
+            " LEFT JOIN gfs_envelope_bodies b ON b.id = q.body_id "
+            "WHERE q.to_instance=? AND q.expires_at > ? "
+            "ORDER BY q.created_at ASC, q.id ASC",
             (to_instance, now),
         )
         out: list[GfsQueuedEnvelope] = []
@@ -3461,10 +3621,15 @@ class SqliteGfsEnvelopeQueueRepo:
                 continue
             try:
                 sealed = orjson.loads(d["sealed_json"])
+                if d.get("body_id") is not None:
+                    body = orjson.loads(d["body_json"] or "null")
+                    if not isinstance(body, dict):
+                        continue
+                    sealed = {**body, "wrap": sealed}
             except orjson.JSONDecodeError:
-                # Unreachable through the route (the dict is serialised from a
-                # validated shape), but a corrupt row must not wedge the whole
-                # drain — skip it and let the TTL sweep collect it.
+                # Unreachable through the route (the dicts are serialised from
+                # a validated shape), but a corrupt row must not wedge the
+                # whole drain — skip it and let the TTL sweep collect it.
                 continue
             if not isinstance(sealed, dict):
                 continue
@@ -3494,6 +3659,15 @@ class SqliteGfsEnvelopeQueueRepo:
         def _run(conn) -> int:
             cur = conn.execute(
                 "DELETE FROM gfs_envelope_queue WHERE expires_at <= ?",
+                (now,),
+            )
+            # The trigger freed every body whose last reference just went;
+            # this backstop collects an expired body nothing references (a
+            # row written around the trigger) — never one still referenced.
+            conn.execute(
+                "DELETE FROM gfs_envelope_bodies WHERE expires_at <= ?"
+                " AND NOT EXISTS (SELECT 1 FROM gfs_envelope_queue q"
+                " WHERE q.body_id = gfs_envelope_bodies.id)",
                 (now,),
             )
             return int(cur.rowcount or 0)
@@ -3758,6 +3932,8 @@ class AbstractGfsMailboxRepo(Protocol):
 
     async def is_mailbox(self, mailbox_id: str) -> bool: ...
 
+    async def mailboxes_among(self, ids: list[str]) -> set[str]: ...
+
     async def register(
         self,
         mailbox_id: str,
@@ -3809,6 +3985,22 @@ class SqliteGfsMailboxRepo:
             "SELECT 1 FROM gfs_mailboxes WHERE mailbox_id=?", (mailbox_id,)
         )
         return row is not None
+
+    async def mailboxes_among(self, ids: list[str]) -> set[str]:
+        """The ids in *ids* that are registered mailboxes and NOT also held
+        by an instance (an id held by both can be told apart from neither —
+        the same refusal as a single envelope's). One query for up to
+        ``MULTI_MAX_RECIPIENTS`` ids (under SQLite's bind limit)."""
+        if not ids:
+            return set()
+        marks = ",".join("?" * len(ids))
+        rows = await self._db.fetchall(
+            f"SELECT mailbox_id FROM gfs_mailboxes WHERE mailbox_id IN ({marks})"
+            " AND mailbox_id NOT IN (SELECT instance_id FROM client_instances"
+            f" WHERE instance_id IN ({marks}))",
+            (*ids, *ids),
+        )
+        return {str(_as_dict(r)["mailbox_id"]) for r in rows}
 
     async def register(
         self,
@@ -4048,9 +4240,7 @@ class AbstractGfsSpaceEpochRepo(Protocol):
         self, space_id: str, epoch: int, *, now: int, min_interval_s: int
     ) -> bool: ...
 
-    async def get_strict(self, space_id: str) -> GfsSpaceStrictState | None: ...
-
-    async def set_publish_mode(self, space_id: str, mode: str, *, at: int) -> bool: ...
+    async def get_writer_keys(self, space_id: str) -> GfsSpaceWriterKeys | None: ...
 
     async def pin_writer_key(
         self, space_id: str, epoch: int, writer_pk: str, *, replace: bool
@@ -4124,15 +4314,14 @@ class SqliteGfsSpaceEpochRepo:
         )
         return changed > 0
 
-    # ── Strict mode (v_50, migration 0015) ───────────────────────────────
+    # ── Writer keys (member publish, migration 0015) ─────────────────────
 
-    async def get_strict(self, space_id: str) -> GfsSpaceStrictState | None:
-        """The space's publish mode and writer-key pins, or ``None`` for a
-        space this server does not list."""
+    async def get_writer_keys(self, space_id: str) -> GfsSpaceWriterKeys | None:
+        """The space's writer-key pins, or ``None`` for a space this server
+        does not list."""
         row = _as_dict(
             await self._db.fetchone(
-                "SELECT member_publish_mode, member_publish_mode_at,"
-                " writer_key_epoch, writer_key_pk,"
+                "SELECT writer_key_epoch, writer_key_pk,"
                 " writer_key_prev_epoch, writer_key_prev_pk"
                 " FROM global_spaces WHERE space_id=?",
                 (space_id,),
@@ -4145,29 +4334,13 @@ class SqliteGfsSpaceEpochRepo:
             value = row.get(name)
             return int(value) if value is not None else None
 
-        return GfsSpaceStrictState(
+        return GfsSpaceWriterKeys(
             space_id=space_id,
-            publish_mode=str(row.get("member_publish_mode") or "trusted"),
-            mode_at=_int("member_publish_mode_at"),
             writer_key_epoch=_int("writer_key_epoch"),
             writer_key_pk=row.get("writer_key_pk"),
             writer_key_prev_epoch=_int("writer_key_prev_epoch"),
             writer_key_prev_pk=row.get("writer_key_prev_pk"),
         )
-
-    async def set_publish_mode(self, space_id: str, mode: str, *, at: int) -> bool:
-        """The OWNER's notice states ``mode`` at ``at`` (its signed ``ts``, unix
-        seconds). Lands only when no older-or-equal statement is newer — a
-        replayed older notice never moves the mode back. The CHECK constraint
-        refuses any other value. Returns whether the row changed."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE global_spaces SET member_publish_mode=?,"
-            " member_publish_mode_at=?"
-            " WHERE space_id=?"
-            " AND (member_publish_mode_at IS NULL OR member_publish_mode_at <= ?)",
-            (mode, at, space_id, at),
-        )
-        return changed > 0
 
     async def pin_writer_key(
         self, space_id: str, epoch: int, writer_pk: str, *, replace: bool
@@ -4222,10 +4395,6 @@ class AbstractGfsChannelRepo(Protocol):
 
     async def set_epoch(
         self, channel_id: str, epoch: int, *, expected: int | None, now: int
-    ) -> bool: ...
-
-    async def set_publish_mode(
-        self, channel_id: str, mode: str, *, at: int
     ) -> bool: ...
 
     async def pin_writer_key(
@@ -4289,8 +4458,6 @@ class SqliteGfsChannelRepo:
             epoch=_int("content_epoch"),
             epoch_prev=_int("content_epoch_prev"),
             epoch_raised_at=_int("content_epoch_raised_at"),
-            publish_mode=str(row.get("publish_mode") or "trusted"),
-            publish_mode_at=_int("publish_mode_at"),
             writer_key_epoch=_int("writer_key_epoch"),
             writer_key_pk=row.get("writer_key_pk"),
             writer_key_prev_epoch=_int("writer_key_prev_epoch"),
@@ -4338,16 +4505,6 @@ class SqliteGfsChannelRepo:
             )
             params = (epoch, now, now, channel_id, expected, epoch)
         return await self._db.enqueue_rowcount(sql, params) > 0
-
-    async def set_publish_mode(self, channel_id: str, mode: str, *, at: int) -> bool:
-        """Lands only when no newer statement is stored — a replayed older
-        notice never moves the mode back. The CHECK refuses other values."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE gfs_channels SET publish_mode=?, publish_mode_at=?"
-            " WHERE channel_id=? AND (publish_mode_at IS NULL OR publish_mode_at <= ?)",
-            (mode, at, channel_id, at),
-        )
-        return changed > 0
 
     async def pin_writer_key(self, channel_id: str, epoch: int, writer_pk: str) -> bool:
         """Pin ``writer_pk`` as the writer key of ``epoch``: the first pin of

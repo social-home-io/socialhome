@@ -27,6 +27,7 @@ from socialhome.app import (
     _build_gfs_route_resolver,
     _build_link_previews,
     _build_middleware,
+    _build_outbox_processor,
     _build_page_files_reach_host,
     create_app,
     dispatch_gfs_relay_frame,
@@ -41,10 +42,20 @@ from socialhome.config import Config
 from socialhome.dashboard.advertiser import DisplayAdvertiser, display_short_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DeliveryResult,
+    FederationEvent,
     FederationEventType,
     GfsConnection,
     InstanceSource,
     RemoteInstance,
+)
+from socialhome.domain.file_hashes import space_content_media_name
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceFeatures,
+    SpaceMember,
+    SpaceType,
 )
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.federation.pairing_gfs_reach import PairingGfsReach
@@ -63,6 +74,7 @@ from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRep
 from socialhome.services.app_federation_service import AppFederationService
 from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.services.gfs_route_discovery_service import GfsRouteDiscoveryService
+from socialhome.services.space_media_wanted import SpaceMediaWanted
 
 
 @pytest.fixture
@@ -704,6 +716,36 @@ async def test_gfs_route_resolver_maps_routes_to_active_connection_urls(tmp_dir)
         await db.shutdown()
 
 
+def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
+    """v_91: the outbox is the only multi sender — a broadcast that queued
+    a multi payload wakes it — and it groups rows with the moderation
+    check (unwired here: ``None``)."""
+
+    class _Fed:
+        wake = None
+        still_wanted = None
+
+        def attach_outbox_wake(self, wake, *, still_wanted=None):
+            self.wake = wake
+            self.still_wanted = still_wanted
+
+    class _Unpair:
+        async def sweep_tombstones(self):
+            return 0
+
+    fed = _Fed()
+    processor = _build_outbox_processor(
+        web.Application(),
+        object(),
+        fed,  # type: ignore[arg-type]
+        object(),
+        _Unpair(),  # type: ignore[arg-type]
+    )
+    assert fed.wake == processor.wake
+    assert processor._multi is fed
+    assert fed.still_wanted is not None and fed.still_wanted() is None
+
+
 def test_build_gfs_relay_inbound_returns_the_service():
     svc = _build_gfs_relay_inbound(
         federation_service=object(),  # type: ignore[arg-type]
@@ -956,20 +998,203 @@ async def test_page_files_reach_the_host_unless_a_link_seat_lacks_upload_rights(
             return self.mode_, "host"
 
     class _Uploader:
-        def __init__(self, reader, can):
-            self.reader, self.can = reader, can
+        def __init__(self, reader, can, frames):
+            self.reader, self.can, self.frames = reader, can, frames
 
         async def is_relay_reader(self, iid):
             return self.reader
 
+        async def takes_relay_frames(self, iid):
+            return self.frames
+
         async def can_upload(self, space_id):
             return self.can
 
-    async def _check(mode, reader, can):
-        reach = _build_page_files_reach_host(_Conflicts(mode), _Uploader(reader, can))
+    async def _check(mode, reader, can, frames=False):
+        reach = _build_page_files_reach_host(
+            _Conflicts(mode), _Uploader(reader, can, frames)
+        )
         return await reach("sp")
 
     assert await _check(PageMode.HOST, True, False)
     assert await _check(PageMode.MEMBER, False, False)
     assert await _check(PageMode.MEMBER, True, True)
+    # A host behind a GFS that takes binary relay frames (v_87) gets the
+    # files pushed, like from any member: no upload authorization needed.
+    assert await _check(PageMode.MEMBER, True, False, frames=True)
+    # Only a host that cannot take the push (v_80 seat, a GFS without
+    # ``envelope_media``) still needs the GFS cache.
     assert not await _check(PageMode.MEMBER, True, False)
+
+
+async def test_space_media_wanted_is_wired_both_ways(cfg):
+    """v_92: the media route's requester sits under its key, the provider
+    answers ``SPACE_MEDIA_WANTED``, and the v_87 refill bridge is gone."""
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        assert isinstance(app[K.space_media_wanted_key], SpaceMediaWanted)
+        registry = app[K.federation_service_key]._event_registry
+        assert registry.handler_count(FederationEventType.SPACE_MEDIA_WANTED) == 1
+    assert not hasattr(K, "relay_media_refill_key")
+
+
+async def test_a_host_that_missed_a_members_picture_asks_for_it_without_a_view(
+    cfg,
+):
+    """The whole household, real repositories: d posted a picture while this
+    host was down for longer than the mesh keeps a chunk — the push is gone,
+    nobody was told. The host is back; a verified space event arrives (the
+    sync that brings d's row) and the federation dispatch marks the space.
+    The file check finds the row's picture missing and sends d's household
+    one ``SPACE_MEDIA_WANTED`` — no view involved."""
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        db = app[K.db_key]
+        fed = app[K.federation_service_key]
+        own = fed._own_instance_id
+        spaces = app[K.space_repo_key]
+        seats = app[K.space_remote_member_repo_key]
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES('me','u-me','M')"
+        )
+        await spaces.save(
+            Space(
+                id="sp-h",
+                name="S",
+                owner_instance_id=own,
+                owner_username="me",
+                identity_public_key="aa" * 32,
+                config_sequence=1,
+                features=SpaceFeatures(),
+                space_type=SpaceType.PRIVATE,
+                join_mode=JoinMode.INVITE_ONLY,
+            )
+        )
+        await spaces.save_member(
+            SpaceMember(space_id="sp-h", user_id="u-me", role="owner", joined_at="t")
+        )
+        await seats.add(
+            space_id="sp-h",
+            instance_id="hh-d",
+            user_id="u-d",
+            user_pk=None,
+            display_name="D",
+            role="member",
+        )
+        name = space_content_media_name("sp-h", "ab" * 32, "p.webp")
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, media_url) "
+            "VALUES('p1', 'sp-h', 'u-d', 'image', ?)",
+            (f"api/media/{name}",),
+        )
+        sent: list[tuple[str, FederationEventType, dict]] = []
+
+        async def _send(*, to_instance_id, event_type, payload, space_id=None):
+            sent.append((to_instance_id, event_type, payload))
+            return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+        wanted = app[K.space_media_wanted_key]
+        wanted._apply_grace_s = 0.0
+        with (
+            # Slotted: patched on the class (an unbound mock, kwargs only).
+            patch.object(
+                type(fed), "send_with_mesh_fallback", AsyncMock(side_effect=_send)
+            ),
+            patch.object(
+                type(fed), "space_member_supports", AsyncMock(return_value=True)
+            ),
+        ):
+            await fed._dispatch_event(
+                FederationEvent(
+                    msg_id="m1",
+                    event_type=FederationEventType.SPACE_SYNC_COMPLETE,
+                    from_instance="hh-d",
+                    to_instance=own,
+                    timestamp="2026-11-12T00:00:00+00:00",
+                    payload={},
+                    space_id="sp-h",
+                )
+            )
+            await wanted.drain()
+        assert sent == [
+            (
+                "hh-d",
+                FederationEventType.SPACE_MEDIA_WANTED,
+                {"space_id": "sp-h", "files": [{"item": "p1", "name": name}]},
+            )
+        ]
+
+
+async def test_the_boot_row_marks_are_taken_before_any_inbound_starts(
+    tmp_dir, monkeypatch
+):
+    """v_92 — a helper resume counts only rows stored before this process
+    started: the marks are read before the GFS mailboxes or the GFS
+    websockets can store anything queued while we were down."""
+    from socialhome.federation.sync.space.scheduler import SpaceSyncScheduler
+    from socialhome.infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.gfs_mailbox_service import GfsMailboxService
+
+    order: list[str] = []
+    set_marks: list[tuple[int, int]] = []
+    real_marks = SqliteSpacePostRepo.row_marks
+    real_set = SpaceSyncScheduler.set_row_marks
+    real_mailboxes = GfsMailboxService.start
+    real_ws = GfsWebSocketSupervisor.start
+
+    async def _marks(self):
+        order.append("marks")
+        return await real_marks(self)
+
+    def _set(self, marks):
+        set_marks.append(marks)
+        real_set(self, marks)
+
+    async def _mailboxes(self):
+        order.append("mailboxes")
+        await real_mailboxes(self)
+
+    async def _ws(self):
+        order.append("gfs-ws")
+        await real_ws(self)
+
+    monkeypatch.setattr(SqliteSpacePostRepo, "row_marks", _marks)
+    monkeypatch.setattr(SpaceSyncScheduler, "set_row_marks", _set)
+    monkeypatch.setattr(GfsMailboxService, "start", _mailboxes)
+    monkeypatch.setattr(GfsWebSocketSupervisor, "start", _ws)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        pass
+    assert order[0] == "marks"
+    assert {"mailboxes", "gfs-ws"} <= set(order)
+    assert set_marks == [(0, 0)]  # a fresh database: nothing stored yet
+
+
+async def test_a_failed_boot_marks_read_sets_none(tmp_dir, monkeypatch):
+    """The read failing at startup leaves the scheduler without marks, so
+    it asks no helper (it never runs a resume with no cut)."""
+    from socialhome.app_keys import space_sync_scheduler_key
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+
+    async def _broken(self):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(SqliteSpacePostRepo, "row_marks", _broken)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        assert app[space_sync_scheduler_key]._row_marks is None

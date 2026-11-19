@@ -55,6 +55,7 @@ from ..domain.federation import (
     RemoteInstance,
     gfs_relay_available,
     is_relay_only,
+    is_space_seat,
     pending_kind,
 )
 from ..federation.pairing_gfs_reach import parse_reach
@@ -73,6 +74,7 @@ def _instance_dict(
     dropped_envelopes: int,
     last_relay_accepted_at: str | None,
     gfs_routes: int,
+    shares_space: bool = False,
 ) -> dict:
     """Public-shape view of a :class:`RemoteInstance`.
 
@@ -158,6 +160,10 @@ def _instance_dict(
         # ``approval``), ``None`` once confirmed — the SPA words the
         # cancel for it.
         "pending_kind": pending_kind(inst),
+        # A pending pairing with a household we already share a space
+        # with: the space keeps working while it waits (and when it is
+        # cancelled) — the SPA says so on the pending card.
+        "shares_space": shares_space,
         "reachable": reachable,
         "transport": transport_state,
         # Undelivered envelopes still queued for this peer. A peer that
@@ -424,10 +430,18 @@ class PairingConnectionCollectionView(BaseView):
 
     async def get(self) -> web.Response:
         self.require_user()
-        instances = await self.svc(federation_repo_key).list_instances()
+        fed = self.svc(federation_service_key)
+        # A pending pairing with a household we share a space with has no
+        # row of its own (the row is the space seat, which keeps working):
+        # it is listed in the seat's place, as the pending pairing it is.
+        listed = await self.svc(federation_repo_key).list_instances()
+        staged = {half.id: half for half in fed.pending_pairings.list_staged()}
+        shares_space = staged.keys() & {inst.id for inst in listed}
+        instances = [staged.pop(inst.id, inst) for inst in listed]
+        # (A half whose seat ended meanwhile still waits: listed too.)
+        instances.extend(staged.values())
         transport = self.request.app.get(federation_transport_key)
         outbox = self.svc(outbox_repo_key)
-        fed = self.svc(federation_service_key)
         rows = []
         for inst in instances:
             ts: Literal["rtc", "https", "gfs_relay"] | None = None
@@ -456,6 +470,7 @@ class PairingConnectionCollectionView(BaseView):
                     dropped_envelopes=dropped,
                     last_relay_accepted_at=fed.last_relay_accepted_at(inst.id),
                     gfs_routes=await _gfs_route_count(self, inst.id),
+                    shares_space=inst.id in shares_space,
                 )
             )
         return web.json_response(rows)
@@ -681,11 +696,16 @@ class PairingConnectionDetailView(BaseView):
             return error_response(403, "FORBIDDEN", "Admin only.")
         instance_id = self.match("instance_id")
         inst = await self.svc(federation_repo_key).get_instance(instance_id)
-        if inst is not None and inst.status is not PairingStatus.CONFIRMED:
+        fed = self.svc(federation_service_key)
+        if fed.pending_pairings.staged(instance_id) is not None or (
+            inst is not None and inst.status is not PairingStatus.CONFIRMED
+        ):
             # A handshake still in flight is cancelled, not unpaired: no
             # UNPAIR tombstone retrying for weeks to a peer that never
             # confirmed. Should it have been confirmed a moment ago, the
-            # caller asked for it gone either way — unpair it below.
+            # caller asked for it gone either way — unpair it below. (A
+            # pending pairing kept beside a space seat: the card the admin
+            # clicked is the pending one — the seat is never what goes.)
             try:
                 notified = await self.svc(pairing_cancel_service_key).cancel_pending(
                     instance_id
@@ -694,6 +714,11 @@ class PairingConnectionDetailView(BaseView):
                 pass
             else:
                 return web.json_response({"ok": True, "peer_notified": notified})
+        if is_space_seat(inst):
+            # A household we only share a space with is no pairing to end
+            # (a stale pending card whose handshake expired lands here):
+            # the seat goes when the shared space does, never by an UNPAIR.
+            return error_response(404, "NOT_FOUND", "Instance not found.")
         notified_or_none = await self.svc(peer_unpair_service_key).unpair(instance_id)
         if notified_or_none is None:
             return error_response(404, "NOT_FOUND", "Instance not found.")

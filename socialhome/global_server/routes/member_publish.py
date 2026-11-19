@@ -1,14 +1,10 @@
-"""Trusted-mode member publish routes (v_49).
+"""Member publish routes.
 
-* ``POST /gfs/member-publish`` — a member household publishes its own space
-  item, identified by its household signature and authorized by a writer cert.
-* ``POST /gfs/member-publish-anon`` — strict mode (v_50): a member household
-  publishes WITHOUT naming itself, authorized by the space's per-epoch writer
-  group key. Kept a separate view (and service method) from the identified
-  path so the two can never share a branch.
+* ``POST /gfs/member-publish-anon`` — a member household publishes its own
+  space item WITHOUT naming itself, authorized by the space's per-epoch
+  writer group key (the only member-publish route since v_90).
 * ``POST /gfs/spaces/{space_id}/epoch`` — a seed holder's content-epoch
-  notice (v_50: optionally carrying the space's publish mode and the writer
-  key cert).
+  notice (optionally carrying the writer key cert).
 
 The logic lives in :mod:`socialhome.global_server.member_publish`; these views
 only parse, call and map refusals to ONE uniform ``403`` body each (the reason
@@ -24,7 +20,6 @@ from aiohttp import web
 from ...domain.gfs_member_publish import (
     InvalidMemberPublish,
     MemberPublishAnonRequest,
-    MemberPublishRequest,
 )
 from ...domain.space_item import PAYLOAD_SUITE_UNSUPPORTED_ERROR, PayloadSuiteRefused
 from .. import app_keys as K
@@ -44,51 +39,18 @@ def _suite_refused() -> web.Response:
     return web.json_response({"error": PAYLOAD_SUITE_UNSUPPORTED_ERROR}, status=409)
 
 
-class MemberPublishView(GfsBaseView):
-    """``POST /gfs/member-publish`` — see :mod:`..member_publish`.
-
-    ``200 {"status": "published"}`` once accepted (a suppressed replay is the
-    same answer); ``400`` for a malformed body; ``403`` (uniform) for any
-    authorization failure; ``409 payload_suite_unsupported`` for a compressed
-    item while a follower of the space lacks ``payload_zlib1``; ``429`` past a
-    per-household or per-space limit; ``503`` while the background fan-out is
-    stopped or its backlog is full."""
-
-    async def post(self) -> web.Response:
-        svc = self.svc(K.gfs_member_publish_key)
-        body = await self.bounded_json(PUBLISH_MAX_BODY_BYTES)
-        try:
-            req = MemberPublishRequest.from_wire(body)
-        except InvalidMemberPublish as exc:
-            raise web.HTTPBadRequest(reason=str(exc)) from exc
-        try:
-            await svc.publish(req)
-        except MemberPublishRateLimited:
-            resp = web.json_response({"error": "rate_limited"}, status=429)
-            resp.headers["Retry-After"] = "60"
-            return resp
-        except MemberPublishBusy:
-            resp = web.json_response({"error": "busy"}, status=503)
-            resp.headers["Retry-After"] = "5"
-            return resp
-        except PayloadSuiteRefused:
-            return _suite_refused()
-        except PermissionError as exc:
-            log.debug("GFS member publish refused for space %s: %s", req.target, exc)
-            return web.json_response(_REFUSED_PUBLISH, status=403)
-        return web.json_response({"status": "published"})
-
-
 class MemberPublishAnonView(GfsBaseView):
-    """``POST /gfs/member-publish-anon`` — strict-mode (anonymous) member
-    publish; see :mod:`..member_publish`.
+    """``POST /gfs/member-publish-anon`` — (anonymous) member publish; see
+    :mod:`..member_publish`.
 
     ``200 {"status": "published"}`` once accepted; ``400`` for a malformed
     body (including one carrying ``instance_id``, a household ``signature``
-    or a ``writer_cert``); ``403`` (uniform, the same body as the identified
-    route) for any refusal, a replay included; ``429`` past the per-(space,
-    client address), per-space or per-writer-key limit; ``503`` while the fan-out is full. Nothing about
-    the caller is logged — there is nothing identifying to log."""
+    or a ``writer_cert``); ``403`` (uniform) for any refusal, a replay
+    included; ``409 payload_suite_unsupported`` for a compressed item while a
+    follower of the space lacks that suite; ``429`` past the per-(space,
+    client address), per-space or per-writer-key limit; ``503`` while the
+    fan-out is full. Nothing about the caller is logged — there is nothing
+    identifying to log."""
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_member_publish_key)
@@ -133,10 +95,9 @@ class SpaceEpochNoticeView(GfsBaseView):
       ``/gfs/publish``, and it may raise the epoch by +1 at most, once a
       minute, never the owner-confirmed floor.
 
-    v_50 adds optional fields: the owner form may carry ``publish_mode``
-    (``"trusted"`` / ``"strict"``) and ``writer_key_cert``, both inside its
-    household signature; the seed-only form may carry ``writer_key_cert``
-    (authority-signed on its own). See ``GfsMemberPublishService``.
+    Either form may carry ``writer_key_cert`` — inside the owner's household
+    signature, authority-signed on its own in the seed-only form. See
+    ``GfsMemberPublishService``.
     """
 
     async def post(self) -> web.Response:
@@ -154,7 +115,6 @@ class SpaceEpochNoticeView(GfsBaseView):
                     epoch=_field(body, "epoch"),
                     ts=str(_field(body, "ts")),
                     signature=str(_field(body, "signature")),
-                    publish_mode=body.get("publish_mode"),
                     writer_key_cert=body.get("writer_key_cert"),
                     gfs_key=body.get("gfs_key"),
                 )

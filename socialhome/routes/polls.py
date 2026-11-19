@@ -94,6 +94,7 @@ class PollSummaryView(BaseView):
         try:
             summary = await svc.create_poll(
                 post_id=post_id,
+                actor_user_id=ctx.user_id,
                 question=str(body.get("question") or ""),
                 options=list(body.get("options") or []),
                 allow_multiple=bool(body.get("allow_multiple", False)),
@@ -117,13 +118,14 @@ class SchedulePollCollectionView(BaseView):
     """
 
     async def post(self) -> web.Response:
-        self.require_user()
+        ctx = self.user
         post_id = self.match("id")
         body = await self.body()
         svc = self.svc(poll_service_key)
         try:
             summary = await svc.create_schedule_poll(
                 post_id=post_id,
+                actor_user_id=ctx.user_id,
                 title=str(body.get("title") or ""),
                 deadline=body.get("deadline"),
                 slots=list(body.get("slots") or []),

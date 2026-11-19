@@ -17,7 +17,12 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from socialhome.crypto import b64url_decode, b64url_encode, verify_ed25519
 from socialhome.domain.ws_binary_frame import encode_binary_frame
-from socialhome.services.gfs_ws_client import GfsWebSocketClient, _to_ws_url
+from socialhome.federation.inbound_validator import UnpairedPeerRefusedError
+from socialhome.services.gfs_ws_client import (
+    ENVELOPE_MEDIA_FRAME,
+    GfsWebSocketClient,
+    _to_ws_url,
+)
 
 try:
     import pytest_socket  # noqa: F401
@@ -796,8 +801,8 @@ def test_the_hello_asks_for_binary_frames():
         on_relay=None,
     )
     assert "ws_binary1" in client._build_hello()["accepts"]
-    # Member items without the plaintext writer cert: verified inside.
-    assert "space_item_no_cert" in client._build_hello()["accepts"]
+    # No frame carries a plaintext writer cert any more (v_90): no label.
+    assert "space_item_no_cert" not in client._build_hello()["accepts"]
 
 
 async def test_on_text_dispatch_covers_every_frame_type():
@@ -1266,6 +1271,56 @@ async def test_on_text_swallows_envelope_handler_exception(caplog):
     )
     assert "Replay detected" in caplog.text
     assert "secret-blob" not in caplog.text
+
+
+async def test_on_text_is_quiet_about_a_household_unpaired_moments_ago(caplog):
+    """A relayed envelope from a household whose row we dropped moments ago
+    (it sealed the frame before it learned — e.g. the host's last frames to
+    a household it just removed from their only shared space) was already
+    logged by the pipeline step that refused it. The socket must not log it
+    again at WARNING with a traceback, exactly like the inbox route and the
+    DataChannel."""
+    seed, _pub = _gen_keypair()
+
+    async def refuse(_frame: dict) -> None:
+        raise UnpairedPeerRefusedError("No instance found for instance_id='x'")
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-env5",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=_sink_noop,
+        on_envelope=refuse,
+    )
+    with caplog.at_level(logging.DEBUG):
+        await client._on_text(json.dumps({"type": "envelope", "sealed": {}}))
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert "No instance found" in caplog.text
+
+
+async def test_a_refused_media_frame_is_still_counted(monkeypatch):
+    """The quiet path is for control envelopes; a media frame refused for
+    the same reason still reaches the media-refusal note."""
+    seed, _pub = _gen_keypair()
+
+    async def refuse(_frame: dict) -> None:
+        raise UnpairedPeerRefusedError("No instance found for instance_id='x'")
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-env6",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=_sink_noop,
+        on_envelope=refuse,
+    )
+    noted: list[Exception] = []
+    monkeypatch.setattr(
+        GfsWebSocketClient, "_note_media_refused", lambda self, exc: noted.append(exc)
+    )
+    await client._on_text(json.dumps({"type": ENVELOPE_MEDIA_FRAME, "body": {}}))
+    assert len(noted) == 1
 
 
 async def test_stop_on_a_connected_client_returns_promptly_without_cancel(

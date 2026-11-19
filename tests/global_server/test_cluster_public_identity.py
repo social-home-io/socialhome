@@ -27,15 +27,22 @@ from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
     ed25519_public_key,
-    sign_ed25519,
 )
-from socialhome.domain.gfs_member_publish import MemberPublishRequest
-from socialhome.global_server.app_keys import gfs_cluster_key, gfs_fed_repo_key
+from socialhome.domain.gfs_member_publish import MemberPublishAnonRequest
+from socialhome.global_server.app_keys import (
+    gfs_cluster_key,
+    gfs_fed_repo_key,
+    gfs_space_epoch_repo_key,
+)
 from socialhome.global_server.cluster import NODE_HELLO
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
-from socialhome.writer_cert import sign_writer_cert
+from socialhome.writer_key import (
+    derive_writer_seed,
+    issue_writer_key_grant,
+    sign_with_writer_key,
+)
 
 SPACE_ID = "sp-public"
 SEED_HEX = "5e" * 32
@@ -102,27 +109,34 @@ async def _seed_state(server: TestServer) -> None:
         )
     )
     await fed.mark_relay_seen(HOUSEHOLD_ID, at=int(time.time()))
+    # The owner confirmed epoch 3 and pinned its writer key.
+    epochs = server.app[gfs_space_epoch_repo_key]
+    await epochs.confirm(SPACE_ID, 3, now=int(time.time()))
+    await epochs.pin_writer_key(
+        SPACE_ID,
+        3,
+        issue_writer_key_grant(
+            space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=3
+        ).writer_key_cert.writer_pk,
+        replace=True,
+    )
 
 
 def _publish_body(gfs_instance_id: str, payload: str) -> dict:
-    req = MemberPublishRequest(
-        instance_id=HOUSEHOLD_ID,
+    req = MemberPublishAnonRequest(
         gfs_instance_id=gfs_instance_id,
         ts=datetime.now(UTC).isoformat(),
-        signature="",
+        nonce=b64url_encode(os.urandom(16)),
         target=SPACE_ID,
         epoch=3,
-        writer_cert=sign_writer_cert(
-            space_seed=SPACE_SEED,
-            space_id=SPACE_ID,
-            epoch=3,
-            instance_pk=HOUSEHOLD_PK,
-            scope="comment",
-        ),
         payload=payload,
+        writer_sig="",
+        writer_sig_suite="ed25519",
     )
-    sig = sign_ed25519(HOUSEHOLD_SEED, req.signing_bytes())
-    return replace(req, signature=b64url_encode(sig)).to_wire()
+    seed = derive_writer_seed(SPACE_SEED, SPACE_ID, 3)
+    return replace(
+        req, writer_sig=sign_with_writer_key(seed, req.signing_bytes())
+    ).to_wire()
 
 
 async def _info(server: TestServer) -> dict:
@@ -138,7 +152,7 @@ async def _publish(server: TestServer, gfs_instance_id: str, payload: str) -> in
     async with (
         ClientSession() as http,
         http.post(
-            f"{_url(server)}/gfs/member-publish",
+            f"{_url(server)}/gfs/member-publish-anon",
             json=_publish_body(gfs_instance_id, payload),
         ) as resp,
     ):

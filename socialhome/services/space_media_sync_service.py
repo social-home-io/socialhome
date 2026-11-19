@@ -29,8 +29,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
+import time
 import uuid
-from collections.abc import Iterator
+from collections import OrderedDict
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -40,11 +42,13 @@ import aiofiles.os
 from ..domain.federation import FederationEventType
 from ..domain.file_hashes import blob_hash_fields, sha256_hex
 from ..domain.media_chunking import split_into_chunks
+from ..domain.media_constraints import is_safe_media_name
 from ..repositories.space_media_outbox_repo import (
     AbstractSpaceMediaOutboxRepo,
     SpaceMediaOutboxEntry,
 )
 from .backoff import jittered_backoff_seconds
+from .inbound_media_store import media_basename, media_file_path
 from .media_chunk_pipeline import send_chunks
 from .media_file_hasher import MediaFileHasher
 from .peer_unpair_service import is_unpair_tombstone
@@ -55,9 +59,34 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: One chunk's send gets at most this long (no progress for so long): a
+#: send that hangs (a mesh path that never answers) fails its row, which
+#: is rescheduled like any failed one. Per chunk, not per file, so a big
+#: file over a slow path that keeps moving is still delivered.
+CHUNK_IDLE_TIMEOUT_S: float = 120.0
+#: The files one flush pass holds in memory at once (recipients go in
+#: parallel); a file larger than this goes alone.
+MAX_INFLIGHT_FILE_BYTES: int = 64 * 1024 * 1024
+#: Recipients served at once by one flush pass.
+PARALLEL_RECIPIENTS: int = 6
+#: ``(file, household)`` rows remembered from the start of their send, oldest dropped,
+#: so a chunk the mesh reports lost (:meth:`SpaceMediaSyncService
+#: .on_mesh_chunk_lost`) can queue the file again. In memory only: a nack
+#: arrives within the mesh's pending window (minutes) or never.
+MAX_SENT_MARKS: int = 512
+#: v_92 — ``(file, household)`` rows queued because the household asked for
+#: the file (``SPACE_MEDIA_WANTED``) remembered at once, oldest dropped. In
+#: memory only: a mark lost to a restart costs one shortcut-dropped push,
+#: and the requester asks again on its next view.
+MAX_PUSHED_MARKS: int = 4096
+
+
+#: Where a sent row's one mesh resend stands (``SpaceMediaSyncService._sent``).
+_SENT, _RESEND_QUEUED, _RESENT = range(3)
+
 
 class _RelayReaders(Protocol):
-    async def is_relay_reader(self, instance_id: str) -> bool: ...
+    async def reads_from_gfs(self, instance_id: str, filename: str) -> bool: ...
 
 
 #: Max chunks of one blob in flight at once (see DmMediaSyncService). Small
@@ -74,12 +103,16 @@ class SpaceMediaSyncService:
     """Build + dispatch ``SPACE_MEDIA_BLOB`` rows."""
 
     __slots__ = (
+        "_budget",
         "_federation",
         "_federation_repo",
+        "_held",
         "_interval",
         "_media_dir",
         "_outbox",
+        "_pushed",
         "_relay_readers",
+        "_sent",
         "_stop",
         "_task",
         "_wake",
@@ -112,14 +145,26 @@ class SpaceMediaSyncService:
         # the next poll. ``_interval`` remains a fallback poll.
         self._wake = asyncio.Event()
         #: v_80 — who reads the space's pictures from a GFS media cache
-        #: instead (:meth:`SpaceMediaGfsUploader.is_relay_reader`).
+        #: instead (:meth:`SpaceMediaGfsUploader.reads_from_gfs`).
         self._relay_readers: _RelayReaders | None = None
+        #: Bytes of the files the current pass holds (``MAX_INFLIGHT_FILE_BYTES``).
+        self._budget = asyncio.Condition()
+        self._held = 0
+        #: v_92 — rows a household asked for (:data:`MAX_PUSHED_MARKS`).
+        self._pushed: OrderedDict[tuple[str, str], None] = OrderedDict()
+        #: ``(file, household)`` → the row as it was sent and where its one
+        #: resend stands: ``_SENT`` → (a chunk is reported lost) →
+        #: ``_RESEND_QUEUED`` → (the row is sent again) → ``_RESENT``
+        #: (:data:`MAX_SENT_MARKS`).
+        self._sent: OrderedDict[tuple[str, str], tuple[SpaceMediaOutboxEntry, int]] = (
+            OrderedDict()
+        )
 
     def attach_relay_readers(self, readers: _RelayReaders) -> None:
         """Wire the v_80 reader check: a member household seated from an
-        invite link at v_80 gets no ``SPACE_MEDIA_BLOB`` push — the GFS
-        relay refuses those bytes, and it fetches the file from its GFS's
-        media cache instead."""
+        invite link gets its ``SPACE_MEDIA_BLOB`` push through the GFS relay
+        like any member, except while its GFS's media cache is known to hold
+        the file (it fetches it from there then)."""
         self._relay_readers = readers
 
     def attach_federation(self, federation: FederationService) -> None:
@@ -139,8 +184,20 @@ class SpaceMediaSyncService:
         correlation_id: str,
         target_instance_ids: list[str],
         media_urls: list[str],
+        push: bool = False,
+        wire_names: Mapping[str, str] | None = None,
     ) -> None:
         """One outbox row per (media_url, peer) tuple.
+
+        ``push`` (v_92): the targets asked for these files
+        (``SPACE_MEDIA_WANTED``) — they already missed their GFS cache, so
+        the send-time "reads from its GFS" shortcut never drops these rows.
+
+        ``wire_names`` (v_92): local file name → the name it is SENT under
+        (default: its local name). A provider ships an asked-for file under
+        the requested content name (``sc-``) even when it stores it under
+        its own reader name (``sg-``), which a receiver refuses by name. An
+        unsafe wire name queues nothing.
 
         Generic enqueue surface — :class:`SpacePostOutbound` and
         :class:`GalleryFederationOutbound` both call this. The
@@ -153,18 +210,19 @@ class SpaceMediaSyncService:
         ``(blob_id, target_instance_id)`` primary key — a re-shared
         image doesn't ship twice.
         """
-        if self._relay_readers is not None:
-            target_instance_ids = [
-                t
-                for t in target_instance_ids
-                if not await self._relay_readers.is_relay_reader(t)
-            ]
         for url in media_urls:
             filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
             if not filename:
                 continue
             path = self._media_dir / filename
-            blob_id = filename
+            blob_id = (wire_names or {}).get(filename, filename)
+            if not is_safe_media_name(blob_id):
+                log.warning(
+                    "space-media-sync: unsafe wire name %r for %s — not queued",
+                    blob_id,
+                    filename,
+                )
+                continue
             for target in target_instance_ids:
                 if not target:
                     continue
@@ -175,7 +233,81 @@ class SpaceMediaSyncService:
                     target_instance_id=target,
                     bytes_path=str(path),
                 )
+                if push:
+                    key = (blob_id, target)
+                    self._pushed[key] = None
+                    self._pushed.move_to_end(key)
+                    while len(self._pushed) > MAX_PUSHED_MARKS:
+                        self._pushed.popitem(last=False)
         # Nudge the loop so it ships now rather than on the next poll.
+        self._wake.set()
+
+    async def held_files(self, media_urls: Sequence[str]) -> list[str]:
+        """The *media_urls* whose file is in this household's media dir, in
+        order. A catch-up queues only these: a row can be here without its
+        file (it never arrived), and a file that is not here cannot ship."""
+        held: list[str] = []
+        for url in media_urls:
+            path = media_file_path(self._media_dir, media_basename(url))
+            if path is not None and await aiofiles.os.path.isfile(path):
+                held.append(url)
+        return held
+
+    async def on_mesh_chunk_lost(self, target_instance_id: str, head: dict) -> None:
+        """A chunk of ``head["blob_id"]`` we sent to *target_instance_id*
+        over the mesh came back nacked (``SPACE_ROUTE_STALE``: the target
+        restarted and cannot open what was sealed to its old key).
+
+        The relay had taken the chunk, so the row was done and deleted (or
+        is still being sent: its later chunks — then ``_send_row`` keeps the
+        row instead of deleting it); the mesh keeps no copy of a chunk to
+        retransmit. Queue the whole file again — once: the other chunks' nacks find the row already queued,
+        and a nack for the resend gives up (the receiver asks for the file
+        when someone opens it, v_92). Never raises.
+        """
+        blob_id = head.get("blob_id")
+        if not isinstance(blob_id, str):
+            return
+        key = (blob_id, target_instance_id)
+        sent = self._sent.get(key)
+        if sent is None:
+            return
+        entry, state = sent
+        if state != _SENT:
+            # Another chunk of the first send (the file is queued already),
+            # or the resend itself: nothing more to do.
+            log.debug(
+                "space-media-sync: %s → %s lost on the mesh — %s",
+                blob_id,
+                target_instance_id,
+                "already queued again"
+                if state == _RESEND_QUEUED
+                else "the resend too; not sent a third time",
+            )
+            return
+        try:
+            await self._outbox.enqueue(
+                blob_id=entry.blob_id,
+                space_id=entry.space_id,
+                correlation_id=entry.correlation_id,
+                target_instance_id=entry.target_instance_id,
+                bytes_path=entry.bytes_path,
+            )
+        except Exception:
+            log.warning(
+                "space-media-sync: queueing %s → %s again failed",
+                blob_id,
+                target_instance_id,
+                exc_info=True,
+            )
+            return
+        log.info(
+            "space-media-sync: %s → %s was lost on the mesh (the target "
+            "could not open it) — queued again",
+            blob_id,
+            target_instance_id,
+        )
+        self._sent[key] = (entry, _RESEND_QUEUED)
         self._wake.set()
 
     # Back-compat alias for the post-only signature shipped in PR #440.
@@ -278,99 +410,239 @@ class SpaceMediaSyncService:
         if self._federation is None:
             return 0
         fed = self._federation  # non-None past the guard; captured for closures
+        # A row a send left ``in_flight`` when it died past ``Exception``
+        # (an inner cancellation, a DB error while rescheduling) is taken
+        # back on every pass, not only at the next start. ``_loop`` is the
+        # only caller, so passes never overlap.
+        await self._outbox.reclaim_in_flight()
         due = await self._outbox.list_due(limit=limit)
-        shipped = 0
+        # Like the GFS: one copy of the bytes, one row per recipient, and the
+        # recipients served in parallel (at most :data:`PARALLEL_RECIPIENTS`
+        # at once, each recipient's rows one after the other), so a slow or
+        # stuck recipient never holds the others back.
+        by_target: dict[str, list[SpaceMediaOutboxEntry]] = {}
         for entry in due:
-            if await is_unpair_tombstone(
-                self._federation_repo, entry.target_instance_id
-            ):
-                # Not even over the mesh fallback: it gets our UNPAIR and
-                # nothing else (unpairing already purged the rest).
-                await self._outbox.delete(
-                    blob_id=entry.blob_id,
-                    target_instance_id=entry.target_instance_id,
-                )
-                continue
-            await self._outbox.mark_in_flight(
-                blob_id=entry.blob_id,
-                target_instance_id=entry.target_instance_id,
-            )
-            try:
-                payloads = await self._build_blob_payloads(entry, fed)
-            except Exception as exc:
-                log.warning(
-                    "space-media-sync: build failed for %s → %s: %s",
-                    entry.blob_id,
-                    entry.target_instance_id,
-                    exc,
-                    exc_info=True,
-                )
-                await self._reschedule_or_fail(entry, str(exc))
-                continue
-            # Use mesh fallback so a member household that isn't a
-            # CONFIRMED direct peer (joined via §D1b on a mesh path
-            # like c↔b↔d) still receives the bytes — the chunks
-            # ride SPACE_ROUTED end-to-end-sealed through the
-            # relays. A direct-peer path uses ``send_event``
-            # internally so the per-chunk overhead matches the DM
-            # case for the common LAN-paired scenario.
-            # Dispatch chunks with a bounded concurrency window (order is
-            # irrelevant — the receiver writes each by ``chunk_index``):
-            # ``PIPELINE_WINDOW`` workers pull chunks lazily, so a file in
-            # many chunks never becomes a coroutine per chunk.
-            # ``send_with_mesh_fallback`` doesn't raise on delivery failure;
-            # it returns ``DeliveryResult(ok=False)`` (no_route /
-            # not_confirmed / transport blip), so we raise on that to funnel
-            # both failure modes into one. Any chunk failing reschedules the
-            # whole row.
+            by_target.setdefault(entry.target_instance_id, []).append(entry)
+        gate = asyncio.Semaphore(PARALLEL_RECIPIENTS)
 
-            async def _send(
-                payload: dict,
-                raw: bytes,
-                *,
-                tgt: str = entry.target_instance_id,
-                space_id: str = entry.space_id,
-            ) -> None:
-                # ``mesh_fallback=True`` keeps the existing semantics:
-                # a CONFIRMED v_14+ peer gets the binary channel; a
-                # non-CONFIRMED / mesh-only member still receives the
-                # bytes as base64 over SPACE_ROUTED. The binary channel
-                # is point-to-point only, so mesh members never use it.
-                result = await fed.send_media_chunk(
-                    to_instance_id=tgt,
-                    event_type=FederationEventType.SPACE_MEDIA_BLOB,
-                    payload=payload,
-                    raw_chunk=raw,
-                    mesh_fallback=True,
-                    # The envelope's routing ``space_id`` — every other
-                    # space fan-out sets it, and these frames did not:
-                    # the §24.11 ban check reads it off the envelope and
-                    # silently no-ops when it is absent, so a household
-                    # banned from the space could still push bytes at us.
-                    space_id=space_id,
-                )
-                if not result.ok:
-                    raise RuntimeError(result.error or "delivery_failed")
+        async def _serve(rows: list[SpaceMediaOutboxEntry]) -> int:
+            n = 0
+            async with gate:
+                for row in rows:
+                    if await self._dispatch(row, fed):
+                        n += 1
+            return n
 
-            failure = await send_chunks(payloads, _send, window=PIPELINE_WINDOW)
-            if failure is not None:
-                payload, error = failure
+        results = await asyncio.gather(
+            *(_serve(rows) for rows in by_target.values()), return_exceptions=True
+        )
+        shipped = 0
+        for result in results:
+            if isinstance(result, BaseException):
                 log.warning(
-                    "space-media-sync: chunk %d/%d failed for %s → %s: %s",
-                    payload.get("chunk_index", 0),
-                    payload.get("chunk_count", 1),
-                    entry.blob_id,
-                    entry.target_instance_id,
-                    error,
+                    "space-media-sync: a recipient's sends failed",
+                    exc_info=result,
                 )
-                await self._reschedule_or_fail(entry, str(error) or "chunk send failed")
-                continue
+            else:
+                shipped += result
+        return shipped
+
+    async def _dispatch(
+        self, entry: SpaceMediaOutboxEntry, fed: FederationService
+    ) -> bool:
+        """Send one row (every chunk of one file to one household); whether
+        it shipped."""
+        if await is_unpair_tombstone(self._federation_repo, entry.target_instance_id):
+            # Not even over the mesh fallback: it gets our UNPAIR and
+            # nothing else (unpairing already purged the rest).
             await self._outbox.delete(
                 blob_id=entry.blob_id,
                 target_instance_id=entry.target_instance_id,
             )
-            shipped += 1
-        return shipped
+            return False
+        key = (entry.blob_id, entry.target_instance_id)
+        if (
+            self._relay_readers is not None
+            and key not in self._pushed
+            and await self._relay_readers.reads_from_gfs(
+                entry.target_instance_id, entry.blob_id
+            )
+        ):
+            # Decided at send time, not when the row was queued, and only
+            # when the reader's GFS is known to hold the file: a GFS whose
+            # cache was off when the file was planned never got it, so that
+            # reader keeps the push.
+            # A file the reader asked for (v_92, ``push``) is never dropped:
+            # it already missed its GFS.
+            log.debug(
+                "space-media-sync: %s reads %s from its GFS — no push",
+                entry.target_instance_id,
+                entry.blob_id,
+            )
+            await self._outbox.delete(
+                blob_id=entry.blob_id,
+                target_instance_id=entry.target_instance_id,
+            )
+            return False
+        try:
+            size = (await aiofiles.os.stat(entry.bytes_path)).st_size
+        except OSError:
+            size = 0  # the build below reports the missing file
+        need = min(size, MAX_INFLIGHT_FILE_BYTES)
+        async with self._budget:
+            await self._budget.wait_for(
+                lambda: self._held + need <= MAX_INFLIGHT_FILE_BYTES
+            )
+            self._held += need
+        try:
+            sent = await self._send_row(entry, fed)
+            if sent:
+                self._pushed.pop(key, None)
+            return sent
+        finally:
+            async with self._budget:
+                self._held -= need
+                self._budget.notify_all()
+
+    async def _send_row(
+        self, entry: SpaceMediaOutboxEntry, fed: FederationService
+    ) -> bool:
+        await self._outbox.mark_in_flight(
+            blob_id=entry.blob_id,
+            target_instance_id=entry.target_instance_id,
+        )
+        log.debug(
+            "space-media-sync: sending %s → %s",
+            entry.blob_id,
+            entry.target_instance_id,
+        )
+        started = time.monotonic()
+        try:
+            payloads = await self._build_blob_payloads(entry, fed)
+        except Exception as exc:
+            log.warning(
+                "space-media-sync: build failed for %s → %s: %s",
+                entry.blob_id,
+                entry.target_instance_id,
+                exc,
+                exc_info=True,
+            )
+            await self._reschedule_or_fail(entry, str(exc))
+            return False
+        # Use mesh fallback so a member household that isn't a
+        # CONFIRMED direct peer (joined via §D1b on a mesh path
+        # like c↔b↔d) still receives the bytes — the chunks
+        # ride SPACE_ROUTED end-to-end-sealed through the
+        # relays. A direct-peer path uses ``send_event``
+        # internally so the per-chunk overhead matches the DM
+        # case for the common LAN-paired scenario.
+        # Dispatch chunks with a bounded concurrency window (order is
+        # irrelevant — the receiver writes each by ``chunk_index``):
+        # ``PIPELINE_WINDOW`` workers pull chunks lazily, so a file in
+        # many chunks never becomes a coroutine per chunk.
+        # ``send_with_mesh_fallback`` doesn't raise on delivery failure;
+        # it returns ``DeliveryResult(ok=False)`` (no_route /
+        # not_confirmed / transport blip), so we raise on that to funnel
+        # both failure modes into one. Any chunk failing reschedules the
+        # whole row.
+
+        async def _send(
+            payload: dict,
+            raw: bytes,
+            *,
+            tgt: str = entry.target_instance_id,
+            space_id: str = entry.space_id,
+        ) -> None:
+            # ``mesh_fallback=True`` keeps the existing semantics:
+            # a CONFIRMED v_14+ peer gets the binary channel; a
+            # non-CONFIRMED / mesh-only member still receives the
+            # bytes as base64 over SPACE_ROUTED. The binary channel
+            # is point-to-point only, so mesh members never use it.
+            try:
+                result = await asyncio.wait_for(
+                    fed.send_media_chunk(
+                        to_instance_id=tgt,
+                        event_type=FederationEventType.SPACE_MEDIA_BLOB,
+                        payload=payload,
+                        raw_chunk=raw,
+                        mesh_fallback=True,
+                        # The envelope's routing ``space_id`` — every other
+                        # space fan-out sets it, and these frames did not:
+                        # the §24.11 ban check reads it off the envelope
+                        # and silently no-ops when it is absent, so a
+                        # household banned from the space could still push
+                        # bytes at us.
+                        space_id=space_id,
+                    ),
+                    timeout=CHUNK_IDLE_TIMEOUT_S,
+                )
+            except TimeoutError:
+                raise RuntimeError(
+                    f"timeout: no progress for {CHUNK_IDLE_TIMEOUT_S:.0f} s"
+                ) from None
+            if not result.ok and not result.held_in_order:
+                # ``held_in_order``: the chunk is in the federation outbox
+                # behind the seat's pending rows (the post it belongs to
+                # went there as one multi upload a moment ago) and goes out
+                # in order — sent, as far as this file is concerned.
+                raise RuntimeError(result.error or "delivery_failed")
+
+        # Marked before the first chunk goes: a nack can arrive while later
+        # chunks are still being sent (the target is back, the route cached).
+        key = (entry.blob_id, entry.target_instance_id)
+        before = self._sent.get(key)
+        self._remember_sent(entry)
+        failure = await send_chunks(payloads, _send, window=PIPELINE_WINDOW)
+        log.debug(
+            "space-media-sync: %s → %s %s after %.1f s",
+            entry.blob_id,
+            entry.target_instance_id,
+            "failed" if failure is not None else "sent",
+            time.monotonic() - started,
+        )
+        if failure is not None:
+            payload, error = failure
+            log.warning(
+                "space-media-sync: chunk %d/%d failed for %s → %s: %s",
+                payload.get("chunk_index", 0),
+                payload.get("chunk_count", 1),
+                entry.blob_id,
+                entry.target_instance_id,
+                error,
+            )
+            if before is not None and before[1] == _RESEND_QUEUED:
+                # The resend itself failed: its retry is still the resend.
+                self._sent[key] = before
+            await self._reschedule_or_fail(entry, str(error) or "chunk send failed")
+            return False
+        mark = self._sent.get(key)
+        if mark is not None and mark[1] == _RESEND_QUEUED:
+            # A chunk was reported lost during this very send: the row is
+            # the resend — due now, not deleted.
+            await self._outbox.reschedule(
+                blob_id=entry.blob_id,
+                target_instance_id=entry.target_instance_id,
+                attempts=entry.attempts,
+                next_attempt_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                last_error="a chunk was lost on the mesh",
+            )
+            self._wake.set()
+            return True
+        await self._outbox.delete(
+            blob_id=entry.blob_id,
+            target_instance_id=entry.target_instance_id,
+        )
+        return True
+
+    def _remember_sent(self, entry: SpaceMediaOutboxEntry) -> None:
+        """Keep the row being sent for :meth:`on_mesh_chunk_lost`. A row
+        queued again by it stays marked as the resend."""
+        key = (entry.blob_id, entry.target_instance_id)
+        previous = self._sent.pop(key, None)
+        resend = previous is not None and previous[1] == _RESEND_QUEUED
+        self._sent[key] = (entry, _RESENT if resend else _SENT)
+        while len(self._sent) > MAX_SENT_MARKS:
+            self._sent.popitem(last=False)
 
     # ── Internals ─────────────────────────────────────────────────────
 

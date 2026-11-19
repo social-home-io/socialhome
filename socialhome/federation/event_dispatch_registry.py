@@ -15,6 +15,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from ..domain.federation import FederationEvent, FederationEventType
+from .inbound_retry import InboundRetry
 
 log = logging.getLogger(__name__)
 
@@ -35,10 +36,12 @@ class EventDispatchRegistry:
     just invokes.
     """
 
-    __slots__ = ("_handlers",)
+    __slots__ = ("_handlers", "_retry")
 
-    def __init__(self) -> None:
+    def __init__(self, *, retry: InboundRetry | None = None) -> None:
         self._handlers: dict[FederationEventType, list[EventHandler]] = {}
+        #: One more run for a handler that failed on a locked database.
+        self._retry = retry
 
     def register(
         self,
@@ -73,18 +76,32 @@ class EventDispatchRegistry:
     async def dispatch(self, event: FederationEvent) -> None:
         """Invoke all handlers registered for the event's type.
 
-        Handler exceptions are logged and swallowed so one failing
-        handler doesn't block others.
+        A handler exception never blocks the other handlers. The envelope's
+        replay id is already stored, so the sender cannot deliver it again:
+        a handler that failed on a locked database gets one more run in
+        place (:class:`InboundRetry`). Every failure that is final is one
+        ERROR record naming the handler, the event type, the sending
+        household and the exception class, with the traceback — the
+        message itself never carries the payload.
         """
-        handlers = self._handlers.get(event.event_type, ())
-        for handler in handlers:
+        for handler in tuple(self._handlers.get(event.event_type, ())):
             try:
                 await handler(event)
-            except Exception:
-                log.exception(
-                    "Event handler %s failed for %s",
-                    getattr(handler, "__qualname__", repr(handler)),
-                    event.event_type,
+            except Exception as first:
+                exc: Exception | None = first
+                if self._retry is not None:
+                    exc = await self._retry.again(event, handler, first)
+                if exc is None:
+                    continue
+                name = getattr(handler, "__qualname__", repr(handler))
+                log.error(
+                    "Event handler %s failed for %s from %s: %s — the event"
+                    " is lost for this handler",
+                    name,
+                    event.event_type.value,
+                    event.from_instance,
+                    type(exc).__name__,
+                    exc_info=exc,
                 )
 
     def handlers_for(

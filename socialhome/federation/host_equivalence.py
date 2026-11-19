@@ -26,7 +26,7 @@ It covers CONTENT and admin actions — the full §25.6 stream (roster and bans
 included), role changes, live bans / unbans, remote-member removals,
 proposal mirrors, the
 signing-seed share, the host writer exemption. It never covers owner-only
-settings: the owner-signed GFS list, ``private_gfs``, ``gfs_publish_mode``,
+settings: the owner-signed GFS list, ``private_gfs``,
 the authority cert / ``host_identity_pk``, the config, dissolve and the age
 gate keep comparing against ``owner_instance_id`` alone, and even a trusted
 inviter never acts on a user of the owner household
@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING
 
 import orjson
 
+from ..crypto import ed25519_public_key
 from ..domain.space import SpaceRole
 from ..space_owner_statement import MAX_STATEMENT_AGE_MS
 
@@ -126,6 +127,74 @@ async def acts_as_host(
     return await is_trusted_inviter(space_repo, seat_repo, space, sender)
 
 
+async def acting_hosts(
+    space_repo: AbstractSpaceRepo,
+    seat_repo: AbstractSpaceRemoteMemberRepo | None,
+    space: Space,
+    *,
+    own_instance_id: str,
+) -> list[str]:
+    """The households acting as *space*'s host HERE, owner first: its owner
+    and — on a household a delegated admin invited — that inviting admin
+    while it is host-equivalent (:func:`is_trusted_inviter`). One notion
+    for everything that talks to "the host": the sync scheduler's BEGINs
+    and its silent-host wait (v_92), and who a ``SPACE_MEDIA_WANTED`` asks
+    before any helper. Without a roster mirror (*seat_repo*) only the
+    owner."""
+    targets = [space.owner_instance_id]
+    if seat_repo is None:
+        return targets
+    inviter = await space_repo.get_invited_by(space.id)
+    if (
+        inviter
+        and inviter not in targets
+        and inviter != own_instance_id
+        and await acts_as_host(space_repo, seat_repo, space, inviter)
+    ):
+        targets.append(inviter)
+    return targets
+
+
+async def serves_as_host(
+    space_repo: AbstractSpaceRepo, space: Space | None, *, own_instance_id: str
+) -> bool:
+    """The other side of :func:`acts_as_host`: whether THIS household may
+    act as *space*'s host toward other member households — it owns the
+    space, or it is a delegated admin household: delegation is on, one of
+    its people holds a live ``admin`` seat, and it holds the seed of the
+    authority key the space pins (what its inviter proof is signed with).
+
+    This grants nothing: every receiver still decides with
+    :func:`acts_as_host` on its own rows. It only keeps a household nobody
+    would listen to from sending."""
+    if space is None or not own_instance_id:
+        return False
+    if space.owner_instance_id == own_instance_id:
+        return True
+    features = getattr(space, "features", None)
+    if not getattr(features, "delegated_admin_authority", False):
+        return False
+    if not await holds_local_admin_seat(space_repo, space.id):
+        return False
+    seed = await space_repo.get_space_seed(space.id)
+    return (
+        seed is not None
+        and ed25519_public_key(seed).hex()
+        == str(space.identity_public_key or "").lower()
+    )
+
+
+async def holds_local_admin_seat(space_repo: AbstractSpaceRepo, space_id: str) -> bool:
+    """Whether one of THIS household's people holds a live ``admin`` seat in
+    *space_id* — what makes it a delegated admin household at all (the seed
+    is taken, and host-equivalence served, only with one)."""
+    local = set(await space_repo.list_local_member_user_ids(space_id))
+    return any(
+        m.user_id in local and m.role == SpaceRole.ADMIN
+        for m in await space_repo.list_members(space_id)
+    )
+
+
 async def touches_owner_household(
     space_repo: AbstractSpaceRepo,
     seat_repo: AbstractSpaceRemoteMemberRepo | None,
@@ -151,8 +220,11 @@ async def touches_owner_household(
 
 
 __all__ = [
+    "acting_hosts",
     "acts_as_host",
+    "holds_local_admin_seat",
     "is_trusted_inviter",
     "owner_statement_current",
+    "serves_as_host",
     "touches_owner_household",
 ]

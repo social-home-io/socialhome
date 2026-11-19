@@ -50,6 +50,7 @@ from socialhome.services.calendar_service import (
 from socialhome.services.media_ref_guard import MediaRefGuard
 from socialhome.services.moderation_release import release_scope
 from socialhome.services.space_moderation_service import SpaceModerationService
+from tests.space_media_items import expected_urls
 
 # Event seeds are anchored in the near future so the service's
 # past-occurrence RSVP lock (``cannot RSVP to an occurrence that has
@@ -3661,3 +3662,21 @@ async def test_an_unchanged_cover_plans_nothing_on_edit(space_cal_env):
         cover_url="api/media/new-cover.webp",
     )
     assert media.planned == [("sp-cal", ["api/media/new-cover.webp"], False)]
+
+
+# ─── Registry tripwire: every registered field ships ─────────────────────
+
+
+async def test_an_events_every_registered_field_ships(space_cal_env):
+    env = space_cal_env
+    sync = await _with_cover_shipping(env)
+    urls = expected_urls("calendar", stored_only=True)
+    await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Picnic",
+        start=_SEED.isoformat(),
+        end=(_SEED + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+        cover_url=urls[0],
+    )
+    assert [c["media_urls"] for c in sync.calls] == [urls]

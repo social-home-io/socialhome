@@ -224,9 +224,9 @@ async def test_relay_queue_drop_logs_name_no_target(gfs_db, caplog):
 
 def test_two_gfss_give_a_household_different_mailboxes():
     root = bytes(range(32))
-    a = derive_mailbox_keys(root, "gfs-a", "space-1", 0)
-    b = derive_mailbox_keys(root, "gfs-b", "space-1", 0)
+    a = derive_mailbox_keys(root, "gfs-a", 853190)
+    b = derive_mailbox_keys(root, "gfs-b", 853190)
     assert a.mailbox_id != b.mailbox_id
     assert a.kem_public != b.kem_public
     with pytest.raises(ValueError):
-        derive_mailbox_keys(root, "gfs|x", "space-1", 0)
+        derive_mailbox_keys(root, "gfs|x", 853190)

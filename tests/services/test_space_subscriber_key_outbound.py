@@ -159,13 +159,14 @@ async def env(tmp_dir):
         with_seed,
         join_mode=JoinMode.OPEN,
         allow_subscribers=True,
+        owner=own_iid,
     ):
         skp = generate_space_keypair()
         await space_repo.save(
             Space(
                 id=space_id,
                 name="S",
-                owner_instance_id=own_iid,
+                owner_instance_id=owner,
                 owner_username="alice",
                 identity_public_key=skp.public_key.hex(),
                 config_sequence=0,
@@ -507,6 +508,25 @@ async def test_reconcile_skips_space_without_seed(recon_env):
     assert recon_env["gfs"].calls == []
 
 
+@pytest.mark.security
+async def test_reconcile_skips_a_space_this_household_does_not_own(recon_env):
+    """Only the owner lists a space. A leftover publication row on a
+    delegated admin (it holds the seed) must not make it ask the GFS for the
+    subscriber list on its identified session — that names it as a seed
+    holder — on a reconnect or after a rotation."""
+    await recon_env["make_space"](
+        "sp-del", SpaceType.GLOBAL, with_seed=True, owner="owner.home"
+    )
+    recon_env["conn_repo"].add_conn("gfs-1")
+    recon_env["conn_repo"].publish("gfs-1", "sp-del")
+
+    await recon_env["svc"].reconcile("gfs-1")
+    await recon_env["svc"].reconcile_space_everywhere("sp-del")
+
+    assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
 async def test_reconcile_skips_private_space(recon_env):
     await recon_env["make_space"]("sp-priv", SpaceType.PRIVATE, with_seed=True)
     recon_env["conn_repo"].add_conn("gfs-1")
@@ -811,6 +831,29 @@ async def test_reconcile_space_everywhere_is_fail_soft(recon_env):
 
 
 # ─── allow_subscribers OFF: listed for discovery, never publicly readable ──
+
+
+@pytest.mark.security
+async def test_a_new_subscriber_frame_gets_no_answer_from_a_delegated_admin(env):
+    """An honest GFS notifies only the owner. A curious one could push the
+    frame, with a key it minted, to any household's socket: an answer would
+    say "this socket holds the seed". Only the owner answers."""
+    await env["make_space"](
+        "sp-del", SpaceType.GLOBAL, with_seed=True, owner="owner.home"
+    )
+    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    for reason in (None, "subscribe", "reconnect"):
+        await env["svc"].handle(
+            _new_subscriber_frame(
+                "sp-del",
+                sub_iid,
+                id_kp.public_key,
+                kw_kp.public_key,
+                keywrap_sig,
+                reason=reason,
+            )
+        )
+    assert env["gfs"].calls == []
 
 
 async def test_space_without_subscribers_seals_no_key_on_new_subscriber(env):

@@ -14,6 +14,30 @@ from datetime import UTC, datetime, timedelta
 from .federation import FederationEventType
 from .moment import MOMENT_MAX_LIFETIME_DAYS
 
+#: The outbox's base retry schedule in seconds — index == attempt number
+#: after the first failure. The last entry is the ceiling.
+BACKOFF_SECONDS: tuple[int, ...] = (
+    5,
+    10,
+    20,
+    40,
+    80,
+    160,
+    320,
+    640,
+    1280,
+    2560,
+    5120,
+    10240,
+    14400,
+)
+
+#: Max attempts before an outbox entry is moved to ``failed`` (or, for
+#: :data:`NEVER_DROP` / long-lived, pinned at the ceiling backoff — and left
+#: out of the v_91 seat ordering). Matches the length of
+#: :data:`BACKOFF_SECONDS`.
+MAX_ATTEMPTS: int = len(BACKOFF_SECONDS)
+
 #: Event types that must NEVER be marked ``failed`` regardless of attempt
 #: count (§4.4.7).  These carry security or structural state — admin key
 #: shares, bans, unpair signals, key revocations — that the receiver
@@ -169,6 +193,12 @@ def is_long_lived(event_type: FederationEventType, key: str | None) -> bool:
     return key is None or not key.startswith(CAPPED_DELETE_KEY_PREFIX)
 
 
+def admin_seed_key_prefix(space_id: str) -> str:
+    """The outbox-key prefix of every queued ``SPACE_ADMIN_KEY_SHARE`` for
+    *space_id* (:func:`supersede_key`) — what an authority rotation drops."""
+    return f"admin-seed:{space_id}:"
+
+
 def supersede_key(
     event_type: FederationEventType,
     *,
@@ -178,14 +208,51 @@ def supersede_key(
     """The latest-only key of an outbox entry, or ``None`` (kept as is).
 
     Some events carry *state*, not history: a person's online status, a
-    person's pin on a space map. For those a newer send makes every queued
-    older one worthless — and harmful: delivered after it, the older one
-    overwrites the newer state at the peer, and every queued copy takes a
+    person's pin on a space map, a voter's selection in a space poll
+    (``SPACE_POLL_VOTE_CAST`` carries the whole selection; since v_94 the
+    receiver orders it by its stamp, so an older one landing late no longer
+    wins — the key only saves the slot). For those a newer send makes every
+    queued older one worthless — and, where the receiver keeps no stamp,
+    harmful: delivered after it, the older one overwrites the newer state
+    at the peer — and every queued copy takes a
     slot of the per-peer cap that a DM or a post would otherwise keep. So
     the outbox holds at most one pending row per (peer, key): a new one
     replaces it, and a newer one delivered directly drops it.
 
+    A space's roster snapshot to one household is state too (per space
+    and part).
+
     The key is local-only (an outbox column, never on the wire)."""
+    if event_type is FederationEventType.SPACE_POLL_VOTE_CAST:
+        post_id, voter = payload.get("post_id"), payload.get("voter_user_id")
+        if not (
+            space_id
+            and isinstance(post_id, str)
+            and post_id
+            and isinstance(voter, str)
+            and voter
+        ):
+            return None
+        return f"poll-vote:{space_id}:{post_id}:{voter}"
+    if event_type is FederationEventType.SPACE_ADMIN_KEY_SHARE:
+        # Only the newest seed share of a space is worth delivering (an
+        # older one carries the seed of a retired key); a rotation drops
+        # every queued one by this prefix so none lands after a revocation.
+        return f"{admin_seed_key_prefix(space_id)}seed" if space_id else None
+    if event_type is FederationEventType.SPACE_ROSTER_SNAPSHOT:
+        # The host's whole roster for one space, to one household: a newer
+        # one makes a queued older one worthless (the receiver merges by
+        # version, so only the slot is saved). Per part — a multi-part
+        # send's parts replace the older send's same-numbered parts.
+        part = payload.get("part", 0)
+        if not space_id or not isinstance(part, int) or isinstance(part, bool):
+            return None
+        if payload.get("entries") == []:
+            # A credentials-only snapshot (no roster entry — a real roster
+            # is never empty): its own slot, outside the roster prefix, so
+            # it never replaces or drops a queued roster snapshot.
+            return f"roster-credentials:{space_id}"
+        return f"{roster_snapshot_key_prefix(space_id)}{part}"
     user_id = payload.get("user_id")
     if not isinstance(user_id, str) or not user_id:
         return None
@@ -193,7 +260,21 @@ def supersede_key(
         return f"online:{user_id}"
     if event_type is FederationEventType.SPACE_LOCATION_UPDATED and space_id:
         return f"location:{space_id}:{user_id}"
+    if event_type is FederationEventType.SPACE_POST_REACTION and space_id:
+        # v_93 — one person's reaction with one emoji on one post: its
+        # latest toggle is all a peer needs (receivers order by the stamp
+        # anyway), so a flood of toggles holds one slot, not one per click.
+        post_id, emoji = payload.get("post_id"), payload.get("emoji")
+        if isinstance(post_id, str) and post_id and isinstance(emoji, str) and emoji:
+            return f"reaction:{space_id}:{post_id}:{user_id}:{emoji}"
     return None
+
+
+def roster_snapshot_key_prefix(space_id: str) -> str:
+    """What the outbox key of every queued ``SPACE_ROSTER_SNAPSHOT`` part
+    of *space_id* starts with — a new snapshot drops them all first, so a
+    shorter send never leaves an older one's higher parts behind."""
+    return f"roster-snapshot:{space_id}:"
 
 
 def retention_expires_at(

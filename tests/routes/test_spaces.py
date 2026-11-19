@@ -15,6 +15,7 @@ from socialhome.app_keys import db_key as _db_key
 from socialhome.app_keys import (
     gfs_connection_service_key,
     notification_delivery_key,
+    space_repo_key,
     space_service_key,
 )
 from socialhome.auth import sha256_token_hash
@@ -524,20 +525,22 @@ async def test_explicit_allow_subscribers_change_by_an_admin_is_still_forbidden(
     assert body["features"]["allow_subscribers"] is True
 
 
-# ── v_50: gfs_publish_mode (owner-only) ──────────────────────────────────
+# ── v_90: there is no GFS publish mode ───────────────────────────────────
 
 
-async def test_gfs_publish_mode_defaults_to_trusted_and_the_owner_sets_strict(client):
+async def test_the_space_has_no_gfs_publish_mode_and_ignores_one(client):
+    """One mode, always anonymous: the features carry no publish mode, and a
+    PATCH still naming one (an older SPA) changes nothing."""
     r = await client.post(
         "/api/spaces",
-        json={"name": "Strict", "space_type": "global"},
+        json={"name": "OneMode", "space_type": "global"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
     body = await (
         await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
     ).json()
-    assert body["features"]["gfs_publish_mode"] == "trusted"
+    assert "gfs_publish_mode" not in body["features"]
     r = await client.patch(
         f"/api/spaces/{sid}",
         json={"features": {"gfs_publish_mode": "strict"}},
@@ -547,53 +550,7 @@ async def test_gfs_publish_mode_defaults_to_trusted_and_the_owner_sets_strict(cl
     body = await (
         await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
     ).json()
-    assert body["features"]["gfs_publish_mode"] == "strict"
-    # A partial edit of another key leaves it alone.
-    r = await client.patch(
-        f"/api/spaces/{sid}",
-        json={"features": {"bazaar": False}},
-        headers=_auth(client._admin_token),
-    )
-    assert r.status == 200, await r.text()
-    body = await (
-        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
-    ).json()
-    assert body["features"]["gfs_publish_mode"] == "strict"
-
-
-async def test_gfs_publish_mode_change_by_an_admin_is_forbidden(client):
-    r = await client.post(
-        "/api/spaces",
-        json={"name": "StrictAdmin", "space_type": "global"},
-        headers=_auth(client._admin_token),
-    )
-    sid = (await r.json())["id"]
-    await _promote_bob_to_admin(client, sid)
-    r = await client.patch(
-        f"/api/spaces/{sid}",
-        json={"features": {"gfs_publish_mode": "strict"}},
-        headers=_auth(client._bob_token),
-    )
-    assert r.status == 403, await r.text()
-    body = await (
-        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
-    ).json()
-    assert body["features"]["gfs_publish_mode"] == "trusted"
-
-
-async def test_an_unknown_gfs_publish_mode_is_a_422(client):
-    r = await client.post(
-        "/api/spaces",
-        json={"name": "StrictBad", "space_type": "global"},
-        headers=_auth(client._admin_token),
-    )
-    sid = (await r.json())["id"]
-    r = await client.patch(
-        f"/api/spaces/{sid}",
-        json={"features": {"gfs_publish_mode": "open"}},
-        headers=_auth(client._admin_token),
-    )
-    assert r.status == 422, await r.text()
+    assert "gfs_publish_mode" not in body["features"]
 
 
 # ── private_gfs (owner-only) + invite link type ──────────────────────────
@@ -1103,6 +1060,51 @@ async def test_list_members_includes_federated_remote_members(client):
     assert remote["picture_url"] is None
     assert remote["is_online"] is False
     assert remote["location_share_enabled"] is False
+
+
+async def test_space_members_names_every_admin_household(client):
+    """What the owner is shown before turning "Let admins act for me" on
+    comes from this list: every other household with an admin seat is a
+    row with ``role: "admin"`` and its household ID (``instance_id``); the
+    owner's own household carries none, and a removed admin is not listed.
+    """
+    db = client.app[_db_key]
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "ActForMe"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    for instance_id, user_id, role, tombstoned in (
+        ("peer-one", "uid-a1", "admin", 0),
+        ("peer-one", "uid-a2", "admin", 0),
+        ("peer-two", "uid-b1", "admin", 0),
+        ("peer-two", "uid-b2", "member", 0),
+        ("peer-gone", "uid-c1", "admin", 1),
+    ):
+        await db.enqueue(
+            "INSERT INTO space_remote_members"
+            "(space_id, instance_id, user_id, display_name, role, tombstoned)"
+            " VALUES(?,?,?,?,?,?)",
+            (sid, instance_id, user_id, user_id, role, tombstoned),
+        )
+    resp = await client.get(
+        f"/api/spaces/{sid}/members", headers=_auth(client._admin_token)
+    )
+    assert resp.status == 200, await resp.text()
+    members = await resp.json()
+    admins = sorted(
+        (m["instance_id"], m["user_id"])
+        for m in members
+        if m["role"] == "admin" and m.get("instance_id")
+    )
+    assert admins == [
+        ("peer-one", "uid-a1"),
+        ("peer-one", "uid-a2"),
+        ("peer-two", "uid-b1"),
+    ]
+    own = [m for m in members if not m.get("instance_id")]
+    assert [m["role"] for m in own] == ["owner"]
 
 
 async def test_remote_member_display_name_prefers_fresh_users_table_row(client):
@@ -2797,6 +2799,36 @@ async def test_my_join_requests_lists_only_own_pending(client):
     assert set(body["pending_space_ids"]) == {"sp-pend-1", "sp-pend-2"}
     assert "sp-done" not in body["pending_space_ids"]
     assert "sp-admin" not in body["pending_space_ids"]
+
+
+async def test_my_join_requests_leave_out_another_households(client):
+    """A request is keyed by (household, user id). Another household
+    asking to join a space hosted here — or holding a pending admin
+    request — under bob's user id is not bob's request: his space cards
+    show no "Request pending". His own outgoing request (it names the
+    host) does show."""
+    repo = client.app[space_repo_key]
+    admin = _auth(client._admin_token)
+    r = await client.post("/api/spaces", json={"name": "Hosted"}, headers=admin)
+    hosted = (await r.json())["id"]
+    r = await client.post("/api/spaces", json={"name": "Elevated"}, headers=admin)
+    elevated = (await r.json())["id"]
+    await repo.save_join_request(
+        hosted, client._bob_uid, remote_applicant_instance_id="peer-far"
+    )
+    await repo.save_join_request(
+        elevated,
+        client._bob_uid,
+        remote_applicant_instance_id="peer-far",
+        requested_role="admin",
+    )
+    await repo.save_join_request(
+        "a-space-elsewhere", client._bob_uid, remote_applicant_instance_id="host-far"
+    )
+
+    r = await client.get("/api/me/join-requests", headers=_auth(client._bob_token))
+    assert r.status == 200
+    assert (await r.json())["pending_space_ids"] == ["a-space-elsewhere"]
 
 
 async def test_my_join_requests_empty(client):

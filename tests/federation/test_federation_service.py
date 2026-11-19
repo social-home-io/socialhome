@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -41,6 +42,7 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_SUPERSEDED,
     BroadcastResult,
     DeliveryResult,
+    FederationEvent,
     FederationEventType,
     InstanceSource,
     PairingSession,
@@ -54,6 +56,7 @@ from socialhome.domain.media_chunking import (
     ROUTED_CHUNK_BYTES,
     media_chunk_bytes,
 )
+from socialhome.domain.outbox import OutboxEntry
 from socialhome.federation import FederationService, routed_crypto
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation import media_framing as _mf
@@ -85,6 +88,7 @@ from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.json_text import dumps_str
+from tests.pairing_fakes import SavesPendingMixin
 
 # ─── Shared fixtures & stubs ──────────────────────────────────────────────
 
@@ -144,7 +148,7 @@ def _make_remote_instance(
     return inst, session_key
 
 
-class InMemoryFederationRepo:
+class InMemoryFederationRepo(SavesPendingMixin):
     """Minimal in-memory federation repo for tests."""
 
     def __init__(self):
@@ -355,6 +359,12 @@ class InMemoryOutboxRepo:
 
     def __init__(self):
         self.enqueued: list[dict] = []
+        #: Migration 0145 — stored payloads by id (``OutboxPayload``).
+        self.payloads: dict = {}
+        #: ``(entry_id, next_attempt_at, attempts)`` per reschedule.
+        self.rescheduled: list[tuple[str, str, int]] = []
+        #: Multi payloads :meth:`ungroup_payload` took out of every group.
+        self.ungrouped: set[str] = set()
 
     async def enqueue(
         self,
@@ -366,10 +376,13 @@ class InMemoryOutboxRepo:
         authority_json: str | None = None,
         expires_at: str | None = None,
         supersede_key: str | None = None,
+        payload_ref=None,
     ) -> str:
         entry_id = msg_id or str(uuid.uuid4())
         if supersede_key is not None:
             await self.drop_superseded(instance_id, supersede_key)
+        if payload_ref is not None:
+            self.payloads.setdefault(payload_ref.id, payload_ref)
         self.enqueued.append(
             {
                 "id": entry_id,
@@ -378,9 +391,59 @@ class InMemoryOutboxRepo:
                 "payload_json": payload_json,
                 "expires_at": expires_at,
                 "supersede_key": supersede_key,
+                "payload_id": payload_ref.id if payload_ref is not None else None,
             }
         )
         return entry_id
+
+    async def enqueue_refs(
+        self, *, instance_ids, event_type, supersede_key, payload_ref
+    ) -> dict[str, str]:
+        return {
+            iid: await self.enqueue(
+                instance_id=iid,
+                event_type=event_type,
+                payload_json="",
+                supersede_key=supersede_key,
+                payload_ref=payload_ref,
+            )
+            for iid in instance_ids
+        }
+
+    async def get_payload(self, payload_id: str):
+        return self.payloads.get(payload_id)
+
+    def entries(self) -> list[OutboxEntry]:
+        """The queued rows as ``list_due`` would return them (test helper)."""
+        return [
+            OutboxEntry(
+                id=e["id"],
+                instance_id=e["instance_id"],
+                event_type=e["event_type"],
+                payload_json=e["payload_json"],
+                status="pending",
+                attempts=0,
+                next_attempt_at="",
+                created_at="",
+                supersede_key=e["supersede_key"],
+                payload_id=e["payload_id"],
+                space_id=(
+                    self.payloads[e["payload_id"]].space_id
+                    if e["payload_id"] is not None
+                    else None
+                ),
+                msg_id=(
+                    self.payloads[e["payload_id"]].msg_id
+                    if e["payload_id"] is not None
+                    and e["payload_id"] not in self.ungrouped
+                    else None
+                ),
+            )
+            for e in self.enqueued
+        ]
+
+    async def ungroup_payload(self, payload_id: str) -> None:
+        self.ungrouped.add(payload_id)
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int:
         before = len(self.enqueued)
@@ -406,8 +469,12 @@ class InMemoryOutboxRepo:
         ]
         return before - len(self.enqueued)
 
-    async def list_due(self, limit: int = 50):
+    async def list_due(self, limit: int = 50, *, exclude=()):
         return []
+
+    async def has_pending_row(self, instance_id: str) -> bool:
+        """Every queued row counts as pending and unexpired here."""
+        return any(e["instance_id"] == instance_id for e in self.enqueued)
 
     async def delete_pending_of_types(self, instance_id, event_types) -> int:
         before = len(self.enqueued)
@@ -427,7 +494,7 @@ class InMemoryOutboxRepo:
     async def reschedule(
         self, entry_id: str, next_attempt_at: str, attempts: int
     ) -> None:
-        pass
+        self.rescheduled.append((entry_id, next_attempt_at, attempts))
 
     async def expire_past_retention(self, now_iso: str) -> int:
         return 0
@@ -2053,6 +2120,59 @@ async def test_begin_mesh_catchup_sync_carries_the_authority_echo():
         )
     payload = send_mock.call_args.kwargs["payload"]
     assert payload["authority_epoch_echo"] == {"key_epoch": 3}
+    assert "mod_held" not in payload
+
+
+@pytest.mark.asyncio
+async def test_begin_mesh_catchup_sync_carries_the_roster_digest():
+    """Should-fix 4: a mesh-only member's BEGIN carries its roster digest,
+    so its host repairs its mirror by the same rule as a paired member's;
+    the digest is recorded with the request for a relay re-BEGIN."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(
+        return_value=DeliveryResult(instance_id="host-1", ok=True),
+    )
+    digest = {"suite": "rd1-sha256", "digest": "d" * 64, "cert_epoch": 2}
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        await svc.begin_mesh_catchup_sync(
+            space_id="sp-1", host_instance_id="host-1", roster_digest=digest
+        )
+    assert send_mock.call_args.kwargs["payload"]["roster_digest"] == digest
+    assert sync_manager.record_sync_request.call_args.kwargs["roster_digest"] == digest
+
+
+@pytest.mark.asyncio
+async def test_begin_mesh_catchup_sync_carries_the_moderation_echo():
+    """A reviewer household's BEGIN to a mesh-only host echoes the pending
+    moderation items it holds — an empty list is an echo too."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(
+        return_value=DeliveryResult(instance_id="host-1", ok=True),
+    )
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        await svc.begin_mesh_catchup_sync(
+            space_id="sp-1",
+            host_instance_id="host-1",
+            sync_mode="incremental",
+            mod_held={},
+        )
+    assert send_mock.call_args.kwargs["payload"]["mod_held"] == {}
 
 
 @pytest.mark.asyncio
@@ -2297,6 +2417,84 @@ async def test_dispatch_space_post_created():
         space_id="s1",
     )
     await svc._dispatch_event(event)
+
+
+async def test_any_dispatched_space_event_tells_the_host_contact():
+    """v_92: every verified event dispatched here tells the host contact who
+    sent it for which space, so a silent host that speaks again (a post, a
+    config change — not only a sync answer) stops helper escalation at once.
+    Events without a space tell it nothing."""
+    svc, _ = _make_service(bus=EventBus())
+    seen: list[tuple[str, str]] = []
+
+    class _Contact:
+        def heard_from(self, space_id: str, instance_id: str) -> None:
+            seen.append((space_id, instance_id))
+
+    svc.attach_host_contact(_Contact())
+    for space_id in ("s1", None):
+        await svc._dispatch_event(
+            FederationEvent(
+                msg_id=f"m-{space_id}",
+                event_type=FederationEventType.SPACE_POST_CREATED,
+                from_instance="host-hh",
+                to_instance="test-instance",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload={"post_id": "p1"},
+                space_id=space_id,
+            )
+        )
+    assert seen == [("s1", "host-hh")]
+
+
+async def test_a_dispatched_space_event_has_the_spaces_files_checked():
+    """Every verified event of a space (a live row, a sync chunk, a helper's
+    catch-up) marks the space for the missing-file check — after its
+    handlers ran, so the row is stored. File traffic itself and events
+    without a space mark nothing."""
+    svc, _ = _make_service(bus=EventBus())
+    marked: list[str] = []
+    svc.attach_space_applied(marked.append)
+    for event_type, space_id in (
+        (FederationEventType.SPACE_POST_CREATED, "s1"),
+        (FederationEventType.SPACE_SYNC_CHUNK, "s2"),
+        (FederationEventType.SPACE_MEDIA_BLOB, "s3"),
+        (FederationEventType.SPACE_MEDIA_WANTED, "s4"),
+        (FederationEventType.SPACE_POST_CREATED, None),
+    ):
+        await svc._dispatch_event(
+            FederationEvent(
+                msg_id=f"m-{space_id}",
+                event_type=event_type,
+                from_instance="peer",
+                to_instance="test-instance",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload={},
+                space_id=space_id,
+            )
+        )
+    assert marked == ["s1", "s2"]
+
+
+async def test_a_failing_file_check_mark_never_costs_the_event(caplog):
+    svc, _ = _make_service(bus=EventBus())
+
+    def _boom(space_id: str) -> None:
+        raise RuntimeError("boom")
+
+    svc.attach_space_applied(_boom)
+    await svc._dispatch_event(
+        FederationEvent(
+            msg_id="m",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            from_instance="peer",
+            to_instance="test-instance",
+            timestamp=datetime.now(UTC).isoformat(),
+            payload={},
+            space_id="s1",
+        )
+    )
+    assert "marking space s1" in caplog.text
 
 
 async def test_dispatch_space_member_joined():
@@ -3872,42 +4070,12 @@ async def test_send_with_mesh_fallback_no_route_when_not_in_cooldown():
     discover_route.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_broadcast_to_space_members_sends_the_relay_payload_to_relay_seats(
-    monkeypatch,
-):
-    """A household seated from an invite link rides the connection-server
-    relay, whose envelope cap is far tighter than a paired peer's. A caller
-    that ships bulky bytes hands a smaller ``relay_payload`` for exactly
-    those members; every other member gets the full ``payload``."""
-    km = _make_kek_manager()
-    fed_repo = InMemoryFederationRepo()
-    paired, _ = _make_remote_instance(km)
-    relayed, _ = _make_remote_instance(km)
-    relayed = dataclasses.replace(relayed, source=InstanceSource.SPACE_SESSION)
-    await fed_repo.save_instance(paired)
-    await fed_repo.save_instance(relayed)
-    space_id = "space-relay-variant"
-    fed_repo.add_space_member(space_id, paired.id)
-    fed_repo.add_space_member(space_id, relayed.id)
-    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
-    sent: dict[str, dict] = {}
-
-    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
-        sent[to_instance_id] = payload
-        return MagicMock(ok=True)
-
-    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
-    await svc.broadcast_to_space_members(
-        space_id,
-        FederationEventType.SPACE_CONFIG_CHANGED,
-        {"variant": "full"},
-        relay_payload={"variant": "relay"},
-    )
-    assert sent == {
-        paired.id: {"variant": "full"},
-        relayed.id: {"variant": "relay"},
-    }
+def test_broadcast_to_space_members_has_no_relay_variant():
+    """Owner decision 2026-11-15: every member gets the same payload — the
+    ``relay_payload`` special case for households seated from an invite link
+    is gone (the one image cap fits the relay)."""
+    params = inspect.signature(FederationService.broadcast_to_space_members).parameters
+    assert "relay_payload" not in params
 
 
 @pytest.mark.asyncio
@@ -6363,6 +6531,8 @@ async def test_a_chunk_over_the_route_cap_goes_json():
 @pytest.mark.parametrize(
     "change",
     [
+        # A seat that somehow holds an address still gets no direct POST:
+        # households met through a GFS never talk directly.
         {"source": InstanceSource.SPACE_SESSION},
         {"remote_inbox_url": ""},
         {"status": PairingStatus.PENDING_SENT},
@@ -6875,29 +7045,3 @@ async def test_the_files_hash_map_reaches_only_v85_households(monkeypatch):
         new.id: {"id": "p", "files": files, "files_suite": "sha256"},
         old.id: {"id": "p"},
     }
-
-
-@pytest.mark.asyncio
-async def test_send_event_unqueued_never_queues_and_honours_mailbox_only():
-    """v_88 round 9 (mailbox updates): one attempt, never the outbox; with
-    ``mailbox_only`` and no mailbox, nothing is sent at all."""
-    relay = _OneServerRelay((False, None))
-    svc, inst, _key, _fed_repo, outbox = await _svc_for_one_server(relay)
-    result = await svc.send_event_unqueued(
-        to_instance_id=inst.id,
-        event_type=FederationEventType.SPACE_MAILBOX_UPDATED,
-        payload={"mailbox": None},
-        space_id="sp-1",
-        mailbox_only=True,
-    )
-    assert result.ok is False and relay.calls == []
-    result = await svc.send_event_unqueued(
-        to_instance_id=inst.id,
-        event_type=FederationEventType.SPACE_MAILBOX_UPDATED,
-        payload={"mailbox": None},
-        space_id="sp-1",
-        mailbox_only=False,
-    )
-    assert result.ok is False and len(relay.calls) == 1
-    assert relay.calls[0][1]["space_id"] == "sp-1"
-    assert outbox.enqueued == []

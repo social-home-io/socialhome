@@ -10,12 +10,11 @@ import pytest
 from socialhome.crypto import ed25519_public_key
 from socialhome.domain.gfs_channel import (
     CHANNEL_FRAME_KEYS,
-    ChannelCert,
+    CHANNEL_ROUTES,
     ChannelEpochNotice,
     ChannelItemFrame,
     ChannelPass,
     ChannelPublishAnonRequest,
-    ChannelPublishRequest,
     ChannelRegisterRequest,
     ChannelSubscribeRequest,
     ChannelUnregisterRequest,
@@ -28,7 +27,6 @@ from socialhome.domain.gfs_channel import (
 )
 from socialhome.gfs_channel import (
     derive_channel_seed,
-    issue_channel_cert,
     issue_channel_pass,
     issue_channel_writer_key,
     new_channel_id,
@@ -52,10 +50,6 @@ def test_channel_id_validation(bad) -> None:
 
 
 def test_statement_round_trips() -> None:
-    cert = issue_channel_cert(
-        channel_seed=SEED, channel_id=CID, epoch=1, instance_pk=PK, scope="comment"
-    )
-    assert ChannelCert.from_wire(cert.to_wire()) == cert
     p = issue_channel_pass(channel_seed=SEED, channel_id=CID, epoch=1, instance_pk=PK)
     assert ChannelPass.from_wire(p.to_wire()) == p
     wk = issue_channel_writer_key(
@@ -64,18 +58,14 @@ def test_statement_round_trips() -> None:
     assert ChannelWriterKeyGrant.from_wire(wk.to_wire()) == wk
 
 
-def test_statements_refuse_extra_or_missing_keys() -> None:
-    cert = issue_channel_cert(
-        channel_seed=SEED, channel_id=CID, epoch=1, instance_pk=PK, scope="write"
-    ).to_wire()
-    with pytest.raises(InvalidChannelWire):
-        ChannelCert.from_wire({**cert, "space_id": "leak"})
-    with pytest.raises(InvalidChannelWire):
-        ChannelCert.from_wire({k: v for k, v in cert.items() if k != "epoch"})
-    with pytest.raises(InvalidChannelWire):
-        ChannelCert.from_wire({**cert, "scope": "admin"})
-    with pytest.raises(InvalidChannelWire):
-        ChannelCert.from_wire({**cert, "epoch": True})
+def test_there_is_no_identified_channel_publish() -> None:
+    # v_90 — one mode: the channel cert and ``/gfs/channels/publish`` are gone.
+    import socialhome.domain.gfs_channel as codec
+
+    for gone in ("ChannelCert", "ChannelPublishRequest", "CHANNEL_PUBLISH_ROUTE"):
+        assert not hasattr(codec, gone), gone
+    assert "/gfs/channels/publish" not in CHANNEL_ROUTES
+    assert "/gfs/channels/publish-anon" in CHANNEL_ROUTES
 
 
 def test_requests_round_trip() -> None:
@@ -90,11 +80,12 @@ def test_requests_round_trip() -> None:
         gfs_instance_id="g",
         ts=TS,
         epoch=3,
-        publish_mode="strict",
     )
     assert ChannelEpochNotice.from_wire(notice.to_wire()) == notice
+    assert "publish_mode" not in notice.to_wire()
+    # A notice still carrying a publish mode (pre-v_90) is malformed.
     with pytest.raises(InvalidChannelWire):
-        ChannelEpochNotice.from_wire({**notice.to_wire(), "publish_mode": "loud"})
+        ChannelEpochNotice.from_wire({**notice.to_wire(), "publish_mode": "trusted"})
     unreg = sign_unregister(
         channel_seed=SEED, channel_id=CID, gfs_instance_id="g", ts=TS
     )
@@ -114,21 +105,6 @@ def test_requests_round_trip() -> None:
         instance_id="i", gfs_instance_id="g", channel_id=CID, ts=TS, signature="s"
     )
     assert ChannelUnsubscribeRequest.from_wire(unsub.to_wire()) == unsub
-    cert = issue_channel_cert(
-        channel_seed=SEED, channel_id=CID, epoch=1, instance_pk=PK, scope="write"
-    )
-    pub = ChannelPublishRequest(
-        instance_id="i",
-        gfs_instance_id="g",
-        channel_id=CID,
-        ts=TS,
-        signature="s",
-        epoch=1,
-        channel_cert=cert,
-        payload="ct",
-    )
-    assert ChannelPublishRequest.from_wire(pub.to_wire()) == pub
-    assert set(pub.fan_out_frame()) == CHANNEL_FRAME_KEYS
     anon = ChannelPublishAnonRequest(
         gfs_instance_id="g",
         channel_id=CID,
@@ -140,7 +116,8 @@ def test_requests_round_trip() -> None:
         writer_sig_suite="ed25519",
     )
     assert ChannelPublishAnonRequest.from_wire(anon.to_wire()) == anon
-    assert anon.fan_out_frame() == pub.fan_out_frame()
+    assert anon.fan_out_frame() == channel_frame(CID, 1, "ct")
+    assert set(anon.fan_out_frame()) == CHANNEL_FRAME_KEYS
 
 
 def test_anon_request_refuses_identity_fields() -> None:
@@ -196,6 +173,9 @@ def test_grant_codec_bounds() -> None:
         with pytest.raises(InvalidChannelWire):
             GfsChannelGrant.from_wire({**base, "epoch_offset": bad})
     assert grant.channel_epoch == 10
+    # v_90 — a grant carries no channel cert any more.
+    with pytest.raises(InvalidChannelWire):
+        GfsChannelGrant.from_wire({**base, "channel_cert": {}})
 
 
 # ── L2: optional, signed ``gfs_key`` ─────────────────────────────────────

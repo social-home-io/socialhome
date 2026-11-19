@@ -641,6 +641,23 @@ describe('ConnectionsPage — pending pairing cancel', () => {
     expect(r.getByRole('button', { name: 'connections.pending.cancel_label(name=Zeta House)' })).toBeTruthy()
   })
 
+  it('a pending pairing with a household we share a space with says the space keeps working', async () => {
+    const r = await renderPage({
+      conns: [makeConnection(), { ...zeta, pending_kind: 'code', shares_space: true }],
+    })
+    // It is a pending card like any other (never a space-only row)…
+    expect(r.container.querySelector('[data-pending-kind]')!.textContent).toContain('connections.meta.waiting_code')
+    expect(r.getByRole('button', { name: 'connections.pending.cancel_label(name=Zeta House)' })).toBeTruthy()
+    // …with the reassurance next to what it waits on.
+    expect(r.container.querySelector('[data-shares-space]')!.textContent)
+      .toContain('connections.meta.pending_shares_space')
+  })
+
+  it('an ordinary pending pairing says nothing about a space', async () => {
+    const r = await renderPage({ conns: [makeConnection(), zeta] })
+    expect(r.container.querySelector('[data-shares-space]')).toBeNull()
+  })
+
   it('a confirmed household has no Cancel', async () => {
     const r = await renderPage({ conns: [makeConnection()] })
     expect(r.queryByText('connections.pending.cancel')).toBeNull()

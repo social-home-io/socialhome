@@ -160,7 +160,7 @@ async def houses(aiohttp_client, tmp_path):
 
 
 def _repo(app):
-    return app[space_sync_service_key]._space_post_repo
+    return app[space_sync_service_key]._exporters["posts"]._repo
 
 
 def _pid(owner: str, space: str = SPACE) -> str:
@@ -607,7 +607,7 @@ async def test_a_space_with_retention_syncs_only_its_window(houses):
 async def test_retention_never_hides_gallery_items_nothing_prunes(houses):
     h, _c, d = houses
     await h[db_key].enqueue("UPDATE spaces SET retention_days=7 WHERE id=?", (SPACE,))
-    gallery = h[space_sync_service_key]._gallery_repo
+    gallery = h[space_sync_service_key]._exporters["gallery"]._repo
     await gallery.create_album(
         GalleryAlbum(id="alb-old", space_id=SPACE, owner_user_id=AUTHOR, name="Trip")
     )

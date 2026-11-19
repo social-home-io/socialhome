@@ -23,6 +23,7 @@ from socialhome.domain.events import (
     SpacePostCreated,
 )
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.file_hashes import FileHash
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Comment, CommentType, FileMeta, Post, PostType
 from socialhome.domain.space import JoinMode, SpaceType
@@ -33,9 +34,11 @@ from socialhome.services.space_post_outbound import SpacePostOutbound
 from socialhome.services.space_public_author import (
     author_signing_bytes,
     signed_media_refs,
+    verified_file_hashes,
     verify_signed_author_inner,
 )
 from tests.services.test_space_public_author import _v25_author_signing_bytes
+from tests.space_media_items import expected_urls, synthetic_object
 
 
 @dataclass
@@ -1694,3 +1697,174 @@ async def test_a_comments_picture_rides_with_its_hash_and_its_bytes(tmp_path):
     assert kwargs["correlation_id"] == "c-1"
     assert kwargs["target_instance_ids"] == ["peer-b"]
     assert kwargs["media_urls"] == ["api/media/c.webp"]
+
+
+# ─── v_93: a space reaction reaches every member household ───────────────
+
+
+def _reaction_event(uid="u-1", *, added=True, space_id="sp-1", origin=None, at=None):
+    from socialhome.domain.events import PostReactionChanged
+
+    extra = {} if at is None else {"occurred_at": at}
+    return PostReactionChanged(
+        post=_post_obj("u-author"),
+        space_id=space_id,
+        origin_instance_id=origin,
+        reactor_user_id=uid,
+        emoji="👍",
+        added=added,
+        **extra,
+    )
+
+
+@pytest.mark.parametrize("added", [True, False])
+async def test_a_local_space_reaction_is_broadcast_to_member_households(added):
+    """A private space too (no GFS involved): the delta — who, which emoji,
+    add or remove, when — goes to every member household at v_93; an older
+    one is skipped (``min_proto_version``)."""
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    bus = EventBus()
+    federation = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    at = datetime(2026, 11, 11, 9, 30, 0, 123456, tzinfo=UTC)
+    await bus.publish(_reaction_event(added=added, at=at))
+    federation.broadcast_to_space_members.assert_awaited_once()
+    call = federation.broadcast_to_space_members.call_args
+    assert call.args[:2] == ("sp-1", FederationEventType.SPACE_POST_REACTION)
+    assert call.args[2] == {
+        "space_id": "sp-1",
+        "post_id": "post-1",
+        "user_id": "u-1",
+        "emoji": "👍",
+        "action": "add" if added else "remove",
+        "at": at.isoformat(),
+    }
+    assert call.kwargs == {
+        "min_proto_version": FederationCapability.MIN_FOR_SPACE_POST_REACTIONS
+    }
+
+
+@pytest.mark.parametrize("setup", ["inbound", "household", "anonymous"])
+async def test_a_reaction_is_not_broadcast_where_it_must_not_be(setup):
+    """An inbound reaction is never echoed, a household-feed one is not a
+    space event, and one naming nobody is not sent."""
+    bus = EventBus()
+    federation = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    await bus.publish(
+        _reaction_event(
+            uid="" if setup == "anonymous" else "u-1",
+            space_id=None if setup == "household" else "sp-1",
+            origin="peer.home" if setup == "inbound" else None,
+        )
+    )
+    federation.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_failed_reaction_broadcast_never_breaks_the_reaction():
+    """Fail-soft: the reaction is already stored; a broadcast that raises is
+    logged, not raised into the request."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members.side_effect = RuntimeError("down")
+    _make_outbound(bus=bus, federation=federation)
+    await bus.publish(_reaction_event())
+    federation.broadcast_to_space_members.assert_awaited_once()
+
+
+async def test_a_reaction_carries_one_stamp_on_both_paths():
+    """The member broadcast and the GFS ``space_item`` carry the SAME stamp,
+    so a household that gets both applies one (the second is not newer)."""
+    bus, member, uid = _items_setup()
+    at = datetime(2026, 11, 11, 9, 30, 0, 123456, tzinfo=UTC)
+    await bus.publish(_reaction_event(uid=uid, at=at))
+    assert datetime.fromisoformat(member.scheduled[0][3]["ts"]) == at
+
+
+# ─── Registry tripwire: every registered field ships ─────────────────────
+
+
+def _write_files(tmp_path, urls):
+    for url in urls:
+        (tmp_path / url.rsplit("/", 1)[-1]).write_bytes(url.encode())
+
+
+async def test_a_post_ships_and_hashes_every_registered_field(tmp_path):
+    urls = expected_urls("posts", stored_only=True)
+    _write_files(tmp_path, urls)
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    federation._own_instance_id = "self-id"
+    fed_repo = AsyncMock()
+    fed_repo.list_member_instance_ids = AsyncMock(return_value=["peer-a"])
+    media_sync = AsyncMock()
+    outbound = _make_outbound(
+        bus=bus, federation=federation, media_sync=media_sync, federation_repo=fed_repo
+    )
+    outbound.attach_file_hasher(MediaFileHasher(tmp_path))
+    post = synthetic_object("posts", item_id="p-reg")
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert set(payload["files"]) == {u.rsplit("/", 1)[-1] for u in urls}
+    assert media_sync.enqueue_for_post.call_args.kwargs["media_urls"] == urls
+
+
+async def test_a_comment_ships_and_hashes_every_registered_field(tmp_path):
+    urls = expected_urls("comments", stored_only=True)
+    _write_files(tmp_path, urls)
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    federation.own_instance_id = "us"
+
+    async def _supports(iid, *, min_version):
+        return True
+
+    federation.space_member_supports = _supports
+    media_sync = AsyncMock()
+    fed_repo = AsyncMock()
+    fed_repo.list_member_instance_ids = AsyncMock(return_value=["us", "peer-b"])
+    outbound = _make_outbound(
+        bus=bus, federation=federation, media_sync=media_sync, federation_repo=fed_repo
+    )
+    outbound.attach_file_hasher(MediaFileHasher(tmp_path))
+    comment = synthetic_object("comments", item_id="c-reg")
+    await bus.publish(CommentAdded(post_id="p-1", comment=comment, space_id="sp-1"))
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert set(payload["files"]) == {u.rsplit("/", 1)[-1] for u in urls}
+    assert media_sync.enqueue_for_blob.call_args.kwargs["media_urls"] == urls
+
+
+async def test_relay_hint_carries_the_posts_signed_file_hashes(tmp_path):
+    """v_92 — the pre-signed relay inner of a picture post carries its file
+    hashes under the author's signature, so whoever relays it, the GFS copy
+    names the file by content on a member that gets it first."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+    out = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(space_type=SpaceType.PUBLIC)}),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    (tmp_path / "p.webp").write_bytes(b"pixels")
+    out.attach_file_hasher(MediaFileHasher(tmp_path))
+    post = Post(
+        id="post-f",
+        author=uid,
+        type=PostType.IMAGE,
+        image_urls=("api/media/p.webp",),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert verify_signed_author_inner(relay)
+    assert verified_file_hashes(relay) == {
+        "p.webp": FileHash(hashlib.sha256(b"pixels").hexdigest())
+    }

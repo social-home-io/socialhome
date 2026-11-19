@@ -273,7 +273,7 @@ first-come rule. See [`spaces.md`](./spaces.md) and the v_36 row in
   `SPACE_TASK_*` inbound handlers.
 - `socialhome/federation/sync/space/exporters/tasks.py`,
   `tasks_archived.py`, `tasks_deleted.py`, `task_lists.py`,
-  `task_lists_deleted.py`, `receiver.py`, `resume.py` — §25.6 sync (list
+  `task_lists_deleted.py`, `receive_tasks.py`, `resume.py` — §25.6 sync (list
   and task tombstones included) and the resume replay.
 - `socialhome/repositories/task_repo.py` — `SqliteTaskRepo`,
   `SqliteSpaceTaskRepo`.

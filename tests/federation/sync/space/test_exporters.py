@@ -7,6 +7,7 @@ so the receiver has JSON-serialisable input.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import fields, replace
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -15,8 +16,16 @@ from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.conversation import ConversationMessage, SystemChatScope
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.page import Page
-from socialhome.domain.post import Comment, CommentType, Post, PostType
-from socialhome.domain.space import SpaceMember
+from socialhome.domain.post import (
+    BazaarListing,
+    BazaarMode,
+    BazaarStatus,
+    Comment,
+    CommentType,
+    Post,
+    PostType,
+)
+from socialhome.domain.space import SpaceMember, SpaceZone
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import (
     RecurrenceRule,
@@ -41,6 +50,7 @@ from socialhome.federation.sync.space.exporters import (
     CommentsDeletedExporter,
     CommentsExporter,
     GalleryExporter,
+    MemberPicturesExporter,
     MembersExporter,
     PagesDeletedExporter,
     PagesExporter,
@@ -58,6 +68,10 @@ from socialhome.federation.sync.space.exporters import (
     TimetablesExporter,
     ZonesExporter,
 )
+from socialhome.federation.sync.space.exporters import polls as polls_mod
+from socialhome.federation.sync.space.exporters.members import (
+    PreModeratorMembersExporter,
+)
 from socialhome.federation.sync.space.window import SyncWindows
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
@@ -71,6 +85,7 @@ from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
 from socialhome.repositories.sticky_repo import SqliteStickyRepo
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
 from socialhome.repositories.timetable_repo import SqliteSpaceTimetableRepo
+from tests.poll_votes import cast
 
 
 class _NoSpaces:
@@ -92,6 +107,9 @@ class _FakeSpacePostRepo:
 
     async def list_feed(self, space_id, *, before=None, limit=20):
         return self._posts
+
+    async def list_reaction_stamps(self, post_ids):
+        return {}
 
     async def list_sync_page(
         self,
@@ -134,7 +152,6 @@ class _FakeSpaceRepo:
 
 
 async def test_members_exporter():
-    from socialhome.federation.sync.space.exporters import MembersExporter
 
     member = SpaceMember(
         space_id="sp-1",
@@ -146,6 +163,63 @@ async def test_members_exporter():
     recs = await ex.list_records("sp-1")
     assert recs[0]["user_id"] == "u-1"
     assert recs[0]["role"] == "member"
+
+
+class _OwnerAwareSpaceRepo(_FakeSpaceRepo):
+    """A space owned by household ``owner-hh`` whose owner is ``u-owner``."""
+
+    async def get(self, space_id):
+        return SimpleNamespace(id=space_id, owner_instance_id="owner-hh")
+
+    async def get_owner_user_id(self, space_id):
+        return "u-owner"
+
+
+class _OwnerSeats:
+    """The roster mirror: ``u-owner-2`` is a second person of the owner."""
+
+    async def get(self, space_id, instance_id, user_id):
+        held = instance_id == "owner-hh" and user_id == "u-owner-2"
+        return SimpleNamespace(user_id=user_id) if held else None
+
+
+def _roster_rows():
+    return [
+        SpaceMember(space_id="sp-1", user_id=uid, role=role, joined_at="t")
+        for uid, role in (
+            ("u-owner", "owner"),
+            ("u-owner-2", "member"),
+            ("u-admin", "admin"),
+            ("u-other", "member"),
+        )
+    ]
+
+
+async def test_a_non_owner_never_streams_the_owner_households_member_rows():
+    """Review round 3 (#1361): a delegated admin that synced with the owner
+    holds the owner household's member rows, but those may only come from
+    the owner — the receiver drops them from anybody else (and warns). An
+    honest admin does not send them."""
+
+    ex = MembersExporter(
+        _OwnerAwareSpaceRepo(members=_roster_rows()),
+        own_instance_id="admin-hh",
+        remote_member_repo=_OwnerSeats(),
+    )
+    assert [r["user_id"] for r in await ex.list_records("sp-1")] == [
+        "u-admin",
+        "u-other",
+    ]
+
+
+async def test_the_owner_streams_its_own_households_member_rows():
+
+    ex = MembersExporter(
+        _OwnerAwareSpaceRepo(members=_roster_rows()),
+        own_instance_id="owner-hh",
+        remote_member_repo=_OwnerSeats(),
+    )
+    assert len(await ex.list_records("sp-1")) == 4
 
 
 class _FakePictureRepo:
@@ -161,7 +235,6 @@ async def test_members_exporter_says_no_picture_only_without_a_blob():
     hash is NULL while this household still holds the blob (an old wipe
     whose blob hash was not repairable) must not say "no picture": the key
     is left out. A seat with no blob says ``null``; a hash ships as is."""
-    from socialhome.federation.sync.space.exporters import MembersExporter
 
     rows = [
         SpaceMember(space_id="sp-1", user_id="u-none", role="member", joined_at="t"),
@@ -186,10 +259,6 @@ async def test_members_exporter_says_no_picture_only_without_a_blob():
 
 
 async def test_pre_moderator_members_exporter_downgrades_only_moderators():
-    from socialhome.federation.sync.space.exporters import MembersExporter
-    from socialhome.federation.sync.space.exporters.members import (
-        PreModeratorMembersExporter,
-    )
 
     rows = [
         SpaceMember(space_id="sp-1", user_id=uid, role=role, joined_at="2026")
@@ -212,7 +281,6 @@ async def test_pre_moderator_members_exporter_downgrades_only_moderators():
 
 
 async def test_bans_exporter():
-    from socialhome.federation.sync.space.exporters import BansExporter
 
     ex = BansExporter(
         _FakeSpaceRepo(
@@ -225,7 +293,6 @@ async def test_bans_exporter():
 
 
 async def test_posts_exporter_serialises_enums_and_datetimes():
-    from socialhome.federation.sync.space.exporters import PostsExporter
 
     post = Post(
         id="p-1",
@@ -250,7 +317,6 @@ async def test_posts_exporter_ships_hidden_anchor_posts_with_their_flag():
     ships ``hidden_from_feed`` so the joiner's feed stays as clean as the
     provider's.
     """
-    from socialhome.federation.sync.space.exporters import PostsExporter
 
     when = datetime(2026, 9, 19, tzinfo=UTC)
     shown = Post(
@@ -272,7 +338,6 @@ async def test_posts_exporter_ships_hidden_anchor_posts_with_their_flag():
 
 
 async def test_comments_exporter_walks_posts():
-    from socialhome.federation.sync.space.exporters import CommentsExporter
 
     post = Post(
         id="p-1",
@@ -297,7 +362,6 @@ async def test_comments_exporter_walks_posts():
 
 
 async def test_tasks_exporter_normalises_status_and_assignees():
-    from socialhome.federation.sync.space.exporters import TasksExporter
 
     now = datetime.now(UTC)
     task = Task(
@@ -331,7 +395,6 @@ async def test_tasks_exporter_normalises_status_and_assignees():
 
 
 async def test_tasks_exporters_carry_priority_labels_and_archived_at():
-    from socialhome.federation.sync.space.exporters import TasksArchivedExporter
 
     now = datetime(2026, 9, 1, tzinfo=UTC)
     task = Task(
@@ -363,10 +426,6 @@ async def test_tasks_archived_filters_to_archived_at():
     regardless of their status (a DONE task is *not* archived unless
     the user explicitly archived it).
     """
-    from socialhome.federation.sync.space.exporters import (
-        TasksArchivedExporter,
-        TasksExporter,
-    )
 
     now = datetime.now(UTC)
     active = Task(
@@ -413,7 +472,6 @@ async def test_tasks_archived_filters_to_archived_at():
 
 
 async def test_pages_exporter():
-    from socialhome.federation.sync.space.exporters import PagesExporter
 
     page = Page(
         id="pg-1",
@@ -438,7 +496,6 @@ async def test_pages_exporter():
 
 
 async def test_stickies_exporter():
-    from socialhome.federation.sync.space.exporters import StickiesExporter
 
     sticky = Sticky(
         id="s-1",
@@ -461,7 +518,6 @@ async def test_stickies_exporter():
 
 
 async def test_calendar_exporter_serialises_datetimes():
-    from socialhome.federation.sync.space.exporters import CalendarExporter
 
     event = CalendarEvent(
         id="e-1",
@@ -475,6 +531,9 @@ async def test_calendar_exporter_serialises_datetimes():
     class _Repo:
         async def list_events_sync_page(self, space_id, *, cursor, limit, since):
             return [event], None
+
+        async def list_rsvps(self, event_id):
+            return []
 
     recs = await CalendarExporter(_Repo()).list_records("sp-1")
     assert recs[0]["id"] == "e-1"
@@ -506,8 +565,6 @@ async def test_calendar_exporter_streams_a_series_once_whatever_its_age(db):
 
 
 async def test_gallery_exporter_emits_albums_then_items():
-    from socialhome.domain.gallery import GalleryAlbum, GalleryItem
-    from socialhome.federation.sync.space.exporters import GalleryExporter
 
     album = GalleryAlbum(
         id="a-1",
@@ -598,7 +655,6 @@ async def test_a_favourite_never_rides_the_gallery_sync(db):
 
 
 async def test_polls_exporter_walks_posts_with_polls():
-    from socialhome.federation.sync.space.exporters import PollsExporter
 
     post = SimpleNamespace(id="p-1")
 
@@ -613,14 +669,68 @@ async def test_polls_exporter_walks_posts_with_polls():
         async def list_options_with_counts(self, post_id):
             return [{"id": "opt-a", "text": "Yes", "count": 3}]
 
-    recs = await PollsExporter(_Polls(), _Posts(), _WINDOWS).list_records("sp-1")
+        async def list_votes(self, post_id, *, limit=None):
+            return [{"option_id": "opt-a", "voter_user_id": "u-1"}]
+
+        async def list_vote_stamps(self, post_id, *, limit):
+            return {"u-1": ["2026-11-12T10:00:00+00:00", ["opt-a"]]}, False
+
+    exporter = PollsExporter(_Polls(), _Posts(), _WINDOWS)
+    recs = await exporter.list_records("sp-1")
     assert recs[0]["post_id"] == "p-1"
     assert recs[0]["meta"]["question"] == "Pizza?"
     assert recs[0]["options"][0]["id"] == "opt-a"
+    # v_94: each voter's selection with its stamp, no plain list.
+    assert recs[0]["vote_stamps"] == {"u-1": ["2026-11-12T10:00:00+00:00", ["opt-a"]]}
+    assert "votes" not in recs[0] and "votes_partial" not in recs[0]
+    # v_92 / v_93: who voted for what, unstamped.
+    (old,) = await exporter.unstamped_votes().list_records("sp-1")
+    assert old["votes"] == [{"option_id": "opt-a", "voter_user_id": "u-1"}]
+    assert "vote_stamps" not in old and "votes_partial" not in old
+    # Below v_92: neither.
+    (older,) = await exporter.without_votes().list_records("sp-1")
+    assert "votes" not in older and "vote_stamps" not in older
+
+
+async def test_polls_exporter_cuts_votes_at_a_whole_voter(monkeypatch):
+    """One record must fit one chunk: past ``MAX_VOTES_PER_POLL`` the list
+    is cut — never through a voter — and marked partial."""
+
+    monkeypatch.setattr(polls_mod, "MAX_VOTES_PER_POLL", 3)
+    post = SimpleNamespace(id="p-1")
+    held = [
+        {"option_id": o, "voter_user_id": v}
+        for o, v in (("a", "u-1"), ("b", "u-1"), ("a", "u-2"), ("b", "u-2"))
+    ]
+
+    class _Posts:
+        async def list_sync_page(self, space_id, **_kw):
+            return [post], None
+
+    class _Polls:
+        async def get_meta(self, post_id):
+            return {"question": "Pizza?"}
+
+        async def list_options_with_counts(self, post_id):
+            return []
+
+        async def list_votes(self, post_id, *, limit=None):
+            return held[:limit]
+
+        async def list_vote_stamps(self, post_id, *, limit):
+            assert limit == 3
+            return {"u-1": ["2026-11-12T10:00:00+00:00", ["a", "b"]]}, True
+
+    exporter = PollsExporter(_Polls(), _Posts(), _WINDOWS)
+    (rec,) = await exporter.unstamped_votes().list_records("sp-1")
+    assert rec["votes_partial"] is True
+    assert rec["votes"] == held[:2]
+    # The v_94 stamp map is cut by the repo, per voter, and marked the same.
+    (rec,) = await exporter.list_records("sp-1")
+    assert rec["votes_partial"] is True and list(rec["vote_stamps"]) == ["u-1"]
 
 
 async def test_polls_exporter_skips_posts_without_polls():
-    from socialhome.federation.sync.space.exporters import PollsExporter
 
     post = SimpleNamespace(id="p-2")
 
@@ -644,8 +754,6 @@ async def test_zones_exporter_serialises_catalogue():
     member instance joining mid-life picks up every zone, not only
     the ones added after the join. The exporter is a thin asdict
     over what the repo returns."""
-    from socialhome.domain.space import SpaceZone
-    from socialhome.federation.sync.space.exporters import ZonesExporter
 
     z = SpaceZone(
         id="z_office",
@@ -682,8 +790,6 @@ async def test_bazaar_exporter_serialises_listings():
     """F4: bazaar listings ship under the ``bazaar`` resource so a
     catch-up sync rebuilds full listing cards (mode / price / photos /
     status) on the receiver — not just the wrapper post's caption."""
-    from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
-    from socialhome.federation.sync.space.exporters import BazaarExporter
 
     listing = BazaarListing(
         post_id="bzr-1",
@@ -707,6 +813,9 @@ async def test_bazaar_exporter_serialises_listings():
         async def list_faq_for_listings(self, post_ids):
             return {}
 
+        async def list_bids_for_listings(self, post_ids, *, per_listing):
+            return {}
+
     recs = await BazaarExporter(_Repo(), _WINDOWS).list_records("sp-1")
     assert len(recs) == 1
     r = recs[0]
@@ -728,8 +837,6 @@ async def test_bazaar_exporter_serialises_listings():
 async def test_member_pictures_exporter_inlines_webp_bytes():
     """F6: per-space avatars catch up so a new joiner sees existing
     members' faces instead of broken <img>."""
-    from socialhome.domain.space import SpaceMember
-    from socialhome.federation.sync.space.exporters import MemberPicturesExporter
 
     members = [
         SpaceMember(
@@ -766,7 +873,6 @@ async def test_member_pictures_exporter_inlines_webp_bytes():
     assert r["user_id"] == "u-alice"
     assert r["picture_hash"] == "abc123"
     # base64 round-trips.
-    import base64
 
     assert base64.b64decode(r["picture_webp_base64"]) == b"\x89WEBP-bytes"
 
@@ -775,11 +881,6 @@ async def test_member_pictures_exporter_streams_only_changed_pictures():
     """§25.6 incremental (migration 0122): a periodic session ships only
     the pictures stamped after the watermark — of members who still use
     a per-space picture."""
-    import base64
-
-    from socialhome.domain.space import SpaceMember
-    from socialhome.federation.sync.space.exporter import IncrementalExporter
-    from socialhome.federation.sync.space.exporters import MemberPicturesExporter
 
     members = [
         SpaceMember(
@@ -818,8 +919,6 @@ async def test_member_pictures_exporter_streams_only_changed_pictures():
 async def test_member_pictures_exporter_skips_when_picture_missing():
     """Member row has hash but the bytes vanished (race / dropped row)
     — skip rather than ship a hash with no bytes."""
-    from socialhome.domain.space import SpaceMember
-    from socialhome.federation.sync.space.exporters import MemberPicturesExporter
 
     class _SpaceRepo:
         async def list_members(self, space_id):
@@ -846,10 +945,6 @@ async def test_member_pictures_exporter_skips_when_picture_missing():
 async def test_schedules_exporter_emits_slot_defs():
     """F5: schedule polls catch up via the ``schedules`` resource so a
     remote member's slot picker isn't empty after §25.6 sync."""
-    from datetime import datetime
-
-    from socialhome.domain.post import Post, PostType
-    from socialhome.federation.sync.space.exporters import SchedulesExporter
 
     post = Post(
         id="p-sched",
@@ -886,6 +981,16 @@ async def test_schedules_exporter_emits_slot_defs():
                 },
             ]
 
+        async def list_schedule_answers(self, post_id, *, limit):
+            return [
+                {
+                    "slot_id": "s2",
+                    "user_id": "u-2",
+                    "availability": "yes",
+                    "responded_at": "2026-07-01T10:00:00+00:00",
+                }
+            ][:limit]
+
     recs = await SchedulesExporter(_PollRepo(), _PostRepo(), _WINDOWS).list_records(
         "sp-1"
     )
@@ -896,6 +1001,18 @@ async def test_schedules_exporter_emits_slot_defs():
     assert len(r["slots"]) == 2
     assert r["slots"][0]["id"] == "s1"
     assert r["slots"][1]["start_time"] is None
+    # v_92: the answers (with their stamps), when they were read, and the
+    # pick ride along.
+    assert r["responses"] == [
+        {
+            "slot_id": "s2",
+            "user_id": "u-2",
+            "availability": "yes",
+            "responded_at": "2026-07-01T10:00:00+00:00",
+        }
+    ]
+    assert r["responses_at"] and "responses_partial" not in r
+    assert r["finalized_slot_id"] is None
 
 
 # ── §25.6 incremental sessions (migration 0086 change stamps) ────────────
@@ -929,7 +1046,7 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
                 content=pid,
             ),
         )
-    await polls.create_poll(
+    await polls.create_poll_if_absent(
         post_id="p-vote",
         question="Q?",
         closes_at=None,
@@ -960,8 +1077,8 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
     mark = await _seq(db)
 
     await posts.edit("p-edit", "edited", space_id="sp")
-    assert await polls.cast_vote_in_space(
-        space_id="sp", post_id="p-vote", option_id="o-1", voter_user_id="u2"
+    assert await cast(
+        polls, space_id="sp", post_id="p-vote", option_ids=["o-1"], voter_user_id="u2"
     )
     await posts.soft_delete("p-gone", space_id="sp")
     await posts.soft_delete_comment("k-gone", space_id="sp")
@@ -1134,7 +1251,6 @@ def test_the_roster_stays_full():
 
 
 async def test_members_exporter_without_a_picture_repo_never_claims_a_reset():
-    from socialhome.federation.sync.space.exporters import MembersExporter
 
     member = SpaceMember(space_id="sp-1", user_id="u-1", role="member", joined_at="t")
     recs = await MembersExporter(_FakeSpaceRepo(members=[member])).list_records("sp-1")

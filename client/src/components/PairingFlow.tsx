@@ -898,7 +898,19 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
       const result = await api.post('/api/pairing/confirm', {
         token: pairingToken.value,
         verification_code: verificationCode.value,
-      }) as { instance_id?: string; display_name?: string }
+      }) as { instance_id?: string; display_name?: string; status?: string }
+      if (result.status && result.status !== 'confirmed') {
+        // A household we already share a space with: the code is verified
+        // here, and the pairing completes once THEY confirm — our shared
+        // space keeps working meanwhile. Not "paired" yet, and nothing to
+        // configure yet: the Connections list shows it as waiting.
+        showToast(
+          t('connections.meta.waiting_approval', { name: result.display_name ?? '' }),
+          'info',
+        )
+        open.value = false
+        return
+      }
       // Capture peer identity for the configure-sharing step (the WS
       // subscriber may have already done this; set only if not yet set).
       if (result.instance_id) {

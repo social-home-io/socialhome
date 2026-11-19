@@ -220,7 +220,9 @@ there is no frame to send.
 - **Refusals** — the inbox's generic bodies: a body without the magic
   is read as JSON; an unknown suite byte, trailing bytes, another frame
   type, a non-media event, a bad tag or hash → 400; bad signature → 403;
-  unknown inbox → 404; replay / stale timestamp → 410; a body over
+  unknown inbox → 404; replay / stale timestamp → 410 (a replay carries
+  `"code": "REPLAY"` like a JSON envelope's; the media sender ignores it —
+  a refused chunk has used up its `msg_id` without being held); a body over
   `HTTPS_MEDIA_MAX_BODY_BYTES` (512 KiB + 16 KiB) → 413, from
   `Content-Length` once the 4 magic bytes are read, else while streaming;
   its own per-IP bucket (600 / min) → 429. A sender that gets anything
@@ -317,7 +319,7 @@ entitled to send:
 - **One media directory, two namespaces.** Space files and DM
   attachments share `media_dir`, and a `SPACE_MEDIA_BLOB` for a row not
   seen yet is accepted by name. A space blob never writes a reserved
-  name (`inbound_media_store.is_reserved_media_name`: the `dm-` and
+  name (`domain/media_constraints.is_reserved_media_name`: the `dm-` and
   `gm-` prefixes and the DM transients `*.preview.webp` / `*.part<N>` /
   `*.assembled`), so no household can plant a DM's file through a space
   — before the DM arrives or while it waits for its bytes. Before

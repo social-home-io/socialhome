@@ -469,9 +469,9 @@ async def test_a_ticket_issued_on_node_a_is_redeemed_on_node_b_once(nodes):  # n
     tickets = await _ticket_cache(a.app, session, url_a, batch=1)
     await tickets.refill()
     (ticket,) = tickets._tickets
-    keys = derive_mailbox_keys(ROOT, "gfs-shared", "space-x", 0)
+    keys = derive_mailbox_keys(ROOT, "gfs-shared", 800830)
     assert await register_mailbox(session, url_b, keys, "gfs-shared", tickets=tickets)
-    other = derive_mailbox_keys(ROOT, "gfs-shared", "space-y", 0)
+    other = derive_mailbox_keys(ROOT, "gfs-shared", 748850)
     async with session.post(
         url_a + "/gfs/mailbox/register",
         json=build_register_body(other, "gfs-shared", ticket=ticket),

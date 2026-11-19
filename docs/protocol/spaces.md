@@ -66,19 +66,63 @@ uses), not just `cover_hash` / `icon_hash`. Before, every member (paired or
 link-joined) kept the image from its join time. The bytes sit inside the
 encrypted payload, and under the authority signature when the edit is signed.
 They go only to space members (`broadcast_to_space_members`) and only on the
-edit that changed the image, so a rename ships no bytes. They are bounded per
-transport through `embed_space_images` / `ImageProcessor.fit_within`. A paired
-or mesh-routed member gets the image under `SPACE_*_SNAPSHOT_MAX_BYTES`
-(256 KiB cover / 64 KiB icon, ~1 MiB envelope). A member seated from an
-invite link (`space_session`) sits behind the connection-server relay
-(~191 KiB envelope), so `broadcast_to_space_members(..., relay_payload=…)`
-sends it a separately signed variant under `SPACE_*_BOOTSTRAP_MAX_BYTES`
-(64 / 16 KiB). The member applies the image only after the change passes
+edit that changed the image, so a rename ships no bytes.
+
+**One cover size for every member** (owner decision 2026-11-15). A space's
+cover and icon have ONE cap each, whichever way a member household is
+reached: `SPACE_COVER_MAX_BYTES` = 64 KiB and `SPACE_ICON_MAX_BYTES` =
+16 KiB of WebP (`domain/media_constraints.py`). They are sized to the
+tightest leg the image travels: base64'ed (4·⌈65,536/3⌉ = 87,384 B and
+4·⌈16,384/3⌉ = 21,848 B) they are exactly what `SPACE_CONFIG_RESERVE_BYTES`
+holds next to a space's config inside ONE GFS-relay envelope
+(`domain/relay_media_frame.py`), and together (~107 KiB of base64) they leave
+~85 KiB of the 256 KiB sealed invite-link ACK for config, content key and
+roster — an ACK whose config and roster need more is resent without both
+images (and DENY'd if even that does not fit), the one case an image is
+dropped on the way. Where the image is SET, `SpaceService.set_cover` / `set_icon`
+re-encode the upload to a WebP within the cap (1200 px / 256 px, then
+`ImageProcessor.fit_within` shrinks it, off the event loop) — an ordinary
+photo always fits. An image that does not decode, or whose header declares
+more than `SPACE_IMAGE_MAX_SOURCE_PIXELS` (40 M), is refused
+(`IMAGE_UNREADABLE`); one not even a 64 px rendition of fits, with
+`IMAGE_TOO_LARGE`. Every path ships that one image: the config change,
+the join snapshot (§D1b invitation, §D2 / §D2b ACKs, join-request ACK) —
+there is no per-transport variant any more (`relay_payload` is gone). A
+cover stored before the cap (up to a few hundred KiB) is re-encoded within
+it the first time a send carries it (`embed_space_images`), and the
+rendition is kept under the same `cover_hash`, so it is re-encoded once;
+until the owner changes it, every member — paired or behind a GFS — gets
+that rendition, which a GFS-reached member already got before (it was the
+relay variant). The write-back is compare-and-set on the version tag
+(`replace_bytes_if_hash`), so a cover set or cleared while the re-encode
+runs is never undone; a stored cover that cannot be made to fit is left
+out of every send and remembered (in memory) per space and version, so it
+is not re-encoded on each send. The GFS directory listing publishes the
+stored bytes, so a pre-cap cover is published at its old size until its
+first send rewrites it. The member applies the image only after the change passes
 the owner / authority and last-writer-wins gates, so an out-of-order older
 change cannot roll the picture back (`apply_space_images_from_config_change`).
-Before storing, it checks the bytes: at most `SPACE_IMAGE_EMBED_MAX_BYTES`, and
-a WebP that fully decodes (Pillow, off the event loop) within 1200 px / 256 px.
-The join-snapshot path runs the same check. A shrunken rendition does not
+Before storing, it checks the bytes on every inbound path (config change
+and catch-up, join snapshot): at most the cap — an image over it is NOT
+stored, the one already held stays, and a WARNING names the cap — and a
+WebP that fully decodes (Pillow, off the event loop) within 1200 px /
+256 px. The refusal holds for a config change from a sender that caps its
+images (`FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES`, v_81 — every
+build after the released v_80 line; `sender_caps_space_images`, judged by
+`space_member_version`). A join snapshot (invitation accept, invite-link /
+redeem ACK) is always taken leniently — it was sealed when the invitation
+was made, maybe by a host that upgraded since — so its over-cap image is
+re-encoded as below. A host on
+the released v_80 line still sends a paired member covers of up to
+256 KiB: from such a sender (or one whose version is unknown) an image
+over the cap but within `SPACE_IMAGE_EMBED_MAX_BYTES` is re-encoded on
+the receiver (`ImageProcessor.fit_within`, off the event loop, logged at
+INFO) and the rendition stored — so no member of a released host loses its
+cover while that host upgrades. No version bump: the wire shape is
+unchanged, v_81–v_94 are unreleased and ship together (so no build that
+sends big covers exists past v_80), and a v_80 receiver accepts any image up to
+`SPACE_IMAGE_EMBED_MAX_BYTES` (1.5 MiB), so the capped image is accepted
+everywhere. A shrunken rendition does not
 digest to the host's hash, so the bytes are stored under the announced hash,
 which works as a version tag. A cleared hash removes the stored image. No
 protocol version is involved: an older member ignores the extra keys, as it
@@ -266,8 +310,12 @@ sequenceDiagram
 `SPACE_KEY_EXCHANGE`, `SPACE_KEY_EXCHANGE_ACK`,
 `SPACE_KEY_EXCHANGE_REKEY`, `SPACE_ADMIN_KEY_SHARE`,
 `SPACE_AUTHORITY_ROTATED` (v_44), `SPACE_SESSION_CLEANUP`,
-`SPACE_MAILBOX_UPDATED` (v_88 — a GFS-only pair's per-space mailbox moved
-or was lost; see [gfs-relay](./gfs-relay.md#per-space-mailboxes-v_88)).
+`SPACE_MEMBER_CARD` (v_89 — a member household hands the host its signed
+member card: its key-wrap key and its one GFS mailbox, or none) and
+`SPACE_MAILBOX_DIRECTORY` (v_89 — the host passes those cards on as
+`{cards, removed, snapshot}` to writer-seat member households only, never
+to followers); see
+[gfs-relay](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 `SPACE_AUTHORITY_ROTATED` is the owner's rotation of the space authority
 key after an admin household is revoked — see
@@ -280,7 +328,11 @@ ends (kick, ban, leave, dissolve), we delete their `space_session`
 their mirror. The receiver re-derives the answer from its own
 `space_instances` rows rather than trusting the sender, so it cannot be
 used to tear down a seat that is still carrying another shared space. See
-[`invites.md`](./invites.md).
+[`invites.md`](./invites.md). A seat that the two households upgraded to a
+pairing is no seat any more and is never torn down this way; when that
+pairing ends, the seat the two had is made again from the household's
+member card, where we hold one our roster lets us use
+([pairing](./pairing.md#pairing-with-a-household-you-share-a-space-with)).
 
 **Cross-household admin**
 
@@ -299,7 +351,14 @@ approval" below.
 `SPACE_ROUTE_STALE` (v_28+). Generic source-routed envelope, the
 discovery probe that finds the path, and the signed nack a restarted
 target sends back so the origin re-discovers instead of waiting out its
-route cache. See "Mesh routing (SPACE_ROUTED)" below.
+route cache. See "Mesh routing (SPACE_ROUTED)" below. From v_89 a
+`space_session` seat (a household seated from an invite link or a member
+card) may send or be forwarded a `SPACE_ROUTED` in exactly one shape, the
+**host hop**: three hops `[member, host, member]`, the routing space's host
+in the middle, both ends carded on the host, sealed to the target's
+key-wrap key from its card. Anything else from that peer class is dropped
+(`federation/host_hop.py`, `SpaceRoutedHandler._touches_seat`); see
+[gfs-relay](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 **Space sync**
 
@@ -308,6 +367,13 @@ route cache. See "Mesh routing (SPACE_ROUTED)" below.
 `SPACE_SYNC_REJECTED` (v_20+), … — the reconnect content-sync handshake.
 `SPACE_SYNC_REJECTED` is the membership backstop covered under "Dissolution"
 below; the rest are the WebRTC/HTTPS content-streaming dance.
+
+**Older files on view (v_92)**
+
+`SPACE_MEDIA_WANTED` `{space_id, files: [{item, name}]}` (≤ 50) — a member
+household asks the host, then one trusted helper at a time, for files of
+live items it holds but never received; the answer is `SPACE_MEDIA_BLOB`.
+See [media.md](./media.md#older-files-on-view--space_media_wanted-v_92).
 
 **GFS public-content relay (Phase 5)**
 
@@ -386,10 +452,16 @@ The rule, precisely:
   editing or deleting somebody else's row is a write. The classification
   is exhaustive over the enum and pinned by a test, so a new space event
   type is refused-by-default until somebody classifies it.
-- **One opt-in:** `SPACE_COMMENT_CREATED`, when the space has
-  `allow_subscriber_comment` on **and** the payload's author names a live
-  `subscriber` seat of that same household. (`allow_subscriber_react` has
-  no inbound surface — space reactions are not federated events.)
+- **Two opt-ins:** `SPACE_COMMENT_CREATED` and the author's own
+  `SPACE_COMMENT_UPDATED` / `SPACE_COMMENT_DELETED`, when the space has
+  `allow_subscriber_comment` on, and (v_93) `SPACE_POST_REACTION`, when it
+  has `allow_subscriber_react` on — each only when the payload's acting
+  user (`author` / `user_id`) names a live `subscriber` seat of that same
+  household (an edit / delete carries the comment's `author` for this; the
+  handler still checks the row is that author's). Neither flag covers the
+  other's event. Reactions on space
+  posts reach every member household since v_93 — see
+  [feeds.md](./feeds.md#reactions-on-space-posts-v_93).
 - **A household the receiver holds no roster row for is not a writer** —
   except the space's **host**, the roster authority (a member stub written
   before roster mirroring may hold no row for it). Its write is **held**
@@ -434,7 +506,7 @@ act as one — only moderation (below) reaches a local user's rows.
 | Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household; from v_36 a new row's owner-bound id must commit to that creator and space | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
 | Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |
 | RSVPs | the user seated on the sender; plus the two writes the calendar service makes for another household: the event creator's household or a moderator settling a `requested` RSVP (→ `going` / `waitlist`, or removed), and any writer household promoting a `waitlist` RSVP into a free seat | | |
-| Poll close, schedule create / finalise | the wrapper post's author's household | | |
+| Poll create (once — a held poll is never rewritten; option ids bound to the post) / close, schedule create / finalise | the wrapper post's author's household (create: or the host relaying it, or releasing a reviewed post — then the `posts` access level); never on a system (bot) post | | |
 | Bazaar listing | the seller seated on the sender, on the seller's own wrapper post, once (a re-send is a no-op) | status (sold / expired / cancelled) and offer acceptance: the seller's household only (a non-seller's expiry of an ended listing is DEBUG noise — every household sweeps expiries, only the seller's announces) | — |
 | Bazaar offers (v_73) | the offerer holds a live **writer** seat on the sender, on an active non-auction listing whose seller is one of OUR people — offers go to the seller's household only, see [Bazaar](./bazaar.md) | accept / reject: the seller's household, for an offer one of ours made; withdraw: the offerer's household, for a listing one of ours sells | — |
 | Zones | settings authority only — the host or a live `admin` seat; a `moderator` seat is refused (the local service is admin-only); a new zone's `created_by` bound like a create | same | same |
@@ -467,9 +539,17 @@ other shape — every earlier row's uuid4, a row from a household that does
 not bind yet, a bot post — keeps the rules above (the legacy window; see
 the v_34 and v_36 rows in [`capabilities.md`](./capabilities.md)).
 
-A **read-only (`subscriber`) seat authors nothing**, with the one opt-in
+A **read-only (`subscriber`) seat authors nothing**, with the two opt-ins
 the Follower gate already has: a comment, when the space turned
-`allow_subscriber_comment` on. It may still change a row it already owns.
+`allow_subscriber_comment` on, and a reaction on a post (v_93), when it
+turned `allow_subscriber_react` on. Editing or deleting its own comment
+needs the same comment right as writing one — see "Followers are members
+with a read-only role".
+
+**A reaction is the reactor's own** (`SPACE_POST_REACTION`, v_93): the
+named `user_id` must hold a live seat on the sending household — a writer
+seat, or a follower seat under the opt-in above. No household reacts for
+another's member, the host included.
 
 **A re-send of an existing post is an edit**, judged like one — the
 author's household or a moderator; a bot post only a moderator — and it
@@ -531,34 +611,168 @@ member household, not only on the host:
   seat — and a host-local member the current `roster_sequence`. Sent when
   the host seats a household (its invitation's roster may be stale: a
   demotion or kick in between would otherwise never reach it), when a
-  member household first advertises v_32, and on the periodic sync tick.
-  Not sent after an invite-link redeem (the ACK's roster is taken at seat
-  time, and the redeemer has no space row yet) nor, on the timer, to a
-  link-joined household (a timed envelope over the connection-server relay
-  would be new traffic metadata for it). The host signs a snapshot's
-  entries, and the receiver verifies them, in a worker thread, off the
-  event loop.
-- **Only what changed, on the timer.** A snapshot names the
-  `roster_version` it is complete up to (the host's `roster_sequence`).
-  A member household that applied one from the host — every entry
-  verified — echoes it on its next `SPACE_SYNC_BEGIN` to the host as
-  `roster_echo {roster_version, cert_epoch}` (`cert_epoch`: the epoch of
-  the writer cert it holds, or `null`). The periodic tick then skips that
-  household while the echo still matches the current `roster_sequence`
-  and the writer cert the host would send; after a roster change it sends
-  the household the snapshot **without the removals at or below the
-  echoed version** (it applied them in that full snapshot). Seat and
-  upgrade snapshots are sent whole, as before. Both sides keep this in
-  memory: a restart costs one full snapshot per household. A household
-  that never echoes (older, or a link-joined one) is unchanged. Additive:
-  an older host ignores `roster_echo`, an older member ignores
-  `roster_version`. Credentials that change without a roster change heal
-  through their own paths (the rekey / rotation per-peer fan-outs, the
-  channel service, the v_46 authority echo) and still ride every snapshot
-  that is sent. Cost: a space with 50 seats, ~100 removals and 15 member
-  households used to send 15 × ~150 entries × ~400 B ≈ 900 KB every
-  30 minutes (≈ 43 MB a day; a busy space with thousands of seats or
-  removals far more); unchanged, it now sends nothing.
+  member household first advertises v_32, and in reply to a member's sync
+  BEGIN whose mirror is wrong (below). Not sent after an invite-link redeem
+  (the ACK's roster is taken at seat time, and the redeemer has no space row
+  yet). The host signs a snapshot's entries, and the receiver verifies
+  them, in a worker thread, off the event loop.
+- **Repair on a digest mismatch, in reply to an admitted BEGIN.** The host
+  never sends a roster snapshot on its own timer. Every `SPACE_SYNC_BEGIN` a
+  member household (this version) sends to the space's host — direct, the
+  mesh catch-up and incremental BEGINs, the relay re-BEGIN after an ICE
+  timeout, the accept's mesh catch-up and the authority-echo BEGIN —
+  carries `roster_digest {suite: "rd1-sha256", digest, cert_epoch}`
+  (`domain/space_roster_digest.py`): SHA-256 over the canonical JSON list
+  of `[instance_id, user_id, role]` of every LIVE seat it mirrors outside
+  its own household (sorted, the role as every receiver stores it — the
+  host's `owner` as `member`), and the epoch of the writer cert it holds.
+  Only a BEGIN the sync admission let in (S-6: 5 per hour per household) is
+  looked at (`FederationService.attach_sync_begin_admitted`). The host
+  computes the same digest for that household from its own seats (cached
+  per `roster_sequence` for 60 s) and reads the writer-cert epoch it would
+  issue without signing one (`SpaceWriterCertService.cert_epoch_for_peer`).
+
+  **One rule** (`SpaceService._repair_roster`), for every member household
+  however it is reached (paired, mesh, or seated from an invite link over
+  the GFS relay):
+  - digest and cert epoch match → nothing;
+  - otherwise → one repair snapshot, unless one went to this (space,
+    household) within its cooldown. The cooldown is 30 min after a
+    snapshot that went out (`send_roster_snapshot` returned true). It
+    doubles, up to a day, on every CONSECUTIVE mismatch answered with a
+    sent snapshot — whether or not the digest moved meanwhile — and starts
+    over only when the digest matches (or a v_80 echo reached the version
+    sent). A lost snapshot therefore backs off too: live gossip still
+    carries every change, the repair is a safety net. A match also brings
+    the next allowed repair back to at most 30 min after the last snapshot,
+    so a new miss after a day-long backoff does not wait out the day.
+  - A snapshot built but not sent (building it raised — logged at
+    WARNING — or a part's send failed) waits 15 min
+    (`ROSTER_REPAIR_RETRY_S`) without doubling. A send that stops before
+    building (a household below the snapshot line, no signing seed, a
+    space we no longer host) records nothing and costs no budget.
+  - **Budget:** at most `ROSTER_REPAIR_PER_SPACE_PER_MINUTE` (2) repair
+    snapshots a minute for one space and `ROSTER_REPAIR_PER_MINUTE` (6)
+    across every space the household hosts, charged right before a
+    snapshot is built. One space (a restart, a backup restore, sybil
+    followers of a public space) cannot starve the others. A household the
+    budget holds back is not recorded and asks again on its next admitted
+    BEGIN. Nothing is persisted: the budget bounds what a restart costs.
+
+  A writer cert behind or ahead of the host's, with the roster digest
+  matching, is repaired with the household's credentials alone: a snapshot
+  with `entries: []` and only its own writer cert / writer group key /
+  channel grant (~1–2 KB sealed), under the same cooldown. It has its own
+  outbox slot (`roster-credentials:<space>`) and never replaces or drops a
+  queued roster snapshot. An unknown suite, a suite that is
+  not a string, or a malformed digest (a cert epoch outside 0 … 2^63−1) is
+  refused — no repair, no fall-back to `roster_echo` — and logged at
+  WARNING at most once per (space, household) an hour, its text cut short.
+  The repair memory is per space and live seat (forgotten when the
+  household leaves, and the whole space — with its cached seats — when it
+  is dissolved or no longer hosted here). The snapshot goes as a tracked
+  background task. Followers of a PUBLIC or PRIVATE space sync and so send
+  a digest like any member; only a follower-only household of a GLOBAL
+  space sends no BEGIN at all, so it gets no periodic repair: only seat /
+  upgrade snapshots and live gossip. A new snapshot drops every queued part
+  of an older one to the same household first (outbox key prefix per
+  space), and a queued part is replaced by a newer one (supersede key per
+  space and part). The same BEGIN also echoes `dir_seq`, the version of
+  the space's member directory the household holds (v_89, see
+  [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89));
+  a host whose directory is newer answers with one directory snapshot.
+  Credentials that change without a roster change heal through their own
+  paths (the rekey / rotation per-peer fan-outs, the channel service, the
+  v_46 authority echo) and ride every snapshot that is sent.
+- **What a snapshot carries, and how it applies.** The host's live seats
+  and the host's own tombstones: every remote seat it removed in the last
+  30 days (`ROSTER_TOMBSTONE_WINDOW_S`, by `removed_at`, re-stamped when a
+  removal is re-issued at a newer version), each with its version and
+  authority signature exactly as live gossip carried it. A CONSECUTIVE
+  repair — the last one did not heal the member — carries every tombstone,
+  whatever its age: a member offline longer than the window (its LEFT
+  gossip left the outbox after 7 days) still learns of a kick and stops
+  sending space content to a removed household. The member merges each
+  entry by the usual per-entry rule (`apply_member_event`): strictly newer
+  wins, a tombstone wins a tie.
+  - **The host's own seats.** Only the host seats its own people (no
+    delegated admin seats a user of the owner's household), so a complete,
+    fully verified snapshot from the host speaks for every live seat OF
+    THE HOST'S INSTANCE: a mirrored host seat it does not name — a
+    departure or ban whose LEFT the member missed — ends as a LEFT at the
+    snapshot's `roster_version`, only where the seat is at or below it (a
+    newer one is gossip that overtook the snapshot). A delayed older
+    snapshot cannot bring it back: its version is lower.
+  - **Every other household's seats are never inferred from absence**: a
+    seat the snapshot does not name stays as the member has it. So a
+    delayed older snapshot (a GFS may hold one for a day) can neither
+    resurrect nor remove anything newer, and a seat a delegated admin made
+    while the owner was offline survives the owner's return even when the
+    members' BEGINs beat the admin's gossip (its card, its game seats and
+    its posts stay).
+
+  Size: ~500 B per tombstone; the 30-day window bounds an ordinary repair
+  by the removals of a month — in the worst case below with 10 % monthly
+  churn, ~1 000 tombstones ≈ 500 KB (~5 parts) on top of the live seats.
+  Only a consecutive repair carries them all (five years of a busy space:
+  ~60 000 ≈ 30 MB), and it is bounded by the doubling cooldown (at most
+  one a day per household once the backoff is at its cap).
+- **Residuals (a mismatch a snapshot cannot heal).** Each stays, its
+  repairs backing off to one snapshot a day per household:
+  - **A seat only the member knows** — one a delegated admin's gossip put
+    on another household that the host refused, or has not heard of yet.
+    The host keeps no tombstone for a seat it never seated.
+  - **A host restored from an older backup.** Its counter and seats are
+    behind what it issued; members keep the newer rows (strictly newer
+    wins), and the mismatch lasts until the host's own changes pass them.
+
+  Bans also reach a member through the §25.6 sync's `bans` resource, and
+  `is_banned` is checked at every authorship check, so a banned user's
+  writes are refused even before its seat ends.
+- **Older households (v_80) keep the echo.** A snapshot names the
+  `roster_version` it is complete up to; a member that applied one echoes
+  it as `roster_echo {roster_version, cert_epoch}` — a v_80 member only on
+  its DIRECT BEGIN. A v_80 household's BEGIN with no `roster_digest` is
+  answered by that echo under the same rule: right while it echoes the
+  current `roster_sequence` and the writer cert the host would send; an
+  echo at or past the version of the snapshot sent means it took it (the
+  cooldown starts over; a newer roster change is a new mismatch after 30
+  min). A stale echo gets every live seat and the recent removals above
+  it; no echo at all, every live seat and every recent removal. So a v_80
+  member's mesh, incremental-mesh and relay BEGINs (no echo) get the whole
+  roster — capped by the same cooldown, i.e. at most what the old periodic
+  timer sent. A household at `FederationCapability.MIN_FOR_ROSTER_DIGEST`
+  (v_81, the first unreleased line) carries the digest on every BEGIN path
+  to the host, so its BEGIN without one asks for nothing. No version bump:
+  `roster_digest` is an optional BEGIN field an older host ignores, and the
+  sync stream's contents do not change (no sync line).
+- **Cost.** ~500 B per roster entry, parts of 96 KiB (~255 KiB sealed for
+  the GFS relay). Per admitted BEGIN: the ~110 B digest field, one read of
+  the space's live seats per 60 s and roster version (cached), a hash over
+  them, and the cert-epoch lookup (a key read and the household's
+  entitlement — no signature). No grace: a BEGIN that overtakes in-flight
+  gossip (a member that just restarted) costs that household one snapshot
+  it would have caught up on anyway — ~25 KB for a 50-seat space, ~6 MB at
+  the worst case below — within the cooldown and the budgets.
+
+  | Case | Before (main: the periodic timer) | Now |
+  |---|---|---|
+  | No roster change, per 30-min tick | the whole roster to every household with a stale or missing echo | ~110 B per BEGIN, **0 snapshot bytes** |
+  | One roster change | live gossip, then the whole roster to every household on the next tick (≈ 20 MB at 200 seats, ≈ 500 MB at 1000) | live gossip only; a snapshot only to a household whose mirror is wrong at its next BEGIN |
+  | A missed remote removal (≤ 30 days old) | healed on the next tick | healed by one snapshot |
+  | A missed departure or ban of the host's own people | never healed (the snapshot named only current seats) | healed by one snapshot |
+  | A residual (above) | the whole roster every 30 min, forever | 30 min, 1 h, 2 h … then one snapshot a day per household |
+  | Lost snapshots in an active space | — | the same backoff (consecutive mismatches double it); gossip still carries changes |
+  | Hostile member | the whole roster every 30 min | at most one snapshot per 30 min (a matching digest in between starts the cooldown over), doubling to one a day while it stays wrong; only admitted BEGINs count, 5 per hour |
+  | Restart, backup restore, or sybil followers in one space | — | ≤ 2 snapshots a minute for that space, ≤ 6 a minute host-wide (≤ 33 MB/min and ~66 000 signatures/min at the worst case below; a few KB each for an ordinary space). Known limit: three busy spaces at their per-space cap take the whole global budget, so a fourth waits until a minute frees a slot |
+  | A member offline past the 30-day window | — | its first repair carries the window, the next (consecutive) one every tombstone — ≤ ~30 MB once for five years of a busy worst-case space |
+  | 1000 member households + 10 000 follower seats (~11 000 entries ≈ 5.5 MB + ≤ ~500 KB of tombstones, ~65 parts) | ≈ 5.5 GB per tick if every echo is stale | 1000 × ~110 B per 30 min ≈ 110 KB; a lost gossip costs that one household one ~6 MB burst; a restore storm in that one space heals at 2 households a minute (~8 h for 1000), ≤ 12 MB/min |
+
+  Seats see a per-space part-count burst only on a digest mismatch.
+  Followers receive the member roster in seat / upgrade snapshots and live
+  gossip today; that is unchanged here. The v_80 echo path costs what it
+  did (the whole roster once per roster change per v_80 household, at most
+  once per cooldown — few, and paired).
 - **Held writes.** A write naming a user the space has **no record of at
   all** — or, at the Follower gate, coming from a household it holds no
   row for — may simply have beaten the gossip seating them. It is held in a
@@ -604,9 +818,6 @@ member household, not only on the host:
 
 Known edges of the snapshot, all self-limiting:
 
-- A **link-joined household** gets no periodic snapshot (see above); its
-  mirror heals when it is seated again or first advertises v_32 after an
-  upgrade, and live gossip keeps reaching it in between.
 - A **v_32 receiver behind an older host** gets no snapshots at all — the
   host does not send them — and converges on live gossip and the §25.6
   catch-up stream as before.
@@ -819,7 +1030,7 @@ how people find the space and ask to be let in — but its **content stream
 stops at the member households**:
 
 - no post is relayed to the GFS (`services/space_public_outbound.py`, both
-  the local-author and the owner-offline remote-author paths);
+  the local-author and the remote-author paths);
 - the per-space AES-256 content key is never sealed to a GFS subscriber
   (`services/space_subscriber_key_outbound.py`, the `new_subscriber` handoff
   and every reconcile entry point), so a subscriber cannot open even a
@@ -1286,7 +1497,8 @@ binding and comments on the host path.
 paired joiner receives), on a role change that alters the household's write /
 comment rights, on every content-key rotation (`SPACE_KEY_EXCHANGE_REKEY`)
 and on every authority rotation (`SPACE_AUTHORITY_ROTATED`, signed with the
-new key), plus the v_49 upgrade and the periodic roster-snapshot tick.
+new key), plus the v_49 upgrade and the roster repair a member's sync
+BEGIN asks for (a digest mismatch or a writer-cert epoch it lacks).
 
 **Delivery — existing channels only.** Each household is delivered ITS OWN
 cert, inside that household's encrypted per-peer envelope (a cert is not
@@ -1420,34 +1632,81 @@ from write to comment or none (remote or local), a household leaving the
 space (`SPACE_INSTANCE_LEFT`, see "Member leave (v_49)"),
 `allow_subscriber_comment` turned off while a follower seat exists,
 and — as before — every kick and ban. Promotions do not rotate; the new
-cert is delivered in a roster snapshot, and turning follower comments on
-sends each follower household its `comment` cert at once.
+cert is delivered in a roster snapshot.
+
+**Followers are members with a read-only role** (owner decision
+2026-11-17). A follower holds the `subscriber` role; the space's switches
+"followers may comment" (`allow_subscriber_comment`) and "followers may
+react" (`allow_subscriber_react`) are that role's rights, checked like any
+role's. There is no follower cert, scope, lifetime or request of its own:
+
+- **One rights rule.** A comment — and editing or deleting one's OWN
+  comment — needs a seat whose role may comment: every writer role, and
+  `subscriber` while the comment switch is on. A reaction needs a writer
+  role, or `subscriber` while the react switch is on. The same rule on
+  every path: the author's household (`SpaceService._require_comment_right`
+  / `_assert_writable_member`), the direct events (§24.11 writer gate, the
+  two opt-ins above), and the GFS-relayed `space_item` at a member
+  household (`SpaceAuthorship.item_seat_admits`). A moderator's removal of
+  someone else's comment is content authority, as for any role.
+- **Same cert, same key.** With the comment switch on a follower household
+  is entitled to the `comment` cert a comment-only member holds
+  (`entitlement_for_instance`) and, in a publicly readable space, the same
+  writer group key. A household without the roster (a GFS subscriber) goes
+  by the cert alone, so it keeps a `comment`-scope reaction (it used to drop
+  every one as "maybe a follower's").
+- **A setting that changes rights follows one rule**
+  (`SpaceService._writer_certs_after_rights_change`, for the `posts` access
+  level and the comment switch alike): if any household's entitlement
+  shrinks → ONE rotation, so the old certs and the writer key die with the
+  epoch; otherwise each household that gained gets its credentials alone —
+  the `entries: []` snapshot above, ~1–2 KB to that one household. No roster
+  goes out (it used to be the whole roster to every follower household:
+  ~5.5 MB each at 11 000 seats). Every receiver applies the credentials
+  before it looks at the entries, a released v_80 household included. The
+  same message re-delivers a cert after a promotion and hands out the
+  writer group key when a space first becomes publicly readable.
+- **Cost of a comment-switch toggle,** for F seated follower households and
+  H households in all: ON = the config event + F × ~1–2 KB (≤ 3 signatures
+  each at the host); OFF where it takes a household's comment right away (a
+  household whose only seats are follower seats) = the config event + one
+  rotation (a sealed rekey of ~1–2 KB to each of the H households); OFF
+  where no household loses a right = the config event. One rotation per toggle, never
+  per follower. The react switch changes no cert (a `comment` cert carries
+  reactions): toggling it sends the config event only.
+- **A follower leaving or being removed** is a member leaving: a rotation
+  only if it could write (the comment switch was on).
+- **What the cert cannot say.** A `comment` cert does not record the react
+  switch: with comments on and reactions off, a follower household that
+  ignored its own switch could publish a reaction over a GFS; every
+  household with the roster refuses it, a GFS subscriber keeps it. With
+  comments off and reactions on a follower holds no cert, so its reactions
+  reach every seated household (the direct path) but no GFS subscriber.
 
 **Residuals.** A revoked writer can still post until the rotation reaches a
 receiver, plus the 10-minute grace — and if no seed holder is online to
 rotate, until one is. Before this release demotion did not rotate at all.
 
-**Writer group key (v_50, strict spaces).** Where the owner set
-`gfs_publish_mode = "strict"`, the same four channels also carry
-`writer_key` — the epoch's writer group key (`{writer_key_suite, space_id,
-epoch, writer_seed, writer_key_cert}`, derived from the space seed per epoch)
-— next to the cert, only to a v_50 household holding a publishing scope
-(`write` and `comment` get the same key). The receiver verifies it against
+**Writer group key (v_50; every publicly readable space, v_90).** In a
+publicly readable space the same four channels also carry `writer_key` —
+the epoch's writer group key (`{writer_key_suite, space_id, epoch,
+writer_seed, writer_key_cert}`, derived from the space seed per epoch) —
+next to the cert, only to a v_90 household holding a publishing scope
+(`write` and `comment` get the same key — a follower household that may
+comment included). The receiver verifies it against
 the pinned space key and keeps it KEK-wrapped on `space_keys.writer_key`; it
 signs the household's anonymous publishes to the connection server (see
-[`discovery.md`](./discovery.md#member-publish-strict-mode-v_50)). It
-rotates with the epoch, so revocation = rotation covers it too; the switch
-to strict rotates once so the key arrives with a fresh epoch. The setting is
-owner-only: a member household takes it only from the owner household's own
-`SPACE_CONFIG_CHANGED` (a delegated admin's signed config can't flip it), and
-the host pins it like `allow_subscribers`.
+[`discovery.md`](./discovery.md#the-writer-group-key-v_50-every-publicly-readable-space-since-v_90)). It
+rotates with the epoch, so revocation = rotation covers it too. There is
+no publish-mode setting any more (v_90: the trusted / strict
+`gfs_publish_mode` is gone — every member publish is anonymous).
 
 **Private spaces and the connection server (`private_gfs`, 2026-10-04).**
 Whether a PRIVATE space touches a connection server at all is an
 **owner-only** feature flag, `SpaceFeatures.private_gfs` — OFF for every new
 private space, federated in `SPACE_CONFIG_CHANGED`, taken by a member
 household only from the owner household's own config and pinned on the host
-(like `gfs_publish_mode`; a forwarded `update_config` is pinned too). OFF:
+(like `allow_subscribers`; a forwarded `update_config` is pinned too). OFF:
 no `gfs`-type invite link (only `internal` links — see
 [`invites.md`](./invites.md#the-link-type-gfs-or-internal)), no channel, no
 grant. ON: `gfs` links are allowed and the space gets the channel below,
@@ -1461,9 +1720,10 @@ channel and rotates the content key.
 channels also carry `gfs_channel` — the household's per-epoch grant for the
 space's opaque connection-server channel (`{channel_suite, space_id,
 channel_id, channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite,
-binding_sig, channel_pass, channel_cert?, writer_key?}`), to every v_51
-member household with a live seat — a pass for every member household (a
-reader gets a pass-only grant), a cert or writer key for writers. It is bound
+binding_sig, channel_pass, writer_key?}`), to every v_51 member household
+with a live seat — a pass for every member household (a reader gets a
+pass-only grant), the channel writer key for a v_90 writer (no channel cert
+since v_90). It is bound
 to the space by the authority key, verified against the pinned space key and
 kept KEK-wrapped on `space_keys.gfs_channel`; a snapshot's grant is taken
 only from the host. See
@@ -1625,6 +1885,17 @@ are both sourced from the space's dedicated atomic `roster_sequence`
 mutation no longer bumps the config-LWW version (and a delegated admin's
 offline config edit can't lag behind the owner at an equal sequence).
 `roster_sequence` is backfilled from `config_sequence` once for continuity.
+A household that signs a roster event (the host, or a delegated admin
+acting while the owner is away) takes the next version above its counter
+**and above every seat version it holds for the space**: a member
+household's counter only moves with the config it is sent, while the seats
+it mirrors carry the host's versions, so its own counter + 1 could be below
+the seat it removes — and that removal was dropped as stale everywhere,
+the owner included (which then never rotated the removed admin's key).
+A receiver drops a roster entry whose `member_version` is more than 2^32
+above its own `roster_sequence` (`MAX_ROSTER_VERSION_LEAD`): versions are
+counters, and a forged huge one would otherwise outrank every honest event
+for that seat and drag the next signer's counter up to it.
 The receiver's
 version-guarded CRDT merge (`apply_member_event`) converges regardless of
 delivery order: a strictly-greater version wins, removal wins an
@@ -1864,6 +2135,15 @@ reviewer household may decide an item; an **approval is applied by the
 host alone**, which replays the write from its own stored copy through the
 feature's normal persist path, so the released content federates exactly
 like a direct write, as the submitter's, with the approval block.
+
+A reviewer household that lacks an item — its person was promoted after
+the item was submitted, or it was offline — or that missed a decision is
+caught up by the host: its §25.6 `SPACE_SYNC_BEGIN` to the host echoes
+what it holds, by state (`mod_held`), and the host sends that
+household the difference
+([`moderation.md` — Re-delivery and catch-up](./moderation.md#re-delivery-and-catch-up)).
+A household whose last admin / moderator is demoted drops the other
+households' pending items it holds.
 
 **What queues** — `SpaceFeatures.access_decision` answers `queue` for a
 plain member's:
@@ -2123,11 +2403,63 @@ deduped by instance via `space_remote_members.role == 'admin'`). The
 payload is `{space_id, space_seed: b64url(32-byte seed),
 seed_suite: "ed25519-seed"}` and it travels **only** over the
 encrypted peer-pair path (`send_with_mesh_fallback`) addressed to that
-one household — **never broadcast**, because a non-member relay must
+one household — **never broadcast** and never inside a v_91 multi frame
+(`MULTI_SEND_EXCLUDED_EVENT_TYPES`), because a non-member relay must
 never see the signing key.
 
+**Every admin, whichever way it is reached** (owner decision
+2026-11-15, v_94). An admin household reached only through a GFS — seated
+from an invite link or the GFS directory (`InstanceSource.SPACE_SESSION`)
+— gets the seed exactly like a paired or mesh one: same triggers, same
+payload and suite, sealed under that seat's session key and carried by the
+GFS mailbox / relay as ciphertext. The share itself is one sealed frame
+for one mailbox: no space id, no event type, no key. Afterwards
+the household sends the GFS what any writer household sends (anonymous
+items, the same fan-out seat, nothing on a reconnect beyond the seat
+re-take every writer sends) and answers nothing a GFS hands it differently,
+so in a publicly readable space the GFS cannot tell which household was
+handed the seed
+([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)).
+Residuals, stated plainly: an admin household without a mailbox (an older
+sealed-redeem seat) is reached by an instance-addressed relay frame, whose
+routing body shows the GFS its instance id (`to_instance`) — as every frame
+to such a seat does; what only the seed can sign (the notice of a
+rotation the admin runs, a removal made on its household)
+still goes out, anonymously, so the GFS can learn that some household
+besides the owner holds the seed, not which. (On a private space's opaque
+channel a delegated admin's own seat is renewed on the rekey of a rotation
+it runs, like every member's; see the residuals for what timing still
+shows.) See
+[gfs-relay.md](./gfs-relay.md#residuals). Gated on
+`MIN_FOR_RELAY_ADMIN_KEY_SHARE` (94): an older link-seated admin is skipped
+at WARNING and acts through the host. The seed goes to nobody while any GFS
+state tied to the space key is not provably current
+(`GfsConnectionService.authority_key_revocable`, D1): a GFS that lists the
+space has not proved `authority_rotation` (the owner could not retire the
+key there — probed again at most every 30 s while it is unreachable); a
+**re-pin is owed** — a GFS that lists the space, or one the space was
+withdrawn from, has not CONFIRMED pinning the current key (see "Durable
+re-pin" below; the gate asks once more before it answers no); or a GFS still
+owes the unregister of a private channel the space no longer uses. The owner
+is told (notification `space_delegation_blocked`, at most once a day per
+space), and a space whose admins may hold the key is never listed on a GFS
+without `authority_rotation` in the first place
+(`409 GFS_KEY_ROTATION_UNSUPPORTED`). An admin also only takes it while one of its
+own people holds a live admin seat, and only when the payload's space is
+the envelope's. A share that is definitively not sent (no seat, no route,
+no host hop) is not counted as shared; a queued one is. An admin household
+of a delegating space echoes `seed_held` in its `authority_epoch_echo`
+(from key epoch 0 on), and the owner re-shares on an explicit `false` at
+most hourly per household — a share lost in a 24 h GFS queue heals. The
+hour counts only from a re-share that passed every gate (a refused one is
+tried again on the next echo); it is built under the rotation's per-space
+lock and sent outside it (checked again right before), so a revocation
+never waits behind a send.
+
 The receiver **fails closed**: it stores the seed only when the
-§24.11-verified `from_instance` is the space's `owner_instance_id`,
+§24.11-verified `from_instance` is the space's `owner_instance_id` (or the
+delegated admin that invited it, `host_equivalence`), the payload names the
+envelope's space, one of its own people holds a live admin seat there,
 its *own* local copy of the space has `delegated_admin_authority` ON,
 the `seed_suite` is recognised (`SUPPORTED_SEED_SUITES`, no default
 fallback), and the seed b64url-decodes to exactly 32 bytes. Anything
@@ -2147,7 +2479,13 @@ through that decide whose content the §24.11 authorship rule accepts.
 Sharing the seed makes that household a co-authority of the space, not
 just an admin; the owner opts into it per space. From v_44 that authority
 ends with the admin seat: the owner rotates the key the moment the
-household's last admin seat goes (or the flag is turned off).
+household's last admin seat goes (or the flag is turned off). It cannot
+make admins, though: on the space it hosts the owner refuses seed-signed
+gossip that keeps or sets an ADMIN seat (D5, 2026-11-15) — so a kicked
+admin cannot re-assert its own seat at a higher version and turn a
+delegated admin's kick stale on the owner, which then rotates when it learns
+of the kick. Other member households may still mirror such a re-assertion
+until the owner's rotation; the rotation stops that household signing.
 
 Gated on `FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE`: against
 a sub-v_22 admin household (no handler) the owner SKIPS the send and
@@ -2161,11 +2499,17 @@ sequenceDiagram
     participant O as HFS O (owner)
     participant A as HFS A (remote admin)
     participant R as HFS R (relay / non-member)
+    participant G as GFS (A reached only through it)
     Note over O: delegated_admin_authority ON<br/>+ promote A to ADMIN (or flag flips on)
-    O->>O: peer_supports(A, v_22)?
-    O-->>A: SPACE_ADMIN_KEY_SHARE<br/>(encrypted peer-pair; seed + ed25519-seed suite)
+    O->>O: peer_supports(A, v_22)? (v_94 if A is GFS-only)<br/>every listing GFS proved authority_rotation?
+    alt A paired / mesh
+        O-->>A: SPACE_ADMIN_KEY_SHARE<br/>(encrypted peer-pair; seed + ed25519-seed suite)
+    else A reached only through the GFS
+        O->>G: sealed mailbox frame (session key)
+        G->>A: sealed frame — no space id, no type, no key
+    end
     Note over R: never on the path — seed is<br/>NEVER broadcast / relayed
-    A->>A: verify from_instance == owner<br/>+ local flag ON + 32-byte seed
+    A->>A: verify from_instance == owner<br/>+ local flag ON + own live admin seat<br/>+ 32-byte seed == pinned key
     A->>A: set_space_seed(space_id, seed)<br/>(INFO audit log)
     Note over A: A can now sign space-authority<br/>events with O offline
 ```
@@ -2223,7 +2567,12 @@ config, invite, rotation bundle and §25.6 sync sentinel it sends. The trust
 is also bound to the key epoch the admin PROVED (`spaces.invited_by_epoch`):
 after a rotation it resumes only when the admin re-proves with the NEW seed —
 an honest delegated admin's §25.6 sentinel carries its fresh inviter proof
-(`own_inviter_proof`), checked against the sender. A moved pin, the owner's
+(`own_inviter_proof`), checked against the sender. A household that takes the
+owner's rotation bundle asks its inviting admin for that stream at once (an
+incremental `SPACE_SYNC_BEGIN`, only while that admin still holds an admin
+seat by the bundle's roster), so a valid admin is host again within one sync
+rather than at the next periodic tick; the owner hands the admins it keeps
+their new seed before the bundles go out. A moved pin, the owner's
 fresh statement or the admin's own roster never resume it on their own, so an
 admin revoked by the rotation (no new seed) stays out (see discovery.md,
 "Statements expire and follow the key"). **If the owner stays unreachable for more than 30 days**, the
@@ -2243,10 +2592,21 @@ be the invitee's only way into the space:
   `SPACE_MEMBER_UNBANNED`, `SPACE_REMOTE_MEMBER_REMOVED`,
   `SPACE_ADMIN_PROPOSAL_UPDATED` mirrors and `SPACE_ADMIN_KEY_SHARE` (the
   seed must still be the private half of the pinned key) apply, and the host
-  exemption of the space-writer gate covers it.
+  exemption of the space-writer gate covers it;
+- its member directory (`SPACE_MAILBOX_DIRECTORY`) is taken like the
+  owner's, on its own version line, and it may be the middle of the host
+  hop — the invitee gives it its member card and its `dir_seq` echo too
+  (gfs-relay.md, "Who is the host"). Its directory never removes the owner
+  household.
+
+"The host" for content, sync, the member directory and the host hop
+always means this: the owner or the trusted inviting admin
+(`acts_as_host` / `acting_hosts`; `serves_as_host` on the sending side).
+A test scans those modules for comparisons with `owner_instance_id`
+(`tests/federation/test_host_notion_guard.py`).
 
 **Owner-only stays owner-only**: the owner-signed GFS list, `private_gfs`,
-`gfs_publish_mode`, the authority cert / `host_identity_pk`, the config
+the authority cert / `host_identity_pk`, the config
 last-writer-wins owner path, dissolve, sync-rejected and the age gate
 compare against `owner_instance_id` alone. Any other
 admin household gets the member-provider rules. Turning delegation off — or
@@ -2385,7 +2745,21 @@ no revoked household.
 
 **Steps on the owner.** (1) mint a fresh keypair at
 `authority_key_epoch + 1` in one compare-and-set write; (2) sign the cert;
-(3) rotate the content key, the rekey signed with the NEW key; (4) send
+(3) rotate the content key, the rekey signed with the NEW key; (3a)
+move the pin on every GFS that holds one for the space
+(`GfsConnectionService.repin_owed`): re-publish to every GFS that lists it,
+and send the pin-only publish to every GFS it was **withdrawn** from — each
+re-pins from the cert, so from here on no GFS takes the retired key's relays,
+epoch notices or media uploads (this runs BEFORE the per-member sends, which
+can take minutes in a large space; a rotation never tells a GFS that never
+held the space that it exists) and re-announce the epoch of a public / global
+space; (3b) drop every `SPACE_ADMIN_KEY_SHARE`
+of the space still queued in the owner's outbox — to each member household
+and to the revoked one, which may hold no seat any more (a seed share also
+supersedes per space there). A frame a GFS already accepted is out of reach:
+it carries the retired key's seed, which every re-pinned receiver refuses
+(residual: a member that missed the rotation still verifies that key until
+its cert arrives); (4) send
 each member household `SPACE_AUTHORITY_ROTATED` over its encrypted
 pairwise path — only `space_id` is plaintext; the payload carries the
 cert, the owner's full `space_meta` (signed with the new key, including
@@ -2393,14 +2767,148 @@ the cert, `authority_key_epoch` and `config_sequence`), the content key
 (signed with the new key) and the household's roster entries (as in a
 roster snapshot, signed with the new key); (5) if delegation is still on,
 re-share the new seed with the cert to every remaining admin household;
-(6) re-publish a public / global space to every GFS that already lists it
-(each re-pins from the cert; a rotation never tells a new GFS the space
-exists), then re-seal the content key to GFS subscribers. The remaining
+(6) re-seal the content key to GFS subscribers (after the re-pin of step
+3a). The remaining
 admins' seed share (step 5) is sent BEFORE the bundles, and the bundle and
 legacy rekey go only to households that still hold a live seat — a
 household whose last seat was just tombstoned (also through gossip, which
 now drops it from `space_instances` like the owner's own removal path does)
 gets neither the new content key nor the config or roster.
+
+**Durable re-pin (owner decisions D2 / D4, 2026-11-15).** A re-pin is one
+request that can fail, and until it lands the retired key still works on
+that server. So the owner tracks what each GFS holds and re-sends until it
+is current:
+
+- **Confirmed, not claimed.** `POST /gfs/spaces/{id}/publish` answers
+  `identity_public_key`, the key the server pins after the request. The
+  owner counts a re-pin only when that is exactly the key it offered
+  (`_pin_confirmed`, per space and connection, in memory). A server that
+  names another key (it refused or could not apply the cert), or none (an
+  older build), **owes** the re-pin — its signed `authority_rotation`
+  capability is a claim, the answered pin is what its relay checks against.
+  A lying server can still answer one key and honour another; that is the
+  malicious-GFS limit below, not something a household can test.
+- **Retried until it lands.** What is owed is re-sent by the rotation, on
+  every reconnect of that GFS (`heal_space_pins`), by a retry pass every
+  5 minutes (`infrastructure/gfs_cleanup_scheduler.py` — it reads what is
+  owed and sends only that; nothing owed, nothing sent), and once more by
+  the seed-share gate itself. After an attempt that was not confirmed (the
+  server down, a refusal, an answer naming another key) the next one for the
+  same key waits — 4 minutes, doubling up to 6 hours per (space, GFS) — so
+  neither the pass nor the gate (which an admin's sync can trigger) hammers
+  a dead or old server; a reconnect or a newer key asks at once.
+- **Withdrawn listings (D2).** Withdrawing a listing hides it from
+  discovery; the GFS keeps the row, the pinned key and the followers seated
+  there. The owner records each one (`gfs_withdrawn_listings`, migration
+  0147, with the key the server last confirmed) and a rotation sends that
+  GFS a **pin-only publish**: the publish body with `withdrawn: true` inside
+  the owner-signed bytes, a fresh `ts`, the owner's cert, the new key and
+  **no metadata** (blank name, description, images — the space may be
+  private by now). The GFS moves the pin under the usual cert rule, stores
+  nothing else, leaves `status` alone and keeps the listing withdrawn; a
+  space it holds no row for answers `404 {"error": "not listed"}` (after the
+  signature verified) and the owner forgets the row — only on that exact
+  answer; any other 404 (a proxy) leaves it owed. Because this publish also
+  WITHDRAWS a listing, it names the one server it is for: `gfs_key`, that
+  server's identity key, is inside the signed bytes and mandatory, and a
+  server refuses one that is not its own — otherwise the GFS that received
+  it could replay it, within the `ts` window, to another GFS where the
+  space is listed and take that listing and its invite pages down. The
+  withdrawal itself (`unpublish`) and every ordinary listing publish
+  carry the same field to a server that proved the capability (an ordinary
+  publish replayed to another GFS would list the space there). Sent only to a server that proved the signed
+  `withdrawn_repin` capability — an older one would refuse the field, and a
+  plain publish would list the space again — so on such a server the re-pin
+  stays owed (WARNING, seed shares blocked) until its operator upgrades or
+  the owner disconnects that GFS. A listing left over from before the space
+  left the public tiers (its withdrawal has not landed yet) gets the same
+  pin-only publish instead of a re-publish. A global space never does — the
+  pin-only publish withdraws the listing and takes its invite pages down —
+  and a withdrawn row is re-checked under the space's listing lock right
+  before the send, so a space listed there again meanwhile is left alone. A
+  server that answers that it pins no key at all owes nothing (no key
+  authorizes a relay there).
+- **Private channels (D4).** A private space's opaque channel key derives
+  from the authority seed, so the old channel is unregistered before the
+  seed is swapped. Each server the channel lives on is first recorded as
+  owing that unregister together with the channel's signing seed, wrapped
+  under the household KEK and bound to its row
+  (`gfs_channel_withdrawals.channel_seed`, migration 0147), then asked; a
+  server that was down keeps its row and is asked again on its reconnect
+  and by the retry pass — after the rotation too. A chosen server whose
+  connection is suspended is recorded as well. The seed goes with the row
+  once the server confirmed. Nothing else ends it: unreachable or refused
+  (a 403 from clock skew or a stale server key is not a confirmation), the
+  row and its seed stay, the next attempt waits (4 minutes doubling to 6
+  hours; a reconnect asks at once), and the row keeps blocking new seed
+  shares for the space — the owner is told through
+  `space_delegation_blocked` and decides (disconnecting that GFS drops its
+  rows). The seed recorded is the one that derives the stored channel key,
+  and one that can no longer be read (another KEK) keeps the row owed too.
+- **Cost.** Per rotation: one publish per listing GFS (as before) plus one
+  ~1 KB pin-only publish per GFS the space was withdrawn from (typically
+  0–2). Per retry: one request per (space, GFS) still owed and due
+  (4 minutes doubling to 6 hours: a few a day for a dead server), zero in
+  steady state. A LISTING retry is the full re-publish — metadata with the
+  embedded cover and icon, up to a few hundred KB — which is why it backs
+  off rather than going out every pass; a withdrawn-listing retry is the
+  ~1 KB pin-only body, a channel retry a few hundred bytes. No fan-out to
+  members.
+- **What is left.** Listings withdrawn before this release left no row, so a
+  rotation cannot reach them (re-list and withdraw again to record one). A
+  dissolved space is never rotated, so the pin a GFS keeps for it is never
+  moved. A GFS that is gone for good, or never upgrades, blocks new seed
+  shares for that space until the owner disconnects it — the rows go with
+  the connection, and the old pin there is then out of the owner's reach. A
+  malicious GFS that keeps honouring an old key towards the followers it
+  alone serves cannot be stopped by any household (it controls their only
+  path). The pin-only publish is IDENTIFIED (owner-signed, naming the space
+  id): a GFS a space was withdrawn from keeps seeing, at each rotation,
+  that this household's space rotated its key — also after the space went
+  private. It learns no name, member or reason, and it already knew the
+  space and its owner from the listing; the alternative is leaving the old
+  key valid there.
+
+**The owner hears of a kick made while it was away.** A delegated admin's
+removal reaches the owner only as roster gossip (`SPACE_MEMBER_LEFT`), which
+is droppable: about 10 hours of outbox retries, 24 hours in a GFS mailbox.
+One that never arrived left the kicked household an admin on the owner —
+which re-shared every new seed with it. Now a seed-holding admin household
+answers the owner's own statement: when a roster snapshot from the owner
+(sent on a `roster_digest` mismatch after the member's sync BEGIN) names a
+seat live that this household holds a removal for at the same or a higher
+`member_version`, it re-states that removal to the owner alone — one
+`SPACE_MEMBER_LEFT` per seat, signed with the space key, at the removal's
+own version (`PrivateSpaceInviteHandler._restate_removals`). The owner
+applies it like any gossip (a removal wins a version tie) and rotates when
+it ends an admin seat. Bounded: at most 16 per snapshot part, each removal
+at most once an hour per admin household, ~0.5 KB each, one recipient; zero
+in the normal case. Only removals written under the current key epoch are
+re-stated (an older one may be a since-revoked holder's), never the owner
+household's seats or the sender's own.
+
+**A removed household seats nobody.** Live `SPACE_MEMBER_JOINED` gossip is
+refused when the receiver holds a removal (any tombstoned seat) of the
+household that SENT it and no live admin seat of it — whoever the entry
+seats: a kicked admin that still holds the current seed can no longer sign
+itself, a fresh user id or a second household it controls back in (only a
+seed holder by right sends a JOINED at all). A household comes back
+through the host (its gossip or snapshot) or the admin household that
+invites it. Residuals, stated plainly: until the owner hears of the kick
+(an admin's sync BEGIN with a differing roster digest, answered by the
+owner's snapshot — the owner sends one per household at most every 30
+minutes, backing off up to a day) the
+kicked household still holds the current seed and gets any new one; a
+household that has not seen the removal yet (the owner included) still takes
+that household's self-signed JOINED — as a plain member at most on the owner
+(D5), where it ends the admin seat and rotates the key, but the person is
+seated again and must be removed once more; the same forged JOINED relayed
+by an accomplice household is not caught; and a rotation the owner runs
+before it heard of the kick resets every member to the owner's roster, so
+the kicked admin is back until removed again. Any seed holder can still
+sign a removal of another admin (a delegated admin is trusted with exactly
+that); the owner sees it and re-promotes.
 
 **Receiver rules** (`services/space_authority_pin.py`, one function every
 path uses):
@@ -2681,6 +3189,32 @@ sequenceDiagram
     H->>W: SPACE_KEY_EXCHANGE_REKEY (epoch=N+1)
     H->>A: SPACE_KEY_EXCHANGE_REKEY (epoch=N+1)
 ```
+
+`SPACE_REMOTE_MEMBER_REMOVED` names its space on the envelope (`space_id`,
+a routing field) and is sent FIRST — before the seat is tombstoned and the
+removed household's `space_instances` row is dropped: a household seated
+from the host's directory is reached at its GFS mailbox — or through the
+host — and both are found per space, from the member card on that row and
+only while the roster holds a live seat of that household. This is what lets
+a delegated admin that is itself reached only through a GFS remove a member
+while the owner is offline (before, its removal stopped at "no path" after
+the seat was dropped locally, with no gossip and no rekey). Telling the
+household is best effort and never blocks the removal: a send that is queued
+for an offline household counts as said, and one that finds no path at all
+is logged while the removal completes (seat, gossip, rekey) — nobody keeps a
+seat by being unreachable; that household is answered on its next sync
+(`SPACE_SYNC_REJECTED`). Before, any "not delivered now" answer — a queued
+send included — aborted the removal after the seat was dropped locally. The
+removed household drops its own copy only on the word of its host (the owner,
+or the admin that invited it). A removal another delegated admin made while
+the owner was offline reaches the owner as roster gossip; when the owner
+applies it, it sends that household its own `SPACE_REMOTE_MEMBER_REMOVED`
+(one frame, one recipient, best effort — the `SPACE_SYNC_REJECTED` reconnect
+backstop remains for a household it cannot reach then), and only for a seat
+the owner itself held live: a signed removal can name any household, and
+the notice carries the space id. Before, such a
+household kept its copy and kept syncing until that backstop, up to 30
+minutes later.
 
 Owner cannot be kicked through this path — same invariant as
 `remove_member`. Self-leaves on a remote space run the local path (the
@@ -3287,10 +3821,130 @@ already run. The origin then applies, in order, each a fail-closed drop:
    makes the target mint a new ephemeral) and `send_routed` the retained
    inner event **once**, flagged as a retry.
 
+**What the origin keeps.** One rule for every inner event type, by size
+of the inner's compact JSON (UTF-8 bytes):
+
+| Inner | Kept for the retransmit |
+|---|---|
+| ≤ 64 KiB | always |
+| > 64 KiB (a long page, a space cover, a §25.6 chunk with one big record) | yes, under one budget for all of them: 16 MiB (`_MAX_RETAINED_LARGE_BYTES`). A new one that would pass it demotes the **oldest** kept large records to head-only until it fits |
+| > 64 KiB of a type whose sender holds the bytes itself (`SPACE_MEDIA_BLOB`: the file is on disk) | no — the sender is told and queues the file again (below) |
+| a host hop (v_89), whatever its size | no record at all: it is sealed to the target's static key-wrap key and never nacked |
+| the retransmit itself | no copy: a nack for it gives up |
+
+The newest send wins the budget because it is the one worth sending again:
+a page autosaves a couple of seconds after typing stops, each save the
+whole page, so an older large record is superseded anyway. 16 MiB is some
+32 of the largest space item (~0.5 MB) inside one pending window (270 s);
+a household runs on a Raspberry Pi next to Home Assistant. The budget
+counts every large inner held for a retransmit: the records in the table,
+the ones whose nack is being handled, and the ones waiting on their one
+deferred attempt — those last two are never demoted (if they alone fill
+the budget, the new send is not kept). A demoted record's nack invalidates
+the route and resends nothing, with one `WARNING` on the sender ("not
+kept: newer sends took the large-inner budget"); the member gets the item
+with its next §25.6 sync. Large retransmits run **one at a time**: sealing
+and encrypting one holds several copies of it (JSON, ciphertext, base64
+twice), so a burst of nacks never multiplies that. A `send_routed` whose
+first hop raises keeps nothing (the caller's retry goes out under a new
+`route_id`).
+
+**What one hop carries — the uniform limit, live and by sync.** A hop
+takes 1 MiB of envelope (the HTTPS inbox body, the data channel message).
+Every space item has one limit per kind on every path (a live payload up to
+515,998 bytes, a §25.6 record up to the same; `domain/relay_media_frame.py`),
+and the mesh carries both at the limit:
+
+* **A live event** is sealed for the route and encrypted for the hop
+  (base64 twice): at the live bound it is 929,278 bytes on a hop of the
+  longest route (8 households), hybrid-sized signatures throughout.
+* **A §25.6 sync chunk** carries its record's ciphertext as base64url text,
+  which the seal and the hop would base64 twice more (a record over
+  ~433,000 bytes would not fit). So when the chunk's JSON would not fit one
+  hop, `send_routed` seals its **raw layout** instead (`sync-chunk-raw-v1`,
+  the layout a GFS relay frame uses — `federation/relay_event_body.py`),
+  naming the suite in the sealed blob (`event_body_suite`) and binding it
+  into the AEAD; the target rebuilds the identical payload, so the chunk's
+  own signature and content-key AEAD are untouched. At the record bound
+  that is 937,995 bytes on a hop. The choice is made on the **encoded size
+  of the envelope** (the routed payload's JSON as it will be encrypted,
+  plus 12 KiB for the largest header a hop adds — a hybrid signature set,
+  and a route-origin signature that turns hybrid). On a **host hop** the
+  host's leg to the seat is a GFS relay frame (532,382 bytes), which binds
+  first: there the routed payload must also fit that frame as it would be
+  framed, with room for a hybrid origin signature, or the chunk is sealed
+  raw. So no record size falls between "fits as JSON" and "sent raw" on
+  either kind of route (`tests/federation/test_mesh_item_limits.py`
+  sweeps every 256 bytes from 400,000 to the bound over 8 households, and
+  every 2,048 bytes from 300,000 over a host hop into a frame). Only toward a target known to read it: the §25.6 provider passes
+  its requester's version (v_87+, `MIN_FOR_RELAY_MEDIA`); a host hop reads
+  the target's card. A released build (v_80) is never sent a raw body, so
+  no version bump: v_81–v_94 ship together.
+* **The host hop's leg to a seat behind a GFS** rides one relay frame with
+  the wrapper's sealed ciphertext raw (`space-routed-raw-v1`,
+  [gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)): 521,113
+  bytes for a live event at the bound, 526,026 for a sync chunk at the
+  bound, of the frame's 532,382.
+
+Cost: none for what fits as JSON (no second seal); a chunk over the
+threshold is sealed twice (JSON, measured, then raw) and travels ~25 %
+smaller on every hop than its JSON would. Large retransmits run one at a
+time for the whole send (the seal, the hop's encryption and the first
+hop's write each hold copies of the inner), so a slow first hop delays the
+next large retransmit — never a small one.
+
+**What can still be lost live, and what heals it.** Everything below is
+healed by the member's next §25.6 sync (on its restart and at least every
+30 minutes), which over the mesh now carries every record up to the bound:
+
+| Case | How often | Heal |
+|---|---|---|
+| The target was away longer than the origin's pending window (270 s) | every longer outage | its catch-up sync on restart |
+| The record was demoted under the 16 MiB budget (newer large sends) | > ~32 frame-sized sends within 270 s | sync; the newest of a page's saves is the one kept |
+| The retransmit itself was nacked (the target restarted twice) | rare | sync |
+| The one deferred attempt still found no route | the target stayed unreachable > ~35 s after its nack | sync |
+| The origin restarted inside the window (its pending records are in RAM) | rare | sync from the host, which holds the item (the origin had sent it there too) |
+| A hop toward the target is reachable only through its GFS relay fallback (a paired peer whose inbox is down; the JSON relay envelope takes ~191 KiB) | while that pair's direct path is down | sync once the direct path is back — the stream crosses the same hop |
+| The space's host is down while it is the only path (host hop) | while it is down | the origin's leg to the host is queued in the origin's outbox and sent when the host is back; sync |
+
+A host hop is never nacked (it is sealed to the target's long-term
+key-wrap key, which a restart does not change), so it keeps nothing for a
+retransmit; its leg toward a seat is queued like any other send.
+
+Before this every inner over 64 KiB was treated like a media chunk —
+recorded by its head only — though nothing but the media outbox can send
+its event again: a long page a household sent while a mesh-only member
+was restarting was dropped with one `INFO` line on the sender. Cost of a
+large retransmit: the event's bytes once more, to the one household that
+could not open them (≤ ~1 MiB per hop, ≤ 8 hops), never a fan-out.
+
+The retransmit may arrive after a copy that came another way (the
+member's §25.6 catch-up, a GFS `space_item`). Creates and saves are
+upserts; a post or comment edit that is not newer than the held row
+changes nothing (last writer wins) and is logged at `DEBUG` ("not
+applied — not newer than what is held here", or "— deleted here" for a
+row deleted meanwhile), not as a cross-space refusal.
+
 Step 8 is skipped — route invalidated, nothing resent — when the nacked
 send was itself the retry (a target that nacks twice gets one `INFO`
-line, not a loop) or when the inner exceeds 64 KiB (media chunks ride the
-durable `space_media_outbox`, which rediscovers on its own next attempt).
+line, not a loop) or when the inner was not kept. For a media chunk the
+first hop had taken it, so the
+`space_media_outbox` row was already done: the handler hands the inner's
+small head (`blob_id`, …, never the bytes) to the media outbox
+(`SpaceRoutedHandler.attach_lost_inner_listener` →
+`SpaceMediaSyncService.on_mesh_chunk_lost`), which queues the **whole
+file** for that household again, once per file — the other chunks' nacks
+find it queued, and a nack for the resend gives up. The row is marked
+before its first chunk goes, so a nack that arrives while later chunks are
+still being sent keeps the row (due at once) instead of being dropped. A
+chunk the relay dropped without a nack (the target stayed away past the
+pending window), or a lost resend, is asked for by the receiver: a few
+minutes after the row reached it, or when someone opens it
+(`SPACE_MEDIA_WANTED`, [media.md](./media.md#older-files-on-view--space_media_wanted-v_92)). Cost: the file's
+bytes once more to the one household that could not open them. Before
+this a picture a mesh-only member posted while the host was down was lost
+on the host: the relay delivered the chunks after the host's restart, the
+host nacked them, and nobody sent them again.
 When rediscovery finds **no route** the origin does not give up at once:
 the nack's own trigger is "the target just rebooted", and the two-second
 discovery window routinely closes before the target is back — its late
@@ -3315,7 +3969,8 @@ visits each hop at most once; replays are no-ops); one retransmit per
 original send (the retry's pending record is flagged so its own nack
 cannot trigger another) plus at most one deferred re-attempt; a
 bounded pending table (2000 entries, oldest
-expiry evicted first, ≤ 64 KiB retained inner each); and
+expiry evicted first, ≤ 64 KiB retained inner each plus ≤ 16 MiB of
+large ones in all, one large retransmit at a time); and
 `discover_route` single-flights per target and honours the negative
 cooldown, so a burst of nacks for one target costs one flood.
 

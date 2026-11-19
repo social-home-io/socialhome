@@ -141,6 +141,7 @@ from ..domain.events import (
     SchedulePollFinalized,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
+    SpaceDelegationBlocked,
     SpaceInviteAnswered,
     SpaceJoinApproved,
     SpaceJoinDenied,
@@ -705,6 +706,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "space_member_joined",
         "space_dissolved",
         "space_admins_reconfirm",
+        "space_delegation_blocked",
         "space_join_requested",
         "space_join_approved",
         "space_ownership_transferred",
@@ -1616,6 +1618,7 @@ class NotificationService(ProtectionGateMixin):
         )
         self._subscribe(RemoteSpaceDissolved, self.on_remote_space_dissolved)
         self._subscribe(SpaceAdminSeedsRetiredAfterRestore, self.on_admin_seeds_retired)
+        self._subscribe(SpaceDelegationBlocked, self.on_delegation_blocked)
         # Momentum (§Momentum) — reactions, replies, and new follows.
         self._subscribe(MomentReactionChanged, self.on_moment_reaction_changed)
         # D13: reactions on posts (household feed and spaces).
@@ -5641,6 +5644,35 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=None,
             )
 
+    async def on_delegation_blocked(self, event: SpaceDelegationBlocked) -> None:
+        """D1: no admin of the space can get its signing seed while a GFS it
+        is listed on can't take a new space key (or can't be reached). Tell
+        the space's OWNER (only) — delegated admin must not fail silently."""
+        for member in await self._space_members(event.space_id):
+            if member.role != SpaceRole.OWNER:
+                continue
+            owner = await self._local_user(member.user_id)
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_delegation_blocked",
+                    title=self._t(
+                        "notification.space.delegation_blocked",
+                        locale=self._locale(owner),
+                        fallback=(
+                            "Admins can't act for you in a space yet: one of its "
+                            "GFSs can't take a new space key or isn't reachable"
+                        ),
+                    ),
+                    body=None,
+                    link_url=f"/spaces/{event.space_id}",
+                ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE, event.space_id, space_id=event.space_id
+                ),
+                actor_user_id=None,
+            )
+
     async def on_space_join_requested(
         self,
         event: SpaceJoinRequested,
@@ -5669,9 +5701,7 @@ class NotificationService(ProtectionGateMixin):
                 continue
             # A remote applicant is named by the name this household holds,
             # never by their raw user id.
-            name = await self._person_name(
-                event.user_id, self._locale(recipient), space_id=event.space_id
-            )
+            name = await self._applicant_name(request, event, self._locale(recipient))
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -5757,6 +5787,35 @@ class NotificationService(ProtectionGateMixin):
             household_paired=bool(household) and await self._paired(str(household)),
         )
 
+    async def _applicant_name(
+        self, request: dict | None, event: SpaceJoinRequested, locale: str | None
+    ) -> str:
+        """Who asks, for the admins' bell: the name this household holds
+        for them (:meth:`_person_name`) — except that a request from
+        ANOTHER household never borrows the name of a person here. The
+        other household chooses the user id it sends; when that id is one
+        of ours, the request is named from that household's own seat in
+        the space, else "Someone"."""
+        household = (request or {}).get("remote_applicant_instance_id")
+        if not household or await self._local_user(event.user_id) is None:
+            return await self._person_name(
+                event.user_id, locale, space_id=event.space_id
+            )
+        seat = (
+            await self._remote_members.get(
+                event.space_id, str(household), event.user_id
+            )
+            if self._remote_members is not None
+            else None
+        )
+        return (seat.display_name if seat else None) or self._someone(locale)
+
+    async def _own_join_request(self, request_id: str) -> bool:
+        """Whether the request is one of this household's people — not one
+        another household filed (under whatever user id it sent)."""
+        request = await self._spaces.get_join_request(request_id)
+        return not (request or {}).get("remote_applicant_instance_id")
+
     async def _paired(self, instance_id: str) -> bool:
         """Is *instance_id* a household this one is paired with?"""
         if not instance_id or self._instances is None:
@@ -5773,7 +5832,7 @@ class NotificationService(ProtectionGateMixin):
         if space is None:
             return
         recipient = await self._local_user(event.user_id)
-        if recipient is None:
+        if recipient is None or not await self._own_join_request(event.request_id):
             # A §D2 cross-household applicant (or an admin/mod elevation of
             # one): the approved user lives on another household, so there
             # is no LOCAL user to notify — and a notification row for a
@@ -5851,9 +5910,11 @@ class NotificationService(ProtectionGateMixin):
         because the notification may surface on a lock screen.
         """
         recipient = await self._local_user(event.user_id)
-        if recipient is None:
+        if recipient is None or not await self._own_join_request(event.request_id):
             # Cross-household applicant — no local user to notify, and a row
-            # for a non-local user_id would fail the users FK.
+            # for a non-local user_id would fail the users FK. A request
+            # another household filed under a local person's user id is not
+            # that person's either.
             return
         await self._save_notif(
             new_notification(

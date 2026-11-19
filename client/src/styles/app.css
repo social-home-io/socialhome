@@ -3161,6 +3161,12 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
  * add chip and Comment beside them (the chat bubble's chips below stay
  * compact on a fine pointer). */
 .sh-reactions .sh-reaction-chip { min-height: 36px; }
+/* The "+k" / "−" fold is a tap target like the chips: never narrower
+ * than it is tall (a lone "−" was 25 px wide on a phone). */
+.sh-reactions .sh-reaction-more {
+  min-width: 36px;
+  justify-content: center;
+}
 .sh-reaction-chip:hover {
   background: var(--sh-primary-soft);
   border-color: var(--sh-primary);
@@ -10971,6 +10977,120 @@ hr {
   gap: var(--sh-space-sm);
   justify-content: center;
 }
+/* Household ID (HouseholdId.tsx) — the fingerprint of a household's
+   identity key, in groups of four so two people can compare it. The gap
+   is CSS only: copied text is the plain ID. */
+.sh-household-id {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.sh-household-id__code {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--sh-font-family-mono);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  padding-top: 2px;
+  color: var(--sh-text);
+}
+/* Inline groups (not flex / grid items): a selection made by hand copies
+   the ID in one piece, like the copy button. */
+.sh-household-id__code > span {
+  display: inline-block;
+  margin-inline-end: 0.6em;
+}
+@media (max-width: 640px) {
+  /* A phone can't fit all eight groups on a line: two tidy rows of four
+     instead of a stray last group. */
+  .sh-household-id__code {
+    max-width: calc(4 * (4ch + 0.6em));
+  }
+}
+.sh-conn-own-id {
+  display: flex;
+  padding: var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg);
+  min-width: 0;
+}
+/* Before an admin grant to another household (AdminGrantCheck.tsx): what
+   the role gives + whose household it is. Calm — a note, not an alarm. */
+.sh-admin-grant-check {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-left: 3px solid var(--sh-accent, #b25a00);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  min-width: 0;
+}
+.sh-admin-grant-check p {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.45;
+}
+.sh-admin-grant-check__warning {
+  color: var(--sh-text);
+  font-weight: 600;
+}
+.sh-admin-grant-check__id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sh-admin-grant-check__label {
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+}
+.sh-admin-grant-check__hint {
+  color: var(--sh-text-muted);
+}
+/* Space settings › "Let admins act for me" going on (MembersSection.tsx):
+   the same note, listing every other household with an admin, then
+   Cancel / Turn on. */
+.sh-admin-authority-confirm {
+  margin-top: var(--sh-space-sm);
+  gap: var(--sh-space-sm);
+}
+.sh-admin-authority-confirm:focus { outline: none; }
+.sh-admin-authority-confirm:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-admin-authority-confirm__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-admin-authority-confirm__list > li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding-top: var(--sh-space-sm);
+  border-top: 1px solid var(--sh-border);
+}
+.sh-admin-authority-confirm__who {
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-admin-authority-confirm__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sh-space-sm);
+}
 @media (max-width: 640px) {
   /* Stack the row on a phone: avatar + name on top, actions below. Two
      action buttons ("Make admin" / "Decline") beside the avatar leave the
@@ -15719,6 +15839,12 @@ a.sh-space-hero-members:focus-visible,
   font-weight: 600;
 }
 .sh-poll-option--voted .sh-poll-option-count { color: var(--sh-primary-text); }
+/* A follower's poll: why the result rows don't respond (#1353). */
+.sh-poll-readonly {
+  margin: var(--sh-space-sm) 0 0;
+  font-size: var(--sh-font-size-xs);
+  overflow-wrap: anywhere;
+}
 .sh-poll-footer {
   margin-top: var(--sh-space-sm);
   padding-top: var(--sh-space-sm);
@@ -27101,20 +27227,6 @@ button.sh-page-editor-status {
   min-height: 36px;
 }
 
-/* Space settings — connection server publish mode (v_50): the two options'
- * plain-language explanations under the chip group. */
-.sh-gfs-publish-mode__help {
-  margin: var(--sh-space-sm) 0 0;
-  font-size: var(--sh-font-size-sm);
-}
-.sh-gfs-publish-mode__help dt {
-  font-weight: 600;
-}
-.sh-gfs-publish-mode__help dd {
-  margin: 0 0 var(--sh-space-sm);
-  color: var(--sh-text-muted);
-  overflow-wrap: anywhere;
-}
 
 /* Space settings — whether a PRIVATE space uses the connection server.
  * The 409 refusal lists the link-joined households on a danger tint. */
@@ -30455,3 +30567,16 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   .sh-cp-table__actions .sh-btn { margin: 0; min-height: 44px; white-space: normal; }
   .sh-cp-table .sh-cp-guardians-row { padding: 0 0 var(--sh-space-sm); }
 }
+
+/* LengthCounter — "n/max" under a capped text field near its cap. */
+.sh-length-counter {
+  display: block;
+  margin-top: 2px;
+  text-align: end;
+  font-size: var(--sh-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--sh-text-muted);
+}
+.sh-length-counter--full { color: var(--sh-danger); }
+/* Directly under its field, not a form gap away. */
+.sh-form > .sh-length-counter { margin-top: calc(2px - var(--sh-space-md)); }
