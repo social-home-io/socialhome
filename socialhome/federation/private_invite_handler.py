@@ -98,6 +98,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: How far above our own ``roster_sequence`` a roster entry's
+#: ``member_version`` may be. Versions are counters (one per roster change);
+#: a household that was away for years of changes is still far inside this.
+MAX_ROSTER_VERSION_LEAD: int = 2**32
+
 #: Longest ``join_request_id`` a host's ``SPACE_REMOTE_MEMBER_REMOVED`` may
 #: name (it is ``uuid4().hex`` on the host).
 _MAX_JOIN_REQUEST_ID_LEN = 128
@@ -1786,6 +1791,43 @@ class PrivateSpaceInviteHandler:
             sender=event.from_instance,
         )
 
+    async def _tell_removed_household(
+        self, space_id: str, instance_id: str, user_id: str
+    ) -> None:
+        """The host's ``SPACE_REMOTE_MEMBER_REMOVED`` for a seat that ended
+        through a delegated admin's gossip — one frame to the one household,
+        what the host's own ``remove_remote_member`` sends. Best effort: a
+        household it does not reach now is told by the reconnect backstop
+        (``SPACE_SYNC_REJECTED`` on its next sync BEGIN)."""
+        if self._federation is None:
+            return
+        try:
+            result = await self._federation.send_with_mesh_fallback(
+                to_instance_id=instance_id,
+                event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+                payload={"space_id": space_id, "user_id": user_id},
+                space_id=space_id,
+            )
+        except Exception:
+            log.info(
+                "roster-gossip: telling %s that %s left space %s failed — its "
+                "next sync is answered instead",
+                instance_id,
+                user_id,
+                space_id,
+                exc_info=True,
+            )
+            return
+        if not result.ok:
+            log.info(
+                "roster-gossip: %s could not be told that %s left space %s (%s) "
+                "— its next sync is answered instead",
+                instance_id,
+                user_id,
+                space_id,
+                getattr(result, "error", None),
+            )
+
     async def _merge_roster_entry(
         self,
         event_type: object,
@@ -1823,6 +1865,25 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
+        space = await self._space_repo.get(space_id)
+        held_sequence = getattr(space, "roster_sequence", None)
+        if (
+            isinstance(held_sequence, int)
+            and member_version > held_sequence + MAX_ROSTER_VERSION_LEAD
+        ):
+            # A version is a small counter the signer takes just above what
+            # it holds. One far ahead of ours is forged — and once stored it
+            # would outrank every honest event for that seat for good, and
+            # drag the counter of whoever next signs for the space up to it.
+            log.warning(
+                "roster-gossip %s for %s: member_version %d is far ahead of "
+                "ours (%d) — dropping",
+                event_type,
+                space_id,
+                member_version,
+                held_sequence,
+            )
+            return
         raw_role = str(p.get("role") or SpaceRole.MEMBER.value)
         role = mirrorable_remote_role(raw_role)
         # ``owner`` is expected (the host names its owner seat, migration
@@ -1837,7 +1898,6 @@ class PrivateSpaceInviteHandler:
             )
         display_name = p.get("display_name")
         user_pk = p.get("user_pk")
-        space = await self._space_repo.get(space_id)
         hosted = (
             space is not None
             and bool(self._own_instance_id)
@@ -1962,6 +2022,24 @@ class PrivateSpaceInviteHandler:
                     space_id=space_id, instance_id=instance_id, user_id=user_id
                 )
             )
+        if (
+            applied
+            and tombstoned
+            and hosted
+            and sender is not None
+            and sender != instance_id
+            and prior is not None
+            and not prior.tombstoned
+        ):
+            # On the space we host, another household's gossip just ended
+            # this seat: a delegated admin removed the member while we were
+            # offline. A household drops its copy of a space only on its
+            # HOST's word, so say it — before its ``space_instances`` row
+            # goes below. (Its own LEFT needs no answer.) Only for a seat
+            # WE held live: a signed LEFT can name any household — one that
+            # was never in the space, or one already removed — and the
+            # notice carries the space id.
+            await self._tell_removed_household(space_id, instance_id, user_id)
         if (
             applied
             and tombstoned
