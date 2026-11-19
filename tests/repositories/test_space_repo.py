@@ -965,7 +965,9 @@ async def test_list_pending_join_request_space_ids_for_user(env):
     # A pending request for bob → excluded (different user).
     await env.repo.save_join_request("sp-other", "uid-bob")
 
-    ids = await env.repo.list_pending_join_request_space_ids_for_user("uid-alice")
+    ids = await env.repo.list_pending_join_request_space_ids_for_user(
+        "uid-alice", own_instance_id="inst-x"
+    )
     assert set(ids) == {"sp-pend-a", "sp-pend-b"}
     assert len(ids) == len(set(ids))  # DISTINCT — no duplicate space_ids
     assert "sp-approved" not in ids
@@ -975,8 +977,90 @@ async def test_list_pending_join_request_space_ids_for_user(env):
 async def test_list_pending_join_request_space_ids_for_user_empty(env):
     """A user with no pending requests gets an empty list."""
     assert (
-        await env.repo.list_pending_join_request_space_ids_for_user("uid-alice") == []
+        await env.repo.list_pending_join_request_space_ids_for_user(
+            "uid-alice", own_instance_id="inst-x"
+        )
+        == []
     )
+
+
+async def test_my_pending_requests_leave_out_another_households(env):
+    """A request is keyed by (household, user id) — the other household
+    chooses the user id it sends. A request ANOTHER household filed under
+    my user id, kept here because this household hosts the space (or
+    seated the redeemer of an admin link), is not mine: only a local
+    request and my own outgoing copy (which names the HOST) are."""
+    await env.repo.save(_space("sp-hosted"))  # owned by inst-x: we host it
+    await env.repo.save(_space("sp-elevated"))
+    await env.repo.save(_space("sp-mine"))
+    # Another household asks to join a space we host, under alice's id.
+    await env.repo.save_join_request(
+        "sp-hosted", "uid-alice", remote_applicant_instance_id="peer"
+    )
+    # Another household's pending admin elevation under alice's id.
+    await env.repo.save_join_request(
+        "sp-elevated",
+        "uid-alice",
+        remote_applicant_instance_id="peer",
+        requested_role="admin",
+    )
+    # Alice's own: a local request, and her outgoing copy for a space of
+    # another household (no ``spaces`` row here; the row names the host).
+    await env.repo.save_join_request("sp-mine", "uid-alice")
+    await env.repo.save_join_request(
+        "the-hosts-space", "uid-alice", remote_applicant_instance_id="host"
+    )
+
+    ids = await env.repo.list_pending_join_request_space_ids_for_user(
+        "uid-alice", own_instance_id="inst-x"
+    )
+    assert sorted(ids) == ["sp-mine", "the-hosts-space"]
+
+
+async def test_my_outgoing_request_shows_for_a_space_mirrored_here(env):
+    """The applicant may hold a row for the host's space (a mirrored
+    public / global space): its own outgoing request still shows."""
+    await env.repo.save(_space("sp-theirs"))  # owned by inst-x, not by us
+    await env.repo.save_join_request(
+        "sp-theirs", "uid-alice", remote_applicant_instance_id="inst-x"
+    )
+    ids = await env.repo.list_pending_join_request_space_ids_for_user(
+        "uid-alice", own_instance_id="inst-us"
+    )
+    assert ids == ["sp-theirs"]
+
+
+async def test_a_second_pending_admin_elevation_returns_the_first(env):
+    """Migration 0148: one pending admin elevation per (space, household,
+    user id) — a second insert files nothing and returns the row on file.
+    Another household, a local member, and an ordinary join are their own
+    rows; once the first is answered a new one can be filed."""
+    await env.repo.save(_space("sp-el"))
+
+    async def file(household):
+        return await env.repo.save_join_request(
+            "sp-el",
+            "uid-alice",
+            remote_applicant_instance_id=household,
+            requested_role="admin",
+        )
+
+    first = await file("peer")
+    assert await file("peer") == first
+    local = await file(None)
+    assert await file(None) == local
+    other = await file("peer-2")
+    plain = await env.repo.save_join_request(
+        "sp-el", "uid-alice", remote_applicant_instance_id="peer"
+    )
+    assert len({first, local, other, plain}) == 4
+    rows = await env.repo.list_pending_join_requests("sp-el")
+    assert sorted(r["id"] for r in rows) == sorted([first, local, other, plain])
+
+    await env.repo.update_join_request_status(first, "denied")
+    again = await file("peer")
+    assert again != first
+    assert (await env.repo.get_join_request(again))["status"] == "pending"
 
 
 async def test_host_identity_pk_round_trips(env):
@@ -2369,6 +2453,33 @@ async def test_unread_posts_compare_below_the_second(env):
     assert row.unread_posts == 1
 
 
+async def test_an_elevation_answered_during_the_conflict_is_filed_anew(
+    env, monkeypatch
+):
+    """The request on file is answered between the refused insert and the
+    read-back: the key is free again, so the second insert lands — never an
+    id that names no row."""
+    await env.repo.save(_space("sp-el"))
+    first = await env.repo.save_join_request(
+        "sp-el", "uid-alice", requested_role="admin"
+    )
+    real = env.db.fetchone
+
+    async def answered_meanwhile(sql, params=()):
+        monkeypatch.setattr(env.db, "fetchone", real)
+        await env.repo.update_join_request_status(first, "denied")
+        return await real(sql, params)
+
+    monkeypatch.setattr(env.db, "fetchone", answered_meanwhile)
+    second = await env.repo.save_join_request(
+        "sp-el", "uid-alice", requested_role="admin"
+    )
+    assert second != first
+    assert [r["id"] for r in await env.repo.list_pending_join_requests("sp-el")] == [
+        second
+    ]
+
+
 async def test_a_join_request_keeps_a_local_communitys_verdict(env):
     """Migration 0111: inside / edge — never the location itself."""
     await env.repo.save(_space("sp-lc"))
@@ -2383,7 +2494,9 @@ async def test_an_applicant_keeps_a_request_for_a_space_it_does_not_hold(env):
     rid = await env.repo.save_join_request(
         "the-hosts-space", "uid-alice", remote_applicant_instance_id="host"
     )
-    ids = await env.repo.list_pending_join_request_space_ids_for_user("uid-alice")
+    ids = await env.repo.list_pending_join_request_space_ids_for_user(
+        "uid-alice", own_instance_id="inst-x"
+    )
     assert ids == ["the-hosts-space"]
     assert rid
 

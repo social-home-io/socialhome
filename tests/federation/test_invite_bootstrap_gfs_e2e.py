@@ -42,7 +42,7 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import LocalHomeLocationUpdated
+from socialhome.domain.events import LocalHomeLocationUpdated, SpaceMemberJoined
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -604,6 +604,8 @@ async def test_a_joins_bs_space_through_the_connection_server(households, gfs):
     """No pairing, no mesh, no address — just a link and a relay."""
     a, b = households
     space, hint = await _mint_invite(b, gfs.url)
+    joined: list[SpaceMemberJoined] = []
+    a.bus.subscribe(SpaceMemberJoined, joined.append)
 
     result = await a.space_service.redeem_invite_token(
         TOKEN_MARKER,
@@ -614,6 +616,12 @@ async def test_a_joins_bs_space_through_the_connection_server(households, gfs):
 
     assert result["space_id"] == space.id
     assert result["role"] == "member"
+    # a's own bus hears of its new member at once: that is what takes the
+    # household's fan-out seat on the space's connection servers (before,
+    # only the next reconnect did).
+    assert [(j.space_id, j.user_id, j.role) for j in joined] == [
+        (space.id, a.user_id, "member")
+    ]
 
     # a holds a real seat: a local stub + its own membership row.
     seated = await a.space_repo.get(space.id)

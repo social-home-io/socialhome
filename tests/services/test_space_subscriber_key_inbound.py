@@ -540,12 +540,21 @@ async def test_a_bundle_with_a_forged_authority_signature_is_dropped(env, caplog
     sink = _Sink()
     env["svc"].attach_profiles_sink(sink)
     forged = generate_space_keypair().private_key
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         await env["svc"].handle(
             _bundle_frame(env, "sp-b", plaintext=_bundle_plain(), seed=forged)
         )
     assert sink.calls == []
     assert "authority signature failed" in caplog.text
+    # INFO, not WARNING: the everyday cause is a rotated key that reached us
+    # over the GFS before the owner's cert did (the pin heals a moment later
+    # and the same content key arrives with the rotation bundle). Either way
+    # the frame is dropped; nothing is taken from it.
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "authority signature failed" in r.message
+    ]
 
 
 async def test_a_bundle_sealed_to_someone_else_is_dropped_quietly(env, caplog):
