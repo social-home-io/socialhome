@@ -999,6 +999,7 @@ python .claude/skills/federation-demo/harness.py gfs-member-mesh
 python .claude/skills/federation-demo/harness.py members-mesh-restart
 python .claude/skills/federation-demo/harness.py gfs-moderator-parity
 python .claude/skills/federation-demo/harness.py members-parity
+python .claude/skills/federation-demo/harness.py members-parity-apps
 python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
@@ -2027,6 +2028,36 @@ invited it, holds d's card); then a is stopped again and d and e each post
 — the other must show it,
 mailbox to mailbox — and no GFS envelope / mailbox line names an instance
 id, a mailbox id or the space.
+
+### ``members-parity-apps`` — a space's game tables for a paired/mesh member and a GFS-only member (owner acceptance gate, games)
+
+Prereqs: ``members-parity`` (same space, same members: **d** over the
+paired / mesh path, **e** only through the GFS). The games half of the
+acceptance check for "every space member is equal, whichever way their
+household is reached". Installs the stand-in apps ``demo-table`` (3–6
+players) and ``demo-duel`` (two players) on a, d and e straight into
+``installed_apps``. Every check polls (3 s, bounded timeout, 429-aware).
+
+| Action | Who acts | Compared |
+|---|---|---|
+| games list | a allows both apps | ``GET …/games``: ``allowed_apps``, ``games_possible`` on d and e as on a |
+| table card | a opens a ``demo-table`` table | the card on d and e: app, note, host's name, players range, ``open`` |
+| seats | d and e join from the lobby | a, d and e show the same three seats (seat, name, state), each ``seated`` |
+| game started | a | ``playing`` on all three |
+| message to everyone | a, d and e, one each | the two other seats hold it (``POST /api/apps/{id}/held``), from the sender's seat |
+| sealed message | d → e's seat, e → d's seat | the receiver holds it as ``direct``; the hub a holds no plaintext (mailbox + database files) |
+| table closed | a | ``ended`` / ``closed`` on all three |
+| a duel between the members | e hosts and d joins, then d hosts and e joins | the card on the two others; ``playing`` at two seats on both; a's card reads ``playing``; a move each way; the host closes it and nobody lists it |
+| space game lobby | a opens one more table | the "Open games" strip (games list + every open table) on d and e as on a |
+| person invite | — | **NOTE**, never a failure: ``GET /api/apps/{id}/invitable`` lists paired households' people only (pairing is the consent); members who are not paired play at a space table |
+| the GFS holds nothing of a table | — | no note or message marker in ``gfs.db*`` |
+
+In the duels the hub is a member's household: d and e, paired with nobody,
+exchange ``SPACE_APP_TABLE`` / ``SPACE_APP_SESSION`` over the space. Every
+action is reported PASS / DIFF / NOTE in a table at the end; the step fails
+naming each DIFF. ``verify`` (gated on the ``members_parity_apps`` state
+key) re-checks that the closed tables stayed ended on a, d and e and that
+no GFS database file holds a note or a message.
 
 ### ``members-mesh-restart`` — a large space event reaches a mesh-only member that restarts
 
