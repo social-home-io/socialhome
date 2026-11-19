@@ -578,17 +578,22 @@ class GfsWebSocketClient:
                 return
             try:
                 await self._on_envelope(frame)
-            except UnpairedPeerRefusedError as exc:
-                # A household we dropped moments ago sealed this before it
-                # learned (the host's last frames to a household it just
-                # removed from their only shared space). The pipeline step
-                # that refused it logged it; not again at WARNING here —
-                # the inbox route and the DataChannel treat it the same.
-                log.debug(
-                    "gfs.ws.client: envelope via %s refused: %s", self._gfs_url, exc
-                )
-                return
             except ValueError as exc:
+                if frame_type != ENVELOPE_MEDIA_FRAME and isinstance(
+                    exc, UnpairedPeerRefusedError
+                ):
+                    # A household we dropped moments ago sealed this before
+                    # it learned (the host's last frames to a household it
+                    # just removed from their only shared space). The
+                    # pipeline step that refused it logged it; not again at
+                    # WARNING here — the inbox route and the DataChannel
+                    # treat it the same.
+                    log.debug(
+                        "gfs.ws.client: envelope via %s refused: %s",
+                        self._gfs_url,
+                        exc,
+                    )
+                    return
                 if frame_type != ENVELOPE_MEDIA_FRAME:
                     log.warning(
                         "gfs.ws.client: on_envelope handler raised for %s: %s",

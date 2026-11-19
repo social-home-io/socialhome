@@ -18,7 +18,11 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from socialhome.crypto import b64url_decode, b64url_encode, verify_ed25519
 from socialhome.domain.ws_binary_frame import encode_binary_frame
 from socialhome.federation.inbound_validator import UnpairedPeerRefusedError
-from socialhome.services.gfs_ws_client import GfsWebSocketClient, _to_ws_url
+from socialhome.services.gfs_ws_client import (
+    ENVELOPE_MEDIA_FRAME,
+    GfsWebSocketClient,
+    _to_ws_url,
+)
 
 try:
     import pytest_socket  # noqa: F401
@@ -1293,6 +1297,30 @@ async def test_on_text_is_quiet_about_a_household_unpaired_moments_ago(caplog):
         await client._on_text(json.dumps({"type": "envelope", "sealed": {}}))
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
     assert "No instance found" in caplog.text
+
+
+async def test_a_refused_media_frame_is_still_counted(monkeypatch):
+    """The quiet path is for control envelopes; a media frame refused for
+    the same reason still reaches the media-refusal note."""
+    seed, _pub = _gen_keypair()
+
+    async def refuse(_frame: dict) -> None:
+        raise UnpairedPeerRefusedError("No instance found for instance_id='x'")
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-env6",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=_sink_noop,
+        on_envelope=refuse,
+    )
+    noted: list[Exception] = []
+    monkeypatch.setattr(
+        GfsWebSocketClient, "_note_media_refused", lambda self, exc: noted.append(exc)
+    )
+    await client._on_text(json.dumps({"type": ENVELOPE_MEDIA_FRAME, "body": {}}))
+    assert len(noted) == 1
 
 
 async def test_stop_on_a_connected_client_returns_promptly_without_cancel(

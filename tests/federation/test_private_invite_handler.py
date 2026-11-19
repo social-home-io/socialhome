@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -638,7 +639,10 @@ def _hosting(handler, *, applied: bool = True):
     handler.h._own_instance_id = "inst-host"
     handler.space_repo.get = AsyncMock(
         return_value=SimpleNamespace(
-            id="sp-gossip", owner_instance_id="inst-host", authority_key_epoch=0
+            id="sp-gossip",
+            owner_instance_id="inst-host",
+            authority_key_epoch=0,
+            roster_sequence=8,
         )
     )
     handler.remote_members.get_including_tombstones = AsyncMock(
@@ -717,6 +721,59 @@ async def test_only_the_host_tells_and_only_for_a_removal_it_applied(
         sender=sender,
     )
     fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "prior",
+    [None, SimpleNamespace(role="member", tombstoned=True)],
+    ids=["never seated", "already removed"],
+)
+async def test_the_host_tells_no_household_it_did_not_seat(handler, prior):
+    """A signed LEFT can name ANY household — one that was never in the
+    space (a paired peer of the host), or one removed long ago, again at a
+    higher version. The notice carries the space id, so the host sends it
+    only for a seat it held live itself."""
+    fed = _hosting(handler)
+    handler.remote_members.get_including_tombstones = AsyncMock(return_value=prior)
+    await handler.h._merge_roster_entry(
+        "SPACE_MEMBER_LEFT",
+        "sp-gossip",
+        dict(_LEFT),
+        tombstoned=True,
+        verified_epoch=0,
+        sender="inst-admin",
+    )
+    handler.remote_members.apply_member_event.assert_awaited_once()
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tombstoned", [True, False])
+async def test_a_roster_version_far_ahead_of_ours_is_dropped(
+    handler, caplog, tombstoned
+):
+    """Versions are counters. A seed holder that signs one near the top of
+    the range would outrank every honest event for that seat for good — and
+    drag the counter of whoever next signs for the space up to it. Dropped
+    on receive, live gossip and snapshot entries alike; one just inside the
+    lead is taken."""
+    _hosting(handler)  # roster_sequence 8
+    for version, taken in (
+        (2**63 - 1, False),
+        (8 + 2**32 + 1, False),
+        (8 + 2**32, True),
+    ):
+        handler.remote_members.apply_member_event.reset_mock()
+        with caplog.at_level(logging.WARNING):
+            await handler.h._merge_roster_entry(
+                "SPACE_MEMBER_LEFT",
+                "sp-gossip",
+                dict(_LEFT) | {"member_version": version},
+                tombstoned=tombstoned,
+                verified_epoch=0,
+                sender=None,
+            )
+        assert handler.remote_members.apply_member_event.await_count == int(taken)
+    assert "far ahead of ours" in caplog.text
 
 
 async def test_a_removed_household_that_cannot_be_told_is_still_removed(handler):

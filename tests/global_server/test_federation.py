@@ -3118,6 +3118,45 @@ async def test_a_contact_of_the_old_key_is_not_served_with_the_new_pin(svc):
     assert (await svc.get_space("sp-ask")).join_contact is None
 
 
+async def test_a_repin_another_publish_already_made_keeps_the_contact(svc, monkeypatch):
+    """Two publishes with the same cert race; the loser's compare-and-set
+    does not move the pin — it already is the offered key. Its contact was
+    judged against exactly that key, so it stays served. When the row pins
+    ANOTHER key after a lost compare-and-set, the contact is not served."""
+    seed, pk, owner_id = _owner_identity()
+    await svc.register_instance(owner_id, pk.hex(), auto_accept=True)
+    k1_seed, k1_pk = _make_keypair()
+    await _publish_asking(svc, seed, owner_id, k1_seed, k1_pk, None)
+    k2_seed, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-ask", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    real = SqliteGfsFederationRepo.set_space_authority
+    won_by_other = {"pin": k2_pk.hex()}
+
+    async def _lost(repo, space_id, **kw):
+        # The concurrent publish lands first; ours then loses the CAS.
+        if won_by_other["pin"] == k2_pk.hex():
+            await real(repo, space_id, **kw)
+        return False
+
+    monkeypatch.setattr(SqliteGfsFederationRepo, "set_space_authority", _lost)
+    row, contact = await _publish_asking(svc, seed, owner_id, k2_seed, k2_pk, cert)
+    assert row.join_contact == contact
+    assert (await svc.get_space("sp-ask")).join_contact == contact
+
+    k3_seed, k3_pk = _make_keypair()
+    cert3 = _rot_cert(
+        seed, pk, owner_id, space_id="sp-ask", authority_pk_hex=k3_pk.hex(), epoch=2
+    )
+    won_by_other["pin"] = "someone else"
+    row, _contact = await _publish_asking(svc, seed, owner_id, k3_seed, k3_pk, cert3)
+    assert row.join_contact is None
+    stored = await svc.get_space("sp-ask")
+    assert stored.identity_public_key == k2_pk.hex()
+    assert stored.join_contact is None
+
+
 async def test_the_owners_same_cert_again_is_a_quiet_no_op(svc, caplog):
     """The owner re-publishes with the cert of the key already pinned on
     every reconnect and metadata change (it re-sends until a server

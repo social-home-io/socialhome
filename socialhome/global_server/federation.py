@@ -2219,11 +2219,20 @@ class GfsFederationService:
                     authority_cert=authority_cert,
                 )
             elif contact is not None:
-                # The pin did not move after all (a concurrent publish won
-                # the compare-and-set): the contact was judged against a key
-                # this row does not pin, so it is not served.
-                space = replace(space, join_contact=None)
-                await self._repo.upsert_space(space)
+                # The pin did not move here (a concurrent publish won the
+                # compare-and-set). Keep the contact only if the row now
+                # pins the key it was judged against — the other publish
+                # carried the same cert — else it is not served.
+                stored = await self._repo.get_space(space_id)
+                if stored is None or stored.identity_public_key != identity_public_key:
+                    space = replace(space, join_contact=None)
+                    await self._repo.upsert_space(space)
+                else:
+                    space = replace(
+                        space,
+                        identity_public_key=stored.identity_public_key,
+                        authority_cert=stored.authority_cert,
+                    )
         # Data repair, at the moment the truth arrives: a space whose owner
         # EXPLICITLY withdrew readability has no public readership, so every
         # seat in ``space_subscribers`` is meaningless and would otherwise keep

@@ -1892,6 +1892,10 @@ household's counter only moves with the config it is sent, while the seats
 it mirrors carry the host's versions, so its own counter + 1 could be below
 the seat it removes — and that removal was dropped as stale everywhere,
 the owner included (which then never rotated the removed admin's key).
+A receiver drops a roster entry whose `member_version` is more than 2^32
+above its own `roster_sequence` (`MAX_ROSTER_VERSION_LEAD`): versions are
+counters, and a forged huge one would otherwise outrank every honest event
+for that seat and drag the next signer's counter up to it.
 The receiver's
 version-guarded CRDT merge (`apply_member_event`) converges regardless of
 delivery order: a strictly-greater version wins, removal wins an
@@ -3187,14 +3191,21 @@ host — and both are found per space, from the member card on that row and
 only while the roster holds a live seat of that household. This is what lets
 a delegated admin that is itself reached only through a GFS remove a member
 while the owner is offline (before, its removal stopped at "no path" after
-the seat was dropped locally, with no gossip and no rekey). A household that
-cannot be reached at all is refused (403) before anything changed. The
+the seat was dropped locally, with no gossip and no rekey). Telling the
+household is best effort and never blocks the removal: a send that is queued
+for an offline household counts as said, and one that finds no path at all
+is logged while the removal completes (seat, gossip, rekey) — nobody keeps a
+seat by being unreachable; that household is answered on its next sync
+(`SPACE_SYNC_REJECTED`). Before, any "not delivered now" answer — a queued
+send included — aborted the removal after the seat was dropped locally. The
 removed household drops its own copy only on the word of its host (the owner,
 or the admin that invited it). A removal another delegated admin made while
 the owner was offline reaches the owner as roster gossip; when the owner
 applies it, it sends that household its own `SPACE_REMOTE_MEMBER_REMOVED`
 (one frame, one recipient, best effort — the `SPACE_SYNC_REJECTED` reconnect
-backstop remains for a household it cannot reach then). Before, such a
+backstop remains for a household it cannot reach then), and only for a seat
+the owner itself held live: a signed removal can name any household, and
+the notice carries the space id. Before, such a
 household kept its copy and kept syncing until that backstop, up to 30
 minutes later.
 
