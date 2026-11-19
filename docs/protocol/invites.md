@@ -1229,7 +1229,10 @@ sends, so the user id alone is no key: somebody holding a leaked admin
 link who redeemed first under another person's user id would otherwise
 swallow that person's own request. Both are filed, each shown with its
 own household ID, and approving one neither approves nor removes the
-other. A repeat from the same household still files nothing new.
+other. A repeat from the same household still files nothing new — also
+when two redeems arrive together: a partial UNIQUE index over the pending
+elevations (migration 0148) lets one insert through, and the admins are
+told once.
 
 #### An admin met through a link holds the signing seed like any admin
 

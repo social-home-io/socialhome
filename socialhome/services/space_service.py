@@ -7502,7 +7502,7 @@ class SpaceService(
         if invite is None:
             raise InviteExpiredError()
         async with self.seating_lock(str(invite["space_id"])):
-            await self._accept_remote_invite_locked(
+            joined = await self._accept_remote_invite_locked(
                 token=token, user_id=user_id, share_location=share_location
             )
         await self._bus.publish(
@@ -7510,10 +7510,27 @@ class SpaceService(
                 space_id=str(invite["space_id"]), user_id=user_id, accepted=True
             )
         )
+        if joined is not None:
+            # The joiner side of a cross-household join says so like a
+            # host-side seat does (the other joiner path, an invite-link /
+            # approved-request redeem, does the same in
+            # ``SpaceInviteTokenRedeemCoordinator._seat_local_after_ack``):
+            # what a new local member needs at once — the fan-out seat on
+            # the space's connection servers above all — hangs off it.
+            await self._bus.publish(
+                SpaceMemberJoined(
+                    space_id=joined.space_id,
+                    user_id=joined.user_id,
+                    role=joined.role,
+                )
+            )
 
     async def _accept_remote_invite_locked(
         self, *, token: str, user_id: str, share_location: bool
-    ) -> None:
+    ) -> SpaceMember | None:
+        """The accept under the space's seating lock. Returns the
+        membership row it newly wrote (``None``: no stub to seat in, or the
+        person was a member already)."""
         assert self._federation is not None
         invite = await self._spaces.get_invitation_by_token(token)
         if invite is None:
@@ -7712,16 +7729,7 @@ class SpaceService(
         # log + skip — the space shows up once SPACE_CONFIG_CHANGED
         # upserts it.
         stub = await self._spaces.get(space_id)
-        if stub is not None:
-            await self._spaces.save_member(
-                SpaceMember(
-                    space_id=space_id,
-                    user_id=user_id,
-                    role=SpaceRole.MEMBER.value,
-                    joined_at=datetime.now(UTC).isoformat(),
-                )
-            )
-        else:
+        if stub is None:
             log.warning(
                 "accept_remote_invite: stub space row missing for"
                 " space_id=%s — invitee will see the invite as accepted"
@@ -7729,6 +7737,16 @@ class SpaceService(
                 "_CHANGED upserts the stub. Sender on older protocol?",
                 space_id,
             )
+            return None
+        was_member = await self._spaces.get_member(space_id, user_id) is not None
+        member = SpaceMember(
+            space_id=space_id,
+            user_id=user_id,
+            role=SpaceRole.MEMBER.value,
+            joined_at=datetime.now(UTC).isoformat(),
+        )
+        await self._spaces.save_member(member)
+        return None if was_member else member
 
     async def sweep_unjoined_invitation_stubs(self) -> int:
         """Startup (idempotent): drop stubs seated by a private invitation
@@ -8086,13 +8104,20 @@ class SpaceService(
                 and r.get("requested_role") == SpaceRole.ADMIN.value
             ):
                 return
+        # The read above is only the cheap path: two redeems arriving
+        # together both pass it. The unique index (migration 0148) lets one
+        # insert through; the other gets the id on file and announces nothing.
+        new_id = uuid.uuid4().hex
         rid = await self._spaces.save_join_request(
             space_id,
             user_id,
             requested_role=SpaceRole.ADMIN.value,
             remote_applicant_instance_id=remote_instance_id,
             remote_applicant_pk=remote_pk,
+            request_id=new_id,
         )
+        if rid != new_id:
+            return
         await self._bus.publish(
             SpaceJoinRequested(
                 space_id=space_id,
@@ -9747,6 +9772,7 @@ class SpaceService(
         the browser/detail cards after a reload."""
         return await self._spaces.list_pending_join_request_space_ids_for_user(
             user_id,
+            own_instance_id=self._own_instance_id,
         )
 
     async def is_subscribed(self, user_id: str, space_id: str) -> bool:

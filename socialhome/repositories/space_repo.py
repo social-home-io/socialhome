@@ -440,6 +440,8 @@ class AbstractSpaceRepo(Protocol):
     async def list_pending_join_request_space_ids_for_user(
         self,
         user_id: str,
+        *,
+        own_instance_id: str,
     ) -> list[str]: ...
     async def update_join_request_status(
         self,
@@ -3039,31 +3041,57 @@ class SqliteSpaceRepo:
 
         ``gfs_relay`` — JSON relay contact of a household that asked
         through a GFS (migration 0143): where the answer goes back sealed.
+
+        ``requested_role`` — a pending admin elevation is unique per
+        (space, household, user id) (migration 0148): when one is already
+        pending, nothing is inserted and ITS id is returned, so a caller
+        that passed ``request_id`` can tell (the ids differ).
         """
         rid = request_id or uuid.uuid4().hex
         expires = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
-        await self._db.enqueue(
-            """
-            INSERT INTO space_join_requests(
-                id, space_id, user_id, message, expires_at,
-                remote_applicant_instance_id, remote_applicant_pk,
-                requested_role, area_verdict, gfs_relay
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO NOTHING
-            """,
-            (
-                rid,
-                space_id,
-                user_id,
-                message,
-                expires,
-                remote_applicant_instance_id,
-                remote_applicant_pk,
-                requested_role,
-                area_verdict,
-                gfs_relay,
-            ),
-        )
+        # Twice: a conflicting elevation answered between our insert and the
+        # read-back leaves the key free again, so the second insert lands.
+        for _ in range(2):
+            inserted = await self._db.enqueue_rowcount(
+                """
+                INSERT INTO space_join_requests(
+                    id, space_id, user_id, message, expires_at,
+                    remote_applicant_instance_id, remote_applicant_pk,
+                    requested_role, area_verdict, gfs_relay
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    rid,
+                    space_id,
+                    user_id,
+                    message,
+                    expires,
+                    remote_applicant_instance_id,
+                    remote_applicant_pk,
+                    requested_role,
+                    area_verdict,
+                    gfs_relay,
+                ),
+            )
+            if inserted or requested_role is None:
+                break
+            row = await self._db.fetchone(
+                """
+                SELECT id FROM space_join_requests
+                 WHERE space_id=? AND user_id=?
+                   AND IFNULL(remote_applicant_instance_id, '')=?
+                   AND status='pending' AND requested_role=?
+                """,
+                (
+                    space_id,
+                    user_id,
+                    remote_applicant_instance_id or "",
+                    requested_role,
+                ),
+            )
+            if row is not None:
+                return str(row["id"])
         return rid
 
     async def has_approved_join_request(
@@ -3151,13 +3179,37 @@ class SqliteSpaceRepo:
     async def list_pending_join_request_space_ids_for_user(
         self,
         user_id: str,
+        *,
+        own_instance_id: str,
     ) -> list[str]:
+        """Spaces ``user_id`` of THIS household has a pending request for.
+
+        A request is keyed by (household, user id), and a remote ``user_id``
+        is whatever the other household sends — so a row another household
+        filed under this user id is not theirs. Each household's copy names
+        the OTHER party in ``remote_applicant_instance_id``; the host's copy
+        is told apart the way the inbound answer check does
+        (``federation_inbound/space_invites.py``): a request for a space
+        this household owns, or an admin elevation (the applicant's side
+        never records one). Ours are a local request (no other party) and
+        our outgoing copy (the other party is the host)."""
         rows = await self._db.fetchall(
             """
-            SELECT DISTINCT space_id FROM space_join_requests
-             WHERE user_id=? AND status='pending'
+            SELECT DISTINCT r.space_id FROM space_join_requests AS r
+             WHERE r.user_id=? AND r.status='pending'
+               AND (
+                    r.remote_applicant_instance_id IS NULL
+                    OR (
+                        r.requested_role IS NULL
+                        AND NOT EXISTS (
+                            SELECT 1 FROM spaces AS s
+                             WHERE s.id = r.space_id
+                               AND s.owner_instance_id = ?
+                        )
+                    )
+               )
             """,
-            (user_id,),
+            (user_id, own_instance_id),
         )
         return [r["space_id"] for r in rows]
 

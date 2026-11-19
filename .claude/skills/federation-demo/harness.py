@@ -26177,9 +26177,8 @@ def cmd_gfs_admin_seed() -> None:
        seat, admin pending) and a approves. e holds the signing seed of the
        key a pins; a logged the share and e the receipt. The GFS log carries
        no ``space_admin_key_share``. e keeps the fan-out seat on the GFS
-       (``space_subscribers``) it took as a plain member (a household takes
-       its seats when its GFS socket connects, so e is restarted once
-       before the approval) — also after it restarts and reconnects.
+       (``space_subscribers``) it took as a plain member the moment it
+       joined — also after it restarts and reconnects.
     2. **e acts for the owner.** a is stopped. e posts: b and d hold it, and
        the GFS got an anonymous member publish and no authority-signed
        ``POST /gfs/publish`` at all (a delegated admin is a writer to the
@@ -26326,23 +26325,30 @@ def cmd_gfs_admin_seed() -> None:
     seat_sql = "SELECT 1 FROM space_subscribers WHERE space_id=? AND instance_id=?"
     seat_of_e = (space_id, e["instance_id"])
 
-    def _reconnect_and_check_seat(what: str) -> None:
-        """e restarts (a household takes its fan-out seats when its GFS
-        socket connects) and must then hold its seat for the space."""
-        now = _load()
-        _kill_household("e", now["instances"]["e"])
-        _respawn(now, "e")
+    def _check_seat(what: str) -> None:
+        """e must hold its fan-out seat for the space on the GFS."""
         try:
             _poll_gfs_rows(seat_sql, seat_of_e, bool, what=what)
         except SystemExit as exc:
             raise SystemExit(f"{step}: {exc}") from None
 
+    def _reconnect_and_check_seat(what: str) -> None:
+        """e restarts and must take its seat again when its GFS socket
+        connects."""
+        now = _load()
+        _kill_household("e", now["instances"]["e"])
+        _respawn(now, "e")
+        _check_seat(what)
+
     _admin_seed_join_as_admin(
         state,
         space_id,
         step,
-        as_member=lambda: _reconnect_and_check_seat(
-            "e, a plain member, holds no fan-out seat on the GFS"
+        # No restart: the redeem itself takes the seat (the joiner side
+        # publishes ``SpaceMemberJoined``).
+        as_member=lambda: _check_seat(
+            "e, a plain member, took no fan-out seat on the GFS when it "
+            "joined (it must not wait for its next reconnect)"
         ),
     )
     state = _load()
