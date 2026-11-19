@@ -26,7 +26,7 @@ import orjson
 import pytest
 from aiohttp.test_utils import TestServer
 
-from socialhome.domain.events import SpaceJoinRequested
+from socialhome.domain.events import SpaceJoinRequested, SpaceMemberJoined
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -228,12 +228,19 @@ async def test_unpaired_household_asks_through_the_gfs_and_becomes_a_member(
         a.user_id
     )
 
+    joined: list[SpaceMemberJoined] = []
+    a.bus.subscribe(SpaceMemberJoined, joined.append)
     await b.space_service.approve_join_request(
         request_id, actor_username=b.username, space_id=space.id
     )
     await _settle(gfs, a, b)
 
     assert await a.space_repo.get_member(space.id, a.user_id) is not None
+    # The applicant's household hears of its new member at once (its
+    # fan-out seat on the space's connection servers hangs off this).
+    assert [(j.space_id, j.user_id, j.role) for j in joined] == [
+        (space.id, a.user_id, "member")
+    ]
     roster = await b.remote_members.list_for_space(space.id)
     assert [m.user_id for m in roster] == [a.user_id]
     assert (await a.space_repo.get_join_request(request_id))["status"] == "approved"

@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from ..domain.events import SpaceRemoteSeatLive
+from ..domain.events import SpaceMemberJoined, SpaceRemoteSeatLive
 from ..domain.federation import (
     PENDING_KIND_CODE,
     PENDING_KIND_REQUEST,
@@ -960,12 +960,27 @@ class SpaceInviteTokenRedeemCoordinator:
         lock, so a redeem and an accept (or two redeems) for one space id
         from different households never both seat."""
         async with self._seating_lock(str(result.get("space_id") or "")):
-            return await self._seat_local_after_ack_locked(
+            out, joined = await self._seat_local_after_ack_locked(
                 result,
                 viewer_user_id=viewer_user_id,
                 issuer_instance_id=issuer_instance_id,
                 bootstrap=bootstrap,
             )
+        if joined is not None:
+            # Outside the seating lock (subscribers talk to a connection
+            # server). The joiner side of every cross-household join ends
+            # here or in ``SpaceService.accept_remote_invite``; both say so
+            # with the event a host-side seat publishes, so whatever a new
+            # local member needs at once — the fan-out seat on the space's
+            # connection servers, above all — hangs off ONE event.
+            await self._bus.publish(
+                SpaceMemberJoined(
+                    space_id=joined.space_id,
+                    user_id=joined.user_id,
+                    role=joined.role,
+                )
+            )
+        return out
 
     async def _seat_local_after_ack_locked(
         self,
@@ -974,8 +989,11 @@ class SpaceInviteTokenRedeemCoordinator:
         viewer_user_id: str,
         issuer_instance_id: str,
         bootstrap: InviteBootstrapHint | None = None,
-    ) -> dict:
-        """Receiver-side persistence for an accepted redeem.
+    ) -> tuple[dict, SpaceMember | None]:
+        """Receiver-side persistence for an accepted redeem. Returns the
+        result for the caller and the membership row this redeem newly
+        wrote (``None``: nothing seated, or the person was a member
+        already), which :meth:`_seat_local_after_ack` announces.
 
         Shared by all three outbound paths (direct peer, mesh-routed,
         §D2b bootstrap) so the §CP.F1 age gate, the §D1b anti-hijack
@@ -992,6 +1010,7 @@ class SpaceInviteTokenRedeemCoordinator:
         # the issuer's household.
         space_id = str(result.get("space_id") or "")
         role_str = str(result.get("role") or SpaceRole.MEMBER.value)
+        joined: SpaceMember | None = None
         if space_id:
             meta = result.get("space_meta")
             meta_dict = meta if isinstance(meta, dict) else None
@@ -1137,14 +1156,18 @@ class SpaceInviteTokenRedeemCoordinator:
                     await self._writer_certs.accept_channel_grant(
                         space_id, meta.get("gfs_channel")
                     )
-                await self._spaces.save_member(
-                    SpaceMember(
-                        space_id=space_id,
-                        user_id=viewer_user_id,
-                        role=role_str,
-                        joined_at=datetime.now(UTC).isoformat(),
-                    )
+                was_member = (
+                    await self._spaces.get_member(space_id, viewer_user_id) is not None
                 )
+                member = SpaceMember(
+                    space_id=space_id,
+                    user_id=viewer_user_id,
+                    role=role_str,
+                    joined_at=datetime.now(UTC).isoformat(),
+                )
+                await self._spaces.save_member(member)
+                if not was_member:
+                    joined = member
                 # A pending private invitation from another household for
                 # this space can no longer be joined (migration 0093).
                 await expire_superseded_invitations(
@@ -1191,7 +1214,7 @@ class SpaceInviteTokenRedeemCoordinator:
             # the owner's approval on the host. Surface it so the SPA can
             # say so rather than showing a bare member seat.
             out["pending_role"] = str(pending)
-        return out
+        return out, joined
 
     # ── Receiver side (the issuer in this exchange) ────────────────────
 

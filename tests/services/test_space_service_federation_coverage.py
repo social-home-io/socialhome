@@ -28,6 +28,7 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     RemoteJoinRequestApproved,
     SpaceInviteAnswered,
+    SpaceMemberJoined,
     SpaceRemoteSeatEnded,
 )
 from socialhome.domain.federation import (
@@ -295,12 +296,20 @@ async def test_accept_remote_invite_happy(stack):
 
     answered: list[SpaceInviteAnswered] = []
     stack.bus.subscribe(SpaceInviteAnswered, answered.append)
+    joined: list[SpaceMemberJoined] = []
+    stack.bus.subscribe(SpaceMemberJoined, joined.append)
     await stack.svc.accept_remote_invite(
         token="tok-xyz",
         user_id=bob.user_id,
     )
 
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
+    # The invitee's household hears of its new member at once — the event
+    # that takes its fan-out seat on the space's connection servers (before,
+    # only the next reconnect did).
+    assert [(j.space_id, j.user_id, j.role) for j in joined] == [
+        ("sp-on-the-other-side", bob.user_id, "member")
+    ]
     # The invite leaves the invitee's "Needs you".
     assert [(a.space_id, a.user_id, a.accepted) for a in answered] == [
         ("sp-on-the-other-side", bob.user_id, True)
