@@ -38,6 +38,7 @@ from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..domain.relay_media_frame import is_relay_media_body
 from ..domain.subscriber_accepts import OUR_HELLO_ACCEPTS
 from ..domain.ws_binary_frame import InvalidBinaryFrame, decode_binary_frame
+from ..federation.inbound_validator import UnpairedPeerRefusedError
 
 log = logging.getLogger(__name__)
 
@@ -578,6 +579,21 @@ class GfsWebSocketClient:
             try:
                 await self._on_envelope(frame)
             except ValueError as exc:
+                if frame_type != ENVELOPE_MEDIA_FRAME and isinstance(
+                    exc, UnpairedPeerRefusedError
+                ):
+                    # A household we dropped moments ago sealed this before
+                    # it learned (the host's last frames to a household it
+                    # just removed from their only shared space). The
+                    # pipeline step that refused it logged it; not again at
+                    # WARNING here — the inbox route and the DataChannel
+                    # treat it the same.
+                    log.debug(
+                        "gfs.ws.client: envelope via %s refused: %s",
+                        self._gfs_url,
+                        exc,
+                    )
+                    return
                 if frame_type != ENVELOPE_MEDIA_FRAME:
                     log.warning(
                         "gfs.ws.client: on_envelope handler raised for %s: %s",

@@ -216,6 +216,7 @@ class _MissingKeyCrypto:
 async def test_decrypt_missing_epoch_stashes_in_cache_and_replays(
     bus,
     peer_setup,
+    caplog,
 ):
     """The first chunk arrives before the key — decrypt raises with
     'missing epoch', the receiver stashes the redeliver in the cache,
@@ -267,8 +268,14 @@ async def test_decrypt_missing_epoch_stashes_in_cache_and_replays(
     }
     envelope = await _sign_as_peer(kp, envelope)
 
-    # First arrival — key missing, gets stashed.
-    await r.on_chunk(serialise_chunk(envelope), from_instance="peer-a")
+    # First arrival — key missing, gets stashed. An expected, handled race:
+    # one INFO line that says so, no traceback (it read as a crash in the
+    # log of a host that came back before the rekey it had missed).
+    with caplog.at_level(logging.INFO):
+        await r.on_chunk(serialise_chunk(envelope), from_instance="peer-a")
+    stashed = [x for x in caplog.records if "stashing for replay" in x.getMessage()]
+    assert len(stashed) == 1
+    assert stashed[0].exc_info is None
     assert space_repo.members == []
     assert len(cache) == 1
 

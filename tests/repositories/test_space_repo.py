@@ -474,6 +474,27 @@ async def test_increment_roster_sequence_atomic(env):
     assert v2 == 2
 
 
+async def test_increment_roster_sequence_outranks_every_seat_we_hold(env):
+    """A member household's counter only moves with the config it is sent,
+    while the seats it mirrors arrive at the HOST's versions (gossip, a
+    snapshot, a rotation baseline). A delegated admin's removal signed at
+    its own lagging counter + 1 was below the seat's version and every
+    household dropped it as stale — the owner never heard of the removal
+    and never retired the removed admin's key. The next version is above
+    every seat version this household holds for the space."""
+    await env.repo.save(_space("sp-lag"))
+    await env.repo.save(_space("sp-other"))
+    await env.repo.increment_roster_sequence("sp-lag")  # 1
+    for space_id, version in (("sp-lag", 6), ("sp-other", 40)):
+        await env.db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id,"
+            " role, member_version) VALUES(?,?,?,?,?)",
+            (space_id, "peer", "u-1", "admin", version),
+        )
+    assert await env.repo.increment_roster_sequence("sp-lag") == 7
+    assert await env.repo.increment_roster_sequence("sp-lag") == 8
+
+
 async def test_increment_roster_sequence_concurrent(env):
     """Concurrent roster increments each return a unique sequence number."""
     await env.repo.save(_space("sp-rconc"))

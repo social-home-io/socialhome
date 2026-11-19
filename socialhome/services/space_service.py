@@ -7078,6 +7078,52 @@ class SpaceService(
         if not result.ok:
             raise SpacePermissionError("no path to invitee household")
 
+    async def _tell_removed_household(
+        self, space_id: str, instance_id: str, user_id: str
+    ) -> None:
+        """``SPACE_REMOTE_MEMBER_REMOVED`` to the household whose seat is
+        about to end — best effort, the removal stands either way.
+
+        Named with its space: a household seated from the host's directory
+        is reached at its GFS mailbox (or through the host), and both are
+        found per space. A send that is queued (the household is offline)
+        counts as said. One that finds no path at all is logged and the
+        removal goes on — nobody can keep a seat by being unreachable; such
+        a household is answered on its next sync (``SPACE_SYNC_REJECTED``).
+        """
+        assert self._federation is not None
+        try:
+            result = await self._federation.send_with_mesh_fallback(
+                to_instance_id=instance_id,
+                event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+                payload={"space_id": space_id, "user_id": user_id},
+                space_id=space_id,
+            )
+        except Exception:
+            log.warning(
+                "space %s: telling %s that %s was removed failed — the removal "
+                "stands; its next sync is answered",
+                space_id,
+                instance_id,
+                user_id,
+                exc_info=True,
+            )
+            return
+        if result.ok or result.error in (
+            DELIVERY_ERROR_QUEUED,
+            DELIVERY_ERROR_RELAY_THROTTLED,
+            DELIVERY_ERROR_MESH_DEFERRED,
+        ):
+            return
+        log.info(
+            "space %s: %s could not be told now that %s was removed (%s) — the "
+            "removal stands; its next sync is answered",
+            space_id,
+            instance_id,
+            user_id,
+            result.error,
+        )
+
     async def _rotate_and_distribute_space_key(self, space_id: str) -> None:
         """Forward-secrecy: mint a fresh epoch + ship the new key to
         remaining members (#121).
@@ -7775,6 +7821,17 @@ class SpaceService(
         last = removed or await self._remote_members.get_including_tombstones(
             space_id, instance_id, user_id
         )
+        # The household is told FIRST, naming the space: one seated from the
+        # host's directory is reached at its GFS mailbox, and that is found
+        # per space — on the member card its ``space_instances`` row keeps,
+        # and only while our roster still holds a live seat of it
+        # (``SpaceMemberDirectory.target_for``). Sent after the seat was
+        # dropped and without the space, an admin that reaches the members
+        # only through a GFS (a GFS-only delegated admin acting while the
+        # owner is away) got "no path" here — and that answer ABORTED the
+        # removal half-way: the seat gone on its own household, no gossip,
+        # no rekey. Telling is best effort now; the removal always completes.
+        await self._tell_removed_household(space_id, instance_id, user_id)
         await self._remote_members.remove(space_id, instance_id, user_id)
         await self._bus.publish(
             SpaceRemoteSeatEnded(
@@ -7795,11 +7852,6 @@ class SpaceService(
         still_present = any(r.instance_id == instance_id for r in rows)
         if not still_present:
             await self._spaces.remove_space_instance(space_id, instance_id)
-        await self._send_invite_envelope(
-            to_instance_id=instance_id,
-            event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
-            payload={"space_id": space_id, "user_id": user_id},
-        )
         # v_23 — peer-replicate the kick so every member household tombstones
         # this user in their roster.
         await self._emit_member_roster_gossip(

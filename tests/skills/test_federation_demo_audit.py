@@ -9,7 +9,7 @@ Two real bugs surfaced here:
    so the whole log collapsed into one big block and the audit
    couldn't see anything individually.
 2. Several known-benign warning patterns (DTLS handshake timeouts on
-   loopback, outbox terminal HTTP 410 drops, HTTPS-inbox transient
+   loopback, HTTPS-inbox transient
    failures during the inner-ring settle window) weren't in
    ``_LOG_BENIGN`` so they would have been (mis-)reported as audit
    failures if the splitter had been working.
@@ -24,10 +24,16 @@ import importlib.util
 import ipaddress
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from socialhome import outbound_fetch, peer_url
+from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
+    verify_authority_event,
+)
+from socialhome.crypto import ed25519_public_key
 from socialhome.domain import gfs_server
 
 # Load the harness module by path — it lives outside the ``socialhome``
@@ -139,11 +145,6 @@ def test_block_splitter_keeps_traceback_frames_attached(harness):
 @pytest.mark.parametrize(
     "line",
     [
-        # Outbox terminal-drop on HTTP 410 — by design when
-        # dual-transport delivery hits the receiver's replay cache on
-        # the second arrival.
-        "WARNING:socialhome.app:outbox: peer-abc returned terminal HTTP 410 for msg — dropping",
-        "WARNING:socialhome.infrastructure.outbox_processor:OutboxProcessor: peer permanently rejected msg-xyz — dropping",
         # Transient HTTPS-inbox failure during the inner-ring settle
         # window. The trailing empty error (``failed: ``) is what
         # ``str(aiohttp.ClientConnectorError)`` produces in some cases —
@@ -173,6 +174,54 @@ def test_known_benign_lines_are_in_allowlist(harness, line):
     assert any(needle in line for needle in harness._LOG_BENIGN), (
         f"line not matched by any _LOG_BENIGN needle: {line!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "WARNING:socialhome.app:outbox: peer-abc returned terminal HTTP 410 for msg — dropping",
+        "WARNING:socialhome.infrastructure.outbox_processor:OutboxProcessor: peer permanently rejected msg-xyz — dropping",
+    ],
+)
+def test_a_delivered_message_dropped_as_rejected_is_a_finding(
+    harness, tmp_path, monkeypatch, line
+):
+    """#1384: a message the receiver already holds counts as delivered. The
+    sender's two WARNINGs for it left the allowlist — the first one although
+    the broader ``outbox: `` retry needle matches it too."""
+    monkeypatch.setattr(harness, "ROOT", tmp_path)
+    monkeypatch.setattr(harness, "NOISE_WINDOWS_PATH", tmp_path / "noise.json")
+    monkeypatch.setattr(harness, "LOG_GENERATIONS_PATH", tmp_path / "gens.json")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "log.txt").write_text(
+        f"WARNING:socialhome.app:outbox: peer-abc returned HTTP 503 for msg\n{line}\n"
+    )
+    found = harness._audit_logs({"instances": {"a": {}}})
+    assert found == [f"a: log audit — {line}"]
+
+
+def test_the_gfs_log_format_is_audited_too(harness, tmp_path, monkeypatch):
+    """The GFS logs ``asctime LEVEL    name: msg``; its WARNING / ERROR
+    lines are findings like a household's (they used to match no marker),
+    its one start-up advisory is not."""
+    monkeypatch.setattr(harness, "ROOT", tmp_path)
+    monkeypatch.setattr(harness, "GFS_DIR", tmp_path / "gfs")
+    monkeypatch.setattr(harness, "NOISE_WINDOWS_PATH", tmp_path / "noise.json")
+    monkeypatch.setattr(harness, "LOG_GENERATIONS_PATH", tmp_path / "gens.json")
+    (tmp_path / "gfs").mkdir()
+    warn = (
+        "2026-11-18 21:06:46,774 WARNING  socialhome.global_server.federation: "
+        "GFS: space sp-1 published a join contact that does not verify; dropped"
+    )
+    err = "2026-11-18 21:06:47,001 ERROR    socialhome.global_server.x: boom"
+    (tmp_path / "gfs" / "log.txt").write_text(
+        "2026-11-18 20:48:42,933 INFO     socialhome.global_server.server: up\n"
+        "2026-11-18 20:48:42,933 WARNING  socialhome.global_server.server: GFS: "
+        "minted a new random identity key and stored it at /x (mode 0600).\n"
+        f"{warn}\n{err}\n"
+    )
+    found = harness._audit_logs({"instances": {}, "gfs": {"pid": 1}})
+    assert found == [f"gfs: log audit — {warn}", f"gfs: log audit — {err}"]
 
 
 def test_dtls_block_is_correctly_classified_as_benign(harness):
@@ -212,6 +261,85 @@ def test_loopback_shim_treats_only_loopback_as_public(harness, monkeypatch):
     assert gfs_server.is_private_host("192.168.1.1")
     assert peer_url.is_private_host("127.0.0.1")
     assert "validate_peer_url" not in harness._LOOPBACK_IS_PUBLIC_PRELUDE
+
+
+# ── v_94 gfs-admin-seed ───────────────────────────────────────────────
+
+
+def test_admin_seed_step_is_wired(harness):
+    """The step dispatches by name and ``verify`` checks what it left."""
+    assert callable(harness.cmd_gfs_admin_seed)
+    assert callable(harness._check_gfs_admin_seed)
+
+
+def test_admin_seed_check_flags_a_stale_pin_and_a_working_old_seed(
+    harness, monkeypatch
+):
+    """``verify`` fails when a GFS still pins another key than the owner's,
+    or still takes a seed of the removed admin — and passes when neither."""
+    state = {
+        "instances": {"e": {"user_id": "u-e"}},
+        "gfs_admin_seed": {
+            "space_id": "sp-1",
+            "name": "Lab",
+            "retired_seeds": ["11" * 32],
+        },
+    }
+    cols = {"identity_public_key": "k3", "name": "Lab"}
+    monkeypatch.setattr(harness, "_space_col", lambda label, sid, col: cols[col])
+    monkeypatch.setattr(harness, "_space_seed", lambda label, sid: label.encode() * 32)
+    monkeypatch.setattr(
+        harness, "_seed_pin", lambda seed: "k3" if seed == b"d" * 32 else "k2"
+    )
+    monkeypatch.setattr(
+        harness, "_remote_member_row", lambda label, sid, uid: {"tombstoned": 1}
+    )
+    pins = {"A": ("k3", True, False), "B (withdrawn)": ("k2", True, True)}
+    monkeypatch.setattr(
+        harness,
+        "_admin_seed_servers",
+        lambda st: [(name, f"http://{name}", name) for name in pins],
+    )
+    monkeypatch.setattr(harness, "_gfs_pin", lambda rows_of, sid: pins[rows_of])
+    answers = {"http://A": 200, "http://B (withdrawn)": 403}
+    monkeypatch.setattr(
+        harness, "_authority_probe", lambda url, sid, seed: answers[url]
+    )
+    failures: list[str] = []
+    harness._check_gfs_admin_seed(state, failures)
+    assert len(failures) == 2
+    assert "GFS B (withdrawn) pins" in failures[1]
+    assert "GFS A answered HTTP 200" in failures[0]
+    pins["B (withdrawn)"] = ("k3", True, True)
+    answers["http://A"] = 403
+    failures.clear()
+    harness._check_gfs_admin_seed(state, failures)
+    assert failures == []
+
+
+def test_authority_probe_signs_what_the_gfs_verifies(harness, monkeypatch):
+    """The pin probe is the subscribers query a seed holder sends: the
+    signature it carries verifies under the seed's key, over the space id
+    and the timestamp in the query."""
+    asked: list[str] = []
+    monkeypatch.setattr(
+        harness, "_request", lambda url, **kw: asked.append(url) or (403, {})
+    )
+    seed = bytes(range(32))
+    assert harness._authority_probe("http://gfs", "sp-1", seed) == 403
+    url = urlsplit(asked[0])
+    assert url.path == "/gfs/spaces/sp-1/subscribers"
+    query = {k: v[0] for k, v in parse_qs(url.query).items()}
+    assert query["summary"] == "1"
+    assert verify_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
+        space_id="sp-1",
+        payload={"space_id": "sp-1", "ts": query["ts"]},
+        authority_sig=query["authority_sig"],
+        authority_sig_suite=query["authority_sig_suite"],
+        space_public_key=ed25519_public_key(seed),
+    )
+    assert harness._seed_pin(seed) == ed25519_public_key(seed).hex()
 
 
 # ── v_57 gfs-private-channel-multi ────────────────────────────────────

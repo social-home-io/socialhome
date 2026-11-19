@@ -345,8 +345,8 @@ MULTI_MAX_TRANSIENT: int = 3
 #: would find the target gone and silently lose the very event that tells
 #: it so. Only these two: the other removals do not ride
 #: ``broadcast_to_space_members`` to the household they remove
-#: (``SPACE_REMOTE_MEMBER_REMOVED`` is a direct send after the host already
-#: dropped the row; bans are not broadcast this way at all). They carry
+#: (``SPACE_REMOTE_MEMBER_REMOVED`` is a direct send BEFORE the seat and the
+#: row go; bans are not broadcast this way at all). They carry
 #: lifecycle / roster state, never space content, and a household that was
 #: instance-BANNED meanwhile is still skipped (see :meth:`_deferred_send_one`).
 #: Every other event re-reads membership.

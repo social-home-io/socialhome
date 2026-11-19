@@ -557,7 +557,7 @@ class SpaceSyncReceiver(
                 sync_id=sync_id,
                 ciphertext=ciphertext,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — every branch below handles or logs it
             # ``decrypt_chunk`` raises ``RuntimeError`` with
             # ``"missing epoch"`` in the message when the receiver
             # hasn't imported this epoch's key yet (#122). When a
@@ -577,7 +577,6 @@ class SpaceSyncReceiver(
                     epoch,
                     sync_id,
                     resource,
-                    exc_info=True,
                 )
 
                 async def _redeliver() -> None:
