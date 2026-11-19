@@ -4112,7 +4112,11 @@ it:
    authority key, checks it names the listed owner and that the key-wrap
    key is bound to the identity key (`verify_keywrap_binding`), and **pins
    on first sight** two keys: the space authority key and — through the
-   contact it signed — the **owner household's identity key**. After that:
+   contact it signed — the **owner household's identity key**. A listing
+   without a contact (an invite-only space) pins the authority key and the
+   **owner's instance id** the listing names; an instance id is the hash of
+   the identity key, so it binds every later cert and contact to that one
+   household. After that:
    - the authority key moves **only along the owner's v_44 chain**: with a
      contact the listing also carries the owner's `authority_cert` for the
      current key, and the household accepts a new key only when that cert
@@ -4120,6 +4124,14 @@ it:
      `key_epoch` (`verify_authority_cert`). The GFS's own
      `authority_rotation_seq` moves nothing — a GFS, even the one that gave
      the pin, cannot swap the key;
+   - a listing **without a contact** carries no cert, so an invite-only
+     space's own rotation shows up as a bare other key. A pin that holds no
+     owner key yet takes nothing from it and records no conflict (nothing
+     is offered to ask through, nothing was vouched for); the first contact
+     the space lists must come with the pinned owner's cert for the key
+     that signed it, or it is a conflict. (Such a rotation used to be
+     logged as a conflict on every household that had seen the listing, and
+     closed the GFS route to the space for good.)
    - under the same key a contact must name the same owner key, and only a
      **newer** one is taken: the pin keeps the newest signed `issued_at`
      it ever took as a high-water mark that never goes down (also across a

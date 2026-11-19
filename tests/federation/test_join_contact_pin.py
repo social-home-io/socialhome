@@ -236,3 +236,118 @@ def test_a_transfer_inside_the_owner_household_keeps_the_pin():
     pin = _see(pin, _item(host, space, at=T0 + timedelta(hours=2)))
     assert usable_contact(pin) is not None
     assert load_pin(pin)["conflict"] is False
+
+
+# ─── A listing without a contact (an invite-only space) ──────────────────
+
+
+def _bare(host, space_kp, **over) -> dict:
+    """An invite-only space's listing as a GFS serves it: no join contact,
+    and so no cert either (``public_space_dict`` keeps it back)."""
+    item = _item(host, space_kp, **over)
+    item.pop("join_contact")
+    return item
+
+
+def _warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_an_invite_only_spaces_rotation_is_no_conflict(caplog):
+    """An invite-only listing pinned the authority key and NO owner. The
+    owner's own rotation then showed up as a bare other key (no contact, so
+    no cert): a "conflict" WARNING on every household that had seen the
+    listing, and the GFS route to the space closed for good. Nothing is
+    offered and nothing was vouched for: the pin stays as it is."""
+    host, space, rotated = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    pin = _see(None, _bare(host, space))
+    assert load_pin(pin)["owner_instance"] == host.instance_id
+    assert load_pin(pin)["owner_pk"] == ""
+    with caplog.at_level("WARNING"):
+        after = _see(pin, _bare(host, rotated), GFS_B)
+    assert after == pin
+    assert load_pin(after)["conflict"] is False
+    assert _warnings(caplog) == []
+
+
+def test_a_rotated_invite_only_space_can_take_requests_later():
+    """Once such a space lists a contact, it comes with the owner's cert:
+    the owner household the FIRST listing named (an instance id is the hash
+    of its identity key) certifies the new key, and the pin follows."""
+    host, space, rotated = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    pin = _see(None, _bare(host, space))
+    pin = _see(pin, _bare(host, rotated))
+    taken = _see(pin, _item(host, rotated, cert=host.cert(rotated, 1)), GFS_B)
+    held = load_pin(taken)
+    assert held["conflict"] is False
+    assert held["authority_pk"] == rotated.public_key.hex()
+    assert held["key_epoch"] == 1
+    assert held["owner_pk"] == host.ident.public_key.hex()
+    assert usable_contact(taken)[0]["instance_id"] == host.instance_id
+    # The same cert cannot move the pin again (the epoch must rise).
+    again = _see(taken, _item(host, space, cert=host.cert(space, 1)))
+    assert load_pin(again)["conflict"] is True
+
+
+def test_an_invite_only_pin_refuses_a_contact_without_its_owners_chain():
+    """Only the owner named at first sight moves the key. Another key with
+    a contact and no cert, a cert by another household (under its own id or
+    claiming the owner's), a contact for another household: conflicts."""
+    host, space, rotated = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    impostor = _Host()
+    pin = _see(None, _bare(host, space))
+    assert load_pin(_see(pin, _item(host, rotated)))["conflict"] is True
+    own_id = _item(impostor, rotated, cert=impostor.cert(rotated, 5))
+    assert load_pin(_see(pin, own_id))["conflict"] is True
+    claimed = impostor.cert(rotated, 5)
+    claimed["owner_instance_id"] = host.instance_id
+    assert load_pin(_see(pin, _item(host, rotated, cert=claimed)))["conflict"] is True
+    # …and under the SAME key, a contact must name that owner household.
+    assert load_pin(_see(pin, _item(impostor, space)))["conflict"] is True
+    taken = _see(pin, _item(host, space))
+    assert usable_contact(taken)[0]["instance_id"] == host.instance_id
+    assert load_pin(taken)["owner_pk"] == host.ident.public_key.hex()
+
+
+def test_a_pin_that_names_no_owner_stays_fail_closed(caplog):
+    """A pin stored before the owner id was pinned (or from a listing that
+    names no owner): a bare other key is still no conflict, but there is
+    nobody's chain to follow, so a contact under another key is refused
+    even with a cert."""
+    host, space, rotated = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    pin = _see(None, _bare(host, space, owning_instance=""))
+    assert load_pin(pin)["owner_instance"] == ""
+    with caplog.at_level("WARNING"):
+        assert _see(pin, _bare(host, rotated)) == pin
+    assert _warnings(caplog) == []
+    moved = _see(pin, _item(host, rotated, cert=host.cert(rotated, 1)))
+    assert load_pin(moved)["conflict"] is True
+
+
+def test_a_bare_other_key_still_conflicts_with_a_pinned_owner_key():
+    """Unchanged: a pin that vouches for an owner key (a space that takes
+    requests) treats another key without the owner's chain as a conflict,
+    contact or not."""
+    host, space, forged = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    pin = _see(None, _item(host, space))
+    assert load_pin(_see(pin, _bare(host, forged), GFS_B))["conflict"] is True
