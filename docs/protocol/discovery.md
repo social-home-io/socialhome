@@ -4125,13 +4125,16 @@ it:
      `authority_rotation_seq` moves nothing — a GFS, even the one that gave
      the pin, cannot swap the key;
    - a listing **without a contact** carries no cert, so an invite-only
-     space's own rotation shows up as a bare other key. A pin that holds no
-     owner key yet takes nothing from it and records no conflict (nothing
+     space's own rotation shows up as a bare other key. A pin that names
+     its owner by id and holds no owner key yet takes nothing from it and
+     records no conflict (nothing
      is offered to ask through, nothing was vouched for); the first contact
      the space lists must come with the pinned owner's cert for the key
      that signed it, or it is a conflict. (Such a rotation used to be
      logged as a conflict on every household that had seen the listing, and
-     closed the GFS route to the space for good.)
+     closed the GFS route to the space for good. A pin stored before the
+     owner id was pinned names no owner and still latches a conflict on any
+     other key.)
    - under the same key a contact must name the same owner key, and only a
      **newer** one is taken: the pin keeps the newest signed `issued_at`
      it ever took as a high-water mark that never goes down (also across a

@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import orjson
+import pytest
 
 from socialhome.authority_cert import sign_authority_cert
 from socialhome.crypto import (
@@ -321,23 +322,62 @@ def test_an_invite_only_pin_refuses_a_contact_without_its_owners_chain():
     assert load_pin(taken)["owner_pk"] == host.ident.public_key.hex()
 
 
-def test_a_pin_that_names_no_owner_stays_fail_closed(caplog):
+def test_a_pin_that_names_no_owner_stays_fail_closed():
     """A pin stored before the owner id was pinned (or from a listing that
-    names no owner): a bare other key is still no conflict, but there is
-    nobody's chain to follow, so a contact under another key is refused
-    even with a cert."""
+    names no owner) has nobody's chain to follow, so it keeps the one guard
+    it had: ANY other key latches a conflict. Left open, a household still
+    holding the OLD seed (a removed admin) could, with a GFS's help, list
+    the old key again with a contact of its own — the pin names no owner to
+    refuse it by."""
     host, space, rotated = (
         _Host(),
         generate_identity_keypair(),
         generate_identity_keypair(),
     )
+    removed_admin = _Host()
     pin = _see(None, _bare(host, space, owning_instance=""))
     assert load_pin(pin)["owner_instance"] == ""
-    with caplog.at_level("WARNING"):
-        assert _see(pin, _bare(host, rotated)) == pin
-    assert _warnings(caplog) == []
+    after = _see(pin, _bare(host, rotated))
+    assert load_pin(after)["conflict"] is True
+    # The old key with the removed admin's own contact gets nothing.
+    assert usable_contact(_see(after, _item(removed_admin, space), GFS_B)) is None
+    # …and neither does the owner's contact under the new key.
     moved = _see(pin, _item(host, rotated, cert=host.cert(rotated, 1)))
     assert load_pin(moved)["conflict"] is True
+
+
+def test_a_removed_admin_cannot_take_over_an_invite_only_pin():
+    """The same attempt against a pin that names its owner by id: after the
+    rotation (a bare other key, no conflict), the old key listed again with
+    the removed admin's own contact is refused — it names another owner."""
+    host, space, rotated = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    removed_admin = _Host()
+    pin = _see(None, _bare(host, space))
+    pin = _see(pin, _bare(host, rotated))
+    taken = _see(pin, _item(removed_admin, space), GFS_B)
+    assert usable_contact(taken) is None
+    assert load_pin(taken)["conflict"] is True
+
+
+@pytest.mark.parametrize("junk", [[], {}, ["ed25519"], 7])
+def test_a_malformed_cert_in_a_listing_is_ignored_not_a_crash(junk):
+    """One directory row must not abort the whole poll: a cert whose suite
+    is no string is no cert, on a first listing and on a later one."""
+    host, space, other = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    bad = {**host.cert(space, 1), "cert_sig_suite": junk}
+    pin = _see(None, _bare(host, space, authority_cert=bad))
+    assert load_pin(pin)["key_epoch"] == 0
+    worse = {**host.cert(other, 2), "authority_key_suite": junk}
+    assert _see(pin, _bare(host, other, authority_cert=worse)) == pin
+    assert load_pin(_see(pin, _item(host, other, cert=worse)))["conflict"] is True
 
 
 def test_a_bare_other_key_still_conflicts_with_a_pinned_owner_key():

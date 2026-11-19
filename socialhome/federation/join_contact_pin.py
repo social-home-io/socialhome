@@ -13,7 +13,7 @@ names. An instance id IS the hash of an identity key, so the id alone binds
 every later cert and contact to that one household; its key is filled in
 from the first cert or contact that derives to it. (A pin that names no
 owner at all — stored before this, or from a listing naming none — has
-nobody's chain to follow: a contact under another key is a conflict.)
+nobody's chain to follow: any other key is a conflict.)
 After that:
 
 * the authority key moves only along the owner's own chain: a v_44 cert
@@ -28,12 +28,16 @@ After that:
   cannot be replayed. A contact signed more than
   :data:`MAX_FUTURE_SKEW` ahead is no contact (a seed holder or a clock
   jump cannot freeze a binding by dating it in the future);
-* a listing WITHOUT a contact under another key, seen by a pin that holds
-  no owner key yet (an invite-only space that rotated: the GFS serves the
-  owner's cert only beside a contact), changes nothing and is no conflict:
+* a listing WITHOUT a contact under another key, seen by a pin that names
+  its owner by id and holds no owner key yet (an invite-only space that
+  rotated: the GFS serves the owner's cert only beside a contact), changes
+  nothing and is no conflict:
   there is nothing to ask through and nothing vouched for. The pin keeps
   its key; the space's first contact must come with the pinned owner's cert
-  for the key that signed it;
+  for the key that signed it. (Such a pin does not know its first key's
+  epoch — no cert came with it — so that first contact may arrive under
+  any key the owner ever certified, an older one included. It still names
+  the owner's own keys, so a request is sealed to the owner either way.);
 * anything else — another authority without that chain, another owner, a
   GFS that swapped the key — is a **conflict**: the contact is dropped and
   stays dropped (fail closed). Nothing is sealed to such a space through
@@ -144,14 +148,16 @@ def merge_pin(
     rotated = _rotation(old, new, space_id=space_id)
     if rotated is not None:
         return rotated
-    if new["contact"] is None and not old["owner_pk"]:
+    if new["contact"] is None and old["owner_instance"] and not old["owner_pk"]:
         # A listing without a contact carries no cert either (the GFS keeps
         # it to itself), so an invite-only space's own rotation shows up as
         # a bare other key. The pin vouches for no owner key yet and the
         # listing offers nothing to ask through: nothing conflicts, and
         # nothing is taken — the pin stays, and the first contact the space
         # lists has to arrive with the pinned owner's chain to the key it
-        # is signed with.
+        # is signed with. Only for a pin that names its owner by id: one
+        # that names none could not refuse a holder of the old seed listing
+        # the old key again with its own contact, so it keeps latching.
         log.debug(
             "public_space_discovery: space %s is listed by %s under another "
             "authority key, with no contact — pin unchanged",

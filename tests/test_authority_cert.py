@@ -194,6 +194,19 @@ def test_unknown_suite_raises_no_fallback(owner, field):
 
 
 @pytest.mark.parametrize("field", ["cert_sig_suite", "authority_key_suite"])
+@pytest.mark.parametrize("junk", [[], {}, ["ed25519"], 7, None])
+def test_a_suite_that_is_no_string_is_refused_not_a_crash(owner, field, junk):
+    """A cert comes off the wire (a GFS directory row among others): a list
+    or an object where the suite belongs is unhashable, and the set lookup
+    raised ``TypeError`` — past every caller's ``except``."""
+    _kp, owner_id = owner
+    cert = _cert(owner)
+    cert[field] = junk
+    with pytest.raises(UnsupportedAuthorityCertSuite):
+        verify_authority_cert(cert, space_id=SPACE, owner_instance_id=owner_id)
+
+
+@pytest.mark.parametrize("field", ["cert_sig_suite", "authority_key_suite"])
 def test_missing_suite_raises_no_default(owner, field):
     _kp, owner_id = owner
     cert = _cert(owner)
