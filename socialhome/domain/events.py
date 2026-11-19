@@ -1940,6 +1940,20 @@ class SpaceAuthorityEchoDue(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceInviterReproofDue(DomainEvent):
+    """A member household a delegated admin invited just took the owner's
+    rotation of the space key: that admin proved the seed of the OLD key,
+    so it stops acting as host here (``federation/host_equivalence.py``)
+    until its §25.6 sentinel carries a proof for the new one. The sync
+    scheduler answers with an incremental ``SPACE_SYNC_BEGIN`` to it now
+    rather than at the next periodic tick."""
+
+    space_id: str
+    inviter_instance_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteSpaceInviteDeclined(DomainEvent):
     """Mirror of :class:`RemoteSpaceInviteAccepted` for the decline path."""
 

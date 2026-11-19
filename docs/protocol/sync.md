@@ -1575,7 +1575,11 @@ for the key it holds now. A household that admin invited
 rotation resumes it only on such a proof — naming the sender, for the pinned
 key and epoch (`apply_inviter_reproof`); an admin the rotation revoked cannot
 make one. A proof that names another household, an older key, or a key
-we do not pin is ignored. The stream whose sentinel resumed the trust was
+we do not pin is ignored. The household does not wait for the periodic tick:
+on the owner's rotation bundle it sends its inviting admin an incremental
+BEGIN right away (trigger 11 of the scheduler, `SpaceInviterReproofDue`) —
+one BEGIN per rotation and invited household, to one admin, answered by an
+incremental stream. The stream whose sentinel resumed the trust was
 applied under the member rules (the trust came back only at its end), so,
 like a held-back stream, it is not reported clean and its snapshot is not
 recorded — the next session re-streams under the restored trust. Owners and

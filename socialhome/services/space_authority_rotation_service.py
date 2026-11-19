@@ -91,6 +91,7 @@ from ..domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceAuthorityEchoDue,
+    SpaceInviterReproofDue,
     SpaceRemoteSeatLive,
 )
 from ..domain.federation import FederationEvent, FederationEventType
@@ -1416,7 +1417,8 @@ class SpaceAuthorityRotationService:
         # One bundle per space at a time: two copies (a redelivery racing
         # the original) must not interleave their resets.
         async with self._lock(space_id):
-            await self._apply_bundle(space_id, p, event.from_instance)
+            if await self._apply_bundle(space_id, p, event.from_instance):
+                await self._ask_inviter_again(space_id)
             # v_49 — our writer cert under the (now pinned) new key, from the
             # owner household only (the bundle's sender). The cert also
             # authenticates itself against the pin in ``accept``.
@@ -1442,7 +1444,51 @@ class SpaceAuthorityRotationService:
                         space_id, p.get("gfs_channel")
                     )
 
-    async def _apply_bundle(self, space_id: str, p: dict, sender: str) -> None:
+    async def _ask_inviter_again(self, space_id: str) -> None:
+        """We took the owner's bundle and pin its key: the delegated admin
+        that invited us proved the seed of an OLDER one, so it no longer
+        acts as host here (its directory, its catch-up stream, its admin
+        actions) until it proves the new key — which only its §25.6
+        sentinel carries. Ask for that stream now
+        (:class:`SpaceInviterReproofDue`): the owner hands the admins it
+        keeps their new seed BEFORE the bundles go out, so the proof is
+        there. Only while that household still holds an admin seat by the
+        roster the bundle just set — an admin the rotation revoked has
+        nothing to prove. Fail-soft: the periodic sync asks anyway."""
+        try:
+            space = await self._spaces.get(space_id)
+            if space is None or not space.features.delegated_admin_authority:
+                return
+            inviter = await self._spaces.get_invited_by(space_id)
+            if not inviter or inviter in (
+                space.owner_instance_id,
+                self._own_instance_id,
+            ):
+                return
+            if (
+                await self._spaces.get_invited_by_epoch(space_id)
+                == space.authority_key_epoch
+            ):
+                return
+            seats = await self._remote_members.list_for_instance(
+                space_id, inviter, include_tombstoned=False
+            )
+            if not any(seat.role == SpaceRole.ADMIN for seat in seats):
+                return
+            await self._bus.publish(
+                SpaceInviterReproofDue(space_id=space_id, inviter_instance_id=inviter)
+            )
+        except Exception:
+            log.warning(
+                "space %s: asking the inviting admin for its proof failed",
+                space_id,
+                exc_info=True,
+            )
+
+    async def _apply_bundle(self, space_id: str, p: dict, sender: str) -> bool:
+        """Apply the owner's rotation bundle. ``True`` when it was the
+        owner's and its cert is consistent with what we pin now (applied
+        here, or already held) — ``False`` for anything dropped."""
         space = await self._spaces.get(space_id)
         if space is None:
             log.warning(
@@ -1450,9 +1496,9 @@ class SpaceAuthorityRotationService:
                 space_id,
                 sender,
             )
-            return
+            return False
         if space.owner_instance_id == self._own_instance_id:
-            return  # our own space: our pin is the authority
+            return False  # our own space: our pin is the authority
         if sender != space.owner_instance_id:
             # The cert is owner-signed, but the baseline reset below goes past
             # every ordinary ordering guard — only the owner itself may ask
@@ -1463,7 +1509,7 @@ class SpaceAuthorityRotationService:
                 sender,
                 space.owner_instance_id,
             )
-            return
+            return False
         held_before = space.authority_key_epoch
         held_cert = await self._spaces.get_authority_cert(space_id)
         outcome = await apply_authority_cert(
@@ -1478,7 +1524,7 @@ class SpaceAuthorityRotationService:
                 space_id,
                 outcome.value,
             )
-            return
+            return False
         space = await self._spaces.get(space_id) or space
         if p.get("baseline") is False:
             await self._note_forgotten(space, p, held_before, held_cert)
@@ -1499,7 +1545,7 @@ class SpaceAuthorityRotationService:
                 space_id,
                 space.authority_key_epoch,
             )
-            return
+            return True
         cutoff = space.authority_key_epoch
         if p.get("baseline") is False:
             # A post-restore rotation: the owner's roster and config are the
@@ -1522,7 +1568,7 @@ class SpaceAuthorityRotationService:
                 forgotten = 0
             if missed is None and not forgotten:
                 await self._import_content_key(space, p.get("space_content_key"))
-                return
+                return True
             cutoff = max(missed or 0, forgotten)
             log.warning(
                 "SPACE_AUTHORITY_ROTATED for %s: missed the baseline for key "
@@ -1549,6 +1595,7 @@ class SpaceAuthorityRotationService:
             keep_newer_removals=p.get("baseline") is False,
         )
         await self._reset_content_key(space, p.get("space_content_key"), cutoff)
+        return True
 
     @staticmethod
     def _missed_baseline_cutoff(
