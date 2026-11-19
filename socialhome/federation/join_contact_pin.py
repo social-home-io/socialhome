@@ -5,9 +5,16 @@ space authority key — :mod:`socialhome.space_join_contact`), the space
 authority key itself (``identity_public_key``) and, with a contact, the
 owner's v_44 rotation cert for that key. The GFS serves all three, so the
 first listing a household sees is trusted on first use (TOFU), exactly like
-a follower's first pin of the same key. That first contact pins two keys:
-the **space authority key** and, through the contact it signed, the
-**owner household's identity key**. After that:
+a follower's first pin of the same key. That first listing pins the
+**space authority key** and the **owner household**: its identity key from
+the contact the authority key signed, or — for a listing without a contact
+(an invite-only space lists none) — the owner's instance id the listing
+names. An instance id IS the hash of an identity key, so the id alone binds
+every later cert and contact to that one household; its key is filled in
+from the first cert or contact that derives to it. (A pin that names no
+owner at all — stored before this, or from a listing naming none — has
+nobody's chain to follow: any other key is a conflict.)
+After that:
 
 * the authority key moves only along the owner's own chain: a v_44 cert
   (:func:`~socialhome.authority_cert.verify_authority_cert`) signed by the
@@ -21,6 +28,16 @@ the **space authority key** and, through the contact it signed, the
   cannot be replayed. A contact signed more than
   :data:`MAX_FUTURE_SKEW` ahead is no contact (a seed holder or a clock
   jump cannot freeze a binding by dating it in the future);
+* a listing WITHOUT a contact under another key, seen by a pin that names
+  its owner by id and holds no owner key yet (an invite-only space that
+  rotated: the GFS serves the owner's cert only beside a contact), changes
+  nothing and is no conflict:
+  there is nothing to ask through and nothing vouched for. The pin keeps
+  its key; the space's first contact must come with the pinned owner's cert
+  for the key that signed it. (Such a pin does not know its first key's
+  epoch — no cert came with it — so that first contact may arrive under
+  any key the owner ever certified, an older one included. It still names
+  the owner's own keys, so a request is sealed to the owner either way.);
 * anything else — another authority without that chain, another owner, a
   GFS that swapped the key — is a **conflict**: the contact is dropped and
   stays dropped (fail closed). Nothing is sealed to such a space through
@@ -53,6 +70,7 @@ import orjson
 from ..authority_cert import (
     InvalidAuthorityCert,
     UnsupportedAuthorityCertSuite,
+    VerifiedAuthorityCert,
     verify_authority_cert,
 )
 from ..space_join_contact import (
@@ -106,6 +124,7 @@ def candidate_from_listing(item: dict, *, gfs_url: str) -> str | None:
             "contact": contact,
             "authority_pk": authority_pk.lower(),
             "cert": cert if isinstance(cert, dict) else None,
+            "owner_instance": str(item.get("owning_instance") or ""),
             "gfs": gfs_url,
         }
     )
@@ -129,6 +148,23 @@ def merge_pin(
     rotated = _rotation(old, new, space_id=space_id)
     if rotated is not None:
         return rotated
+    if new["contact"] is None and old["owner_instance"] and not old["owner_pk"]:
+        # A listing without a contact carries no cert either (the GFS keeps
+        # it to itself), so an invite-only space's own rotation shows up as
+        # a bare other key. The pin vouches for no owner key yet and the
+        # listing offers nothing to ask through: nothing conflicts, and
+        # nothing is taken — the pin stays, and the first contact the space
+        # lists has to arrive with the pinned owner's chain to the key it
+        # is signed with. Only for a pin that names its owner by id: one
+        # that names none could not refuse a holder of the old seed listing
+        # the old key again with its own contact, so it keeps latching.
+        log.debug(
+            "public_space_discovery: space %s is listed by %s under another "
+            "authority key, with no contact — pin unchanged",
+            space_id,
+            new["gfs"],
+        )
+        return existing
     return _conflict(
         old,
         f"{new['gfs']} lists it under another authority key than the one pinned "
@@ -176,16 +212,23 @@ def usable_contact(raw: str | None) -> tuple[dict[str, str], str] | None:
 
 
 def _first_pin(new: dict[str, Any], *, space_id: str) -> str:
-    """TOFU: the authority key, and the owner key its contact names."""
+    """TOFU: the authority key and the owner household — the key its
+    contact names, or without a contact the instance id the listing names
+    (and its key, when the listing's cert for this key derives to it)."""
     contact = new["contact"]
+    owner_instance = contact["instance_id"] if contact else new["owner_instance"]
+    cert = _first_cert(new, owner_instance, space_id=space_id)
+    owner_pk = contact["identity_pk"] if contact else ""
+    if not owner_pk and cert is not None:
+        owner_pk = cert.owner_pk_hex
     return _dump(
         {
             "contact": contact,
             "authority_pk": new["authority_pk"],
             "contact_issued_at": contact["issued_at"] if contact else "",
-            "owner_pk": contact["identity_pk"].lower() if contact else "",
-            "owner_instance": contact["instance_id"] if contact else "",
-            "key_epoch": _cert_epoch_for(new, new["authority_pk"], space_id=space_id),
+            "owner_pk": owner_pk.lower(),
+            "owner_instance": owner_instance,
+            "key_epoch": cert.key_epoch if cert is not None else 0,
             "gfs": new["gfs"],
             "conflict": False,
         }
@@ -198,7 +241,12 @@ def _same_key(old: dict[str, Any], new: dict[str, Any], *, space_id: str) -> str
         # The listing carries no contact (an owner that stopped listing one,
         # or a GFS that dropped it): nothing to ask through, pin unchanged.
         return _dump({**old, "contact": None})
-    if old["owner_pk"] and contact["identity_pk"].lower() != old["owner_pk"]:
+    if (old["owner_pk"] and contact["identity_pk"].lower() != old["owner_pk"]) or (
+        # Pinned from a listing without a contact: the owner is held by id
+        # (``candidate_from_listing`` proved the contact's key derives to
+        # the id it names).
+        old["owner_instance"] and contact["instance_id"] != old["owner_instance"]
+    ):
         return _conflict(
             old,
             f"{new['gfs']} lists a contact naming another owner key",
@@ -224,14 +272,16 @@ def _same_key(old: dict[str, Any], new: dict[str, Any], *, space_id: str) -> str
 def _rotation(old: dict[str, Any], new: dict[str, Any], *, space_id: str) -> str | None:
     """The pin after an owner-certified rotation to ``new``'s key, or
     ``None`` when ``new`` carries no such chain from the pinned owner."""
-    if not old["owner_pk"] or not old["owner_instance"] or new["cert"] is None:
+    if not old["owner_instance"] or new["cert"] is None:
         return None
     try:
+        # The cert's key must derive to the pinned owner id — and equal the
+        # pinned owner key, once the pin holds one.
         cert = verify_authority_cert(
             new["cert"],
             space_id=space_id,
             owner_instance_id=old["owner_instance"],
-            known_owner_pk_hex=old["owner_pk"],
+            known_owner_pk_hex=old["owner_pk"] or None,
         )
     except InvalidAuthorityCert, UnsupportedAuthorityCertSuite:
         return None
@@ -240,8 +290,9 @@ def _rotation(old: dict[str, Any], new: dict[str, Any], *, space_id: str) -> str
         or cert.key_epoch <= old["key_epoch"]
     ):
         return None
+    owner_pk = old["owner_pk"] or cert.owner_pk_hex.lower()
     contact = new["contact"]
-    if contact is not None and contact["identity_pk"].lower() != old["owner_pk"]:
+    if contact is not None and contact["identity_pk"].lower() != owner_pk:
         return None
     mark = _parse(old["contact_issued_at"])
     if contact is not None and mark is not None:
@@ -262,6 +313,7 @@ def _rotation(old: dict[str, Any], new: dict[str, Any], *, space_id: str) -> str
                 contact["issued_at"] if contact else old["contact_issued_at"]
             ),
             "authority_pk": new["authority_pk"],
+            "owner_pk": owner_pk,
             "key_epoch": cert.key_epoch,
             "gfs": new["gfs"],
         }
@@ -278,22 +330,24 @@ def _conflict(old: dict[str, Any], why: str, *, space_id: str) -> str:
     return _dump({**old, "contact": None, "conflict": True})
 
 
-def _cert_epoch_for(new: dict[str, Any], authority_pk: str, *, space_id: str) -> int:
-    """The epoch of a listing's cert for its own key at first sight, from
-    the owner its contact names; ``0`` without a verifying one."""
+def _first_cert(
+    new: dict[str, Any], owner_instance: str, *, space_id: str
+) -> VerifiedAuthorityCert | None:
+    """A first listing's cert for its own key, when the owner the listing
+    names (through its contact, else by id) issued it; else ``None``."""
     contact = new["contact"]
-    if contact is None or new["cert"] is None:
-        return 0
+    if not owner_instance or new["cert"] is None:
+        return None
     try:
         cert = verify_authority_cert(
             new["cert"],
             space_id=space_id,
-            owner_instance_id=contact["instance_id"],
-            known_owner_pk_hex=contact["identity_pk"],
+            owner_instance_id=owner_instance,
+            known_owner_pk_hex=contact["identity_pk"] if contact else None,
         )
     except InvalidAuthorityCert, UnsupportedAuthorityCertSuite:
-        return 0
-    return cert.key_epoch if cert.authority_pk_hex == authority_pk else 0
+        return None
+    return cert if cert.authority_pk_hex == new["authority_pk"] else None
 
 
 def _load_candidate(raw: str | None) -> dict[str, Any] | None:
@@ -311,6 +365,7 @@ def _load_candidate(raw: str | None) -> dict[str, Any] | None:
         "contact": parse_join_contact(contact) if contact is not None else None,
         "authority_pk": value["authority_pk"].lower(),
         "cert": cert if isinstance(cert, dict) else None,
+        "owner_instance": str(value.get("owner_instance") or ""),
         "gfs": str(value.get("gfs") or ""),
     }
 

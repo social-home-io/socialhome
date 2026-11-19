@@ -26236,12 +26236,12 @@ def cmd_gfs_admin_seed() -> None:
             "description": "v_94: an admin reached only through a GFS",
             "space_type": "global",
             "gfs_ids": [a_a_id],
-            # "Ask to join": the listing then carries the owner's signed join
-            # contact, so a household that saw the listing pins the owner key
-            # and follows the rotations below along the owner's cert chain
-            # (``federation/join_contact_pin.py``). A listing without a
-            # contact pins no owner, and a later rotation reads as a conflict.
-            "join_mode": "request",
+            # Invite-only (the default): the listing carries no join contact
+            # and no cert, so the rotations below show every household that
+            # saw the listing a bare other key — which is no conflict
+            # (``federation/join_contact_pin.py``; ``verify``'s log audit
+            # would flag the WARNING).
+            "join_mode": "invite_only",
         },
     )
     space_id = _must(f"{step}: a creates the space", s, space, ok=(201,))["id"]

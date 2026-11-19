@@ -186,10 +186,19 @@ def verify_authority_cert(
     """
     if not isinstance(cert, dict):
         raise InvalidAuthorityCert("cert is not an object")
-    if cert.get("cert_sig_suite") not in SUPPORTED_AUTHORITY_CERT_SUITES:
-        raise UnsupportedAuthorityCertSuite(str(cert.get("cert_sig_suite")))
-    if cert.get("authority_key_suite") not in SUPPORTED_AUTHORITY_KEY_SUITES:
-        raise UnsupportedAuthorityCertSuite(str(cert.get("authority_key_suite")))
+    # ``isinstance`` first: a list or an object off the wire is unhashable,
+    # and the set lookup alone would raise ``TypeError`` past every caller.
+    sig_suite, key_suite = cert.get("cert_sig_suite"), cert.get("authority_key_suite")
+    if (
+        not isinstance(sig_suite, str)
+        or sig_suite not in SUPPORTED_AUTHORITY_CERT_SUITES
+    ):
+        raise UnsupportedAuthorityCertSuite(str(sig_suite))
+    if (
+        not isinstance(key_suite, str)
+        or key_suite not in SUPPORTED_AUTHORITY_KEY_SUITES
+    ):
+        raise UnsupportedAuthorityCertSuite(str(key_suite))
     missing = AUTHORITY_CERT_FIELDS - set(cert)
     if missing:
         raise InvalidAuthorityCert(f"cert is missing {sorted(missing)}")
