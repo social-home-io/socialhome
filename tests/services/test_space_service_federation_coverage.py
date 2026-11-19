@@ -391,6 +391,93 @@ async def test_remove_remote_member_happy(stack):
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
 
 
+async def test_remove_remote_member_tells_the_household_before_its_seat_goes(
+    stack, monkeypatch
+):
+    """A household seated from the host's directory is reached at its GFS
+    mailbox, and a mailbox is found per space: on the member card its
+    ``space_instances`` row keeps, while the roster holds a live seat of it.
+    So the removal notice names its space and goes out before the seat and
+    that row are dropped. Otherwise an admin that reaches members only
+    through a GFS answered 403 "no path to invitee household" after it had
+    already dropped the seat — no gossip, no rekey."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    await stack.space_repo.add_space_instance(space.id, "peer")
+    order: list[object] = []
+
+    async def _send(**kw):
+        held = await stack.db.fetchone(
+            "SELECT 1 FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space.id, "peer"),
+        )
+        order.append(("notice", kw.get("space_id"), held is not None))
+        return DeliveryResult(instance_id="peer", ok=True)
+
+    remove = SqliteSpaceRemoteMemberRepo.remove
+
+    async def _remove(repo, *args):
+        order.append("seat dropped")
+        await remove(repo, *args)
+
+    stack.fed_svc.send_with_mesh_fallback.side_effect = _send
+    monkeypatch.setattr(SqliteSpaceRemoteMemberRepo, "remove", _remove)
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert order == [("notice", space.id, True), "seat dropped"]
+    assert (
+        await stack.db.fetchone(
+            "SELECT 1 FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space.id, "peer"),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("error", ["delivery_failed", "no_route"])
+async def test_remove_remote_member_completes_when_the_household_is_not_reached(
+    stack, error
+):
+    """Telling the household is best effort. A notice queued for an offline
+    household ("delivery_failed") counts as said; one that finds no path at
+    all is logged. Either way the removal completes — seat ended, row gone —
+    so nobody keeps a seat by being unreachable. (Any "not delivered now"
+    answer used to abort the removal with 403 after the seat was dropped
+    locally: no gossip, no rekey.)"""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    await stack.space_repo.add_space_instance(space.id, "peer")
+    stack.fed_svc.send_with_mesh_fallback.return_value = DeliveryResult(
+        instance_id="peer", ok=False, error=error
+    )
+    ended: list = []
+    stack.bus.subscribe(SpaceRemoteSeatEnded, ended.append)
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert [(e.instance_id, e.user_id) for e in ended] == [("peer", "bob")]
+    assert (
+        await stack.db.fetchone(
+            "SELECT 1 FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space.id, "peer"),
+        )
+        is None
+    )
+
+
+async def test_remove_remote_member_survives_a_send_that_raises(stack):
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    stack.fed_svc.send_with_mesh_fallback.side_effect = RuntimeError("transport")
+    ended: list = []
+    stack.bus.subscribe(SpaceRemoteSeatEnded, ended.append)
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert len(ended) == 1
+
+
 async def test_remove_remote_member_announces_the_seat_ended(stack):
     """v_77: the game tables this household hosts take the player out."""
     await _user(stack, "alicehost")

@@ -333,8 +333,7 @@ That single command runs the full sequence:
 
      What the audit currently accepts as benign (each with an
      in-source comment): STUN-server status chatter, outbox-retry
-     on briefly-unreachable peers, outbox terminal drops on HTTP
-     410 (dual-transport replay-cache hit), HTTPS-inbox transient
+     on briefly-unreachable peers, HTTPS-inbox transient
      failures during the inner-ring settle window, DTLS handshake
      timeouts on loopback (perfect-negotiation glare aborts one
      side mid-handshake, federation falls through to HTTPS-inbox),
@@ -343,6 +342,20 @@ That single command runs the full sequence:
      waits the 65 s window. If any of these patterns START coming
      with a per-step content-check failure, that's the real bug
      — the log line on its own is just the symptom.
+
+     No longer accepted: ``outbox: … returned terminal HTTP 410``
+     and ``OutboxProcessor: peer permanently rejected``. They were
+     the sender's two WARNINGs for a message the receiver already
+     held (its replay cache answered the second copy). Since #1384
+     that answer counts as delivered, so either line is a finding
+     again — a message really was refused for good.
+
+     The GFS process's own log is audited the same way. It logs
+     ``asctime LEVEL    logger: message`` rather than the households'
+     ``LEVEL:logger:message``, so until the ``gfs-admin-seed`` work its
+     WARNING / ERROR lines matched no marker and were never looked at;
+     the only accepted GFS line is its start-up "minted a new random
+     identity key" advisory. (GFS B's log is not audited.)
 
      **Expected-noise windows** (no blanket ignores). A step that
      takes a household offline, or runs a negative control, records
@@ -1010,6 +1023,7 @@ python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after m
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
 python .claude/skills/federation-demo/harness.py gfs-private-channel-multi
+python .claude/skills/federation-demo/harness.py gfs-admin-seed   # last before verify: needs relay-pair (a ↔ d) and, for the withdrawn-listing checks, gfs-b-up; restarts a and e
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-b-down
 python .claude/skills/federation-demo/harness.py gfs-down
@@ -1241,6 +1255,64 @@ list, e's copy of the post and that B's database never names the space.
 ``Retry-After`` or a bounded backoff) when it pairs a ↔ d soon after
 ``pair``, and waits for e's socket after re-pairing it with A.
 
+### ``gfs-admin-seed`` — a GFS-only admin acts for the owner, and its seed dies with its seat (v_94)
+
+Owner rule: an admin reached only through a GFS has the same rights as a
+paired one. Runs last before ``verify`` (after ``relay-pair``; with
+``gfs-b-up`` it also covers a GFS the space was **withdrawn** from). It
+restarts a and e, so it is an ``@_offline_step``.
+
+Setup: a creates a global, publicly readable space with "Let admins act for
+me" on (``delegated_admin_authority``), listed on GFS A — and listed on GFS
+B, then withdrawn again, so B keeps a pin for a space it no longer lists
+and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
+
+1. **The seed reaches e.** e redeems a published admin link (a member
+   seat, admin pending) and a approves. e holds the seed of the key a pins
+   (e's own wrapped copy, opened with e's KEK); a logged the share, e the
+   receipt. The GFS log carries no ``space_admin_key_share`` and no seed
+   bytes, and e keeps its fan-out seat (``space_subscribers``) — also
+   after e restarts and reconnects.
+2. **e acts for the owner.** a is killed. e posts: b and d hold it, and
+   the GFS log shows an anonymous ``/gfs/member-publish-anon`` and **no**
+   ``POST /gfs/publish`` (a delegated admin is a writer to the GFS). e
+   renames the space (HTTP 200: executed on e, signed with the seed) — b
+   and d show the name. e removes b's person — d drops the seat. a comes
+   back and holds all three; its key did not move; and it tells b, which
+   drops its own copy only on its host's word.
+3. **Removed by the owner.** a removes e and rotates the key (K1 → K2). d
+   pins K2; GFS A re-pins from the owner's cert; GFS B re-pins from the
+   pin-only publish and stays withdrawn; a records K2 as what B confirmed.
+   e holds no seat. Then e plays a removed admin that **refuses to
+   forget**: the harness writes its seat and the wrapped K1 seed back into
+   e's database (the one place the step writes app state), e signs a rename
+   with K1, and d must log a refusal of that frame and keep the name.
+4. **Removed by another admin, owner away.** e joins again (admin link,
+   approval) and holds the K2 seed; a makes d's person an admin too. a is
+   killed; d removes e (HTTP 200: executed on d). a comes back, learns of
+   it — from d's roster gossip or from d re-stating the removal against a's
+   roster snapshot (#1380), whichever arrives first; the step prints which
+   — and rotates again (K2 → K3). d holds the K3 seed; both GFS pin K3;
+   a tells e, which drops its copy.
+
+**The pin probe.** "The old seed works on no GFS" is asked of each GFS
+directly: ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh
+authority signature made with the seed in question — the request only the
+space key may make, checked against the same pin as a relay, an epoch
+notice or a media upload, and read-only. e's K1 seed answers **200** on A
+and on B while e is an admin (the positive control) and **403** on both
+after step 3; after step 4 K1 and K2 answer 403 on both and d's K3 seed
+200.
+
+``verify`` (gated on the ``gfs_admin_seed`` state key) re-checks that every
+GFS pins the key a pins, that d holds its seed and the name e set, that
+the host seats e no more and e does not hold the current seed, and that both
+retired seeds are still refused.
+
+```bash
+python .claude/skills/federation-demo/harness.py gfs-admin-seed
+```
+
 ### ``gfs-fallback-switch`` — the GFS fallback for an existing pair (v_54)
 
 Needs ``relay-pair`` (a ↔ d, an ordinary pair with addresses and no GFS
@@ -1438,9 +1510,10 @@ The topology is what makes the content steps meaningful:
 
 - ``gfs-pair`` pairs **a**, **d** and **e** with the GFS. a and d are
   **not** QR-paired with each other (d pairs only with b; a↔d exists
-  only after the separate ``relay-pair`` step, which is not part of
-  this chain), so anything d receives from a's space can only have
-  travelled through the GFS. **c** is paired with neither and is the
+  only after ``relay-pair``, which the chain runs late — after
+  ``gfs-private-channel``, before ``gfs-b-up``), so until then anything d
+  receives from a's space travelled through the GFS or over the mesh
+  through b. **c** is paired with neither and is the
   negative control.
 - **e** is paired with *nobody* — not even by mesh. It is the only
   household for which the §D2b bootstrap redeem and the
@@ -2007,7 +2080,10 @@ check polls (3 s, bounded timeout, 429-aware); no sleep is a check.
 | catch-up | a, while d and e are killed | new post, edit, deletion after both respawn; a 450 KiB page — asserted for both, read from each member's database: e gets it as one binary relay frame in its §25.6 catch-up, d over the mesh (a re-sends the routed page after d's nack, and d's catch-up carries the record raw inside the route's seal) |
 | old picture | a, while d and e are killed | the blob is expired from the GFS cache as 30-day-old content (as ``gfs-media-on-demand``'s old leg), then both must show the picture; SKIP if a cached nothing |
 | host offline | d and e, a killed | each one's picture post on the other |
-| admin rights | a promotes e's person; e deletes d's post | role on both; the post gone on both (e is put back to member) |
+| admin rights | a promotes e's person (GFS only), then d's (paired / mesh); each admin deletes the other member's post | role on a, d and e; the post gone on all three; the person back to member |
+| the signing seed | in the fresh private space below, a makes e's person an admin next to b | b (paired) and e (GFS only) both hold the seed of the key a pins |
+| acting for the owner | a killed; b renames the space, then e does | the name on d after each (b is on no GFS here and e is paired with nobody: no path between them without the host); on a, b and d when a is back |
+| admin removed | a takes e's admin seat away | a's key epoch rises; b holds the new seed, e none; b, d and e pin the new key |
 
 Every action is reported PASS / DIFF / SKIP in a table at the end; the step
 fails naming each DIFF with what the reference and each member showed plus
@@ -2028,6 +2104,19 @@ invited it, holds d's card); then a is stopped again and d and e each post
 — the other must show it,
 mailbox to mailbox — and no GFS envelope / mailbox line names an instance
 id, a mailbox id or the space.
+
+The same space carries the **admin rights** rows that need "Let admins act
+for me" (v_94: an admin reached only through a GFS is handed the signing
+seed like a paired one). a makes e's person an admin next to b: both must
+hold the seed of the key a pins (each household's own wrapped copy, read
+with its own KEK). In the owner-offline window b and then e rename the
+space — executed on the admin's own household (HTTP 200, never a forward)
+and signed with the seed — and d must show each name (b and e have no path
+to each other while the host is away: b is on no GFS at this point, e is
+paired with nobody); a, b and d show the last one once a is back. a then
+takes e's admin seat away: the key
+rotates as for any admin, b holds the new seed, e's is gone, and b, d and
+e pin the new key. ``gfs-admin-seed`` covers the removal in depth.
 
 ### ``members-parity-apps`` — a space's game tables for a paired/mesh member and a GFS-only member (owner acceptance gate, games)
 
