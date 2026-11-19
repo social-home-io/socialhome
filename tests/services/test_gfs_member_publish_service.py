@@ -1506,6 +1506,10 @@ class _Channels:
         self.announced.append((space_id, only))
         return 1
 
+    async def on_rekey_sent(self, space_id):
+        self.rotations.append(f"rekey-sent:{space_id}")
+        return True
+
     async def heal(self, gfs_id):
         self.healed.append(gfs_id)
         return 0
@@ -1577,6 +1581,8 @@ async def test_private_epoch_notices_and_heal_go_to_the_channel(world):
     assert channels.rotations[-1] == f"retire:{SPACE_ID}"
     await svc.enable_channel(SPACE_ID)
     assert channels.rotations[-1] == f"enable:{SPACE_ID}"
+    await svc.channel_rekey_sent(SPACE_ID)
+    assert channels.rotations[-1] == f"rekey-sent:{SPACE_ID}"
 
 
 async def test_a_public_space_never_touches_the_channel(world):
@@ -1585,6 +1591,7 @@ async def test_a_public_space_never_touches_the_channel(world):
     assert not await world["svc"].channel_space(SPACE_ID)
     await world["svc"].reconcile_channel(SPACE_ID)
     await world["svc"].enable_channel(SPACE_ID)
+    await world["svc"].channel_rekey_sent(SPACE_ID)
     assert channels.rotations == []
 
 

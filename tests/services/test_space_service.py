@@ -12424,8 +12424,12 @@ async def _removal_with_member_gfs(stack, member_gfs):
             raise member_gfs
         return 1
 
+    async def _seat(space_id):
+        order.append("own seat")
+
     gfs = AsyncMock()
     gfs.announce_epoch = AsyncMock(side_effect=_announce)
+    gfs.channel_rekey_sent = AsyncMock(side_effect=_seat)
     stack.space_svc.attach_space_crypto_service(space_crypto)
     stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
     stack.space_svc.attach_member_gfs(gfs)
@@ -12439,6 +12443,18 @@ async def _removal_with_member_gfs(stack, member_gfs):
 async def test_a_rotation_sends_the_gfs_epoch_notice_before_rekey_and_reseal(stack):
     space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
     gfs.announce_epoch.assert_awaited_once_with(space.id)
+    # A rotating admin's own channel seat is renewed once its rekey went
+    # out — when the members renew theirs — never right after the notice.
+    gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
+    assert order == ["notice", "rekey", "own seat", "reseal"]
+
+
+async def test_a_failing_own_seat_renewal_never_breaks_the_rotation(stack):
+    space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
+    gfs.channel_rekey_sent = AsyncMock(side_effect=RuntimeError("boom"))
+    order.clear()
+    await stack.space_svc._rotate_and_distribute_space_key(space.id)
+    gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
     assert order == ["notice", "rekey", "reseal"]
 
 
@@ -12446,7 +12462,7 @@ async def test_a_failing_epoch_notice_never_breaks_the_rotation(stack):
     space, bob, order, _gfs = await _removal_with_member_gfs(
         stack, RuntimeError("gfs down")
     )
-    assert order == ["notice", "rekey", "reseal"]
+    assert order == ["notice", "rekey", "own seat", "reseal"]
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
 
 

@@ -339,6 +339,14 @@ class GfsMemberPublishService:
         if self._channels is not None and await self._private(space_id):
             await self._channels.on_rotation(space_id)
 
+    async def channel_rekey_sent(self, space_id: str) -> None:
+        """The member rekey of a content-key rotation we ran went out: a
+        private space's channel service renews our own seat now, as the
+        members renew theirs on that rekey
+        (:meth:`GfsChannelService.on_rekey_sent`). No-op for other spaces."""
+        if self._channels is not None and await self._private(space_id):
+            await self._channels.on_rekey_sent(space_id)
+
     def wire(self, bus: EventBus) -> None:
         """Subscribe a newly seated local writer to the GFS fan-out at once
         (the reconnect hook would otherwise only catch it next connect)."""

@@ -102,10 +102,27 @@ The Social Home ↔ GFS link is split by direction:
     Once every household ships `ts` it becomes mandatory. A publish answers
     `{status, space_id, identity_public_key}` — the authority key the GFS
     pins after the request, which is how the owner checks that a re-pin
-    took. A publish or a withdrawal may name the server it is for —
+    took. A publish or a withdrawal names the server it is for —
     `gfs_key`, that server's identity key, inside the signed bytes; one
     naming another server is refused, so a body sent to one GFS cannot be
-    replayed to another. A publish carrying `withdrawn: true` (inside the
+    replayed to another (a listing publish replayed there would LIST the
+    space on a server its owner did not choose). A household binds it on
+    every listing publish and withdrawal to a server that proved
+    `withdrawn_repin` (cached from the `/gfs/info` each connect fetches);
+    an older server gets the body without it, and a body without the
+    field (an older household) is judged as before. A server that does not
+    advertise the capability — or a publish sent before the first verified
+    `/gfs/info` after a restart — therefore still gets a body it could
+    replay elsewhere; the gate goes, and the field becomes mandatory, once
+    no GFS older than `withdrawn_repin` is in use. All nodes of one
+    cluster must run that revision before any advertises it (an older node
+    refuses a signed field it does not know). The
+    binding is per server, not per request: the same body sent again to
+    the SAME server inside the `ts` window is taken again (a withdrawal
+    replayed after a re-list withdraws once more, a listing replayed after
+    a withdrawal lists once more). That needs the owner's TLS session or
+    the server itself, which can hide or show a listing anyway; the owner's
+    next publish or withdrawal puts it right. A publish carrying `withdrawn: true` (inside the
     signed bytes, `ts` and `gfs_key` mandatory; capability
     `withdrawn_repin`) is a **pin-only** publish
     for a listing the owner withdrew: the pin moves under the usual cert
@@ -3220,10 +3237,11 @@ so a rotation it makes while the owner is offline reaches a server it never
 joined. Right after its own rotation it holds no grant for the new epoch
 yet: it announces with its newest stored grant. Its own grant for the new
 epoch (same channel and servers; a seat pass and writer key only if it
-held them) is renewed later, on the first item of the new epoch that
-reaches its old seat or on its next reconnect — never right after the
-notice, where it would be the first seat on the new epoch
-(`GfsChannelService._renew_own_grant`; what remains visible is in
+held them) it takes once its rekey went out, through the same
+`accept_grant` a member applies the rekey's grant with — so its seat is
+renewed when the members renew theirs, never right after the notice, where
+it would be the first seat on the new epoch
+(`GfsChannelService.on_rekey_sent`; what a GFS still sees is in
 [gfs-relay.md](./gfs-relay.md#residuals)). The
 owner's notices stay on its own registered connections.
 

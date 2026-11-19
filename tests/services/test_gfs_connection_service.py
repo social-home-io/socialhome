@@ -3913,7 +3913,13 @@ async def _repin_svc(env, monkeypatch, *, with_cert: bool):
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
 
     async def _body(
-        self, space_id, *, with_cert=True, with_place=False, with_contact=False
+        self,
+        space_id,
+        *,
+        with_cert=True,
+        with_place=False,
+        with_contact=False,
+        gfs_key=None,
     ):
         return {"name": "S", **({"authority_cert": {"k": 1}} if with_cert else {})}
 
@@ -3933,7 +3939,13 @@ async def _repin_svc(env, monkeypatch, *, with_cert: bool):
     if not with_cert:
 
         async def _plain(
-            self, space_id, *, with_cert=True, with_place=False, with_contact=False
+            self,
+            space_id,
+            *,
+            with_cert=True,
+            with_place=False,
+            with_contact=False,
+            gfs_key=None,
         ):
             return {"name": "S"}
 
@@ -5857,6 +5869,28 @@ async def test_unpublish_names_the_server_it_is_for(env):
             signed["gfs_key"] = body["gfs_key"]
         else:
             assert "gfs_key" not in body
+        canonical = json.dumps(signed, separators=(",", ":"), sort_keys=True).encode()
+        assert verify_ed25519(
+            owner.public_key, canonical, b64url_decode(body["signature"])
+        )
+
+
+async def test_a_listing_publish_names_the_server_it_is_for(env):
+    """A normal listing publish is signed for ONE server too (``gfs_key``
+    inside the signed bytes): the server that received it cannot replay it
+    to another GFS the owner is registered on and list the space there. An
+    older server (no ``withdrawn_repin``) gets today's body."""
+    for caps, bound in ((_REPIN_CAPS, True), ({"anonymous_publish": True}, False)):
+        session = _PinSession(caps=caps)
+        svc, owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+        svc._record_capabilities(await svc._repo.get("g1"), session.info)
+        await svc.publish_space("sp-rot", "g1")
+        _url, body = next(p for p in session.posts if p[0].endswith("/publish"))
+        if bound:
+            assert body["gfs_key"] == _GFS_KP.public_key.hex()
+        else:
+            assert "gfs_key" not in body
+        signed = {k: v for k, v in body.items() if k != "signature"}
         canonical = json.dumps(signed, separators=(",", ":"), sort_keys=True).encode()
         assert verify_ed25519(
             owner.public_key, canonical, b64url_decode(body["signature"])
