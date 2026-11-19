@@ -531,9 +531,7 @@ async def test_a_remote_request_carries_the_coarse_home_only_with_consent(stack)
     assert payload["join_location"] == {"lat": 47.38, "lon": 8.54}
     # The applicant keeps its side of the request for a space it does not
     # hold (no ``spaces`` row here — migration 0111 dropped the FK).
-    rows = await stack.repo.list_pending_join_request_space_ids_for_user(
-        stack.carl.user_id
-    )
+    rows = await stack.svc.list_pending_join_request_space_ids(stack.carl.user_id)
     assert rows == ["sp-b"]
 
 
