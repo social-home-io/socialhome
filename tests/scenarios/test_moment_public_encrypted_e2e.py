@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -338,8 +339,10 @@ async def _post_moment(w, moment_id: str = MOMENT_ID) -> None:
         duration_ms=None,
         parent_moment_id=None,
         origin_instance_id="",
-        created_at="2026-10-20T08:00:00+00:00",
-        expires_at="2099-10-21T08:00:00+00:00",
+        # Relative to now: a create older than a moment's 30-day lifetime is
+        # refused as a replay, so a fixed date turns this test red a month on.
+        created_at=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+        expires_at=(datetime.now(UTC) + timedelta(hours=23)).isoformat(),
         is_public=True,
     )
     await w["author_moments"].save(moment)
