@@ -39,6 +39,7 @@ from socialhome.domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
     SpaceDelegationBlocked,
+    SpaceJoinRequested,
     SpaceMemberJoined,
     SpaceModerationQueued,
     SpacePostCreated,
@@ -8553,6 +8554,54 @@ async def test_an_admin_elevation_is_one_request_per_household_and_person(stack)
         space.id, actor_username="hosty"
     )
     assert [r["remote_applicant_instance_id"] for r in left] == ["peer-attacker"]
+
+
+async def test_two_concurrent_admin_redeems_from_one_household_file_one_request(
+    stack,
+):
+    """Two redeems of an admin link by one household at the same moment
+    both pass the "already on file?" read; the unique index (migration
+    0148) lets one insert through, and the admins are told once. A local
+    member's two concurrent redeems likewise."""
+    _owner, space, _fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-far", "u-far")
+    bob = await stack.provision_user("bob")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id,
+            user_id=bob.user_id,
+            role=SpaceRole.MEMBER,
+            joined_at="2026-01-01T00:00:00",
+        )
+    )
+    filed: list[SpaceJoinRequested] = []
+
+    async def _grab(event: SpaceJoinRequested) -> None:
+        filed.append(event)
+
+    stack.bus.subscribe(SpaceJoinRequested, _grab)
+
+    await asyncio.gather(
+        *(
+            stack.space_svc.file_admin_elevation_request(
+                space.id, "u-far", remote_instance_id="peer-far"
+            )
+            for _ in range(4)
+        ),
+        *(
+            stack.space_svc.file_admin_elevation_request(space.id, bob.user_id)
+            for _ in range(4)
+        ),
+    )
+
+    rows = await stack.space_repo.list_pending_join_requests(space.id)
+    assert sorted(
+        (r["remote_applicant_instance_id"] or "", r["user_id"]) for r in rows
+    ) == [
+        ("", bob.user_id),
+        ("peer-far", "u-far"),
+    ]
+    assert sorted(e.request_id for e in filed) == sorted(r["id"] for r in rows)
 
 
 async def test_a_local_admin_elevation_does_not_hide_a_remote_one(stack):

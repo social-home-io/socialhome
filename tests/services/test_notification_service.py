@@ -3955,13 +3955,14 @@ async def test_another_households_request_under_a_local_user_id_is_not_that_user
         own_instance_id="iid",
     )
     space = await space_svc.create_space(owner_username="anna", name="Club")
-    for rid in ("jr-a", "jr-b"):
+    # One pending elevation per household (migration 0148): two households.
+    for rid, household in (("jr-a", "peer-far"), ("jr-b", "peer-near")):
         await repo.save_join_request(
             space.id,
             bob.user_id,
             request_id=rid,
             requested_role="admin",
-            remote_applicant_instance_id="peer-far",
+            remote_applicant_instance_id=household,
         )
     await stack.bus.publish(
         SpaceJoinRequested(space_id=space.id, user_id=bob.user_id, request_id="jr-a")

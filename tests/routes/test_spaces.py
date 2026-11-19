@@ -15,6 +15,7 @@ from socialhome.app_keys import db_key as _db_key
 from socialhome.app_keys import (
     gfs_connection_service_key,
     notification_delivery_key,
+    space_repo_key,
     space_service_key,
 )
 from socialhome.auth import sha256_token_hash
@@ -2798,6 +2799,36 @@ async def test_my_join_requests_lists_only_own_pending(client):
     assert set(body["pending_space_ids"]) == {"sp-pend-1", "sp-pend-2"}
     assert "sp-done" not in body["pending_space_ids"]
     assert "sp-admin" not in body["pending_space_ids"]
+
+
+async def test_my_join_requests_leave_out_another_households(client):
+    """A request is keyed by (household, user id). Another household
+    asking to join a space hosted here — or holding a pending admin
+    request — under bob's user id is not bob's request: his space cards
+    show no "Request pending". His own outgoing request (it names the
+    host) does show."""
+    repo = client.app[space_repo_key]
+    admin = _auth(client._admin_token)
+    r = await client.post("/api/spaces", json={"name": "Hosted"}, headers=admin)
+    hosted = (await r.json())["id"]
+    r = await client.post("/api/spaces", json={"name": "Elevated"}, headers=admin)
+    elevated = (await r.json())["id"]
+    await repo.save_join_request(
+        hosted, client._bob_uid, remote_applicant_instance_id="peer-far"
+    )
+    await repo.save_join_request(
+        elevated,
+        client._bob_uid,
+        remote_applicant_instance_id="peer-far",
+        requested_role="admin",
+    )
+    await repo.save_join_request(
+        "a-space-elsewhere", client._bob_uid, remote_applicant_instance_id="host-far"
+    )
+
+    r = await client.get("/api/me/join-requests", headers=_auth(client._bob_token))
+    assert r.status == 200
+    assert (await r.json())["pending_space_ids"] == ["a-space-elsewhere"]
 
 
 async def test_my_join_requests_empty(client):

@@ -225,7 +225,7 @@ async def test_unpaired_household_asks_through_the_gfs_and_becomes_a_member(
         (request_id, a.user_id, MESSAGE)
     ]
     assert space.id in await a.space_repo.list_pending_join_request_space_ids_for_user(
-        a.user_id
+        a.user_id, own_instance_id=a.instance_id
     )
 
     joined: list[SpaceMemberJoined] = []

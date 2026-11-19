@@ -191,9 +191,16 @@ class SpaceSubscriberKeyInbound:
             if healed is None or not self._verify_authority(
                 space_id, envelope, healed.identity_public_key
             ):
-                log.warning(
+                # INFO, not WARNING: the everyday cause is a rotation race —
+                # the owner's new key reaches us over the GFS before its
+                # certificate does over our own path. The pin heals when the
+                # cert lands and the rotation bundle carries the same content
+                # key, so nothing is lost. A forged frame is dropped the same
+                # way; nothing is taken from either.
+                log.info(
                     "space_subscriber_key.inbound: authority signature failed "
-                    "for space %s",
+                    "for space %s — dropped (a key rotation may still be on "
+                    "its way)",
                     space_id,
                 )
                 return
@@ -281,9 +288,12 @@ class SpaceSubscriberKeyInbound:
             space.identity_public_key,
             event_type=AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
         ):
-            log.warning(
+            # INFO: the same rotation race as a key handoff (the new key
+            # can arrive over the GFS before its certificate); dropped.
+            log.info(
                 "space_subscriber_key.inbound: profiles bundle authority "
-                "signature failed for space %s",
+                "signature failed for space %s — dropped (a key rotation may "
+                "still be on its way)",
                 space_id,
             )
             return

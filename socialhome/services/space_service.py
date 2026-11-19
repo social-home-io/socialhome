@@ -8104,13 +8104,20 @@ class SpaceService(
                 and r.get("requested_role") == SpaceRole.ADMIN.value
             ):
                 return
+        # The read above is only the cheap path: two redeems arriving
+        # together both pass it. The unique index (migration 0148) lets one
+        # insert through; the other gets the id on file and announces nothing.
+        new_id = uuid.uuid4().hex
         rid = await self._spaces.save_join_request(
             space_id,
             user_id,
             requested_role=SpaceRole.ADMIN.value,
             remote_applicant_instance_id=remote_instance_id,
             remote_applicant_pk=remote_pk,
+            request_id=new_id,
         )
+        if rid != new_id:
+            return
         await self._bus.publish(
             SpaceJoinRequested(
                 space_id=space_id,
@@ -9765,6 +9772,7 @@ class SpaceService(
         the browser/detail cards after a reload."""
         return await self._spaces.list_pending_join_request_space_ids_for_user(
             user_id,
+            own_instance_id=self._own_instance_id,
         )
 
     async def is_subscribed(self, user_id: str, space_id: str) -> bool:
