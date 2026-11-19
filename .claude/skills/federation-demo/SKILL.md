@@ -2031,8 +2031,11 @@ id, a mailbox id or the space.
 
 ### ``members-parity-apps`` — a space's game tables for a paired/mesh member and a GFS-only member (owner acceptance gate, games)
 
-Prereqs: ``members-parity`` (same space, same members: **d** over the
-paired / mesh path, **e** only through the GFS). The games half of the
+Prereqs: ``members-parity``. Runs in the private space its last action left
+(a hosts it; **d** is a member over the paired / mesh path, seated by the
+admin b; **e** only through the GFS, joined by a ``gfs`` link) — the space
+the content actions use is a global one, and a global space never has game
+tables. The games half of the
 acceptance check for "every space member is equal, whichever way their
 household is reached". Installs the stand-in apps ``demo-table`` (3–6
 players) and ``demo-duel`` (two players) on a, d and e straight into

@@ -24379,6 +24379,10 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
         },
     )
     space_id = _must(f"{step}: a creates a private space", s, space, ok=(201,))["id"]
+    # ``members-parity-apps`` plays in this space: a global space (the one
+    # the content actions above use) never has game tables.
+    state["members_parity_private_space_id"] = space_id
+    _save(state)
     s, cur = _inst_request(state, "a", "GET", f"/api/spaces/{space_id}")
     feats = dict(_must(f"{step}: a reads the space", s, cur).get("features") or {})
     feats["private_gfs"] = True
@@ -25502,9 +25506,12 @@ def cmd_members_parity_apps() -> None:
     """Owner acceptance gate, games: a space's game tables work the same
     for every member, whichever way its household is reached (CLAUDE.md).
 
-    Prereqs: ``members-parity`` (a hosts the link-joined space
-    ``gfs_invite_space_id``; **d** is a member over the paired / mesh path,
-    **e** only through the GFS). Installs the stand-in apps ``demo-table``
+    Prereqs: ``members-parity``. Runs in the private space its last action
+    left (``members_parity_private_space_id``: a hosts it, **d** is a member
+    over the paired / mesh path — seated by the admin b —, **e** only
+    through the GFS, joined by a ``gfs`` link) — the space the content
+    actions use is a global one, and a global space never has game tables.
+    Installs the stand-in apps ``demo-table``
     (3–6 players) and ``demo-duel`` (two players) on a, d and e straight
     into ``installed_apps``. Every check polls with a bounded timeout and
     is reported PASS or DIFF (NOTE for what is by design); the step fails
@@ -25536,7 +25543,7 @@ def cmd_members_parity_apps() -> None:
     import sqlite3
 
     state = _load()
-    space_id = (state or {}).get("gfs_invite_space_id")
+    space_id = (state or {}).get("members_parity_private_space_id")
     if not state or not _gfs_alive(state) or not space_id:
         raise SystemExit("run the gfs chain through 'members-parity' first")
     step = "members-parity-apps"
