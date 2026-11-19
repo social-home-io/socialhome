@@ -26620,7 +26620,7 @@ def cmd_gfs_admin_seed() -> None:
     # that, is refused there (the stated residual of a rotation: an old-key
     # rekey still in flight is refused and not retried; a's own rotation
     # brings the next content key). Expected on a, for exactly that rekey.
-    late = _open_noise_window(
+    _open_noise_window(
         about="d",
         reason=f"{step}: d's old-key rekey reaches the owner after its rotation",
         witnesses=("a",),
@@ -26678,7 +26678,17 @@ def cmd_gfs_admin_seed() -> None:
     _admin_seed_probe(
         state, space_id, seed3, want=200, whose="d's seed (K3)", step=step
     )
-    _close_noise_windows(late)
+    # d's rekey for a must have left d's outbox — taken or refused, it has
+    # arrived — and the window then closes with the step's tail (a retry
+    # may land a little later than the row's last state shows).
+    _poll(
+        "d's rekey for a to leave d's outbox",
+        lambda: (
+            "space_key_exchange_rekey" not in _outbox_events("d", a["instance_id"])
+        ),
+        timeout=300.0,
+        interval=2.0,
+    )
 
     state = _load()
     state["gfs_admin_seed"] = {
