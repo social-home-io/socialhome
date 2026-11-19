@@ -16,6 +16,7 @@ from socialhome.domain.events import (
     PairingConfirmed,
     SpaceAuthorityEchoDue,
     SpaceInviteAnswered,
+    SpaceInviterReproofDue,
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
@@ -2756,3 +2757,55 @@ async def test_a_caught_up_gfs_only_owner_gets_the_authority_echo_every_tick(
     await _wait_checks(sched)
     assert sched._federation.mesh_fields[0]["sync_mode"] == "incremental"
     assert sched._federation.mesh_extras == [{"key_epoch": 0, "seed_held": False}]
+
+
+# ── A rotation: the inviting admin is asked for its fresh proof ───────────
+
+
+async def test_an_inviter_reproof_begins_with_a_paired_inviter(
+    bus, queue, sync_manager
+):
+    """``SpaceInviterReproofDue``: the incremental §25.6 BEGIN goes to the
+    admin household that invited us now — its sentinel carries the inviter
+    proof for the rotated key."""
+    sched, fed, _repo, _asked = _mod_sched(bus, queue, sync_manager, confirmed=True)
+    fed.confirmed.add("admin-b")
+    sched._federation_repo = _FakeFedRepo([_peer("host"), _peer("admin-b")])
+    sched.wire()
+    await queue.start()
+    try:
+        await bus.publish(
+            SpaceInviterReproofDue(space_id="sp-1", inviter_instance_id="admin-b")
+        )
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    (begin,) = [
+        s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN
+    ]
+    assert begin["to"] == "admin-b"
+    assert begin["payload"]["sync_mode"] == "incremental"
+
+
+async def test_an_inviter_reproof_reaches_a_mesh_only_inviter(bus, queue, sync_manager):
+    sched, fed, _repo, _asked = _mod_sched(bus, queue, sync_manager, confirmed=False)
+    await sched._on_inviter_reproof_due(
+        SpaceInviterReproofDue(space_id="sp-1", inviter_instance_id="admin-b")
+    )
+    assert fed.mesh_catchups == [("sp-1", "admin-b")]
+    assert fed.mesh_fields[0]["sync_mode"] == "incremental"
+
+
+async def test_an_inviter_reproof_for_a_gone_space_or_ourselves_is_a_no_op(
+    bus, queue, sync_manager
+):
+    sched, fed, repo, _asked = _mod_sched(bus, queue, sync_manager, confirmed=False)
+    for inviter in ("self", "host", ""):  # us, the owner (always host), nobody
+        await sched._on_inviter_reproof_due(
+            SpaceInviterReproofDue(space_id="sp-1", inviter_instance_id=inviter)
+        )
+    repo.get = AsyncMock(return_value=None)
+    await sched._on_inviter_reproof_due(
+        SpaceInviterReproofDue(space_id="sp-gone", inviter_instance_id="admin-b")
+    )
+    assert fed.mesh_catchups == [] and fed.sent == []

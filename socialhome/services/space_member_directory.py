@@ -1068,10 +1068,20 @@ class SpaceMemberDirectory:
         for card in stored:
             if card.instance_id != issuer:
                 await self._seat(card)
+        # Read before our card goes out below: a first send in this very
+        # frame is not an unanswered one yet.
+        unanswered = await self._unanswered_hosts(space_id)
         await self._publish_to_host(space_id, issuer, host_is_v89=True)
         # Another host's card may just have arrived (the owner's, in the
         # directory of the admin that invited us): it gets our card too.
         await self._publish_to_hosts(space_id)
+        # The space HAS a directory (this frame), yet a household acting as
+        # its host that we gave our card to never sent us one: our card
+        # never got there (the owner's gate refuses a household it knows no
+        # seat of yet — the admin seated us while it was away). Again, now.
+        for host in unanswered:
+            if host != issuer:
+                await self._ask(space_id, host)
         if (news or gone or relist) and await self.serves(space_id):
             # We act as host for the households we invited: what the owner
             # just told us goes on to them.
@@ -1196,20 +1206,40 @@ class SpaceMemberDirectory:
         await self._put(space_id, instance_id, doc)
         await self._drop_card(space_id, instance_id)
 
+    async def _unanswered_hosts(self, space_id: str) -> list[str]:
+        """The households acting as *space_id*'s host that have our card
+        (``sent``) and never gave us a directory (no ``dir_seq``, none
+        coming in). Sending a card is no proof it was taken: a host that
+        knows no seat of ours yet refuses it, and nothing tells us."""
+        out = []
+        for host in await self._hosts(space_id):
+            doc = await self._doc(space_id, host)
+            if (
+                "sent" in doc
+                and not _is_count(doc.get("dir_seq"))
+                and (space_id, host) not in self._snap_in
+            ):
+                out.append(host)
+        return out
+
     async def _drop_lapsed(self, space_id: str) -> None:
         """The trust in a host ended, or we stopped acting as one: its
         version line goes (a resumed trust starts from a fresh snapshot)
         and so does every household only it listed — the owner's directory
-        is what counts again."""
+        is what counts again. A host still acting that never gave us its
+        directory is asked for it now (:meth:`_unanswered_hosts`): what the
+        lapsed one listed is gone until it answers."""
         hosts = await self.hosts_of(space_id)
         if not hosts:
             return
         serving = await self.serves(space_id)
+        lapsed = False
         for (space, inst), doc in sorted((await self._rows()).items()):
             if space != space_id or inst == self._instance_id:
                 continue
             changed = False
             if inst not in hosts and ("dir_seq" in doc or "sent" in doc):
+                lapsed = lapsed or "dir_seq" in doc
                 for key in ("dir_seq", "sent", "sent_digest", "host_proto", "wait"):
                     doc.pop(key, None)
                 self._snap_in.pop((space_id, inst), None)
@@ -1228,6 +1258,9 @@ class SpaceMemberDirectory:
                 await self._end_seat(inst)
             if changed:
                 await self._put(space_id, inst, doc)
+        if lapsed:
+            for host in await self._unanswered_hosts(space_id):
+                await self._ask(space_id, host)
 
     def _complete(
         self, space_id: str, issuer: str, payload: dict[str, Any], seq: int
@@ -1370,14 +1403,17 @@ class SpaceMemberDirectory:
         old = await self.card_of(space_id, sender)
         changed = await self._store(space_id, card)
         await self._mark_direct(space_id, sender)
-        await self._mark_seated(space_id, sender)
+        first = await self._mark_seated(space_id, sender)
         # A first card, or the same card again, is the household's "I am
         # seated": it gets a snapshot (at most once per
         # :data:`HELLO_RESNAPSHOT_S`). A NEWER card (a rotation) is only a
-        # delta.
+        # delta — unless it is the first the household gave us itself (we
+        # held its card only because a delegated admin passed it on): it
+        # holds no version of ours a delta could build on.
         snapshot_to = (
             {sender}
-            if (old is None or not changed) and self._may_resnapshot(space_id, sender)
+            if (first or old is None or not changed)
+            and self._may_resnapshot(space_id, sender)
             else set()
         )
         await self.reconcile(

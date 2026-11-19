@@ -25,6 +25,7 @@ from socialhome.domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceAuthorityEchoDue,
+    SpaceInviterReproofDue,
 )
 from socialhome.domain.federation import (
     DeliveryResult,
@@ -1516,3 +1517,73 @@ async def test_a_rotation_says_so_when_a_gfs_still_owes_the_repin(env, caplog):
         "2 connection server(s) still pin the retired key" in r.getMessage()
         for r in caplog.records
     )
+
+
+# ── A rotation asks the inviting admin for its fresh proof at once ────────
+
+
+async def _rotated_for_an_invitee(env, *, inviter_role="admin"):
+    """The owner rotates; the bundle it sent "v44" is what a member
+    household that "v43" invited (proved at epoch 0) receives."""
+    await env.remote.set_role(SPACE, "v43", "u-v43", inviter_role)
+    await env.spaces.set_invited_by(SPACE, "v43", 0)
+    due: list = []
+
+    async def _rec(event):
+        due.append((event.space_id, event.inviter_instance_id))
+
+    env.bus.subscribe(SpaceInviterReproofDue, _rec)
+    await env.svc.rotate(SPACE)
+    _member, handler = await _member_env(env)
+    bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+
+    async def deliver(sender=env.fed.own_instance_id):
+        await handler(
+            FederationEvent(
+                msg_id=str(uuid.uuid4()),
+                event_type=FET.SPACE_AUTHORITY_ROTATED,
+                from_instance=sender,
+                to_instance="member-household",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload=bundle,
+                space_id=SPACE,
+            )
+        )
+
+    return due, deliver
+
+
+async def test_a_rotation_asks_the_inviting_admin_for_its_fresh_proof(env):
+    """The key rotated: the admin that invited us proved the OLD key's
+    seed, so it stops acting as host here until its §25.6 sentinel carries
+    a proof for the new one. We ask for that stream now, not at the next
+    periodic sync (30 minutes of a valid admin not counting)."""
+    due, deliver = await _rotated_for_an_invitee(env)
+    await deliver()
+    assert due == [(SPACE, "v43")]
+    # Re-proved meanwhile: a redelivered bundle asks for nothing.
+    epoch = (await env.spaces.get(SPACE)).authority_key_epoch
+    await env.spaces.set_invited_by_epoch(SPACE, epoch)
+    await deliver()
+    assert len(due) == 1
+
+
+async def test_a_bundle_not_from_the_owner_asks_the_inviter_for_nothing(env):
+    due, deliver = await _rotated_for_an_invitee(env)
+    await deliver(sender="v44")
+    assert due == []
+
+
+async def test_an_inviter_without_an_admin_seat_is_not_asked(env):
+    """The rotation revoked the very admin that invited us (its seat is a
+    member's now): no proof can come from it."""
+    due, deliver = await _rotated_for_an_invitee(env, inviter_role="member")
+    await deliver()
+    assert due == []
+
+
+async def test_a_household_nobody_but_the_owner_invited_asks_nobody(env):
+    due, deliver = await _rotated_for_an_invitee(env)
+    await env.spaces.set_invited_by(SPACE, None)
+    await deliver()
+    assert due == []

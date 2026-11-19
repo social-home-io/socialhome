@@ -2567,7 +2567,12 @@ config, invite, rotation bundle and §25.6 sync sentinel it sends. The trust
 is also bound to the key epoch the admin PROVED (`spaces.invited_by_epoch`):
 after a rotation it resumes only when the admin re-proves with the NEW seed —
 an honest delegated admin's §25.6 sentinel carries its fresh inviter proof
-(`own_inviter_proof`), checked against the sender. A moved pin, the owner's
+(`own_inviter_proof`), checked against the sender. A household that takes the
+owner's rotation bundle asks its inviting admin for that stream at once (an
+incremental `SPACE_SYNC_BEGIN`, only while that admin still holds an admin
+seat by the bundle's roster), so a valid admin is host again within one sync
+rather than at the next periodic tick; the owner hands the admins it keeps
+their new seed before the bundles go out. A moved pin, the owner's
 fresh statement or the admin's own roster never resume it on their own, so an
 admin revoked by the rotation (no new seed) stays out (see discovery.md,
 "Statements expire and follow the key"). **If the owner stays unreachable for more than 30 days**, the
