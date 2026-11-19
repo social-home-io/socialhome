@@ -25880,26 +25880,6 @@ def _admin_seed_await_seed(label: str, space_id: str, pin: str, step: str) -> by
         ) from None
 
 
-def _admin_seed_early_handoff_window(space_id: str, step: str) -> list[int]:
-    """Opened right before the owner a rotates the lab space's authority
-    key. A member household holds its fan-out seat on the GFS from the
-    moment it joins, so the GFS fans a's ``space_subscriber_key_handoff`` —
-    signed with the NEW key — to b and d too. It travels a -> GFS -> member,
-    the owner's cert for that key travels a -> member over the pairing or
-    the mesh, and the two race. When the handoff wins, the member refuses
-    it (it pins the old key, and only the owner's cert moves a member's
-    pin — never a GFS's word), logs one WARNING and takes the content key
-    from the rotation bundle a moment later. Expected for exactly this
-    space's handoff, on the members, while the rotation lasts."""
-    return _open_noise_window(
-        about="a",
-        reason=f"{step}: the new-key handoff reaches a member before the owner's cert",
-        witnesses=("b", "d"),
-        named=("space_subscriber_key.inbound: authority signature failed for space",),
-        names=[space_id],
-    )
-
-
 def _admin_seed_await_rotation(
     state: dict,
     space_id: str,
@@ -26579,13 +26559,11 @@ def cmd_gfs_admin_seed() -> None:
         }
     finally:
         conn.close()
-    early = _admin_seed_early_handoff_window(space_id, step)
     s, body = _inst_request(state, "a", "DELETE", e_url)
     _must(f"{step}: a removes e", s, body, ok=(200,))
     k2, epoch2 = _admin_seed_await_rotation(
         state, space_id, old_pin=k1, old_epoch=epoch1, members=("d",), step=step
     )
-    _close_noise_windows(early)
     _admin_seed_seat_gone(state, space_id, step)
     _admin_seed_probe(
         state, space_id, seed1, want=403, whose="e's old seed (K1)", step=step
@@ -26642,7 +26620,6 @@ def cmd_gfs_admin_seed() -> None:
         )
         print("  a offline: d (admin) removed e on its own household ✓")
     finally:
-        early = _admin_seed_early_handoff_window(space_id, step)
         _admin_seed_respawn_owner()
     # d rekeyed the content when it removed e, signed with K2. a first hears
     # of the removal and retires K2 — so d's rekey, when it reaches a after
@@ -26666,7 +26643,6 @@ def cmd_gfs_admin_seed() -> None:
         step=step,
         timeout=300.0,
     )
-    _close_noise_windows(early)
     row = _remote_member_row("a", space_id, e["user_id"])
     if row is None or int(row.get("tombstoned") or 0) != 1:
         raise SystemExit(f"{step}: a rotated but still seats e: {row!r}")
