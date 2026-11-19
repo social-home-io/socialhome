@@ -7276,6 +7276,21 @@ class SpaceService(
                 "rotate_and_distribute_space_key: rekey broadcast failed for %s",
                 space_id,
             )
+        # A private space's channel: every member household renews its seat
+        # when this rekey reaches it. A delegated admin that ran the
+        # rotation renews its own on the same trigger, now — not earlier
+        # (right after its notice it would be the first seat on the new
+        # epoch) and at no moment of its own, or the connection server
+        # could tell which household rotated. No-op for the owner.
+        if self._member_gfs is not None:
+            try:
+                await self._member_gfs.channel_rekey_sent(space_id)
+            except Exception:
+                log.exception(
+                    "rotate_and_distribute_space_key: renewing our own "
+                    "channel seat failed for %s",
+                    space_id,
+                )
         # GFS subscribers (not member households — see the docstring). Never
         # raises by contract, but stay defensive: the kick already succeeded.
         if self._subscriber_keys is not None:

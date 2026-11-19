@@ -293,3 +293,98 @@ async def test_one_gfs_cannot_replay_the_pin_only_publish_to_another(tmp_path):
             assert a_row.withdrawn is True
             assert a_row.identity_public_key == k2.public_key.hex()
         await db.shutdown()
+
+
+async def test_one_gfs_cannot_replay_a_listing_publish_to_another(tmp_path):
+    """A normal listing publish lists a space. The owner lists it on GFS A
+    only; A replays the body verbatim, inside the ``ts`` window, to GFS B —
+    where the owner is registered too but never listed the space. B must
+    refuse it: the addressed server's key is inside the owner-signed bytes.
+    Stripped of the field, the signature no longer verifies."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    app_a = create_gfs_app(db_path=tmp_path / "a" / "gfs.db")
+    app_b = create_gfs_app(db_path=tmp_path / "b" / "gfs.db")
+    async with (
+        TestClient(TestServer(app_a)) as ga,
+        TestClient(TestServer(app_b)) as gb,
+    ):
+        owner = generate_identity_keypair()
+        owner_id = derive_instance_id(owner.public_key)
+        db = AsyncDatabase(tmp_path / "hfs.db", batch_timeout_ms=10)
+        await db.startup()
+        conn_repo = SqliteGfsConnectionRepo(db)
+        for cid, gfs in (("A", ga), ("B", gb)):
+            await gfs.server.app[gfs_fed_repo_key].upsert_instance(
+                ClientInstance(
+                    instance_id=owner_id,
+                    display_name="Owner",
+                    public_key=owner.public_key.hex(),
+                    status="active",
+                    auto_accept=True,
+                )
+            )
+            await conn_repo.save(
+                GfsConnection(
+                    id=cid,
+                    gfs_instance_id="gfs-" + cid,
+                    display_name=cid,
+                    public_key=await _served_key(gfs),
+                    inbox_url=str(gfs.make_url("")).rstrip("/"),
+                    status="active",
+                    paired_at="2026-01-01T00:00:00+00:00",
+                )
+            )
+        space_repo = SqliteSpaceRepo(db, key_manager=KeyManager(b"\x05" * 32))
+        k1 = generate_identity_keypair()
+        await space_repo.save(
+            Space(
+                id=_SPACE,
+                name="Only on A",
+                owner_instance_id=owner_id,
+                owner_username="alice",
+                identity_public_key=k1.public_key.hex(),
+                config_sequence=0,
+                features=SpaceFeatures(),
+                space_type=SpaceType.GLOBAL,
+                join_mode=JoinMode.OPEN,
+            )
+        )
+        await space_repo.set_space_seed(_SPACE, k1.private_key)
+        sent: list[tuple[str, dict]] = []
+
+        class _Recording:
+            def __init__(self, session):
+                self._session = session
+
+            def post(self, url, **kw):
+                sent.append((url, kw.get("json") or {}))
+                return self._session.post(url, **kw)
+
+            def __getattr__(self, name):
+                return getattr(self._session, name)
+
+        async with aiohttp.ClientSession() as session:
+            rec = _Recording(session)
+            svc = GfsConnectionService(conn_repo, http_client=rec, publish_client=rec)
+            svc.attach_publish_context(
+                space_repo=space_repo,
+                own_instance_id=owner_id,
+                own_signing_key=owner.private_key,
+            )
+            svc._authority_rotation["A"] = True
+            svc._withdrawn_repin["A"] = True
+            await svc.publish_space(_SPACE, "A")
+            listing = next(b for u, b in sent if u.endswith("/publish"))
+            assert await _served_key(ga) != await _served_key(gb)
+            a_repo = ga.server.app[gfs_fed_repo_key]
+            b_repo = gb.server.app[gfs_fed_repo_key]
+            assert (await a_repo.get_space(_SPACE)).name == "Only on A"
+            path = f"/gfs/spaces/{_SPACE}/publish"
+            replayed = await gb.post(path, json=listing)
+            assert replayed.status == 403
+            assert await b_repo.get_space(_SPACE) is None
+            stripped = {k: v for k, v in listing.items() if k != "gfs_key"}
+            assert (await gb.post(path, json=stripped)).status == 403
+            assert await b_repo.get_space(_SPACE) is None
+        await db.shutdown()
