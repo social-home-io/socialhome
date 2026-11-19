@@ -1282,6 +1282,48 @@ async def test_rtc_peer_publishes_transport_changed_on_close():
     assert received[0].transport == "https"
 
 
+async def test_close_all_at_shutdown_announces_no_transport_change():
+    """``close_all`` is the shutdown path: the database closes right after
+    it. A ``PeerTransportChanged`` published from there reached
+    ``RealtimeService`` once the database was gone ("Cannot operate on a
+    closed database" on every stop of a household with an open peer), and
+    told nobody anything: the WebSockets are already closed."""
+    bus = EventBus()
+    received: list[PeerTransportChanged] = []
+
+    async def _record(e: PeerTransportChanged) -> None:
+        received.append(e)
+
+    bus.subscribe(PeerTransportChanged, _record)
+
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=_FakeSignaler(),
+        bus=bus,
+    )
+    peer = _RtcPeer(
+        instance_id="peer-sd",
+        signaling=t._signaling_factory("peer-sd"),
+        inbound=t._inbound_factory("peer-sd"),
+        bus=bus,
+    )
+    peer._open.set()
+    peer._loop = asyncio.get_running_loop()
+    await peer._publish_open_if_needed()
+    t._peers["peer-sd"] = peer
+    received.clear()
+
+    await t.close_all()
+    # A publish would ride a task of its own — give it every chance to run.
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert t.peer_count() == 0
+    assert received == []
+    assert peer._teardown_task is None
+
+
 async def test_rtc_peer_does_not_publish_close_without_prior_open():
     """A peer that never opened doesn't publish a spurious 'https' on close.
     The transport never *flipped* — it was always HTTPS."""
