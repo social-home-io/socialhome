@@ -25,6 +25,7 @@ from socialhome.domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceAuthorityEchoDue,
+    SpaceFeaturesApplied,
     SpaceInviterReproofDue,
 )
 from socialhome.domain.federation import (
@@ -355,6 +356,40 @@ async def test_bundle_parts_not_signed_by_the_new_key_are_ignored(env):
     assert got.identity_public_key == k2.public_key.hex()  # the cert applied
     assert got.name == "S"  # K1-signed config ignored
     assert await env.crypto.get_current_epoch(SPACE) == epoch_before  # bad suite
+
+
+async def test_an_applied_bundle_announces_the_stored_space(env):
+    """A rotation bundle moves the pin (dropping a seed for the old key) and
+    can carry a new owner GFS list: followers of ``SpaceFeaturesApplied``
+    (the GFS-needed bell) re-read the space after it was applied."""
+    k2 = generate_identity_keypair()
+    cert = sign_authority_cert(
+        space_id=SPACE,
+        owner_instance_id=env.fed.own_instance_id,
+        owner_seed=env.fed.own_identity_seed,
+        owner_pk_hex=env.fed.own_identity_pk.hex(),
+        authority_pk_hex=k2.public_key.hex(),
+        key_epoch=1,
+    )
+    seen: list[bytes | None] = []
+
+    async def _on_applied(event: SpaceFeaturesApplied) -> None:
+        seen.append(await env.spaces.get_space_seed(event.space_id))
+
+    env.bus.subscribe(SpaceFeaturesApplied, _on_applied)
+    _member, handler = await _member_env(env)
+    await handler(
+        FederationEvent(
+            msg_id="m",
+            event_type=FET.SPACE_AUTHORITY_ROTATED,
+            from_instance=env.fed.own_instance_id,
+            to_instance="member-household",
+            timestamp=datetime.now(UTC).isoformat(),
+            payload={"space_id": SPACE, "authority_cert": cert},
+            space_id=SPACE,
+        )
+    )
+    assert seen == [None]
 
 
 async def test_public_space_republishes_then_reseals(env):

@@ -265,6 +265,22 @@ def test_a_new_photos_row_keeps_its_count_album_and_kinds():
     assert (bad.items, bad.album) == (None, None)
 
 
+def test_a_gfs_needed_row_keeps_the_gfss_it_told_of():
+    p = first_params(None, gfs=("https://a.example", "https://b.example"))
+    raw = p.to_dict()
+    assert raw["gfs"] == ["https://a.example", "https://b.example"]
+    assert NotificationParams.from_dict(raw) == p
+    assert "gfs" not in first_params(NotificationActor("ben")).to_dict()
+    # The newest event's set wins; one without a set keeps the row's.
+    assert regroup(p, None, reopen=False, gfs=("https://c.example",)).gfs == (
+        "https://c.example",
+    )
+    assert regroup(p, None, reopen=True).gfs == p.gfs
+    bad = NotificationParams.from_dict({"gfs": ["", 7, "https://a.example"]})
+    assert bad.gfs == ("https://a.example",)
+    assert NotificationParams.from_dict({"gfs": "https://a.example"}).gfs == ()
+
+
 def test_a_bad_others_count_reads_as_none():
     for bad in (-1, "3", True, 1.5, None):
         assert NotificationParams.from_dict({"others": bad}).others is None

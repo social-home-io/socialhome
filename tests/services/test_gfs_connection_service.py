@@ -727,6 +727,60 @@ async def test_pair_success(env):
     assert saved is not None
 
 
+def _pair_session(status: str) -> _StubSession:
+    return _StubSession(
+        method_responses={
+            "GET": (
+                200,
+                {
+                    "gfs_instance_id": "remote-gfs-id",
+                    "public_key": "bb" * 32,
+                    "server_name": "Test GFS",
+                },
+            ),
+            "POST": (200, {"status": status}),
+        },
+    )
+
+
+async def test_an_active_pairing_runs_the_connected_hooks(env):
+    """A new active connection may be one a space this household stands in
+    for was missing (the GFS-needed bell) — the hooks hear it, in order,
+    one failing never skipping the next."""
+    _, repo = env
+    session = _pair_session("registered")
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    heard: list[str] = []
+
+    async def _boom(conn):
+        raise RuntimeError("boom")
+
+    async def _hook(conn):
+        heard.append(conn.status)
+
+    svc.attach_on_connected(_boom)
+    svc.attach_on_connected(_hook)
+    await svc.pair({"gfs_url": "https://gfs.example.com", "token": "t"}, **_OWN_PAIR_KW)
+    assert heard == ["active"]
+
+
+async def test_a_pending_pairing_runs_no_connected_hook(env):
+    _, repo = env
+    session = _pair_session("pending")
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    heard: list[str] = []
+
+    async def _hook(conn):
+        heard.append(conn.status)
+
+    svc.attach_on_connected(_hook)
+    conn = await svc.pair(
+        {"gfs_url": "https://gfs.example.com", "token": "t"}, **_OWN_PAIR_KW
+    )
+    assert conn.status == "pending"
+    assert heard == []
+
+
 async def test_pair_ships_keywrap_pubkey_and_kem_suite(env):
     _, repo = env
     session = _StubSession(

@@ -304,6 +304,10 @@ class NotificationParams:
       written, so the client builds the sentence in the reader's language
       (``space_name`` stays the space's, for a space album). Never in a
       push.
+    * ``gfs`` — on a "your household isn't on this space's GFSs" row
+      (``space_gfs_needed``): the addresses of the GFSs it told of, so the
+      same GFS is told of once until it is connected or leaves the list;
+      ``()`` on every other row. Never in a push.
     """
 
     actors: tuple[NotificationActor, ...] = ()
@@ -316,6 +320,7 @@ class NotificationParams:
     others: int | None = None
     items: int | None = None
     album: str | None = None
+    gfs: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -336,6 +341,8 @@ class NotificationParams:
             out["items"] = self.items
         if self.album is not None:
             out["album"] = self.album
+        if self.gfs:
+            out["gfs"] = list(self.gfs)
         return out
 
     @classmethod
@@ -358,6 +365,7 @@ class NotificationParams:
         others = raw.get("others")
         items = raw.get("items")
         album = raw.get("album")
+        gfs = raw.get("gfs")
         return cls(
             actors=actors,
             actor_count=_count(raw.get("actor_count"), len(actors)),
@@ -385,6 +393,11 @@ class NotificationParams:
                 else None
             ),
             album=album if isinstance(album, str) else None,
+            gfs=(
+                tuple(sorted({g for g in gfs if isinstance(g, str) and g}))
+                if isinstance(gfs, list)
+                else ()
+            ),
         )
 
 
@@ -402,6 +415,7 @@ def first_params(
     others: int | None = None,
     items: int | None = None,
     album: str | None = None,
+    gfs: tuple[str, ...] = (),
 ) -> NotificationParams:
     """A fresh row's params: one event, by *actor* (``None`` for a notice
     nobody caused)."""
@@ -416,6 +430,7 @@ def first_params(
         others=others,
         items=items,
         album=album,
+        gfs=gfs,
     )
 
 
@@ -429,6 +444,7 @@ def regroup(
     others: int | None = None,
     items: int | None = None,
     album: str | None = None,
+    gfs: tuple[str, ...] = (),
 ) -> NotificationParams:
     """*old*'s params after one more event by *actor*.
 
@@ -441,13 +457,15 @@ def regroup(
     New activity is new work: a "Needs you" row that had been handled is
     pending again (no ``handled``), with this event's *flags*. *others*
     (a group game's count) and *items* (a "new photos" row's count, which
-    the handler already added up) are this event's, else the row's."""
+    the handler already added up) are this event's, else the row's; so is
+    *gfs* (the GFSs a ``space_gfs_needed`` row told of)."""
     if old is None:
         old = NotificationParams()
     space_name = space_name or old.space_name
     others = others if others is not None else old.others
     items = items if items is not None else old.items
     album = album if album is not None else old.album
+    gfs = gfs or old.gfs
     if reopen:
         fresh = first_params(actor, space_name=space_name, flags=flags, others=others)
         return NotificationParams(
@@ -460,6 +478,7 @@ def regroup(
             others=others,
             items=items,
             album=album,
+            gfs=gfs,
         )
     actors = old.actors
     count = old.actor_count
@@ -477,6 +496,7 @@ def regroup(
         others=others,
         items=items,
         album=album,
+        gfs=gfs,
     )
 
 

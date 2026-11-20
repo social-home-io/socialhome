@@ -53,7 +53,7 @@ whom a guardian block (§CP.F2) separates from them. Each call names its
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -193,6 +193,7 @@ from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
+    Space,
     SpaceConfigEventType,
     SpaceFeatureAccess,
     SpaceRole,
@@ -334,6 +335,7 @@ class _Pending:
     others: int | None = None
     items: int | None = None
     album: str | None = None
+    gfs: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -619,6 +621,18 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
         ("notification.push.gallery_added", "New photos from {name}"),
         ("notification.push.gallery_added_anon", "New photos"),
     ),
+    # Not on every GFS of a space this household stands in for: the space,
+    # never which GFSs (the bell lists them).
+    "space_gfs_needed": (
+        (
+            "notification.push.space_gfs_needed",
+            "Your household isn't connected to every GFS of {space_name}",
+        ),
+        (
+            "notification.push.space_gfs_needed_anon",
+            "Your household isn't connected to every GFS of a space",
+        ),
+    ),
     # An admin put your private album in the trash (D7): who, never the
     # album — its name can be the secret.
     "gallery_album_trashed": (
@@ -648,6 +662,10 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
 #: Rows that are a decision about the recipient's own content: they stay
 #: when the thing itself is deleted (the author still learns what happened).
 _DECISION_TYPES: frozenset[str] = frozenset({"post_moderated", "moderation_decided"})
+
+#: "Your household isn't on every GFS of a space it stands in for" — kept
+#: in line by :meth:`NotificationService.reconcile_space_gfs_needed`.
+_GFS_NEEDED_TYPE: str = "space_gfs_needed"
 
 #: The notice that a space ended — it outlives the space's other rows.
 _SPACE_ENDED_TYPES: frozenset[str] = frozenset({"space_dissolved"})
@@ -826,6 +844,7 @@ def _grouped(
     others: int | None = None,
     items: int | None = None,
     album: str | None = None,
+    gfs: tuple[str, ...] = (),
 ) -> tuple[Notification, bool, bool]:
     """``(row to write, reopened, silent)`` for *note* joining *group*.
 
@@ -847,6 +866,7 @@ def _grouped(
                 others=others,
                 items=items,
                 album=album,
+                gfs=gfs,
             ),
         )
         return saved, False, not push
@@ -867,6 +887,7 @@ def _grouped(
             others=others,
             items=items,
             album=album,
+            gfs=gfs,
         ),
     )
     reopened = group.is_read
@@ -1148,6 +1169,7 @@ class NotificationService(ProtectionGateMixin):
         others: int | None = None,
         items: int | None = None,
         album: str | None = None,
+        gfs: tuple[str, ...] = (),
     ) -> Notification | None:
         """The one gate every notification passes, then persist + publish
         ``NotificationCreated`` + fire title-only pushes to every registered
@@ -1196,7 +1218,8 @@ class NotificationService(ProtectionGateMixin):
         (:data:`~socialhome.domain.notification.JOIN_REQUEST_FLAGS`).
         ``others`` is a group game's count (``params.others``, v_76);
         ``items`` and ``album`` a "new photos" row's (``params.items`` /
-        ``params.album``, D9).
+        ``params.album``, D9); ``gfs`` a "not on every GFS" row's
+        (``params.gfs``).
 
         What the recipient chose (D4, D10, :meth:`_heard`) comes last: a
         muted post or a kind set to Off → no row; a kind set to In app → a
@@ -1243,6 +1266,7 @@ class NotificationService(ProtectionGateMixin):
                     others,
                     items,
                     album,
+                    gfs,
                 )
             )
             return None
@@ -1253,7 +1277,7 @@ class NotificationService(ProtectionGateMixin):
             since=_group_since(),
         )
         saved, reopened, silent = _grouped(
-            note, group, about, actor, push, flags, others, items, album
+            note, group, about, actor, push, flags, others, items, album, gfs
         )
         if group is None:
             await self._notifs.save(saved)
@@ -1322,6 +1346,7 @@ class NotificationService(ProtectionGateMixin):
                 item.others,
                 item.items,
                 item.album,
+                item.gfs,
             )
             # A second event for the same group in this job joins the row
             # the first one made, as it would one save at a time.
@@ -5642,6 +5667,97 @@ class NotificationService(ProtectionGateMixin):
                     NotificationObject.SPACE, event.space_id, space_id=event.space_id
                 ),
                 actor_user_id=None,
+            )
+
+    async def reconcile_space_gfs_needed(
+        self, space: Space, missing: Sequence[tuple[str, str]]
+    ) -> None:
+        """Bring the "your household isn't on every GFS of *space*" bell in
+        line with *missing* — ``(address, name)`` of each GFS on the owner's
+        list this household isn't connected to, empty when it is on all of
+        them or doesn't stand in for the host (see
+        :class:`~socialhome.services.space_gfs_needed_service.SpaceGfsNeededService`).
+
+        One row per household admin who is a member of the space (an admin
+        outside it never learns the space's name from a bell), about the
+        space, listing the missing GFSs and opening the space, whose notice
+        has the Connect button. ``params.gfs`` records the GFSs a row told
+        of, so each is told of once:
+
+        * a GFS missing that the pending row doesn't name → the row names
+          all missing ones and comes to the top; it pushes when it starts
+          or re-opens a read row (a repeat on a row still unread is silent,
+          D8), unless the reader chose In app for Needs you;
+        * a told-of GFS connected or delisted while others still miss → the
+          row drops it in place (no reopen, no push), so it is told of again
+          if it goes missing later;
+        * nothing missing → every pending row is resolved (``done``)."""
+        key = object_key(NotificationObject.SPACE, space.id)
+        rows = await self._notifs.find(
+            Spec(
+                where=[("object_key", "=", key), ("type", "=", _GFS_NEEDED_TYPE)],
+            )
+        )
+        pending: dict[str, Notification] = {}
+        for row in rows:
+            if row.params is not None and row.params.handled is not None:
+                continue
+            held = pending.get(row.user_id)
+            if held is None or row.created_at > held.created_at:
+                pending[row.user_id] = row
+        if not missing:
+            if pending:
+                await self._resolve(key, types=(_GFS_NEEDED_TYPE,), outcome="done")
+            return
+        wanted = tuple(sorted({url for url, _ in missing}))
+        names = {url: name or url for url, name in missing}
+        told: set[str] = set()
+        for admin in await self._active_users():
+            if not admin.is_admin:
+                continue
+            seat = await self._spaces.get_member(space.id, admin.user_id)
+            if seat is None or seat.role == SpaceRole.SUBSCRIBER:
+                continue
+            told.add(admin.user_id)
+            mine = pending.get(admin.user_id)
+            had = set(mine.params.gfs) if mine is not None and mine.params else set()
+            title = self._t(
+                "notification.space.gfs_needed",
+                locale=self._locale(admin),
+                fallback=(
+                    "Connect your household to {gfs} so it can stand in for "
+                    "the host of {space_name}"
+                ),
+                gfs=", ".join(names[url] for url in wanted),
+                space_name=space.name,
+            )
+            if set(wanted) - had:
+                await self._save_notif(
+                    new_notification(
+                        user_id=admin.user_id,
+                        type=_GFS_NEEDED_TYPE,
+                        title=title,
+                        link_url=f"/spaces/{space.id}",
+                    ),
+                    about=NotificationSubject.of(
+                        NotificationObject.SPACE,
+                        space.id,
+                        space_id=space.id,
+                        space_name=space.name,
+                    ),
+                    actor_user_id=None,
+                    push_params={"space_name": space.name},
+                    gfs=wanted,
+                )
+            elif mine is not None and mine.params is not None and had != set(wanted):
+                # A told-of GFS is fine now: forget it, quietly.
+                await self._notifs.update_group(
+                    replace(mine, title=title, params=replace(mine.params, gfs=wanted))
+                )
+        for user_id in pending.keys() - told:
+            # No longer a household admin in the space: nothing for them.
+            await self._resolve(
+                key, types=(_GFS_NEEDED_TYPE,), outcome="done", user_id=user_id
             )
 
     async def on_delegation_blocked(self, event: SpaceDelegationBlocked) -> None:

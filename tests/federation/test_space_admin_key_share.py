@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from socialhome.crypto import ed25519_public_key
+from socialhome.domain.events import SpaceAdminSeedStored
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -117,6 +118,35 @@ async def test_accepts_seed_from_owner_with_delegation_on(tmp_dir):
         await h._on_admin_key_share(_event(_share_payload()))
         stored = await space_repo.get_space_seed(SPACE_ID)
         assert stored == GOOD_SEED
+    finally:
+        await db.shutdown()
+
+
+async def test_a_stored_seed_announces_the_seat_locally(tmp_dir):
+    """The household now stands in for the host: a local
+    ``SpaceAdminSeedStored`` lets its admins hear whether it is on every
+    GFS of the space (the GFS-needed bell)."""
+    h, _space_repo, db = await _make_handler(tmp_dir, delegation=True)
+    try:
+        await h._on_admin_key_share(_event(_share_payload()))
+        published = [c.args[0] for c in h._bus.publish.await_args_list]
+        assert any(
+            isinstance(e, SpaceAdminSeedStored) and e.space_id == SPACE_ID
+            for e in published
+        )
+    finally:
+        await db.shutdown()
+
+
+async def test_a_dropped_seed_announces_nothing(tmp_dir):
+    h, _space_repo, db = await _make_handler(tmp_dir, delegation=False)
+    try:
+        await h._on_admin_key_share(_event(_share_payload()))
+        assert not [
+            c
+            for c in h._bus.publish.await_args_list
+            if isinstance(c.args[0], SpaceAdminSeedStored)
+        ]
     finally:
         await db.shutdown()
 

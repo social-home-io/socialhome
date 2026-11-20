@@ -5200,6 +5200,38 @@ async def test_owner_turning_delegation_off_clears_our_seed(db, bus, inbound):
     assert await repo.get_space_seed("sp-off") is None
 
 
+async def test_features_applied_follows_the_dropped_seed(db, bus, inbound):
+    """A follower of ``SpaceFeaturesApplied`` (the GFS-needed bell) sees the
+    stored state AFTER the owner's off-flip dropped our seed — not a seat
+    this household no longer holds."""
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    repo = await _seeded_admin_stub(
+        db, space_id="sp-off2", owner_instance="owner-i", kp=kp
+    )
+    inbound._space_repo = repo
+    _own_instance(inbound, "admin-i")
+    seen: list[bytes | None] = []
+
+    async def _on_applied(event: SpaceFeaturesApplied) -> None:
+        seen.append(await repo.get_space_seed(event.space_id))
+
+    bus.subscribe(SpaceFeaturesApplied, _on_applied)
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-off2",
+            from_instance="owner-i",
+            owner_instance="owner-i",
+            sequence=6,
+            name="Off",
+            seed=kp.private_key,
+            features={"delegated_admin_authority": False},
+        )
+    )
+    assert seen == [None]
+
+
 async def test_a_co_admin_cannot_strip_our_seed_with_a_signed_off_flip(
     db, bus, inbound
 ):

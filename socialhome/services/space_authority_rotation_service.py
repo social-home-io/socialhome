@@ -91,6 +91,7 @@ from ..domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceAuthorityEchoDue,
+    SpaceFeaturesApplied,
     SpaceInviterReproofDue,
     SpaceRemoteSeatLive,
 )
@@ -1418,6 +1419,9 @@ class SpaceAuthorityRotationService:
         # the original) must not interleave their resets.
         async with self._lock(space_id):
             if await self._apply_bundle(space_id, p, event.from_instance):
+                # Followers re-read the stored space: a moved pin (our seed
+                # for the old key is gone) or the owner's newer GFS list.
+                await self._bus.publish(SpaceFeaturesApplied(space_id=space_id))
                 await self._ask_inviter_again(space_id)
             # v_49 — our writer cert under the (now pinned) new key, from the
             # owner household only (the bundle's sender). The cert also
