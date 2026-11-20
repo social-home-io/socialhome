@@ -48,6 +48,7 @@ import orjson
 
 from ..crypto import b64url_decode, b64url_encode
 from ..db import AsyncDatabase
+from ..domain.home_location import coarse_home_for_peer_or_none
 from ..infrastructure.key_manager import KeyManager, KeyManagerError
 from .recovery_crypto import seal_kit, unseal_kit
 
@@ -249,6 +250,18 @@ class RecoveryKitService:
     def _insert_row(conn: sqlite3.Connection, table: str, row: dict) -> None:
         if not row:
             return
+        if table == "remote_instances" and ("home_lat" in row or "home_lon" in row):
+            # A kit built before peer homes were coarsened still carries
+            # a 4 dp peer home: keep only the ~3 km cell centre, as every
+            # other write of these columns does.
+            coarse = coarse_home_for_peer_or_none(
+                row.get("home_lat"), row.get("home_lon")
+            )
+            row = {
+                **row,
+                "home_lat": coarse[0] if coarse else None,
+                "home_lon": coarse[1] if coarse else None,
+            }
         cols = list(row.keys())
         col_list = ", ".join(cols)
         placeholders = ", ".join("?" for _ in cols)

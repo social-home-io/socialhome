@@ -20,6 +20,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.recovery_crypto import (
     RecoveryKitError,
@@ -443,3 +444,34 @@ async def test_restored_salt_matches_source(populated, empty_target):
 
     assert (dst_dir / ".kek_salt").read_bytes() == src_salt
     assert b64url_decode(b64url_encode(src_salt)) == src_salt
+
+
+async def test_restore_keeps_a_peer_home_only_as_the_coarse_point(
+    populated, empty_target
+):
+    """A kit built before peer homes were coarsened still carries a 4 dp
+    peer home: the restore stores only the ~3 km cell centre, and our own
+    home keeps 4 dp."""
+    src_dir, src_db, _iid, _seed = populated
+    dst_dir, dst_db = empty_target
+    await src_db.enqueue(
+        "UPDATE remote_instances SET home_lat=52.5201, home_lon=13.4049"
+        " WHERE id='peer-iid'"
+    )
+    await src_db.enqueue(
+        "UPDATE instance_identity SET home_lat=47.3769, home_lon=8.5417 WHERE id='self'"
+    )
+    kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
+
+    await RecoveryKitService(dst_db, dst_dir).restore_kit(kit, PASS)
+
+    peer = await dst_db.fetchone(
+        "SELECT home_lat, home_lon FROM remote_instances WHERE id='peer-iid'"
+    )
+    assert (peer["home_lat"], peer["home_lon"]) == coarse_home_for_peer(
+        52.5201, 13.4049
+    )
+    own = await dst_db.fetchone(
+        "SELECT home_lat, home_lon FROM instance_identity WHERE id='self'"
+    )
+    assert (own["home_lat"], own["home_lon"]) == (47.3769, 8.5417)

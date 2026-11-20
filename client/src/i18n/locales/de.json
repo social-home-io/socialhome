@@ -2378,6 +2378,7 @@
   "connections.map.you_sub": "Dieses Social Home",
   "connections.map.not_on_map": "Nicht auf der Karte",
   "connections.map.no_coords": "Gekoppelt, aber noch kein Standort.",
+  "connections.map.home_approx": "Ungefähre Gegend, auf etwa 3 km genau",
   "nav.organize": "Organize",
   "nav.chats": "Chats",
   "nav.highlights": "Highlights",

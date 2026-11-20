@@ -20,12 +20,17 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
+from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.federation.pairing_coordinator import PairingCoordinator
 from socialhome.federation.peer_pairing_client import (
     sign_peer_body,
 )
 from socialhome.infrastructure.key_manager import KeyManager
 from tests.pairing_fakes import SavesPendingMixin
+
+#: What a paired household gets of the 52.52, 13.40 home: the ~3 km
+#: cell centre (``coarse_home_for_peer``).
+_SHARED = coarse_home_for_peer(52.52, 13.40)
 
 
 class _FakeRepo(SavesPendingMixin):
@@ -194,8 +199,8 @@ async def test_accept_peer_accept_body_carries_home_coords_when_set():
 
     assert len(captured) == 1
     body = captured[0]["body"]
-    assert body.get("home_lat") == 52.52
-    assert body.get("home_lon") == 13.40
+    assert body.get("home_lat") == _SHARED[0]
+    assert body.get("home_lon") == _SHARED[1]
 
 
 async def test_accept_peer_accept_body_omits_home_coords_when_none():
@@ -269,8 +274,8 @@ async def test_handle_peer_accept_populates_home_coords_on_remote_instance():
     b_iid = derive_instance_id(kp_b.public_key)
     stored = repo_a.instances.get(b_iid)
     assert stored is not None
-    assert stored.home_lat == 52.52
-    assert stored.home_lon == 13.40
+    assert stored.home_lat == _SHARED[0]
+    assert stored.home_lon == _SHARED[1]
 
 
 async def test_handle_peer_accept_home_coords_none_when_absent_from_body():

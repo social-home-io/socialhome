@@ -214,14 +214,17 @@ function markersFor(data: FriendsPayload, model: FriendsModel): LocationMarker[]
   for (const h of data.households) {
     if (h.home_lat === null || h.home_lon === null) continue
     const n = counts.get(h.instance_id) ?? 0
+    // A paired household's home reaches us only as a ~3 km area (the
+    // centre of its grid cell), never the house: say so.
+    const people = `${peopleCount(n)} · ${t('connections.map.home_approx')}`
     out.push({
       id: h.instance_id,
       lat: h.home_lat,
       lon: h.home_lon,
       label: h.display_name,
       sub_label: h.reachable
-        ? peopleCount(n)
-        : `${peopleCount(n)} · ${unreachableText(h.unreachable_since)}`,
+        ? people
+        : `${people} · ${unreachableText(h.unreachable_since)}`,
       state: h.reachable ? 'zone' : 'away',
       glyph: '🏠',
     })

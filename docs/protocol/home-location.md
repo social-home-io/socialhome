@@ -1,10 +1,13 @@
 # Home location (federation map)
 
-The home-location surface lets every household broadcast its physical
-coordinates to confirmed peers so a map view can show where each paired
-household sits in the world. Coordinates are coarse — truncated to 4
-decimal places (~11 m) per §GPS-truncation, which is precise enough for
-a city-level pin but not a street address.
+The home-location surface lets every household share where it is with
+the paired households it chose (`share_home`) so a map view can show
+where each paired household sits in the world. What leaves the household
+is an **area, not the house**: the centre of the ~3 km grid cell the home
+lies in (`coarse_home_for_peer`, owner decision 2026-11-20) — at most
+about 2.4 km from the real home, enough for "they live in that part of
+town" and never a street. The household's own home stays at 4 decimal
+places (~11 m) on its own side.
 
 ## Scope
 
@@ -37,9 +40,10 @@ sequenceDiagram
     Adapter->>Bus: publish LocalHomeLocationUpdated
 
     Bus->>Fed: on_local_home_location_updated
-    loop for each confirmed peer @ proto_version >= 5
-        Fed->>Peer: LOCAL_HOME_LOCATION_CHANGED<br/>{ latitude, longitude }
-        Peer->>Peer: UPDATE remote_instances<br/>SET home_lat, home_lon
+    Fed->>Fed: coarse_home_for_peer(lat, lon)<br/>(~3 km cell centre)
+    loop for each confirmed peer @ proto_version >= 5 with share_home on
+        Fed->>Peer: LOCAL_HOME_LOCATION_CHANGED<br/>{ latitude, longitude } (cell centre)
+        Peer->>Peer: coarse_home_for_peer again<br/>UPDATE remote_instances<br/>SET home_lat, home_lon
         Peer->>Bus: publish PeerHomeChanged
     end
 ```
@@ -87,20 +91,47 @@ without waiting for a subsequent `LOCAL_HOME_LOCATION_CHANGED` broadcast.
 The row it creates carries the same `share_home` switch, so the later
 fan-out keeps honouring it.
 
-## GPS precision
+## Precision: the household keeps 4 dp, a paired household gets ~3 km
 
-All latitude / longitude values are truncated to **4 decimal places**
-before any storage or transmission — `round(float(val), 4)`. This
-applies at three enforcement points:
+The household's own home (`instance_identity.home_lat` / `home_lon`) is
+truncated to **4 decimal places** (~11 m) when the adapter reads it from
+HA Core or an admin sets it — it stays in the household (its own pin,
+the Home zone, the local-community check, Discover sorting).
 
-1. **Adapter `on_startup`** — when the value is read from HA Core.
-2. **Pairing coordinator** — when `home_lat` / `home_lon` go into or
-   arrive in the pairing code or the `PAIRING_PEER_ACCEPT` body.
-3. **Inbound handler** — when `LOCAL_HOME_LOCATION_CHANGED` is
-   processed.
+A paired household only ever gets the **centre of the ~3 km grid cell**
+the home lies in — `coarse_home_for_peer` in
+`socialhome/domain/home_location.py`:
 
-Raw device precision is never stored. See [`../principles.md`](../principles.md)
-§ GPS truncation and [`../database.md`](../database.md) conventions.
+- Latitude snaps to a 0.03° grid (~3.3 km north–south); longitude to a
+  grid of whole cells around the circle of latitude, each about 3 km wide
+  east–west (`0.03° / cos(latitude)`, floored at cos = 0.1 near the
+  poles). The point sent is the cell's centre, at 4 dp.
+- Deterministic and idempotent: the same home always gives the same
+  point (sending it again, or a move within the same cell, tells
+  the peer nothing new), and a centre snaps to itself.
+- At most about 2.4 km (half the cell's diagonal) from the real home.
+
+Enforcement points — the sender coarsens, and the receiver coarsens
+again so a household still on an older release (which sends 4 dp) is
+never stored precisely:
+
+1. **Senders** — the pairing code and `PAIRING_PEER_ACCEPT`
+   (`pairing_coordinator._home_fields`), the `LOCAL_HOME_LOCATION_CHANGED`
+   fan-out (`FederationService._on_local_home_location_updated`) and the
+   one-shot send when `share_home` flips on (`PeerHomeSharingService`).
+2. **Receivers** — the pairing coordinator (code scanned, peer-accept
+   received) and the inbound `LOCAL_HOME_LOCATION_CHANGED` handler; a
+   missing or out-of-range value is "no home".
+3. **The repository** — every write of `remote_instances.home_lat` /
+   `home_lon` (`SqliteFederationRepo`) goes through the same helper, and
+   migration `0149_coarsen_peer_homes.py` rewrote the homes already
+   received.
+
+No `proto_version` bump: the fields are the same, only coarser, and an
+older receiver simply stores the coarse point. The SPA says so on the
+peer's pin ("Approximate area, within about 3 km"). See
+[`../principles.md`](../principles.md) § People's locations are never
+shared by design.
 
 ## SPA — Connections Map tab
 
@@ -111,7 +142,8 @@ renders an OpenStreetMap canvas (Leaflet) with:
   home_lon` value from `GET /api/pairing/connections`.
 - One pin per confirmed peer that has coordinates, marked with a
   transport-indicator badge (⚡ WebRTC DataChannel, ☁ HTTPS inbox).
-- A distance and 8-point compass bearing popup when a pin is tapped.
+- A distance and 8-point compass bearing popup when a pin is tapped,
+  and a line saying the peer's home is an approximate area (~3 km).
 - A "Not on map" footer listing peers whose coordinates are NULL (e.g.
   standalone instances without a configured location).
 
@@ -154,9 +186,12 @@ gate prevents further coord updates from reaching that peer anyway.
   hook.
 - `socialhome/platform/ha_home_location.py` — shared helper that
   fetches `/api/config` and persists via `FederationRepo`.
-- `socialhome/repositories/federation_repo.py` — `update_instance_home`
-  updates `instance_identity`; `update_remote_instance_home` updates
-  `remote_instances`.
+- `socialhome/domain/home_location.py` — `coarse_home_for_peer` /
+  `coarse_home_for_peer_or_none`, `PEER_HOME_GRID_DEG`.
+- `socialhome/repositories/federation_repo.py` — `set_local_home_location`
+  updates `instance_identity`; `update_instance_home` (and every other
+  write of the peer's home) stores `remote_instances.home_lat` /
+  `home_lon` as the cell centre.
 - `socialhome/domain/events.py` — `LocalHomeLocationUpdated`,
   `PeerHomeChanged` (internal bus events).
 - `socialhome/domain/federation.py` — `FederationEventType.LOCAL_HOME_LOCATION_CHANGED`,

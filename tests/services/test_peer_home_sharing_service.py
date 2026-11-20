@@ -12,6 +12,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.services.peer_home_sharing_service import (
     PeerHomeSharingService,
     UnknownInstanceError,
@@ -115,7 +116,8 @@ async def test_set_share_home_off_sends_null_coords_envelope():
 
 
 async def test_set_share_home_on_sends_current_coords():
-    """Turning share_home ON sends the current local coords to the peer."""
+    """Turning share_home ON sends the current home to the peer — as the
+    ~3 km cell centre, never the 4 dp home."""
     peer = _peer("peer-1", share_home=False)
     repo = _FakeFederationRepo([peer], local_lat=52.52, local_lon=13.405)
     fed = AsyncMock()
@@ -127,10 +129,11 @@ async def test_set_share_home_on_sends_current_coords():
     await svc.set_share_home("peer-1", value=True, set_by="admin")
 
     assert repo.share_home_calls == [("peer-1", True)]
+    lat, lon = coarse_home_for_peer(52.52, 13.405)
     fed.send_event.assert_awaited_once_with(
         to_instance_id="peer-1",
         event_type=FederationEventType.LOCAL_HOME_LOCATION_CHANGED,
-        payload={"latitude": 52.52, "longitude": 13.405},
+        payload={"latitude": lat, "longitude": lon},
     )
 
 

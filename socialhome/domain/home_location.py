@@ -1,9 +1,10 @@
 """The household's own home location — where "our home" is on the map.
 
 One point per household (``instance_identity.home_lat`` / ``home_lon``,
-4 dp). It stays in the household: it is shared with a paired household
-only through that pair's ``share_home`` switch, and a ~1 km version of it
-rides a local-community join only after the person agreed
+4 dp). The 4 dp point stays in the household. A paired household gets
+only an area of about 3 km (:func:`coarse_home_for_peer`), and only
+through that pair's ``share_home`` switch; a ~1 km version rides a
+local-community join only after the person agreed
 (``docs/protocol/local-communities.md``).
 
 Where it comes from is the platform's business
@@ -21,14 +22,29 @@ from .errors import CodedError
 
 __all__ = [
     "HOME_LOCATION_PRECISION_DP",
+    "PEER_HOME_GRID_DEG",
     "HomeLocation",
     "HomeLocationFromPlatformError",
     "InvalidHomeLocationError",
+    "coarse_home_for_peer",
+    "coarse_home_for_peer_or_none",
     "validate_home_location",
 ]
 
 #: Stored precision (§2 GPS rule: 4 dp, about 11 m).
 HOME_LOCATION_PRECISION_DP = 4
+
+#: Side of the grid cell a paired household sees our home in, in degrees
+#: of latitude: 0.03° is about 3.3 km north–south. East–west the cell is
+#: widened by ``1 / cos(latitude)`` so it stays about 3 km wide away from
+#: the equator. The home is shown as the cell's centre, at most about
+#: 2.4 km (half the cell's diagonal) from the real one — an area of town,
+#: never a street (owner decision 2026-11-20).
+PEER_HOME_GRID_DEG = 0.03
+
+#: Floor for ``cos(latitude)`` when widening a cell east–west, so the cells
+#: near the poles do not grow to a whole ring of longitude.
+_MIN_COS_LAT = 0.1
 
 
 @dataclass(slots=True, frozen=True)
@@ -81,3 +97,46 @@ def validate_home_location(latitude: object, longitude: object) -> tuple[float, 
         raise InvalidHomeLocationError()
     # ``+ 0.0`` folds a rounded ``-0.0`` into ``0.0``.
     return lat + 0.0, lon + 0.0
+
+
+def coarse_home_for_peer(latitude: object, longitude: object) -> tuple[float, float]:
+    """The home a paired household gets: the centre of the ~3 km grid cell
+    (:data:`PEER_HOME_GRID_DEG`) the home lies in, at 4 dp.
+
+    Deterministic — the same home always gives the same point, so sending
+    it again (or a move within the same cell) tells nothing more —
+    and idempotent: a centre snaps to itself, so a receiver that coarsens
+    an already coarse point again keeps it. Both the sender and the
+    receiver run it. :class:`InvalidHomeLocationError` for a value
+    :func:`validate_home_location` refuses.
+    """
+    lat, lon = validate_home_location(latitude, longitude)
+    grid = PEER_HOME_GRID_DEG
+    lat_cells = round(180.0 / grid)
+    lat_cell = min(math.floor((lat + 90.0) / grid), lat_cells - 1)
+    lat_centre = -90.0 + (lat_cell + 0.5) * grid
+    # Whole cells around the circle of latitude, each about ``grid`` of
+    # latitude wide on the ground; derived from the snapped centre so every
+    # home in a lat band shares one lon grid.
+    cos_lat = max(math.cos(math.radians(lat_centre)), _MIN_COS_LAT)
+    lon_cells = max(1, int(360.0 * cos_lat / grid))
+    lon_width = 360.0 / lon_cells
+    lon_cell = min(math.floor((lon + 180.0) / lon_width), lon_cells - 1)
+    lon_centre = -180.0 + (lon_cell + 0.5) * lon_width
+    dp = HOME_LOCATION_PRECISION_DP
+    # ``+ 0.0`` folds a rounded ``-0.0`` into ``0.0``.
+    return round(lat_centre, dp) + 0.0, round(lon_centre, dp) + 0.0
+
+
+def coarse_home_for_peer_or_none(
+    latitude: object, longitude: object
+) -> tuple[float, float] | None:
+    """:func:`coarse_home_for_peer`, or ``None`` when either value is
+    missing or not a usable home — for a peer home received from another
+    household, where a bad value means "no home", never a precise one."""
+    if latitude is None or longitude is None:
+        return None
+    try:
+        return coarse_home_for_peer(latitude, longitude)
+    except InvalidHomeLocationError:
+        return None

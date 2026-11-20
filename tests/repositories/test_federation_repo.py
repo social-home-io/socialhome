@@ -17,6 +17,7 @@ from socialhome.domain.federation import (
     PeerGfsRoute,
     RemoteInstance,
 )
+from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
@@ -553,13 +554,14 @@ async def test_update_instance_home_writes_lat_lon(env):
     )
 
     got = await env.fed_repo.get_instance("peer-home")
-    assert got.home_lat == 52.52
-    assert got.home_lon == 13.40
+    assert (got.home_lat, got.home_lon) == coarse_home_for_peer(52.52, 13.40)
     assert got.display_name == "Bob"  # other columns intact
 
 
-async def test_update_instance_home_truncates_to_4dp(env):
-    """Inputs above 4dp precision are rounded — §25 invariant."""
+async def test_update_instance_home_stores_only_the_coarse_point(env):
+    """The repo is the choke point: whatever a caller passes, a peer home is
+    stored as the ~3 km cell centre, never 4 dp (owner decision
+    2026-11-20)."""
     inst = RemoteInstance(
         id="peer-prec",
         display_name="Carol",
@@ -579,8 +581,51 @@ async def test_update_instance_home_truncates_to_4dp(env):
     )
 
     got = await env.fed_repo.get_instance("peer-prec")
-    assert got.home_lat == 52.5235
-    assert got.home_lon == 13.4012
+    assert (got.home_lat, got.home_lon) == coarse_home_for_peer(52.523456, 13.401234)
+    assert got.home_lat != 52.5235
+
+
+async def test_update_instance_home_clears_on_none_or_a_bad_home(env):
+    inst = RemoteInstance(
+        id="peer-clear",
+        display_name="Dan",
+        remote_identity_pk="23" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="https://dan/wh",
+        local_inbox_id="wh-dan",
+        status=PairingStatus.CONFIRMED,
+        home_lat=52.515,
+        home_lon=13.3854,
+    )
+    await env.fed_repo.save_instance(inst)
+    await env.fed_repo.update_instance_home("peer-clear", latitude=None, longitude=None)
+    got = await env.fed_repo.get_instance("peer-clear")
+    assert (got.home_lat, got.home_lon) == (None, None)
+
+    await env.fed_repo.update_instance_home(
+        "peer-clear", latitude=123.0, longitude=13.4
+    )
+    got = await env.fed_repo.get_instance("peer-clear")
+    assert (got.home_lat, got.home_lon) == (None, None)
+
+
+async def test_save_instance_stores_a_peer_home_only_coarse(env):
+    inst = RemoteInstance(
+        id="peer-save",
+        display_name="Eve",
+        remote_identity_pk="24" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="https://eve/wh",
+        local_inbox_id="wh-eve",
+        status=PairingStatus.CONFIRMED,
+        home_lat=48.137154,
+        home_lon=11.576124,
+    )
+    await env.fed_repo.save_instance(inst)
+    got = await env.fed_repo.get_instance("peer-save")
+    assert (got.home_lat, got.home_lon) == coarse_home_for_peer(48.137154, 11.576124)
 
 
 async def test_update_instance_home_unknown_id_is_noop(env):
@@ -712,8 +757,7 @@ async def test_update_instance_home_with_nulls_clears_row(env):
         "peer-null-home", latitude=52.52, longitude=13.405
     )
     got = await env.fed_repo.get_instance("peer-null-home")
-    assert got.home_lat == 52.52
-    assert got.home_lon == 13.405
+    assert (got.home_lat, got.home_lon) == coarse_home_for_peer(52.52, 13.405)
     # …then clear them via None.
     await env.fed_repo.update_instance_home(
         "peer-null-home", latitude=None, longitude=None
@@ -1377,13 +1421,21 @@ async def test_promote_pending_instance_consumes_the_session_and_confirms(env):
     await env.fed_repo.save_instance(half)
     await env.fed_repo.create_pairing(_session("tok-a", "own-h"))
 
-    promoted = replace(half, status=PairingStatus.CONFIRMED, display_name="New")
+    promoted = replace(
+        half,
+        status=PairingStatus.CONFIRMED,
+        display_name="New",
+        home_lat=48.137154,
+        home_lon=11.576124,
+    )
     assert await env.fed_repo.promote_pending_instance(promoted, token="tok-a")
 
     got = await env.fed_repo.get_instance("peer-half")
     assert got is not None
     assert got.status is PairingStatus.CONFIRMED
     assert got.display_name == "New"
+    # A peer home is never stored finer than the ~3 km cell centre.
+    assert (got.home_lat, got.home_lon) == coarse_home_for_peer(48.137154, 11.576124)
     assert got.local_inbox_id == "own-h"
     assert await env.fed_repo.get_pairing("tok-a") is None
 

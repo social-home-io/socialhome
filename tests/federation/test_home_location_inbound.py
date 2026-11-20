@@ -16,6 +16,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.federation.federation_service import FederationService
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -97,20 +98,20 @@ async def test_inbound_home_location_updates_row_and_publishes_event():
     # Row updated
     inst = await fed_repo.get_instance("peer-1")
     assert inst is not None
-    assert inst.home_lat == 52.52
-    assert inst.home_lon == 13.405
+    # Stored (and published) as the ~3 km cell centre.
+    assert (inst.home_lat, inst.home_lon) == coarse_home_for_peer(52.52, 13.405)
 
     # Event published
     assert len(received) == 1
     ev = received[0]
     assert ev.instance_id == "peer-1"
-    assert ev.latitude == 52.52
-    assert ev.longitude == 13.405
+    assert (ev.latitude, ev.longitude) == coarse_home_for_peer(52.52, 13.405)
 
 
 @pytest.mark.asyncio
-async def test_inbound_home_location_truncates_to_4dp():
-    """Inbound coordinates are truncated to 4dp (belt-and-braces, §25)."""
+async def test_a_precise_inbound_home_is_stored_coarse():
+    """An older peer still sends its 4 dp (or finer) home: we keep only the
+    ~3 km cell centre, so no path stores a precise peer home."""
     svc, fed_repo, bus = _make_service()
     await fed_repo.save_instance(_peer("peer-2"))
 
@@ -123,12 +124,30 @@ async def test_inbound_home_location_truncates_to_4dp():
 
     inst = await fed_repo.get_instance("peer-2")
     assert inst is not None
-    assert inst.home_lat == round(52.520099999, 4)
-    assert inst.home_lon == round(13.405099999, 4)
+    expected = coarse_home_for_peer(52.520099999, 13.405099999)
+    assert (inst.home_lat, inst.home_lon) == expected
+    assert expected != (round(52.520099999, 4), round(13.405099999, 4))
     assert len(received) == 1
     ev = received[0]
-    assert ev.latitude == round(52.520099999, 4)
-    assert ev.longitude == round(13.405099999, 4)
+    assert (ev.latitude, ev.longitude) == expected
+
+
+@pytest.mark.asyncio
+async def test_an_out_of_range_inbound_home_is_ignored():
+    svc, fed_repo, bus = _make_service()
+    await fed_repo.save_instance(_peer("peer-9"))
+
+    received: list[PeerHomeChanged] = []
+    bus.subscribe(PeerHomeChanged, received.append)
+
+    await svc._on_local_home_location_changed(
+        _event("peer-9", {"latitude": 123.0, "longitude": 13.4})
+    )
+
+    inst = await fed_repo.get_instance("peer-9")
+    assert inst is not None
+    assert inst.home_lat is None
+    assert received == []
 
 
 @pytest.mark.asyncio

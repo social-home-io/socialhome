@@ -73,7 +73,8 @@ class FederationEventType(str, enum.Enum):
     #: Sent on startup when the local HA-sourced home GPS coordinates
     #: change vs. the previously-stored value, and on first boot of
     #: a fresh instance. Payload: ``{"latitude": float, "longitude":
-    #: float}`` (4dp-truncated per §25). Confirmed peers update
+    #: float}`` — the ~3 km grid-cell centre (``coarse_home_for_peer``),
+    #: never the 4 dp home; both null revokes. Confirmed peers update
     #: their :class:`RemoteInstance.home_lat` / ``home_lon`` columns
     #: so the SPA's federation map renders the move.
     LOCAL_HOME_LOCATION_CHANGED = "local_home_location_changed"
@@ -1317,7 +1318,7 @@ class RemoteInstance:
     #: ``None`` on every other peer (they have an address; nothing needs
     #: sealing).
     remote_keywrap_pk: str | None = None
-    home_lat: float | None = None  # 4dp-truncated
+    home_lat: float | None = None  # ~3 km cell centre (coarse_home_for_peer)
     home_lon: float | None = None
     paired_at: str | None = None
     created_at: str | None = None

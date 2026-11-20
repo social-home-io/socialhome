@@ -14223,10 +14223,14 @@ def cmd_verify() -> None:
     #     The assertion validates the full carry-through: seed → peer-accept →
     #     remote_instances → /api/friends response.
     #
-    #     Expected coords per label (4dp precision from schema):
-    #     a=Berlin(52.52,13.405), b=Hamburg(53.55,9.99), c=Frankfurt(50.11,8.68)
+    #     Expected coords per label: a paired household gets only the
+    #     centre of the ~3 km grid cell of the seeded home
+    #     (``coarse_home_for_peer``, owner decision 2026-11-20), never the
+    #     4 dp home itself.
+    from socialhome.domain.home_location import coarse_home_for_peer
+
     _expected_coords: dict[str, tuple[float, float]] = {
-        label: (_SEED_COORDS[label][0], _SEED_COORDS[label][1])
+        label: coarse_home_for_peer(*_SEED_COORDS[label])
         for label in ("a", "b", "c", "d")
     }
     for viewer in ("a", "b", "c"):
@@ -14259,10 +14263,7 @@ def cmd_verify() -> None:
                 )
             else:
                 exp_lat, exp_lon = _expected_coords[other]
-                # Compare at 4 dp (schema precision).
-                if round(lat, 4) != round(exp_lat, 4) or round(lon, 4) != round(
-                    exp_lon, 4
-                ):
+                if (lat, lon) != (exp_lat, exp_lon):
                     failures.append(
                         f"{viewer}: peer {other} home coords mismatch — "
                         f"got ({lat}, {lon}), expected ({exp_lat}, {exp_lon})",
@@ -14356,6 +14357,12 @@ def cmd_verify() -> None:
                 failures.append(
                     f"share_home ON: Bob still has NULL coords for Alpha "
                     f"after re-enable (row={row2!r})"
+                )
+            elif (row2[0], row2[1]) != _expected_coords["a"]:
+                failures.append(
+                    f"share_home ON: Bob holds Alpha's home as "
+                    f"({row2[0]}, {row2[1]}), expected the ~3 km cell centre "
+                    f"{_expected_coords['a']!r}"
                 )
             else:
                 print(

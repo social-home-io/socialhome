@@ -1358,7 +1358,8 @@ device precision, never cap-at-runtime-but-store-precise. Applied
 uniformly: presence updates, space zones, household zones, household
 location, public-space discovery rows, a local community's centre. (A
 join to a local community is coarser still: the joiner's home rounded to
-2 decimals, ~1 km.)
+2 decimals, ~1 km. So is the household home a paired household gets: the
+centre of a ~3 km grid cell, below.)
 
 ## People's locations are never shared by design
 
@@ -1374,6 +1375,17 @@ Never via a GFS, never as a side effect of joining a space. The one other
 place a household's location travels is a join to a local community, below:
 coarse (~1 km), with the person's explicit consent, to that space's host only.
 Every other federation payload is location-free.
+
+**The household home reaches a paired household only as an area
+(owner decision 2026-11-20).** What `share_home` sends is the centre of
+the ~3 km grid cell the home lies in (`coarse_home_for_peer`,
+[`protocol/home-location.md`](./protocol/home-location.md#precision-the-household-keeps-4-dp-a-paired-household-gets-3-km)),
+never the 4 dp house: a fixed grid, so sending it again tells nothing
+more; at most ~2.4 km from the real home. The receiver coarsens again
+and stores nothing finer (a household on an older release still sends
+4 dp). The household keeps its own home at 4 dp. DM location messages,
+space map pins, zones and place pins are unchanged — a person chooses
+each of those on purpose.
 
 Space locations are not people's locations, and still stay minimal.
 

@@ -20,6 +20,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.federation.federation_service import FederationService
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -95,7 +96,25 @@ async def test_local_home_location_fans_out_to_v5_confirmed_peer():
         assert (
             call_kwargs["event_type"] == FederationEventType.LOCAL_HOME_LOCATION_CHANGED
         )
-        assert call_kwargs["payload"] == {"latitude": 52.52, "longitude": 13.40}
+        # Only the ~3 km cell centre leaves the household, never the home.
+        lat, lon = coarse_home_for_peer(52.52, 13.40)
+        assert call_kwargs["payload"] == {"latitude": lat, "longitude": lon}
+        assert (lat, lon) != (52.52, 13.40)
+
+
+async def test_home_cleared_fans_out_null_coords():
+    """A home that is no longer set fans out the both-null revoke."""
+    _svc, fed_repo, bus = _make_service()
+    await fed_repo.save_instance(_peer("peer-v5", proto_version=5))
+
+    with patch(_SEND_EVENT_PATH, new_callable=AsyncMock) as mock_send:
+        await bus.publish(LocalHomeLocationUpdated(latitude=None, longitude=None))
+
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.kwargs["payload"] == {
+            "latitude": None,
+            "longitude": None,
+        }
 
 
 @pytest.mark.asyncio

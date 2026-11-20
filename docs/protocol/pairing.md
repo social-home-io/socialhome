@@ -116,8 +116,8 @@ sequenceDiagram
 | `sig_suite` | no | `"ed25519+mldsa65"` when B supports hybrid PQ signatures. |
 | `pq_identity_pk` | no | B's ML-DSA-65 public key (when `sig_suite` is hybrid). |
 | `pq_algorithm` | no | PQ algorithm name (when `sig_suite` is hybrid). |
-| `home_lat` | no | B's household latitude, truncated to 4 decimal places. Sent only when B's admin shares B's home with A ([below](#home-sharing-is-chosen-before-the-handshake)) and both `home_lat` and `home_lon` are available (HA / HAOS mode, or operator-configured). See [home-location.md](./home-location.md). |
-| `home_lon` | no | B's household longitude, truncated to 4 decimal places. |
+| `home_lat` | no | B's household latitude as the centre of its ~3 km grid cell (`coarse_home_for_peer`) — never the 4 dp home; A coarsens again on receipt. Sent only when B's admin shares B's home with A ([below](#home-sharing-is-chosen-before-the-handshake)) and both `home_lat` and `home_lon` are available (HA / HAOS mode, or operator-configured). See [home-location.md](./home-location.md). |
+| `home_lon` | no | B's household longitude, the same ~3 km cell centre. |
 | `keywrap_pk` | GFS reach | B's static X25519 key-wrap public key (hex) — what A seals relayed traffic to. |
 | `keywrap_sig` | GFS reach | Ed25519 self-signature of `keywrap_pk` by B's identity key (b64url). A verifies the binding and refuses the accept on a mismatch (fail closed). |
 | `keywrap_suite` | GFS reach | `"x25519"` (`keywrap_seal.KEM_SUITE_X25519`). Unknown or missing → refused, never defaulted. |

@@ -7,7 +7,8 @@ its map updates immediately:
 
 * OFF: empty coords ``{latitude: None, longitude: None}`` — the peer's
   inbound handler treats this as a revoke and clears its row.
-* ON: current local coords from ``instance_identity`` (via
+* ON: the current home from ``instance_identity`` as the ~3 km cell
+  centre (``coarse_home_for_peer``), never the 4 dp home (via
   :meth:`AbstractFederationRepo.get_local_identity`); if local coords are
   unset, no envelope is sent (the peer re-enters the fan-out as soon as HA
   Core pushes a location).
@@ -21,6 +22,7 @@ from __future__ import annotations
 import logging
 
 from ..domain.federation import FederationEventType
+from ..domain.home_location import coarse_home_for_peer_or_none
 from ..federation.federation_service import FederationService
 from ..repositories.federation_repo import AbstractFederationRepo
 
@@ -77,19 +79,17 @@ class PeerHomeSharingService:
             return
 
         # ON: send current local coords if we have any.
-        identity = await self._federation_repo.get_local_identity()
-        if (
-            identity is None
-            or identity.get("home_lat") is None
-            or identity.get("home_lon") is None
-        ):
+        identity = await self._federation_repo.get_local_identity() or {}
+        # Only the ~3 km cell centre leaves the household, never the 4 dp
+        # home.
+        coarse = coarse_home_for_peer_or_none(
+            identity.get("home_lat"), identity.get("home_lon")
+        )
+        if coarse is None:
             return  # no coords yet — peer will receive them on next HA location push
 
         await self._federation_service.send_event(
             to_instance_id=instance_id,
             event_type=FederationEventType.LOCAL_HOME_LOCATION_CHANGED,
-            payload={
-                "latitude": float(identity["home_lat"]),
-                "longitude": float(identity["home_lon"]),
-            },
+            payload={"latitude": coarse[0], "longitude": coarse[1]},
         )

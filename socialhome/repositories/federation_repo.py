@@ -27,6 +27,7 @@ from ..domain.federation import (
     PeerGfsRoute,
     RemoteInstance,
 )
+from ..domain.home_location import coarse_home_for_peer_or_none
 from .base import bool_col, row_to_dict, rows_to_dicts
 
 
@@ -738,17 +739,15 @@ class SqliteFederationRepo:
 
         Used by the inbound
         :data:`FederationEventType.LOCAL_HOME_LOCATION_CHANGED`
-        handler. Values are 4dp-truncated on write per §25 — the
-        inbound caller has already validated the body but we defend-
-        in-depth here. Pass ``None`` for both to clear the columns
+        handler. Stored as the ~3 km cell centre (:func:`_peer_home`) —
+        the inbound caller has already coarsened the body but we defend
+        in depth here. Pass ``None`` for both to clear the columns
         (revoke signal). Missing rows are silent no-ops (the §24.11
         inbound pipeline has already verified the sender is known).
         """
-        lat_db = round(float(latitude), 4) if latitude is not None else None
-        lon_db = round(float(longitude), 4) if longitude is not None else None
         await self._db.enqueue(
             "UPDATE remote_instances SET home_lat = ?, home_lon = ? WHERE id = ?",
-            (lat_db, lon_db, instance_id),
+            (*_peer_home(latitude, longitude), instance_id),
         )
 
     # ── GFS relay fallback (migration 0081) ────────────────────────────
@@ -1197,8 +1196,7 @@ def _instance_params(inst: RemoteInstance) -> tuple:
         int(inst.intro_relay_enabled),
         inst.relay_via,
         inst.remote_keywrap_pk,
-        inst.home_lat,
-        inst.home_lon,
+        *_peer_home(inst.home_lat, inst.home_lon),
         inst.paired_at,
         inst.created_at,
         inst.last_reachable_at,
@@ -1277,6 +1275,17 @@ def _drop_pairing_sessions(conn, inbox_id: str, peer_pk: str) -> list[str]:
     return tokens
 
 
+def _peer_home(
+    latitude: float | None, longitude: float | None
+) -> tuple[float | None, float | None]:
+    """The ``home_lat`` / ``home_lon`` values for a paired household's home:
+    the ~3 km cell centre (:func:`coarse_home_for_peer`), or both ``None``
+    for no (or no usable) home. Every write of the two columns goes
+    through here, so no path stores a precise peer home."""
+    coarse = coarse_home_for_peer_or_none(latitude, longitude)
+    return coarse if coarse is not None else (None, None)
+
+
 def _promote_params(inst: RemoteInstance) -> tuple:
     return (*_promote_set_params(inst), inst.id)
 
@@ -1298,8 +1307,7 @@ def _promote_set_params(inst: RemoteInstance) -> tuple:
         int(inst.intro_relay_enabled),
         inst.relay_via,
         inst.remote_keywrap_pk,
-        inst.home_lat,
-        inst.home_lon,
+        *_peer_home(inst.home_lat, inst.home_lon),
         inst.paired_at,
         inst.last_reachable_at,
         inst.unreachable_since,

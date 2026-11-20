@@ -69,6 +69,7 @@ from ..domain.federation import (
     pending_kind,
 )
 from ..domain.federation_capabilities import OURS
+from ..domain.home_location import coarse_home_for_peer_or_none
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..peer_url import validate_peer_url
@@ -116,18 +117,25 @@ def _relay_result(ok: bool) -> PeerPairingResult:
 
 def _home_fields(local: dict | None, *, share_home: bool) -> dict:
     """``{home_lat, home_lon}`` of this household for a pairing body — only
-    when ``share_home`` is on and a home is set, else ``{}``."""
-    if (
-        not share_home
-        or not local
-        or local.get("home_lat") is None
-        or local.get("home_lon") is None
-    ):
+    when ``share_home`` is on and a home is set, else ``{}``. Only the
+    ~3 km cell centre (:func:`coarse_home_for_peer`) leaves the household,
+    never the 4 dp home."""
+    if not share_home or not local:
         return {}
-    return {
-        "home_lat": round(float(local["home_lat"]), 4),
-        "home_lon": round(float(local["home_lon"]), 4),
-    }
+    coarse = coarse_home_for_peer_or_none(local.get("home_lat"), local.get("home_lon"))
+    if coarse is None:
+        return {}
+    return {"home_lat": coarse[0], "home_lon": coarse[1]}
+
+
+def _received_home(body: dict) -> dict:
+    """The ``home_lat`` / ``home_lon`` columns for a peer's pairing body: its
+    home as the ~3 km cell centre (an older peer still sends 4 dp), or both
+    ``None`` when it sent none or a bad one."""
+    coarse = coarse_home_for_peer_or_none(body.get("home_lat"), body.get("home_lon"))
+    if coarse is None:
+        return {"home_lat": None, "home_lon": None}
+    return {"home_lat": coarse[0], "home_lon": coarse[1]}
 
 
 def _stated_version(proto_version: object) -> int | None:
@@ -515,8 +523,8 @@ class PairingCoordinator:
         negotiated = negotiate(self._own_sig_suite, peer_suite)
 
         # Persist a provisional RemoteInstance. Mirror the QR's
-        # optional ``home_lat`` / ``home_lon`` onto the row at 4dp
-        # precision (same rule the schema enforces). The peer-confirm
+        # optional ``home_lat`` / ``home_lon`` onto the row as the ~3 km
+        # cell centre (``coarse_home_for_peer``). The peer-confirm
         # rebuild downstream preserves these, so a confirmed pair lands
         # with coords already populated — no wait for the next
         # ``LOCAL_HOME_LOCATION_CHANGED`` envelope.
@@ -537,16 +545,7 @@ class PairingCoordinator:
             gfs_relay=gfs_reach,
             paired_at=now.isoformat(),
             share_home=share_home,
-            home_lat=(
-                round(float(qr_payload["home_lat"]), 4)
-                if qr_payload.get("home_lat") is not None
-                else None
-            ),
-            home_lon=(
-                round(float(qr_payload["home_lon"]), 4)
-                if qr_payload.get("home_lon") is not None
-                else None
-            ),
+            **_received_home(qr_payload),
         )
         # Before anything is sent: the relayed confirm and every relayed
         # envelope from A must find the opt-in already set.
@@ -1044,16 +1043,7 @@ class PairingCoordinator:
             paired_at=now.isoformat(),
             # The choice the admin made when the code was minted.
             share_home=session.share_home,
-            home_lat=(
-                round(float(body["home_lat"]), 4)
-                if body.get("home_lat") is not None
-                else None
-            ),
-            home_lon=(
-                round(float(body["home_lon"]), 4)
-                if body.get("home_lon") is not None
-                else None
-            ),
+            **_received_home(body),
         )
         # Before the SAS reaches our admin: the relayed confirm path and
         # B's first relayed envelopes need the opt-in in place. Seed the
