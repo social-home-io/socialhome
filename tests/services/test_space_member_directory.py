@@ -29,9 +29,11 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.domain.gfs_mailbox import OwnMailbox
+from socialhome.domain.gfs_server import GFS_KEY_SUITE_ED25519, GfsServer
 from socialhome.domain.space import SpaceRole
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys, new_mailbox_root
 from socialhome.federation.member_card import build_card, verify_card
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.services import space_member_directory as smd
 from socialhome.services.gfs_envelope_sender import normalize_gfs_base
 from socialhome.services.space_member_directory import (
@@ -104,6 +106,8 @@ class FakeSpaceRepo:
         self.invited_by: dict[str, str] = {}
         self.seed: dict[str, bytes] = {}
         self.local_role = SpaceRole.MEMBER
+        #: The owner's signed GFS list per space (v_57).
+        self.gfs_servers: dict[str, object] = {}
 
     async def get(self, space_id):
         owner = self.owner.get(space_id)
@@ -119,6 +123,7 @@ class FakeSpaceRepo:
             features=SimpleNamespace(
                 delegated_admin_authority=space_id in self.delegated
             ),
+            gfs_servers=self.gfs_servers.get(space_id),
             identity_public_key=key,
             authority_key_epoch=0,
             # The owner's (already verified) statement for the pinned key.
@@ -228,6 +233,16 @@ class FakeMailboxes:
     def __init__(self) -> None:
         self.rev = 0
         self._boxes: dict[str, tuple] = {}
+        #: normalized GFS url → when it was demoted (failover).
+        self.demoted: dict[str, int] = {}
+        #: Our active GFS connections that take mailboxes.
+        self.connected: list[SimpleNamespace] = []
+
+    def demoted_at(self, url: str) -> int:
+        return self.demoted.get(normalize_gfs_base(url), 0) if url else 0
+
+    async def connected_gfs(self):
+        return list(self.connected)
 
     def add_box(self, url: str) -> None:
         keys = derive_mailbox_keys(new_mailbox_root(), "g" * 32, 1)
@@ -2387,9 +2402,11 @@ async def test_the_owner_lists_a_card_its_delegated_admin_passes_on():
     assert o.spaces.doc(SPACE, m["id"])["card"] == card_m.to_wire()
     assert o.spaces.doc(SPACE, m["id"])["gfs_reached"] is True
     assert o.seated == [m["id"]]  # a lazy seat: its own card now verifies
-    # Every member hears of m, flagged as GFS-reached.
+    # Every member hears of m, flagged as GFS-reached — and of our own card,
+    # which names our mailbox at m's GFS now (same mailbox rev, new
+    # content: one rev up, or members keep the old card).
     (delta,) = o.fed.to(admin["id"])
-    assert _ids(delta) == {m["id"]}
+    assert _ids(delta) == {m["id"], o.me["id"]}
     assert delta["payload"]["gfs_reached"] == [m["id"]]
     # The same card again changes nothing.
     o.fed.directories.clear()
@@ -2836,7 +2853,8 @@ async def test_a_passed_on_card_that_beats_its_roster_seat_waits_on_the_owner():
     assert o.spaces.doc(SPACE, m["id"])["gfs_reached"] is True
     assert o.seated == [m["id"]]
     (delta,) = o.fed.to(admin["id"])
-    assert _ids(delta) == {m["id"]}
+    # Our own card too: it names our mailbox at m's GFS now.
+    assert _ids(delta) == {m["id"], o.me["id"]}
     assert "wait" not in o.spaces.doc(SPACE, admin["id"])
 
 
@@ -3090,3 +3108,240 @@ async def test_a_household_first_heard_of_through_its_admin_gets_a_snapshot():
     o.fed.directories.clear()
     await o.card_from(m, _card(m, rev=3))
     assert all("snapshot" not in d["payload"] for d in o.fed.raw_to(m["id"]))
+
+
+# ── Failover: our card moves off a demoted GFS ─────────────────────────
+
+
+THIRD_GFS = "https://third-gfs.example.org"
+
+
+def _on_two_gfs(w: World, *, space_id: str = SPACE) -> None:
+    """Two GFS-reached members of *space_id*, one at GFS, one at
+    OTHER_GFS: we hold a mailbox at each, our card names GFS (sorted
+    first)."""
+    x, y = _hh(), _hh()
+    w.member(x, y, space_id=space_id)
+    for h, url in ((x, GFS), (y, OTHER_GFS)):
+        doc = w.spaces.doc(space_id, h["id"])
+        doc.update({"card": _card(h, gfs=url).to_wire(), "gfs_reached": True})
+        w.spaces.rows[space_id][h["id"]] = orjson.dumps(doc).decode()
+
+
+def _sent_gfs(w: World) -> list[str | None]:
+    return [(c["payload"]["card"]["mailbox"] or {}).get("gfs") for c in w.fed.cards]
+
+
+async def test_our_card_moves_off_a_demoted_gfs_once_with_a_newer_rev():
+    w, host = _member_world()
+    w.mailboxes.rev = 4
+    w.mailboxes.add_box(GFS)
+    w.mailboxes.add_box(OTHER_GFS)
+    _on_two_gfs(w)
+    assert await w.dir.publish_cards() == 1
+    assert _sent_gfs(w) == [GFS]
+    first = w.fed.cards[-1]["payload"]["card"]["rev"]
+    assert await w.dir.publish_cards() == 0  # nothing moved yet
+
+    w.mailboxes.demoted[GFS] = 1  # GFS stayed down past the threshold
+    await w.dir.on_own_change()
+    assert _sent_gfs(w) == [GFS, OTHER_GFS]
+    moved = verify_card(
+        w.fed.cards[-1]["payload"]["card"], expected_instance_id=w.me["id"]
+    )
+    assert moved.rev > first
+    assert w.fed.cards[-1]["to"] == host["id"]
+    await w.dir.on_own_change()
+    assert len(w.fed.cards) == 2  # one card per switch
+
+    # GFS comes back: nothing changes (its demotion stays).
+    await w.dir.publish_cards()
+    assert len(w.fed.cards) == 2
+    # OTHER_GFS fails in turn: back to GFS, demoted longer ago.
+    w.mailboxes.demoted[OTHER_GFS] = 2
+    await w.dir.on_own_change()
+    assert _sent_gfs(w) == [GFS, OTHER_GFS, GFS]
+
+
+async def test_no_move_without_another_mailbox_of_ours_for_that_space():
+    w, _host = _member_world()
+    w.mailboxes.rev = 4
+    w.mailboxes.add_box(GFS)
+    w.mailboxes.add_box(OTHER_GFS)  # held, but this space is not on it
+    gfs_only = _hh()
+    w.member(gfs_only)
+    await w.directory(
+        {"cards": [_card(gfs_only, gfs=GFS).to_wire()], "gfs_reached": [gfs_only["id"]]}
+    )
+    sent = len(w.fed.cards)
+    assert _sent_gfs(w)[-1] == GFS
+    w.mailboxes.demoted[GFS] = 1
+    await w.dir.on_own_change()
+    assert len(w.fed.cards) == sent
+    own = await w.dir.own_card(SPACE)
+    assert own.mailbox is not None and own.mailbox.gfs == GFS
+    assert await w.dir.needed_gfs() == {GFS}
+
+
+async def test_one_card_per_affected_space_and_host():
+    w, host = _member_world()
+    w.mailboxes.rev = 4
+    w.mailboxes.add_box(GFS)
+    w.mailboxes.add_box(OTHER_GFS)
+    w.spaces.owner[SPACE_2] = host["id"]
+    w.spaces.local[SPACE_2] = ["u-local"]
+    w.spaces.rows[SPACE_2] = {w.me["id"]: None, host["id"]: None}
+    _on_two_gfs(w)  # SPACE reaches GFS and OTHER_GFS
+    only = _hh()  # SPACE_2 reaches GFS only
+    w.member(only, space_id=SPACE_2)
+    w.spaces.rows[SPACE_2][only["id"]] = orjson.dumps(
+        {"card": _card(only, gfs=GFS).to_wire(), "gfs_reached": True}
+    ).decode()
+    assert await w.dir.publish_cards() == 2
+    w.fed.cards.clear()
+
+    w.mailboxes.demoted[GFS] = 1
+    await w.dir.on_own_change()
+    assert [c["space"] for c in w.fed.cards] == [SPACE]
+    assert _sent_gfs(w) == [OTHER_GFS]
+
+
+async def test_a_restart_keeps_our_card_where_it_moved():
+    w, _host = _member_world()
+    w.mailboxes.rev = 4
+    w.mailboxes.add_box(GFS)
+    w.mailboxes.add_box(OTHER_GFS)
+    _on_two_gfs(w)
+    w.mailboxes.demoted[GFS] = 1
+    await w.dir.publish_cards()
+    assert _sent_gfs(w) == [OTHER_GFS]
+    # A fresh directory over the same rows and the stored demotion.
+    again = SpaceMemberDirectory(
+        space_repo=w.spaces,
+        federation_repo=w.fed_repo,
+        writer_households=w.writers,
+        mailboxes=w.mailboxes,
+        instance_id=w.me["id"],
+        identity_seed=w.me["seed"],
+        identity_pk=w.me["pk"],
+        keywrap_pk=w.me["kw_pub"],
+        keywrap_sig=w.me["kw_sig"],
+        remote_member_repo=w.seats,
+    )
+    again.attach_to(w.fed)
+    own = await again.own_card(SPACE)
+    assert own.mailbox is not None and own.mailbox.gfs == OTHER_GFS
+    assert await again.publish_cards() == 0
+
+
+def _listed(space_id: str, owner_seed: bytes, *servers: GfsServer):
+    return sign_gfs_server_list(
+        space_id=space_id, servers=servers, issued_at=1, owner_seed=owner_seed
+    )
+
+
+def _server(gfs_id: str, url: str, key: str) -> GfsServer:
+    return GfsServer(
+        gfs_instance_id=gfs_id,
+        inbox_url=url,
+        public_key=key,
+        gfs_key_suite=GFS_KEY_SUITE_ED25519,
+        display_name=gfs_id,
+    )
+
+
+async def test_a_listed_gfs_we_are_connected_to_is_a_failover_only():
+    """The owner-signed list names THIRD_GFS, and we are connected to it:
+    nothing changes while our card's GFS works; once that GFS is demoted we
+    need a mailbox there (minted on demand) and the card names it."""
+    w, host = _member_world()
+    w.mailboxes.rev = 4
+    w.mailboxes.add_box(GFS)
+    gfs_only = _hh()
+    w.member(gfs_only)
+    await w.directory(
+        {"cards": [_card(gfs_only, gfs=GFS).to_wire()], "gfs_reached": [gfs_only["id"]]}
+    )
+    key = "ab" * 32
+    w.spaces.gfs_servers[SPACE] = _listed(
+        SPACE,
+        host["seed"],
+        _server("gfs-third", THIRD_GFS, key),
+        _server("gfs-forged", "https://forged.example.org", "cd" * 32),
+    )
+    w.mailboxes.connected = [
+        SimpleNamespace(
+            gfs_instance_id="gfs-third", inbox_url=THIRD_GFS + "/", public_key=key
+        ),
+        # The id and URL of a listed one, another key: not that GFS.
+        SimpleNamespace(
+            gfs_instance_id="gfs-forged",
+            inbox_url="https://forged.example.org",
+            public_key="ef" * 32,
+        ),
+    ]
+    assert await w.dir.needed_gfs() == {GFS}  # no failover needed
+    own = await w.dir.own_card(SPACE)
+    assert own.mailbox is not None and own.mailbox.gfs == GFS
+
+    w.mailboxes.demoted[GFS] = 1
+    assert await w.dir.needed_gfs() == {GFS, THIRD_GFS}
+    own = await w.dir.own_card(SPACE)
+    assert own.mailbox is not None and own.mailbox.gfs == GFS  # none there yet
+    w.mailboxes.add_box(THIRD_GFS)  # the mint the demotion asked for
+    await w.dir.on_own_change()
+    assert _sent_gfs(w)[-1] == THIRD_GFS
+    # GFS comes back: the card stays, and so does the mailbox it names.
+    assert await w.dir.needed_gfs() == {GFS, THIRD_GFS}
+    own = await w.dir.own_card(SPACE)
+    assert own.mailbox is not None and own.mailbox.gfs == THIRD_GFS
+
+
+async def test_a_listed_gfs_never_gives_a_mailbox_less_card_a_mailbox():
+    w, host = _member_world()
+    key = "ab" * 32
+    w.spaces.gfs_servers[SPACE] = _listed(
+        SPACE, host["seed"], _server("gfs-third", THIRD_GFS, key)
+    )
+    w.mailboxes.connected = [
+        SimpleNamespace(
+            gfs_instance_id="gfs-third", inbox_url=THIRD_GFS, public_key=key
+        )
+    ]
+    w.mailboxes.add_box(THIRD_GFS)  # held for another space
+    assert (await w.dir.own_card(SPACE)).mailbox is None
+    assert await w.dir.needed_gfs() == set()
+
+
+async def test_a_hosted_spaces_own_card_moves_as_a_delta_with_a_newer_rev():
+    w = World()
+    w.mailboxes.rev = 5
+    w.mailboxes.add_box(GFS)
+    w.mailboxes.add_box(OTHER_GFS)
+    a, b = _hh(), _hh()
+    w.member(a, b)
+    for h, url in ((a, GFS), (b, OTHER_GFS)):
+        w.spaces.put_card(SPACE, _card(h, gfs=url))
+        w.fed_repo.instances[h["id"]] = SimpleNamespace(
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.SPACE_SESSION,
+            relay_via=url,
+            proto_version=89,
+        )
+    w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.seat_all()
+    await w.dir.reconcile(SPACE)
+    w.fed.directories.clear()
+
+    w.mailboxes.demoted[GFS] = 1
+    await w.dir.on_own_change()
+    for h in (a, b):
+        (delta,) = w.fed.to(h["id"])
+        (own,) = [
+            c for c in delta["payload"]["cards"] if c["instance_id"] == w.me["id"]
+        ]
+        assert own["mailbox"]["gfs"] == OTHER_GFS
+        assert verify_card(own, expected_instance_id=w.me["id"]).rev == 6
+    w.fed.directories.clear()
+    await w.dir.reconcile(SPACE)
+    assert w.fed.directories == []  # once

@@ -695,15 +695,15 @@ class SpaceMemberDirectory:
     ) -> MemberCard:
         """Our signed card for *space_id*: with our mailbox at *gfs_url* (or,
         without one given, at a GFS the space is reached through, ours or a
-        GFS-reached member's), else no mailbox. *rev* overrides the card
+        GFS-reached member's — one never demoted first, and a GFS of the
+        space's signed list once those are demoted:
+        :meth:`_card_candidates`), else no mailbox. *rev* overrides the card
         revision (a card whose content moved under the same mailbox ``rev``)."""
         mailbox = None
         candidates = (
             [normalize_gfs_base(gfs_url)]
             if gfs_url
-            else sorted(
-                await self._space_gfs(space_id) | await self._member_gfs(space_id)
-            )
+            else await self._card_candidates(space_id)
         )
         for url in candidates:
             got = self._mailboxes.mailbox_at(url)
@@ -729,9 +729,68 @@ class SpaceMemberDirectory:
         urls: set[str] = set()
         for space in sorted({space for (space, _i) in await self._rows()}):
             if await self._in_use(space):
-                urls |= await self._space_gfs(space)
-                urls |= await self._member_gfs(space)
+                core = await self._core_gfs(space)
+                urls |= core
+                urls |= await self._failover_gfs(space, core)
         return urls
+
+    # ── Failover: our card moves off a demoted GFS ───────────────────────
+
+    async def _core_gfs(self, space_id: str) -> set[str]:
+        """The GFSs our card for *space_id* may name a mailbox at: ours
+        (:meth:`_space_gfs`) and a GFS-reached member's
+        (:meth:`_member_gfs`)."""
+        return await self._space_gfs(space_id) | await self._member_gfs(space_id)
+
+    def _rank(self, url: str) -> tuple[int, str]:
+        """A GFS never demoted first, then the one demoted longest ago
+        (:meth:`GfsMailboxService.demoted_at`); the URL breaks ties — the
+        order every card for a space is picked in, so a restart keeps it."""
+        return self._mailboxes.demoted_at(url), url
+
+    async def _failover_gfs(self, space_id: str, core: set[str]) -> set[str]:
+        """The GFSs of *space_id*'s owner-signed list (v_57) we are
+        connected to (the same GFS id, URL and key), outside *core* — only
+        while the best mailbox of ours *core* offers is at a demoted GFS:
+        then they are worth a mailbox (minted on demand) and our card may
+        name one. Otherwise none: a listed GFS alone never gives a card a
+        mailbox."""
+        held = [
+            u for u in sorted(core, key=self._rank) if self._mailboxes.mailbox_at(u)
+        ]
+        if not held or not self._mailboxes.demoted_at(held[0]):
+            return set()
+        space = await self._spaces.get(space_id)
+        listing = space.gfs_servers if space is not None else None
+        if listing is None:
+            return set()
+        conns = await self._mailboxes.connected_gfs()
+        servers, _dropped = listing.servers(
+            own_routes={(c.gfs_instance_id, c.inbox_url) for c in conns}
+        )
+        ours = {
+            (c.gfs_instance_id, normalize_gfs_base(c.inbox_url), c.public_key.lower())
+            for c in conns
+        }
+        listed: set[str] = set()
+        for s in servers:
+            url = normalize_gfs_base(s.inbox_url)
+            if (s.gfs_instance_id, url, s.public_key.lower()) in ours:
+                listed.add(url)
+        return listed - core
+
+    async def _card_candidates(self, space_id: str) -> list[str]:
+        """The GFSs, best first, our card for *space_id* names a mailbox
+        at — the first one we hold a mailbox at (:meth:`own_card`). With
+        nothing demoted that is the lowest URL of :meth:`_core_gfs`, as it
+        always was; a listed GFS (:meth:`_failover_gfs`) comes after every
+        core GFS demoted no later than it."""
+        core = await self._core_gfs(space_id)
+        extra = await self._failover_gfs(space_id, core)
+        return sorted(
+            core | extra,
+            key=lambda u: (self._mailboxes.demoted_at(u), u in extra, u),
+        )
 
     # ── Seat time (sealed redeem / ACK) ──────────────────────────────────
 
@@ -1772,7 +1831,7 @@ class SpaceMemberDirectory:
             return
         cards = await self._space_cards(space_id)
         owner = await self._owns(space_id)
-        own = await self.own_card(space_id)
+        own = await self._own_listed_card(space_id)
         lost = {k for k in self._lost_mailbox if k[0] == space_id}
         if (
             own.mailbox is None
@@ -1829,6 +1888,7 @@ class SpaceMemberDirectory:
         own_doc["listed"] = sorted(listed)
         own_doc["reached"] = reached
         own_doc["own_rev"] = own.rev
+        own_doc["own_digest"] = _content_digest(own)
         await self._put(space_id, self._instance_id, own_doc)
         for to in recipients:
             mine = cards.get(to)
@@ -1853,6 +1913,23 @@ class SpaceMemberDirectory:
                     dir_seq=seq,
                     base_seq=base_all if everything else base_mbx,
                 )
+
+    async def _own_listed_card(self, space_id: str) -> MemberCard:
+        """Our card as the directory of *space_id* (a space we host) lists
+        it: :meth:`own_card`, never under a ``rev`` below the one members
+        hold — and one past it when the content moved while the mailbox
+        ``rev`` did not (another mailbox of ours applies here: a failover),
+        or members keep the old card."""
+        own = await self.own_card(space_id)
+        doc = await self._doc(space_id, self._instance_id)
+        last = _count(doc.get("own_rev"))
+        if last < own.rev:
+            return own
+        if doc.get("own_digest") not in (None, _content_digest(own)):
+            return await self.own_card(space_id, rev=last + 1)
+        if last > own.rev:
+            return await self.own_card(space_id, rev=last)
+        return own
 
     async def _send_snapshot(
         self,
