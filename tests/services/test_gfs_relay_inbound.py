@@ -527,14 +527,14 @@ class _MailboxSender:
     def __init__(self) -> None:
         self.posts: list[dict] = []
 
-    async def mailbox_connection(self, gfs_url):
+    async def mailbox_connection(self, gfs_url, *, space_id=None):
         return object()
 
     async def media_connection(self, gfs_url):
         return object()
 
     async def send_to_mailbox(
-        self, *, mailbox_id, gfs_url, sealed=None, media_body=None
+        self, *, mailbox_id, gfs_url, sealed=None, media_body=None, space_id=None
     ):
         self.posts.append(
             {"mailbox_id": mailbox_id, "sealed": sealed, "media_body": media_body}

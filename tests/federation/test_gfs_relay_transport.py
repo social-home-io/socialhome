@@ -560,7 +560,7 @@ class _FakeMultiRelay:
         self.conn, self.cap, self.status, self.raises = conn, cap, status, raises
         self.calls: list[tuple[list[tuple[str, dict]], str, dict]] = []
 
-    async def multi_connection(self, gfs_url):
+    async def multi_connection(self, gfs_url, *, space_id=None):
         if isinstance(self.raises, RuntimeError):
             raise self.raises
         return self.conn
@@ -568,7 +568,7 @@ class _FakeMultiRelay:
     def multi_max_recipients(self, conn):
         return self.cap
 
-    async def send_to_mailboxes(self, *, entries, gfs_url, body):
+    async def send_to_mailboxes(self, *, entries, gfs_url, body, space_id=None):
         if self.raises is not None:
             raise self.raises
         self.calls.append((list(entries), gfs_url, body))
@@ -667,4 +667,77 @@ async def test_multi_capacity_is_the_proving_servers_cap_or_zero():
             relay_sender=_FakeMultiRelay(raises=RuntimeError("probe"))
         ).multi_capacity("https://gfs.example.org")
         == 0
+    )
+
+
+# ─── A GFS on the space's signed list (v_91 to listed GFSs) ──────────────
+
+
+class _SpaceRecordingRelay:
+    """Records the space each mailbox / multi call names — the one the
+    sender needs to accept a GFS on that space's signed list."""
+
+    def __init__(self) -> None:
+        self.spaces: list[tuple[str, str | None]] = []
+
+    async def mailbox_connection(self, gfs_url, *, space_id=None):
+        self.spaces.append(("mailbox", space_id))
+        return object()
+
+    async def media_connection(self, gfs_url):
+        return None  # media to a mailbox stays on our own connections
+
+    async def multi_connection(self, gfs_url, *, space_id=None):
+        self.spaces.append(("multi", space_id))
+        return object()
+
+    def multi_max_recipients(self, conn):
+        return 500
+
+    async def send_to_mailbox(
+        self, *, mailbox_id, gfs_url, sealed=None, media_body=None, space_id=None
+    ):
+        self.spaces.append(("send", space_id))
+        return True
+
+    async def send_to_mailboxes(self, *, entries, gfs_url, body, space_id=None):
+        self.spaces.append(("send_multi", space_id))
+        return 202
+
+
+async def test_a_target_s_space_reaches_the_sender_on_every_mailbox_call():
+    kp = generate_x25519_keypair()
+    relay = _SpaceRecordingRelay()
+    transport = GfsRelayTransport(relay_sender=relay)
+    url = "https://gfs-listed.example.org"
+    t1, t2 = (
+        MailboxTarget(
+            mailbox_id=c * 32, kem_pk=kp.public_key, gfs_url=url, space_id="sp-1"
+        )
+        for c in "mn"
+    )
+    assert await transport.mailbox_ready(t1)
+    # A media frame to a mailbox needs our own connection there: none here.
+    assert not await transport.mailbox_ready(t1, media=True)
+    assert await transport.multi_capacity(url, space_id="sp-1") == 500
+    assert await transport.send_mailbox(
+        instance=_instance(kp), target=t1, envelope_dict=ENVELOPE
+    ) == (True, None)
+    assert (
+        await transport.send_multi_mailbox(to=[(t1, WRAP), (t2, WRAP)], body=MULTI_BODY)
+    )[0]
+    assert relay.spaces == [
+        ("mailbox", "sp-1"),
+        ("mailbox", "sp-1"),
+        ("multi", "sp-1"),
+        ("send", "sp-1"),
+        ("send_multi", "sp-1"),
+    ]
+
+
+def test_a_space_less_target_names_no_space():
+    target = MailboxTarget(mailbox_id="m" * 32, kem_pk=b"k" * 32, gfs_url="u")
+    assert target.space_id is None
+    assert "sp" not in repr(
+        MailboxTarget(mailbox_id="m" * 32, kem_pk=b"k" * 32, gfs_url="u", space_id="sp")
     )

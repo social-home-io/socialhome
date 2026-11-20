@@ -133,6 +133,7 @@ from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
 from .federation.transport import (
+    TRANSPORT_ERROR_NO_MAILBOX,
     FederationTransport,
     HttpsInboxTransport,
     https_failure_is_relayable,
@@ -972,6 +973,17 @@ async def _redeliver_via_gfs_relay(
             instance=instance,
             envelope_dict=envelope_dict,
         )
+    if not result.ok and result.error == TRANSPORT_ERROR_NO_MAILBOX:
+        # A member seated from the host's directory whose mailbox is out of
+        # reach now (its GFS left the space's signed list since the row was
+        # queued, or stopped proving mailboxes): the space's host carries it.
+        try:
+            hopped = await federation_service.host_hop_outbox_entry(entry, instance)
+        except ValueError as exc:
+            log.warning("outbox: unusable entry %s — dropping: %s", entry.id, exc)
+            return DeliveryOutcome.PERMANENT
+        if hopped is not None:
+            return hopped
     if result.ok:
         # NO ``mark_reachable`` here. The relay answers a uniform 202
         # to every well-formed envelope — recipient online, offline,

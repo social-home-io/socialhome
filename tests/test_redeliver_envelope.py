@@ -21,15 +21,21 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
+    DeliveryResult,
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
 from socialhome.federation.federation_service import FederationService
-from socialhome.federation.transport import _TransportSendResult
+from socialhome.federation.host_hop import HOST_HOP_UNAVAILABLE
+from socialhome.federation.transport import (
+    TRANSPORT_ERROR_NO_MAILBOX,
+    _TransportSendResult,
+)
 from socialhome.infrastructure import (
     PAIR_WINDOW_404_ATTEMPTS,
     DeliveryOutcome,
@@ -1547,3 +1553,103 @@ async def test_redeliver_a_ref_row_without_its_payload_is_permanent(env):
 
     assert await _redeliver_envelope(svc, fed_repo, gone) is DeliveryOutcome.PERMANENT
     assert client.bodies == []
+
+
+# ─── A mailbox seat whose GFS no longer carries it: the host hop ─────────
+
+
+class _HostHop:
+    def __init__(self, result: DeliveryResult) -> None:
+        self.result = result
+        self.calls: list[tuple] = []
+
+    async def send(self, *, to_instance_id, event_type, payload, space_id):
+        self.calls.append((to_instance_id, event_type, payload, space_id))
+        return self.result
+
+
+async def _never_sender(_sender: str, _space: str) -> bool:
+    return False
+
+
+def _no_mailbox() -> _RelayOnlyTransport:
+    return _RelayOnlyTransport(
+        _TransportSendResult(
+            ok=False, via="gfs_relay", error=TRANSPORT_ERROR_NO_MAILBOX
+        )
+    )
+
+
+async def _directory_seat(fed_repo, kek):
+    """A member seated from the host's directory: no relay_via, only its
+    card's mailbox (or the host)."""
+    peer = await _seat_link_joined_peer(fed_repo, kek)
+    peer = dataclasses.replace(peer, relay_via="")
+    await fed_repo.save_instance(peer)
+    return peer
+
+
+@pytest.mark.parametrize(
+    ("hop", "want"),
+    [
+        (DeliveryResult(instance_id="x", ok=True, via="host_hop"), "SUCCESS"),
+        # The host is away: the routed envelope sits in OUR outbox for it.
+        (
+            DeliveryResult(instance_id="x", ok=False, error=DELIVERY_ERROR_QUEUED),
+            "SUCCESS",
+        ),
+        (
+            DeliveryResult(instance_id="x", ok=False, error=HOST_HOP_UNAVAILABLE),
+            "TRANSIENT",
+        ),
+    ],
+)
+async def test_a_queued_row_whose_mailbox_is_out_of_reach_goes_through_the_host(
+    env, hop, want
+):
+    """v_91 to listed GFSs: a row queued while the member's GFS was on the
+    space's list, retried after the owner delisted it (or its GFS stopped
+    proving mailboxes) — the host hop carries the stored payload."""
+    svc, fed_repo, kek = env
+    peer = await _directory_seat(fed_repo, kek)
+    svc.attach_transport(_no_mailbox())
+    host_hop = _HostHop(hop)
+    svc.attach_member_mesh(host_hop=host_hop, mailbox_sender_check=_never_sender)
+    entry = await _queued_ref(svc, peer)
+
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is DeliveryOutcome[want]
+    assert host_hop.calls == [
+        (
+            peer.id,
+            FederationEventType.SPACE_POST_CREATED,
+            {"space_id": "space-1", "post_id": "p-1"},
+            "space-1",
+        )
+    ]
+
+
+async def test_only_a_directory_seat_s_stored_payload_takes_the_host_hop(env):
+    """A link seat has its own relay; a sealed row has no stored payload to
+    hand the host; without a host hop wired nothing changes."""
+    svc, fed_repo, kek = env
+    host_hop = _HostHop(DeliveryResult(instance_id="x", ok=True))
+    svc.attach_transport(_no_mailbox())
+    seat = await _directory_seat(fed_repo, kek)
+    # No host hop wired yet: as before, a transient retry.
+    entry = await _queued_ref(svc, seat)
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.TRANSIENT
+    svc.attach_member_mesh(host_hop=host_hop, mailbox_sender_check=_never_sender)
+    sealed = _OutboxEntry(
+        id="e-sealed",
+        instance_id=seat.id,
+        payload_json=_stored_envelope_json(svc, to_instance=seat.id),
+    )
+    assert await _redeliver_envelope(svc, fed_repo, sealed) is DeliveryOutcome.TRANSIENT
+    # The same household seated from a link: its relay_via carries it.
+    await fed_repo.save_instance(
+        dataclasses.replace(seat, relay_via="https://gfs.example.org")
+    )
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.TRANSIENT
+    assert host_hop.calls == []

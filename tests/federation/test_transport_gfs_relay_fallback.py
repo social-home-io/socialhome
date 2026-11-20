@@ -28,6 +28,7 @@ from socialhome.federation.gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
     MailboxTarget,
+    multi_caps_key,
 )
 from socialhome.federation.transport import (
     TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED,
@@ -858,11 +859,13 @@ class _MultiRelay(_MailboxRelay):
         super().__init__(mailbox_ready=mailbox_ready)
         self.capacity = capacity
         self.capacity_asks: list[str] = []
+        self.capacity_spaces: list[str | None] = []
         self.multi_calls: list[tuple[list[tuple[MailboxTarget, dict]], dict]] = []
         self.multi_result: tuple[bool, int | None, float | None] = (True, None, None)
 
-    async def multi_capacity(self, gfs_url):
+    async def multi_capacity(self, gfs_url, *, space_id=None):
         self.capacity_asks.append(gfs_url)
+        self.capacity_spaces.append(space_id)
         return self.capacity
 
     async def send_multi_mailbox(self, *, to, body):
@@ -891,6 +894,20 @@ async def test_a_capacity_cache_probes_each_gfs_once_per_broadcast():
         assert await t.multi_mailbox_target(_seat(), "sp-1", caps=caps) is _TARGET
     assert len(relay.capacity_asks) == 1
     assert list(caps.values()) == [40]
+
+
+async def test_the_capacity_is_asked_per_gfs_and_space():
+    """v_91 to listed GFSs: one GFS may be ours for no space and listed by
+    one space only, so its capacity is asked — and cached — per space."""
+    relay = _MultiRelay(capacity=40)
+    targets = {sp: dataclasses.replace(_TARGET, space_id=sp) for sp in ("sp-1", "sp-2")}
+    t = _mailbox_transport(relay, [], targets=targets)
+    caps: dict[str, int] = {}
+    for sp in ("sp-1", "sp-2", "sp-1", "sp-2"):
+        assert await t.multi_mailbox_target(_seat(), sp, caps=caps) is targets[sp]
+    assert relay.capacity_spaces == ["sp-1", "sp-2"]
+    assert len(caps) == 2
+    assert caps[multi_caps_key(targets["sp-1"])] == 40
 
 
 async def test_no_multi_target_without_a_mailbox_a_multi_gfs_or_a_seat():

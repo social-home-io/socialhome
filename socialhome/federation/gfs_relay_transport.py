@@ -323,14 +323,26 @@ class MailboxTarget:
     """Where an envelope goes for a household reached through a GFS (v_89):
     its ONE mailbox there (shared by its spaces), the key the frame is
     sealed to and the GFS's base URL. Built from the household's signed
-    member card; never logged (the mailbox id must not reach a log line)."""
+    member card; never logged (the mailbox id must not reach a log line).
+
+    ``space_id`` is the space whose card named the mailbox (``None`` for a
+    space-less envelope): a GFS on THAT space's owner-signed list carries the
+    frame even when we hold no connection to it (v_91 to listed GFSs)."""
 
     mailbox_id: str
     kem_pk: bytes
     gfs_url: str
+    space_id: str | None = None
 
     def __repr__(self) -> str:
         return "MailboxTarget(<mailbox>)"
+
+
+def multi_caps_key(target: MailboxTarget) -> str:
+    """The key one pass caches a GFS's multi capacity under (v_91): its
+    normalized base URL and the target's space — a GFS may be on one
+    space's signed list and no other's, so its answer is per space."""
+    return f"{normalize_gfs_base(target.gfs_url)}\x00{target.space_id or ''}"
 
 
 class GfsRelayTransport:
@@ -530,11 +542,17 @@ class GfsRelayTransport:
     async def mailbox_ready(
         self, target: MailboxTarget, *, media: bool = False
     ) -> bool:
-        """Whether one of our connections reaches *target*'s GFS and that
-        server proved ``envelope_mailbox`` (and ``envelope_media`` when
-        *media*). Never raises."""
+        """Whether *target*'s GFS — one of our connections, or an entry of
+        its space's owner-signed list — proved ``envelope_mailbox``; for
+        *media* also ``envelope_media`` on a connection of ours (a media
+        frame never goes to a GFS we only know from a list). Never raises."""
         try:
-            if await self._sender.mailbox_connection(target.gfs_url) is None:
+            if (
+                await self._sender.mailbox_connection(
+                    target.gfs_url, space_id=target.space_id
+                )
+                is None
+            ):
                 return False
             if media:
                 return await self._sender.media_connection(target.gfs_url) is not None
@@ -591,12 +609,13 @@ class GfsRelayTransport:
 
     # ── v_91: one upload for many mailboxes ───────────────────────
 
-    async def multi_capacity(self, gfs_url: str) -> int:
+    async def multi_capacity(self, gfs_url: str, *, space_id: str | None = None) -> int:
         """Most mailbox ids one multi-recipient upload to the GFS at
-        *gfs_url* may name: ``0`` unless one of our connections there proved
+        *gfs_url* may name: ``0`` unless that GFS — one of our connections,
+        or an entry of *space_id*'s owner-signed list — proved
         ``envelope_mailbox`` and ``envelope_multi``. Never raises."""
         try:
-            conn = await self._sender.multi_connection(gfs_url)
+            conn = await self._sender.multi_connection(gfs_url, space_id=space_id)
             if conn is None:
                 return 0
             return self._sender.multi_max_recipients(conn)
@@ -626,6 +645,7 @@ class GfsRelayTransport:
                 entries=[(t.mailbox_id, wrap) for t, wrap in to],
                 gfs_url=to[0][0].gfs_url,
                 body=body,
+                space_id=to[0][0].space_id,
             )
         except EnvelopeRelayThrottled as exc:
             log.info("gfs relay: a multi-recipient frame was throttled")
@@ -658,6 +678,7 @@ class GfsRelayTransport:
                 gfs_url=target.gfs_url,
                 sealed=sealed,
                 media_body=media_body,
+                space_id=target.space_id,
             )
         except EnvelopeRelayThrottled:
             log.info("gfs relay: a frame for %s's mailbox was throttled", instance.id)
@@ -691,6 +712,7 @@ __all__ = [
     "MailboxTarget",
     "build_relay_plaintext",
     "is_relay_envelope_body",
+    "multi_caps_key",
     "normalize_gfs_base",
     "relay_envelope_fits",
     "seal_relay_envelope",
