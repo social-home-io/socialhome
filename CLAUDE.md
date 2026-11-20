@@ -409,11 +409,16 @@ truth; the panel follows it.
   `tests/federation/test_host_notion_guard.py` lists the allowed ones.
 - GPS coordinates: truncate to 4 decimal places before any storage or
   transmission — `round(float(lat), 4)`, never raw device precision.
+  The household home sent to a paired household (`share_home`) is
+  coarser: the ~3 km grid-cell centre from `coarse_home_for_peer`
+  (`domain/home_location.py`) — senders and receivers both apply it, and
+  `remote_instances.home_lat/home_lon` never hold anything finer.
 - **People's locations are never shared by design.** A person's or a
   household's location leaves the household only toward a specific paired
   household its people trust, under a per-pair switch they control (the
   per-pair `share_home` home location — on by default for a new pair, owner
-  decision 2026-10-19 — and live presence location shared with a peer).
+  decision 2026-10-19, and only as a ~3 km area, owner decision
+  2026-11-20 — and live presence location shared with a peer).
   Every sender honours that switch (pairing QR / accept included); never via
   a GFS, never as a side effect of joining a space — the one exception is
   the consented ~1 km point a local-community join sends to that space's
