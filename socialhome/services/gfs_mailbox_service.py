@@ -26,6 +26,15 @@ mailbox). This service is the household half:
 * **Sweep.** Every ~10 min: release a mailbox nothing needs any more
   (:meth:`attach_needed` says which GFSs are needed), mint one that is
   needed and missing, then the directory's hook.
+* **Failover** (:meth:`_note_down`). Our card for a space names ONE of
+  our mailboxes. When the claim socket of one stays down for
+  :data:`FAILOVER_AFTER_S` while another GFS of ours works, that GFS is
+  *demoted* (stored, so a restart keeps it): the member directory then
+  ranks it last when it picks the mailbox a card names
+  (:meth:`demoted_at`), and every space with another mailbox of ours
+  gets a new card at once. A demoted GFS that comes back stays ranked
+  last — the cards move again only when the GFS they moved to fails too
+  (no flapping).
 * **Recovery / rotation.** A GFS that forgot the mailbox gets the SAME one
   registered again; one it keeps refusing, or a flood on it, gets a fresh
   generation (at most :data:`ROTATIONS_PER_DAY`). Every change bumps the
@@ -117,6 +126,13 @@ ROTATIONS_PER_DAY: int = 1
 #: mailbox is rotated (abuse, e.g. a flood by a removed member that still
 #: knows the address — the new one reaches only current members).
 FLOOD_ROTATE_DROPS: int = 500
+#: How long the claim socket of a mailbox must stay down before the cards
+#: that name it move to another GFS of ours (:meth:`GfsMailboxService
+#: ._note_down`). The claim backoff decides when it is next checked, so
+#: the move comes within one backoff step (at most ~7.5 min) after this.
+FAILOVER_AFTER_S: float = 600.0
+#: Bound on the liveness probe of a GFS we may fail over to.
+PROBE_TIMEOUT_S: float = 10.0
 #: Each claim socket pings this often (inside Cloudflare's 100 s idle
 #: timeout).
 CLAIM_HEARTBEAT_S: float = 30.0
@@ -228,6 +244,27 @@ def _parse_boxes(raw: str | None) -> tuple[int, dict[str, OwnMailbox]]:
     return (rev if isinstance(rev, int) and not isinstance(rev, bool) else 0), boxes
 
 
+def _parse_demoted(raw: str | None) -> dict[str, int]:
+    """``{normalized GFS url: when it was demoted (wall ms)}`` from the
+    stored document (:meth:`GfsMailboxService._note_down`)."""
+    try:
+        data = orjson.loads(raw) if raw else None
+    except orjson.JSONDecodeError:
+        return {}
+    demoted = data.get("demoted") if isinstance(data, dict) else None
+    if not isinstance(demoted, dict):
+        return {}
+    return {
+        normalize_gfs_base(url): at
+        for url, at in demoted.items()
+        if isinstance(url, str)
+        and url
+        and isinstance(at, int)
+        and not isinstance(at, bool)
+        and at > 0
+    }
+
+
 class GfsMailboxService:
     """See the module docstring."""
 
@@ -239,6 +276,9 @@ class GfsMailboxService:
         "_config",
         "_connecting",
         "_daily",
+        "_demoted",
+        "_down_since",
+        "_failed_over",
         "_gfs",
         "_gfs_repo",
         "_identity_seed",
@@ -313,6 +353,13 @@ class GfsMailboxService:
         self._pending: dict[str, float] = {}
         #: GFS id → [day, recovery registers, rotations, dropped frames].
         self._daily: dict[str, list[int]] = {}
+        #: Normalized GFS url → when it was demoted (wall ms; stored with
+        #: the boxes): cards name its mailbox last (:meth:`demoted_at`).
+        self._demoted: dict[str, int] = {}
+        #: GFS id → since when its claim socket is down (monotonic).
+        self._down_since: dict[str, float] = {}
+        #: GFS ids demoted during their current outage (once per outage).
+        self._failed_over: set[str] = set()
         self._lock = asyncio.Lock()
         self._root_lock = asyncio.Lock()
         self._tickets_lock = asyncio.Lock()
@@ -368,6 +415,7 @@ class GfsMailboxService:
         await self._load_root()
         raw = await self._config.get(MAILBOXES_CONFIG_KEY)
         self._rev, self._boxes = _parse_boxes(raw)
+        self._demoted = _parse_demoted(raw)
         if _stored_proto(raw) != OURS:
             # An upgrade moves the card too (it carries our version), so
             # every host gets it once more.
@@ -451,7 +499,15 @@ class GfsMailboxService:
         ms, at least one past the last — it keeps rising across a restore)
         (caller holds the lock)."""
         self._rev = max(self._rev + 1, int(self._wall_clock() * 1000))
-        doc = {
+        await self._persist()
+
+    async def _persist(self) -> None:
+        """Write our mailboxes, the card ``rev`` and the demoted GFSs — a
+        demotion only of a GFS we still hold a mailbox at (caller holds
+        the lock)."""
+        held = self.mailbox_gfs_urls()
+        self._demoted = {u: t for u, t in self._demoted.items() if u in held}
+        doc: dict[str, Any] = {
             "rev": self._rev,
             "proto": OURS,
             "boxes": {
@@ -459,6 +515,8 @@ class GfsMailboxService:
                 for gid, own in sorted(self._boxes.items())
             },
         }
+        if self._demoted:
+            doc["demoted"] = dict(sorted(self._demoted.items()))
         await self._config.set(MAILBOXES_CONFIG_KEY, orjson.dumps(doc).decode())
 
     async def _changed(self) -> None:
@@ -604,6 +662,21 @@ class GfsMailboxService:
     def mailbox_gfs_urls(self) -> set[str]:
         """The (normalized) GFSs we hold a mailbox at."""
         return {normalize_gfs_base(own.gfs_url) for own in self._boxes.values()}
+
+    def demoted_at(self, gfs_url: str) -> int:
+        """When the GFS at *gfs_url* was demoted (wall ms), ``0`` when it
+        never was: a card names the mailbox of the GFS demoted longest ago
+        last of all, one never demoted first (:meth:`_note_down`)."""
+        return self._demoted.get(normalize_gfs_base(gfs_url), 0) if gfs_url else 0
+
+    async def connected_gfs(self) -> list[GfsConnection]:
+        """Our active GFS connections that take mailboxes."""
+        return [
+            conn
+            for conn in await self._gfs_repo.list_active()
+            if conn.status == "active"
+            and await self._gfs.envelope_mailbox_supported(conn)
+        ]
 
     async def _connection_at(self, gfs_url: str) -> GfsConnection | None:
         if not gfs_url:
@@ -897,6 +970,10 @@ class GfsMailboxService:
                 claim.claimed.clear()
             if claim.stop.is_set():
                 return
+            try:
+                await self._note_down(claim)
+            except Exception:
+                log.warning("gfs.mailbox: failover check failed", exc_info=True)
             wait = self._rng.uniform(0.5 * backoff, 1.5 * backoff)
             try:
                 await asyncio.wait_for(claim.stop.wait(), timeout=wait)
@@ -904,6 +981,82 @@ class GfsMailboxService:
             except TimeoutError:
                 pass
             backoff = min(backoff * 2, CLAIM_BACKOFF_MAX_S)
+
+    # ── Failover ─────────────────────────────────────────────────────────
+
+    def _note_up(self, gfs_id: str) -> None:
+        """Our mailbox at *gfs_id* is claimed again: its outage is over. A
+        demotion stays — the cards moved away stay where they are."""
+        self._down_since.pop(gfs_id, None)
+        self._failed_over.discard(gfs_id)
+
+    async def _note_down(self, claim: _Claim) -> None:
+        """A claim attempt on our mailbox failed or its socket dropped (the
+        claim loop's reconnect backoff — no timer of its own). Once it has
+        been down for :data:`FAILOVER_AFTER_S` and another GFS of ours
+        works, demote that GFS — once per outage."""
+        gid = claim.own.gfs_instance_id
+        if claim.released or self._claims.get(gid) is not claim:
+            return
+        now = self._clock()
+        since = self._down_since.setdefault(gid, now)
+        if now - since < FAILOVER_AFTER_S or gid in self._failed_over:
+            return
+        if not await self._has_alternative(gid):
+            return  # nowhere to move to (our own network is down, say)
+        async with self._lock:
+            if claim.released or self._claims.get(gid) is not claim:
+                return
+            url = normalize_gfs_base(claim.own.gfs_url)
+            last = max(self._demoted.values(), default=0)
+            self._demoted[url] = max(int(self._wall_clock() * 1000), last + 1)
+            await self._persist()
+        self._failed_over.add(gid)
+        log.warning(
+            "gfs.mailbox: our mailbox at a GFS has been unreachable for %.0f "
+            "min — moving our member cards to another GFS",
+            (now - since) / 60,
+        )
+        # Off the claim task (its reconnects go on; a release or shutdown
+        # never cuts a publish off): cards with another mailbox of ours
+        # move now; a space whose only other GFS is one we hold no mailbox
+        # at yet gets one minted (the directory's needed set grew).
+        self._spawn(self._after_demotion(), "gfs-mailbox-failover")
+
+    async def _after_demotion(self) -> None:
+        await self._changed()
+        self.mint_soon()
+
+    async def _has_alternative(self, gfs_id: str) -> bool:
+        """Another GFS of ours works NOW: our mailbox there is claimed, or
+        we hold none there yet and it answers an anonymous ``/gfs/info``
+        (a cached capability is no proof — with our own network down,
+        nothing may move)."""
+        for other, claim in self._claims.items():
+            if other != gfs_id and claim.claimed.is_set() and not claim.released:
+                return True
+        for conn in await self.connected_gfs():
+            if (
+                conn.gfs_instance_id != gfs_id
+                and conn.gfs_instance_id not in self._boxes
+                and await self._answers(conn)
+            ):
+                return True
+        return False
+
+    async def _answers(self, conn: GfsConnection) -> bool:
+        """One anonymous ``GET /gfs/info`` on *conn* answers 200 in time."""
+        try:
+            async with self._anon(conn) as session:
+                if session is None:
+                    return False
+                async with session.get(
+                    conn.inbox_url.rstrip("/") + "/gfs/info",
+                    timeout=aiohttp.ClientTimeout(total=PROBE_TIMEOUT_S),
+                ) as resp:
+                    return resp.status == 200
+        except aiohttp.ClientError, TimeoutError, OSError:
+            return False
 
     def _daily_row(self, gfs_id: str) -> list[int]:
         day = int(self._clock() // _DAY_S)
@@ -1011,6 +1164,7 @@ class GfsMailboxService:
                 claim.socket = socket
                 claim.claimed.set()
                 claim.refusals = 0
+                self._note_up(claim.own.gfs_instance_id)
                 if claim.stop.is_set():
                     return
                 async for frame in socket:

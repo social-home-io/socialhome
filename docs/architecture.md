@@ -507,7 +507,12 @@ selects it in two cases:
   before. `GfsMailboxService` also owns this household's side: the
   KEK-wrapped mailbox root, tickets, one mailbox and one anonymous claim
   socket per GFS (`instance_config` `gfs_mailboxes`), our signed member
-  card, and unregistering a mailbox once nothing needs it.
+  card, and unregistering a mailbox once nothing needs it. A GFS whose
+  claim socket stays down for 10 min while another of ours works is
+  demoted (stored), and our cards move to a mailbox at another GFS of
+  the space — one listed by its owner minted on demand — with no switch
+  back unless that one fails too
+  ([gfs-relay.md](protocol/gfs-relay.md), "Failover").
   **Member directory.** `SpaceMemberDirectory` on the host passes the
   cards it holds to the space's writer-seat member households (never
   followers); a member seats each carded household lazily as a

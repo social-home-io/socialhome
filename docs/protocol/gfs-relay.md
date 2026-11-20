@@ -1164,7 +1164,8 @@ no list is the one remaining case that needs the host online. Gated on
 **Storage.** The mailbox root (32 bytes, KEK-wrapped in `instance_config`
 `gfs_mailbox_root`) derives every key from (GFS id, generation) only.
 `instance_config` `gfs_mailboxes` holds `{rev, proto, boxes: {gfs_id: {gen,
-gfs}}}`; `rev` is our member card's revision. Other households' cards live
+gfs}}, demoted?: {gfs_url: wall_ms}}`; `rev` is our member card's revision,
+`demoted` the GFSs our cards moved off (see "Failover" below). Other households' cards live
 on `space_instances.mailbox` (migration 0144, reused, no new migration).
 
 **Member cards.** Every v_89 household signs one card with its identity key
@@ -1482,6 +1483,48 @@ generation, at most once a day. A plain rotation keeps the old address
 delivering until its own release delay is over (a flooded one drops at
 once). Every change (mint, rotation, release) moves the card `rev`, and the
 new card reaches every space — the ones we host too — at once.
+
+**Failover: the card moves off a GFS that stays down.** A card names ONE
+mailbox, so a household on two GFSs of a space still receives only on the
+one its card names. When the claim socket of that mailbox stays down for
+`FAILOVER_AFTER_S` (10 min) while another GFS of ours works right now
+(another mailbox claimed, or a connection where we hold none yet that
+answers an anonymous `/gfs/info`), that GFS is
+**demoted**: `gfs_mailboxes` keeps `demoted: {gfs_url: wall_ms}`, so a
+restart keeps it. It is event-driven: the claim loop's own reconnect
+backoff checks it after each failed attempt (no timer, no poll), so the
+move comes 10–18 min into an outage. A card then picks its mailbox in this
+order: a GFS never demoted first, then the one demoted longest ago, the URL
+breaking ties (with nothing demoted that is the lowest URL, as before). The
+candidates are the GFSs the space is reached through (above), plus — only
+while the best of those is demoted — the GFSs of the space's owner-signed
+list (v_57) we are connected to (same GFS id, URL and key): such a GFS gets
+our mailbox minted on demand, and only then does a card name it. A listed
+GFS alone never gives a mailbox-less card a mailbox.
+
+- **The new card.** The mailbox `rev` does not move (no mailbox changed),
+  so a space whose card changed gets it one `rev` past the one its host
+  holds — the same rule as "a mailbox minted for another space now applies
+  here": one `SPACE_MEMBER_CARD` per affected space and host (the card
+  limiter: once per space, host and `rev`); a space we host sends it as a
+  directory delta. A space with no other mailbox of ours keeps its card and
+  sends nothing. Members take the newer `rev` and address the new mailbox
+  at once (`target_for`, and the v_91 grouping by `card.mailbox.gfs`); a
+  sender must reach that GFS like any other mailbox (its own connection, or
+  the host hop).
+- **No flapping.** A demoted GFS that comes back stays ranked last: the
+  cards move again only when the GFS they moved to fails too (then back to
+  the one demoted longest ago). Each GFS is demoted at most once per
+  outage, and only toward a GFS that works now, so a household whose own
+  network is down moves nothing. (With two spaces on different GFSs, a
+  space whose GFSs are all down can still see its card move between them —
+  at most once per GFS and outage.)
+- **Cost.** One card (~0.7 KiB) per affected space and host per move, then
+  the host's usual delta to its members. A move to a listed GFS we held no
+  mailbox at costs one ticket and one claim socket there, kept for as long
+  as the first GFS stays demoted — a demotion does not expire, so in
+  practice for good, until the household leaves that GFS or the space. No protocol bump: the card's shape is unchanged
+  and a v_89 receiver already takes a newer `rev`.
 
 **Losses and recovery.** Frames to a mailbox that is offline wait in the
 GFS queue (24 h TTL, tail-drop). Since v_89 that queue is the household's
