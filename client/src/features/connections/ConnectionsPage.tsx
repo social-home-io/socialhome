@@ -16,8 +16,10 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { useSignal } from '@preact/signals'
+import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { openPairing, PairingFlow } from '@/components/PairingFlow'
+import { gfsConnectTarget } from '@/components/gfsConnectTarget'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { AutoPairDialog, openAutoPair } from '@/components/AutoPairDialog'
 import { ConnectionDetail } from '@/components/ConnectionDetail'
@@ -153,6 +155,17 @@ export default function ConnectionsPage() {
   const [cancelBusy, setCancelBusy] = useState(false)
   /** List / Map — resets to List on every visit. */
   const view = useSignal<ConnView>('list')
+  // ``?connect_gfs=<address>`` — a space's "connect to this GFS" notice:
+  // open the GFS flow aimed at that GFS (admins only; connecting is
+  // admin-only), then drop the parameter so a reload doesn't reopen it.
+  const loc = useLocation()
+  const connectGfs = loc.query?.connect_gfs
+  useEffect(() => {
+    if (!connectGfs) return
+    const target = gfsConnectTarget(connectGfs)
+    if (isAdmin && target) openPairing('gfs', { gfsUrl: target })
+    loc.route?.('/connections', true)
+  }, [connectGfs]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     void reloadConnections()

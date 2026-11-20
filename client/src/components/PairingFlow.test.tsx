@@ -276,6 +276,54 @@ describe('PairingFlow — GFS paste decoding', () => {
   })
 })
 
+describe('PairingFlow — GFS flow aimed at one GFS (a space notice)', () => {
+  it('links to that GFS page and goes straight to the paste field', async () => {
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    apiPost.mockResolvedValueOnce({})
+    render(<PairingFlow />)
+    openPairing('gfs', { gfsUrl: 'https://club.example/' })
+
+    expect((await screen.findByTestId('gfs-target-start')).textContent)
+      .toContain('gfs.target_intro club.example')
+    const open = screen.getByTestId('gfs-target-open') as HTMLAnchorElement
+    expect(open.getAttribute('href')).toBe('https://club.example')
+    expect(open.getAttribute('target')).toBe('_blank')
+    expect(open.getAttribute('rel')).toContain('noopener')
+    expect(screen.queryByText('gfs.add')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('gfs-target-paste'))
+    const textarea = await screen.findByPlaceholderText('gfs.paste_placeholder')
+    // The page link stays at hand next to the paste field.
+    expect(screen.getByTestId('gfs-target-open')).toBeTruthy()
+    fireEvent.input(textarea, {
+      target: { value: 'socialhome://gfs-pair/https://club.example/?token=t-1' },
+    })
+    fireEvent.click(screen.getByText('pairing.paste_submit'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiPost).toHaveBeenCalledWith('/api/gfs/connections', {
+      gfs_url: 'https://club.example', token: 't-1',
+    })
+  })
+
+  it('ignores an address that is not a plain http(s) URL', async () => {
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('gfs', { gfsUrl: 'javascript:alert(1)' })
+    expect(await screen.findByText('gfs.add')).toBeTruthy()
+    expect(screen.queryByTestId('gfs-target-open')).toBeNull()
+  })
+
+  it('a plain GFS open forgets an earlier aimed-at GFS', async () => {
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('gfs', { gfsUrl: 'https://club.example' })
+    await screen.findByTestId('gfs-target-start')
+    openPairing('gfs')
+    expect(await screen.findByText('gfs.add')).toBeTruthy()
+    expect(screen.queryByTestId('gfs-target-start')).toBeNull()
+  })
+})
+
 describe('PairingFlow — GFS connect failures', () => {
   const GFS_PATH = '/api/gfs/connections'
 

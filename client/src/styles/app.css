@@ -27376,6 +27376,49 @@ button.sh-page-editor-status {
 }
 .sh-gfs-listing__add label { flex: 1 1 14rem; min-width: 0; }
 .sh-gfs-listing__add select { width: 100%; }
+/* In the space itself: a GFS of the space this household isn't connected
+   to (SpaceGfsNotice). Optional = the calm primary tint of the follower
+   banner, with a ✕; needed (a household standing in for the host) = the
+   warning tint, no ✕. */
+.sh-space-gfs-notice {
+  display: flex; flex-direction: column; gap: var(--sh-space-sm);
+  margin-bottom: var(--sh-space-md);
+}
+.sh-space-gfs-notice__row {
+  display: flex; align-items: flex-start; gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sh-primary) 30%, transparent);
+}
+.sh-space-gfs-notice__row--needed {
+  background: color-mix(in srgb, var(--sh-warning) 14%, transparent);
+  border-color: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+}
+.sh-space-gfs-notice__icon { font-size: 1.25em; line-height: 1; padding-top: 4px; }
+.sh-space-gfs-notice__body {
+  flex: 1; min-width: 0;
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+}
+.sh-space-gfs-notice__text { margin: 0; flex: 1 1 16rem; min-width: 0; overflow-wrap: anywhere; }
+.sh-space-gfs-notice__hint {
+  margin: 0; flex: 1 1 100%; font-size: var(--sh-font-size-xs);
+  /* Muted ink on the tint — lifted for contrast, as on the follower banner. */
+  color: color-mix(in srgb, var(--sh-text-muted) 75%, var(--sh-text));
+}
+.sh-space-gfs-notice__connect { min-height: 36px; white-space: nowrap; }
+.sh-space-gfs-notice__dismiss {
+  flex: none;
+  min-width: 36px; min-height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--sh-radius-sm);
+  background: transparent; color: var(--sh-text-muted);
+  cursor: pointer;
+}
+.sh-space-gfs-notice__dismiss:hover { background: color-mix(in srgb, var(--sh-text) 8%, transparent); }
+.sh-space-gfs-notice__dismiss:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+
 /* "Global, but not listed on any GFS yet" — a warning tint, not an error. */
 .sh-gfs-banner {
   margin: 0;

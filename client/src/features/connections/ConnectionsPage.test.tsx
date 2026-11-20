@@ -48,6 +48,13 @@ vi.mock('@/components/PairingFlow', () => ({
   openPairing: vi.fn(),
   PairingFlow: () => null,
 }))
+// The route's query (``?connect_gfs=`` from a space's GFS notice) and the
+// router's replace, per test.
+const loc = vi.hoisted(() => ({ query: {} as Record<string, string>, route: (() => {}) as (p: string, r?: boolean) => void }))
+vi.mock('preact-iso', async (orig) => ({
+  ...(await orig<object>()),
+  useLocation: () => ({ path: '/connections', url: '/connections', query: loc.query, route: loc.route }),
+}))
 
 vi.mock('@/components/ConfirmDialog', () => ({
   ConfirmDialog: ({ open, onConfirm }: { open: boolean; onConfirm: () => void }) =>
@@ -221,6 +228,9 @@ function adminCalls(): string[] {
 beforeEach(() => {
   setUser(true)
   setMode('standalone')
+  loc.query = {}
+  loc.route = vi.fn()
+  ;(openPairing as ReturnType<typeof vi.fn>).mockClear()
   apiGet.mockReset()
   apiPost.mockReset().mockResolvedValue({})
   apiPut.mockReset().mockResolvedValue({})
@@ -968,5 +978,28 @@ describe('ConnectionsPage — server refuses a manual address', () => {
     await waitFor(() => expect(container.querySelector('.sh-conn-hero__warn')).not.toBeNull())
     expect(container.querySelector('#sh-conn-adv-ext')).toBeNull()
     expect(queryByText('connections.hero.setup_warn_ext')).toBeNull()
+  })
+})
+
+describe('ConnectionsPage — ?connect_gfs= (a space\'s GFS notice)', () => {
+  it('opens the GFS flow aimed at that GFS for an admin, then drops the parameter', async () => {
+    loc.query = { connect_gfs: 'https://club.example/' }
+    await renderPage({ conns: [makeConnection()] })
+    expect(openPairing).toHaveBeenCalledWith('gfs', { gfsUrl: 'https://club.example' })
+    expect(loc.route).toHaveBeenCalledWith('/connections', true)
+  })
+
+  it('opens nothing for a member or for an address that is not http(s)', async () => {
+    loc.query = { connect_gfs: 'javascript:alert(1)' }
+    await renderPage({ conns: [makeConnection()] })
+    expect(openPairing).not.toHaveBeenCalled()
+    expect(loc.route).toHaveBeenCalledWith('/connections', true)
+  })
+
+  it('a member landing on the link gets the page without the flow', async () => {
+    setUser(false)
+    loc.query = { connect_gfs: 'https://club.example' }
+    await renderPage({ conns: [makeConnection()] })
+    expect(openPairing).not.toHaveBeenCalled()
   })
 })

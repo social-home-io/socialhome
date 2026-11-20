@@ -1,4 +1,6 @@
 {
+  "space.gfs_notice.needed": "{name} is a GFS name. \"Stand in for the host\": this household is a space admin allowed to act for the owner household while it is offline.",
+  "gfs.target_open": "{name} is a web address host like \"gfs.example.org\". Opens that GFS's own page in a new tab.",
   "moment.tab.yours": "Momentum tab with the person's own moments (\"Yours\" as in \"your moments\"). Keep short.",
   "moment.yours.usage": "{used} and {cap} are sizes like '350 MB' / '2 GB'. Pictures past the household limit are removed, oldest first; the text stays.",
   "moment.yours.until_others": "{time} is a weekday, date and clock time ('Sun 26 Oct, 14:49'). 'it' is the moment.",
