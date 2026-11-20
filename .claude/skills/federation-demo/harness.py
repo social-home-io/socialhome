@@ -15092,6 +15092,14 @@ _LOG_BENIGN: tuple[str, ...] = (
     #   every C++-side log including *real* ERROR lines. Replaced
     #   with the specific juice/STUN status entries above so a
     #   genuine libdatachannel failure still trips the audit.
+    #
+    # The demo's GFS B listens on 127.0.0.1. A household that never
+    # connected to it (b) drops that entry of an owner's list by design
+    # (an owner's list must never aim a member at its own network) and
+    # says so once per list — since v_91 it reads the list when it looks
+    # for a member's mailbox there, then goes through the host hop.
+    # Production never lists a loopback GFS; the WARNING is real there.
+    "of the owner's GFS list unusable here (bad field, private network address",
 )
 
 #: Lines a fix made impossible in a clean run, but that a BROADER needle in

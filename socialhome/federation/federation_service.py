@@ -3106,12 +3106,36 @@ class FederationService:
                         payload=payload,
                         space_id=space_id,
                     )
-            return await self.send_event(
+            result = await self.send_event(
                 to_instance_id=to_instance_id,
                 event_type=event_type,
                 payload=payload,
                 space_id=space_id,
             )
+            if (
+                result.error == DELIVERY_ERROR_RELAY_TOO_LARGE
+                and instance.source is InstanceSource.SPACE_SESSION
+                and not instance.relay_via
+                and space_id
+                and self._host_hop is not None
+            ):
+                # Too large for a JSON frame and no binary frame route to
+                # its mailbox (a GFS we know only from the space's signed
+                # list carries no media frames from us): the host's leg
+                # sends it as a frame (``relay_frame_leg``).
+                log.info(
+                    "member mesh: %s for %s too large for its mailbox — "
+                    "through the host",
+                    event_type.value,
+                    to_instance_id,
+                )
+                return await self._host_hop.send(
+                    to_instance_id=to_instance_id,
+                    event_type=event_type,
+                    payload=payload,
+                    space_id=space_id,
+                )
+            return result
         if self._route_service is None or self._routed_handler is None:
             return DeliveryResult(
                 instance_id=to_instance_id,

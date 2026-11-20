@@ -1627,7 +1627,13 @@ receiver checks, same GFS endpoints), so there is no protocol bump.
   when it is one of our ACTIVE connections (as before; ours wins) or the
   URL of an entry on THAT space's signed list. A space-less envelope uses
   our own connections only; a card in one space never makes another
-  space's list apply.
+  space's list apply. The match is on the full normalized address
+  (scheme, host, port and path — the form the proof of possession binds);
+  a list naming two servers on one host is no target at all, since frames
+  are grouped by host. A binary media frame (`\x00SHR`) to a mailbox still
+  needs a connection of ours: an event too large for a JSON frame to a
+  member on a GFS we know only from the list goes through the host hop,
+  whose leg to it is a frame.
 - **Pinned to the owner's entry.** For a listed GFS we never connected to,
   the target is the v_57 **listing target** the follower publish already
   uses (`GfsConnectionService.server_targets`): the URL and key the owner
@@ -1645,17 +1651,31 @@ receiver checks, same GFS endpoints), so there is no protocol bump.
   which serves only GFSs we are registered on. A private / local address is
   dropped before any request.
 - **Fallback: the host hop.** A GFS neither ours nor listed, one that does
-  not prove mailboxes / `envelope_multi`, one that is down (no verified
+  not prove mailboxes / `envelope_multi` (or never answered with a verified
   capability block), or one the owner delisted between the enqueue and the
   retry: the next outbox pass no longer groups those rows, they go per row,
   find no mailbox in reach (`no_mailbox`) and the stored payload goes
   through the host hop (`FederationService.host_hop_outbox_entry`). A
-  live send makes the same choice (`send_with_mesh_fallback`).
+  live send makes the same choice (`send_with_mesh_fallback`). A GFS that
+  proved its capabilities and then went down keeps its cached answers, so
+  its rows are retried there — and handed to the host hop once a row has
+  failed `MAILBOX_HOST_HOP_AFTER` (= `MULTI_MAX_TRANSIENT`, 3) attempts, a
+  throttle never counting; so is a row too large for its mailbox. A row
+  whose upload the GFS took but whose `202` was lost may then reach the
+  member twice, the second time through the host as a new routed envelope;
+  the receiver applies it as the same event (as for any host hop).
 - **Privacy.** A household with NO GFS connection now contacts the
   space's listed GFSs anonymously to deliver to members, as it already did
   for followers: the GFS sees the address, time and sizes of the upload and
-  the recipient mailboxes, never the sender's identity or the content (the
-  IP residual in [principles](../principles.md)).
+  the recipient mailboxes — so it can link the sender's address to those
+  member mailboxes — never the sender's identity or the content (the IP
+  residual in [principles](../principles.md)).
+- **Cost of reaching a listed GFS.** Each request to a listing target opens
+  a fresh pinned session (DNS, TCP, TLS); the capability block is cached
+  and the proof renewed hourly, shared with the follower publish. Each
+  mailbox lookup for an address that is not ours reads the space's list
+  (`server_targets`: the space row, our connections, the resolve) — a few
+  local reads per recipient per send, no network.
 
 **The audience is the current member set.** The targets are exactly the
 ones `broadcast_to_space_members` plans: the `space_instances` households
@@ -1881,7 +1901,7 @@ sequenceDiagram
 | Local outbox per multi broadcast (200 seats) | — | one wrapped payload + 200 ref rows (≈ 48 KB), deleted on the 202; read in one drain pass (`DRAIN_BATCH` = 500), so ONE upload |
 | Retry after a lost `202` (200 seats) | 200 per-recipient re-sends | 1 upload, same `msg_id` — receivers drop it in the replay cache |
 | 20 members on a listed GFS the author is not on, a 2 KiB post | ≈ 20 × 3 KiB = 60 KiB of host hops author → host + 20 host uploads (host online only) | 1 upload of ≈ 10 KiB from the author (+ one `/gfs/info` and one proof per hour per GFS); the host carries nothing |
-| 200 members on 3 listed GFSs the author is not on | 200 host hops + 200 host uploads | 3 × ⌈n_gfs / 500⌉ uploads, i.e. 3 |
+| 200 members on 3 listed GFSs the author is not on | 200 host hops + 200 host uploads | Σ over the GFSs of ⌈n_g / max_recipients⌉ uploads — 3 while each GFS holds ≤ 500 of them |
 | Followers | 0 | 0 |
 
 Implementation: `socialhome/federation/multi_recipient.py`,

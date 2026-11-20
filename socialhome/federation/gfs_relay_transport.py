@@ -549,7 +549,9 @@ class GfsRelayTransport:
         try:
             if (
                 await self._sender.mailbox_connection(
-                    target.gfs_url, space_id=target.space_id
+                    target.gfs_url,
+                    # A media frame: our own connections only.
+                    space_id=None if media else target.space_id,
                 )
                 is None
             ):
@@ -678,7 +680,8 @@ class GfsRelayTransport:
                 gfs_url=target.gfs_url,
                 sealed=sealed,
                 media_body=media_body,
-                space_id=target.space_id,
+                # A media frame never goes to a GFS we only know from a list.
+                space_id=target.space_id if media_body is None else None,
             )
         except EnvelopeRelayThrottled:
             log.info("gfs relay: a frame for %s's mailbox was throttled", instance.id)

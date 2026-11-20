@@ -348,8 +348,9 @@ exactly:**
     mailboxes anonymously, over that server's own pinned cookie-less
     session, exactly as its follower publish goes there — so a household
     with no GFS connection at all now contacts the space's listed GFSs to
-    deliver to members (address, time and sizes, never its identity; the
-    IP residual below).
+    deliver to members (address, time, sizes and the recipient mailboxes —
+    so the GFS can link that address to those member mailboxes — never its
+    identity; the IP residual below).
 
   - **A space fan-out shows the GFS its exact recipient list (v_91; owner
     sign-off 2026-11-09, wrap per recipient 2026-11-10).** Space content

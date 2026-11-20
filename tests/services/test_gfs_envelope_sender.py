@@ -795,3 +795,37 @@ async def test_our_own_connection_to_a_listed_gfs_is_used_as_before(http_session
         assert opened == []
     finally:
         await server.close()
+
+
+async def test_a_listed_gfs_matches_on_its_full_address_path_included(http_session):
+    """The listed URL and the card's URL must be the same address — a
+    path, a port or a scheme apart is another server (fail closed)."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, _opened = _wire_listed(
+            fake, http_session, servers=[_listed(fake, url=fake.url + "/gfs")]
+        )
+        assert await sender._listed_connection(fake.url, LISTED_SPACE) is None
+        listed = await sender._listed_connection(fake.url + "/GFS/", LISTED_SPACE)
+        assert listed is None  # a path is case-sensitive
+        listed = await sender._listed_connection(fake.url + "/gfs/", LISTED_SPACE)
+        assert listed is not None and listed.inbox_url == fake.url + "/gfs"
+    finally:
+        await server.close()
+
+
+async def test_two_listed_servers_on_one_host_are_no_target(http_session, caplog):
+    """Frames are grouped by host: with two listed servers on one host a
+    group could reach the wrong one, so neither is a target."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        other = generate_identity_keypair().public_key.hex()
+        sender, _opened = _wire_listed(
+            fake,
+            http_session,
+            servers=[_listed(fake), _listed(fake, key=other, url=fake.url + "/two")],
+        )
+        assert await sender.mailbox_connection(fake.url, space_id=LISTED_SPACE) is None
+        assert "several servers on one host" in caplog.text
+    finally:
+        await server.close()

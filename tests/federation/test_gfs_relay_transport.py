@@ -728,7 +728,7 @@ async def test_a_target_s_space_reaches_the_sender_on_every_mailbox_call():
     )[0]
     assert relay.spaces == [
         ("mailbox", "sp-1"),
-        ("mailbox", "sp-1"),
+        ("mailbox", None),  # media: our own connections only
         ("multi", "sp-1"),
         ("send", "sp-1"),
         ("send_multi", "sp-1"),
@@ -741,3 +741,18 @@ def test_a_space_less_target_names_no_space():
     assert "sp" not in repr(
         MailboxTarget(mailbox_id="m" * 32, kem_pk=b"k" * 32, gfs_url="u", space_id="sp")
     )
+
+
+async def test_a_media_frame_to_a_mailbox_never_names_the_space():
+    """A binary frame rides our own connections only: the sender is never
+    asked to accept a listed GFS for it."""
+    kp = generate_x25519_keypair()
+    relay = _SpaceRecordingRelay()
+    transport = GfsRelayTransport(relay_sender=relay)
+    target = MailboxTarget(
+        mailbox_id="m" * 32, kem_pk=kp.public_key, gfs_url="https://g", space_id="sp-1"
+    )
+    await transport.send_media_mailbox(
+        instance=_instance(kp), target=target, media_body=b"\x00SHM" + b"x" * 64
+    )
+    assert relay.spaces == [("send", None)]

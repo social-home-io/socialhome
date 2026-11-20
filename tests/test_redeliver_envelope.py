@@ -1653,3 +1653,83 @@ async def test_only_a_directory_seat_s_stored_payload_takes_the_host_hop(env):
     )
     assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.TRANSIENT
     assert host_hop.calls == []
+
+
+def _relay_failure(error: str | None) -> _RelayOnlyTransport:
+    return _RelayOnlyTransport(
+        _TransportSendResult(ok=False, via="gfs_relay", error=error)
+    )
+
+
+async def test_a_row_too_large_for_the_mailbox_goes_through_the_host(env):
+    """No binary frame route to the mailbox (a GFS known only from the
+    space's list carries no media frames from us): the host's leg sends it
+    as a frame — never a PERMANENT drop."""
+    svc, fed_repo, kek = env
+    peer = await _directory_seat(fed_repo, kek)
+    svc.attach_transport(_relay_failure(DELIVERY_ERROR_RELAY_TOO_LARGE))
+    host_hop = _HostHop(DeliveryResult(instance_id="x", ok=True))
+    svc.attach_member_mesh(host_hop=host_hop, mailbox_sender_check=_never_sender)
+    entry = await _queued_ref(svc, peer)
+
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.SUCCESS
+    assert [c[0] for c in host_hop.calls] == [peer.id]
+
+
+@pytest.mark.parametrize(
+    ("error", "attempts", "hops"),
+    [
+        (None, 2, False),  # a GFS failing now: retry it first
+        (None, 3, True),  # it kept failing: the host carries the row
+        (DELIVERY_ERROR_RELAY_THROTTLED, 9, False),  # back-pressure: wait
+    ],
+)
+async def test_a_mailbox_gfs_that_keeps_failing_hands_the_row_to_the_host(
+    env, error, attempts, hops
+):
+    """A listed GFS that went down after it proved its capabilities (its
+    cached answers stay) must not hold a directory seat's rows forever."""
+    svc, fed_repo, kek = env
+    peer = await _directory_seat(fed_repo, kek)
+    svc.attach_transport(_relay_failure(error))
+    host_hop = _HostHop(DeliveryResult(instance_id="x", ok=True))
+    svc.attach_member_mesh(host_hop=host_hop, mailbox_sender_check=_never_sender)
+    entry = dataclasses.replace(await _queued_ref(svc, peer), attempts=attempts)
+
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is (DeliveryOutcome.SUCCESS if hops else DeliveryOutcome.TRANSIENT)
+    assert bool(host_hop.calls) is hops
+
+
+async def test_a_live_send_too_large_for_a_seat_s_mailbox_goes_through_the_host(
+    env, monkeypatch
+):
+    svc, fed_repo, kek = env
+    peer = await _directory_seat(fed_repo, kek)
+    host_hop = _HostHop(DeliveryResult(instance_id=peer.id, ok=True, via="host_hop"))
+    svc.attach_member_mesh(host_hop=host_hop, mailbox_sender_check=_never_sender)
+
+    class _Reachable:
+        async def mailbox_reachable(self, instance, space_id):
+            return True
+
+    svc._transport = _Reachable()  # type: ignore[assignment]
+
+    async def _too_large(_self, **_kw):
+        return DeliveryResult(
+            instance_id=peer.id, ok=False, error=DELIVERY_ERROR_RELAY_TOO_LARGE
+        )
+
+    monkeypatch.setattr(FederationService, "send_event", _too_large)
+    payload = {"space_id": "space-1", "post_id": "p-big"}
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id=peer.id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload=payload,
+        space_id="space-1",
+    )
+    assert result.ok and result.via == "host_hop"
+    assert host_hop.calls == [
+        (peer.id, FederationEventType.SPACE_POST_CREATED, payload, "space-1")
+    ]

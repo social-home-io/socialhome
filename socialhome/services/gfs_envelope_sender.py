@@ -58,6 +58,7 @@ from ..domain.gfs_mailbox import ENVELOPE_MULTI_PATH
 from ..domain.space import SpacePermissionError
 from ..federation.gfs_relay_transport import normalize_gfs_base
 from ..federation.invite_bootstrap import EnvelopeRelayThrottled
+from ..gfs_proof import normalize_gfs_base_url
 from ..outbound_fetch import OutboundFetchRefused
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from .gfs_connection_service import GfsConnectionService
@@ -284,13 +285,13 @@ class GfsEnvelopeSender:
                 and await self._gfs.envelope_mailbox_supported(conn)
             ):
                 return conn
-        listed = await self._listed_connection(want, space_id)
+        listed = await self._listed_connection(gfs_url, space_id)
         if listed is not None and await self._gfs.envelope_mailbox_supported(listed):
             return listed
         return None
 
     async def _listed_connection(
-        self, want: str, space_id: str | None
+        self, gfs_url: str, space_id: str | None
     ) -> GfsConnection | None:
         """The LISTING target (v_57, never stored, never identified) for the
         GFS at normalized base *want* on the owner's signed list of
@@ -300,11 +301,30 @@ class GfsEnvelopeSender:
         listed URL); it is reached only over its own cookie-less session
         pinned to the vetted public address of that URL. ``None`` without a
         space, a list, or an entry at that address: a member's card can name
-        any URL, but nothing goes to a GFS the owner did not list."""
-        if not space_id:
+        any URL, but nothing goes to a GFS the owner did not list.
+
+        Matched on the full normalized address (scheme, host, port AND
+        path — :func:`~socialhome.gfs_proof.normalize_gfs_base_url`, the form
+        the proof of possession binds), and refused when two listed servers
+        share a host under different paths: a frame grouped by host must
+        never reach the other one."""
+        want = normalize_gfs_base_url(gfs_url)
+        if not space_id or not want:
             return None
-        for target in await self._gfs.server_targets(space_id) or ():
-            if not target.registered and normalize_gfs_base(target.inbox_url) == want:
+        targets = await self._gfs.server_targets(space_id) or []
+        base = normalize_gfs_base(gfs_url)
+        if sum(1 for t in targets if normalize_gfs_base(t.inbox_url) == base) > 1:
+            log.warning(
+                "gfs.envelope: the signed GFS list of space %s names several "
+                "servers on one host — none of them is a mailbox target",
+                space_id,
+            )
+            return None
+        for target in targets:
+            if (
+                not target.registered
+                and normalize_gfs_base_url(target.inbox_url) == want
+            ):
                 return target
         return None
 
