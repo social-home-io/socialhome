@@ -952,6 +952,7 @@ async def _signed_get(mw, path: str, ip: str) -> int:
         "/api/users/u1/picture",
         "/api/media/abc.webp",
         "/api/spaces/s1/members/u1/picture",
+        "/api/spaces/s1/authors/u1/picture",
         "/api/spaces/s1/cover",
         "/api/spaces/s1/icon",
     ],
@@ -961,7 +962,7 @@ async def test_signed_media_gets_have_their_own_per_client_limit(path, tmp_path)
     60/min bucket per path family. Each signed media family now has its
     own looser rule, per client address."""
     assert SIGNED_MEDIA_GET_LIMIT == (600, 60)
-    assert len(SIGNED_MEDIA_GET_RULES) == 5
+    assert len(SIGNED_MEDIA_GET_RULES) == 6
     _, _, rate_mw, _ = _build_middleware(
         Config(data_dir=str(tmp_path), db_path=str(tmp_path / "x.db")), RateLimiter()
     )
@@ -1198,3 +1199,112 @@ async def test_a_failed_boot_marks_read_sets_none(tmp_dir, monkeypatch):
     app = create_app(cfg)
     async with TestClient(TestServer(app)):
         assert app[space_sync_scheduler_key]._row_marks is None
+
+
+# ─── Community-scale SPA traffic (Bazaar, home corner, posts, ingress) ──
+
+
+def _mw(tmp_path, capabilities=frozenset()):
+    _, _, rate_mw, _ = _build_middleware(
+        Config(data_dir=str(tmp_path), db_path=str(tmp_path / "x.db")),
+        RateLimiter(),
+        capabilities=capabilities,
+    )
+    return rate_mw
+
+
+async def _user_req(mw, method: str, path: str, user_id: str = "u1") -> int:
+    request = make_mocked_request(method, path, transport=_PeerTransport("10.0.0.1"))
+    request[USER_KEY] = type("Ctx", (), {"user_id": user_id})()
+
+    async def handler(_req):
+        return web.Response(status=200)
+
+    return (await mw(request, handler)).status
+
+
+async def test_bazaar_reads_get_300_a_minute_and_writes_stay_at_60(tmp_path):
+    """A feed of listings reads each one; the 60/min default 429'd at 20
+    cards. Reads get 300/min per person; bids, offers, saves stay at 60."""
+    mw = _mw(tmp_path)
+    paths = ["/api/bazaar", "/api/bazaar/p1", "/api/bazaar/p1/bids"]
+    for i in range(300):
+        assert await _user_req(mw, "GET", paths[i % 3]) == 200
+    assert await _user_req(mw, "GET", "/api/bazaar/p2") == 429
+    for _ in range(60):
+        assert await _user_req(mw, "POST", "/api/bazaar/p1/bids") == 200
+    assert await _user_req(mw, "POST", "/api/bazaar/p1/offers") == 429
+
+
+async def test_home_corner_gets_its_own_120_bucket(tmp_path):
+    """The home page refreshes ``/api/me/corner`` on live frames: it gets
+    its own 120/min and never spends the ``/api/me`` writes' 60."""
+    mw = _mw(tmp_path)
+    for _ in range(120):
+        assert await _user_req(mw, "GET", "/api/me/corner") == 200
+    assert await _user_req(mw, "GET", "/api/me/corner") == 429
+    assert await _user_req(mw, "PATCH", "/api/me") == 200
+
+
+async def test_post_limit_is_for_creating_posts_only(tmp_path):
+    """``/api/feed/posts`` (30/min) was a prefix and also limited reading
+    comments, reactions and permalinks. Only creating a post is 30/min."""
+    mw = _mw(tmp_path)
+    for _ in range(30):
+        assert await _user_req(mw, "POST", "/api/feed/posts") == 200
+    assert await _user_req(mw, "POST", "/api/feed/posts") == 429
+    for _ in range(40):
+        assert await _user_req(mw, "GET", "/api/feed/posts/p1/comments") == 200
+
+
+async def test_space_author_pictures_are_per_client_signed_media(tmp_path):
+    """``/api/spaces/*/authors/*/picture`` is a signed path (``auth.py``)
+    but fell into the household-wide ``/api/spaces`` bucket."""
+    assert "GET /api/spaces/*/authors/*/picture" in SIGNED_MEDIA_GET_RULES
+    mw = _mw(tmp_path)
+    path = "/api/spaces/s1/authors/u1/picture"
+    for _ in range(600):
+        assert await _signed_get(mw, path, "10.0.0.1") == 200
+    assert await _signed_get(mw, path, "10.0.0.1") == 429
+    assert await _signed_get(mw, path, "10.0.0.2") == 200
+
+
+async def _ingress_signed_get(mw, path: str, ip: str, user_id: str | None) -> int:
+    headers = {"X-Hass-Source": "core.ingress"}
+    if user_id is not None:
+        headers["X-Remote-User-Id"] = user_id
+    request = make_mocked_request(
+        "GET", path, headers=headers, transport=_PeerTransport(ip)
+    )
+    request[USER_KEY] = type("Ctx", (), {"user_id": SIGNED_URL_PRINCIPAL})()
+
+    async def handler(_req):
+        return web.Response(status=200)
+
+    return (await mw(request, handler)).status
+
+
+async def test_ingress_signed_media_is_bucketed_per_ha_user(tmp_path):
+    """Under HA ingress every browser arrives from the Supervisor's address,
+    so per-address signed-media buckets were one household-wide bucket.
+    With ``Capability.INGRESS`` the Supervisor-stamped user id keys it."""
+    mw = _mw(tmp_path, frozenset({Capability.INGRESS}))
+    path = "/api/users/u1/picture"
+    for _ in range(600):
+        assert await _ingress_signed_get(mw, path, "172.30.32.2", "ha-a") == 200
+    assert await _ingress_signed_get(mw, path, "172.30.32.2", "ha-a") == 429
+    assert await _ingress_signed_get(mw, path, "172.30.32.2", "ha-b") == 200
+    # No user stamped (no session user): back to the address.
+    for _ in range(600):
+        assert await _ingress_signed_get(mw, path, "172.30.32.2", None) == 200
+    assert await _ingress_signed_get(mw, path, "172.30.32.2", None) == 429
+
+
+async def test_ingress_user_header_is_ignored_without_the_capability(tmp_path):
+    """Outside ingress nothing strips ``X-Remote-User-*``: a client must not
+    pick its own bucket by sending one."""
+    mw = _mw(tmp_path)
+    path = "/api/users/u1/picture"
+    for i in range(600):
+        assert await _ingress_signed_get(mw, path, "10.0.0.1", f"x{i}") == 200
+    assert await _ingress_signed_get(mw, path, "10.0.0.1", "fresh") == 429

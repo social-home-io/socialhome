@@ -1268,6 +1268,12 @@ export interface BazaarListing {
   /** ``GET /api/bazaar/{id}`` only: the seller's questions and answers
    *  (v_75), in display order. Absent on list rows. */
   faq?: BazaarFaqEntry[]
+  /** ``GET /api/bazaar/{id}`` only: what a card shows, in the one read —
+   *  the bids (reasons only for the seller and that bidder), the viewer's
+   *  own offers (every offer for the seller) and the viewer's saved flag. */
+  bids?: BazaarBid[]
+  offers?: BazaarOffer[]
+  viewer_saved?: boolean
 }
 
 /** One question and its answer on a listing (v_75). Never names who

@@ -3514,6 +3514,7 @@
   "error.not_found": "Introuvable — l'élément a peut-être été supprimé ou déplacé.",
   "error.unprocessable": "Impossible d'effectuer cette action. Vérifiez votre saisie et réessayez.",
   "error.rate_limited": "Trop de tentatives — patientez un instant puis réessayez.",
+  "error.rate_limited_read": "Vous allez un peu vite — réessayez dans un instant.",
   "error.already_member": "Vous êtes déjà membre de cet espace.",
   "error.gfs_relay_not_allowed": "Seuls les foyers jumelés directement peuvent utiliser le GFS en secours.",
   "error.space_not_public": "Seuls les espaces globaux peuvent être référencés sur un GFS.",

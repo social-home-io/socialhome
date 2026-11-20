@@ -401,3 +401,81 @@ describe('api.download — attachments with their file name', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('ApiClient — 429 on a GET (one polite retry)', () => {
+  function res(status: number, body: unknown, retryAfter: string | null = null) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (k: string) => (k.toLowerCase() === 'retry-after' ? retryAfter : null) },
+      json: vi.fn().mockResolvedValue(body),
+    } as unknown as Response
+  }
+  const limited = { error: { code: 'RATE_LIMITED', detail: 'Too many requests — wait a moment.' } }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('waits Retry-After and retries a GET once', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(429, limited, '3'))
+      .mockResolvedValueOnce(res(200, { ok: 1 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const p = api.get('/api/bazaar/p1')
+    await vi.advanceTimersByTimeAsync(2_900)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(200)
+    await expect(p).resolves.toEqual({ ok: 1 })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('without Retry-After it waits about 2 s', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(429, limited))
+      .mockResolvedValueOnce(res(200, [1]))
+    vi.stubGlobal('fetch', fetchMock)
+    const p = api.get('/api/me/corner')
+    await vi.advanceTimersByTimeAsync(1_900)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(200)
+    await expect(p).resolves.toEqual([1])
+  })
+
+  it('caps a long Retry-After at 30 s', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(429, limited, '600'))
+      .mockResolvedValueOnce(res(200, {}))
+    vi.stubGlobal('fetch', fetchMock)
+    const p = api.get('/api/feed')
+    await vi.advanceTimersByTimeAsync(30_000)
+    await expect(p).resolves.toEqual({})
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries only once, then says you are going a bit fast', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn().mockResolvedValue(res(429, limited, '1'))
+    vi.stubGlobal('fetch', fetchMock)
+    const p = api.get('/api/bazaar').catch((e) => e)
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await p
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(429)
+    expect(err.code).toBe('RATE_LIMITED')
+    expect(err.message).toBe("You're going a bit fast — try again in a moment.")
+  })
+
+  it('never retries a POST', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(res(429, limited, '1'))
+    vi.stubGlobal('fetch', fetchMock)
+    const err = await api.post('/api/bazaar/p1/bids', { amount: 1 }).catch((e) => e)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(err.status).toBe(429)
+  })
+})

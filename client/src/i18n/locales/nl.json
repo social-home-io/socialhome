@@ -3514,6 +3514,7 @@
   "error.not_found": "Niet gevonden — misschien is het verwijderd of verplaatst.",
   "error.unprocessable": "Dat lukte niet. Controleer je invoer en probeer het opnieuw.",
   "error.rate_limited": "Te veel pogingen — wacht even en probeer het opnieuw.",
+  "error.rate_limited_read": "Je gaat een beetje snel — probeer het zo nog eens.",
   "error.already_member": "Je bent al lid van deze space.",
   "error.gfs_relay_not_allowed": "Alleen direct gekoppelde huishoudens kunnen de GFS-terugvaloptie gebruiken.",
   "error.space_not_public": "Alleen wereldwijde spaces kunnen op een GFS worden vermeld.",

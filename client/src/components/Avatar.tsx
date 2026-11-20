@@ -43,6 +43,10 @@ export function Avatar({ src, name, size = 40, onClick, online }: AvatarProps) {
       class={`sh-avatar ${onClick ? 'sh-avatar--clickable' : ''}`}
       width={size}
       height={size}
+      // A long people list must not pull every picture at once: each is a
+      // signed-media GET, and off-screen ones can wait for a scroll.
+      loading="lazy"
+      decoding="async"
       style={boxStyle}
       onClick={onClick}
       onError={() => setErrored(true)}

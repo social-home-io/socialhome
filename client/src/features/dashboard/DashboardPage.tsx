@@ -14,7 +14,7 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
-import { ws } from '@/ws'
+import { useThrottledLiveRefresh } from '@/hooks/useThrottledLiveRefresh'
 import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
@@ -51,6 +51,19 @@ import { safeIconSrc } from '@/utils/appIcon'
 import { presenceLabel } from '@/utils/presenceLabel'
 import { statusLine } from '@/utils/statusLine'
 import type { UserStatus } from '@/types'
+
+const DASHBOARD_LIVE_EVENTS = [
+  'notification.new', 'notification.unread_count',
+  'dm.message',
+  'calendar.created', 'calendar.updated',
+  'calendar.deleted',
+  'timetable.changed', 'timetable.deleted',
+  'presence.updated', 'user.status_changed',
+  'task.created', 'task.updated', 'task.deleted',
+  'task.completed', 'task.assigned',
+  'bazaar.bid_placed', 'bazaar.listing_created',
+  'bazaar.listing_closed', 'bazaar.offer_accepted',
+] as const
 
 interface CornerPresence {
   user_id: string
@@ -113,29 +126,10 @@ export default function DashboardPage() {
   useEffect(() => {
     void loadInstalled()
     void refresh()
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const debouncedRefresh = () => {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { void refresh() }, 200)
-    }
-    const relevant = [
-      'notification.new', 'notification.unread_count',
-      'dm.message',
-      'calendar.created', 'calendar.updated',
-      'calendar.deleted',
-      'timetable.changed', 'timetable.deleted',
-      'presence.updated', 'user.status_changed',
-      'task.created', 'task.updated', 'task.deleted',
-      'task.completed', 'task.assigned',
-      'bazaar.bid_placed', 'bazaar.listing_created',
-      'bazaar.listing_closed', 'bazaar.offer_accepted',
-    ]
-    const offs = relevant.map(t => ws.on(t, debouncedRefresh))
-    return () => {
-      offs.forEach(off => off())
-      if (timer) clearTimeout(timer)
-    }
   }, [])
+  // Live frames refetch the bundle — throttled, never for space or
+  // household chat messages, and not while the tab is hidden.
+  useThrottledLiveRefresh(() => { void refresh() }, DASHBOARD_LIVE_EVENTS)
 
   if (loading && !bundle) {
     return (

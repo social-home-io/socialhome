@@ -3541,6 +3541,7 @@
   "error.not_found": "No se encontró: puede que se haya eliminado o movido.",
   "error.unprocessable": "No se pudo hacer. Revisa lo que escribiste y vuelve a intentarlo.",
   "error.rate_limited": "Demasiados intentos: espera un momento y vuelve a intentarlo.",
+  "error.rate_limited_read": "Vas un poco rápido: vuelve a intentarlo en un momento.",
   "error.already_member": "Ya eres miembro de este espacio.",
   "error.gfs_relay_not_allowed": "Solo los hogares vinculados directamente pueden usar el GFS como alternativa.",
   "error.space_not_public": "Solo los espacios globales se pueden listar en un GFS.",

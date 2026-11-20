@@ -86,4 +86,13 @@ describe('BazaarOffersPanel', () => {
     await Promise.resolve()
     expect(apiPost).not.toHaveBeenCalled()
   })
+
+  it('offers handed down by the card render without a read of their own', () => {
+    const { container } = render(
+      <BazaarOffersPanel listing={listing} currentUserId="seller1"
+                         offers={[offer({ amount: 7000 })]} />,
+    )
+    expect(container.textContent).toContain('70.00')
+    expect(apiGet).not.toHaveBeenCalled()
+  })
 })

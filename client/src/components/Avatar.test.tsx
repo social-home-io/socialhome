@@ -68,4 +68,13 @@ describe('Avatar', () => {
     expect(container.querySelector('img')).toBeNull()
     expect(container.textContent).toContain('CA')
   })
+
+  // A people list of 40+ avatars loaded every picture at once — each one a
+  // signed-media GET against the per-client bucket. Off-screen avatars wait.
+  it('loads the photo lazily and decodes it off the main thread', () => {
+    const { container } = render(<Avatar name="Anna" src="/pic.jpg" />)
+    const img = container.querySelector('img') as HTMLImageElement
+    expect(img.getAttribute('loading')).toBe('lazy')
+    expect(img.getAttribute('decoding')).toBe('async')
+  })
 })

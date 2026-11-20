@@ -24,7 +24,7 @@ import { useEffect, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { api } from '@/api'
-import { ws } from '@/ws'
+import { useThrottledLiveRefresh } from '@/hooks/useThrottledLiveRefresh'
 import { currentUser } from '@/store/auth'
 import { CardSkeleton } from '@/components/SkeletonScreen'
 import {
@@ -44,6 +44,15 @@ import {
 import { TodayScheduleCard } from './TodayScheduleCard'
 import { HomeTodayCard } from './HomeTodayCard'
 import { activeTimetables, lessonCount } from './schedule'
+
+const WELCOME_LIVE_EVENTS = [
+  'notification.new', 'notification.unread_count',
+  'dm.message',
+  'calendar.created', 'calendar.updated',
+  'calendar.deleted',
+  'timetable.changed', 'timetable.deleted',
+  'task.created', 'task.updated', 'task.deleted', 'task.completed',
+] as const
 
 const EMPTY: WelcomeBundle = {
   unread_notifications: 0,
@@ -73,27 +82,10 @@ export default function WelcomePage() {
     }
   }
 
-  useEffect(() => {
-    void refresh()
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const debounced = () => {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { void refresh() }, 200)
-    }
-    const events = [
-      'notification.new', 'notification.unread_count',
-      'dm.message',
-      'calendar.created', 'calendar.updated',
-      'calendar.deleted',
-      'timetable.changed', 'timetable.deleted',
-      'task.created', 'task.updated', 'task.deleted', 'task.completed',
-    ]
-    const offs = events.map(e => ws.on(e, debounced))
-    return () => {
-      offs.forEach(off => off())
-      if (timer) clearTimeout(timer)
-    }
-  }, [])
+  useEffect(() => { void refresh() }, [])
+  // Live frames refetch the bundle — throttled, never for space or
+  // household chat messages, and not while the tab is hidden.
+  useThrottledLiveRefresh(() => { void refresh() }, WELCOME_LIVE_EVENTS)
 
   if (loading && !bundle) {
     return (

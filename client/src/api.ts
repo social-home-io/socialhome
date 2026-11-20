@@ -52,6 +52,20 @@ async function _parseJsonOrNull<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** Default and ceiling for the wait before a rate-limited GET's retry. */
+const RETRY_DEFAULT_MS = 2_000
+const RETRY_MAX_MS = 30_000
+
+/** How long a 429 asks us to wait: ``Retry-After`` in seconds (an HTTP
+ *  date too), capped at 30 s; ~2 s when the header is missing or odd. */
+function retryAfterMs(res: Response): number {
+  const raw = res.headers?.get?.('retry-after')?.trim()
+  if (!raw) return RETRY_DEFAULT_MS
+  let ms = /^\d+$/.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - Date.now()
+  if (!Number.isFinite(ms) || ms < 0) ms = RETRY_DEFAULT_MS
+  return Math.min(ms, RETRY_MAX_MS)
+}
+
 /** The ``error`` object of a canonical ``{"error": {"code", "detail"}}``
  *  body, or ``null`` when the body is missing / not JSON / another shape
  *  (proxy errors, upstream 502s). Never throws. */
@@ -104,12 +118,15 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly path: string,
     parsed?: ApiErrorBody | null,
+    /** The user-facing line, when the client knows better than the body
+     *  (a read still rate-limited after its retry). */
+    message?: string,
   ) {
     const code = typeof parsed?.code === 'string' ? parsed.code : null
     const detail = typeof parsed?.detail === 'string' ? parsed.detail : null
     // Call sites show ``err.message`` (toasts, status banners) — make it
     // the translated, user-facing line.
-    super(apiErrorMessage(status, path, parsed ?? null))
+    super(message ?? apiErrorMessage(status, path, parsed ?? null))
     this.name = 'ApiError'
     this.code = code
     this.detail = detail
@@ -196,12 +213,22 @@ class ApiClient {
   private static _loggingOut = false
   static resetLoggedOut(): void { ApiClient._loggingOut = false }
 
+  /** A read that answered 429 waits ``Retry-After`` (else ~2 s, at most
+   *  30 s) and tries once more — a busy page (a feed of listings, a home
+   *  page on a lively chat) gets its data a moment late instead of an
+   *  error. Only a GET, and only once: a write is never repeated behind
+   *  the user's back, and a second 429 says so plainly. */
   async get<T = any>(path: string, params?: Record<string, string>): Promise<T> {
     const url = params ? `${path}?${new URLSearchParams(params)}` : path
-    const res = await this._handle(
-      await fetch(_rel(url), { headers: this.headers() }),
-      path,
-    )
+    let raw = await fetch(_rel(url), { headers: this.headers() })
+    if (raw.status === 429) {
+      await new Promise(resolve => setTimeout(resolve, retryAfterMs(raw)))
+      raw = await fetch(_rel(url), { headers: this.headers() })
+      if (raw.status === 429) {
+        throw new ApiError(429, path, await _parseErrorBody(raw), t('error.rate_limited_read'))
+      }
+    }
+    const res = await this._handle(raw, path)
     return res.json()
   }
 

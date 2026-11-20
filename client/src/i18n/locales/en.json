@@ -3550,6 +3550,7 @@
   "error.not_found": "Not found — it may have been deleted or moved.",
   "error.unprocessable": "Couldn't do that. Check your input and try again.",
   "error.rate_limited": "Too many tries — wait a moment and try again.",
+  "error.rate_limited_read": "You're going a bit fast — try again in a moment.",
   "error.already_member": "You're already a member of this space.",
   "error.gfs_relay_not_allowed": "Only households you paired with directly can use the GFS fallback.",
   "error.space_not_public": "Only global spaces can be listed on a GFS.",

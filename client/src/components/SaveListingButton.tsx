@@ -1,8 +1,9 @@
 /**
  * SaveListingButton — heart icon to bookmark a bazaar listing (§23.23).
  *
- * Lazy-probes ``GET /api/bazaar/{id}/save`` on mount so the button
- * renders the correct filled/empty state immediately. Clicking toggles
+ * Takes the saved state from its card (``viewer_saved`` on
+ * ``GET /api/bazaar/{id}``); only without one does it probe
+ * ``GET /api/bazaar/{id}/save`` on mount. Clicking toggles
  * via POST / DELETE and flips the local state optimistically; failures
  * revert + surface a toast.
  */
@@ -16,13 +17,19 @@ interface Props {
   /** Optional size override — default 22px keeps the glyph visible
    *  inside a PostCard meta row without crowding other affordances. */
   size?: number
+  /** The saved state the card already read — no probe of our own. */
+  initialSaved?: boolean
 }
 
-export function SaveListingButton({ postId, size = 22 }: Props) {
-  const [saved, setSaved] = useState<boolean | null>(null)
+export function SaveListingButton({ postId, size = 22, initialSaved }: Props) {
+  const [saved, setSaved] = useState<boolean | null>(initialSaved ?? null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
+    if (initialSaved !== undefined) {
+      setSaved(initialSaved)
+      return
+    }
     let stopped = false
     api.get(`/api/bazaar/${postId}/save`).then(
       (body: { saved: boolean }) => {
@@ -30,7 +37,7 @@ export function SaveListingButton({ postId, size = 22 }: Props) {
       },
     ).catch(() => { if (!stopped) setSaved(false) })
     return () => { stopped = true }
-  }, [postId])
+  }, [postId, initialSaved])
 
   const toggle = async () => {
     if (busy || saved === null) return

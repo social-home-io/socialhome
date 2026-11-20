@@ -3514,6 +3514,7 @@
   "error.not_found": "Nicht gefunden – vielleicht wurde es gelöscht oder verschoben.",
   "error.unprocessable": "Das hat nicht geklappt. Prüf deine Eingabe und versuch es erneut.",
   "error.rate_limited": "Zu viele Versuche – warte einen Moment und versuch es dann erneut.",
+  "error.rate_limited_read": "Du bist gerade etwas schnell – versuch es gleich noch einmal.",
   "error.already_member": "Du bist bereits Mitglied in diesem Space.",
   "error.gfs_relay_not_allowed": "Den GFS-Ausweichweg können nur direkt gekoppelte Haushalte nutzen.",
   "error.space_not_public": "Nur globale Spaces können auf einem GFS gelistet werden.",
