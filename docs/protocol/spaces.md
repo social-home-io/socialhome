@@ -1875,14 +1875,18 @@ should connect to each one:
   quiet), not pinned. The push names only the space (§25.3). It is
   checked when the seed is stored (`SpaceAdminSeedStored`, after an
   accepted `SPACE_ADMIN_KEY_SHARE`), when an owner config is applied
-  (`SpaceFeaturesApplied` — a newer GFS list, or delegation turned off),
+  (`SpaceFeaturesApplied` — `SPACE_CONFIG_CHANGED` or a rotation bundle:
+  a newer GFS list, delegation turned off, a moved authority key),
   when a GFS connection is added, and once at startup. The row remembers
   which GFSs it told of (`params.gfs`), so the same GFS is told of once —
   restarts included — until it is connected or leaves the list, and again
   only if it goes missing later; a GFS that is fine again drops out of
   the row quietly. Nothing missing, or no seat any more (the seed was
-  dropped, the admin stepped down) → the row is resolved
-  (`handled.outcome: "done"`).
+  dropped) → the row is resolved (`handled.outcome: "done"`); a person who
+  is no longer a household admin has theirs resolved at the next check.
+  The row ages out like any other (90 days, the per-person cap): a GFS
+  still missing after that is told of again at the next check — a
+  reminder, not a repeat. One check per space runs at a time.
 
 Local only: no federation message, no protocol change, no table.
 

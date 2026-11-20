@@ -19,8 +19,9 @@ When it checks a space:
 
 * this household gets the seat (:class:`SpaceAdminSeedStored`);
 * a config change from the owner side was applied
-  (:class:`SpaceFeaturesApplied`) — a newer owner-signed GFS list, or
-  delegation turned off (which drops the seat);
+  (:class:`SpaceFeaturesApplied`, from ``SPACE_CONFIG_CHANGED`` or a
+  rotation bundle) — a newer owner-signed GFS list, delegation turned off
+  or a moved authority key (either drops the seat);
 * a GFS connection was added (:meth:`on_connection_added`, every space);
 * at startup (:meth:`check_all`, every space).
 
@@ -29,6 +30,7 @@ Nothing missing, or no seat any more → the bell is resolved.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -53,7 +55,14 @@ Describe = Callable[[Space], Awaitable[tuple[list[dict] | None, bool]]]
 class SpaceGfsNeededService:
     """Keeps the ``space_gfs_needed`` bell in line with the truth."""
 
-    __slots__ = ("_bus", "_describe", "_notifications", "_spaces", "_stands_in")
+    __slots__ = (
+        "_bus",
+        "_describe",
+        "_locks",
+        "_notifications",
+        "_spaces",
+        "_stands_in",
+    )
 
     def __init__(
         self,
@@ -72,6 +81,11 @@ class SpaceGfsNeededService:
         #: :meth:`GfsServerSelectionService.describe` — the owner's list
         #: with ``connected`` per GFS, as the space page shows it.
         self._describe = describe
+        #: One check per space at a time: startup's sweep, a new connection
+        #: and an inbound event may race — without it a check that read the
+        #: GFSs before a connect could bell after it, or two could each add
+        #: a row.
+        self._locks: dict[str, asyncio.Lock] = {}
 
     def wire(self) -> None:
         self._bus.subscribe(SpaceAdminSeedStored, self._on_space_event)
@@ -92,20 +106,22 @@ class SpaceGfsNeededService:
         space."""
         for space in await self._spaces.list_all():
             try:
-                await self._check_space(space)
+                await self.check(space.id)
             except Exception:
                 log.exception("GFS-needed bell: check failed for %s", space.id)
 
     async def check(self, space_id: str) -> None:
-        space = await self._spaces.get(space_id)
-        if space is None:
-            return
-        await self._check_space(space)
-
-    async def _check_space(self, space: Space) -> None:
-        await self._notifications.reconcile_space_gfs_needed(
-            space, await self._missing(space)
-        )
+        """Bring *space_id*'s bell in line — the space is read under the
+        lock, so a check never acts on a list or seat another one saw
+        change."""
+        lock = self._locks.setdefault(space_id, asyncio.Lock())
+        async with lock:
+            space = await self._spaces.get(space_id)
+            if space is None:
+                return
+            await self._notifications.reconcile_space_gfs_needed(
+                space, await self._missing(space)
+            )
 
     async def _missing(self, space: Space) -> list[tuple[str, str]]:
         """``(address, name)`` of each listed GFS we aren't connected to —

@@ -3,6 +3,8 @@ every GFS of a space it stands in for (:mod:`socialhome.services.space_gfs_neede
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from socialhome.crypto import (
@@ -71,6 +73,7 @@ class _World:
         return self.stands_in
 
     async def describe(self, space):
+        await asyncio.sleep(0)  # a real listing awaits the database
         if not self.servers:
             return None, False
         return [
@@ -352,6 +355,22 @@ async def test_an_admin_who_stepped_down_has_their_bell_resolved(stack):
     await stack.svc.check_all()
 
     assert await _pending(stack, anna.user_id) == []
+
+
+async def test_concurrent_checks_of_one_space_bell_once(stack):
+    """Startup's sweep racing an inbound event for the same space: one
+    row, one push."""
+    anna, _, space = await _setup(stack)
+    stack.world.servers = {GFS_A: ("Alpha GFS", False)}
+
+    await asyncio.gather(
+        stack.svc.check_all(),
+        stack.svc.check(space.id),
+        stack.svc.check(space.id),
+    )
+
+    assert len(await _rows(stack, anna.user_id)) == 1
+    assert len(stack.push.calls) == 1
 
 
 async def test_an_unknown_space_is_ignored(stack):

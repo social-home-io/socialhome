@@ -5684,9 +5684,10 @@ class NotificationService(ProtectionGateMixin):
         has the Connect button. ``params.gfs`` records the GFSs a row told
         of, so each is told of once:
 
-        * a GFS missing that the pending row doesn't name → the row (re)opens
-          naming all missing ones, with a push (unless the reader chose In
-          app for Needs you);
+        * a GFS missing that the pending row doesn't name → the row names
+          all missing ones and comes to the top; it pushes when it starts
+          or re-opens a read row (a repeat on a row still unread is silent,
+          D8), unless the reader chose In app for Needs you;
         * a told-of GFS connected or delisted while others still miss → the
           row drops it in place (no reopen, no push), so it is told of again
           if it goes missing later;
