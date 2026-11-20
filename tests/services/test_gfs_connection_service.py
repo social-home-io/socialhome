@@ -4941,7 +4941,9 @@ async def test_a_bad_entry_in_one_space_never_blocks_another_space(env):
     assert factory.urls == ["https://dead.example", "https://real.example"]
 
 
-def _proving_session(gid: str, *, url: str, seed=None, base_url: str = ""):
+def _proving_session(
+    gid: str, *, url: str, seed=None, base_url: str = "", extra_caps=None
+):
     """A listing session whose server offers proof of possession and signs
     the nonce for *base_url* (default: the listed URL) with *seed*."""
     session = _ListingSession(
@@ -4950,6 +4952,7 @@ def _proving_session(gid: str, *, url: str, seed=None, base_url: str = ""):
             "anonymous_publish": True,
             "member_publish_strict": True,
             "proof_of_possession": True,
+            **(extra_caps or {}),
         },
     )
 
@@ -5021,6 +5024,38 @@ async def test_a_listing_proof_is_reused_then_renewed(env, monkeypatch):
     # Expired: the next question proves again before answering.
     assert await svc.member_publish_strict_supported(target)
     assert len(session.posts) == 2
+
+
+async def test_a_listing_proof_is_renewed_before_a_mailbox_or_multi_answer(
+    env, monkeypatch
+):
+    """v_91 to a listed GFS: the mailbox and multi checks honour the same
+    proof TTL as the follower publish — an expired proof is renewed before
+    either answers."""
+    clock = [1000.0]
+    monkeypatch.setattr(gfs_connection_service.time, "monotonic", lambda: clock[0])
+    session = _proving_session(
+        "gfs-b",
+        url="https://gfs-b.example",
+        extra_caps={
+            "envelope_mailbox": {"sig_suites": ["ed25519"], "idle_days": 30},
+            "envelope_multi": {"max_recipients": 500},
+        },
+    )
+    svc, _ = await _targets_svc(
+        env, servers=(_listed("gfs-b"),), factory=_Factory(session)
+    )
+    [target] = await svc.server_targets("sp")
+    assert await svc.envelope_mailbox_supported(target)
+    assert await svc.envelope_multi_supported(target)
+    assert len(session.posts) == 1
+    clock[0] += gfs_connection_service.LISTING_PROOF_TTL_S + 1
+    [target] = await svc.server_targets("sp")
+    assert await svc.envelope_multi_supported(target)
+    assert len(session.posts) == 2
+    clock[0] += gfs_connection_service.LISTING_PROOF_TTL_S + 1
+    assert await svc.envelope_mailbox_supported(target)
+    assert len(session.posts) == 3
 
 
 async def test_a_blip_on_re_proof_keeps_the_previous_verdict(env, monkeypatch):

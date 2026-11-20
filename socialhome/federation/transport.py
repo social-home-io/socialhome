@@ -65,6 +65,7 @@ from . import app_framing, media_framing
 from .gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
+    multi_caps_key,
 )
 from .inbound_validator import UnpairedPeerRefusedError
 from .inbox_reply import inbox_holds_envelope
@@ -2302,30 +2303,33 @@ class FederationTransport:
     ) -> MailboxTarget | None:
         """*instance*'s GFS mailbox for *space_id* when a multi-recipient
         upload can reach it (v_90): a :data:`InstanceSource.SPACE_SESSION`
-        seat whose mailbox sits on a GFS of ours that proved
-        ``envelope_mailbox`` and ``envelope_multi``. ``None`` → the caller
-        sends to it per recipient. *caps*, when given, caches
-        :meth:`multi_capacity` by GFS URL across the calls of one pass (one
-        broadcast, one outbox drain), so each GFS is probed once. Never
-        raises."""
+        seat whose mailbox sits on a GFS that proved ``envelope_mailbox`` and
+        ``envelope_multi`` — a GFS of ours, or one on *space_id*'s
+        owner-signed list (v_91 to listed GFSs). ``None`` → the caller sends
+        to it per recipient. *caps*, when given, caches
+        :meth:`multi_capacity` by :func:`multi_caps_key` (GFS + space) across
+        the calls of one pass (one broadcast, one outbox drain), so each GFS
+        is probed once per space. Never raises."""
         if instance.source is not InstanceSource.SPACE_SESSION:
             return None
         target = await self._mailbox_target(instance, space_id, media=False)
         if target is None:
             return None
-        cap = caps.get(target.gfs_url) if caps is not None else None
+        key = multi_caps_key(target)
+        cap = caps.get(key) if caps is not None else None
         if cap is None:
-            cap = await self.multi_capacity(target.gfs_url)
+            cap = await self.multi_capacity(target.gfs_url, space_id=target.space_id)
             if caps is not None:
-                caps[target.gfs_url] = cap
+                caps[key] = cap
         return target if cap >= 1 else None
 
-    async def multi_capacity(self, gfs_url: str) -> int:
+    async def multi_capacity(self, gfs_url: str, *, space_id: str | None = None) -> int:
         """Most mailbox ids one upload to the GFS at *gfs_url* may name;
-        ``0`` when no connection of ours there proved ``envelope_multi``."""
+        ``0`` when neither a connection of ours there nor the entry for it on
+        *space_id*'s signed list proved ``envelope_multi``."""
         if self._gfs_relay is None:
             return 0
-        return await self._gfs_relay.multi_capacity(gfs_url)
+        return await self._gfs_relay.multi_capacity(gfs_url, space_id=space_id)
 
     async def send_multi_mailbox(
         self, *, to: list[tuple[MailboxTarget, dict]], body: dict

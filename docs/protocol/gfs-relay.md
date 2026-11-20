@@ -1152,9 +1152,12 @@ GFS, so two ex-members' mailboxes never hold each other open. A card whose
 content moves under the same mailbox `rev` (a mailbox minted for another
 space now applies here) is sent with a newer `rev`.
 
-A member with no connection to that GFS owns none there: it is reached,
-and reaches the GFS-reached member, through the host hop. That is the one
-remaining case that needs the host online. Gated on
+A member with no connection to that GFS owns none there: it is reached
+through the host hop. It still reaches the GFS-reached member directly when
+the space owner's signed list names that GFS: it uploads to the member's
+mailbox there anonymously, as a follower publish goes to a listed GFS
+([to every listed GFS](#to-every-gfs-on-the-spaces-signed-list)). A GFS on
+no list is the one remaining case that needs the host online. Gated on
 `FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH` (v_89), slug
 `mailbox_member_mesh`. Not space-scoped, no sync-stream change.
 
@@ -1414,8 +1417,9 @@ Its version follows the card. Such a seat:
   capabilities fan-out (its version rides its card).
 
 **The host hop.** The fallback only: a member that cannot reach a seat at
-its mailbox (no connection to that GFS, or the household has no mailbox —
-a paired member not connected to that GFS) sends through the space's host: a three-hop `SPACE_ROUTED` `[member, host, member]` with the
+its mailbox (its GFS is neither one of ours nor on the space's signed list,
+it proves no mailboxes, or the household has no mailbox — a paired member
+not connected to that GFS) sends through the space's host: a three-hop `SPACE_ROUTED` `[member, host, member]` with the
 routing `space_id`, sealed to the target's key-wrap key from its card — no
 route discovery. The host relays without reading. A `space_session` seat
 may send or be forwarded a `SPACE_ROUTED` in exactly this shape: three
@@ -1544,7 +1548,7 @@ admin / moderator helpers for it. Helper and media recovery are PR 4.
 | A paired / mesh member connected to a GFS a GFS-reached member uses | +1 claim socket and +1 ticket per household on that GFS (not per space); +1 newer card (~0.7 KiB) per space it is in there; directory frames +~35 B per GFS-reached card (`gfs_reached`) |
 | A join (global space, N = 200 writers, G = 200 GFS-only) | Redeem + ACK carry one card each; one `SPACE_MEMBER_CARD`; snapshot ≤ 200 × ~0.7 KiB ≈ 140 KiB in 2 parts to the newcomer (up to 2 snapshots when the first races the seat); a ~0.7 KiB delta to each of 199 households ≈ 140 KiB |
 | Rollout of that space | G × N cards ≈ 200 × 200 × 0.7 KiB ≈ 28 MB once (every GFS-reached household needs every writer's card) |
-| One non-host calendar event, host offline | 199 × one ~4 KiB frame ≈ 800 KB uplink from the author, 199 GFS pushes, followers 0 — from a GFS-only member too: paired members connected to the GFS take it at their own mailbox; one not connected gets it through the host hop once the host is back (or the 30-min heal) |
+| One non-host calendar event, host offline | 199 × one ~4 KiB frame ≈ 800 KB uplink from the author, 199 GFS pushes, followers 0 — from a GFS-only member too: paired members connected to the GFS take it at their own mailbox; one not connected gets it through the host hop once the host is back (or the 30-min heal); since v_91 an author not connected to a listed GFS uploads there itself — one multi upload per GFS |
 | A removal | `removed` to 199 households, a few bytes each; no rotation |
 | Sweep | One local DB pass every ~10 min |
 
@@ -1577,7 +1581,7 @@ sequenceDiagram
     D->>G: POST /gfs/envelope {to_instance: mailbox E, sealed} (anonymous)
     G->>E: frame on E's claim socket
     E->>E: open → §24.11 (gfs_mailbox, check_mailbox_sender: card of D)
-    Note over D,E: D has no connection to that GFS → [D, A, E] SPACE_ROUTED, sealed to E's key-wrap key
+    Note over D,E: E's GFS neither D's own nor on the space's signed list → [D, A, E] SPACE_ROUTED, sealed to E's key-wrap key
 ```
 
 **Open (owner decision pending).** Paired and mesh members own no
@@ -1650,6 +1654,71 @@ due rows of one multi payload with the same eligibility rule and grouping
 key, chunks them at the GFS's `max_recipients`, and makes one upload per
 chunk. A lone seat, a paired peer, an older peer and every other event type
 keep the per-recipient path.
+
+### To every GFS on the space's signed list
+
+A seat's mailbox may sit on a GFS the author holds no connection to — a
+mesh-only author, or a member connected to another GFS of the space. When
+the space OWNER's signed list (`spaces.gfs_servers`, migration 0093) names
+that GFS, the author uploads there itself: the multi upload for two or more
+of its members, the single `POST /gfs/envelope` for a lone one. Before
+this, only a GFS of our own was a target and such members went through the
+host hop one by one. Nothing between households changes (same frame, same
+receiver checks, same GFS endpoints), so there is no protocol bump.
+
+- **Which GFS.** A member card's `mailbox.gfs` (normalized) is a target
+  when it is one of our ACTIVE connections (as before; ours wins) or the
+  URL of an entry on THAT space's signed list. A space-less envelope uses
+  our own connections only; a card in one space never makes another
+  space's list apply. The match is on the full normalized address
+  (scheme, host, port and path — the form the proof of possession binds);
+  a list naming two servers on one host is no target at all, since frames
+  are grouped by host. A binary media frame (`\x00SHR`) to a mailbox still
+  needs a connection of ours: an event too large for a JSON frame to a
+  member on a GFS we know only from the list goes through the host hop,
+  whose leg to it is a frame.
+- **Pinned to the owner's entry.** For a listed GFS we never connected to,
+  the target is the v_57 **listing target** the follower publish already
+  uses (`GfsConnectionService.server_targets`): the URL and key the owner
+  signed. Its capability block (`envelope_mailbox`, `envelope_multi`) must
+  verify against that key, and a server offering proof of possession must
+  sign a fresh nonce bound to the listed URL (re-proven hourly) before
+  anything is uploaded. A member's card can name any URL, but nothing goes
+  to a GFS the owner did not list, and a server answering at a listed URL
+  without the listed key proves nothing. The list itself is taken only
+  under the owner household's signature
+  (`apply_gfs_servers_from_metadata`).
+- **The session.** Every request to a listing target rides its own
+  cookie-less session pinned to the vetted public address of the listed URL
+  (`GfsConnectionService.anon_session`) — never the shared mailbox session,
+  which serves only GFSs we are registered on. A private / local address is
+  dropped before any request.
+- **Fallback: the host hop.** A GFS neither ours nor listed, one that does
+  not prove mailboxes / `envelope_multi` (or never answered with a verified
+  capability block), or one the owner delisted between the enqueue and the
+  retry: the next outbox pass no longer groups those rows, they go per row,
+  find no mailbox in reach (`no_mailbox`) and the stored payload goes
+  through the host hop (`FederationService.host_hop_outbox_entry`). A
+  live send makes the same choice (`send_with_mesh_fallback`). A GFS that
+  proved its capabilities and then went down keeps its cached answers, so
+  its rows are retried there — and handed to the host hop once a row has
+  failed `MAILBOX_HOST_HOP_AFTER` (= `MULTI_MAX_TRANSIENT`, 3) attempts, a
+  throttle never counting; so is a row too large for its mailbox. A row
+  whose upload the GFS took but whose `202` was lost may then reach the
+  member twice, the second time through the host as a new routed envelope;
+  the receiver applies it as the same event (as for any host hop).
+- **Privacy.** A household with NO GFS connection now contacts the
+  space's listed GFSs anonymously to deliver to members, as it already did
+  for followers: the GFS sees the address, time and sizes of the upload and
+  the recipient mailboxes — so it can link the sender's address to those
+  member mailboxes — never the sender's identity or the content (the IP
+  residual in [principles](../principles.md)).
+- **Cost of reaching a listed GFS.** Each request to a listing target opens
+  a fresh pinned session (DNS, TCP, TLS); the capability block is cached
+  and the proof renewed hourly, shared with the follower publish. Each
+  mailbox lookup for an address that is not ours reads the space's list
+  (`server_targets`: the space row, our connections, the resolve) — a few
+  local reads per recipient per send, no network.
 
 **The audience is the current member set.** The targets are exactly the
 ones `broadcast_to_space_members` plans: the `space_instances` households
@@ -1841,6 +1910,25 @@ sequenceDiagram
     G->>A: {body, wrap A}; last reference gone → body freed
 ```
 
+To GFSs the author never connected to, on the owner's signed list:
+
+```mermaid
+sequenceDiagram
+    participant D as Author D (mesh only, no GFS)
+    participant G1 as GFS 1 (listed)
+    participant G2 as GFS 2 (listed)
+    participant A as Host A
+    participant M as Members on G1 / G2
+    D->>D: broadcast: cards name mailboxes on G1 and G2, both on the owner's signed list → one multi payload per GFS
+    D->>G1: GET /gfs/info + POST /gfs/proof (own pinned cookie-less session; block verified against the listed key)
+    D->>G1: POST /gfs/envelope/multi {to: G1's member mailboxes, body}
+    D->>G2: GET /gfs/info + POST /gfs/proof, then POST /gfs/envelope/multi {to: G2's member mailboxes, body}
+    G1->>M: {body, wrap} per mailbox
+    G2->>M: {body, wrap} per mailbox
+    Note over A: carries nothing
+    Note over D,A: a GFS neither ours nor listed, or delisted before the retry → [D, A, member] SPACE_ROUTED (host hop)
+```
+
 **Cost** (a ~1 KiB calendar event; measured with the real code —
 `build_multi_envelope` / `seal_multi` / `wrap_mr_key`):
 
@@ -1855,6 +1943,8 @@ sequenceDiagram
 | Local outbox, 200 recipients failing | 200 × ~1.9 KB sealed envelopes = 420 KB of rows | one ~1.5 KB wrapped payload + 200 × ~230 B = 48 KB |
 | Local outbox per multi broadcast (200 seats) | — | one wrapped payload + 200 ref rows (≈ 48 KB), deleted on the 202; read in one drain pass (`DRAIN_BATCH` = 500), so ONE upload |
 | Retry after a lost `202` (200 seats) | 200 per-recipient re-sends | 1 upload, same `msg_id` — receivers drop it in the replay cache |
+| 20 members on a listed GFS the author is not on, a 2 KiB post | ≈ 20 × 3 KiB = 60 KiB of host hops author → host + 20 host uploads (host online only) | 1 upload of ≈ 10 KiB from the author (+ one `/gfs/info` and one proof per hour per GFS); the host carries nothing |
+| 200 members on 3 listed GFSs the author is not on | 200 host hops + 200 host uploads | Σ over the GFSs of ⌈n_g / max_recipients⌉ uploads — 3 while each GFS holds ≤ 500 of them |
 | Followers | 0 | 0 |
 
 Implementation: `socialhome/federation/multi_recipient.py`,
@@ -1862,7 +1952,9 @@ Implementation: `socialhome/federation/multi_recipient.py`,
 `FederationService._queue_multi_groups` / `_multi_target` /
 `outbox_multi_groups` / `deliver_outbox_multi` / `_must_queue_behind`,
 `OutboxProcessor` (`wake`, `_start_pass`),
-`GfsEnvelopeSender.send_to_mailboxes`, `GfsRelayInbound.handle_mailbox_frame`,
+`GfsEnvelopeSender.send_to_mailboxes` / `mailbox_connection` (listing
+targets, `_listed_connection`), `multi_caps_key`,
+`FederationService.host_hop_outbox_entry`, `GfsRelayInbound.handle_mailbox_frame`,
 `inbound_validator.make_check_multi_recipient`,
 `socialhome/global_server/envelope_relay.py`, GFS migration 0031,
 household migration 0145.

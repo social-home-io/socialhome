@@ -70,7 +70,7 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
         ),
         "socialhome/federation/federation_service.py": (
             "transport",
-            "relay sizes, relay frames, mailbox / multi delivery",
+            "relay sizes, relay frames, mailbox / multi delivery, host hop fallbacks",
         ),
         "socialhome/federation/transport.py": (
             "transport",
@@ -336,7 +336,7 @@ _COUNTS: dict[str, dict[str, int]] = {
     "SPACE_SESSION": {
         "socialhome/app.py": 1,
         "socialhome/domain/federation.py": 3,
-        "socialhome/federation/federation_service.py": 16,
+        "socialhome/federation/federation_service.py": 18,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
         "socialhome/federation/routed_envelope.py": 1,

@@ -151,11 +151,11 @@ class _Gfs:
         self._queue.append((to, {"type": "envelope_media", "body": body}, False))
         return True
 
-    async def mailbox_connection(self, gfs_url):
+    async def mailbox_connection(self, gfs_url, *, space_id=None):
         return object()
 
     async def send_to_mailbox(
-        self, *, mailbox_id, gfs_url, sealed=None, media_body=None
+        self, *, mailbox_id, gfs_url, sealed=None, media_body=None, space_id=None
     ):
         if media_body is not None:
             if self.throttle_media:
@@ -173,7 +173,7 @@ class _Gfs:
             )
         return True
 
-    async def multi_connection(self, gfs_url):
+    async def multi_connection(self, gfs_url, *, space_id=None):
         return None
 
     def multi_max_recipients(self, conn) -> int:
@@ -658,10 +658,10 @@ async def test_a_large_broadcast_to_mailbox_seats_goes_per_recipient_by_frame():
     gfs = _Gfs()
     uploads: list = []
 
-    async def _multi_connection(gfs_url):
+    async def _multi_connection(gfs_url, *, space_id=None):
         return object()
 
-    async def _send_to_mailboxes(*, entries, gfs_url, body):
+    async def _send_to_mailboxes(*, entries, gfs_url, body, space_id=None):
         uploads.append(entries)
         return 202
 

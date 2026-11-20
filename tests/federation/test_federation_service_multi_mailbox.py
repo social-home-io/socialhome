@@ -41,6 +41,7 @@ from socialhome.federation.federation_service import MULTI_MAX_TRANSIENT
 from socialhome.federation.gfs_relay_transport import (
     GfsRelayTransport,
     MailboxTarget,
+    multi_caps_key,
 )
 from socialhome.federation.multi_recipient import (
     MULTI_TO_INSTANCE,
@@ -100,11 +101,12 @@ class _Transport:
         target = self.targets.get(instance.id)
         if target is None:
             return None
-        cap = caps.get(target.gfs_url) if caps is not None else None
+        key = multi_caps_key(target)
+        cap = caps.get(key) if caps is not None else None
         if cap is None:
             cap = await self.multi_capacity(target.gfs_url)
             if caps is not None:
-                caps[target.gfs_url] = cap
+                caps[key] = cap
         return target if cap >= 1 else None
 
     async def multi_capacity(self, gfs_url: str) -> int:
@@ -488,16 +490,16 @@ class _MultiSender:
     def __init__(self) -> None:
         self.uploads: list[tuple[list[tuple[str, dict]], str, dict]] = []
 
-    async def mailbox_connection(self, gfs_url):
+    async def mailbox_connection(self, gfs_url, *, space_id=None):
         return object()
 
-    async def multi_connection(self, gfs_url):
+    async def multi_connection(self, gfs_url, *, space_id=None):
         return object()
 
     def multi_max_recipients(self, conn) -> int:
         return 500
 
-    async def send_to_mailboxes(self, *, entries, gfs_url, body):
+    async def send_to_mailboxes(self, *, entries, gfs_url, body, space_id=None):
         self.uploads.append((list(entries), gfs_url, body))
         return 202
 

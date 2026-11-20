@@ -62,6 +62,7 @@ from .domain.events import (
     UserBlocked,
 )
 from .domain.federation import (
+    DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     FederationEventType,
     InstanceSource,
@@ -71,7 +72,7 @@ from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from .domain.space import ContentAction
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
-from .federation.federation_service import FederationService
+from .federation.federation_service import MULTI_MAX_TRANSIENT, FederationService
 from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
 from .federation.host_hop import HostHop
@@ -133,6 +134,7 @@ from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
 from .federation.transport import (
+    TRANSPORT_ERROR_NO_MAILBOX,
     FederationTransport,
     HttpsInboxTransport,
     https_failure_is_relayable,
@@ -923,6 +925,28 @@ async def _redeliver_envelope(
     return DeliveryOutcome.TRANSIENT
 
 
+#: Failed mailbox attempts of one outbox row (multi uploads included)
+#: after which a member seated from the host's directory gets the row
+#: through the host hop instead: its GFS keeps failing (down, or a listed
+#: GFS whose address stopped vetting) — the same bound after which a multi
+#: payload goes per row (:data:`MULTI_MAX_TRANSIENT`).
+MAILBOX_HOST_HOP_AFTER: int = MULTI_MAX_TRANSIENT
+
+
+def _mailbox_out_of_reach(entry, error: str | None) -> bool:
+    """Whether a failed mailbox send of *entry* is one a retry will not
+    deliver: no mailbox in reach (its GFS left the space's signed list since
+    the row was queued, or stopped proving mailboxes), a frame too large for
+    the JSON relay with no binary route, or a GFS that kept failing for
+    :data:`MAILBOX_HOST_HOP_AFTER` attempts. A throttle is never one."""
+    if error in (TRANSPORT_ERROR_NO_MAILBOX, DELIVERY_ERROR_RELAY_TOO_LARGE):
+        return True
+    return (
+        error != DELIVERY_ERROR_RELAY_THROTTLED
+        and entry.attempts >= MAILBOX_HOST_HOP_AFTER
+    )
+
+
 async def _redeliver_via_gfs_relay(
     federation_service: FederationService,
     entry,
@@ -972,6 +996,17 @@ async def _redeliver_via_gfs_relay(
             instance=instance,
             envelope_dict=envelope_dict,
         )
+    if not result.ok and _mailbox_out_of_reach(entry, result.error):
+        # A member seated from the host's directory whose mailbox frame a
+        # retry will not deliver: the space's host carries it (only such a
+        # seat's stored payload — ``host_hop_outbox_entry`` says None else).
+        try:
+            hopped = await federation_service.host_hop_outbox_entry(entry, instance)
+        except ValueError as exc:
+            log.warning("outbox: unusable entry %s — dropping: %s", entry.id, exc)
+            return DeliveryOutcome.PERMANENT
+        if hopped is not None:
+            return hopped
     if result.ok:
         # NO ``mark_reachable`` here. The relay answers a uniform 202
         # to every well-formed envelope — recipient online, offline,

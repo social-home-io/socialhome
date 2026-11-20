@@ -2113,6 +2113,9 @@ class SpaceMemberDirectory:
             mailbox_id=card.mailbox.mailbox_id,
             kem_pk=card.mailbox.kem_pk,
             gfs_url=card.mailbox.gfs,
+            # The space whose card it is: a GFS on that space's signed list
+            # may carry the frame (v_91). Space-less: our connections only.
+            space_id=space_id,
         )
 
     async def sender_allowed(self, sender: str, space_id: str) -> bool:
