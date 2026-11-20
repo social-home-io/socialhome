@@ -161,6 +161,23 @@ function notConfiguredHint(): string {
   return t('pairing.error.no_url')
 }
 
+/** The longest server-asked wait (seconds) the SAS confirm sits out
+ *  before trying once more; past it, the failure panel says so. */
+const CONFIRM_RETRY_MAX_WAIT_S = 60
+
+/**
+ * How long to wait before confirming once more, or ``null`` for no retry:
+ * only a 429 whose body names a ``retry_after`` (the household limiter's
+ * sliding window, in seconds) of at most {@link CONFIRM_RETRY_MAX_WAIT_S}.
+ */
+function confirmRetryWaitMs(err: unknown): number | null {
+  if (!(err instanceof ApiError) || err.status !== 429) return null
+  const wait = err.extra.retry_after
+  if (typeof wait !== 'number' || !Number.isFinite(wait)) return null
+  if (wait < 0 || wait > CONFIRM_RETRY_MAX_WAIT_S) return null
+  return wait * 1000
+}
+
 /**
  * Translate an API failure into a human-friendly hint shown under the
  * "Pairing failed" headline. The previous behaviour dumped the raw
@@ -207,6 +224,9 @@ function friendlyPairError(
     }
     if (err.status === 422) {
       return t('pairing.error.malformed')
+    }
+    if (err.status === 429) {
+      return t('error.rate_limited')
     }
     if (err.status >= 500) {
       return t('pairing.error.server')
@@ -916,11 +936,25 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
 
   const verify = async () => {
     step.value = 'verifying'
+    type ConfirmResult = { instance_id?: string; display_name?: string; status?: string }
+    const confirm = () => api.post('/api/pairing/confirm', {
+      token: pairingToken.value,
+      verification_code: verificationCode.value,
+    }) as Promise<ConfirmResult>
     try {
-      const result = await api.post('/api/pairing/confirm', {
-        token: pairingToken.value,
-        verification_code: verificationCode.value,
-      }) as { instance_id?: string; display_name?: string; status?: string }
+      let result: ConfirmResult
+      try {
+        result = await confirm()
+      } catch (err: unknown) {
+        // The other household already accepted — failing here would
+        // strand both sides mid-handshake. A 429 is refused before the
+        // server touches the pairing, so waiting it out and confirming
+        // once more is safe.
+        const wait = confirmRetryWaitMs(err)
+        if (wait === null) throw err
+        await new Promise((resolve) => setTimeout(resolve, wait))
+        result = await confirm()
+      }
       if (result.status && result.status !== 'confirmed') {
         // A household we already share a space with: the code is verified
         // here, and the pairing completes once THEY confirm — our shared

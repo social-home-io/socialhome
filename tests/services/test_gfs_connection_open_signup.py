@@ -30,6 +30,7 @@ from socialhome.global_server.app_keys import gfs_admin_repo_key, gfs_fed_repo_k
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.server import create_gfs_app
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.services import gfs_connection_service
 from socialhome.services.gfs_connection_service import (
     GfsConnectionService,
     GfsSignupError,
@@ -184,9 +185,12 @@ async def test_open_signup_refused_when_already_connected(tmp_dir, repo):
 
 
 class _Resp:
-    def __init__(self, status: int, body: object = None) -> None:
+    def __init__(
+        self, status: int, body: object = None, headers: dict | None = None
+    ) -> None:
         self.status = status
         self._body = body if body is not None else {}
+        self.headers = headers or {}
         self.content = self
 
     async def read(self, n: int = -1) -> bytes:
@@ -203,7 +207,8 @@ class _Resp:
 
 
 class _Stub:
-    """Answers by path; an ``Exception`` value is raised instead."""
+    """Answers by path; an ``Exception`` value is raised instead, and a
+    ``list`` answers its items in turn (one per request)."""
 
     def __init__(self, routes: dict[str, object]) -> None:
         self.routes = routes
@@ -213,6 +218,8 @@ class _Stub:
         self.calls.append((method, url, body))
         path = url.split("://", 1)[1].split("/", 1)[1]
         ans = self.routes["/" + path]
+        if isinstance(ans, list):
+            ans = ans.pop(0)
         if isinstance(ans, Exception):
             raise ans
         return ans
@@ -333,11 +340,117 @@ async def test_registration_refused(repo):
         {
             "/gfs/info": _Resp(200, _info({"open_signup": True})),
             "/gfs/signup-token": _Resp(200, {"token": "t", "expires_in": 600}),
-            "/gfs/register": _Resp(401, {"error": "invalid_or_expired_token"}),
+            "/gfs/register": _Resp(409, {"error": "id_in_use"}),
         }
     )
     assert await _reason(repo, stub) == "refused"
     assert await repo.list_all() == []
+
+
+async def test_expired_or_used_code_is_not_a_refusal(repo):
+    """Regression (community event): the GFS's 401 ``invalid_or_expired_token``
+    — a code that expired or was already used — read "The GFS didn't accept
+    this household". It is its own reason, so the admin is told to get a
+    fresh code."""
+    stub = _Stub(
+        {
+            "/gfs/info": _Resp(200, _info({"open_signup": True})),
+            "/gfs/signup-token": _Resp(200, {"token": "t", "expires_in": 600}),
+            "/gfs/register": _Resp(401, {"error": "invalid_or_expired_token"}),
+        }
+    )
+    assert await _reason(repo, stub) == "code_expired"
+    assert await repo.list_all() == []
+
+
+async def test_qr_code_that_expired_is_code_expired(repo):
+    """The same for a scanned / pasted code (``pair``)."""
+    stub = _Stub(
+        {
+            "/gfs/info": _Resp(200, _info({})),
+            "/gfs/register": _Resp(401, {"error": "invalid_or_expired_token"}),
+        }
+    )
+    with pytest.raises(GfsSignupError) as exc:
+        await _svc(repo, stub).pair({"gfs_url": GFS_URL, "token": "old"}, **OWN)
+    assert exc.value.reason == "code_expired"
+
+
+async def test_registration_rate_limited_is_busy(repo):
+    stub = _Stub(
+        {
+            "/gfs/info": _Resp(200, _info({"open_signup": True})),
+            "/gfs/signup-token": _Resp(200, {"token": "t", "expires_in": 600}),
+            "/gfs/register": _Resp(429, {"error": "rate_limited"}),
+        }
+    )
+    assert await _reason(repo, stub) == "busy"
+
+
+# ─── A busy GFS: one retry after a short Retry-After ─────────────────────
+
+
+@pytest.fixture
+def sleeps(monkeypatch) -> list[float]:
+    """Record the waits instead of sleeping them."""
+    waited: list[float] = []
+
+    async def _sleep(seconds: float) -> None:
+        waited.append(seconds)
+
+    monkeypatch.setattr(gfs_connection_service.asyncio, "sleep", _sleep)
+    return waited
+
+
+async def test_signup_token_429_with_short_retry_after_retries_once(repo, sleeps):
+    """At a community event several households connect at once and the GFS
+    sheds some with 429 + ``Retry-After``. The household waits that long
+    (when short) and asks once more instead of failing the one-click step."""
+    stub = _Stub(
+        {
+            "/gfs/info": _Resp(200, _info({"open_signup": True})),
+            "/gfs/signup-token": [
+                _Resp(429, {"error": "rate_limited"}, {"Retry-After": "12"}),
+                _Resp(200, {"token": "t", "expires_in": 600}),
+            ],
+            "/gfs/register": _Resp(200, {"status": "registered"}),
+        }
+    )
+    conn = await _svc(repo, stub).pair_open_signup(GFS_URL, **OWN)
+    assert conn.status == "active"
+    assert sleeps == [12]
+    assert [u.rsplit("/", 1)[1] for _m, u, _b in stub.calls].count("signup-token") == 2
+
+
+async def test_signup_token_retries_only_once(repo, sleeps):
+    stub = _Stub(
+        {
+            "/gfs/info": _Resp(200, _info({"open_signup": True})),
+            "/gfs/signup-token": [
+                _Resp(429, {"error": "rate_limited"}, {"Retry-After": "60"}),
+                _Resp(429, {"error": "rate_limited"}, {"Retry-After": "60"}),
+            ],
+        }
+    )
+    assert await _reason(repo, stub) == "busy"
+    assert sleeps == [60]
+
+
+@pytest.mark.parametrize("retry_after", [None, "61", "3600", "soon", "-5"])
+async def test_signup_token_429_without_a_short_wait_is_busy_at_once(
+    repo, sleeps, retry_after
+):
+    """No ``Retry-After``, a long one, or one that isn't delta-seconds: no
+    waiting in the request — the existing "The GFS is busy" answer."""
+    headers = {"Retry-After": retry_after} if retry_after is not None else {}
+    stub = _Stub(
+        {
+            "/gfs/info": _Resp(200, _info({"open_signup": True})),
+            "/gfs/signup-token": [_Resp(429, {"error": "rate_limited"}, headers)],
+        }
+    )
+    assert await _reason(repo, stub) == "busy"
+    assert sleeps == []
 
 
 async def test_registration_server_error_is_unreachable(repo):

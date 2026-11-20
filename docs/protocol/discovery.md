@@ -617,7 +617,17 @@ sequenceDiagram
 ### Connecting a household: QR code or open sign-up
 
 A household pairs with a GFS by registering with a **single-use pairing
-token** (10-minute TTL). There are two ways to get one:
+token** (10-minute TTL). Every landing-page view and every sign-up request
+gets a fresh one — a room of people behind one NAT each get their own. The
+GFS bounds them by LIVE tokens (unexpired, unused): 50 per client address
+(IPv6 by /64) and 2 000 per server, cluster-wide in the shared database. At
+a cap the landing page says "Too many pairing codes from your network right
+now" instead of showing a code, and `POST /gfs/signup-token` answers 429 +
+`Retry-After`; the one-click connect waits out a `Retry-After` of at most
+60 s once and asks again before it reports "busy". A token that expired or
+was already used fails `/gfs/register` with 401, which the household
+reports as "this pairing code expired or was already used"
+(`422 GFS_CODE_EXPIRED`), not as a refusal. There are two ways to get one:
 
 - **QR code / pairing code** — scanned or pasted from the GFS landing page
   (`socialhome://gfs-pair/{base_url}?token=…`, see

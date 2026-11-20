@@ -3482,6 +3482,7 @@
   "error.gfs_identity_mismatch": "Ce n'est apparemment pas le GFS de Social Home. Vérifiez l'adresse.",
   "error.gfs_proof_failed": "Le serveur à cette adresse n'a pas pu prouver qu'il est bien le GFS qu'il prétend être. Vérifiez l'adresse.",
   "error.gfs_pairing_failed": "Le GFS n'a pas accepté ce foyer.",
+  "error.gfs_code_expired": "Ce code de jumelage a expiré ou a déjà été utilisé. Récupérez un nouveau code sur la page d'accueil du GFS.",
   "error.gfs_already_connected": "Vous êtes déjà connecté à ce GFS.",
   "error.storage_full": "Votre Social Home n'a plus d'espace de stockage. Libérez de l'espace ou contactez votre admin.",
   "error.dashboard_password_required": "Définissez un mot de passe pour le tableau de bord avant de l'activer.",

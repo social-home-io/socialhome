@@ -3271,13 +3271,26 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # Connection management — per-peer reads (visible users,
             # transport detail), admin toggles (home sharing, GFS fallback)
             # and unpair. Opening one Manage panel spends two requests, so
-            # the 5/min handshake bucket below 429'd after two opens and a
+            # the old 5/min handshake bucket 429'd after two opens and a
             # toggle. The longest matching prefix wins.
             "/api/pairing/connections": (30, 60),
             # Cancelling pending pairings — an admin clearing a few stale
             # cards in a row; the same cadence as connection management.
             "/api/pairing/pending": (30, 60),
-            "/api/pairing": (5, 60),  # pairing handshakes
+            # The read-only inboxes (auto-pair and relay requests), which the
+            # Connections page refetches on WS events: one bucket of their
+            # own, so neither they nor the handshakes starve the other. A
+            # method rule: the approve / decline POSTs under the same paths
+            # stay handshakes (``*-requests`` matches only the list paths).
+            "GET /api/pairing/*-requests": (30, 60),
+            # Pairing handshakes (initiate / accept / confirm / introduce,
+            # auto-pair, inbox approve / decline). Admin-only and
+            # authenticated; at 5/min an admin pairing a room of households
+            # (a community event) 429'd mid-handshake from the third one.
+            # One pairing spends 2–3 calls per side, so 30/min is ~10 a
+            # minute; each pairing's federation cost is one handshake with
+            # one peer, never a fan-out.
+            "/api/pairing": (30, 60),
         },
     )
     return (

@@ -17,7 +17,8 @@ renderers here stay the fallback for a GFS without a viewer. The landing
 (``/``) is the operator's own page and always renders here.
 
 Shared QR-token service handles the single-use 10-minute pairing token
-(spec §24.7.4) with a 1-new-token-per-30-s-per-IP rate limit.
+(spec §24.7.4): a fresh one per landing view / sign-up request, bounded by
+caps on LIVE tokens per client address and per server.
 """
 
 from __future__ import annotations
@@ -57,8 +58,19 @@ log = logging.getLogger(__name__)
 
 #: Pairing-token TTL (spec §24.7.4). The repository enforces it on consume.
 PAIR_TOKEN_TTL_SECONDS: int = REPO_PAIR_TOKEN_TTL_SECONDS
-#: Minimum seconds between new-token requests per IP.
-PAIR_TOKEN_MIN_INTERVAL: int = 30
+#: Cap on LIVE pairing tokens (unexpired, unconsumed) per client bucket
+#: (:meth:`ClientIpResolver.bucket` — the address, an IPv6 /64). Every
+#: landing view mints a fresh single-use code, so a room full of people
+#: behind one NAT / CGNAT address each gets a real one; a used code frees
+#: its place. The landing window (:data:`LISTING_MAX_PER_MINUTE`) already
+#: bounds how fast one address can mint; this bounds how many it can hold.
+#: Counted cluster-wide in the shared database the tokens live in.
+PAIR_TOKEN_MAX_LIVE_PER_CLIENT: int = 50
+#: Cap on LIVE pairing tokens across the whole server (every node): what a
+#: botnet cycling addresses can park in the shared table at once.
+PAIR_TOKEN_MAX_LIVE_TOTAL: int = 2000
+#: ``Retry-After`` (seconds) for a sign-up token refused at a live-token cap.
+PAIR_TOKEN_CAP_RETRY_S: int = 60
 #: Public-listing rate limit per IP (spec §24.7.3).
 LISTING_MAX_PER_MINUTE: int = 30
 
@@ -90,9 +102,10 @@ ICE_SERVERS_MAX_PER_MINUTE: int = 30
 PUBLISH_MAX_PER_MINUTE: int = 120
 
 #: Per-IP/minute cap on ``POST /gfs/signup-token`` (open sign-up). A real
-#: household asks once, during onboarding; the token service's own
-#: :data:`PAIR_TOKEN_MIN_INTERVAL` already allows one token per address per
-#: 30 s. This in-memory window sheds a flood BEFORE it reaches the database.
+#: household asks once, during onboarding — but several households on one
+#: network (a community event) ask within the same minute, so there is no
+#: per-address interval on top; the token service only caps LIVE tokens.
+#: This in-memory window sheds a flood BEFORE it reaches the database.
 SIGNUP_MAX_PER_MINUTE: int = 5
 
 #: Server-wide cap on ``POST /gfs/signup-token`` per minute, across every
@@ -383,17 +396,23 @@ class PairingTokenService:
     def __init__(self, admin_repo: AbstractGfsAdminRepo) -> None:
         self._admin_repo = admin_repo
 
-    async def generate(self, client_ip: str) -> tuple[str | None, int]:
-        """Return ``(token, remaining_wait)`` — if the caller is in the
-        rate-limit window ``token`` is ``None`` and ``remaining_wait`` is
-        the seconds until a new one can be issued.
+    async def generate(self, client_bucket: str) -> tuple[str | None, int]:
+        """Mint a fresh single-use token for *client_bucket*.
+
+        Returns ``(token, 0)``, or ``(None, retry_after_s)`` when
+        :data:`PAIR_TOKEN_MAX_LIVE_PER_CLIENT` or
+        :data:`PAIR_TOKEN_MAX_LIVE_TOTAL` live tokens already exist — the
+        caller then says so honestly; it never hands out a stand-in token.
         """
-        since = int(time.time()) - PAIR_TOKEN_MIN_INTERVAL
-        recent = await self._admin_repo.count_pair_tokens(client_ip, since=since)
-        if recent > 0:
-            return None, PAIR_TOKEN_MIN_INTERVAL
         token = secrets.token_urlsafe(32)
-        await self._admin_repo.save_pair_token(token, client_ip)
+        stored = await self._admin_repo.save_pair_token(
+            token,
+            client_bucket,
+            max_live_per_ip=PAIR_TOKEN_MAX_LIVE_PER_CLIENT,
+            max_live_total=PAIR_TOKEN_MAX_LIVE_TOTAL,
+        )
+        if not stored:
+            return None, PAIR_TOKEN_CAP_RETRY_S
         return token, 0
 
     async def consume(self, token: str) -> bool:
@@ -681,7 +700,7 @@ def _render_landing(
     server_name: str,
     landing_markdown: str,
     header_image_url: str,
-    token: str,
+    token: str | None,
     pair_code: str,
     pair_qr_data_uri: str,
     spaces: list[dict] | None,
@@ -692,7 +711,9 @@ def _render_landing(
 ) -> tuple[str, str]:
     """The ``GET /`` page as ``(html, css)`` — ``css`` is the exact text of
     its one ``<style>``, for the CSP hash. ``spaces=None`` leaves the
-    spaces section out (``[server] landing_space_list = false``)."""
+    spaces section out (``[server] landing_space_list = false``);
+    ``token=None`` (a live-token cap was hit) shows the "too many codes"
+    note in place of the QR and code."""
     rows = []
     # Per-card accent stripe: a class + a rule in the page's hashed
     # ``<style>``, not a ``style=`` attribute (the public-page CSP refuses
@@ -751,6 +772,36 @@ def _render_landing(
         f'<img src="{_escape(header_image_url)}" alt="" class="hero-image" />'
         if header_image_url
         else ""
+    )
+    pair_html = (
+        f"""<div class="pair">
+        <img src="{pair_qr_data_uri}" alt="Pairing QR" />
+        <div>
+          <ol>
+            <li>Open Social Home</li>
+            <li>Spaces → Discover → ⬡ Global</li>
+            <li>Scan the QR or copy the pairing code below</li>
+          </ol>
+          <p><code class="copy-code" id="pair-code"
+                   data-pair-token="{_escape(token)}"
+                   >{_escape(pair_code)}</code></p>
+          <p>
+            <button type="button" class="copy-btn" id="copy-pair-btn"
+                    data-copy-target="pair-code"
+                    data-copied-label="Copied ✓"
+                    data-default-label="Copy code">Copy code</button>
+          </p>
+          <p class="muted">Valid for 10 minutes · single-use.</p>
+        </div>
+      </div>"""
+        if token is not None
+        else """<div class="pair-busy" role="status">
+        <p><strong>Too many pairing codes from your network right now.</strong></p>
+        <p class="muted">Each visit gets its own code, and a code you don't
+        use stays reserved for 10 minutes. Reload this page in a minute
+        for yours.</p>
+        <p><a class="reload-btn" href="">Reload</a></p>
+      </div>"""
     )
     css = f"""
     /* GFS public theme — mirrors the SH SPA design tokens (see
@@ -830,6 +881,15 @@ def _render_landing(
     .pair img {{ width: 200px; height: 200px;
                  background: #fff; padding: 6px;
                  border: 1px solid var(--hair); border-radius: 8px; }}
+    .pair-busy {{ border: 1px solid var(--hair); border-radius: 10px;
+                  padding: 14px 16px; background: var(--warm-bg); }}
+    .pair-busy p {{ margin: 0 0 8px; }}
+    .pair-busy .reload-btn, .pair-busy .reload-btn:hover {{
+      display: inline-block; padding: 8px 18px; border-radius: 999px;
+      background: var(--primary); color: #fff; text-decoration: none;
+      font-size: 14px; font-weight: 600; }}
+    .pair-busy .reload-btn:focus-visible {{ outline: 2px solid var(--ink);
+                                            outline-offset: 2px; }}
     {_COPY_WIDGET_CSS}
     .filters {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }}
     .filters a {{ padding: 4px 12px; border-radius: 999px;
@@ -881,26 +941,7 @@ def _render_landing(
 
     <section>
       <h2>Connect your Social Home</h2>
-      <div class="pair">
-        <img src="{pair_qr_data_uri}" alt="Pairing QR" />
-        <div>
-          <ol>
-            <li>Open Social Home</li>
-            <li>Spaces → Discover → ⬡ Global</li>
-            <li>Scan the QR or copy the pairing code below</li>
-          </ol>
-          <p><code class="copy-code" id="pair-code"
-                   data-pair-token="{_escape(token)}"
-                   >{_escape(pair_code)}</code></p>
-          <p>
-            <button type="button" class="copy-btn" id="copy-pair-btn"
-                    data-copy-target="pair-code"
-                    data-copied-label="Copied ✓"
-                    data-default-label="Copy code">Copy code</button>
-          </p>
-          <p class="muted">Valid for 10 minutes · single-use.</p>
-        </div>
-      </div>
+      {pair_html}
     </section>
     {_COPY_BUTTON_SCRIPT_TAG}
 {spaces_html}
@@ -1261,9 +1302,11 @@ async def handle_landing(request: web.Request) -> web.Response:
         await admin_repo.get_config("header_image_file")
     ) or cfg.header_image_file
 
+    # A fresh single-use code per view (reloads and category / search
+    # links are views too), or ``None`` at a live-token cap — then the page
+    # says so instead of showing a code. Never a stand-in token: one would
+    # only fail later at ``/gfs/register`` as an unexplained refusal.
     token, _wait = await token_svc.generate(_client_bucket(request))
-    if token is None:
-        token = "please-wait"
     # The pairing code is a single ``socialhome://gfs-pair/{base_url}
     # ?token={token}`` URL — chat-safe, copy/paste friendly, and the
     # same string the SH SPA's GFS paste field consumes. When the GFS
@@ -1271,12 +1314,15 @@ async def handle_landing(request: web.Request) -> web.Response:
     # configuring), fall back to the bare token so the QR isn't broken
     # — the SPA paste path won't accept it, which is the right
     # behaviour (no operator should pair against an unconfigured GFS).
-    pair_code = (
-        f"socialhome://gfs-pair/{cfg.base_url}?token={token}"
-        if cfg.base_url
-        else f"token:{token}"
-    )
-    qr_data = await _render_qr_png_data_uri(pair_code)
+    pair_code = ""
+    qr_data = ""
+    if token is not None:
+        pair_code = (
+            f"socialhome://gfs-pair/{cfg.base_url}?token={token}"
+            if cfg.base_url
+            else f"token:{token}"
+        )
+        qr_data = await _render_qr_png_data_uri(pair_code)
 
     search = (request.query.get("search") or "").strip()
     category = (request.query.get("category") or "").strip()

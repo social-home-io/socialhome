@@ -60,6 +60,7 @@ callers that must re-bind to a GFS at a new address.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hmac
 import logging
@@ -305,6 +306,22 @@ def _require_secure_url(url: str, *, field: str) -> None:
         raise GfsConnectionError(str(exc)) from exc
 
 
+#: The longest ``Retry-After`` (seconds) the one-click open sign-up waits out
+#: in-request before asking the GFS for a token once more. Longer: ``busy``.
+SIGNUP_RETRY_MAX_WAIT_S: int = 60
+
+
+def _short_retry_after(value: str | None) -> int | None:
+    """A delta-seconds ``Retry-After`` of at most
+    :data:`SIGNUP_RETRY_MAX_WAIT_S`, else ``None`` (missing, an HTTP date,
+    garbage, negative or too long — not worth holding the request for)."""
+    try:
+        wait = int(str(value).strip())
+    except ValueError:
+        return None
+    return wait if 0 <= wait <= SIGNUP_RETRY_MAX_WAIT_S else None
+
+
 class GfsSignupError(GfsConnectionError):
     """Connecting to a GFS failed — a scanned / pasted pairing code
     (:meth:`GfsConnectionService.pair`) or open sign-up
@@ -322,9 +339,13 @@ class GfsSignupError(GfsConnectionError):
       descriptor — retrying won't help, so not ``unreachable``);
     * ``closed`` — no verified ``open_signup`` capability, or the token
       endpoint said no (403/404);
-    * ``busy`` — the GFS rate-limited the token request (429);
-    * ``refused`` — the GFS turned the registration down (e.g. an expired
-      token);
+    * ``busy`` — the GFS rate-limited the token request or the
+      registration (429);
+    * ``code_expired`` — the GFS refused the pairing token at registration
+      (401 ``invalid_or_expired_token``): it expired or was already used, so
+      a fresh code is the way out;
+    * ``refused`` — the GFS turned the registration down for any other
+      reason;
     * ``unproven`` — the GFS offers proof of possession but could not prove
       it holds the key ``/gfs/info`` names at the address used (an impostor
       replaying a real descriptor, a relay, or a ``base_url`` that differs
@@ -336,6 +357,21 @@ class GfsSignupError(GfsConnectionError):
     def __init__(self, message: str, *, reason: str, status: int | None = None) -> None:
         super().__init__(message, status=status)
         self.reason = reason
+
+
+class _SignupRetryAfter(Exception):
+    """A ``429`` from ``/gfs/signup-token`` worth one retry after
+    ``wait_s`` seconds; ``error`` is what to raise if the retry is refused
+    too. Internal to :meth:`GfsConnectionService._request_signup_token`."""
+
+    def __init__(self, wait_s: int, error: GfsSignupError) -> None:
+        super().__init__(str(error))
+        self.wait_s = wait_s
+        self.error = error
+
+
+#: ``/gfs/register`` answers that mean something other than "refused".
+_REGISTER_STATUS_REASONS: dict[int, str] = {401: "code_expired", 429: "busy"}
 
 
 def _contact_reason(exc: GfsConnectionError, *, answered: str) -> str:
@@ -1243,10 +1279,14 @@ class GfsConnectionService:
             )
         except GfsConnectionError as exc:
             # No status = never answered; a 5xx = the GFS is having trouble.
-            # Anything else is the GFS saying no to this registration.
+            # A 401 is the token (``/gfs/register`` answers it for nothing
+            # else): expired or already used — a fresh code fixes it. A 429
+            # is the GFS shedding load. Anything else is the GFS saying no to
+            # this registration.
+            answered = _REGISTER_STATUS_REASONS.get(exc.status or 0, "refused")
             raise GfsSignupError(
                 str(exc),
-                reason=_contact_reason(exc, answered="refused"),
+                reason=_contact_reason(exc, answered=answered),
                 status=exc.status,
             ) from exc
         self._possession[_possession_key(conn)] = proven
@@ -1531,8 +1571,25 @@ class GfsConnectionService:
         """``POST {gfs_url}/gfs/signup-token`` → the single-use token.
 
         Sends no body: the GFS learns nothing here beyond what any visitor
-        to its landing page reveals.
+        to its landing page reveals. A ``429`` whose ``Retry-After`` is at
+        most :data:`SIGNUP_RETRY_MAX_WAIT_S` is waited out and asked ONCE
+        more — several households connecting in the same minute (a
+        community event) otherwise fail the one-click step on the GFS's
+        global brake. A longer or missing ``Retry-After``, or a second 429,
+        is ``busy``.
         """
+        try:
+            return await self._request_signup_token_once(gfs_url)
+        except _SignupRetryAfter as busy:
+            await asyncio.sleep(busy.wait_s)
+        try:
+            return await self._request_signup_token_once(gfs_url)
+        except _SignupRetryAfter as busy:
+            raise busy.error from None
+
+    async def _request_signup_token_once(self, gfs_url: str) -> str:
+        """One ``POST /gfs/signup-token``. Raises :class:`_SignupRetryAfter`
+        for a 429 worth one retry, :class:`GfsSignupError` otherwise."""
         try:
             async with self._client().post(
                 f"{gfs_url}/gfs/signup-token",
@@ -1546,11 +1603,15 @@ class GfsConnectionService:
                         status=resp.status,
                     )
                 if resp.status == 429:
-                    raise GfsSignupError(
+                    busy = GfsSignupError(
                         "The GFS is handing out too many sign-ups right now",
                         reason="busy",
                         status=429,
                     )
+                    wait = _short_retry_after(resp.headers.get("Retry-After"))
+                    if wait is None:
+                        raise busy
+                    raise _SignupRetryAfter(wait, busy)
                 if resp.status != 200:
                     detail = await _remote_detail(resp, context="/gfs/signup-token")
                     raise GfsSignupError(

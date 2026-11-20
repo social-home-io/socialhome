@@ -1177,14 +1177,26 @@ async def test_pair_classifies_a_non_json_answer_as_identity_mismatch(env):
     assert session.calls == ["GET"]
 
 
-async def test_pair_classifies_a_refused_token(env):
+async def test_pair_classifies_an_expired_or_used_token(env):
+    """``/gfs/register`` answers 401 only for the token: expired or already
+    used — its own reason, so the admin is told to get a fresh code."""
     _, repo = env
     session = _StubSession(
         method_responses={"GET": (200, _PAIR_INFO), "POST": (401, {})}
     )
     exc = await _pair_reason(repo, session)
-    assert exc.reason == "refused"
+    assert exc.reason == "code_expired"
     assert exc.status == 401
+
+
+async def test_pair_classifies_a_refused_registration(env):
+    _, repo = env
+    session = _StubSession(
+        method_responses={"GET": (200, _PAIR_INFO), "POST": (409, {})}
+    )
+    exc = await _pair_reason(repo, session)
+    assert exc.reason == "refused"
+    assert exc.status == 409
 
 
 async def test_pair_classifies_a_5xx_registration_as_unreachable(env):
