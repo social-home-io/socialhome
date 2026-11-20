@@ -107,7 +107,7 @@ the home lies in — `coarse_home_for_peer` in
   east–west (`0.03° / cos(latitude)`, floored at cos = 0.1 near the
   poles). The point sent is the cell's centre, at 4 dp.
 - Deterministic and idempotent: the same home always gives the same
-  point (sending it again, or a home that moved down the street, tells
+  point (sending it again, or a move within the same cell, tells
   the peer nothing new), and a centre snaps to itself.
 - At most about 2.4 km (half the cell's diagonal) from the real home.
 

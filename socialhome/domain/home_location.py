@@ -104,7 +104,7 @@ def coarse_home_for_peer(latitude: object, longitude: object) -> tuple[float, fl
     (:data:`PEER_HOME_GRID_DEG`) the home lies in, at 4 dp.
 
     Deterministic — the same home always gives the same point, so sending
-    it again (or a home that moved down the street) tells nothing more —
+    it again (or a move within the same cell) tells nothing more —
     and idempotent: a centre snaps to itself, so a receiver that coarsens
     an already coarse point again keeps it. Both the sender and the
     receiver run it. :class:`InvalidHomeLocationError` for a value
