@@ -2152,7 +2152,7 @@ export function ConversationView({
       target?.closest(
         '.sh-message-media-tap,'
         + '.sh-message-file,'
-        + '.sh-audio-bubble,'
+        + '.sh-message-audio__player,'
         + '.sh-message-quote,'
         + '.sh-reaction-strip,'
         + '.sh-message-reply-btn,'

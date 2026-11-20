@@ -415,6 +415,55 @@ describe('ConversationView — reaction from the household dashboard', () => {
   })
 })
 
+describe('ConversationView — voice note long-press', () => {
+  // Dragging the voice note's seek bar (or tapping play / speed) must
+  // stay with the player: a press there never arms long-press or
+  // swipe-to-reply. The bail list used to name ``.sh-audio-bubble``, a
+  // class nothing renders, so a hold on the player opened the sheet.
+  function wireVoiceNote(): void {
+    const wired = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/conversations/conv-a/messages')) {
+        return [{
+          ...msgRow('conv-a-voice', 'the transcript', 'u-bob', 'audio'),
+          media_url: 'api/media/v.webm',
+        }]
+      }
+      return wired(url)
+    })
+  }
+
+  const hold = async (el: Element) => {
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.pointerDown(el, { pointerType: 'touch', clientX: 10, clientY: 10 })
+    await new Promise((r) => setTimeout(r, 550))
+  }
+
+  it('a hold on the player keeps the context sheet closed', async () => {
+    wireVoiceNote()
+    const { render, waitFor, ConversationView } = await setup()
+    const { container } = render(<ConversationView conversationId="conv-a" />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-message-audio__seek')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    await hold(container.querySelector('.sh-message-audio__seek')!)
+    expect(document.querySelector('.sh-context-sheet')).toBeNull()
+  })
+
+  it('a hold on the transcript still opens it', async () => {
+    wireVoiceNote()
+    const { render, waitFor, ConversationView } = await setup()
+    const { container } = render(<ConversationView conversationId="conv-a" />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-message-audio__transcript')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    await hold(container.querySelector('.sh-message-audio__transcript')!)
+    await waitFor(() => {
+      expect(document.querySelector('.sh-context-sheet')).not.toBeNull()
+    })
+  })
+})
+
 describe('ConversationView — dm.active ownership', () => {
   const activeCalls = (send: ReturnType<typeof vi.fn>) =>
     send.mock.calls.filter(c => c[0] === 'dm.active').map(c => c[1])
