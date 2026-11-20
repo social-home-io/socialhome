@@ -3295,6 +3295,12 @@ async def test_a_listed_gfs_we_are_connected_to_is_a_failover_only():
     assert await w.dir.needed_gfs() == {GFS, THIRD_GFS}
     own = await w.dir.own_card(SPACE)
     assert own.mailbox is not None and own.mailbox.gfs == THIRD_GFS
+    # After a restart its capability probe has not answered yet: the
+    # mailbox we hold there keeps it a target — no bounce back.
+    w.mailboxes.connected = []
+    assert await w.dir.needed_gfs() == {GFS, THIRD_GFS}
+    own = await w.dir.own_card(SPACE)
+    assert own.mailbox is not None and own.mailbox.gfs == THIRD_GFS
 
 
 async def test_a_listed_gfs_never_gives_a_mailbox_less_card_a_mailbox():

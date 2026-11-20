@@ -772,10 +772,17 @@ class SpaceMemberDirectory:
             (c.gfs_instance_id, normalize_gfs_base(c.inbox_url), c.public_key.lower())
             for c in conns
         }
+        # A listed GFS we already hold our mailbox at counts too, whatever
+        # its capability probe says right now (after a restart it may not
+        # have answered yet): the card that moved there stays there.
+        held_urls = self._mailboxes.mailbox_gfs_urls()
         listed: set[str] = set()
         for s in servers:
             url = normalize_gfs_base(s.inbox_url)
-            if (s.gfs_instance_id, url, s.public_key.lower()) in ours:
+            if (
+                url in held_urls
+                or (s.gfs_instance_id, url, s.public_key.lower()) in ours
+            ):
                 listed.add(url)
         return listed - core
 

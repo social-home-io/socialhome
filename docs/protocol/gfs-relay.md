@@ -1483,8 +1483,9 @@ new card reaches every space — the ones we host too — at once.
 **Failover: the card moves off a GFS that stays down.** A card names ONE
 mailbox, so a household on two GFSs of a space still receives only on the
 one its card names. When the claim socket of that mailbox stays down for
-`FAILOVER_AFTER_S` (10 min) while another GFS of ours works (another
-mailbox claimed now, or a connection where we hold none yet), that GFS is
+`FAILOVER_AFTER_S` (10 min) while another GFS of ours works right now
+(another mailbox claimed, or a connection where we hold none yet that
+answers an anonymous `/gfs/info`), that GFS is
 **demoted**: `gfs_mailboxes` keeps `demoted: {gfs_url: wall_ms}`, so a
 restart keeps it. It is event-driven: the claim loop's own reconnect
 backoff checks it after each failed attempt (no timer, no poll), so the
@@ -1511,11 +1512,14 @@ GFS alone never gives a mailbox-less card a mailbox.
   cards move again only when the GFS they moved to fails too (then back to
   the one demoted longest ago). Each GFS is demoted at most once per
   outage, and only toward a GFS that works now, so a household whose own
-  network is down moves nothing.
+  network is down moves nothing. (With two spaces on different GFSs, a
+  space whose GFSs are all down can still see its card move between them —
+  at most once per GFS and outage.)
 - **Cost.** One card (~0.7 KiB) per affected space and host per move, then
   the host's usual delta to its members. A move to a listed GFS we held no
-  mailbox at costs one ticket and one claim socket there (kept while the
-  first GFS stays demoted). No protocol bump: the card's shape is unchanged
+  mailbox at costs one ticket and one claim socket there, kept for as long
+  as the first GFS stays demoted — a demotion does not expire, so in
+  practice for good, until the household leaves that GFS or the space. No protocol bump: the card's shape is unchanged
   and a v_89 receiver already takes a newer `rev`.
 
 **Losses and recovery.** Frames to a mailbox that is offline wait in the

@@ -131,6 +131,8 @@ FLOOD_ROTATE_DROPS: int = 500
 #: ._note_down`). The claim backoff decides when it is next checked, so
 #: the move comes within one backoff step (at most ~7.5 min) after this.
 FAILOVER_AFTER_S: float = 600.0
+#: Bound on the liveness probe of a GFS we may fail over to.
+PROBE_TIMEOUT_S: float = 10.0
 #: Each claim socket pings this often (inside Cloudflare's 100 s idle
 #: timeout).
 CLAIM_HEARTBEAT_S: float = 30.0
@@ -1002,34 +1004,59 @@ class GfsMailboxService:
             return
         if not await self._has_alternative(gid):
             return  # nowhere to move to (our own network is down, say)
-        self._failed_over.add(gid)
         async with self._lock:
+            if claim.released or self._claims.get(gid) is not claim:
+                return
             url = normalize_gfs_base(claim.own.gfs_url)
             last = max(self._demoted.values(), default=0)
             self._demoted[url] = max(int(self._wall_clock() * 1000), last + 1)
             await self._persist()
+        self._failed_over.add(gid)
         log.warning(
             "gfs.mailbox: our mailbox at a GFS has been unreachable for %.0f "
             "min — moving our member cards to another GFS",
             (now - since) / 60,
         )
-        # Cards with another mailbox of ours move now; a space whose only
-        # other GFS is one we hold no mailbox at yet gets one minted
-        # (the directory's needed set grew with the demotion).
+        # Off the claim task (its reconnects go on; a release or shutdown
+        # never cuts a publish off): cards with another mailbox of ours
+        # move now; a space whose only other GFS is one we hold no mailbox
+        # at yet gets one minted (the directory's needed set grew).
+        self._spawn(self._after_demotion(), "gfs-mailbox-failover")
+
+    async def _after_demotion(self) -> None:
         await self._changed()
         self.mint_soon()
 
     async def _has_alternative(self, gfs_id: str) -> bool:
-        """Another GFS of ours works: our mailbox there is claimed now, or
-        we hold none there yet (a mint proves it is up before any card
-        names it)."""
+        """Another GFS of ours works NOW: our mailbox there is claimed, or
+        we hold none there yet and it answers an anonymous ``/gfs/info``
+        (a cached capability is no proof — with our own network down,
+        nothing may move)."""
         for other, claim in self._claims.items():
             if other != gfs_id and claim.claimed.is_set() and not claim.released:
                 return True
-        return any(
-            conn.gfs_instance_id != gfs_id and conn.gfs_instance_id not in self._boxes
-            for conn in await self.connected_gfs()
-        )
+        for conn in await self.connected_gfs():
+            if (
+                conn.gfs_instance_id != gfs_id
+                and conn.gfs_instance_id not in self._boxes
+                and await self._answers(conn)
+            ):
+                return True
+        return False
+
+    async def _answers(self, conn: GfsConnection) -> bool:
+        """One anonymous ``GET /gfs/info`` on *conn* answers 200 in time."""
+        try:
+            async with self._anon(conn) as session:
+                if session is None:
+                    return False
+                async with session.get(
+                    conn.inbox_url.rstrip("/") + "/gfs/info",
+                    timeout=aiohttp.ClientTimeout(total=PROBE_TIMEOUT_S),
+                ) as resp:
+                    return resp.status == 200
+        except aiohttp.ClientError, TimeoutError, OSError:
+            return False
 
     def _daily_row(self, gfs_id: str) -> list[int]:
         day = int(self._clock() // _DAY_S)
