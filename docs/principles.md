@@ -343,7 +343,13 @@ exactly:**
     adds its mailbox to the space's cluster above; it opens no new
     identified link, and the mailbox is released once no GFS-reached
     member is left there. A member not connected to that GFS is reached
-    through the host hop.
+    through the host hop. It REACHES members there itself when the
+    space owner's signed list names that GFS (v_91): it uploads to their
+    mailboxes anonymously, over that server's own pinned cookie-less
+    session, exactly as its follower publish goes there — so a household
+    with no GFS connection at all now contacts the space's listed GFSs to
+    deliver to members (address, time and sizes, never its identity; the
+    IP residual below).
 
   - **A space fan-out shows the GFS its exact recipient list (v_91; owner
     sign-off 2026-11-09, wrap per recipient 2026-11-10).** Space content
@@ -506,8 +512,10 @@ connected to. **What that concedes, exactly:**
   household key, no writer cert in the clear, no cookie (each one is reached
   over its own cookie-less session), no subscribe and no pairing. It gets
   only the anonymous `member-publish-anon` request, a delegated admin's
-  authority-signed epoch notice and the identity-free `/gfs/publish` relay,
-  and it keeps no `client_instances` row for the household. IP and timing
+  authority-signed epoch notice, the identity-free `/gfs/publish` relay and
+  the anonymous mailbox frames for members whose card mailbox is there
+  (`/gfs/envelope`, `/gfs/envelope/multi`, v_91), and it keeps no
+  `client_instances` row for the household. IP and timing
   are the same accepted limit as every anonymous GFS path above; a member
   that does not want any server it never chose to see its address has to
   route its traffic through something that hides it.
