@@ -490,3 +490,265 @@ async def test_settle_releases_returns_while_a_done_release_awaits_its_discard()
     done.set_result(None)
     svc._releases = {done}  # finished, never discarded
     await svc.settle_releases()
+
+
+# ── Failover: a GFS that stays down is demoted (cards move) ─────────────
+
+GFS_B = "https://gfs-b.example.org"
+GFS_C = "https://gfs-c.example.org"
+
+
+def _conn(gfs_id: str, url: str) -> GfsConnection:
+    return GfsConnection(
+        id=f"conn-{gfs_id}",
+        gfs_instance_id=gfs_id,
+        display_name=gfs_id,
+        public_key="00" * 32,
+        inbox_url=url,
+        status="active",
+        paired_at="2026-11-08T00:00:00+00:00",
+    )
+
+
+class _Repo:
+    def __init__(self, *conns: GfsConnection) -> None:
+        self.conns = list(conns)
+
+    async def get(self, conn_id):
+        return next((c for c in self.conns if c.id == conn_id), None)
+
+    async def list_active(self):
+        return list(self.conns)
+
+
+def _offline(*conns, config=None, now=None, wall=None):
+    """A mailbox service with no GFS on the wire: the failover decision
+    only (claims are put in place by hand)."""
+    return GfsMailboxService(
+        instance_config=config or _Config(),
+        key_manager=KeyManager(KEK),
+        gfs_repo=_Repo(*conns),
+        gfs_service=_Gfs(None),
+        instance_id=HOME_ID,
+        identity_seed=HOME_SEED,
+        clock=lambda: now[0],
+        wall_clock=lambda: wall[0] if wall is not None else WALL,
+        release_delay=(0.0, 0.0),
+    )
+
+
+async def _with_claims(svc, *boxes: tuple[str, str]) -> dict[str, gms._Claim]:
+    """Hold a mailbox at each ``(gfs_id, url)``, its claim in place (no
+    socket, nothing claimed)."""
+    await svc._load_root()
+    claims = {}
+    for gid, url in boxes:
+        own = gms.OwnMailbox(gen=1, gfs_instance_id=gid, gfs_url=url)
+        svc._boxes[gid] = own
+        claim = gms._Claim(keys=svc._keys(own), own=own)
+        svc._claims[gid] = claim
+        claims[gid] = claim
+    async with svc._lock:
+        await svc._store_boxes()
+    return claims
+
+
+async def test_a_mailbox_down_past_the_threshold_is_demoted_not_before():
+    now = [1000.0]
+    a, b = _conn("gfs-a", "https://gfs-a.example.org"), _conn("gfs-b", GFS_B)
+    config = _Config()
+    svc = _offline(a, b, config=config, now=now)
+    calls, hook = _counter()
+    svc.attach_on_change(hook)
+    claims = await _with_claims(svc, ("gfs-a", a.inbox_url), ("gfs-b", GFS_B))
+    claims["gfs-b"].claimed.set()  # B works
+    rev = svc.rev
+
+    await svc._note_down(claims["gfs-a"])  # the outage starts
+    now[0] += gms.FAILOVER_AFTER_S - 1
+    await svc._note_down(claims["gfs-a"])
+    assert svc.demoted_at(a.inbox_url) == 0
+    assert calls == []
+
+    now[0] += 1
+    await svc._note_down(claims["gfs-a"])
+    assert svc.demoted_at(a.inbox_url) == int(WALL * 1000)
+    assert svc.demoted_at(GFS_B) == 0
+    assert calls == [1]  # the cards go out at once
+    assert svc.rev == rev  # the mailboxes did not change: no new card rev
+    stored = orjson.loads(config.data[MAILBOXES_CONFIG_KEY])
+    assert stored["demoted"] == {normalize_gfs_base(a.inbox_url): int(WALL * 1000)}
+
+    now[0] += 3600
+    await svc._note_down(claims["gfs-a"])  # still the same outage
+    assert calls == [1]
+
+
+async def test_no_demotion_without_another_working_gfs():
+    now = [1000.0]
+    a, b = _conn("gfs-a", "https://gfs-a.example.org"), _conn("gfs-b", GFS_B)
+    calls, hook = _counter()
+    # Only one GFS at all.
+    alone = _offline(a, now=now)
+    alone.attach_on_change(hook)
+    claims = await _with_claims(alone, ("gfs-a", a.inbox_url))
+    await alone._note_down(claims["gfs-a"])
+    now[0] += 10 * gms.FAILOVER_AFTER_S
+    await alone._note_down(claims["gfs-a"])
+    assert alone.demoted_at(a.inbox_url) == 0
+    # Another mailbox, but its claim is down too (our own network is out).
+    both = _offline(a, b, now=now)
+    both.attach_on_change(hook)
+    claims = await _with_claims(both, ("gfs-a", a.inbox_url), ("gfs-b", GFS_B))
+    await both._note_down(claims["gfs-a"])
+    now[0] += 10 * gms.FAILOVER_AFTER_S
+    await both._note_down(claims["gfs-a"])
+    assert both.demoted_at(a.inbox_url) == 0
+    assert calls == []
+
+
+async def test_a_gfs_we_hold_no_mailbox_at_yet_counts_as_somewhere_to_go(
+    monkeypatch,
+):
+    """A space's other GFS where we hold no mailbox yet: the demotion
+    stands and a mint follows (the mint proves that GFS is up before any
+    card names it)."""
+    now = [1000.0]
+    a, b = _conn("gfs-a", "https://gfs-a.example.org"), _conn("gfs-b", GFS_B)
+    svc = _offline(a, b, now=now)
+    claims = await _with_claims(svc, ("gfs-a", a.inbox_url))
+    minted: list[int] = []
+    monkeypatch.setattr(
+        gms.GfsMailboxService, "mint_soon", lambda self: minted.append(1)
+    )
+    await svc._note_down(claims["gfs-a"])
+    now[0] += gms.FAILOVER_AFTER_S
+    await svc._note_down(claims["gfs-a"])
+    assert svc.demoted_at(a.inbox_url) > 0
+    assert minted == [1]
+
+
+async def test_a_demoted_gfs_that_comes_back_stays_demoted_no_flapping():
+    now, wall = [1000.0], [WALL]
+    a, b = _conn("gfs-a", "https://gfs-a.example.org"), _conn("gfs-b", GFS_B)
+    svc = _offline(a, b, now=now, wall=wall)
+    calls, hook = _counter()
+    svc.attach_on_change(hook)
+    claims = await _with_claims(svc, ("gfs-a", a.inbox_url), ("gfs-b", GFS_B))
+    claims["gfs-b"].claimed.set()
+    await svc._note_down(claims["gfs-a"])
+    now[0] += gms.FAILOVER_AFTER_S
+    await svc._note_down(claims["gfs-a"])
+    first = svc.demoted_at(a.inbox_url)
+    assert calls == [1]
+
+    # A comes back: nothing moves.
+    claims["gfs-a"].claimed.set()
+    svc._note_up("gfs-a")
+    assert svc.demoted_at(a.inbox_url) == first
+    assert calls == [1]
+
+    # B fails in turn while A works: B is demoted later than A, so the
+    # cards move back to A — only because B failed.
+    claims["gfs-b"].claimed.clear()
+    wall[0] += 7200
+    await svc._note_down(claims["gfs-b"])
+    now[0] += gms.FAILOVER_AFTER_S
+    await svc._note_down(claims["gfs-b"])
+    assert svc.demoted_at(GFS_B) > first
+    assert calls == [1, 1]
+
+    # B is back; a new outage of A then demotes A anew.
+    claims["gfs-b"].claimed.set()
+    svc._note_up("gfs-b")
+    claims["gfs-a"].claimed.clear()
+    wall[0] += 7200
+    await svc._note_down(claims["gfs-a"])
+    now[0] += gms.FAILOVER_AFTER_S
+    await svc._note_down(claims["gfs-a"])
+    assert svc.demoted_at(a.inbox_url) > svc.demoted_at(GFS_B)
+
+
+async def test_a_restart_keeps_the_demotion():
+    now = [1000.0]
+    a, b = _conn("gfs-a", "https://gfs-a.example.org"), _conn("gfs-b", GFS_B)
+    config = _Config()
+    svc = _offline(a, b, config=config, now=now)
+    claims = await _with_claims(svc, ("gfs-a", a.inbox_url), ("gfs-b", GFS_B))
+    claims["gfs-b"].claimed.set()
+    await svc._note_down(claims["gfs-a"])
+    now[0] += gms.FAILOVER_AFTER_S
+    await svc._note_down(claims["gfs-a"])
+    demoted = svc.demoted_at(a.inbox_url)
+    assert demoted > 0
+
+    again = _offline(a, b, config=config, now=now)
+    again._root = svc._root
+    again._rev, again._boxes = gms._parse_boxes(config.data[MAILBOXES_CONFIG_KEY])
+    again._demoted = gms._parse_demoted(config.data[MAILBOXES_CONFIG_KEY])
+    assert again.demoted_at(a.inbox_url + "/") == demoted
+    assert again.demoted_at(GFS_B) == 0
+
+
+async def test_a_released_mailbox_takes_its_demotion_with_it():
+    now = [1000.0]
+    a, b = _conn("gfs-a", "https://gfs-a.example.org"), _conn("gfs-b", GFS_B)
+    config = _Config()
+    svc = _offline(a, b, config=config, now=now)
+    claims = await _with_claims(svc, ("gfs-a", a.inbox_url), ("gfs-b", GFS_B))
+    claims["gfs-b"].claimed.set()
+    await svc._note_down(claims["gfs-a"])
+    now[0] += gms.FAILOVER_AFTER_S
+    await svc._note_down(claims["gfs-a"])
+    assert svc.demoted_at(a.inbox_url) > 0
+    del svc._boxes["gfs-a"]
+    async with svc._lock:
+        await svc._store_boxes()
+    assert svc.demoted_at(a.inbox_url) == 0
+    assert "demoted" not in orjson.loads(config.data[MAILBOXES_CONFIG_KEY])
+
+
+async def test_a_released_or_replaced_claim_never_demotes():
+    now = [1000.0]
+    a, b = _conn("gfs-a", "https://gfs-a.example.org"), _conn("gfs-b", GFS_B)
+    svc = _offline(a, b, now=now)
+    claims = await _with_claims(svc, ("gfs-a", a.inbox_url), ("gfs-b", GFS_B))
+    claims["gfs-b"].claimed.set()
+    old = claims["gfs-a"]
+    old.released = True
+    await svc._note_down(old)
+    now[0] += gms.FAILOVER_AFTER_S
+    await svc._note_down(old)
+    assert svc.demoted_at(a.inbox_url) == 0
+    assert "gfs-a" not in svc._down_since
+
+
+async def test_the_claim_loop_reports_each_failed_attempt(gfs, monkeypatch):
+    """The failover check rides the claim loop's own reconnect backoff."""
+    _server, session, url, conn = gfs
+    svc = _service(session, conn)
+    await _ready(svc, conn)
+    await svc.ensure(url)
+    assert await svc.wait_claimed(5)
+    assert svc._down_since == {}
+    downs: list[str] = []
+    real = svc._note_down
+
+    async def note(claim):
+        downs.append(claim.own.gfs_instance_id)
+        await real(claim)
+
+    monkeypatch.setattr(
+        gms.GfsMailboxService, "_note_down", lambda self, claim: note(claim)
+    )
+    monkeypatch.setattr(gms, "CLAIM_BACKOFF_MIN_S", 0.01)
+    socket = svc._claims[GFS_ID].socket
+    assert socket is not None
+    await socket.close()  # the claim socket drops
+    for _ in range(200):
+        if downs:
+            break
+        await asyncio.sleep(0.02)
+    assert downs and downs[0] == GFS_ID
+    assert GFS_ID in svc._down_since
+    await svc.stop()
