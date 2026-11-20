@@ -449,6 +449,7 @@ from .services.space_crypto_service import (
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     SpaceContentEncryption,
 )
+from .services.space_gfs_needed_service import SpaceGfsNeededService
 from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
@@ -1235,6 +1236,33 @@ def _build_gfs_server_selection(
     gfs_connection_service.attach_on_removed(selection.on_connection_removed)
     selection.wire()
     return selection
+
+
+def _build_space_gfs_needed(
+    app: web.Application,
+    *,
+    repos: SimpleNamespace,
+    bus: EventBus,
+    notification_service: NotificationService,
+    gfs_server_selection: GfsServerSelectionService,
+    gfs_connection_service: GfsConnectionService,
+) -> SpaceGfsNeededService:
+    """The household admins' bell while this household stands in for a
+    space's host but isn't on every GFS of it: checked when the seat
+    arrives, on an applied owner config (a new GFS list), on a new GFS
+    connection and once at startup. Local only. Whether we stand in is
+    asked of the space service in ``app`` at call time — startup swaps it
+    for one that knows the real instance id."""
+    needed = SpaceGfsNeededService(
+        space_repo=repos.space,
+        notifications=notification_service,
+        bus=bus,
+        stands_in=lambda space: app[K.space_service_key].stands_in_for_host(space),
+        describe=gfs_server_selection.describe,
+    )
+    needed.wire()
+    gfs_connection_service.attach_on_connected(needed.on_connection_added)
+    return needed
 
 
 def _build_peer_gfs_relay(
@@ -4369,6 +4397,14 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.space_service_key] = space_service
     app[K.space_approval_service_key] = space_approval_service
     app[K.notification_service_key] = notification_service
+    space_gfs_needed = _build_space_gfs_needed(
+        app,
+        repos=repos,
+        bus=bus,
+        notification_service=notification_service,
+        gfs_server_selection=gfs_server_selection,
+        gfs_connection_service=gfs_connection_service,
+    )
     app[K.notification_delivery_key] = notification_delivery
     app[K.notification_settings_service_key] = _build_notification_settings(
         repos, user_service, system_chat_policy
@@ -6333,6 +6369,14 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_server_selection.reconcile_on_startup()
         except Exception:
             log.exception("gfs: owner GFS selection reconcile failed at startup")
+
+        # 8c. A space this household stands in for whose GFSs it isn't all
+        #     on: its admins get one bell (deduped on the row — a restart
+        #     doesn't bell again for the same GFS).
+        try:
+            await space_gfs_needed.check_all()
+        except Exception:
+            log.exception("gfs: GFS-needed check failed at startup")
 
         # 9. Tell paired households we're back — in the background, so the
         #    listen port opens now. Each step awaits one federation send per

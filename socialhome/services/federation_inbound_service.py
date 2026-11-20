@@ -3975,7 +3975,6 @@ class FederationInboundService(ProtectionGateMixin):
                 owner_instance_id=existing.owner_instance_id,
                 authority_key_epoch=existing.authority_key_epoch,
             )
-        await self._bus.publish(SpaceFeaturesApplied(space_id=space_id))
         if (
             is_owner
             and existing.owner_instance_id != own_instance_id
@@ -4002,6 +4001,9 @@ class FederationInboundService(ProtectionGateMixin):
             # authorizes. (Only on the owner's word — a co-admin's signed
             # snapshot must not be able to strip another admin's seed.)
             await self._space_repo.clear_space_seed(space_id)
+        # Followers re-read the stored row — after the seed above is gone, so
+        # none of them sees a seat this household no longer holds.
+        await self._bus.publish(SpaceFeaturesApplied(space_id=space_id))
         # A cover / icon change ships the new image in ``space_meta``; land
         # it (validated) now that the change itself passed every gate above,
         # so an out-of-order older change can never roll the picture back.

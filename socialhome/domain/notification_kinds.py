@@ -103,6 +103,9 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "moderation_pending": NotifKind.NEEDS_YOU,
     "space_report": NotifKind.NEEDS_YOU,
     "moderation_unavailable": NotifKind.NEEDS_YOU,
+    # This household stands in for a space's host but isn't on every GFS
+    # of it: only a household admin can connect.
+    "space_gfs_needed": NotifKind.NEEDS_YOU,
     # Retired: an old row still files under Needs you (it resolves).
     "dm_contact_requested": NotifKind.NEEDS_YOU,
     "app_challenge": NotifKind.NEEDS_YOU,

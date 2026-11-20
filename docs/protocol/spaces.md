@@ -1856,6 +1856,36 @@ current key material — used when ownership is transferred or a
 co-admin is added so the new admin can decrypt pre-existing content
 without a full resync.
 
+### A delegated admin on every GFS
+
+A household that holds a delegated-admin seat (it has the space's
+signing seed and the owner turned `delegated_admin_authority` on — the
+space detail's `stands_in_for_host`) acts for the host while the host is
+offline. Members reached only through a GFS need it on **every** GFS of
+the owner's signed list (`spaces.gfs_servers`), so its household admins
+should connect to each one:
+
+- **In the space** — `SpaceGfsNotice` names each listed GFS this
+  household isn't connected to as *needed* (not dismissible), with a
+  one-click Connect for household admins (`/connections?connect_gfs=…`).
+- **A bell** (`SpaceGfsNeededService`) — one `space_gfs_needed` row per
+  space for each household admin who is a member of it (an admin outside
+  the space never learns its name this way), listing the missing GFSs and
+  opening the space. Kind *Needs you* (Push by default; In app keeps it
+  quiet), not pinned. The push names only the space (§25.3). It is
+  checked when the seed is stored (`SpaceAdminSeedStored`, after an
+  accepted `SPACE_ADMIN_KEY_SHARE`), when an owner config is applied
+  (`SpaceFeaturesApplied` — a newer GFS list, or delegation turned off),
+  when a GFS connection is added, and once at startup. The row remembers
+  which GFSs it told of (`params.gfs`), so the same GFS is told of once —
+  restarts included — until it is connected or leaves the list, and again
+  only if it goes missing later; a GFS that is fine again drops out of
+  the row quietly. Nothing missing, or no seat any more (the seed was
+  dropped, the admin stepped down) → the row is resolved
+  (`handled.outcome: "done"`).
+
+Local only: no federation message, no protocol change, no table.
+
 ## Roster gossip (v_23+)
 
 The space roster is **peer-replicated** so every member household converges

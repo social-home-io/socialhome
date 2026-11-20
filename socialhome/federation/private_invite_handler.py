@@ -36,6 +36,7 @@ from ..domain.events import (
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
     SpaceAdminAuthorityRevoked,
+    SpaceAdminSeedStored,
     SpaceRemoteSeatEnded,
     SpaceRemoteSeatLive,
 )
@@ -1701,6 +1702,9 @@ class PrivateSpaceInviteHandler:
             space_id,
             event.from_instance,
         )
+        # Local only: the household's admins hear if it isn't on every GFS
+        # of the space it now stands in for (the GFS-needed bell).
+        await self._bus.publish(SpaceAdminSeedStored(space_id=space_id))
 
     # ── Space roster gossip (v_23) ──────────────────────────────────────
 

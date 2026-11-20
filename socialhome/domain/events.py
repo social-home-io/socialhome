@@ -1903,6 +1903,19 @@ class SpaceAdminAuthorityRevoked(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceAdminSeedStored(DomainEvent):
+    """On a household that does NOT host the space: the owner's (or an
+    inviting delegated admin's) ``SPACE_ADMIN_KEY_SHARE`` was accepted and
+    the space's signing seed stored — this household can now stand in for
+    the host. Local only; the GFS-needed bell
+    (:class:`~socialhome.services.space_gfs_needed_service.SpaceGfsNeededService`)
+    re-checks the space's GFSs on it."""
+
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceAdminSeedsRetiredAfterRestore(DomainEvent):
     """The owner household was restored from a backup or Recovery Kit and a
     space it hosts rotated its authority key WITHOUT re-sharing the new

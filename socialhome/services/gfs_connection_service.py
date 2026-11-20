@@ -474,6 +474,7 @@ class GfsConnectionService:
         "_moment_delete_log",
         "_moment_media_30d",
         "_moment_reactions",
+        "_on_connected",
         "_on_disconnect",
         "_on_listings_changed",
         "_on_rebound",
@@ -715,6 +716,10 @@ class GfsConnectionService:
         #: push socket closes now, not at the next reconcile
         #: (:meth:`GfsWebSocketSupervisor.forget`).
         self._on_removed: list[Callable[[GfsConnection], Awaitable[object]]] = []
+        #: Called in order with a NEW active connection after pairing — the
+        #: GFS-needed bell resolves for the spaces that were missing it
+        #: (:meth:`SpaceGfsNeededService.on_connection_added`).
+        self._on_connected: list[Callable[[GfsConnection], Awaitable[object]]] = []
         #: Called in order with the connection id after it adopted the
         #: server's new public id (:meth:`_rebind_to_served_id`): the seat
         #: keeper moves this household's follow seats to the new id, the
@@ -978,6 +983,14 @@ class GfsConnectionService:
         order attached; one failing never skips the next)."""
         self._on_removed.append(hook)
 
+    def attach_on_connected(
+        self, hook: Callable[[GfsConnection], Awaitable[object]]
+    ) -> None:
+        """Add a hook run after pairing made a new ACTIVE connection (in the
+        order attached; one failing never skips the next). A pending one
+        (awaiting the GFS admin) runs none."""
+        self._on_connected.append(hook)
+
     def attach_on_rebound(self, hook: Callable[[str], Awaitable[object]]) -> None:
         """Add a hook run after a connection adopted a new public id (hooks
         run in the order attached; one failing never skips the next)."""
@@ -1239,6 +1252,12 @@ class GfsConnectionService:
         self._possession[_possession_key(conn)] = proven
         if proven:
             self._proven_at[conn.id] = time.monotonic()
+        if conn.status == "active":
+            for hook in self._on_connected:
+                try:
+                    await hook(conn)
+                except Exception:
+                    log.exception("gfs: on-connected hook failed for %s", conn.id)
         return conn
 
     async def _require_possession(self, gfs_url: str, info: dict) -> bool:
