@@ -27412,7 +27412,6 @@ button.sh-page-editor-status {
   cursor: pointer;
 }
 .sh-space-gfs-notice__dismiss:hover { background: color-mix(in srgb, var(--sh-text) 8%, transparent); }
-.sh-space-gfs-notice__dismiss:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
 
 /* "Global, but not listed on any GFS yet" — a warning tint, not an error. */
 .sh-gfs-banner {

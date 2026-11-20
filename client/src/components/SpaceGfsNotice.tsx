@@ -20,7 +20,7 @@
  * anchored on the document base); anyone else gets the "ask a household
  * admin" hint instead.
  */
-import { useState } from 'preact/hooks'
+import { useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import { addBase } from '@/baseUrl'
 import { currentUser } from '@/store/auth'
@@ -81,20 +81,36 @@ export function SpaceGfsNotice({ space }: { space: GfsNoticeSpace }): JSX.Elemen
   const userId = currentUser.value?.user_id ?? null
   const isAdmin = currentUser.value?.is_admin === true
   const needed = space.stands_in_for_host === true
-  // Bumped on a dismiss so the row goes at once (storage may be blocked).
+  // Hidden this visit, by space + GFS (the page may stay mounted from one
+  // space to the next), so a row goes at once even with storage blocked.
   const [hidden, setHidden] = useState<string[]>([])
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const hiddenKey = (url: string) => `${space.id}\n${url}`
   const rows = missingGfsServers(space).filter(g => needed || (
-    !hidden.includes(g.inbox_url) && !isGfsNoticeDismissed(userId, space.id, g.inbox_url)
+    !hidden.includes(hiddenKey(g.inbox_url)) && !isGfsNoticeDismissed(userId, space.id, g.inbox_url)
   ))
   if (rows.length === 0) return null
+  const dismiss = (url: string) => {
+    // The ✕ removes its own row: land focus on the next row's ✕, else on
+    // the page's main region, never on <body>.
+    const buttons = [...(rootRef.current?.querySelectorAll<HTMLButtonElement>(
+      '.sh-space-gfs-notice__dismiss') ?? [])]
+    const at = buttons.findIndex(b => b.dataset.gfs === url)
+    const next = buttons[at + 1] ?? buttons[at - 1] ?? null
+    dismissGfsNotice(userId, space.id, url)
+    setHidden(h => [...h, hiddenKey(url)])
+    setTimeout(() => {
+      const target = next?.isConnected ? next : document.getElementById('main')
+      target?.focus()
+    }, 0)
+  }
   return (
-    <div class="sh-space-gfs-notice" data-testid="space-gfs-notice">
+    <div class="sh-space-gfs-notice" role="status" ref={rootRef} data-testid="space-gfs-notice">
       {rows.map(g => {
         const name = g.display_name || gfsHost(g.inbox_url)
         return (
           <div key={g.inbox_url}
                class={`sh-space-gfs-notice__row${needed ? ' sh-space-gfs-notice__row--needed' : ''}`}
-               role="status"
                data-testid={needed ? 'space-gfs-notice-needed' : 'space-gfs-notice-optional'}>
             <span class="sh-space-gfs-notice__icon" aria-hidden="true">{needed ? '⚠️' : '🛰️'}</span>
             <div class="sh-space-gfs-notice__body">
@@ -126,10 +142,8 @@ export function SpaceGfsNotice({ space }: { space: GfsNoticeSpace }): JSX.Elemen
                       aria-label={t('space.gfs_notice.dismiss_aria', { name })}
                       title={t('common.close')}
                       data-testid="space-gfs-notice-dismiss"
-                      onClick={() => {
-                        dismissGfsNotice(userId, space.id, g.inbox_url)
-                        setHidden(h => [...h, g.inbox_url])
-                      }}>
+                      data-gfs={g.inbox_url}
+                      onClick={() => dismiss(g.inbox_url)}>
                 ✕
               </button>
             )}

@@ -163,7 +163,9 @@ export default function ConnectionsPage() {
   useEffect(() => {
     if (!connectGfs) return
     const target = gfsConnectTarget(connectGfs)
-    if (isAdmin && target) openPairing('gfs', { gfsUrl: target })
+    // An address we won't aim at still opens the plain GFS flow: the
+    // click never lands on a page where nothing happens.
+    if (isAdmin) openPairing('gfs', target ? { gfsUrl: target } : {})
     loc.route?.('/connections', true)
   }, [connectGfs]) // eslint-disable-line react-hooks/exhaustive-deps
 

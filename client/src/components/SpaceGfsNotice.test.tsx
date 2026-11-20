@@ -107,6 +107,40 @@ describe('SpaceGfsNotice — any other household', () => {
       .getByTestId('space-gfs-notice-optional')).toBeTruthy()
   })
 
+  it('a dismissal in one space does not hide the row in the next (same mount)', () => {
+    const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('blocked')
+    })
+    try {
+      const r = render(<SpaceGfsNotice space={space()} />)
+      fireEvent.click(r.getByTestId('space-gfs-notice-dismiss'))
+      expect(r.queryByTestId('space-gfs-notice')).toBeNull()
+      r.rerender(<SpaceGfsNotice space={space({ id: 's-2' })} />)
+      expect(r.getByTestId('space-gfs-notice-optional')).toBeTruthy()
+    } finally {
+      set.mockRestore()
+    }
+  })
+
+  it('moves focus to the next row, else to the main region, on dismiss', async () => {
+    const main = document.createElement('main')
+    main.id = 'main'
+    main.tabIndex = -1
+    document.body.appendChild(main)
+    try {
+      const other = { display_name: 'Other GFS', inbox_url: 'https://other.example', connected: false }
+      const r = render(<SpaceGfsNotice space={space({ gfs_servers: [CLUB, other] })} />)
+      fireEvent.click(r.getAllByTestId('space-gfs-notice-dismiss')[0])
+      await new Promise(res => setTimeout(res, 0))
+      expect(document.activeElement?.getAttribute('data-gfs')).toBe('https://other.example')
+      fireEvent.click(r.getByTestId('space-gfs-notice-dismiss'))
+      await new Promise(res => setTimeout(res, 0))
+      expect(document.activeElement).toBe(main)
+    } finally {
+      main.remove()
+    }
+  })
+
   it('still works when storage is blocked', () => {
     const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('blocked')

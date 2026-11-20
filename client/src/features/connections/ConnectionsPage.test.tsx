@@ -989,10 +989,10 @@ describe('ConnectionsPage — ?connect_gfs= (a space\'s GFS notice)', () => {
     expect(loc.route).toHaveBeenCalledWith('/connections', true)
   })
 
-  it('opens nothing for a member or for an address that is not http(s)', async () => {
+  it('an address that is not plain http(s) opens the plain GFS flow, not aimed at it', async () => {
     loc.query = { connect_gfs: 'javascript:alert(1)' }
     await renderPage({ conns: [makeConnection()] })
-    expect(openPairing).not.toHaveBeenCalled()
+    expect(openPairing).toHaveBeenCalledWith('gfs', {})
     expect(loc.route).toHaveBeenCalledWith('/connections', true)
   })
 
