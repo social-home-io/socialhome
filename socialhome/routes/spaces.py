@@ -393,6 +393,10 @@ class SpaceDetailView(BaseView):
                 # Global but listed on no GFS ("global, not listed"): the
                 # SPA shows a banner until the owner picks servers.
                 "gfs_unlisted": gfs_unlisted,
+                # This household acts for the host while it's offline (a
+                # delegated admin holding the signing seed): a GFS of the
+                # space we aren't connected to is then needed, not optional.
+                "stands_in_for_host": await svc.stands_in_for_host(space),
                 # A local community's area ``{lat, lon, radius_km}`` (4 dp
                 # centre) or null. Only the hosting household holds one; a
                 # member household's stub never has it.

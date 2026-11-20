@@ -4413,3 +4413,44 @@ async def test_local_invites_without_icon_has_null_icon_url(client):
     assert inv["space_name"] == "Plain"
     assert inv["space_icon_url"] is None
     assert inv["space_emoji"] is None
+
+
+async def test_the_space_detail_says_whether_we_stand_in_for_the_host(client):
+    """The SPA's GFS notice marks a missing GFS as needed only for a
+    household that can act for the space's host: hosted elsewhere, the
+    owner lets admins act for them, and we hold the space's signing seed."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Stand-in space"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+
+    async def stands_in() -> bool:
+        resp = await client.get(
+            f"/api/spaces/{sid}", headers=_auth(client._admin_token)
+        )
+        assert resp.status == 200, await resp.text()
+        return (await resp.json())["stands_in_for_host"]
+
+    # Our own space: we ARE the host.
+    assert await stands_in() is False
+    resp = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"delegated_admin_authority": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 200, await resp.text()
+    repo = client.app[space_repo_key]
+    if await repo.get_space_seed(sid) is None:
+        await repo.set_space_seed(sid, b"\x07" * 32)
+    assert await stands_in() is False
+    await client.app[_db_key].enqueue(
+        "UPDATE spaces SET owner_instance_id='some-other-household' WHERE id=?",
+        (sid,),
+    )
+    # Hosted elsewhere, delegation on, seed held: we stand in.
+    assert await stands_in() is True
+    # Without the seed we only forward.
+    await repo.clear_space_seed(sid)
+    assert await stands_in() is False

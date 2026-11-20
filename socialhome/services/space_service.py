@@ -3181,6 +3181,13 @@ class SpaceService(
             space
         )
 
+    async def stands_in_for_host(self, space: Space) -> bool:
+        """Whether this household can act for *space*'s host while it is
+        offline (a delegated admin holding the space's signing seed). The
+        SPA marks a GFS of the space this household isn't connected to as
+        needed, not optional, when this is true."""
+        return await self._executes_locally_as_delegated_admin(space)
+
     async def _households_below(
         self, space_id: str, min_version: int
     ) -> list[dict[str, object]]:
