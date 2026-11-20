@@ -2400,6 +2400,7 @@
   "connections.map.you_sub": "Este Social Home",
   "connections.map.not_on_map": "Fuera del mapa",
   "connections.map.no_coords": "Vinculado, pero aún sin ubicación.",
+  "connections.map.home_approx": "Zona aproximada, con un margen de unos 3 km",
   "nav.organize": "Organize",
   "nav.chats": "Chats",
   "nav.highlights": "Highlights",

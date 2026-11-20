@@ -74,6 +74,9 @@ function _peerPopup(
   }
   if (transport) root.append(_line(t(TRANSPORT_KEY[transport]), 'sh-fed-popup__muted'))
   if (distance) root.append(_line(distance, 'sh-fed-popup__muted'))
+  // A paired household's home reaches us only as a ~3 km area (the
+  // centre of its grid cell), never the house: say so.
+  root.append(_line(t('connections.map.home_approx'), 'sh-fed-popup__muted'))
   if (onManage) {
     const btn = document.createElement('button')
     btn.type = 'button'

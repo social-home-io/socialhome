@@ -344,6 +344,22 @@ describe('FederationMap', () => {
     expect(vi.mocked(L.divIcon).mock.calls).toHaveLength(1)
   })
 
+  test('a peer popup says the home is an approximate area; ours does not', () => {
+    selfLat.value = 48.1
+    selfLon.value = 11.6
+    const marker = L.marker([0, 0])
+    vi.mocked(marker.bindPopup).mockClear()
+    connections.value = [
+      { instance_id: 'p', display_name: 'P', status: 'confirmed', reachable: true, home_lat: 52.515, home_lon: 13.3854 } as never,
+    ]
+    render(<FederationMap />)
+    const popups = vi.mocked(marker.bindPopup).mock.calls.map((c) => c[0] as HTMLElement)
+    const self = popups.find((p) => p.textContent!.includes('Your household'))!
+    const peer = popups.find((p) => p.querySelector('strong')!.textContent === 'P')!
+    expect(peer.textContent).toContain('Approximate area, within about 3 km')
+    expect(self.textContent).not.toContain('Approximate area')
+  })
+
   test('this household is a hearth "You" disc', () => {
     selfLat.value = 48.1
     selfLon.value = 11.6

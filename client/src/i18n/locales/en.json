@@ -2682,6 +2682,7 @@
   "connections.map.you_sub": "This Social Home",
   "connections.map.not_on_map": "Not on map",
   "connections.map.no_coords": "Paired, but no home location yet.",
+  "connections.map.home_approx": "Approximate area, within about 3 km",
   "nav.organize": "Organize",
   "nav.chats": "Chats",
   "nav.highlights": "Highlights",

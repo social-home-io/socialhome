@@ -2373,6 +2373,7 @@
   "connections.map.you_sub": "Deze Social Home",
   "connections.map.not_on_map": "Niet op de kaart",
   "connections.map.no_coords": "Gekoppeld, maar nog geen locatie.",
+  "connections.map.home_approx": "Globale omgeving, tot op ongeveer 3 km",
   "nav.organize": "Organize",
   "nav.chats": "Chats",
   "nav.highlights": "Highlights",

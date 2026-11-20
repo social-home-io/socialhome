@@ -2373,6 +2373,7 @@
   "connections.map.you_sub": "Ce Social Home",
   "connections.map.not_on_map": "Absent de la carte",
   "connections.map.no_coords": "Jumelé, mais pas encore d'emplacement.",
+  "connections.map.home_approx": "Zone approximative, à environ 3 km près",
   "nav.organize": "Organize",
   "nav.chats": "Discussions",
   "nav.highlights": "Highlights",

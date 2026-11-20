@@ -390,6 +390,22 @@ describe('FriendsPage', () => {
     expect(cards(container)).toHaveLength(2)
   })
 
+  it('a paired household\'s pin says its home is an approximate area; ours does not', async () => {
+    serve(payload(
+      [hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')], { home_lat: 47.115, home_lon: 8.5 })],
+      [local('u-me', 'Pascal')],
+      { home_lat: 47.0, home_lon: 8.4 },
+    ))
+    const { container, findByRole } = render(<FriendsPage />)
+    fireEvent.click(await findByRole('button', { name: 'Map' }))
+    const subs = Object.fromEntries(
+      [...container.querySelectorAll('.map-marker')].map((m) => [m.getAttribute('data-id'), m.textContent]),
+    )
+    expect(subs['p-a']).toContain('Approximate area, within about 3 km')
+    const own = Object.entries(subs).find(([id]) => id !== 'p-a')![1]
+    expect(own).not.toContain('Approximate area')
+  })
+
   it('no coordinates anywhere: no Map option', async () => {
     serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]))
     const { findByRole, queryByRole } = render(<FriendsPage />)
