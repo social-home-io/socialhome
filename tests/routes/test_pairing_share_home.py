@@ -14,8 +14,13 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
+from socialhome.domain.home_location import coarse_home_for_peer
 
 from .conftest import _auth
+
+#: What a paired household gets of the 52.52, 13.405 home: the ~3 km
+#: cell centre (``coarse_home_for_peer``).
+_SHARED = coarse_home_for_peer(52.52, 13.405)
 
 
 async def _set_home(client) -> None:
@@ -96,8 +101,8 @@ async def test_code_carries_home_by_default(client):
     r = await _initiate(client)
     assert r.status == 201
     data = await r.json()
-    assert data["home_lat"] == 52.52
-    assert data["home_lon"] == 13.405
+    assert data["home_lat"] == _SHARED[0]
+    assert data["home_lon"] == _SHARED[1]
 
 
 async def test_code_has_no_home_when_the_household_default_is_off(client):
@@ -116,7 +121,7 @@ async def test_code_follows_the_dialogs_switch_over_the_default(client):
     assert "home_lat" not in data
     await _set_default(client, False)
     data = await (await _initiate(client, {"share_home": True})).json()
-    assert data["home_lat"] == 52.52
+    assert data["home_lat"] == _SHARED[0]
 
 
 async def test_code_rejects_a_non_boolean_switch(client):
@@ -133,7 +138,7 @@ async def test_accept_shares_home_by_default(client):
     code, iid = _code("tok-default-on")
     r = await client.post("/api/pairing/accept", json=code, headers=_auth(client._tok))
     assert r.status == 200
-    assert rec.bodies[0]["home_lat"] == 52.52
+    assert rec.bodies[0]["home_lat"] == _SHARED[0]
     inst = await client.server.app[federation_repo_key].get_instance(iid)
     assert inst.share_home is True
 

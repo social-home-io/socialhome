@@ -90,6 +90,7 @@ from ..domain.federation import (
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import moment_delete_key, supersede_key
 from ..domain.file_hashes import FILES_FIELD, FILES_SUITE_FIELD
+from ..domain.home_location import coarse_home_for_peer_or_none
 from ..domain.media_chunking import (
     HTTPS_CHUNK_BYTES,
     RELAY_JSON_CHUNK_BYTES,
@@ -5146,15 +5147,16 @@ class FederationService:
             )
             return
         else:
-            try:
-                latitude = round(float(lat_raw), 4)
-                longitude = round(float(lon_raw), 4)
-            except (TypeError, ValueError):  # fmt: skip
+            # Kept only as the ~3 km cell centre — an older peer still
+            # sends its 4 dp home.
+            coarse = coarse_home_for_peer_or_none(lat_raw, lon_raw)
+            if coarse is None:
                 log.warning(
-                    "LOCAL_HOME_LOCATION_CHANGED from %s has non-numeric coordinates",
+                    "LOCAL_HOME_LOCATION_CHANGED from %s has invalid coordinates",
                     event.from_instance,
                 )
                 return
+            latitude, longitude = coarse
         await self._federation_repo.update_instance_home(
             event.from_instance,
             latitude=latitude,
@@ -5175,7 +5177,8 @@ class FederationService:
         event: LocalHomeLocationUpdated,
     ) -> None:
         """Fan out LOCAL_HOME_LOCATION_CHANGED to every **social** peer at
-        proto_version >= 5 that has share_home enabled.
+        proto_version >= 5 that has share_home enabled — the home as the
+        ~3 km cell centre (``coarse_home_for_peer``), never the 4 dp one.
 
         ``list_social_instances`` and not ``list_instances`` — the raw
         list includes ``space_session`` rows, i.e. households we met
@@ -5186,7 +5189,13 @@ class FederationService:
         default is a one-line edit away from flipping back.)
         """
         peers = await self._federation_repo.list_social_instances()
-        payload = {"latitude": event.latitude, "longitude": event.longitude}
+        # Only the ~3 km cell centre leaves the household, never the 4 dp
+        # home; no (or no usable) home is the both-null revoke.
+        coarse = coarse_home_for_peer_or_none(event.latitude, event.longitude)
+        payload = {
+            "latitude": coarse[0] if coarse else None,
+            "longitude": coarse[1] if coarse else None,
+        }
         for peer in peers:
             if not peer.share_home:
                 continue

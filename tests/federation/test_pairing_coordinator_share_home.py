@@ -30,6 +30,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.federation.pairing_coordinator import PairingCoordinator
 from socialhome.federation.peer_pairing_client import sign_peer_body
 from socialhome.infrastructure.key_manager import KeyManager
@@ -38,9 +39,11 @@ from tests.pairing_fakes import SavesPendingMixin
 _HOME = {
     "instance_id": "self",
     "display_name": "Alpha",
-    "home_lat": 52.52,
-    "home_lon": 13.405,
+    "home_lat": 52.5201,
+    "home_lon": 13.4049,
 }
+#: What a paired household gets of :data:`_HOME`: the ~3 km cell centre.
+_SHARED = coarse_home_for_peer(52.5201, 13.4049)
 
 
 class _FakeRepo(SavesPendingMixin):
@@ -147,11 +150,13 @@ async def test_qr_has_no_home_when_sharing_is_off():
     assert "home_lon" not in payload
 
 
-async def test_qr_carries_home_when_sharing_is_on():
+async def test_qr_carries_the_coarse_home_when_sharing_is_on():
+    """Only the ~3 km cell centre leaves the household, never the 4 dp
+    home (owner decision 2026-11-20)."""
     coord, _ = _coordinator(_FakeRepo(_HOME))
     payload = await coord.initiate("https://us.example/inbox", share_home=True)
-    assert payload["home_lat"] == 52.52
-    assert payload["home_lon"] == 13.405
+    assert (payload["home_lat"], payload["home_lon"]) == _SHARED
+    assert payload["home_lat"] != _HOME["home_lat"]
 
 
 async def test_qr_fails_closed_when_the_caller_does_not_say():
@@ -199,8 +204,29 @@ async def test_peer_accept_carries_home_when_sharing_is_on():
     coord, client = _coordinator(repo)
     qr = _qr("tok-on")
     await coord.accept(qr, "https://beta.example/inbox", share_home=True)
-    assert client.bodies[0]["home_lat"] == 52.52
+    body = client.bodies[0]
+    assert (body["home_lat"], body["home_lon"]) == _SHARED
     assert repo.instances[qr["instance_id"]].share_home is True
+
+
+async def test_a_precise_home_on_a_scanned_code_is_stored_coarse():
+    """An older initiator still puts its 4 dp home on the code: we keep
+    only the ~3 km cell centre."""
+    repo = _FakeRepo(_HOME)
+    coord, _ = _coordinator(repo)
+    qr = {**_qr("tok-precise"), "home_lat": 48.137154, "home_lon": 11.576124}
+    await coord.accept(qr, "https://beta.example/inbox", share_home=False)
+    row = repo.instances[qr["instance_id"]]
+    assert (row.home_lat, row.home_lon) == coarse_home_for_peer(48.137154, 11.576124)
+
+
+async def test_a_bad_home_on_a_scanned_code_is_no_home():
+    repo = _FakeRepo(_HOME)
+    coord, _ = _coordinator(repo)
+    qr = {**_qr("tok-bad"), "home_lat": 123.0, "home_lon": 11.5}
+    await coord.accept(qr, "https://beta.example/inbox", share_home=False)
+    row = repo.instances[qr["instance_id"]]
+    assert row.home_lat is None and row.home_lon is None
 
 
 async def test_peer_accept_fails_closed_when_the_caller_does_not_say():
@@ -317,8 +343,10 @@ async def test_initiator_row_keeps_the_choice_made_for_the_code():
         iid = await _peer_accept_for(coord, payload["token"])
         assert repo.instances[iid].share_home is choice
         # The scanner's own home is stored as it shared it — its switch,
-        # not ours.
-        assert repo.instances[iid].home_lat == 48.1
+        # not ours — but never finer than the ~3 km cell centre, even from
+        # an older scanner that still sends 4 dp.
+        row = repo.instances[iid]
+        assert (row.home_lat, row.home_lon) == coarse_home_for_peer(48.1, 11.5)
 
 
 async def test_confirm_keeps_the_choice():

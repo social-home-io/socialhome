@@ -35,6 +35,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.home_location import coarse_home_for_peer
 
 from .conftest import _auth
 
@@ -159,8 +160,8 @@ async def test_friends_lists_confirmed_remote_household(client):
     h = body["households"][0]
     assert h["instance_id"] == "peer-a"
     assert h["display_name"] == "Peer-A Household"
-    assert h["home_lat"] == 52.3676
-    assert h["home_lon"] == 4.9041
+    # A peer home is stored (and listed) as the ~3 km cell centre.
+    assert (h["home_lat"], h["home_lon"]) == coarse_home_for_peer(52.3676, 4.9041)
     assert h["member_count"] == 2
     assert {m["user_id"] for m in h["members"]} == {"ru-1", "ru-2"}
 

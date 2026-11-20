@@ -19,10 +19,15 @@ from socialhome.crypto import (
     generate_x25519_keypair,
 )
 from socialhome.domain.events import PairingConfirmed
+from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.federation.pairing_coordinator import PairingCoordinator
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from tests.pairing_fakes import SavesPendingMixin
+
+#: What a paired household gets of the 52.52, 13.405 home: the ~3 km
+#: cell centre (``coarse_home_for_peer``).
+_SHARED = coarse_home_for_peer(52.52, 13.405)
 
 
 class _FakeRepo(SavesPendingMixin):
@@ -134,8 +139,8 @@ async def test_initiate_carries_home_coords_in_qr_payload():
     payload = await coord.initiate(
         "https://us.example/federation/inbox", share_home=True
     )
-    assert payload["home_lat"] == 52.52
-    assert payload["home_lon"] == 13.405
+    assert payload["home_lat"] == _SHARED[0]
+    assert payload["home_lon"] == _SHARED[1]
 
 
 async def test_initiate_omits_home_coords_when_unset():
@@ -178,8 +183,8 @@ async def test_accept_persists_home_coords_from_qr_payload():
     )
     assert len(repo.instances) == 1
     saved = next(iter(repo.instances.values()))
-    assert saved.home_lat == 52.52
-    assert saved.home_lon == 13.405
+    assert saved.home_lat == _SHARED[0]
+    assert saved.home_lon == _SHARED[1]
 
 
 async def test_confirm_preserves_home_coords():
@@ -209,8 +214,8 @@ async def test_confirm_preserves_home_coords():
         accept_result["verification_code"],
     )
     assert confirmed.status.value == "confirmed"
-    assert confirmed.home_lat == 52.52, "confirm dropped home_lat"
-    assert confirmed.home_lon == 13.405, "confirm dropped home_lon"
+    assert confirmed.home_lat == _SHARED[0], "confirm dropped home_lat"
+    assert confirmed.home_lon == _SHARED[1], "confirm dropped home_lon"
 
 
 async def test_confirm_skips_publish_when_no_bus_wired():
