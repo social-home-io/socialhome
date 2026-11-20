@@ -18152,12 +18152,78 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   gap: var(--sh-space-xs);
   width: 100%;
 }
+/* Our own controls, not ``<audio controls>``: Chrome's ⋮ menu (Download,
+   Playback speed) opens upward from the button and ran off the top of a
+   phone screen for a voice note near the top of the thread — see
+   ``AudioBubble.tsx``. Everything here inherits ``currentColor`` so the
+   same rules read on the cream (received) and hearth (own) bubbles.
+   Row 1: play · seek · speed · download. Row 2: the time under the bar. */
 .sh-message-audio__player {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: var(--sh-space-xs);
   width: 100%;
-  /* Keep the native controls compact — Chrome's default would otherwise
-     overflow the bubble on a 280-px-wide mobile column. */
-  max-width: 280px;
+  min-width: min(220px, 55vw);
+  max-width: 320px;
+}
+.sh-message-audio__play,
+.sh-message-audio__speed,
+.sh-message-audio__download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
   height: 36px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+}
+/* Beats ``.sh-message--mine a``'s underline on the own bubble. */
+.sh-message-audio a.sh-message-audio__download { text-decoration: none; }
+.sh-message-audio__speed {
+  /* Wide enough for "1.5×" so the seek bar doesn't jump as it cycles. */
+  min-width: 44px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.sh-message-audio__play:hover,
+.sh-message-audio__speed:hover,
+.sh-message-audio__download:hover {
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+.sh-message-audio__play:focus-visible,
+.sh-message-audio__speed:focus-visible,
+.sh-message-audio__download:focus-visible,
+.sh-message-audio__seek:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.sh-message-audio__seek {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  margin: 0;
+  accent-color: currentColor;
+  cursor: pointer;
+}
+.sh-message-audio__seek:disabled { cursor: default; opacity: 0.6; }
+/* Hearth accent on the cream (received) bubble; the own bubble keeps
+   ``currentColor`` (cream on hearth). */
+.sh-message:not(.sh-message--mine) .sh-message-audio__seek { accent-color: var(--sh-primary); }
+.sh-message-audio__time {
+  grid-column: 2;
+  font-family: var(--sh-font-family-mono);
+  font-size: var(--sh-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
 }
 .sh-message-audio__player--pending {
   /* Same brightness-pulse cue as image/video previews mid-sync. */
