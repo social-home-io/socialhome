@@ -27402,11 +27402,6 @@ button.sh-page-editor-status {
   gap: var(--sh-space-xs) var(--sh-space-sm);
 }
 .sh-space-gfs-notice__text { margin: 0; flex: 1 1 16rem; min-width: 0; overflow-wrap: anywhere; }
-.sh-space-gfs-notice__hint {
-  margin: 0; flex: 1 1 100%; font-size: var(--sh-font-size-xs);
-  /* Muted ink on the tint — lifted for contrast, as on the follower banner. */
-  color: color-mix(in srgb, var(--sh-text-muted) 75%, var(--sh-text));
-}
 .sh-space-gfs-notice__connect { min-height: 36px; white-space: nowrap; }
 .sh-space-gfs-notice__dismiss {
   flex: none;

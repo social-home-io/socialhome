@@ -148,14 +148,24 @@ describe('SpaceGfsNotice — connect / ask an admin', () => {
 
   it('a person who is not a household admin gets the ask-an-admin hint, no button', () => {
     setViewer(false)
-    for (const stands of [false, true]) {
+    const hints = {
+      optional: 'space.gfs_listing.connect_hint_member:{"name":"Club GFS"}',
+      needed: 'space.gfs_notice.needed_member:{"name":"Club GFS"}',
+    }
+    for (const [kind, hint] of Object.entries(hints)) {
       const { getByTestId, queryByTestId } = render(
-        <SpaceGfsNotice space={space({ stands_in_for_host: stands })} />,
+        <SpaceGfsNotice space={space({ stands_in_for_host: kind === 'needed' })} />,
       )
-      expect(getByTestId('space-gfs-notice-ask-admin').textContent)
-        .toBe('space.gfs_listing.connect_hint_member:{"name":"Club GFS"}')
+      expect(getByTestId(`space-gfs-notice-${kind}`)).toBeTruthy()
+      expect(getByTestId('space-gfs-notice-ask-admin').textContent).toBe(hint)
       expect(queryByTestId('space-gfs-notice-connect')).toBeNull()
       cleanup()
     }
+  })
+
+  it('the connect button names its GFS for a screen reader', () => {
+    const link = render(<SpaceGfsNotice space={space()} />).getByTestId('space-gfs-notice-connect')
+    expect(link.textContent).toBe('space.gfs_notice.connect')
+    expect(link.getAttribute('aria-label')).toBe('space.gfs_notice.connect_aria:{"name":"Club GFS"}')
   })
 })

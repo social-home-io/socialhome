@@ -98,20 +98,26 @@ export function SpaceGfsNotice({ space }: { space: GfsNoticeSpace }): JSX.Elemen
                data-testid={needed ? 'space-gfs-notice-needed' : 'space-gfs-notice-optional'}>
             <span class="sh-space-gfs-notice__icon" aria-hidden="true">{needed ? '⚠️' : '🛰️'}</span>
             <div class="sh-space-gfs-notice__body">
-              <p class="sh-space-gfs-notice__text">
-                {needed
-                  ? t('space.gfs_notice.needed', { name })
-                  : t('space.gfs_notice.optional', { name })}
-              </p>
               {isAdmin ? (
-                <a class={`sh-btn sh-btn--${needed ? 'primary' : 'secondary'} sh-space-gfs-notice__connect`}
-                   href={addBase(connectGfsPath(g.inbox_url))}
-                   data-testid="space-gfs-notice-connect">
-                  {t('space.gfs_notice.connect', { name })}
-                </a>
+                <>
+                  <p class="sh-space-gfs-notice__text">
+                    {needed
+                      ? t('space.gfs_notice.needed', { name })
+                      : t('space.gfs_notice.optional', { name })}
+                  </p>
+                  <a class={`sh-btn sh-btn--${needed ? 'primary' : 'secondary'} sh-space-gfs-notice__connect`}
+                     href={addBase(connectGfsPath(g.inbox_url))}
+                     aria-label={t('space.gfs_notice.connect_aria', { name })}
+                     data-testid="space-gfs-notice-connect">
+                    {t('space.gfs_notice.connect')}
+                  </a>
+                </>
               ) : (
-                <p class="sh-muted sh-space-gfs-notice__hint" data-testid="space-gfs-notice-ask-admin">
-                  {t('space.gfs_listing.connect_hint_member', { name })}
+                // Connecting is a household admin's job: say whom to ask.
+                <p class="sh-space-gfs-notice__text" data-testid="space-gfs-notice-ask-admin">
+                  {needed
+                    ? t('space.gfs_notice.needed_member', { name })
+                    : t('space.gfs_listing.connect_hint_member', { name })}
                 </p>
               )}
             </div>
