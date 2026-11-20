@@ -21,11 +21,14 @@
 #     own PR; ``pull_request`` (not ``pull_request_target``), as in
 #     dependabot-automerge.yml. Every action is pinned by commit.
 #
-# A push made with ``GITHUB_TOKEN`` starts no new workflow run (GitHub's
-# rule against loops), so the new head commit would carry no checks and
-# the required ones on ``main`` would never report. ``workflow_dispatch``
-# is the one event such a token may start: ``commit`` dispatches CI on the
-# branch, and those runs report the required checks on the new head.
+# GitHub holds the ``pull_request`` runs our ``GITHUB_TOKEN`` push starts
+# as "approval required" (actor ``github-actions[bot]``). Held, they still
+# report the required check names, so the PR stays blocked until a human
+# approves them. ``commit`` approves the held runs of the commit it pushed
+# itself (``actions: write``): they run CI exactly as on any PR, with the
+# read-only token ``pull_request`` gets. Only if none shows up (GitHub
+# started no run for the push) does it dispatch CI (``workflow_dispatch``)
+# on the branch instead, so the new head always gets its checks.
 name: Dependabot pinned viewer
 
 on:
@@ -139,4 +142,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF"
+        run: |
+          # Our push's own commit: approve only runs held for exactly it.
+          sha="$(git rev-parse HEAD)"
+          approved=0
+          for _ in $(seq 1 12); do
+            ids="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$sha&status=action_required" \
+              --jq '.workflow_runs[] | select(.event == "pull_request") | .id')"
+            for id in $ids; do
+              if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/approve" >/dev/null; then
+                echo "approved run $id"
+                approved=$((approved + 1))
+              fi
+            done
+            [ "$approved" -gt 0 ] && exit 0
+            sleep 10
+          done
+          echo "No held run for $sha to approve; dispatching CI instead."
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF"

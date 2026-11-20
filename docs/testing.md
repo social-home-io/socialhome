@@ -417,10 +417,12 @@ own PRs. It runs only when Dependabot pushed a same-repo branch touching
    pushes it to the Dependabot branch. Only this job holds
    `contents: write` and `actions: write`.
 
-A push with `GITHUB_TOKEN` starts no new workflow run (GitHub's rule
-against loops), so `commit` then dispatches CI (`workflow_dispatch`) on
-the branch. That run reports the required checks on the new head, and
-auto-merge proceeds as usual. Every action in the workflow is pinned by
+GitHub holds the `pull_request` runs that this `GITHUB_TOKEN` push starts
+as "approval required", and held runs block the PR's required checks. So
+`commit` then approves the held runs of the commit it pushed itself; they
+run CI like on any PR and auto-merge proceeds as usual. If GitHub started
+no run for the push, `commit` dispatches CI (`workflow_dispatch`) on the
+branch instead. Every action in the workflow is pinned by
 commit.
 
 Once a bot commit sits on a Dependabot branch, Dependabot stops rebasing
