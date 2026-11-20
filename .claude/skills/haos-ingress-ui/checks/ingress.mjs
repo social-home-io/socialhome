@@ -517,6 +517,35 @@ await check('router-keeps-prefix', async () => {
   return { problems: [], seen }
 })
 
+// 4a. A space's "connect to this GFS" notice links to
+//     <prefix>/connections?connect_gfs=<address>: the GFS flow opens aimed
+//     at that GFS, the parameter is dropped with a replace that keeps the
+//     prefix, and the GFS's own page is the only off-prefix link (a new
+//     tab, never a navigation of the ingress iframe).
+await check('gfs-connect-link', async () => {
+  const problems = []
+  const gfs = 'https://gfs.example.org'
+  await page.goto(APP + 'connections?connect_gfs=' + encodeURIComponent(gfs + '/'), { waitUntil: 'load' })
+  await step(`the parameter dropped at ${PREFIX}/connections`,
+    page.waitForFunction(w => location.pathname === w && location.search === '', {}, PREFIX + '/connections'))
+  await step('the GFS flow aimed at that GFS',
+    page.waitForFunction(() => !!document.querySelector('[data-testid="gfs-target-start"]')))
+  await settled(page)
+  const open = await page.evaluate(() => {
+    const a = document.querySelector('[data-testid="gfs-target-open"]')
+    return a && { href: a.getAttribute('href'), target: a.getAttribute('target'), rel: a.getAttribute('rel') }
+  })
+  if (!open) problems.push('no link to the GFS page in the aimed-at flow')
+  else {
+    if (open.href !== gfs) problems.push(`GFS page link is ${open.href}, not ${gfs}`)
+    if (open.target !== '_blank') problems.push('the GFS page link would navigate the ingress iframe (no target=_blank)')
+    if (!String(open.rel).includes('noopener')) problems.push('the GFS page link lacks rel=noopener')
+  }
+  await page.screenshot({ path: path.join(SHOTS, problems.length ? 'FAIL-gfs-connect-link.png' : 'gfs-connect-link.png') })
+  await page.keyboard.press('Escape')
+  return { problems }
+})
+
 // 4b. The bell is the one way to Notifications: on a phone the top-bar
 //     bell is a link to <prefix>/notifications (no bottom-bar tab); on
 //     desktop the panel's "See all notifications" link goes there.

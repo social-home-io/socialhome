@@ -9,7 +9,7 @@ import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers, setSpaceHereAllowed } from '@/store/spaceMembers'
 import { useTitle, useTitleGlyph } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
-import type { FeedPost } from '@/types'
+import type { FeedPost, Space, SpaceGfsServer } from '@/types'
 import { LoadErrorState } from '@/components/LoadErrorState'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
@@ -62,6 +62,7 @@ import { SpaceHero, type HeroMember } from '@/components/SpaceHero'
 import { SpaceNeedsYou } from './SpaceNeedsYou'
 import { SpaceSetupCard } from './SpaceSetupCard'
 import { SpaceInviteFirst } from './SpaceInviteFirst'
+import { SpaceGfsNotice } from '@/components/SpaceGfsNotice'
 import { isSetupPending } from './spaceSetup'
 import { useSpaceNotifLevel } from './SpaceNotifLevels'
 import {
@@ -111,7 +112,15 @@ interface SpaceDetail {
     /** Owner opt-in: admins act for the owner while they're offline (an
      *  admin's household then holds the signing seed). Absent → off. */
     delegated_admin_authority?: boolean
+    /** A private space uses the GFS (its private channel). */
+    private_gfs?: boolean
   }
+  /** The owner's signed GFS list, with ``connected`` for this household
+   *  (members only; ``null`` for other tiers / while unknown). */
+  gfs_servers?: SpaceGfsServer[] | null
+  /** This household acts for the host while it's offline (a delegated
+   *  admin holding the signing seed) — a missing GFS is then needed. */
+  stands_in_for_host?: boolean
   /** §D1b — the originating instance. When it differs from
    *  ``instanceConfig.value.instance_id``, this is a stub of a
    *  remote-hosted space and local admin gestures are suppressed. */
@@ -712,6 +721,18 @@ export default function SpaceFeedPage() {
       )}
       {s && feedList && settingsAuthority && !s.archived && membersShown === 1 && (
         <SpaceInviteFirst spaceId={spaceId} role={viewerRole.value} />
+      )}
+
+      {/* A GFS of this space our household isn't connected to: needed for
+       *  a household standing in for the host, optional otherwise. */}
+      {s && feedList && !s.archived && s.space_type && (
+        <SpaceGfsNotice space={{
+          id: s.id,
+          space_type: s.space_type as Space['space_type'],
+          features: s.features as Space['features'],
+          gfs_servers: s.gfs_servers ?? null,
+          stands_in_for_host: s.stands_in_for_host,
+        }} />
       )}
 
       {/* "Open games" on top of the feed — only while a game waits for

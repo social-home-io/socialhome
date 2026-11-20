@@ -41,6 +41,8 @@ import { Switch } from './Switch'
 import { toggles, loadToggles } from './HouseholdToggles'
 import { QrCodeImg } from './QrCodeImg'
 import { QrScanner } from './QrScanner'
+import { gfsHost } from './GfsChecklist'
+import { gfsConnectTarget } from './gfsConnectTarget'
 
 type PairingMode = 'household' | 'gfs'
 type PairingRole = 'unset' | 'inviter' | 'scanner'
@@ -76,6 +78,10 @@ const onGfsConnectedCb = signal<(() => void) | null>(null)
  *  so we can't offer "publish" yet. */
 const gfsResultStatus = signal<string>('active')
 const peerHint = signal<string | null>(null)
+/** GFS mode opened for one GFS (a space's "connect to X" notice): its
+ *  address. The flow still needs the pairing code from that GFS's own
+ *  page (its token), so it links there and asks for the paste. */
+const targetGfsUrl = signal<string | null>(null)
 const scanError = signal<string | null>(null)
 /** Instance ID of the peer that was just paired — populated on ``pairing.confirmed``
  *  so the configure-sharing step can PATCH the right connection. */
@@ -454,8 +460,12 @@ function decodeGfsCode(raw: string): { gfs_url: string; token: string } | null {
 //  Component-level handles + helpers
 // ────────────────────────────────────────────────────────────────
 
-export function openPairing(pairingMode: PairingMode = 'household') {
+export function openPairing(
+  pairingMode: PairingMode = 'household',
+  opts: { gfsUrl?: string } = {},
+) {
   mode.value = pairingMode
+  targetGfsUrl.value = pairingMode === 'gfs' ? gfsConnectTarget(opts.gfsUrl) : null
   open.value = true
   step.value = 'idle'
   role.value = 'unset'
@@ -482,6 +492,18 @@ export function openPairing(pairingMode: PairingMode = 'household') {
     void loadReachOptions()
     void presetShareHome()
   }
+}
+
+/** "Open {host}" — the aimed-at GFS's own page (a new tab), where its
+ *  pairing code sits under the QR. */
+function TargetGfsLink({ url, variant }: { url: string; variant?: 'button' }) {
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer"
+       class={variant === 'button' ? 'sh-btn sh-btn--secondary' : undefined}
+       data-testid="gfs-target-open">
+      {t('gfs.target_open', { name: gfsHost(url) })}
+    </a>
+  )
 }
 
 /** Pre-set the start step's switch from the household default (on unless
@@ -974,11 +996,11 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
   }
 
   // ── GFS path ─────────────────────────────────────────────────────
-  const startGfs = () => {
+  const startGfs = (method: ScanMethod = 'qr') => {
     role.value = 'scanner'  // GFS is "scan/paste a code that the GFS issued"
     step.value = 'scanning'
     scanError.value = null
-    setScanMethod('qr')
+    setScanMethod(method)
   }
 
   const handleGfsScanned = async (raw: string) => {
@@ -1152,7 +1174,12 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
         {step.value === 'scanning' && (
           <div class="sh-pairing-scan">
             {mode.value === 'gfs' && (
-              <p class="sh-muted">{t('gfs.scan_intro')}</p>
+              <p class="sh-muted">
+                {t('gfs.scan_intro')}
+                {targetGfsUrl.value && (
+                  <> <TargetGfsLink url={targetGfsUrl.value} /></>
+                )}
+              </p>
             )}
             {mode.value === 'household' && (
               <p class="sh-muted">{t('pairing.scan_intro')}</p>
@@ -1274,12 +1301,27 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
 
         {/* ── GFS mode ─────────────────────────────────────────── */}
         {mode.value === 'gfs' && step.value === 'idle' && (
-          <div class="sh-pairing-start">
-            <p class="sh-gfs-url-intro sh-muted">{t('gfs.modal_intro')}</p>
-            <div class="sh-pairing-actions">
-              <Button ref={startFocusRef} onClick={startGfs}>{t('gfs.add')}</Button>
+          targetGfsUrl.value ? (
+            <div class="sh-pairing-start" data-testid="gfs-target-start">
+              <p class="sh-gfs-url-intro">
+                {t('gfs.target_intro', { name: gfsHost(targetGfsUrl.value) })}
+              </p>
+              <div class="sh-pairing-actions">
+                <TargetGfsLink url={targetGfsUrl.value} variant="button" />
+                <Button ref={startFocusRef} onClick={() => startGfs('paste')}
+                        data-testid="gfs-target-paste">
+                  {t('gfs.target_paste')}
+                </Button>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div class="sh-pairing-start">
+              <p class="sh-gfs-url-intro sh-muted">{t('gfs.modal_intro')}</p>
+              <div class="sh-pairing-actions">
+                <Button ref={startFocusRef} onClick={() => startGfs()}>{t('gfs.add')}</Button>
+              </div>
+            </div>
+          )
         )}
 
         {mode.value === 'gfs' && step.value === 'success' && (

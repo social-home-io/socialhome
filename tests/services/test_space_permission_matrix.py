@@ -133,6 +133,9 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # Read-only: whether a config edit here would be forwarded to the
         # host (the PATCH route's ``forwarded`` hint). Mutates nothing.
         "config_edits_forward",
+        # Read-only: whether this household stands in for the host (the
+        # space detail's ``stands_in_for_host``). Mutates nothing.
+        "stands_in_for_host",
         # Read-only: the owner's user_id (the members route's ``is_owner``
         # flag). Mutates nothing.
         "owner_user_id",
