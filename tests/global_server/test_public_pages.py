@@ -652,17 +652,32 @@ async def test_a_used_code_frees_its_slot(client, monkeypatch):
 async def test_landing_says_so_when_the_server_has_too_many_live_codes(
     client, monkeypatch
 ):
-    """The server-wide cap holds whatever the address: a botnet can't park
-    unbounded live codes in the shared database."""
+    """Past its guaranteed few, an address is held to the server-wide cap —
+    and the page then blames this GFS, not the visitor's network."""
     monkeypatch.setattr(public, "PAIR_TOKEN_MAX_LIVE_TOTAL", 2)
+    monkeypatch.setattr(public, "PAIR_TOKEN_GUARANTEED_PER_CLIENT", 1)
     for n in (1, 2):
         resp = await client.get("/", headers={"X-Forwarded-For": f"198.51.100.{n}"})
         assert _pair_token(await resp.text()) is not None
-    resp = await client.get("/", headers={"X-Forwarded-For": "198.51.100.3"})
+    # 198.51.100.1 already holds its guaranteed one: the full server says no.
+    resp = await client.get("/", headers={"X-Forwarded-For": "198.51.100.1"})
     text = await resp.text()
     assert _pair_token(text) is None
     assert "please-wait" not in text
-    assert "Too many pairing codes" in text
+    assert "This GFS is handing out too many pairing codes right now" in text
+    assert "from your network" not in text
+
+
+async def test_a_full_server_still_gives_a_fresh_address_a_code(client, monkeypatch):
+    """A few heavy sources filling the server-wide cap must not deny every
+    other visitor a code: an address holding fewer than its guaranteed few
+    always gets one."""
+    monkeypatch.setattr(public, "PAIR_TOKEN_MAX_LIVE_TOTAL", 3)
+    for _ in range(5):
+        await client.get("/", headers={"X-Forwarded-For": "203.0.113.66"})
+    for n in range(1, 4):
+        resp = await client.get("/", headers={"X-Forwarded-For": f"198.51.100.{n}"})
+        assert _pair_token(await resp.text()) is not None
 
 
 # ─── Pairing-code copy/paste fallback (socialhome:// scheme) ──────────

@@ -652,6 +652,7 @@
   "pairing.success_message": "Ahora puedes compartir espacios y enviar mensajes con este hogar.",
   "pairing.done": "Listo",
   "pairing.failed": "Vinculación fallida",
+  "pairing.confirm_retrying": "Ocupado un momento: lo confirmamos de nuevo enseguida…",
   "pairing.failed_message": "No se pudo establecer la conexi\u00f3n. Int\u00e9ntalo de nuevo.",
   "pairing.retry": "Reintentar",
   "pairing.successful": "\u00a1Vinculación correcta!",

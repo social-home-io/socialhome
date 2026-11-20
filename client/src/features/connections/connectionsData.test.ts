@@ -8,6 +8,7 @@ vi.mock('@/api', () => ({
 import {
   INBOX_RELOAD_GAP_MS,
   autoPairRequests,
+  cancelAutoPairReload,
   loadAutoPairRequests,
   reloadAutoPairRequestsSoon,
 } from './connectionsData'
@@ -70,6 +71,17 @@ describe('reloadAutoPairRequestsSoon — a burst of WS events', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(apiGet).toHaveBeenCalledTimes(2)
     expect(autoPairRequests.value.map((r) => r.request_id)).toEqual(['r3'])
+  })
+})
+
+describe('cancelAutoPairReload', () => {
+  it('drops a pending trailing read when the page leaves', async () => {
+    apiGet.mockResolvedValue([])
+    reloadAutoPairRequestsSoon()
+    reloadAutoPairRequestsSoon()
+    cancelAutoPairReload()
+    await vi.advanceTimersByTimeAsync(INBOX_RELOAD_GAP_MS * 2)
+    expect(apiGet).toHaveBeenCalledTimes(1)
   })
 })
 

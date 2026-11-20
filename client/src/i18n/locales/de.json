@@ -636,6 +636,7 @@
   "pairing.success_message": "Du kannst nun Spaces teilen und mit diesem Haushalt Nachrichten austauschen.",
   "pairing.done": "Fertig",
   "pairing.failed": "Kopplung fehlgeschlagen",
+  "pairing.confirm_retrying": "Gerade ausgelastet – gleich wird noch einmal bestätigt …",
   "pairing.failed_message": "Die Verbindung konnte nicht hergestellt werden. Bitte erneut versuchen.",
   "pairing.retry": "Erneut versuchen",
   "pairing.successful": "Kopplung erfolgreich!",

@@ -66,6 +66,7 @@ import {
   loadGfsConnections,
   loadHouseholdAdmins,
   loadSelfHome,
+  cancelAutoPairReload,
   reloadAutoPairRequestsSoon,
   type AutoPairRequest,
 } from './connectionsData'
@@ -197,7 +198,10 @@ export default function ConnectionsPage() {
         )
       }),
     ]
-    return () => { offs.forEach((off) => off()) }
+    return () => {
+      offs.forEach((off) => off())
+      cancelAutoPairReload()
+    }
   }, [])
 
   const compatById = new Map(compatPeers.value.map((p) => [p.instance_id, p]))

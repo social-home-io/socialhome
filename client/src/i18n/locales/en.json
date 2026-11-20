@@ -748,6 +748,7 @@
   "pairing.configure_sharing_title": "Configure sharing",
   "pairing.configure_sharing_intro": "You can adjust this anytime under Manage. Defaults are friendly — your map pin shows up on their Connections page.",
   "pairing.failed": "Pairing failed",
+  "pairing.confirm_retrying": "Busy for a moment — confirming again shortly…",
   "pairing.failed_message": "The connection could not be established. Please try again.",
   "pairing.retry": "Retry",
   "pairing.successful": "Pairing successful!",

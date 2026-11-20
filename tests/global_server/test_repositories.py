@@ -494,6 +494,20 @@ async def test_pair_token_server_cap_holds_across_addresses(admin):
     assert await admin.save_pair_token("t10", "10.0.0.10", **caps)
 
 
+async def test_pair_token_guaranteed_few_ignore_a_full_server(admin):
+    """An address below its guaranteed few gets a token even when the
+    server cap is reached; past them, the server cap holds again."""
+    caps = {"max_live_per_ip": 10, "max_live_total": 2, "guaranteed_per_ip": 2}
+    assert await admin.save_pair_token("h1", "9.9.9.9", **caps)
+    assert await admin.save_pair_token("h2", "9.9.9.9", **caps)
+    assert not await admin.save_pair_token("h3", "9.9.9.9", **caps)
+    assert await admin.save_pair_token("f1", "8.8.8.8", **caps)
+    assert await admin.save_pair_token("f2", "8.8.8.8", **caps)
+    assert not await admin.save_pair_token("f3", "8.8.8.8", **caps)
+    assert await admin.count_live_pair_tokens("8.8.8.8") == 2
+    assert await admin.count_live_pair_tokens("7.7.7.7") == 0
+
+
 async def test_pair_token_caps_hold_under_concurrent_mints(admin):
     """The capped insert is ONE statement: concurrent mints never overshoot
     the cap (a count-then-insert would let them all see room)."""

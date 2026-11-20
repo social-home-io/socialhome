@@ -631,6 +631,7 @@
   "pairing.success_message": "Je kunt nu spaces delen en berichten sturen met dit gezin.",
   "pairing.done": "Klaar",
   "pairing.failed": "Koppelen mislukt",
+  "pairing.confirm_retrying": "Even druk — zo bevestigen we het nog een keer…",
   "pairing.failed_message": "De verbinding kon niet tot stand worden gebracht. Probeer het opnieuw.",
   "pairing.retry": "Opnieuw",
   "pairing.successful": "Koppelen gelukt!",

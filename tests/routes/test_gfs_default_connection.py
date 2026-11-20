@@ -236,9 +236,10 @@ async def test_post_again_right_after_is_not_busy(aiohttp_client, tmp_dir):
 
 
 async def test_post_gfs_busy(aiohttp_client, tmp_dir, monkeypatch):
-    """The GFS has no token to give (its live-code cap is reached): the
-    household waits out the short ``Retry-After`` once, asks again, and only
-    then answers 'busy' — not an error."""
+    """The GFS has no token to give (its live-code cap is reached): codes
+    hold their place for 10 minutes, so the GFS asks for a wait longer than
+    the household sits out in-request — 'busy' at once, not a minute of
+    spinner, and not an error."""
     waited: list[float] = []
 
     async def _sleep(seconds: float) -> None:
@@ -251,7 +252,10 @@ async def test_post_gfs_busy(aiohttp_client, tmp_dir, monkeypatch):
     r = await home.post(PATH, headers=ADMIN)
     assert r.status == 503
     assert (await r.json())["error"]["code"] == "GFS_BUSY"
-    assert waited == [public.PAIR_TOKEN_CAP_RETRY_S]
+    assert (
+        public.PAIR_TOKEN_CAP_RETRY_S > gfs_connection_service.SIGNUP_RETRY_MAX_WAIT_S
+    )
+    assert waited == []
 
 
 async def test_post_gfs_unreachable(aiohttp_client, tmp_dir):

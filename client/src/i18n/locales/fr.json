@@ -631,6 +631,7 @@
   "pairing.success_message": "Vous pouvez maintenant partager des espaces et envoyer des messages avec ce foyer.",
   "pairing.done": "Terminé",
   "pairing.failed": "Échec du couplage",
+  "pairing.confirm_retrying": "Occupé un instant — nouvelle confirmation dans quelques secondes…",
   "pairing.failed_message": "La connexion n'a pas pu être établie. Veuillez réessayer.",
   "pairing.retry": "Réessayer",
   "pairing.successful": "Couplage réussi !",

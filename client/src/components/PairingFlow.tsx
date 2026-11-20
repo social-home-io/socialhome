@@ -70,6 +70,8 @@ const pairingCode = signal('')       // socialhome://pair#… (household) or soc
 const verificationCode = signal('')
 const sasDigits = signal(['', '', '', '', '', ''])
 const pairingToken = signal('')
+/** The SAS confirm is waiting out a server-asked ``retry_after``. */
+const confirmRetrying = signal(false)
 const scannedSas = signal('')  // scanner-side SAS to display
 const open = signal(false)
 const onGfsConnectedCb = signal<(() => void) | null>(null)
@@ -937,10 +939,13 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
   const verify = async () => {
     step.value = 'verifying'
     type ConfirmResult = { instance_id?: string; display_name?: string; status?: string }
-    const confirm = () => api.post('/api/pairing/confirm', {
-      token: pairingToken.value,
-      verification_code: verificationCode.value,
-    }) as Promise<ConfirmResult>
+    // Captured once: the retry below confirms THIS pairing with THIS code,
+    // never whatever a reopened dialog holds by then.
+    const token = pairingToken.value
+    const body = { token, verification_code: verificationCode.value }
+    const confirm = () => api.post('/api/pairing/confirm', body) as Promise<ConfirmResult>
+    /** Still this pairing, still verifying (not closed / restarted). */
+    const current = () => open.value && step.value === 'verifying' && pairingToken.value === token
     try {
       let result: ConfirmResult
       try {
@@ -952,7 +957,14 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
         // once more is safe.
         const wait = confirmRetryWaitMs(err)
         if (wait === null) throw err
-        await new Promise((resolve) => setTimeout(resolve, wait))
+        confirmRetrying.value = true
+        try {
+          await new Promise((resolve) => setTimeout(resolve, wait))
+        } finally {
+          confirmRetrying.value = false
+        }
+        // Closed or restarted meanwhile: that flow owns the dialog now.
+        if (!current()) return
         result = await confirm()
       }
       if (result.status && result.status !== 'confirmed') {
@@ -1284,7 +1296,14 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
           </div>
         )}
 
-        {step.value === 'verifying' && <Spinner />}
+        {step.value === 'verifying' && (
+          <>
+            <Spinner />
+            {confirmRetrying.value && (
+              <p class="sh-muted" role="status">{t('pairing.confirm_retrying')}</p>
+            )}
+          </>
+        )}
 
         {step.value === 'success' && mode.value === 'household' && (
           <div class="sh-pairing-success">

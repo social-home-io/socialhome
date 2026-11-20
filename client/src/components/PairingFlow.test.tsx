@@ -221,6 +221,34 @@ describe('PairingFlow — a busy household server (429)', () => {
     await screen.findByText('pairing.success')
   })
 
+  it('confirm: says it is waiting while it waits', async () => {
+    await toCodeEntry()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/confirm', 5))
+    apiPost.mockResolvedValueOnce({ instance_id: 'peer-d', display_name: 'Delta House', status: 'confirmed' })
+    fireEvent.click(await screen.findByText('pairing.verify'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(screen.getByText('pairing.confirm_retrying')).toBeTruthy()
+    await vi.advanceTimersByTimeAsync(4_500)
+    vi.useRealTimers()
+    await screen.findByText('pairing.success')
+    expect(screen.queryByText('pairing.confirm_retrying')).toBeNull()
+  })
+
+  it('confirm: closed during the wait — no retry, and nothing flips to "failed"', async () => {
+    await toCodeEntry()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/confirm', 5))
+    fireEvent.click(await screen.findByText('pairing.verify'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    fireEvent.click(screen.getByLabelText('modal.close'))
+    await vi.advanceTimersByTimeAsync(5_000)
+    vi.useRealTimers()
+    // initiate + the one refused confirm; no stale retry.
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText('pairing.failed')).toBeNull()
+  })
+
   it('confirm: a second 429 fails with the rate-limit words, not "status 429"', async () => {
     await toCodeEntry()
     vi.useFakeTimers({ shouldAdvanceTime: true })

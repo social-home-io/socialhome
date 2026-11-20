@@ -68,6 +68,12 @@ let inboxReloadTimer: ReturnType<typeof setTimeout> | null = null
  *  read when the gap is over, so the list still ends up current. Timers,
  *  not a shared in-flight promise, so a read that never answers can't
  *  stall later ones. */
+/** Drop a pending trailing read — the page left, nobody shows the inbox. */
+export function cancelAutoPairReload(): void {
+  if (inboxReloadTimer !== null) clearTimeout(inboxReloadTimer)
+  inboxReloadTimer = null
+}
+
 export function reloadAutoPairRequestsSoon(): void {
   if (inboxReloadTimer !== null) return
   // Capped at one gap: a wall clock set back can't hold the inbox for hours.

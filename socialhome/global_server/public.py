@@ -69,8 +69,16 @@ PAIR_TOKEN_MAX_LIVE_PER_CLIENT: int = 50
 #: Cap on LIVE pairing tokens across the whole server (every node): what a
 #: botnet cycling addresses can park in the shared table at once.
 PAIR_TOKEN_MAX_LIVE_TOTAL: int = 2000
+#: Live tokens a client bucket may always hold, whatever the server cap: a
+#: few sources filling :data:`PAIR_TOKEN_MAX_LIVE_TOTAL` must not stop a
+#: fresh visitor getting a code. Past the server cap the table then grows by
+#: at most this many rows per (rate-limited) address.
+PAIR_TOKEN_GUARANTEED_PER_CLIENT: int = 3
 #: ``Retry-After`` (seconds) for a sign-up token refused at a live-token cap.
-PAIR_TOKEN_CAP_RETRY_S: int = 60
+#: Live codes hold their place for the 10-minute TTL, so a retry a minute
+#: later rarely helps: above the household's 60 s in-request retry, so the
+#: one-click connect says "busy" at once instead of spinning for a minute.
+PAIR_TOKEN_CAP_RETRY_S: int = 120
 #: Public-listing rate limit per IP (spec §24.7.3).
 LISTING_MAX_PER_MINUTE: int = 30
 
@@ -410,10 +418,18 @@ class PairingTokenService:
             client_bucket,
             max_live_per_ip=PAIR_TOKEN_MAX_LIVE_PER_CLIENT,
             max_live_total=PAIR_TOKEN_MAX_LIVE_TOTAL,
+            guaranteed_per_ip=PAIR_TOKEN_GUARANTEED_PER_CLIENT,
         )
         if not stored:
             return None, PAIR_TOKEN_CAP_RETRY_S
         return token, 0
+
+    async def cap_hit(self, client_bucket: str) -> str:
+        """After a refused :meth:`generate`: ``"client"`` when
+        *client_bucket* holds its full share of live tokens, else
+        ``"server"`` — so the page blames the right one."""
+        held = await self._admin_repo.count_live_pair_tokens(client_bucket)
+        return "client" if held >= PAIR_TOKEN_MAX_LIVE_PER_CLIENT else "server"
 
     async def consume(self, token: str) -> bool:
         """Single-use + 10-minute TTL. Returns ``True`` iff consumed."""
@@ -704,6 +720,7 @@ def _render_landing(
     pair_code: str,
     pair_qr_data_uri: str,
     spaces: list[dict] | None,
+    busy_cap: str = "client",
     search: str,
     category: str,
     listed_categories: set[str],
@@ -713,7 +730,8 @@ def _render_landing(
     its one ``<style>``, for the CSP hash. ``spaces=None`` leaves the
     spaces section out (``[server] landing_space_list = false``);
     ``token=None`` (a live-token cap was hit) shows the "too many codes"
-    note in place of the QR and code."""
+    note in place of the QR and code — naming the visitor's network for
+    ``busy_cap="client"``, this GFS for ``"server"``."""
     rows = []
     # Per-card accent stripe: a class + a rule in the page's hashed
     # ``<style>``, not a ``style=`` attribute (the public-page CSP refuses
@@ -773,6 +791,11 @@ def _render_landing(
         if header_image_url
         else ""
     )
+    busy_headline = (
+        "This GFS is handing out too many pairing codes right now."
+        if busy_cap == "server"
+        else "Too many pairing codes from your network right now."
+    )
     pair_html = (
         f"""<div class="pair">
         <img src="{pair_qr_data_uri}" alt="Pairing QR" />
@@ -795,8 +818,8 @@ def _render_landing(
         </div>
       </div>"""
         if token is not None
-        else """<div class="pair-busy" role="status">
-        <p><strong>Too many pairing codes from your network right now.</strong></p>
+        else f"""<div class="pair-busy" role="status">
+        <p><strong>{busy_headline}</strong></p>
         <p class="muted">Each visit gets its own code, and a code you don't
         use stays reserved for 10 minutes. Reload this page in a minute
         for yours.</p>
@@ -1306,7 +1329,9 @@ async def handle_landing(request: web.Request) -> web.Response:
     # links are views too), or ``None`` at a live-token cap — then the page
     # says so instead of showing a code. Never a stand-in token: one would
     # only fail later at ``/gfs/register`` as an unexplained refusal.
-    token, _wait = await token_svc.generate(_client_bucket(request))
+    bucket = _client_bucket(request)
+    token, _wait = await token_svc.generate(bucket)
+    busy_cap = await token_svc.cap_hit(bucket) if token is None else ""
     # The pairing code is a single ``socialhome://gfs-pair/{base_url}
     # ?token={token}`` URL — chat-safe, copy/paste friendly, and the
     # same string the SH SPA's GFS paste field consumes. When the GFS
@@ -1364,6 +1389,7 @@ async def handle_landing(request: web.Request) -> web.Response:
         token=token,
         pair_code=pair_code,
         pair_qr_data_uri=qr_data,
+        busy_cap=busy_cap,
         spaces=items if cfg.landing_space_list else None,
         search=search,
         category=category,

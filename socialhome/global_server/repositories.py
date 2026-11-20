@@ -903,8 +903,15 @@ class AbstractGfsAdminRepo(Protocol):
 
     # Pair tokens
     async def save_pair_token(
-        self, token: str, ip: str, *, max_live_per_ip: int, max_live_total: int
+        self,
+        token: str,
+        ip: str,
+        *,
+        max_live_per_ip: int,
+        max_live_total: int,
+        guaranteed_per_ip: int = 0,
     ) -> bool: ...
+    async def count_live_pair_tokens(self, ip: str) -> int: ...
     async def consume_pair_token(self, token: str) -> bool: ...
     async def prune_old_pair_tokens(self, cutoff: int) -> int: ...
 
@@ -1255,26 +1262,58 @@ class SqliteGfsAdminRepo:
     # ── Pair tokens ───────────────────────────────────────────────────
 
     async def save_pair_token(
-        self, token: str, ip: str, *, max_live_per_ip: int, max_live_total: int
+        self,
+        token: str,
+        ip: str,
+        *,
+        max_live_per_ip: int,
+        max_live_total: int,
+        guaranteed_per_ip: int = 0,
     ) -> bool:
         """Store *token* for *ip* unless a live-token cap is reached.
 
-        Live = unconsumed and inside the TTL. ONE conditional ``INSERT …
-        SELECT``: the counts and the insert are a single statement, atomic in
-        SQLite — also across cluster nodes sharing the file — so concurrent
-        mints can never overshoot a cap the way count-then-insert would.
-        Returns ``True`` iff the token was stored.
+        Live = unconsumed and inside the TTL. *ip* may hold at most
+        *max_live_per_ip*; the server-wide *max_live_total* applies only once
+        *ip* already holds *guaranteed_per_ip* — so a few heavy sources that
+        fill the server cap can't deny a code to an address holding none.
+
+        ONE conditional ``INSERT … SELECT``: the counts and the insert are a
+        single statement, atomic in SQLite — also across cluster nodes
+        sharing the file — so concurrent mints can never overshoot a cap the
+        way count-then-insert would. Returns ``True`` iff the token was stored.
         """
         since = int(time.time()) - PAIR_TOKEN_TTL_SECONDS
         changed = await self._db.enqueue_rowcount(
-            "INSERT INTO gfs_pair_tokens(token, ip) SELECT ?, ? "
-            "WHERE (SELECT COUNT(*) FROM gfs_pair_tokens WHERE ip=? "
-            "AND created_at >= ? AND consumed_at IS NULL) < ? "
-            "AND (SELECT COUNT(*) FROM gfs_pair_tokens "
-            "WHERE created_at >= ? AND consumed_at IS NULL) < ?",
-            (token, ip, ip, since, max_live_per_ip, since, max_live_total),
+            "INSERT INTO gfs_pair_tokens(token, ip) SELECT ?, ? FROM ("
+            "SELECT (SELECT COUNT(*) FROM gfs_pair_tokens WHERE ip=? "
+            "AND created_at >= ? AND consumed_at IS NULL) AS per_ip, "
+            "(SELECT COUNT(*) FROM gfs_pair_tokens "
+            "WHERE created_at >= ? AND consumed_at IS NULL) AS total) "
+            "WHERE per_ip < ? AND (per_ip < ? OR total < ?)",
+            (
+                token,
+                ip,
+                ip,
+                since,
+                since,
+                max_live_per_ip,
+                guaranteed_per_ip,
+                max_live_total,
+            ),
         )
         return changed == 1
+
+    async def count_live_pair_tokens(self, ip: str) -> int:
+        """Live (unexpired, unconsumed) pairing tokens held by *ip* — read
+        only after a refused mint, to say which cap was hit."""
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM gfs_pair_tokens WHERE ip=? "
+                "AND created_at >= ? AND consumed_at IS NULL",
+                (ip, int(time.time()) - PAIR_TOKEN_TTL_SECONDS),
+                default=0,
+            )
+        )
 
     async def consume_pair_token(self, token: str) -> bool:
         """Single-use + 10-min TTL, consumed ATOMICALLY.
