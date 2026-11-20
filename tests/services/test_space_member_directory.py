@@ -883,7 +883,21 @@ async def test_target_for_uses_another_spaces_card_only_space_less():
     assert target.mailbox_id == with_box.mailbox.mailbox_id
     assert target.kem_pk == with_box.mailbox.kem_pk
     assert target.gfs_url == GFS
+    # Space-less: no space's GFS list may widen where it goes.
+    assert target.space_id is None
     assert await w.dir.target_for(nobody["id"], SPACE) is None
+
+
+async def test_target_for_names_the_space_whose_card_it_came_from():
+    """v_91 to listed GFSs: a space's target names that space, so a GFS on
+    its owner-signed list may carry the frame."""
+    w, _host = _member_world()
+    a = _hh()
+    w.member(a)
+    w.spaces.put_card(SPACE, _card(a, gfs=GFS))
+    target = await w.dir.target_for(a["id"], SPACE)
+    assert target is not None
+    assert target.space_id == SPACE
 
 
 async def test_verify_seat_card_pins_the_leg_gfs_and_the_household():

@@ -267,9 +267,13 @@ class RelayEnvelopeSender(Protocol):
         """v_87 — POST one binary relay media body (``\\x00SHR``) raw."""
         ...
 
-    async def mailbox_connection(self, gfs_url: str) -> Any:
+    async def mailbox_connection(
+        self, gfs_url: str, *, space_id: str | None = None
+    ) -> Any:
         """v_88 — the connection at *gfs_url* that delivers to per-space
-        mailboxes (proved ``envelope_mailbox``), or ``None``."""
+        mailboxes (proved ``envelope_mailbox``), or ``None``. With
+        *space_id*, an entry of that space's owner-signed GFS list counts
+        too (v_91 to listed GFSs)."""
         ...
 
     async def send_to_mailbox(
@@ -279,13 +283,17 @@ class RelayEnvelopeSender(Protocol):
         gfs_url: str,
         sealed: dict | None = None,
         media_body: bytes | None = None,
+        space_id: str | None = None,
     ) -> bool:
         """v_88 — POST one frame for a mailbox over the anonymous session."""
         ...
 
-    async def multi_connection(self, gfs_url: str) -> Any:
+    async def multi_connection(
+        self, gfs_url: str, *, space_id: str | None = None
+    ) -> Any:
         """v_90 — the connection at *gfs_url* that takes one frame for many
-        mailboxes (proved ``envelope_multi``), or ``None``."""
+        mailboxes (proved ``envelope_multi``), or ``None``; *space_id* as for
+        :meth:`mailbox_connection`."""
         ...
 
     def multi_max_recipients(self, conn: Any) -> int:
@@ -293,7 +301,12 @@ class RelayEnvelopeSender(Protocol):
         ...
 
     async def send_to_mailboxes(
-        self, *, entries: list[tuple[str, dict]], gfs_url: str, body: dict
+        self,
+        *,
+        entries: list[tuple[str, dict]],
+        gfs_url: str,
+        body: dict,
+        space_id: str | None = None,
     ) -> int | None:
         """v_91 — POST one multi-recipient frame (``(mailbox_id, wrap)``
         entries + the body) over the anonymous session; the HTTP status, or

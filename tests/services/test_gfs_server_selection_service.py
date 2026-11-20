@@ -414,6 +414,31 @@ async def test_member_servers_drop_private_hosts_we_do_not_hold(
     assert [s.inbox_url for s in servers] == ["https://public.example", private_url]
 
 
+async def test_member_servers_warn_once_per_list_not_per_read(env, caplog):
+    """Since v_91 the list is read per mailbox lookup too: an unusable entry
+    is a WARNING once per signed list, not one per send."""
+    await _store_owner_list(env, ["https://public.example", "http://10.0.0.7"])
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(3):
+            await env.svc.member_servers("sp-1")
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "unusable" in r.message
+    ]
+    assert len(warnings) == 1
+    # A newer list (another issued_at) is worth a WARNING of its own.
+    caplog.clear()
+    space = await env.spaces.get("sp-1")
+    assert space is not None and space.gfs_servers is not None
+    await env.spaces.set_gfs_servers(
+        "sp-1", dataclasses.replace(space.gfs_servers, issued_at=2)
+    )
+    with caplog.at_level(logging.WARNING):
+        await env.svc.member_servers("sp-1")
+    assert "unusable here" in caplog.text
+
+
 async def test_member_servers_none_when_unknown(env):
     await env.space()
     assert await env.svc.member_servers("sp-1") is None

@@ -121,6 +121,7 @@ from .gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
     MailboxTarget,
+    multi_caps_key,
     normalize_gfs_base,
     relay_envelope_fits,
 )
@@ -2908,6 +2909,47 @@ class FederationService:
             space_id=stored.space_id,
         )
 
+    async def host_hop_outbox_entry(
+        self, entry: OutboxEntry, instance: RemoteInstance
+    ) -> DeliveryOutcome | None:
+        """Hand a queued ref row for a member seated from the host's
+        directory to the space's host (:class:`HostHop`) once no mailbox of
+        it is in reach — the GFS its card names left the space's signed list
+        between the enqueue and this retry, or stopped proving mailboxes
+        (v_91 to listed GFSs). The live path does the same in
+        :meth:`send_with_mesh_fallback`.
+
+        ``None`` when the host hop does not apply (no hop wired, a link seat
+        with its own ``relay_via``, a sealed row with no stored payload, a
+        payload with no space) — the caller keeps its own outcome.
+        SUCCESS once a hop took it, or holds it in our outbox for the host;
+        TRANSIENT otherwise. Raises :class:`ValueError` for a stored payload
+        that is gone or does not unwrap."""
+        if (
+            self._host_hop is None
+            or entry.payload_id is None
+            or instance.source is not InstanceSource.SPACE_SESSION
+            or instance.relay_via
+        ):
+            return None
+        stored, payload_json = await self._outbox_payload_json(entry.payload_id)
+        if not stored.space_id:
+            return None
+        log.info(
+            "outbox: no mailbox of %s in reach for %s — through the host",
+            instance.id,
+            stored.event_type.value,
+        )
+        result = await self._host_hop.send(
+            to_instance_id=instance.id,
+            event_type=stored.event_type,
+            payload=_loads(payload_json),
+            space_id=stored.space_id,
+        )
+        if result.ok or result.error == DELIVERY_ERROR_QUEUED:
+            return DeliveryOutcome.SUCCESS
+        return DeliveryOutcome.TRANSIENT
+
     async def queue_event(
         self,
         *,
@@ -3064,12 +3106,36 @@ class FederationService:
                         payload=payload,
                         space_id=space_id,
                     )
-            return await self.send_event(
+            result = await self.send_event(
                 to_instance_id=to_instance_id,
                 event_type=event_type,
                 payload=payload,
                 space_id=space_id,
             )
+            if (
+                result.error == DELIVERY_ERROR_RELAY_TOO_LARGE
+                and instance.source is InstanceSource.SPACE_SESSION
+                and not instance.relay_via
+                and space_id
+                and self._host_hop is not None
+            ):
+                # Too large for a JSON frame and no binary frame route to
+                # its mailbox (a GFS we know only from the space's signed
+                # list carries no media frames from us): the host's leg
+                # sends it as a frame (``relay_frame_leg``).
+                log.info(
+                    "member mesh: %s for %s too large for its mailbox — "
+                    "through the host",
+                    event_type.value,
+                    to_instance_id,
+                )
+                return await self._host_hop.send(
+                    to_instance_id=to_instance_id,
+                    event_type=event_type,
+                    payload=payload,
+                    space_id=space_id,
+                )
+            return result
         if self._route_service is None or self._routed_handler is None:
             return DeliveryResult(
                 instance_id=to_instance_id,
@@ -4180,7 +4246,7 @@ class FederationService:
                 still_wanted is not None and not await still_wanted(entry)
             ):
                 continue
-            cap = max(caps.get(target.gfs_url, 1), 1)
+            cap = max(caps.get(multi_caps_key(target), 1), 1)
             chunks = buckets.setdefault(_multi_group_key(target, entry.payload_id), [])
             for chunk in chunks:
                 if len(chunk) < cap and all(

@@ -128,6 +128,7 @@ class GfsServerSelectionService:
         "_bus",
         "_change_locks",
         "_channel_hook",
+        "_dropped_warned",
         "_follow_later",
         "_gfs",
         "_locks",
@@ -156,6 +157,10 @@ class GfsServerSelectionService:
         # Who may choose (the space OWNER) and how a listing is made / taken
         # down. Optional so the snapshot side works on its own.
         self._users = user_repo
+        #: space id → (list ``issued_at``, entries dropped) last WARNED about:
+        #: the list is read per mailbox lookup too (v_91), so an unusable
+        #: entry is a WARNING once per list, not once per send.
+        self._dropped_warned: dict[str, tuple[int, int]] = {}
         self._publisher = gfs_connection_service
         # The household identity, attached once it is loaded at startup
         # (:meth:`attach_identity`). Until then nothing is derived.
@@ -461,13 +466,15 @@ class GfsServerSelectionService:
         A private-host entry (loopback / RFC1918 / link-local / ULA) is kept
         only when we hold an active connection to the same
         ``gfs_instance_id`` at the same ``inbox_url``. Dropped entries are
-        logged once per call."""
+        logged once per list (its issued_at and count)."""
         space = await self._spaces.get(space_id)
         if space is None or space.gfs_servers is None:
             return None
         own = {(c.gfs_instance_id, c.inbox_url) for c in await self._gfs.list_active()}
         servers, dropped = space.gfs_servers.servers(own_routes=own)
-        if dropped:
+        seen = (space.gfs_servers.issued_at, dropped)
+        if dropped and self._dropped_warned.get(space_id) != seen:
+            self._dropped_warned[space_id] = seen
             log.warning(
                 "space %s: %d entr(y/ies) of the owner's GFS list unusable here "
                 "(bad field, private network address, duplicate or over the cap)",

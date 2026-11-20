@@ -19,8 +19,10 @@ from aiohttp.test_utils import TestServer
 from socialhome.capabilities_sig import sign_capabilities
 from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.federation import GfsConnection
+from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.space import SpacePermissionError
 from socialhome.federation.invite_bootstrap import EnvelopeRelayThrottled
+from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import (
     EnvelopeRelayUnavailable,
@@ -51,6 +53,9 @@ class _FakeRepo:
         self._conns = conns
 
     async def list_active(self) -> list[GfsConnection]:
+        return list(self._conns)
+
+    async def list_all(self) -> list[GfsConnection]:
         return list(self._conns)
 
 
@@ -610,3 +615,217 @@ async def test_multi_unreachable_server_is_none(http_session):
     assert None is await sender.send_to_mailboxes(
         entries=_entries(*["m" * 32, "n" * 32]), gfs_url=conn.inbox_url, body=MR_BODY
     )
+
+
+# ── A GFS on the space's signed list we never connected to ────────────────
+
+LISTED_SPACE = "sp-listed"
+
+
+class _NoSharedSession:
+    """The shared mailbox session — a listing target must never ride it."""
+
+    def post(self, *_a, **_kw):  # pragma: no cover - the assertion is the point
+        raise AssertionError("a listed GFS was reached over the shared session")
+
+
+def _listed(fake, *, key: str | None = None, url: str | None = None) -> GfsServer:
+    return GfsServer(
+        gfs_instance_id=GFS_INSTANCE_ID,
+        inbox_url=url or fake.url,
+        public_key=key or fake.public_key_hex,
+        gfs_key_suite="ed25519",
+        display_name="Listed",
+    )
+
+
+def _wire_listed(fake, http_session, *, servers, conns=(), refuse: bool = False):
+    """A household with *conns* (none by default) whose space
+    :data:`LISTED_SPACE` is listed on *servers*. Records the listing
+    sessions opened (a fresh cookie-less one per request)."""
+    repo = _FakeRepo(list(conns))
+    opened: list[str] = []
+
+    async def _listing(url: str) -> aiohttp.ClientSession:
+        opened.append(url)
+        if refuse:
+            raise OutboundFetchRefused("private_address")
+        return aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
+
+    service = GfsConnectionService(
+        repo, http_client=http_session, listing_sessions=_listing
+    )
+
+    async def _member_servers(space_id: str):
+        return tuple(servers) if space_id == LISTED_SPACE else None
+
+    service.attach_member_servers(_member_servers)
+    sender = GfsEnvelopeSender(gfs_service=service, gfs_repo=repo)
+    sender.attach_mailbox_session(_NoSharedSession())  # type: ignore[arg-type]
+    return sender, opened
+
+
+async def test_a_listed_gfs_we_never_joined_is_a_target_for_its_space_only(
+    http_session,
+):
+    """The owner's signed list makes a GFS we hold no connection to a mailbox
+    and multi target — for THAT space only, pinned to the listed key."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, _opened = _wire_listed(fake, http_session, servers=[_listed(fake)])
+        conn = await sender.mailbox_connection(fake.url, space_id=LISTED_SPACE)
+        assert conn is not None
+        assert conn.registered is False
+        assert conn.public_key == fake.public_key_hex
+        multi = await sender.multi_connection(fake.url + "/", space_id=LISTED_SPACE)
+        assert multi is not None
+        assert sender.multi_max_recipients(multi) == 500
+        # No space, or another space: our own connections only — none here.
+        assert await sender.mailbox_connection(fake.url) is None
+        assert await sender.multi_connection(fake.url, space_id="sp-other") is None
+    finally:
+        await server.close()
+
+
+async def test_a_multi_upload_to_a_listed_gfs_rides_its_pinned_listing_session(
+    http_session,
+):
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, opened = _wire_listed(fake, http_session, servers=[_listed(fake)])
+        ids = ["m" * 32, "n" * 32]
+        status = await sender.send_to_mailboxes(
+            entries=_entries(*ids),
+            gfs_url=fake.url,
+            body=MR_BODY,
+            space_id=LISTED_SPACE,
+        )
+        assert status == 202
+        assert fake.multi == [
+            {"to": [{"mailbox": i, "wrap": WRAP} for i in ids], "body": MR_BODY}
+        ]
+        # The capability read and the upload each on a fresh pinned session
+        # to the listed address — never the shared one.
+        assert opened and set(opened) == {fake.url}
+    finally:
+        await server.close()
+
+
+async def test_a_single_mailbox_frame_to_a_listed_gfs(http_session):
+    fake, server = await _multi_gfs(multi=None)
+    try:
+        sender, opened = _wire_listed(fake, http_session, servers=[_listed(fake)])
+        assert await sender.send_to_mailbox(
+            mailbox_id="m" * 32,
+            gfs_url=fake.url,
+            sealed=SEALED,
+            space_id=LISTED_SPACE,
+        )
+        assert fake.received == [{"to_instance": "m" * 32, "sealed": SEALED}]
+        assert set(opened) == {fake.url}
+    finally:
+        await server.close()
+
+
+async def test_a_gfs_off_the_list_gets_nothing_not_even_a_probe(http_session):
+    """A member's card may name any URL; only one the owner listed is ever
+    contacted."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, opened = _wire_listed(fake, http_session, servers=[])
+        assert await sender.mailbox_connection(fake.url, space_id=LISTED_SPACE) is None
+        with pytest.raises(EnvelopeRelayUnavailable):
+            await sender.send_to_mailboxes(
+                entries=_entries("m" * 32, "n" * 32),
+                gfs_url=fake.url,
+                body=MR_BODY,
+                space_id=LISTED_SPACE,
+            )
+        assert (fake.info_calls, fake.multi, opened) == (0, [], [])
+    finally:
+        await server.close()
+
+
+async def test_a_listed_entry_whose_server_holds_another_key_is_no_target(
+    http_session,
+):
+    """The key in the owner's list is the pin: a server at the listed URL
+    that signs with any other key proves nothing and gets no upload."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        other = generate_identity_keypair().public_key.hex()
+        sender, _opened = _wire_listed(
+            fake, http_session, servers=[_listed(fake, key=other)]
+        )
+        assert await sender.multi_connection(fake.url, space_id=LISTED_SPACE) is None
+        with pytest.raises(EnvelopeRelayUnavailable):
+            await sender.send_to_mailboxes(
+                entries=_entries("m" * 32, "n" * 32),
+                gfs_url=fake.url,
+                body=MR_BODY,
+                space_id=LISTED_SPACE,
+            )
+        assert fake.multi == []
+    finally:
+        await server.close()
+
+
+async def test_a_listed_gfs_whose_address_is_refused_is_no_target(http_session):
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, opened = _wire_listed(
+            fake, http_session, servers=[_listed(fake)], refuse=True
+        )
+        assert await sender.mailbox_connection(fake.url, space_id=LISTED_SPACE) is None
+        assert opened == [fake.url]
+        assert fake.info_calls == 0
+    finally:
+        await server.close()
+
+
+async def test_our_own_connection_to_a_listed_gfs_is_used_as_before(http_session):
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        own = _conn("gfs-1", fake.url, fake.public_key_hex)
+        sender, opened = _wire_listed(
+            fake, http_session, servers=[_listed(fake)], conns=[own]
+        )
+        conn = await sender.multi_connection(fake.url, space_id=LISTED_SPACE)
+        assert conn is not None and conn.id == "gfs-1" and conn.registered
+        assert opened == []
+    finally:
+        await server.close()
+
+
+async def test_a_listed_gfs_matches_on_its_full_address_path_included(http_session):
+    """The listed URL and the card's URL must be the same address — a
+    path, a port or a scheme apart is another server (fail closed)."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, _opened = _wire_listed(
+            fake, http_session, servers=[_listed(fake, url=fake.url + "/gfs")]
+        )
+        assert await sender._listed_connection(fake.url, LISTED_SPACE) is None
+        listed = await sender._listed_connection(fake.url + "/GFS/", LISTED_SPACE)
+        assert listed is None  # a path is case-sensitive
+        listed = await sender._listed_connection(fake.url + "/gfs/", LISTED_SPACE)
+        assert listed is not None and listed.inbox_url == fake.url + "/gfs"
+    finally:
+        await server.close()
+
+
+async def test_two_listed_servers_on_one_host_are_no_target(http_session, caplog):
+    """Frames are grouped by host: with two listed servers on one host a
+    group could reach the wrong one, so neither is a target."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        other = generate_identity_keypair().public_key.hex()
+        sender, _opened = _wire_listed(
+            fake,
+            http_session,
+            servers=[_listed(fake), _listed(fake, key=other, url=fake.url + "/two")],
+        )
+        assert await sender.mailbox_connection(fake.url, space_id=LISTED_SPACE) is None
+        assert "several servers on one host" in caplog.text
+    finally:
+        await server.close()

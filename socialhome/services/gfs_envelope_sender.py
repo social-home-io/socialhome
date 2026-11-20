@@ -58,6 +58,8 @@ from ..domain.gfs_mailbox import ENVELOPE_MULTI_PATH
 from ..domain.space import SpacePermissionError
 from ..federation.gfs_relay_transport import normalize_gfs_base
 from ..federation.invite_bootstrap import EnvelopeRelayThrottled
+from ..gfs_proof import normalize_gfs_base_url
+from ..outbound_fetch import OutboundFetchRefused
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from .gfs_connection_service import GfsConnectionService
 
@@ -266,9 +268,13 @@ class GfsEnvelopeSender:
             )
             return False
 
-    async def mailbox_connection(self, gfs_url: str) -> GfsConnection | None:
-        """The active connection at *gfs_url* whose server proved
-        ``envelope_mailbox`` (v_88), or ``None``."""
+    async def mailbox_connection(
+        self, gfs_url: str, *, space_id: str | None = None
+    ) -> GfsConnection | None:
+        """The connection at *gfs_url* whose server proved
+        ``envelope_mailbox`` (v_88), or ``None``: one of our ACTIVE
+        connections; else — with *space_id* — the entry for that address on
+        the space owner's signed GFS list (:meth:`_listed_connection`)."""
         if not gfs_url:
             return None
         want = normalize_gfs_base(gfs_url)
@@ -279,6 +285,47 @@ class GfsEnvelopeSender:
                 and await self._gfs.envelope_mailbox_supported(conn)
             ):
                 return conn
+        listed = await self._listed_connection(gfs_url, space_id)
+        if listed is not None and await self._gfs.envelope_mailbox_supported(listed):
+            return listed
+        return None
+
+    async def _listed_connection(
+        self, gfs_url: str, space_id: str | None
+    ) -> GfsConnection | None:
+        """The LISTING target (v_57, never stored, never identified) for the
+        GFS at normalized base *want* on the owner's signed list of
+        *space_id* — the one the follower publish already sends to. Its key
+        is the one the owner signed, so every capability it proves is
+        verified against that key (and its proof of possession bound to the
+        listed URL); it is reached only over its own cookie-less session
+        pinned to the vetted public address of that URL. ``None`` without a
+        space, a list, or an entry at that address: a member's card can name
+        any URL, but nothing goes to a GFS the owner did not list.
+
+        Matched on the full normalized address (scheme, host, port AND
+        path — :func:`~socialhome.gfs_proof.normalize_gfs_base_url`, the form
+        the proof of possession binds), and refused when two listed servers
+        share a host under different paths: a frame grouped by host must
+        never reach the other one."""
+        want = normalize_gfs_base_url(gfs_url)
+        if not space_id or not want:
+            return None
+        targets = await self._gfs.server_targets(space_id) or []
+        base = normalize_gfs_base(gfs_url)
+        if sum(1 for t in targets if normalize_gfs_base(t.inbox_url) == base) > 1:
+            log.warning(
+                "gfs.envelope: the signed GFS list of space %s names several "
+                "servers on one host — none of them is a mailbox target",
+                space_id,
+            )
+            return None
+        for target in targets:
+            if (
+                not target.registered
+                and normalize_gfs_base_url(target.inbox_url) == want
+            ):
+                return target
         return None
 
     async def send_to_mailbox(
@@ -288,11 +335,13 @@ class GfsEnvelopeSender:
         gfs_url: str,
         sealed: dict | None = None,
         media_body: bytes | None = None,
+        space_id: str | None = None,
     ) -> bool:
         """POST one frame for a per-space mailbox (v_88) to the GFS at
         *gfs_url*: a JSON ``{to_instance: mailbox_id, sealed}`` envelope, or
         a raw binary ``\\x00SHR`` media body (already addressed to the
-        mailbox). ``True`` when the relay accepted it.
+        mailbox). ``True`` when the relay accepted it. *space_id* lets a
+        GFS on that space's signed list carry it (:meth:`mailbox_connection`).
 
         Rides the ANONYMOUS session (cookie-less, the one mailbox
         registration uses): a sticky cookie of this household's identified
@@ -301,7 +350,7 @@ class GfsEnvelopeSender:
         on ``429`` and :class:`EnvelopeRelayUnavailable` when no connection
         at *gfs_url* proved ``envelope_mailbox``; any other refusal is
         ``False``. Never logs the mailbox id."""
-        conn = await self.mailbox_connection(gfs_url)
+        conn = await self.mailbox_connection(gfs_url, space_id=space_id)
         if conn is None:
             raise EnvelopeRelayUnavailable(
                 "no GFS connection here delivers to that mailbox",
@@ -323,10 +372,13 @@ class GfsEnvelopeSender:
             }
         return await self._post_anon(conn, url, kwargs, what="a mailbox frame")
 
-    async def multi_connection(self, gfs_url: str) -> GfsConnection | None:
-        """The active connection at *gfs_url* whose server proved both
+    async def multi_connection(
+        self, gfs_url: str, *, space_id: str | None = None
+    ) -> GfsConnection | None:
+        """The connection at *gfs_url* (:meth:`mailbox_connection`, so a GFS
+        on *space_id*'s signed list too) whose server proved both
         ``envelope_mailbox`` and ``envelope_multi`` (v_91), or ``None``."""
-        conn = await self.mailbox_connection(gfs_url)
+        conn = await self.mailbox_connection(gfs_url, space_id=space_id)
         if conn is None or not await self._gfs.envelope_multi_supported(conn):
             return None
         return conn
@@ -342,6 +394,7 @@ class GfsEnvelopeSender:
         entries: list[tuple[str, dict]],
         gfs_url: str,
         body: dict,
+        space_id: str | None = None,
     ) -> int | None:
         """POST ONE multi-recipient frame for many mailboxes (v_91) to the
         GFS at *gfs_url*: ``{"to": [{"mailbox", "wrap"}], "body"}`` to
@@ -355,8 +408,8 @@ class GfsEnvelopeSender:
         :class:`EnvelopeRelayUnavailable` when no connection at *gfs_url*
         proved ``envelope_multi``; an empty list or one over the server's
         ``max_recipients`` is never sent (``None``). Never logs a mailbox
-        id."""
-        conn = await self.multi_connection(gfs_url)
+        id. *space_id* lets a GFS on that space's signed list carry it."""
+        conn = await self.multi_connection(gfs_url, space_id=space_id)
         if conn is None:
             raise EnvelopeRelayUnavailable(
                 "no GFS connection here takes one frame for many mailboxes",
@@ -416,7 +469,12 @@ class GfsEnvelopeSender:
                         resp.status,
                     )
                     return resp.status
-        except (TimeoutError, aiohttp.ClientError, RuntimeError) as exc:
+        except (
+            TimeoutError,
+            aiohttp.ClientError,
+            RuntimeError,
+            OutboundFetchRefused,
+        ) as exc:
             log.info(
                 "gfs.envelope: could not reach %r (%s) with %s: %s",
                 conn.display_name,
@@ -430,7 +488,9 @@ class GfsEnvelopeSender:
     async def _mailbox_anon(
         self, conn: GfsConnection
     ) -> AsyncIterator[aiohttp.ClientSession | None]:
-        if self._mailbox_session is not None:
+        """The shared mailbox session for a GFS we are registered on; a
+        listing target's own pinned, cookie-less session otherwise."""
+        if conn.registered and self._mailbox_session is not None:
             yield self._mailbox_session
             return
         async with self._gfs.anon_session(conn) as session:

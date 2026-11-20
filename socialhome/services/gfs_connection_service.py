@@ -2281,6 +2281,11 @@ class GfsConnectionService:
         ``POST /gfs/envelope`` to a mailbox id. Probed once on a cold miss."""
         if self._listing_failed(conn):
             return False
+        # A listing target (v_91 to a listed GFS): its proof expires as it
+        # does for the follower publish.
+        await self._listing_recheck(conn)
+        if self._listing_failed(conn):
+            return False
         if conn.id not in self._envelope_mailbox:
             failed_at = self._info_failed_at.get(conn.id)
             if failed_at is None or time.monotonic() - failed_at >= (
@@ -2293,6 +2298,11 @@ class GfsConnectionService:
         """Whether *conn*'s GFS proved ``envelope_multi`` (v_91) under a
         valid signature: ``POST /gfs/envelope/multi`` takes one sealed frame
         for many mailbox ids. Probed once on a cold miss."""
+        if self._listing_failed(conn):
+            return False
+        # A listing target (v_91 to a listed GFS): its proof expires as it
+        # does for the follower publish.
+        await self._listing_recheck(conn)
         if self._listing_failed(conn):
             return False
         if conn.id not in self._envelope_multi:
