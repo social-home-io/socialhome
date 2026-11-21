@@ -47,6 +47,7 @@ from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
 from .blob_store import FsBlobFiles
 from .channels import GfsChannelService, build_channel_rate_limit
+from .client_spread import build_client_spread_watch
 from .cluster import ClusterService
 from .cluster_relay import (
     AUDIENCE_CHANNEL,
@@ -642,6 +643,10 @@ class GfsApp:
             return cluster.live_node_count()
 
         middlewares = [
+            # First, so it sees every request — refused ones included: a
+            # WARNING when one client bucket takes most of the traffic
+            # (a CDN / proxy the resolver can't see through).
+            build_client_spread_watch(self.client_ip),
             build_admin_middleware(self.services.admin_auth),
             # The anonymous public limits are cluster-wide: each node allows
             # its share of the budget over the live nodes (``node_share``).
