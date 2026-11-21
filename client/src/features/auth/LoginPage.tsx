@@ -7,6 +7,7 @@ import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { showToast } from '@/components/Toast'
 import { Wordmark } from '@/components/Wordmark'
+import { rateLimitWaitMessage } from './rateLimitWait'
 
 /**
  * LoginPage — standalone-mode credential form (§23.3).
@@ -17,8 +18,9 @@ import { Wordmark } from '@/components/Wordmark'
  * server is running with `SOCIAL_HOME_MODE=standalone` and the user
  * isn't already carrying a session token.
  *
- * The §25.7 IP rate-limit on /api/auth/token (5/15 min) protects this
- * endpoint from brute-force; the form just surfaces the 429.
+ * The §25.7 throttle on /api/auth/token counts only wrong passwords (10
+ * per client address, 5 per username, 15 min); the form surfaces its 429
+ * with the wait in minutes.
  */
 export function LoginPage() {
   const [username, setUsername] = useState('')
@@ -50,7 +52,7 @@ export function LoginPage() {
       } else if (status === 404) {
         setError(t('login.disabled'))
       } else if (status === 429) {
-        setError(t('login.rate_limit'))
+        setError(rateLimitWaitMessage(err?.extra?.retry_after, t('login.rate_limit')))
       } else {
         setError(err?.message || t('login.failed'))
       }

@@ -363,6 +363,96 @@ recipient" (the same uniform `202`). Households use mailboxes only from
 redesign PR 2 on, and only where `/gfs/info` signs `envelope_mailbox`, so
 upgrade every node before rolling out a household release that uses them.
 
+## Client addresses behind a CDN
+
+Every per-client limit keys on the address the GFS resolves for a request
+(`[server] trusted_proxies`; see *Which IP a GFS limiter counts* in
+[`docs/api.md`](../api.md)): the TCP peer, or — when the peer is a trusted
+proxy — the **last** `X-Forwarded-For` entry. Two things break that behind
+Cloudflare:
+
+- Cloudflare *appends* the visitor's address, and a proxy that appends too
+  (`option forwardfor` in HAProxy, `proxy_add_x_forwarded_for` in nginx)
+  leaves a Cloudflare edge address in the last place. Every visitor that
+  edge serves then shares one budget, and the busiest minute 429s them all.
+- An appended header keeps whatever the client sent first, so a client
+  that reaches the proxy directly could pick its own address.
+
+The fix is to have the proxy **set** a single `X-Forwarded-For`: the TCP
+peer, or `CF-Connecting-IP` when — and only when — the peer is one of
+Cloudflare's addresses. Then list only that proxy in `trusted_proxies`.
+This is what the official deployment does (gfs-deployment
+`nomad/jobs/loadbalancer.nomad.hcl`).
+
+HAProxy (`cloudflare-ips.lst` holds the ranges from
+<https://www.cloudflare.com/ips-v4> and <https://www.cloudflare.com/ips-v6>,
+one per line — refresh it when Cloudflare changes them):
+
+```haproxy
+frontend gfs_http
+  bind *:80
+  # No `option forwardfor`: it adds a second header line instead of
+  # replacing the client's.
+  acl from_cloudflare src -f /etc/haproxy/cloudflare-ips.lst
+  acl has_cf_ip req.hdr(CF-Connecting-IP) -m found
+  # Baseline: the peer we actually see. set-header replaces every
+  # X-Forwarded-For the caller sent.
+  http-request set-header X-Forwarded-For %[src]
+  # Behind Cloudflare the client is the address Cloudflare saw.
+  http-request set-header X-Forwarded-For %[req.hdr(CF-Connecting-IP)] if from_cloudflare has_cf_ip
+  # A CF-Connecting-IP from anyone else is forged.
+  http-request del-header CF-Connecting-IP if !from_cloudflare
+  default_backend gfs_app
+```
+
+nginx (`ngx_http_realip_module`): `real_ip_header` is read only from peers
+in `set_real_ip_from`, and `$remote_addr` becomes that address — so send it
+as the one hop, never `$proxy_add_x_forwarded_for`:
+
+```nginx
+# One line per Cloudflare range (ips-v4 + ips-v6).
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 2400:cb00::/32;
+# …the rest of the ranges…
+real_ip_header CF-Connecting-IP;
+real_ip_recursive off;
+
+server {
+    listen 80;
+    location / {
+        proxy_pass http://gfs_backend;
+        proxy_set_header X-Forwarded-For $remote_addr;   # set, not append
+        proxy_set_header CF-Connecting-IP "";            # don't pass it on
+        proxy_set_header Host $host;
+    }
+}
+```
+
+Behind a **Cloudflare Tunnel** (`cloudflared`) the TCP peer is the local
+tunnel process, not a Cloudflare edge address, so the range check above
+never matches. Trust `CF-Connecting-IP` from the tunnel's own address
+instead (in HAProxy, `acl from_cloudflare src 127.0.0.1` when `cloudflared`
+runs on the same host; in nginx, `set_real_ip_from 127.0.0.1;`), and make
+sure nothing but the tunnel can reach that listener.
+
+and in `global_server.toml`, only the proxy itself:
+
+```toml
+[server]
+trusted_proxies = ["127.0.0.1/32"]   # the HAProxy / nginx address, nothing else
+```
+
+**Check it.** A GFS that counts one client address for more than half of
+at least 600 requests in five minutes logs, at most once an hour:
+
+```
+GFS: one client address (162.158.…) made 540 of the last 600 requests (90%) in 5 min — if that is your proxy or CDN, every visitor shares one rate-limit budget. …
+```
+
+If the address is a Cloudflare edge or your own proxy, the recipe above is
+missing. A real heavy client (one big household) can trip it too; then it
+names a household's address and the setup is fine.
+
 ## Rate limits across nodes
 
 The anonymous per-IP limits on the public pages, the highlight offer /

@@ -58,3 +58,34 @@ describe('LoginPage — wrong password', () => {
     })
   })
 })
+
+describe('LoginPage — too many wrong passwords', () => {
+  beforeEach(() => {
+    token.value = null
+    const res = {
+      ok: false,
+      status: 429,
+      headers: new Headers({ 'content-type': 'application/json', 'retry-after': '840' }),
+      json: vi.fn().mockResolvedValue({
+        error: {
+          code: 'RATE_LIMITED',
+          detail: 'Too many login attempts — wait a few minutes.',
+          retry_after: 840,
+        },
+      }),
+    } as unknown as Response
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res))
+  })
+  afterEach(async () => {
+    vi.unstubAllGlobals()
+    await setLocale('en')
+  })
+
+  it('says how many minutes to wait', async () => {
+    const view = await submitWrongPassword()
+    await waitFor(() => {
+      expect(view.container.querySelector('#login-error')?.textContent)
+        .toBe('Too many tries. Wait 14 minutes, then try again.')
+    })
+  })
+})

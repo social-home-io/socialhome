@@ -24,6 +24,7 @@ and ``platform_tokens``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -61,6 +62,16 @@ def hash_password(password: str, *, salt: bytes | None = None) -> str:
     return f"scrypt${n}${r}${p}${salt.hex()}${dk.hex()}"
 
 
+#: Password checks one credential store runs at once.
+VERIFY_CONCURRENCY = 2
+
+#: What an unknown username's password is checked against: a well-formed
+#: envelope with :func:`hash_password`'s parameters that no password
+#: matches (all-zero digest), so a miss costs the same scrypt as a wrong
+#: password and the answer time doesn't tell which names exist.
+_UNKNOWN_USER_HASH = "scrypt$16384$8$1$" + "00" * 16 + "$" + "00" * 32
+
+
 def verify_password(password: str, stored: str) -> bool:
     """Constant-time compare of ``password`` against a scrypt envelope."""
     if not stored.startswith("scrypt$"):
@@ -92,10 +103,13 @@ class LocalCredentialStore:
     is_admin policy) belongs to the adapter, not the credential store.
     """
 
-    __slots__ = ("_db",)
+    __slots__ = ("_db", "_verify_slots")
 
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
+        # At most this many scrypt checks (~50 ms, 16 MiB each) at once, so
+        # a flood of logins can't take over the shared thread pool.
+        self._verify_slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
 
     async def authenticate_bearer(self, token: str) -> ExternalUser | None:
         """Return the principal for a raw bearer token, or ``None``.
@@ -161,9 +175,15 @@ class LocalCredentialStore:
             "SELECT password_hash FROM platform_users WHERE username=?",
             (username,),
         )
-        if row is None or not row["password_hash"]:
-            return None
-        if not verify_password(password, row["password_hash"]):
+        stored = row["password_hash"] if row is not None else None
+        # scrypt is ~50 ms of CPU — off the event loop. An unknown user
+        # (or one with no password) runs the same check against a hash
+        # nothing matches, so a miss costs as long as a wrong password.
+        async with self._verify_slots:
+            ok = await asyncio.to_thread(
+                verify_password, password, stored or _UNKNOWN_USER_HASH
+            )
+        if not ok or not stored:
             return None
         raw = secrets.token_urlsafe(32)
         token_id = secrets.token_urlsafe(16)
