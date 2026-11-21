@@ -393,11 +393,14 @@ of a stream from a household acting as host moved within 2 minutes — a
 co-member's stream does not count; it also beats host offline); then host
 offline, **never** (no `ok` yet), else **behind**. The space's owner
 household is always up to date. It rides `GET /api/spaces/{id}` (`sync`,
-with `waiting_to_send` — our pending outbox items of the space) and, when
-the state or the waiting count changes, the local `space.sync_state` frame,
-members only — the outbox tells the status when a space's rows are queued,
-delivered or dropped (rechecks of a space coalesced, never one per row, no
-timer). **Sync now** (`POST /api/spaces/{id}/sync`) sends the incremental
+with `waiting_to_send` — the space's content items still in our outbox,
+`SPACE_WRITE_EVENT_TYPES` only: never a queued `SPACE_SYNC_BEGIN` or other
+control traffic; the payload is sealed, so on the host this includes the
+members' content it forwards) and, when the state or the waiting count
+changes, the local `space.sync_state` frame, members only — the outbox tells
+the status when a space's rows are queued, delivered or dropped. Every
+trigger takes one recheck path per space: one at a time (frames in order),
+at most one frame per 2 s per space (fixed), never one per row. **Sync now** (`POST /api/spaces/{id}/sync`) sends the incremental
 BEGIN of one round right away to the households acting as host only — a
 mesh-only one over the mesh too, never a paired co-member — within 3 per
 hour per space, inside the host's 5 BEGINs / h budget next to the 2
