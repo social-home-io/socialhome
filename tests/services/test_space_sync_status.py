@@ -591,25 +591,46 @@ async def test_stream_started_never_blocks_the_chunk_path(env):
 
 
 async def test_stop_records_what_is_due_then_takes_no_more(env):
+    """An outcome published before shutdown is still written; after
+    ``stop()`` no trigger writes or frames anything."""
     await env.bus.publish(
         SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
     )
     await env.svc.stop()
     assert env.outcomes.rows[("sp", "owner")][0] is SpaceSyncResult.OK
+    writes, frames = len(env.outcomes.writes), len(env.frames)
+    env.outbox.pending["sp"] = 7
+    env.running.add(("sp", "owner"))
+    env.clock.now = NOW + timedelta(hours=1)
     env.svc.outbox_changed("sp")
     env.svc.stream_started("sp", "owner")
-    assert env.svc._tasks == set()
+    await env.bus.publish(
+        SpaceSyncDeferred(space_id="sp", provider_instance_id="owner")
+    )
+    await asyncio.sleep(0.05)
+    await env.svc.settle()
+    assert len(env.outcomes.writes) == writes
+    assert len(env.frames) == frames
 
 
 async def test_stop_cancels_what_does_not_finish_in_time(env):
-    hang = asyncio.Event()
+    """A recheck stuck on a read is cancelled once the timeout passes:
+    ``stop()`` returns, and nothing is framed from it."""
+    entered = asyncio.Event()
+    cancelled: list[bool] = []
 
     async def _hang(space_id: str) -> int:
-        await hang.wait()
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
         return 0
 
     env.outbox.count_pending_for_space = _hang
     env.svc.outbox_changed("sp")
-    await asyncio.sleep(0)
-    await env.svc.stop(timeout=0.05)
-    assert all(t.done() for t in env.svc._tasks)
+    await entered.wait()
+    await asyncio.wait_for(env.svc.stop(timeout=0.05), timeout=1.0)
+    assert cancelled == [True]
+    assert env.frames == []

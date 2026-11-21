@@ -1633,3 +1633,25 @@ async def test_count_pending_for_space_counts_content_only(env):
     assert await repo.count_pending_for_space("sp-1") == 0
     await _enqueue_ref(env, "peer-a", "m-post")
     assert await repo.count_pending_for_space("sp-1") == 1
+
+
+async def test_a_post_with_its_picture_chunks_counts_once(env):
+    """A picture post's bytes go as SPACE_MEDIA_BLOB chunks, each its own
+    payload: the post counts once, through its post event, never per
+    chunk."""
+    repo = env.outbox_repo
+    await _enqueue_ref(env, "peer-a", "m-post")
+    for i in range(5):
+        await repo.enqueue(
+            instance_id="peer-a",
+            event_type=FederationEventType.SPACE_MEDIA_BLOB,
+            payload_json="",
+            msg_id=f"blob-{i}",
+            payload_ref=OutboxPayload(
+                id=f"blob-{i}",
+                event_type=FederationEventType.SPACE_MEDIA_BLOB,
+                space_id="sp-1",
+                payload_enc="nonce:ciphertext",
+            ),
+        )
+    assert await repo.count_pending_for_space("sp-1") == 1

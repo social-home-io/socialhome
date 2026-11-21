@@ -395,7 +395,8 @@ offline, **never** (no `ok` yet), else **behind**. The space's owner
 household is always up to date. It rides `GET /api/spaces/{id}` (`sync`,
 with `waiting_to_send` — the space's content items still in our outbox,
 `SPACE_WRITE_EVENT_TYPES` only: never a queued `SPACE_SYNC_BEGIN` or other
-control traffic; the payload is sealed, so on the host this includes the
+control traffic, never the `SPACE_MEDIA_BLOB` chunks of an item's files, and
+content queued for the mesh as `SPACE_ROUTED` is not counted; the payload is sealed, so on the host this includes the
 members' content it forwards) and, when the state or the waiting count
 changes, the local `space.sync_state` frame, members only — the outbox tells
 the status when a space's rows are queued, delivered or dropped. Every

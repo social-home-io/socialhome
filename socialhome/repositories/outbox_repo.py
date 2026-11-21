@@ -70,9 +70,15 @@ _LIVE = (
 )
 
 #: The event types :meth:`SqliteOutboxRepo.count_pending_for_space` counts:
-#: space content, never control traffic (sorted: a stable statement).
+#: space content items, never control traffic, and never the bytes of one
+#: (``SPACE_MEDIA_BLOB`` chunks are each a payload of their own — a picture
+#: post counts once, through its post event). Sorted: a stable statement.
 _SPACE_CONTENT_TYPES: tuple[str, ...] = tuple(
-    sorted(t.value for t in SPACE_WRITE_EVENT_TYPES)
+    sorted(
+        t.value
+        for t in SPACE_WRITE_EVENT_TYPES
+        if t is not FederationEventType.SPACE_MEDIA_BLOB
+    )
 )
 
 #: A pending row the v_91 seat ordering counts: inside its retention window
@@ -599,9 +605,12 @@ class SqliteOutboxRepo:
         waits for, and only a content event (:data:`SPACE_WRITE_EVENT_TYPES`:
         posts, comments, chat, pages, gallery, calendar, bazaar, …) — never
         control traffic (a ``SPACE_SYNC_BEGIN``, config, roster, keys),
-        which would grow every round a host is offline. The payload is
-        sealed, so who wrote it is not read: on the host this includes the
-        members' content it forwards."""
+        which would grow every round a host is offline, and never the
+        ``SPACE_MEDIA_BLOB`` chunks of an item's files (a picture post
+        counts once). The payload is sealed, so who wrote it is not read:
+        on the host this includes the members' content it forwards. Content
+        queued for the mesh wrapped as ``SPACE_ROUTED`` is not counted (its
+        type is the wrapper's)."""
         marks = ",".join("?" * len(_SPACE_CONTENT_TYPES))
         return int(
             await self._db.fetchval(
