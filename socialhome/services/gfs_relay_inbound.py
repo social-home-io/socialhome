@@ -44,12 +44,30 @@ Two families ride the one socket, told apart by the sealed plaintext's
   :class:`~socialhome.federation.invite_token_redeem
   .SpaceInviteTokenRedeemCoordinator`, which owns their validation.
 
-Throttles reuse the coordinator's limiter keys and constants unchanged: a
+Throttles reuse the coordinator's limiter keys and constants: a
 process-wide bucket BEFORE the unseal (a flood costs a list append, not an
 AES-GCM open) and a per-family bucket after it, so space traffic,
 redeems and pairing bodies never starve each other (pairing bodies get the
 bootstrap-body budget, :data:`BOOTSTRAP_BODY_INBOUND_LIMIT`, under their
-own key).
+own key). Once the pipeline verified the sender, it holds that household
+to its own budget (§24.11 step 4a,
+:func:`~socialhome.federation.inbound_validator.make_check_instance_rate`
+— one per household, shared with its HTTPS inbox traffic).
+
+Held, not dropped
+-----------------
+
+The GFS deletes a frame from its queue the moment the frame went out on
+our socket — there is no acknowledgement to withhold, so a frame refused
+here for a BUDGET (the process-wide or envelope ceiling, the media budget,
+the sender's per-household budget) would be lost for good. Such a frame is
+instead **held** in memory — bounded by :data:`RELAY_DEFER_MAX_FRAMES` and
+:data:`RELAY_DEFER_MAX_BYTES` — and run again from the stage that refused
+it (never charged to a bucket twice) once that budget frees. Only past the
+bound, or while shutting down, is it dropped as before (sync heals it). A
+frame refused for anything else (signature, replay, a gate) is final, as
+always. A held frame may be applied after a later frame of another
+household — the relay never promised an order across senders.
 
 ``RELAY_DELIVERED_VIA``
 -----------------------
@@ -64,8 +82,13 @@ the same server (a route probe's ack) reads it; nothing puts it on a wire.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections import deque
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -74,7 +97,11 @@ from ..domain.errors import WrongTypeError
 from ..federation.gfs_mailbox import MailboxFlooded, MailboxKeys
 from ..federation.gfs_relay_media import open_relay_media
 from ..federation.gfs_relay_transport import is_relay_envelope_body
-from ..federation.inbound_validator import TRANSPORT_GFS_MAILBOX, TRANSPORT_GFS_RELAY
+from ..federation.inbound_validator import (
+    TRANSPORT_GFS_MAILBOX,
+    TRANSPORT_GFS_RELAY,
+    InboundRateLimitedError,
+)
 from ..federation.invite_bootstrap import JOIN_REQUEST_KINDS, unseal_envelope_body
 from ..federation.invite_token_redeem import (
     BOOTSTRAP_BODY_INBOUND_LIMIT,
@@ -134,7 +161,12 @@ _PAIRING_KEY = "invite-bootstrap:pairing"
 #: service counts and answers with a rotation.
 _MAILBOX_KEY = "gfs-mailbox"
 _MAILBOX_MEDIA_KEY = "gfs-mailbox-media"
-MAILBOX_INBOUND_LIMIT: int = RELAY_ENVELOPE_INBOUND_LIMIT
+#: Frames per window on ONE mailbox. Unlike the household-wide ceilings
+#: (:data:`BOOTSTRAP_INBOUND_LIMIT`, :data:`RELAY_ENVELOPE_INBOUND_LIMIT`)
+#: it stays at 600: one mailbox is one GFS's share of our spaces, and past
+#: it the frame is a flood signal the mailbox service answers with a
+#: rotation, not a budget to wait out.
+MAILBOX_INBOUND_LIMIT: int = 600
 #: v_87 — binary relay media frames, their own bucket.
 _MEDIA_KEY = "gfs-relay:media"
 #: v_87 — media frames that failed to open or failed their checks.
@@ -153,18 +185,93 @@ RELAY_MEDIA_JUNK_LIMIT: int = 120
 #: through (a refused frame spends nothing — it cannot crowd real ones out).
 RELAY_MEDIA_INBOUND_LIMIT: int = 1200
 
+#: What :meth:`GfsRelayInbound.handle_frame` / ``handle_mailbox_frame``
+#: answer for a frame held over a budget (see "Held, not dropped" above).
+DEFERRED_RESPONSE: dict = {"status": "deferred"}
+
+#: The hold's bounds — whichever is reached first drops the NEW frame, as
+#: an over-budget frame was before. 2000 frames is the GFS's own queue cap
+#: for one recipient (``ENVELOPE_QUEUE_MAX_PER_RECIPIENT``): a burst the GFS
+#: would have queued for us is never lost here instead. 16 MiB bounds the
+#: memory (a typical envelope is a few KiB; ~30 full media frames).
+RELAY_DEFER_MAX_FRAMES: int = 2000
+RELAY_DEFER_MAX_BYTES: int = 16 * 1024 * 1024
+#: How often the background drain looks at held frames. A frame is run
+#: again only once the budget that held it frees (its ``Retry-After``), so
+#: this bounds the extra latency, not the retry rate.
+RELAY_DEFER_POLL_S: float = 1.0
+#: At most one "hold full" WARNING per this many seconds.
+RELAY_DEFER_WARN_INTERVAL_S: float = 60.0
+
+
+class _OverBudget(Exception):
+    """A stage refused a relayed frame for a budget (internal).
+
+    Carries the budget (``bucket``), when it frees, and how to run the
+    frame again from that stage — so a retry never pays the buckets the
+    earlier stages already charged. Never a ``ValueError``: nothing that
+    drops refusals may swallow it.
+    """
+
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        retry_after_s: float,
+        resume: Callable[[], Awaitable[dict]],
+    ) -> None:
+        super().__init__(bucket)
+        self.bucket = bucket
+        self.retry_after_s = retry_after_s
+        self.resume = resume
+
+
+@dataclass(slots=True)
+class _Held:
+    """One held frame (module-local, mutable: a retry refused again keeps
+    its place with the new stage)."""
+
+    resume: Callable[[], Awaitable[dict]]
+    bucket: str
+    size: int
+
+
+def _frame_bytes(frame: object) -> int:
+    """About how much memory holding *frame* costs (its sealed strings or
+    its bytes)."""
+    if isinstance(frame, bytes | bytearray):
+        return len(frame)
+    if not isinstance(frame, dict):
+        return 0
+    body = frame.get("body")
+    if isinstance(body, bytes | bytearray):
+        return len(body)
+    sealed = frame.get("sealed")
+    if isinstance(sealed, dict):
+        return sum(len(v) for v in sealed.values() if isinstance(v, str)) + sum(
+            len(str(v)) for v in sealed.values() if isinstance(v, dict)
+        )
+    return 0
+
 
 class GfsRelayInbound:
     """Open one relayed frame and route it to the pipeline or the
     invite-bootstrap coordinator."""
 
     __slots__ = (
+        "_drain_task",
+        "_due",
         "_federation",
         "_gfs_repo",
+        "_held",
+        "_held_bytes",
+        "_hold_full_drops",
+        "_hold_warned_at",
         "_invite",
         "_join",
         "_keywrap_private_key",
         "_rate_limiter",
+        "_stop",
     )
 
     def __init__(
@@ -182,6 +289,15 @@ class GfsRelayInbound:
         self._gfs_repo = gfs_connection_repo
         self._rate_limiter = rate_limiter
         self._join: GfsJoinRequestCoordinator | None = None
+        #: Frames held over a budget, oldest first, and their total size.
+        self._held: deque[_Held] = deque()
+        self._held_bytes = 0
+        #: bucket → when (limiter clock) the frames held on it may run again.
+        self._due: dict[str, float] = {}
+        self._drain_task: asyncio.Task[None] | None = None
+        self._stop = asyncio.Event()
+        self._hold_full_drops = 0
+        self._hold_warned_at = float("-inf")
 
     def attach_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
         """Route "Ask to join" bodies (v_84) to *coordinator*. Unwired, they
@@ -198,19 +314,24 @@ class GfsRelayInbound:
         """
         if not self._keywrap_private_key:
             raise ValueError("no key-wrap key — cannot open relayed envelopes")
+        return await self._run_or_hold(
+            lambda: self._open_frame(frame, gfs_url=gfs_url), size=_frame_bytes(frame)
+        )
+
+    async def _open_frame(self, frame: dict, *, gfs_url: str) -> dict:
         if isinstance(frame, dict) and frame.get("type") == ENVELOPE_MEDIA_FRAME:
             # v_87 media rides its own bucket, ahead of (and never charged
             # to) the process-wide one the control envelopes share.
             return await self._handle_media(frame.get("body"))
         # Process-wide throttle BEFORE the unseal — the cheapest place to
         # shed a flood, and the only one available before we know which
-        # family the blob belongs to.
-        if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
+        # family the blob belongs to. Over it, the frame is held (a list
+        # append, still no open) and opened once the ceiling frees.
+        self._charge(
             _PROCESS_WIDE_KEY,
             limit=BOOTSTRAP_INBOUND_LIMIT,
-            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
-        ):
-            raise ValueError("invite bootstrap inbound rate limit exceeded")
+            resume=lambda: self._open_frame(frame, gfs_url=gfs_url),
+        )
         body = unseal_envelope_body(
             envelope={
                 "sealed": frame.get("sealed") if isinstance(frame, dict) else None
@@ -218,18 +339,7 @@ class GfsRelayInbound:
             keywrap_private_key=self._keywrap_private_key,
         )
         if is_relay_envelope_body(body):
-            # Its OWN bucket — see ``RELAY_ENVELOPE_INBOUND_LIMIT``. No
-            # per-sender throttle: the only id available before the
-            # pipeline runs is the envelope's UNVERIFIED ``from_instance``,
-            # and keying a budget on it would let anyone starve a
-            # household's traffic by claiming its id.
-            if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
-                _ENVELOPES_KEY,
-                limit=RELAY_ENVELOPE_INBOUND_LIMIT,
-                window_s=BOOTSTRAP_INBOUND_WINDOW_S,
-            ):
-                raise ValueError("invite bootstrap envelopes rate limit exceeded")
-            return await self._dispatch_envelope(body, gfs_url=gfs_url)
+            return await self._relay_envelope(body, gfs_url=gfs_url)
         if is_pairing_relay_body(body):
             if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
                 _PAIRING_KEY,
@@ -248,6 +358,20 @@ class GfsRelayInbound:
                 raise ValueError("gfs join requests are not wired on this household")
             return await self._join.handle_body(body, gfs_url=gfs_url)
         return await self._invite.handle_bootstrap_body(body, gfs_url=gfs_url)
+
+    async def _relay_envelope(self, body: dict[str, Any], *, gfs_url: str) -> dict:
+        """A relayed §24.11 envelope: its OWN bucket — see
+        ``RELAY_ENVELOPE_INBOUND_LIMIT`` — then the pipeline. No per-sender
+        budget here: the only id available before the pipeline runs is the
+        envelope's UNVERIFIED ``from_instance``, and keying a budget on it
+        would let anyone starve a household's traffic by claiming its id.
+        The pipeline holds the verified sender to its own (step 4a)."""
+        self._charge(
+            _ENVELOPES_KEY,
+            limit=RELAY_ENVELOPE_INBOUND_LIMIT,
+            resume=lambda: self._relay_envelope(body, gfs_url=gfs_url),
+        )
+        return await self._dispatch_envelope(body, gfs_url=gfs_url)
 
     async def handle_mailbox_frame(
         self, frame: dict | bytes, *, keys: MailboxKeys
@@ -271,7 +395,16 @@ class GfsRelayInbound:
         the wrap opens under the same mailbox key to the body key *K*, which
         opens the body; the pipeline then requires our tag in the ``"*:"``
         audience and a named space, and takes the payload as-is.
-        Raises :class:`ValueError` on any refusal."""
+        Raises :class:`ValueError` on any refusal; a frame over its
+        sender's budget is held (:data:`DEFERRED_RESPONSE`)."""
+        return await self._run_or_hold(
+            lambda: self._open_mailbox_frame(frame, keys=keys),
+            size=_frame_bytes(frame),
+        )
+
+    async def _open_mailbox_frame(
+        self, frame: dict | bytes, *, keys: MailboxKeys
+    ) -> dict:
         if isinstance(frame, bytes | bytearray):
             return await self._handle_media(frame, keys=keys)
         if not isinstance(frame, dict) or frame.get("type") != "envelope":
@@ -302,18 +435,34 @@ class GfsRelayInbound:
         from_instance = inner.get("from_instance")
         if not isinstance(from_instance, str) or not from_instance:
             raise ValueError("relayed federation envelope missing from_instance")
+        return await self._dispatch_mailbox(
+            from_instance, orjson.dumps(inner), multi=multi
+        )
+
+    async def _dispatch_mailbox(
+        self, from_instance: str, raw: bytes, *, multi: bool
+    ) -> dict:
+        """One opened mailbox envelope through the pipeline. Its sender over
+        its budget: held, to run again from here (the mailbox bucket and the
+        open are already paid)."""
         try:
             return await self._federation.handle_inbound_rtc(
                 from_instance,
-                orjson.dumps(inner),
+                raw,
                 transport=TRANSPORT_GFS_MAILBOX,
                 multi=multi,
             )
+        except InboundRateLimitedError as exc:
+            raise _OverBudget(
+                bucket=exc.bucket,
+                retry_after_s=exc.retry_after_s,
+                resume=lambda: self._dispatch_mailbox(from_instance, raw, multi=multi),
+            ) from None
         except ValueError as exc:
             # The routing facts only — never the payload, never the mailbox.
             log.info(
                 "gfs_mailbox: rejected %r envelope from %s: %s",
-                inner.get("event_type"),
+                orjson.loads(raw).get("event_type"),
                 from_instance,
                 exc,
             )
@@ -346,9 +495,8 @@ class GfsRelayInbound:
                 own_instance_id=keys.mailbox_id,
                 keywrap_private_key=keys.kem_private,
             )
-            return await self._federation.handle_inbound_media_relay(
-                media_body,
-                transport=TRANSPORT_GFS_MAILBOX,
+            return await self._dispatch_media(
+                media_body, transport=TRANSPORT_GFS_MAILBOX, charge=False
             )
         if limiter is not None and not limiter.has_room(
             _MEDIA_JUNK_KEY,
@@ -361,14 +509,24 @@ class GfsRelayInbound:
             limit=RELAY_MEDIA_INBOUND_LIMIT,
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
-            raise ValueError("relayed media rate limit exceeded")
+            # Held until the media budget frees (nothing charged yet).
+            raise _OverBudget(
+                bucket=_MEDIA_KEY,
+                retry_after_s=limiter.retry_after_s(
+                    _MEDIA_KEY, window_s=BOOTSTRAP_INBOUND_WINDOW_S
+                ),
+                resume=lambda: self._handle_media(raw),
+            )
         try:
             media_body = open_relay_media(
                 bytes(raw),
                 own_instance_id=self._federation.own_instance_id,
                 keywrap_private_key=self._keywrap_private_key,
             )
-            result = await self._federation.handle_inbound_media_relay(media_body)
+            # A sender over its budget is an ``_OverBudget``, never junk.
+            return await self._dispatch_media(
+                media_body, transport=TRANSPORT_GFS_RELAY, charge=True
+            )
         except ValueError:
             if limiter is not None:
                 limiter.is_allowed(
@@ -377,7 +535,26 @@ class GfsRelayInbound:
                     window_s=BOOTSTRAP_INBOUND_WINDOW_S,
                 )
             raise
-        if self._rate_limiter is not None:
+
+    async def _dispatch_media(
+        self, media_body: bytes, *, transport: str, charge: bool
+    ) -> dict:
+        """One opened media body through the §24.11 media tail; ``charge``
+        spends the instance relay's media budget for a frame that went
+        through. Its sender over its budget: held, to run again from here."""
+        try:
+            result = await self._federation.handle_inbound_media_relay(
+                media_body, transport=transport
+            )
+        except InboundRateLimitedError as exc:
+            raise _OverBudget(
+                bucket=exc.bucket,
+                retry_after_s=exc.retry_after_s,
+                resume=lambda: self._dispatch_media(
+                    media_body, transport=transport, charge=charge
+                ),
+            ) from None
+        if charge and self._rate_limiter is not None:
             # Charged only now: a frame that went through.
             self._rate_limiter.is_allowed(
                 _MEDIA_KEY,
@@ -449,6 +626,14 @@ class GfsRelayInbound:
                 # step judges them against the wider relay window.
                 transport=TRANSPORT_GFS_RELAY,
             )
+        except InboundRateLimitedError as exc:
+            # The verified sender is over its budget: held, to run again
+            # from here (the relay buckets and the unseal are paid).
+            raise _OverBudget(
+                bucket=exc.bucket,
+                retry_after_s=exc.retry_after_s,
+                resume=lambda: self._dispatch_envelope(body, gfs_url=gfs_url),
+            ) from None
         except ValueError as exc:
             # Dropped, but never silently: the reason and the routing
             # fields only — never the payload. INFO because a rejection is
@@ -464,6 +649,152 @@ class GfsRelayInbound:
         finally:
             RELAY_DELIVERED_VIA.reset(token)
 
+    # ── Held frames ──────────────────────────────────────────────────────
+
+    @property
+    def deferred_count(self) -> int:
+        """Frames held over a budget right now."""
+        return len(self._held)
+
+    def _now(self) -> float:
+        """The clock budgets are judged on: the limiter's (``Retry-After``
+        is in its terms), else the monotonic one."""
+        return (
+            self._rate_limiter.now
+            if self._rate_limiter is not None
+            else time.monotonic()
+        )
+
+    def _charge(
+        self, key: str, *, limit: int, resume: Callable[[], Awaitable[dict]]
+    ) -> None:
+        """Spend one of *key*'s budget, or raise :class:`_OverBudget` with
+        *resume* (nothing is charged on a refusal)."""
+        limiter = self._rate_limiter
+        if limiter is None or limiter.is_allowed(
+            key, limit=limit, window_s=BOOTSTRAP_INBOUND_WINDOW_S
+        ):
+            return
+        raise _OverBudget(
+            bucket=key,
+            retry_after_s=limiter.retry_after_s(
+                key, window_s=BOOTSTRAP_INBOUND_WINDOW_S
+            ),
+            resume=resume,
+        )
+
+    async def _run_or_hold(
+        self, run: Callable[[], Awaitable[dict]], *, size: int
+    ) -> dict:
+        try:
+            return await run()
+        except _OverBudget as over:
+            self._hold(over, size=size)
+            return dict(DEFERRED_RESPONSE)
+
+    def _hold(self, over: _OverBudget, *, size: int) -> None:
+        """Hold one over-budget frame, or drop it (``ValueError``) past the
+        hold's bounds or once stopped."""
+        if self._stop.is_set():
+            raise ValueError("relay frame over budget, not held (shutting down)")
+        if (
+            len(self._held) >= RELAY_DEFER_MAX_FRAMES
+            or self._held_bytes + size > RELAY_DEFER_MAX_BYTES
+        ):
+            self._note_hold_full()
+            raise ValueError("relay frame over budget, not held (the hold is full)")
+        self._held.append(_Held(resume=over.resume, bucket=over.bucket, size=size))
+        self._held_bytes += size
+        self._due[over.bucket] = max(
+            self._due.get(over.bucket, float("-inf")),
+            self._now() + max(over.retry_after_s, 1),
+        )
+        log.debug("gfs_relay: holding a frame over the %s budget", over.bucket)
+        if self._drain_task is None or self._drain_task.done():
+            self._drain_task = asyncio.get_running_loop().create_task(
+                self._drain_loop(), name="gfs-relay-held-frames"
+            )
+
+    def _note_hold_full(self) -> None:
+        """A dropped frame is a real loss (sync heals it at best): WARN, at
+        most once a minute, with the count — never the frame."""
+        self._hold_full_drops += 1
+        now = time.monotonic()
+        if now - self._hold_warned_at < RELAY_DEFER_WARN_INTERVAL_S:
+            return
+        log.warning(
+            "gfs_relay: %d relayed frame(s) over budget dropped — %d held "
+            "(%d bytes) already",
+            self._hold_full_drops,
+            len(self._held),
+            self._held_bytes,
+        )
+        self._hold_full_drops = 0
+        self._hold_warned_at = now
+
+    async def run_deferred(self) -> int:
+        """One pass over the held frames: run each whose budget has freed,
+        oldest first; one refused again keeps its place (and holds back the
+        rest on that budget this pass). Returns how many went through.
+        Exposed for tests; the background drain calls it."""
+        ran = 0
+        for item in list(self._held):
+            if self._due.get(item.bucket, float("-inf")) > self._now():
+                continue
+            try:
+                await item.resume()
+            except _OverBudget as over:
+                item.resume, item.bucket = over.resume, over.bucket
+                self._due[over.bucket] = self._now() + max(over.retry_after_s, 1)
+                continue
+            except ValueError as exc:
+                # Refused for good on its retry (a gate, a stale timestamp):
+                # the reason only, never the frame.
+                log.info("gfs_relay: dropped a held frame: %s", exc)
+            except Exception:
+                log.warning("gfs_relay: a held frame failed", exc_info=True)
+            else:
+                ran += 1
+            self._held.remove(item)
+            self._held_bytes -= item.size
+        if not self._held:
+            self._due.clear()
+        return ran
+
+    async def _drain_loop(self) -> None:
+        """Run held frames as their budgets free, until none is left or
+        :meth:`stop` (the ``_stop`` event)."""
+        while self._held and not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=RELAY_DEFER_POLL_S)
+            except TimeoutError:
+                pass
+            if self._stop.is_set():
+                return
+            try:
+                await self.run_deferred()
+            except Exception:  # pragma: no cover - run_deferred catches per frame
+                log.warning("gfs_relay: held-frame pass failed", exc_info=True)
+
+    async def stop(self) -> None:
+        """Stop the held-frame drain (app cleanup, before the database
+        closes). Frames still held are dropped — sync heals them, as for a
+        frame lost to a restart."""
+        self._stop.set()
+        task, self._drain_task = self._drain_task, None
+        if task is not None:
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except TimeoutError, asyncio.CancelledError:
+                task.cancel()
+        if self._held:
+            log.info(
+                "gfs_relay: dropping %d held frame(s) on shutdown", len(self._held)
+            )
+        self._held.clear()
+        self._held_bytes = 0
+        self._due.clear()
+
     async def _connection_id_for(self, gfs_url: str) -> str | None:
         """Our own ``gfs_connections.id`` for the server at *gfs_url*."""
         if not gfs_url:
@@ -476,6 +807,7 @@ class GfsRelayInbound:
 
 
 __all__ = [
+    "DEFERRED_RESPONSE",
     "RELAY_DELIVERED_VIA",
     "RELAY_MEDIA_INBOUND_LIMIT",
     "RELAY_MEDIA_JUNK_LIMIT",

@@ -7,6 +7,7 @@ repo are recording stand-ins at the boundary.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -39,8 +40,12 @@ from socialhome.federation.gfs_relay_transport import (
     seal_relay_envelope,
 )
 from socialhome.federation.inbound_validator import (
+    INSTANCE_INBOUND_LIMIT,
+    INSTANCE_INBOUND_WINDOW_S,
     TRANSPORT_GFS_MAILBOX,
     TRANSPORT_GFS_RELAY,
+    InboundRateLimitedError,
+    instance_bucket,
 )
 from socialhome.federation.invite_bootstrap import KIND_REDEEM
 from socialhome.federation.invite_token_redeem import (
@@ -336,10 +341,11 @@ async def test_the_process_wide_throttle_runs_before_the_unseal(keys):
     fed = _Federation()
     inbound = _inbound(keys, federation=fed, limiter=limiter)
 
-    # Not even a sealed payload — the throttle answers first.
-    with pytest.raises(ValueError, match="inbound rate limit"):
-        await inbound.handle_frame({"sealed": {}})
+    # Not even a sealed payload — the throttle answers first. The GFS has
+    # already handed the frame over, so it is held, not dropped.
+    assert await inbound.handle_frame({"sealed": {}}) == gri.DEFERRED_RESPONSE
     assert fed.calls == []
+    assert inbound.deferred_count == 1
 
 
 async def test_relayed_envelopes_have_their_own_bucket(keys):
@@ -353,9 +359,9 @@ async def test_relayed_envelopes_have_their_own_bucket(keys):
     fed, invite = _Federation(), _Invite()
     inbound = _inbound(keys, federation=fed, invite=invite, limiter=limiter)
 
-    with pytest.raises(ValueError, match="envelopes rate limit"):
-        await inbound.handle_frame(_envelope_frame(keys))
+    assert await inbound.handle_frame(_envelope_frame(keys)) == gri.DEFERRED_RESPONSE
     assert fed.calls == []
+    assert inbound.deferred_count == 1
 
     # …and a full envelope bucket never starves an invite redeem.
     await inbound.handle_frame(_bootstrap_frame(keys))
@@ -1002,3 +1008,358 @@ async def test_a_multi_context_on_a_non_mailbox_transport_is_refused():
     assert await h.federation.handle_inbound_rtc(
         sender, orjson.dumps(env), transport=TRANSPORT_GFS_MAILBOX, multi=True
     ) == {"status": "ok"}
+
+
+# ── Community scale: raised ceilings, per-sender budget, no drops ───────
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class _BudgetedFederation(_MailboxFederation):
+    """The §24.11 pipeline's step 4a at the boundary: refuses a sender over
+    its per-household budget, exactly as the real step does."""
+
+    def __init__(self, limiter: RateLimiter, *, limit: int = 2) -> None:
+        super().__init__()
+        self.limiter = limiter
+        self.limit = limit
+
+    def _charge(self, sender: str) -> None:
+        bucket = instance_bucket(sender, media=False)
+        if not self.limiter.is_allowed(bucket, limit=self.limit, window_s=60):
+            raise InboundRateLimitedError(
+                "Rate limited",
+                bucket=bucket,
+                retry_after_s=self.limiter.retry_after_s(bucket, window_s=60),
+            )
+
+    async def handle_inbound_rtc(
+        self, instance_id, raw_body, *, transport="", multi=False
+    ):
+        self._charge(instance_id)
+        return await super().handle_inbound_rtc(
+            instance_id, raw_body, transport=transport, multi=multi
+        )
+
+
+def _from(sender: str) -> dict:
+    return {**ENVELOPE, "from_instance": sender}
+
+
+async def test_the_relay_ceilings_are_sized_for_a_community():
+    """The pre-unseal ceilings are household-wide, for every relay-seated
+    member at once; one sender is held to its own budget after the pipeline
+    verified it. A mailbox keeps its own 600."""
+    assert BOOTSTRAP_INBOUND_LIMIT == 3000
+    assert RELAY_ENVELOPE_INBOUND_LIMIT == 3000
+    assert gri.MAILBOX_INBOUND_LIMIT == 600
+
+
+async def test_a_sender_over_its_budget_is_held_and_run_once_it_frees(keys):
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    fed = _BudgetedFederation(limiter, limit=2)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    busy, quiet = "a" * 32, "q" * 32
+
+    for _ in range(2):
+        assert await inbound.handle_frame(_envelope_frame(keys, _from(busy))) == {
+            "status": "ok"
+        }
+    # Over the busy sender's budget: held, never dropped.
+    third = _envelope_frame(keys, {**_from(busy), "msg_id": "m-3"})
+    assert await inbound.handle_frame(third) == gri.DEFERRED_RESPONSE
+    assert inbound.deferred_count == 1
+    # Another household is not held up behind it.
+    assert await inbound.handle_frame(_envelope_frame(keys, _from(quiet))) == {
+        "status": "ok"
+    }
+
+    # Nothing runs while the budget is still spent…
+    assert await inbound.run_deferred() == 0
+    assert inbound.deferred_count == 1
+    # …and once the window frees, the held frame is dispatched.
+    clock.t += 61
+    assert await inbound.run_deferred() == 1
+    assert inbound.deferred_count == 0
+    assert [json.loads(raw)["msg_id"] for _, raw, _ in fed.calls][-1] == "m-3"
+
+
+async def test_a_held_frame_is_never_charged_twice_to_the_relay_buckets(keys):
+    """Retried from where it stopped: a frame held for its sender's budget
+    already paid the process-wide and envelope buckets — the retry spends
+    only the sender's."""
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    fed = _BudgetedFederation(limiter, limit=1)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    await inbound.handle_frame(_envelope_frame(keys))
+    await inbound.handle_frame(_envelope_frame(keys, {**ENVELOPE, "msg_id": "m-2"}))
+    assert inbound.deferred_count == 1
+
+    def _spent(key: str) -> int:
+        return sum(1 for t in limiter._windows.get(key, ()) if t > clock.t - 60)
+
+    before = (_spent("invite-bootstrap:inbound"), _spent("invite-bootstrap:envelopes"))
+    assert before == (2, 2)
+    clock.t += 61
+    assert await inbound.run_deferred() == 1
+    clock.t -= 1  # count the retry inside the same window as the first two
+    assert (
+        _spent("invite-bootstrap:inbound"),
+        _spent("invite-bootstrap:envelopes"),
+    ) == (0, 0)
+
+
+async def test_a_held_pre_unseal_frame_is_opened_once_the_ceiling_frees(keys):
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    for _ in range(BOOTSTRAP_INBOUND_LIMIT):
+        limiter.is_allowed(
+            "invite-bootstrap:inbound",
+            limit=BOOTSTRAP_INBOUND_LIMIT,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        )
+    fed = _Federation()
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    assert await inbound.handle_frame(_envelope_frame(keys)) == gri.DEFERRED_RESPONSE
+    assert fed.calls == []
+    clock.t += 61
+    assert await inbound.run_deferred() == 1
+    assert len(fed.calls) == 1
+    assert fed.calls[0][2] == TRANSPORT_GFS_RELAY
+
+
+async def test_a_held_mailbox_frame_keeps_its_mailbox_transport(keys):
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    fed = _BudgetedFederation(limiter, limit=1)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    mkeys = _mailbox_keys()
+    assert await inbound.handle_mailbox_frame(
+        _sealed_from("x" * 32, mkeys), keys=mkeys
+    ) == {"status": "ok"}
+    assert (
+        await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mkeys), keys=mkeys)
+        == gri.DEFERRED_RESPONSE
+    )
+    clock.t += 61
+    assert await inbound.run_deferred() == 1
+    assert [label for _, _, label in fed.calls] == [TRANSPORT_GFS_MAILBOX] * 2
+
+
+async def test_a_held_frame_refused_for_good_is_dropped_on_retry(keys, caplog):
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+
+    class _ThenRefuses(_BudgetedFederation):
+        refuse = False
+
+        async def handle_inbound_rtc(self, *a, **kw):
+            if self.refuse:
+                raise ValueError("Invalid envelope signature")
+            return await super().handle_inbound_rtc(*a, **kw)
+
+    fed = _ThenRefuses(limiter, limit=1)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    await inbound.handle_frame(_envelope_frame(keys))
+    await inbound.handle_frame(_envelope_frame(keys, {**ENVELOPE, "msg_id": "m-2"}))
+    fed.refuse = True
+    clock.t += 61
+    with caplog.at_level(logging.INFO):
+        assert await inbound.run_deferred() == 0
+    assert inbound.deferred_count == 0
+    assert "signature" in caplog.text
+    assert "nonce:ct" not in caplog.text
+
+
+async def test_the_hold_is_bounded_and_a_frame_past_it_is_dropped(keys, monkeypatch):
+    monkeypatch.setattr(gri, "RELAY_DEFER_MAX_FRAMES", 2)
+    limiter = RateLimiter(monotonic=_Clock())
+    fed = _BudgetedFederation(limiter, limit=0)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    for i in range(2):
+        frame = _envelope_frame(keys, {**ENVELOPE, "msg_id": f"m-{i}"})
+        assert await inbound.handle_frame(frame) == gri.DEFERRED_RESPONSE
+    with pytest.raises(ValueError, match="held"):
+        await inbound.handle_frame(_envelope_frame(keys))
+    assert inbound.deferred_count == 2
+
+
+async def test_the_hold_is_bounded_in_bytes(keys, monkeypatch):
+    monkeypatch.setattr(gri, "RELAY_DEFER_MAX_BYTES", 1)
+    limiter = RateLimiter(monotonic=_Clock())
+    fed = _BudgetedFederation(limiter, limit=0)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    with pytest.raises(ValueError, match="held"):
+        await inbound.handle_frame(_envelope_frame(keys))
+    assert inbound.deferred_count == 0
+
+
+async def test_the_background_drain_runs_held_frames_and_stops_on_close(
+    keys, monkeypatch
+):
+    monkeypatch.setattr(gri, "RELAY_DEFER_POLL_S", 0.01)
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    fed = _BudgetedFederation(limiter, limit=1)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    await inbound.handle_frame(_envelope_frame(keys))
+    await inbound.handle_frame(_envelope_frame(keys, {**ENVELOPE, "msg_id": "m-2"}))
+    assert inbound.deferred_count == 1
+    clock.t += 61
+    for _ in range(200):
+        if inbound.deferred_count == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert inbound.deferred_count == 0
+    assert len(fed.calls) == 2
+    await inbound.stop()
+    # Closed: a frame over budget now is dropped, not held for a drain
+    # that will never run.
+    with pytest.raises(ValueError, match="held"):
+        await inbound.handle_frame(_envelope_frame(keys, {**ENVELOPE, "msg_id": "m-3"}))
+
+
+async def test_a_real_pipeline_holds_a_sender_over_budget_without_burning_its_msg_id():
+    """End to end through the real §24.11 pipeline: the per-sender refusal
+    happens after the signature and before the replay id is recorded, so the
+    held frame is dispatched once the budget frees — not refused as a
+    replay."""
+    clock = _Clock()
+    h = _MultiHousehold(limiter=RateLimiter(monotonic=clock))
+    h.federation._inbound_limiter = RateLimiter(monotonic=clock)
+    sender, enc = await h.add_sender()
+    bucket = instance_bucket(sender, media=False)
+    for _ in range(INSTANCE_INBOUND_LIMIT):
+        h.federation.inbound_limiter.is_allowed(
+            bucket, limit=INSTANCE_INBOUND_LIMIT, window_s=INSTANCE_INBOUND_WINDOW_S
+        )
+    frame, env, _ = _multi_frame(h, sender, enc, to=h.audience)
+    assert await h.frame(frame) == gri.DEFERRED_RESPONSE
+    assert h.dispatched == []
+    clock.t += INSTANCE_INBOUND_WINDOW_S + 1
+    assert await h.inbound.run_deferred() == 1
+    [event] = h.dispatched
+    assert event.msg_id == env["msg_id"]
+
+
+async def test_a_forged_sender_never_spends_a_real_households_budget():
+    h = _MultiHousehold()
+    sender, _ = await h.add_sender()
+    _, impostor = await h.add_sender()
+    for _ in range(3):
+        frame, _, _ = _multi_frame(h, sender, impostor, to=h.audience)
+        with pytest.raises(ValueError, match="signature"):
+            await h.frame(frame)
+    assert (
+        h.federation.inbound_limiter.retry_after_s(
+            instance_bucket(sender, media=False), window_s=60
+        )
+        == 0
+    )
+
+
+async def test_a_held_mailbox_media_frame_never_charges_the_mailbox_twice(keys):
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+
+    class _MediaOverBudgetOnce(_MailboxFederation):
+        refuse = 1
+
+        async def handle_inbound_media_relay(self, body, *, transport=""):
+            if self.refuse:
+                self.refuse -= 1
+                raise InboundRateLimitedError(
+                    "Rate limited", bucket="fed-instance-media:x", retry_after_s=5
+                )
+            return await super().handle_inbound_media_relay(body, transport=transport)
+
+    fed = _MediaOverBudgetOnce()
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    mkeys = _mailbox_keys()
+    body = b"\x00SHM" + b"\x01" + b"x" * 100
+    frame = seal_relay_media(
+        to_instance=mkeys.mailbox_id,
+        media_body=body,
+        recipient_keywrap_pub=mkeys.kem_public,
+    )
+    assert (
+        await inbound.handle_mailbox_frame(frame, keys=mkeys) == gri.DEFERRED_RESPONSE
+    )
+    assert await inbound.run_deferred() == 0  # not due yet
+    clock.t += 6
+    assert await inbound.run_deferred() == 1
+    assert fed.media == [(body, TRANSPORT_GFS_MAILBOX)]
+    spent = limiter._windows[f"gfs-mailbox-media:{mkeys.mailbox_id}"]
+    assert len(spent) == 1
+
+
+async def test_a_held_frame_that_crashes_is_dropped_and_logged(keys, caplog):
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+
+    class _Crashes(_BudgetedFederation):
+        crash = False
+
+        async def handle_inbound_rtc(self, *a, **kw):
+            if self.crash:
+                raise RuntimeError("boom")
+            return await super().handle_inbound_rtc(*a, **kw)
+
+    fed = _Crashes(limiter, limit=0)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    assert await inbound.handle_frame(_envelope_frame(keys)) == gri.DEFERRED_RESPONSE
+    fed.crash = True
+    clock.t += 61
+    with caplog.at_level(logging.WARNING):
+        assert await inbound.run_deferred() == 0
+    assert inbound.deferred_count == 0
+    assert "held frame failed" in caplog.text
+
+
+async def test_stop_drops_what_is_still_held(keys, caplog):
+    limiter = RateLimiter(monotonic=_Clock())
+    inbound = _inbound(
+        keys, federation=_BudgetedFederation(limiter, limit=0), limiter=limiter
+    )
+    await inbound.handle_frame(_envelope_frame(keys))
+    assert inbound.deferred_count == 1
+    with caplog.at_level(logging.INFO):
+        await inbound.stop()
+    assert inbound.deferred_count == 0
+    assert "dropping 1 held frame" in caplog.text
+
+
+async def test_a_held_frame_refused_again_keeps_its_place(keys):
+    """A live frame took the slot that freed first: the held one is refused
+    again on its retry, stays held (in order), and runs on the next free."""
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    fed = _BudgetedFederation(limiter, limit=1)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    await inbound.handle_frame(_envelope_frame(keys))
+    for msg_id in ("held-1", "held-2"):
+        await inbound.handle_frame(
+            _envelope_frame(keys, {**ENVELOPE, "msg_id": msg_id})
+        )
+    clock.t += 61
+    await inbound.handle_frame(_envelope_frame(keys, {**ENVELOPE, "msg_id": "live"}))
+    assert await inbound.run_deferred() == 0
+    assert inbound.deferred_count == 2
+    clock.t += 61
+    assert await inbound.run_deferred() == 1
+    clock.t += 61
+    assert await inbound.run_deferred() == 1
+    assert [json.loads(raw)["msg_id"] for _, raw, _ in fed.calls] == [
+        "m-1",
+        "live",
+        "held-1",
+        "held-2",
+    ]
