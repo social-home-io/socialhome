@@ -125,6 +125,23 @@ def changed_since_sql(stamp_col: str, since: int | None) -> tuple[str, tuple[Any
     return f" AND {stamp_col} > ?", (int(since),)
 
 
+#: The largest rowid SQLite can store — the first page's upper bound.
+MAX_ROWID = 2**63 - 1
+
+
+def sync_page_below(cursor: int | None) -> int:
+    """The inclusive rowid bound for the §25.6 sync page after ``cursor``.
+
+    For the newest-first exporters (``ORDER BY rowid DESC``): the query
+    keeps ``rowid <= sync_page_below(cursor)`` — every row on the first
+    page (``cursor=None``), the rows strictly below the cursor after it.
+    That is the same row set as ``(? IS NULL OR rowid < ?)``, but as one
+    plain range SQLite can seek on; the ``OR`` form cannot be used as a
+    seek, so every page re-read and re-sorted the whole space.
+    """
+    return MAX_ROWID if cursor is None else int(cursor) - 1
+
+
 def sync_page_cursor(rows: list[dict[str, Any]], limit: int) -> int | None:
     """The keyset cursor after one §25.6 sync page.
 

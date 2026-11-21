@@ -49,6 +49,7 @@ from .base import (
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
+    sync_page_below,
     sync_page_cursor,
 )
 
@@ -503,14 +504,12 @@ class SqliteBazaarRepo:
                 " WHERE l.space_id=? AND p.deleted=0"
                 + window
                 + changed
-                + " AND (? IS NULL OR l.rowid < ?)"
-                " ORDER BY l.rowid DESC LIMIT ?",
+                + " AND l.rowid <= ? ORDER BY l.rowid DESC LIMIT ?",
                 (
                     space_id,
                     *window_params,
                     *changed_params,
-                    cursor,
-                    cursor,
+                    sync_page_below(cursor),
                     int(limit),
                 ),
             )

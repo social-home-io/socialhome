@@ -50,6 +50,7 @@ from .base import (
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
+    sync_page_below,
     sync_page_cursor,
 )
 from .post_repo import (  # reuse the household post helpers verbatim
@@ -462,14 +463,12 @@ class SqliteSpacePostRepo:
                 " WHERE space_id=? AND deleted=0"
                 + window
                 + changed
-                + " AND (? IS NULL OR rowid < ?)"
-                " ORDER BY rowid DESC LIMIT ?",
+                + " AND rowid <= ? ORDER BY rowid DESC LIMIT ?",
                 (
                     space_id,
                     *window_params,
                     *changed_params,
-                    cursor,
-                    cursor,
+                    sync_page_below(cursor),
                     int(limit),
                 ),
             )
@@ -491,8 +490,8 @@ class SqliteSpacePostRepo:
                 " moderated, moderated_by FROM space_posts"
                 " WHERE space_id=? AND deleted=1"
                 + changed
-                + " AND (? IS NULL OR rowid < ?) ORDER BY rowid DESC LIMIT ?",
-                (space_id, *changed_params, cursor, cursor, int(limit)),
+                + " AND rowid <= ? ORDER BY rowid DESC LIMIT ?",
+                (space_id, *changed_params, sync_page_below(cursor), int(limit)),
             )
         )
         tombstones = [
