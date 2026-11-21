@@ -407,6 +407,17 @@ mesh-only one over the mesh too, never a paired co-member — within 3 per
 hour per space, inside the host's 5 BEGINs / h budget next to the 2
 periodic ones; a space hosted here asks its paired member households.
 
+**Signed sync pages (v_95).** The household acting as host that holds the
+space's authority seed seals, lazily and at most every 15 minutes, a signed
+commitment to the space's state (a **page**: 256 bucket hashes under one
+root). Every sentinel carries the newest page the provider holds — sealed
+under the content key, only to a v_95 requester whose BEGIN `page` is
+older — and any member relays it. A member keeps the newest page and its
+vector, checks its own rows against it at most once an hour, and its
+status adds `sync.page`: **up to date as of page N** even while the host is
+offline, **behind** when a newer page exists than what it applied. See
+[sync-pages.md](./sync-pages.md).
+
 ## What a sync streams
 
 The provider walks `RESOURCE_ORDER` (`federation/sync/space/exporter.py`)

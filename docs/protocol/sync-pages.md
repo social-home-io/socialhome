@@ -1,7 +1,9 @@
 # Sync pages (signed state pages)
 
-**Status: design for Phase 2 and Phase 3 of the sync-pages plan. Nothing
-here ships yet.** It builds on [sync.md](./sync.md), the §25.6 space sync.
+**Status: Phase 2 (signed pages, the "behind?" check) is implemented at
+v_95 — see [Phase 2 as built](#phase-2-as-built-v_95). Phase 3 (verified
+fetch from any member) is design only.** It builds on [sync.md](./sync.md),
+the §25.6 space sync.
 
 The space authority signs a small **page** now and then: a commitment to
 the space's current content, split into 256 **buckets**. A member keeps
@@ -527,17 +529,114 @@ ships in the same release, otherwise v_96).
    `no_link_preview`, `pinned` and `moderated` (§2). This is a known limit,
    with no receiver change.
 
-## Implementation pointers (planned)
+## Phase 2 as built (v_95)
 
-- `socialhome/sync_page.py` (new): commit form, hashing, page sign and
-  verify, suites.
-- `socialhome/federation/sync/space/exporter.py` (`build_sentinel`),
-  `provider.py` (lazy seal, `buckets` mode), `scheduler.py` (`page` in
-  BEGIN, Phase 3 rotation), `receiver_base.py` (`verified` next to
+What shipped, where it is more exact than the design above:
+
+- **Commit form** (`socialhome/sync_page.py`, `COMMIT_SPECS`). Every
+  committed field is always present (an absent field hashes as `null`).
+  Timestamps in the allow-list are normalised to UTC ISO 8601 with
+  microseconds (the stored forms differ between households). Lists are
+  sorted: lists of strings by code point, anything else by its canonical
+  JSON. Floats are `repr` strings. Per resource, beyond the §2 table:
+  - `posts` also commits `media_url` (as a hash); `file_meta` keeps
+    `url` (as a hash), `mime_type`, `original_name`, `size_bytes`; the
+    link card keeps `url`, `title`, `description`, `site_name`,
+    `thumbnail_url` (as a hash). Nested dicts are allow-listed too.
+  - `comments` leaves `edited_at` out: the sync receiver does not keep it
+    (a streamed edit lands without its stamp). The edited content is
+    committed.
+  - `polls` `meta` keeps `post_id, question, closes_at, closed,
+    allow_multiple`; schedule slots keep `id, slot_date, start_time,
+    end_time, position`.
+  - Tombstones commit their identity fields and `created_at`, except
+    `calendar_deleted` (receiver's clock) and `task_lists_deleted` /
+    `tasks_deleted` (their records carry none).
+  - File hashes come from the bytes this household stores
+    (`MediaFileHasher`, cached by name, size and mtime), on the host and on
+    a member alike; a file it cannot hash keeps the row out.
+  - Tested: for every item type of the §25.6 coverage table, the host's
+    export and the member's re-export after the real receiver hash the
+    same (`tests/federation/sync/space/test_page_state.py`), plus rows with
+    pictures, files, a link card, a cover and a sold listing. A golden leaf
+    pins the bytes (`tests/test_sync_page.py`). The same comparison after a
+    *live* event (instead of a stream) is not covered yet.
+- **Wire.** BEGIN `page` = `{signer, epoch, seq, issued_at, root}`
+  (`issued_at` is needed for the order key). Hashes are base64url without
+  padding; the vector is one base64url string. `page_sealed` =
+  `{epoch, payload}` from `encrypt_chunk` (content key, AAD
+  `space_id:epoch:sync_id`), ≤ 24 KiB. Sent only to a requester at
+  `MIN_FOR_SYNC_PAGES` whose `page` is absent or older by
+  `(epoch, issued_at, seq)`; a delta only when its `page` is the stored
+  page's `prev_root` from the same signer and epoch. BEGIN `page` goes only
+  to a provider at v_95 (`space_member_supports`), on every BEGIN path
+  (paired, mesh catch-up / incremental, relay re-BEGIN).
+- **Receiver.** A delta that does not fit the held page is refused and the
+  held page kept (never dropped: that would let a relay roll a member back
+  by then offering an older page). The next BEGIN names the held page, so
+  the provider sends the full vector. A household that signs the space
+  itself never stores another signer's page over its own. A page that does
+  not open (wrong key, tag) is a one-line WARNING.
+- **Equivocation** is flagged for two pages of one signer and epoch with
+  the same `seq` and different roots, or two different pages with the same
+  non-null `prev_root`. The flag is kept in memory (WARNING log with both
+  page hashes is the durable evidence).
+- **Rotation.** A trigger on `spaces` drops the page in the same statement
+  that moves `authority_key_epoch` or `identity_public_key` (every path:
+  rotate, adopt, re-pin). A held page of another epoch is ignored anyway.
+- **Lazy seal.** As in §4, plus: a signer that holds another signer's page
+  younger than 15 min does not seal on top of it. The seal reads the
+  `sync_seq` snapshot before the export, exports with the window cutoff of
+  now (stored in the page) and hashes page by page in a worker thread.
+- **Root check.** At most once an hour per space, never again for a page
+  that matched, never for a page we signed; a checked mismatch is
+  re-checked hourly while sentinels arrive (≤ 24 / day).
+- **Status** (`GET /api/spaces/{id}` `sync.page`, also in the
+  `space.sync_state` frame): `{seq, at, signer_role, applied, match,
+  differing_buckets, conflict}`. `applied` — we applied a clean stream from
+  the page's signer at or past its `seq` (`space_instances.applied_seq`;
+  `null` when that signer is not one of our acting hosts). Rules
+  (`domain/space_sync_page.state_with_page`): a running stream stays
+  **catching up**; `applied` or `match` → **up to date** "as of page N",
+  also while the host is offline; a newer page than we applied →
+  **catching up** while the host answers, **behind** while it is silent;
+  for a signer we do not sync from, a checked mismatch makes a silent
+  host's space **behind**. A plain mismatch with `applied` true does not
+  downgrade: rows newer than the page are normal in a busy space.
+  `signer_role` is `owner` when `signer` names the owner; it is a label any
+  seed holder could set.
+- **Measured** (x86 dev machine, real SQLite with every migration, the
+  real exporters, 50 001 committed rows: 40 000 posts with ~400-char text,
+  6 000 comments, 4 000 tasks): a full seal takes **5.8 s**, of which the
+  hashing is **0.37 s** (7.4 µs per row). The rest is the existing `posts`
+  exporter: its keyset query (`ORDER BY rowid DESC` with the
+  `(space_id, created_at)` index) sorts the whole space for every page of
+  200 rows, ~25 ms per page — O(n²), and the same cost every full §25.6
+  stream pays today. Fixing that query (an index or a rowid-ordered plan)
+  is a separate change; with it a seal would be well under a second here.
+  A Pi will be several times slower. No leaf cache (decision 4).
+- **Storage** (tested): a signer row ≤ 17 KB (page ≈ 0.5 KB + vector
+  8 KiB + a full delta 8.25 KiB), a member row ≤ 9 KB.
+- **Not in Phase 2:** verified fetch from any member, `sync_mode:
+  "buckets"`, listings, `page_match` (all Phase 3); SPA text for the page
+  ("as of page N"), the API field is there.
+
+## Implementation pointers
+
+- Phase 2 (built): `socialhome/sync_page.py` (commit form, hashing, page
+  sign / verify, suites), `federation/sync/space/page_state.py` (the
+  vector from the local exporters), `federation/sync/space/pages.py`
+  (`SyncPageService`: seal, sentinel, receive, root check, status),
+  `exporter.py` (`build_sentinel(page_sealed=…)`), `provider.py`
+  (`_sentinel_page`), `receiver.py` (sentinel path), `scheduler.py`
+  (`page` in BEGIN), `sync_manager.py` / `federation_service.py` (`page`
+  through every BEGIN path), `window.py` (`pinned_cutoff`),
+  `authority_sig.py` (`space_sync_page`), migration `0151`
+  (`space_sync_pages` + the rotation trigger), `domain/space_sync_page.py`
+  and `services/space_sync_status.py` (status), `MIN_FOR_SYNC_PAGES`.
+- Phase 3 (planned): `provider.py` (`buckets` mode), `scheduler.py`
+  (rotation through members), `receiver_base.py` (`verified` next to
   `_acts_as_host`), `watermark.py` (`page_match` → `full_at`).
-- `socialhome/authority_sig.py` (event type `space_sync_page`),
-  `services/space_authority_rotation_service.py` (drop the page on
-  rotation), `domain/federation_capabilities.py` (`MIN_FOR_SYNC_PAGES`).
 
 ## Spec references
 
