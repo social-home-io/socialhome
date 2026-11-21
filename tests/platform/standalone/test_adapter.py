@@ -556,3 +556,17 @@ def test_capabilities_include_mdns_advertise(adapter):
 async def test_withdraw_push_is_a_no_op(adapter):
     """The notify_endpoint webhook has no way to take a push back."""
     assert await adapter.push.withdraw(object(), ["a:/1"]) is None
+
+
+async def test_change_password_keeps_admin_and_display_name(db, adapter):
+    """An admin-issued password reset rotates only the hash: the person
+    stays an admin and keeps their name (it used to reset both)."""
+    await _add_user(db, "alice", display_name="Alice Smith", is_admin=True)
+    await adapter.change_password("alice", "n3w-secret")
+    row = await db.fetchone(
+        "SELECT display_name, is_admin, password_hash FROM platform_users"
+        " WHERE username='alice'"
+    )
+    assert row["is_admin"] == 1
+    assert row["display_name"] == "Alice Smith"
+    assert await adapter.issue_bearer_token("alice", "n3w-secret") is not None

@@ -212,7 +212,7 @@ class HaAdapter(PlatformAdapter):
             raise RuntimeError(
                 "HaAdapter.change_password called before on_startup",
             )
-        await self._credentials.set_password(username, new_password)
+        await self._credentials.change_password(username, new_password)
 
     @staticmethod
     def hash_password(password: str, *, salt: bytes | None = None) -> str:
