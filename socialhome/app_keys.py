@@ -171,6 +171,8 @@ gfs_ws_supervisor_key: AppKey = AppKey("gfs_ws_supervisor")
 #: v_89 — this household's GFS mailboxes (one per GFS) and member directory.
 space_mailbox_service_key: AppKey = AppKey("space_mailbox_service")
 space_member_directory_key: AppKey = AppKey("space_member_directory")
+#: The inbound leg of the GFS relay (its held-frame drain stops on cleanup).
+gfs_relay_inbound_key: AppKey = AppKey("gfs_relay_inbound")
 startup_announcer_key: AppKey = AppKey("startup_announcer")
 #: v_53 shared-GFS route discovery — ``probe_peer`` after a pairing confirm.
 gfs_route_discovery_key: AppKey = AppKey("gfs_route_discovery")

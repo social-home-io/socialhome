@@ -30,6 +30,11 @@ from socialhome.federation.gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     build_relay_plaintext,
 )
+from socialhome.federation.inbound_validator import (
+    INSTANCE_INBOUND_WINDOW_S,
+    INSTANCE_MEDIA_INBOUND_LIMIT,
+    instance_bucket,
+)
 from socialhome.federation.invite_token_redeem import BOOTSTRAP_INBOUND_WINDOW_S
 from socialhome.federation.keywrap_seal import UnsupportedKemSuite
 from socialhome.federation.media_envelope import (
@@ -328,8 +333,16 @@ async def test_relay_frame_header_carries_no_plaintext_for_the_gfs():
 # ── Budgets: media never spends the household's control bucket ──────────
 
 
-def _limited(p, monkeypatch, *, media_limit: int) -> RateLimiter:
-    limiter = RateLimiter()
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _limited(p, monkeypatch, *, media_limit: int, clock=None) -> RateLimiter:
+    limiter = RateLimiter(monotonic=clock) if clock is not None else RateLimiter()
     monkeypatch.setattr(gri, "RELAY_MEDIA_INBOUND_LIMIT", media_limit)
     p.inbound = GfsRelayInbound(
         federation=p.svc_b,
@@ -342,14 +355,20 @@ def _limited(p, monkeypatch, *, media_limit: int) -> RateLimiter:
 
 
 async def test_saturated_media_leaves_the_control_bucket_untouched(monkeypatch):
+    clock = _Clock()
     p = _relay_paired()
-    limiter = _limited(p, monkeypatch, media_limit=2)
+    limiter = _limited(p, monkeypatch, media_limit=2, clock=clock)
     for i in range(2):
         header, sealed = _frame(p, raw=f"chunk-{i}".encode())
         await p.inbound.handle_frame(_relay_frame(p, header, sealed))
     header, sealed = _frame(p, raw=b"one too many")
-    with pytest.raises(ValueError, match="relayed media rate limit"):
+    # Over the media budget the frame is held (the GFS already dequeued
+    # it), and taken once the budget frees.
+    assert (
         await p.inbound.handle_frame(_relay_frame(p, header, sealed))
+        == gri.DEFERRED_RESPONSE
+    )
+    assert p.inbound.deferred_count == 1
     # The process-wide bucket every control / pairing / invite envelope
     # draws on was never charged by media.
     assert limiter.has_room(
@@ -360,6 +379,41 @@ async def test_saturated_media_leaves_the_control_bucket_untouched(monkeypatch):
     with pytest.raises(Exception) as exc:
         await p.inbound.handle_frame({"type": "envelope", "sealed": {}})
     assert "rate limit" not in str(exc.value)
+    clock.t += BOOTSTRAP_INBOUND_WINDOW_S + 1
+    assert await p.inbound.run_deferred() == 1
+    assert p.inbound.deferred_count == 0
+
+
+async def test_a_media_sender_over_its_budget_is_held_not_counted_as_junk(
+    monkeypatch,
+):
+    """Through the real pipeline: the sender's per-household media budget
+    (§24.11 step 5a) refuses after the signature and the replay check —
+    the frame is held, spends nothing from the junk bucket, and is taken
+    once that budget frees."""
+    clock = _Clock()
+    p = _relay_paired()
+    limiter = _limited(p, monkeypatch, media_limit=1200, clock=clock)
+    p.svc_b._inbound_limiter = RateLimiter(monotonic=clock)
+    bucket = instance_bucket(p.a_id, media=True)
+    for _ in range(INSTANCE_MEDIA_INBOUND_LIMIT):
+        p.svc_b.inbound_limiter.is_allowed(
+            bucket,
+            limit=INSTANCE_MEDIA_INBOUND_LIMIT,
+            window_s=INSTANCE_INBOUND_WINDOW_S,
+        )
+    header, sealed = _frame(p)
+    frame = _relay_frame(p, header, sealed)
+    assert await p.inbound.handle_frame(frame) == gri.DEFERRED_RESPONSE
+    assert limiter.has_room(
+        gri._MEDIA_JUNK_KEY, limit=1, window_s=BOOTSTRAP_INBOUND_WINDOW_S
+    )
+    clock.t += INSTANCE_INBOUND_WINDOW_S + 1
+    assert await p.inbound.run_deferred() == 1
+    # It went through, so the relay's media budget is spent once now.
+    assert not limiter.has_room(
+        gri._MEDIA_KEY, limit=1, window_s=BOOTSTRAP_INBOUND_WINDOW_S
+    )
 
 
 async def test_a_refused_media_frame_spends_no_media_budget(monkeypatch):

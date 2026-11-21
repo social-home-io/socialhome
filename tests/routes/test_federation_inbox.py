@@ -473,6 +473,120 @@ async def test_inbound_rate_limit_per_ip(client, env):
     assert 1 <= retry_after <= INBOX_RATE_WINDOW_S
 
 
+async def test_the_inbox_backstop_is_sized_for_many_households_on_one_address():
+    """Behind Home Assistant's inbox relay (and any reverse proxy) every
+    peer household arrives from ONE address, so the per-address bucket is a
+    backstop for ten households at their full per-household budget, not a
+    per-peer limit."""
+    from socialhome.federation.inbound_validator import (
+        INSTANCE_INBOUND_LIMIT,
+        INSTANCE_MEDIA_INBOUND_LIMIT,
+    )
+    from socialhome.routes.federation import (
+        INBOX_RATE_LIMIT,
+        MEDIA_INBOX_RATE_LIMIT,
+    )
+
+    assert INBOX_RATE_LIMIT == 6000
+    assert INBOX_RATE_LIMIT == 10 * INSTANCE_INBOUND_LIMIT
+    assert MEDIA_INBOX_RATE_LIMIT == 6 * INSTANCE_MEDIA_INBOUND_LIMIT
+
+
+def _saturate_household(env) -> str:
+    from socialhome.federation.inbound_validator import (
+        INSTANCE_INBOUND_LIMIT,
+        INSTANCE_INBOUND_WINDOW_S,
+        instance_bucket,
+    )
+
+    limiter = env["fed_svc"].inbound_limiter
+    bucket = instance_bucket(env["peer"].id, media=False)
+    for _ in range(INSTANCE_INBOUND_LIMIT):
+        assert limiter.is_allowed(
+            bucket, limit=INSTANCE_INBOUND_LIMIT, window_s=INSTANCE_INBOUND_WINDOW_S
+        )
+    return bucket
+
+
+async def test_a_household_over_its_budget_gets_429_with_retry_after(client, env):
+    from socialhome.federation.inbound_validator import INSTANCE_INBOUND_WINDOW_S
+
+    bucket = _saturate_household(env)
+    body = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"user_id": "alice", "state": "home"},
+        msg_id="over-budget",
+    )
+    r = await client.post("/federation/inbox/wh-test", data=body)
+    assert r.status == 429
+    assert (await r.json())["error"] == "rate_limited"
+    assert 1 <= int(r.headers["Retry-After"]) <= INSTANCE_INBOUND_WINDOW_S
+
+    # Nothing about the refused envelope was kept: once the window frees,
+    # the sender's outbox redelivers the SAME msg_id and it is taken — not
+    # answered as a replay of an envelope that was never applied.
+    env["fed_svc"].inbound_limiter.reset(bucket)
+    r = await client.post("/federation/inbox/wh-test", data=body)
+    assert r.status == 200
+    assert (await r.json())["status"] == "ok"
+
+
+async def test_a_replayed_envelope_never_spends_a_households_budget(client, env):
+    """A captured genuine envelope pushed again verifies — but the replay
+    step refuses it before the budget is charged."""
+    from socialhome.federation.inbound_validator import (
+        INSTANCE_INBOUND_WINDOW_S,
+        instance_bucket,
+    )
+
+    body = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"user_id": "alice", "state": "home"},
+        msg_id="captured",
+    )
+    assert (await client.post("/federation/inbox/wh-test", data=body)).status == 200
+    for _ in range(5):
+        r = await client.post("/federation/inbox/wh-test", data=body)
+        assert r.status == 410
+    limiter = env["fed_svc"].inbound_limiter
+    bucket = instance_bucket(env["peer"].id, media=False)
+    assert len(limiter._windows[bucket]) == 1
+    assert limiter.retry_after_s(bucket, window_s=INSTANCE_INBOUND_WINDOW_S) > 0
+
+
+async def test_a_forged_envelope_never_spends_a_households_budget(client, env):
+    """The budget is counted after the signature step: an envelope naming a
+    real household but signed by someone else is refused (403) and leaves
+    that household's budget untouched."""
+    from socialhome.federation.inbound_validator import instance_bucket
+
+    forger = generate_identity_keypair()
+    for i in range(5):
+        body = json.loads(
+            _build_envelope(
+                own_iid=env["own_iid"],
+                peer_kp=forger,
+                session_key=env["session_key"],
+                payload={"user_id": "mallory"},
+                msg_id=f"forged-{i}",
+            )
+        )
+        body["from_instance"] = env["peer"].id
+        r = await client.post(
+            "/federation/inbox/wh-test", data=json.dumps(body).encode()
+        )
+        assert r.status == 403
+    limiter = env["fed_svc"].inbound_limiter
+    assert (
+        limiter.retry_after_s(instance_bucket(env["peer"].id, media=False), window_s=60)
+        == 0
+    )
+
+
 async def test_inbound_error_does_not_leak_exception_text(client, env):
     """§Audit #7: validation rejections must NOT echo the underlying
     ``ValueError`` text to the wire — that exposes ban-list / replay
@@ -593,3 +707,42 @@ async def test_a_dropped_write_is_indistinguishable_across_space_states(client, 
     assert json.loads(baseline[1]) == {"status": "ok"}
     for label, answer in answers.items():
         assert answer == baseline, label
+
+
+async def test_refusals_before_the_signature_spend_a_tight_per_address_budget(
+    client, env
+):
+    """The 6000 / min backstop is for many genuine households behind one
+    address. What never proved a household — malformed JSON, an unknown
+    inbox, a bad signature — spends a far smaller per-address budget, so a
+    stranger on a directly reachable household gets 429'd long before
+    6000 bodies of unauthenticated parsing a minute."""
+    from socialhome.app_keys import rate_limiter_key
+    from socialhome.routes.federation import (
+        INBOX_JUNK_RATE_LIMIT,
+        INBOX_RATE_WINDOW_S,
+    )
+
+    assert INBOX_JUNK_RATE_LIMIT == 600
+    limiter = client.server.app[rate_limiter_key]
+    bucket = "federation-inbox-junk:127.0.0.1"
+    good = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"user_id": "alice"},
+        msg_id="good-1",
+    )
+    assert (await client.post("/federation/inbox/wh-test", data=good)).status == 200
+    assert (await client.post("/federation/inbox/nope", data=good)).status == 404
+    assert (await client.post("/federation/inbox/wh-test", data=b"junk")).status == 400
+    # Only the two refusals were charged; the accepted envelope and its
+    # replay (a genuine household's retry) were not.
+    assert (await client.post("/federation/inbox/wh-test", data=good)).status == 410
+    assert len(limiter._windows[bucket]) == 2
+
+    for _ in range(INBOX_JUNK_RATE_LIMIT - 2):
+        limiter.is_allowed(bucket, limit=INBOX_JUNK_RATE_LIMIT, window_s=60)
+    r = await client.post("/federation/inbox/wh-test", data=good)
+    assert r.status == 429
+    assert 1 <= int(r.headers["Retry-After"]) <= INBOX_RATE_WINDOW_S

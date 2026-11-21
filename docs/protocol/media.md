@@ -116,7 +116,8 @@ runs the JSON inbox's §24.11 chain (lookup by inbox id), then the
 channel's tail (suites, decrypt, `chunk_sha256`). The body cap is one
 512 KiB chunk + 16 KiB (`HTTPS_MEDIA_MAX_BODY_BYTES`), checked against
 `Content-Length` once the magic is read and while streaming; binary
-bodies have their own per-IP bucket (600 / min). Any non-2xx answer
+bodies have their own per-IP backstop (3 600 / min) and a per-household
+budget once the signature verified (600 chunks / min). Any non-2xx answer
 sends the JSON chunk instead, and the sender remembers it per peer
 (`MediaHttpsBackoff`): a 429 skips the leg for its `Retry-After`, another
 4xx for 10 min at once, 5xx / no answer for 10 min after 3 in a row, then

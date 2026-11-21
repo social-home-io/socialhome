@@ -75,7 +75,7 @@ from socialhome.federation.invite_token_redeem import (
 from socialhome.federation.keywrap_seal import seal_to_keywrap
 from socialhome.rate_limiter import RateLimiter
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
-from socialhome.services.gfs_relay_inbound import GfsRelayInbound
+from socialhome.services.gfs_relay_inbound import DEFERRED_RESPONSE, GfsRelayInbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from tests.local_area_budget import memory_budget
 
@@ -2170,7 +2170,9 @@ async def test_a_stale_unconfirmed_row_is_upgraded_to_a_relay_seat():
 
 
 async def test_bootstrap_inbound_is_rate_limited_process_wide():
-    """The relay hands us blobs from anyone — cap them before the unseal."""
+    """The relay hands us blobs from anyone — cap them before the unseal.
+    Over the ceiling a frame is held (never opened yet), not dropped: the
+    GFS already handed it over."""
     env = _bootstrap_pair()
     limiter = RateLimiter()
     env.issuer._rate_limiter = limiter
@@ -2181,10 +2183,12 @@ async def test_bootstrap_inbound_is_rate_limited_process_wide():
             limit=BOOTSTRAP_INBOUND_LIMIT,
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         )
-    with pytest.raises(ValueError, match="inbound rate limit"):
-        await env.issuer_inbound.handle_frame(
-            {"to_instance": env.issuer_party.instance_id, "sealed": {}},
-        )
+    result = await env.issuer_inbound.handle_frame(
+        {"to_instance": env.issuer_party.instance_id, "sealed": {}},
+    )
+    assert result == DEFERRED_RESPONSE
+    assert env.issuer_inbound.deferred_count == 1
+    await env.issuer_inbound.stop()
 
 
 async def test_bootstrap_inbound_is_rate_limited_per_sender():

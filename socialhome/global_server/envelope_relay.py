@@ -96,10 +96,10 @@ sealed body for up to 500 mailboxes (a space's member households reached
 over this server), each named with its own ``wrap`` — the body key sealed
 to that mailbox's key-wrap key. Only registered mailboxes are addressed; the
 answer is the same uniform ``202``. Each upload charges its distinct ids to
-a per-IP, per-node recipient budget equal to the single route's request
-limit (:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`), so batching never
-buys more queue work than sending one by one (both budgets are this node's:
-an N-node cluster takes N times as much from one address). The body is
+a per-IP, per-node recipient budget sized for a community's fan-out
+(:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`, 2400 — every recipient a
+reference row inside its own mailbox's queue caps; both budgets are this
+node's: an N-node cluster takes N times as much from one address). The body is
 stored once (``gfs_envelope_bodies``, GFS migration 0031) with one
 reference row per mailbox holding that mailbox's wrap, each charged the
 full body plus its wrap against that mailbox's caps while the pool counts
@@ -267,14 +267,26 @@ ENVELOPE_MULTI_MAX_BODY_BYTES: int = (
 #: the single route.
 ENVELOPE_MULTI_MAX_PER_MINUTE: int = 60
 #: Per-IP/minute RECIPIENT budget on ``POST /gfs/envelope/multi`` on THIS
-#: node (an N-node cluster allows N times as much): each
-#: upload charges its number of distinct ids (:meth:`GfsEnvelopeRelay.
-#: multi_recipients_allow`; 429 past it). Equal to
-#: :data:`ENVELOPE_MAX_PER_MINUTE`, so one upload never buys more queue work
-#: than the same recipients sent one by one through ``/gfs/envelope`` —
-#: without it 60 uploads × 500 ids would be 30 000 recipients a minute. Per
-#: node, like the single route's limiter and the media byte budget.
-ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE: int = ENVELOPE_MAX_PER_MINUTE
+#: node (an N-node cluster allows N times as much): each upload charges its
+#: number of distinct ids (:meth:`GfsEnvelopeRelay.multi_recipients_allow`;
+#: 429 past it). 2400: a community's fan-out — a 200-member space where a
+#: dozen posts, comments and reactions land in one minute is 12 uploads ×
+#: 200 recipients — where the old 600 (the single route's request limit)
+#: 429'd the fourth item. Uploads stay at
+#: :data:`ENVELOPE_MULTI_MAX_PER_MINUTE` (60), so without this budget 60 ×
+#: 500 ids would be 30 000 recipients a minute.
+#:
+#: What a recipient costs this server is bounded per mailbox, not by this
+#: budget: one reference row (its wrap, ~250 B) next to a body stored ONCE
+#: per upload, charged against that mailbox's queue caps
+#: (:data:`ENVELOPE_QUEUE_MAX_PER_RECIPIENT` 2000 rows,
+#: :data:`ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT` 64 MiB, tail-drop) and the
+#: mailbox pool. Worst case from one address on one node: 60 bodies
+#: (≤ 320 KiB) + 2400 wraps a minute ≈ 19 MiB + 0.6 MiB of queue writes —
+#: the single route's 600 / min allows 600 × 320 KiB ≈ 187 MiB. A live
+#: recipient costs a socket push, not a row. Per node, like the single
+#: route's limiter and the media byte budget.
+ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE: int = 2400
 
 #: How long an undelivered envelope waits for its recipient, in seconds.
 #: 24 h: the issuing household of an invite link may simply be asleep, and an

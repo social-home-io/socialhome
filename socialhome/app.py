@@ -5501,6 +5501,7 @@ def create_app(config: Config | None = None) -> web.Application:
         await space_mailboxes.start()
         app[K.space_mailbox_service_key] = space_mailboxes
         app[K.space_member_directory_key] = member_directory
+        app[K.gfs_relay_inbound_key] = gfs_relay_inbound
         real_space_service.attach_gfs_join_requests(gfs_join_requests)
         # An approval whose redeem did not seat its person yet (the host was
         # offline, we restarted): retried now, and on every GFS reconnect.
@@ -6522,6 +6523,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # v_89 — the anonymous mailbox claim sockets and ticket loops.
         if (space_mailboxes := app.get(K.space_mailbox_service_key)) is not None:
             await space_mailboxes.stop()
+        # Relayed frames held over a budget: no more retries once the
+        # sockets that deliver them are down (before the database closes).
+        if (relay_inbound := app.get(K.gfs_relay_inbound_key)) is not None:
+            await relay_inbound.stop()
         # Before the HTTP session closes: queued sealed moment keys ride it.
         await moment_public_key_outbound.stop()
         await moment_public_outbound.stop()

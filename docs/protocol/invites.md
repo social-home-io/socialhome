@@ -589,15 +589,19 @@ HTTP surface), `global_server/routes/ws.py` (the drain on hello),
 
 Cheapest check first; every rung has its own regression test.
 
-1. **Process-wide rate limit** — before the unseal, so a flood costs a
-   list append rather than an AES-GCM open. It is the only bucket
-   available at that point, because which family a blob belongs to is
-   inside the ciphertext.
+1. **Process-wide rate limit** (3 000 / min) — before the unseal, so a
+   flood costs a list append rather than an AES-GCM open. It is the only
+   bucket available at that point, because which family a blob belongs to
+   is inside the ciphertext. Every household that reaches us through a
+   GFS shares it, so a frame over it is held and opened once it frees,
+   never dropped — the GFS already dequeued it (see
+   [gfs-relay → Inbound budgets on the household](./gfs-relay.md#inbound-budgets-on-the-household)).
 1b. **Per-family rate limit**, once the blob is open: bootstrap bodies
-   and relayed §24.11 envelopes draw on separate allowances. They share
-   this socket but not their cadences — an active space's relayed traffic
-   is orders of magnitude more frequent than invite redeems, so one
-   shared budget let either starve the other.
+   (60 / min) and relayed §24.11 envelopes (3 000 / min, held like the
+   above) draw on separate allowances. They share this socket but not
+   their cadences — an active space's relayed traffic is orders of
+   magnitude more frequent than invite redeems, so one shared budget let
+   either starve the other.
 2. **Size / shape caps** on the sealed blob.
 3. **Unseal** with our key-wrap private key; an unknown `kem_suite` is
    rejected outright, never defaulted.

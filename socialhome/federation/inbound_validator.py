@@ -14,6 +14,11 @@ Steps (in order):
 3. **Timestamp skew** — ``abs(now - envelope.timestamp) ≤ 300s`` (wider
    for a relay-carried envelope, see ``RELAY_TIMESTAMP_SKEW_SECONDS``).
 4. **Signature verify** — Ed25519 with the remote's identity_pk.
+5a. **Per-household budget** — the verified sender's envelopes per minute
+    (HTTPS inbox and GFS relay legs; a DataChannel frame is never charged),
+    after the replay check (a replayed envelope never spends it); refused
+    with :class:`InboundRateLimitedError` → ``429`` + ``Retry-After``, its
+    id taken back out of the replay cache.
 4b. **Unpair tombstone** — an ``unpairing`` sender may send ``UNPAIR``
     only; anything else is refused as an unknown instance.
 5. **Replay check** — ``msg_id`` already seen → reject.
@@ -84,6 +89,7 @@ from .multi_recipient import (
 from .space_scope import archive_refusal
 
 if TYPE_CHECKING:
+    from ..rate_limiter import RateLimiter
     from ..repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
@@ -135,6 +141,52 @@ RELAY_QUEUE_TTL_SECONDS = 24 * 60 * 60
 #: ``msg_id``. ``tests/federation/test_inbound_validator.py`` asserts the
 #: inequality so nobody can shrink the retention without noticing.
 RELAY_TIMESTAMP_SKEW_SECONDS = RELAY_QUEUE_TTL_SECONDS + TIMESTAMP_SKEW_SECONDS
+
+
+#: Per-household inbound budget (step 5a): envelopes per
+#: :data:`INSTANCE_INBOUND_WINDOW_S` one VERIFIED household may deliver to us
+#: over the HTTPS inbox and the GFS relay legs together. 600 / min (10 / s)
+#: is far above a household's steady traffic and drains a restart's backlog
+#: (capability update, sync requests, an outbox of a few hundred) inside a
+#: minute; past it the sender is told to wait, never dropped.
+#:
+#: Counted only once the signature proved who sent the envelope — never on
+#: the unauthenticated ``from_instance`` or the inbox id, so a stranger can't
+#: spend a real household's budget by naming it — and only once the replay
+#: check let it through, so a captured genuine envelope pushed again (a space
+#: member re-wrapping a multi frame, a GFS re-pushing a stored one) can't
+#: either. A refusal takes the id back out of the replay cache, so the
+#: refused envelope is taken when it comes back.
+INSTANCE_INBOUND_LIMIT = 600
+#: Media chunks (``SPACE_MEDIA_BLOB`` / ``DM_MEDIA_BLOB``) have their own
+#: per-household budget, so a video never starves a household's envelopes:
+#: 600 chunks of ≤ 512 KiB is ~300 MiB a minute, a 200 MiB video (400
+#: chunks) in one window.
+INSTANCE_MEDIA_INBOUND_LIMIT = 600
+INSTANCE_INBOUND_WINDOW_S = 60
+
+
+def instance_bucket(instance_id: str, *, media: bool) -> str:
+    """The limiter key of *instance_id*'s per-household budget (step 5a)."""
+    return f"{'fed-instance-media' if media else 'fed-instance'}:{instance_id}"
+
+
+class InboundRateLimitedError(ValueError):
+    """A verified household went over its per-household budget (step 5a).
+
+    A ``ValueError`` so every caller that refuses on one still refuses, but
+    never a final one: the inbox answers ``429`` with ``Retry-After`` (the
+    sender's outbox waits and redelivers the same ``msg_id``), and the GFS
+    relay legs hold the frame and run it again once the budget frees
+    (:class:`~socialhome.services.gfs_relay_inbound.GfsRelayInbound`) —
+    the GFS already handed it over. ``bucket`` names the budget, so a
+    holder can skip every frame waiting on the same one.
+    """
+
+    def __init__(self, message: str, *, bucket: str, retry_after_s: int) -> None:
+        super().__init__(message)
+        self.bucket = bucket
+        self.retry_after_s = retry_after_s
 
 
 class UnpairedPeerRefusedError(ValueError):
@@ -1041,6 +1093,58 @@ def make_verify_signature(*, encoder) -> InboundStep:
         raise ValueError("Invalid envelope signature")
 
     return verify_signature
+
+
+def make_check_instance_rate(
+    *,
+    limiter: RateLimiter | None,
+    media_event_types: frozenset[FederationEventType],
+) -> InboundStep:
+    """Step 4a: the verified sender's per-household budget.
+
+    Runs after :func:`make_verify_signature` (which bound ``from_instance``
+    to the key that signed) and straight after :func:`make_check_replay` (a
+    replay is refused there, never charged). A refusal calls
+    ``ctx.replay_undo`` — nothing about the envelope is kept, so its
+    redelivery with the same ``msg_id`` is taken. One bucket per household for envelopes
+    (:data:`INSTANCE_INBOUND_LIMIT`) and one for media chunks
+    (:data:`INSTANCE_MEDIA_INBOUND_LIMIT`), whatever inbox or GFS carried
+    them — each envelope runs this chain once, so it is counted once.
+
+    Charged only where a refusal is redelivered: the HTTPS inbox
+    (``ctx.inbox_id``; ``429`` + ``Retry-After``, the outbox waits) and the
+    GFS relay legs (:data:`RELAY_TRANSPORTS`; the frame is held and run
+    again). A DataChannel frame is neither charged nor refused: the channel
+    has no redelivery (a refusal would lose the frame), and it is read one
+    frame at a time, so a peer can't outrun our processing on it anyway.
+    No limiter wired → no budget.
+    """
+    media_values = frozenset(t.value for t in media_event_types)
+
+    async def check_instance_rate(ctx: InboundContext) -> None:
+        if limiter is None:
+            return
+        if not ctx.inbox_id and ctx.transport not in RELAY_TRANSPORTS:
+            return
+        sender = str(ctx.envelope.get("from_instance") or "")
+        media = ctx.envelope.get("event_type") in media_values
+        limit = INSTANCE_MEDIA_INBOUND_LIMIT if media else INSTANCE_INBOUND_LIMIT
+        bucket = instance_bucket(sender, media=media)
+        if limiter.is_allowed(bucket, limit=limit, window_s=INSTANCE_INBOUND_WINDOW_S):
+            return
+        if ctx.replay_undo is not None:
+            ctx.replay_undo()
+            ctx.replay_undo = None
+        raise InboundRateLimitedError(
+            f"Rate limited: {sender!r} over its inbound budget",
+            bucket=bucket,
+            retry_after_s=limiter.retry_after_s(
+                bucket, window_s=INSTANCE_INBOUND_WINDOW_S
+            )
+            or 1,
+        )
+
+    return check_instance_rate
 
 
 def make_check_replay(*, replay_cache) -> InboundStep:

@@ -290,8 +290,17 @@ BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE: str = (
 #: * a **per-family** bucket once the blob is open, because two unrelated
 #:   traffic classes ride this one socket (see below);
 #: * a **per-sender** bucket checked once the body's identity has been
-#:   verified, so one household can't burn the global budget alone.
-BOOTSTRAP_INBOUND_LIMIT: int = 600
+#:   verified, so one household can't burn the global budget alone (for a
+#:   relayed §24.11 envelope that is the pipeline's per-household budget,
+#:   §24.11 step 5a, 600 / min).
+#:
+#: The process-wide ceiling is shared by EVERY household that reaches us
+#: over a GFS — every member seated from an invite link or a directory, and
+#: every paired peer on the relay fallback — so it is sized for a community
+#: (3000 / min: five households at their full per-household budget at once),
+#: not for one sender. Over it a frame is held and run once it frees, never
+#: dropped (``services/gfs_relay_inbound.py``, "Held, not dropped").
+BOOTSTRAP_INBOUND_LIMIT: int = 3000
 BOOTSTRAP_INBOUND_WINDOW_S: int = 60
 BOOTSTRAP_PER_SENDER_LIMIT: int = 30
 BOOTSTRAP_PER_SENDER_WINDOW_S: int = 60
@@ -305,9 +314,10 @@ BOOTSTRAP_PER_SENDER_WINDOW_S: int = 60
 #: space). Sharing one allowance meant an active space could starve every
 #: redeem attempt, and a redeem flood could stall a space's federation.
 #: They now draw on separate buckets, both still under the process-wide
-#: pre-unseal shed above.
+#: pre-unseal shed above. The envelope family is that ceiling's size: it is
+#: nearly all of the traffic.
 BOOTSTRAP_BODY_INBOUND_LIMIT: int = 60
-RELAY_ENVELOPE_INBOUND_LIMIT: int = 600
+RELAY_ENVELOPE_INBOUND_LIMIT: int = 3000
 
 
 @dataclass(slots=True, frozen=True)

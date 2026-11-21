@@ -106,6 +106,7 @@ from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..peer_http import post_to_peer
+from ..rate_limiter import RateLimiter
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
 from ..task_drain import wait_tasks_done
@@ -134,6 +135,7 @@ from .inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
+    make_check_instance_rate,
     make_check_mailbox_sender,
     make_check_multi_recipient,
     make_check_peer_class,
@@ -465,6 +467,7 @@ class FederationService:
         "_http_client",
         "_ice_servers",
         "_idempotency_cache",
+        "_inbound_limiter",
         "_inbound_pipeline",
         "_inbound_retry",
         "_key_manager",
@@ -686,6 +689,9 @@ class FederationService:
         )
         # §24.11 inbound validation pipeline (middleware chain).
         self._inbound_pipeline = None  # lazy-built on first use
+        # Step 4a's per-household budgets (``make_check_instance_rate``):
+        # one in-memory window per verified sender, shared by every pipeline.
+        self._inbound_limiter = RateLimiter()
         self._media_https_inbound_pipeline = None  # lazy-built on first frame
         # Per-peer memory of the binary HTTPS media leg: a peer whose inbox
         # keeps refusing binary bodies gets JSON only for a while.
@@ -917,6 +923,16 @@ class FederationService:
             # pull our queued UNPAIR forward.
             make_check_unpairing(on_refused=self._on_tombstone_contact),
             make_check_replay(replay_cache=self._replay_cache),
+            # Per-household budget (step 5a): after the signature (a forged
+            # envelope never spends a real household's budget) and after the
+            # replay check (a captured genuine envelope pushed again is refused
+            # as a replay, never charged to its sender). A refusal takes the id
+            # back out of the replay cache, so the 429'd / held envelope is
+            # taken when it comes back with the same msg_id.
+            make_check_instance_rate(
+                limiter=self._inbound_limiter,
+                media_event_types=MEDIA_HTTPS_EVENT_TYPES,
+            ),
             make_decrypt_and_parse(
                 key_manager=self._key_manager,
                 encoder=self._encoder,
@@ -944,6 +960,11 @@ class FederationService:
         # redelivering.
         steps.extend(self.post_decrypt_gate_steps())
         return steps
+
+    @property
+    def inbound_limiter(self) -> RateLimiter:
+        """The per-household inbound budgets (§24.11 step 5a)."""
+        return self._inbound_limiter
 
     @property
     def pending_pairings(self) -> PendingPairings:
