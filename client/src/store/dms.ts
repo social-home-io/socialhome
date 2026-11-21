@@ -298,6 +298,11 @@ export function wireDmWs(): void {
   // A conversation someone started with the viewer: its row comes from
   // the server (members, name), on the same refetch budget.
   ws.on('dm.conversation.created', () => { listRefresh.trigger() })
+  // Reads on another device send no frame: catch up once when the tab
+  // comes back (the counts may have dropped while it was away).
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && rowsLoaded) listRefresh.trigger()
+  })
   ws.on('dm.message_reaction', (e) => {
     // The frame is a patch: ``{conversation_id, message_id, user_id,
     // emoji, action}``. The previous code cloned the array but never

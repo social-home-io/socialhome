@@ -126,6 +126,14 @@ describe('wireDmWs — local unread count', () => {
     expect(dmUnreadTotal.value).toBe(0)
   })
 
+  it('coming back to the tab resyncs the list once (reads on another device)', async () => {
+    await vi.advanceTimersByTimeAsync(10_000)
+    apiGet.mockClear()
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    expect(apiGet).toHaveBeenCalledWith('/api/conversations')
+  })
+
   it('unknown conversations refetch at most once per 5 s, with one trailing refetch', async () => {
     // A burst of new conversations (first messages) …
     for (let i = 0; i < 10; i++) emit('dm.message', frame(`new-${i}`, `m-${i}`))
