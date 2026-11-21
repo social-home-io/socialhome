@@ -121,4 +121,26 @@ describe('DmInboxPage', () => {
     // Calls tab renders the empty-state header from CallsTab.
     expect(await findByText('No active calls')).toBeTruthy()
   })
+
+  it('a new message updates its row from the frame, without refetching the list', async () => {
+    const { findByText, container } = await renderAt('/dms', [
+      { ...FIXTURES[0], unread: 0 },
+      { id: 'c-dm-2', type: 'dm', members: [{ user_id: 'p4', display_name: 'Dora', picture_url: null }],
+        last_message_at: null, name: null, member_count: 2, unread: 0, muted_until: null },
+    ])
+    await findByText('Dora')
+    const { ws } = await import('@/ws')
+    // The inbox page itself listens to no message frame: the store does.
+    const onCalls = (ws.on as unknown as { mock: { calls: [string][] } }).mock.calls
+    expect(onCalls.map(c => c[0])).not.toContain('dm.message')
+    const gets = apiGet.mock.calls.filter(c => c[0] === '/api/conversations').length
+    // What the store's frame handler does for a message in Dora's chat.
+    const dms = await import('@/store/dms')
+    dms.applyConversationRows(dms.conversationRows.value.map(r =>
+      r.id === 'c-dm-2' ? { ...r, unread: 2 } : r))
+    await waitFor(() => {
+      expect(container.querySelector('.sh-dm-unread')?.textContent).toBe('2')
+    })
+    expect(apiGet.mock.calls.filter(c => c[0] === '/api/conversations').length).toBe(gets)
+  })
 })

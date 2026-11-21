@@ -11,10 +11,7 @@
 import { useEffect } from 'preact/hooks'
 import { signal, computed } from '@preact/signals'
 import { useLocation } from 'preact-iso'
-import { api } from '@/api'
-import { ws } from '@/ws'
-import { alertingUnread, dmUnreadTotal, isSystemChatFrame } from '@/store/dms'
-import type { Conversation } from '@/types'
+import { conversationRows, loadDmUnread } from '@/store/dms'
 import { DmInboxSkeleton } from '@/components/Skeleton'
 import { Button } from '@/components/Button'
 import { TabHeader } from '@/components/TabHeader'
@@ -39,15 +36,14 @@ const tabLabels = (): Readonly<Record<ChatsTab, string>> => ({
   calls:  t('calls.title'),
 })
 
-const conversations = signal<Conversation[]>([])
 const loading = signal(true)
 const activeTab = signal<ChatsTab>('dms')
 
 const dmsList = computed(() =>
-  conversations.value.filter((c) => c.type !== 'group_dm'),
+  conversationRows.value.filter((c) => c.type !== 'group_dm'),
 )
 const groupsList = computed(() =>
-  conversations.value.filter((c) => c.type === 'group_dm'),
+  conversationRows.value.filter((c) => c.type === 'group_dm'),
 )
 
 
@@ -72,13 +68,10 @@ export default function DmInboxPage() {
   }, [loc.url])
 
   useEffect(() => {
+    // One fresh list on open. After that the store keeps the rows live
+    // from the ``dm.message`` frames (count, time, order) and refetches
+    // only for a conversation it has no row for — never per message.
     void reload().finally(() => { loading.value = false })
-    // Refresh on any DM frame the server fans out — new conversations
-    // and new messages both bump ``last_message_at`` ordering.
-    // A system chat (household / space) is never in the inbox.
-    const offMsg  = ws.on('dm.message', (e) => { if (!isSystemChatFrame(e.data)) void reload() })
-    const offConv = ws.on('dm.conversation.created', () => { void reload() })
-    return () => { offMsg(); offConv() }
   }, [])
 
   const onSelectTab = (tab: ChatsTab) => {
@@ -238,16 +231,7 @@ export default function DmInboxPage() {
 }
 
 
-const reload = () =>
-  api
-    .get('/api/conversations')
-    .then((data: Conversation[]) => {
-      conversations.value = data
-      // Re-sum the sidebar badge from the just-fetched payload so the
-      // inbox and the badge can never drift while this page is open.
-      // Muted conversations keep their row count but stay out of it.
-      dmUnreadTotal.value = alertingUnread(data)
-    })
-    .catch(() => {
-      /* noop — keep current list on transient failures */
-    })
+/** The list and the sidebar badge from one fetch, so they never drift
+ *  (muted conversations keep their row count but stay out of the badge).
+ *  A transient failure keeps the current list. */
+const reload = () => loadDmUnread()

@@ -58,6 +58,8 @@ import {
 } from '@/store/conversationMembers'
 import { emojiByShortcode } from '@/data/emojis'
 import { currentUser } from '@/store/auth'
+import { isSystemChatFrame, noteConversationRead } from '@/store/dms'
+import { createLiveThrottle, type LiveThrottle } from '@/utils/liveThrottle'
 import { useTitle, useTitleAvatar, type PageAvatar } from '@/store/pageTitle'
 import { normaliseTimestamp } from '@/utils/relativeTime'
 import { addBase } from '@/baseUrl'
@@ -388,11 +390,38 @@ function metaToThreadInfo(meta: ConversationMeta): ThreadInfo {
  *  receipts off the server is told ``{receipt: false}`` and writes no
  *  read tick. Fire-and-forget. */
 export function markThreadRead(convId: string): void {
+  // The Chats badge drops at once; the server hears it at most every 2 s.
+  noteConversationRead(convId)
+  let throttle = readThrottles.get(convId)
+  if (!throttle) {
+    throttle = createLiveThrottle(() => postThreadRead(convId), { minGapMs: READ_MIN_GAP_MS })
+    readThrottles.set(convId, throttle)
+  }
+  throttle.trigger()
+}
+
+/** At most one ``/read`` per thread per this gap. A busy space chat marks
+ *  read on every message at the live edge — 200 members × one message is
+ *  200 writes; throttled, a burst is one post now and one trailing post.
+ *  The server marks up to its own "now", so the trailing post always
+ *  covers the newest message. */
+export const READ_MIN_GAP_MS = 2_000
+const readThrottles = new Map<string, LiveThrottle>()
+
+/** Send a pending trailing ``/read`` now — the thread is being left, so
+ *  the inbox it lands on reads the watermark already advanced. */
+export function flushThreadRead(convId: string): void {
+  readThrottles.get(convId)?.flush()
+}
+
+function postThreadRead(convId: string): void {
   const path = `/api/conversations/${convId}/read`
   const req = readReceiptsEnabled.value
     ? api.post(path)
     : api.post(path, { receipt: false })
-  void Promise.resolve(req).catch(() => {})
+  // Again once the server has it: a frame counted in between (the
+  // store's handler runs before ours) must not leave the badge up.
+  void Promise.resolve(req).then(() => noteConversationRead(convId), () => {})
 }
 
 /** Own, sent, not deleted, and text the sender wrote: a text message or a
@@ -1254,9 +1283,13 @@ export function ConversationView({
       }
       if (!next.some(m => m.id === msg.id)) {
         next = [...next, msg]
-        if (!mine && readReceiptsEnabled.value) {
-          // Ack delivery as soon as the frame lands. The server upsert
-          // is idempotent; a later ``read`` supersedes.
+        // Ack delivery as soon as the frame lands (1:1 and group DMs).
+        // Never in a space or household chat: there every member would
+        // write one row per message (a 200-member chat, 200 writes a
+        // message) for a grey tick a ``read`` supersedes moments later.
+        if (!mine && readReceiptsEnabled.value
+            && !metaRef.current && !isSystemChatFrame(evt.data)) {
+          // The server upsert is idempotent; a later ``read`` supersedes.
           api.post(
             `/api/conversations/${convId}/messages/${msg.id}/delivered`,
           ).catch(() => {})
@@ -1426,6 +1459,7 @@ export function ConversationView({
       // This store's thread is off screen once this runs — a page that
       // lands now has nowhere it legitimately belongs.
       s.active = false
+      flushThreadRead(convId)
       offNewMsg(); offMediaReady(); offMessageUpdated(); offMessageDeleted()
       offReaction(); offGroupUpdated()
       offUserOnline(); offUserIdle(); offUserOffline()

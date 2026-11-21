@@ -76,6 +76,11 @@ import { resolveAvatar } from '@/utils/avatar'
 import { emptyFeedBodyKey } from './spaceFeedEmpty'
 import { personLabel } from '@/utils/names'
 import { titleEmoji } from './spaceGlyph'
+import { applySpacePostCreated } from './spaceFeedLive'
+import { createLiveThrottle } from '@/utils/liveThrottle'
+
+/** At most one whole-feed refetch per this gap for live frames. */
+const SPACE_FEED_REFRESH_GAP_MS = 5_000
 
 interface SpaceDetail {
   id: string
@@ -322,9 +327,18 @@ export default function SpaceFeedPage() {
       .finally(() => { loading.value = false })
     void loadSpaceHeader(spaceId)
 
+    // A new post lands from its frame (``spaceFeedLive.ts``); only one
+    // the frame can't render refetches, at most once per 5 s.
+    const feedRefresh = createLiveThrottle(
+      () => { loadSpaceFeed(spaceId).catch(() => {}) },
+      { minGapMs: SPACE_FEED_REFRESH_GAP_MS, startAt: Date.now(), pauseWhileHidden: true },
+    )
     const off4 = ws.on('space.post.created', (e) => {
-      const d = e.data as { space_id?: string | null }
-      if (d.space_id === spaceId) void loadSpaceFeed(spaceId)
+      const d = e.data as { space_id?: string | null; post?: unknown }
+      if (d.space_id !== spaceId) return
+      const next = applySpacePostCreated(posts.value, d.post)
+      if (next === 'refetch') feedRefresh.trigger()
+      else if (next) posts.value = next
     })
     // Live comment counts — the space analogue of store/feed.ts. The
     // frame fans out to space members as
@@ -358,6 +372,7 @@ export default function SpaceFeedPage() {
     })
     return () => {
       off4()
+      feedRefresh.cancel()
       offComment()
       offModerated()
       offEventDeleted()
