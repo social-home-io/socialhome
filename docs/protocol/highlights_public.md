@@ -783,7 +783,7 @@ GFS bundle alone, or `pnpm build` for both.
   token, so a stolen token cannot be used to enumerate other
   highlights on the same instance.
 - Per-IP rate-limit on the public landing path uses the existing
-  `build_listing_rate_limit()` middleware (30/min/IP). CORS adds no way
+  `build_listing_rate_limit()` middleware (120/min/IP). CORS adds no way
   around the per-IP limit on the anonymous offer / relay GET (20/min/IP);
   their `429` carries `Access-Control-Allow-Origin` so the page can say so.
 - Author can pull every token instantly via `unpublish`. There's no

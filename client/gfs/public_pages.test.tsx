@@ -154,6 +154,12 @@ describe('space page', () => {
     await waitFor(() => expect(container.querySelector('h1')?.textContent).toBe('Garden Club'))
   })
 
+  it('does not try again on its own before the GFS said to', async () => {
+    answer = () => new Response('{}', { status: 429, headers: { 'Retry-After': '45' } })
+    const { container } = render(<PublicPage boot={boot} />)
+    await waitFor(() => expect(container.textContent).toContain('Trying again in 45 s.'))
+  })
+
   it('says busy without a readable wait, in the visitor’s language', async () => {
     setLocale('de')
     answer = () => json({ error: 'rate_limited' }, 429)

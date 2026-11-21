@@ -26,7 +26,11 @@ import orjson
 import pytest
 from aiohttp.test_utils import TestServer
 
-from socialhome.domain.events import SpaceJoinRequested, SpaceMemberJoined
+from socialhome.domain.events import (
+    RemoteJoinRequestBusy,
+    SpaceJoinRequested,
+    SpaceMemberJoined,
+)
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -1000,6 +1004,146 @@ async def test_a_request_with_no_usable_expiry_is_swept(households, gfs):
         )
     assert await b.space_service.expire_due_join_requests() == 2
     assert await b.space_repo.list_pending_join_requests(space.id) == []
+
+
+# ─── A room asks at once: capacity refusals are answered ─────────────────
+
+
+def test_the_budgets_fit_a_meetup():
+    """40 households asking within minutes, and every edge-of-area join of
+    a local community, land here: the per-space budget and the pending cap
+    are sized for a room; the per-sender budget stays tight (the sender is
+    signature-verified)."""
+    assert gfs_join_module.PER_SPACE_LIMIT == 120
+    assert gfs_join_module.PER_SPACE_WINDOW_S == 3600
+    assert gfs_join_module.MAX_PENDING_PER_SPACE == 200
+    assert gfs_join_module.PER_SENDER_LIMIT == 10
+    assert gfs_join_module.PER_SENDER_WINDOW_S == 3600
+
+
+async def _answers_to(gfs, household) -> int:
+    await gfs.drain()
+    return sum(1 for to, _body in gfs.mailbox if to == household.instance_id)
+
+
+async def test_a_full_space_tells_the_applicant_it_is_busy(households, gfs):
+    """Past the pending cap the host answers "busy" instead of dropping the
+    request: the applicant's request ends at once (no 7-day wait), the
+    person is told, and they can ask again."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    told: list[RemoteJoinRequestBusy] = []
+    a.bus.subscribe(RemoteJoinRequestBusy, told.append)
+    with patch.object(gfs_join_module, "MAX_PENDING_PER_SPACE", 0):
+        rid = await _ask(a, b, space)
+        await _settle(gfs, a, b)
+    assert await b.space_repo.list_pending_join_requests(space.id) == []
+    row = await a.space_repo.get_join_request(rid)
+    assert row["status"] == "expired"
+    assert [(e.request_id, e.space_id) for e in told] == [(rid, space.id)]
+    assert await a.space_service.list_busy_join_request_space_ids(a.user_id) == [
+        space.id
+    ]
+    assert space.id not in await a.space_service.list_pending_join_request_space_ids(
+        a.user_id
+    )
+
+    # They ask again once there is room: filed, and no longer "busy".
+    again = await _ask(a, b, space)
+    await _settle(gfs, a, b)
+    assert [
+        r["id"] for r in await b.space_repo.list_pending_join_requests(space.id)
+    ] == [again]
+    assert await a.space_service.list_busy_join_request_space_ids(a.user_id) == []
+
+
+async def test_a_spent_space_budget_tells_the_applicant_it_is_busy(households, gfs):
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    b.gfsjoin.join._rate_limiter = RateLimiter()
+    with patch.object(gfs_join_module, "PER_SPACE_LIMIT", 1):
+        # Someone else spent this hour's budget.
+        await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id="early", request_id="early")
+        )
+        rid = await _ask(a, b, space)
+        await _settle(gfs, a, b)
+    assert [
+        r["id"] for r in await b.space_repo.list_pending_join_requests(space.id)
+    ] == ["early"]
+    assert (await a.space_repo.get_join_request(rid))["status"] == "expired"
+    assert await a.space_service.list_busy_join_request_space_ids(a.user_id) == [
+        space.id
+    ]
+
+
+async def test_banned_repeat_and_closed_are_still_dropped_without_a_word(
+    households, gfs
+):
+    """Only capacity refusals are answered: a banned person, a repeat and a
+    space that takes no requests get nothing back, as before."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    closed = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Closed",
+        space_type=SpaceType.GLOBAL,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    await b.space_repo.ban_member(space.id, "banned-u", banned_by=b.user_id)
+    filed = await b.gfsjoin.join.handle_body(
+        _signed(a, space_id=space.id, user_id="repeat-u", request_id="first")
+    )
+    assert filed["filed"] is True
+    before = await _answers_to(gfs, a)
+    for body in (
+        _signed(a, space_id=space.id, user_id="banned-u", request_id="ban"),
+        _signed(a, space_id=space.id, user_id="repeat-u", request_id="again"),
+        _signed(a, space_id=closed.id, user_id="c", request_id="closed"),
+        _signed(a, space_id="sp-unknown", user_id="u", request_id="unknown"),
+    ):
+        out = await b.gfsjoin.join.handle_body(body)
+        assert out == {"ok": True, "filed": False}
+    assert await _answers_to(gfs, a) == before
+
+
+async def test_busy_answers_are_bounded_per_space(households, gfs):
+    """A flood at a full space (fresh keypairs pass the per-sender budget)
+    gets at most the space's budget of answers an hour; the rest are
+    dropped as before."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    b.gfsjoin.join._rate_limiter = RateLimiter()
+    with (
+        patch.object(gfs_join_module, "MAX_PENDING_PER_SPACE", 0),
+        patch.object(gfs_join_module, "PER_SPACE_LIMIT", 2),
+        patch.object(gfs_join_module, "PER_SENDER_LIMIT", 100),
+    ):
+        outs = [
+            await b.gfsjoin.join.handle_body(
+                _signed(a, space_id=space.id, user_id=f"u{n}", request_id=f"r{n}")
+            )
+            for n in range(5)
+        ]
+    assert [o.get("busy", False) for o in outs] == [True, True, False, False, False]
+    assert await _answers_to(gfs, a) == 2
+
+
+async def test_a_busy_answer_for_no_pending_request_is_dropped(households, gfs):
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    rid = await _ask(a, b, space)
+    await _settle(gfs, a, b)
+    body = _signed(
+        b,
+        kind=KIND_JOIN_REQUEST_ANSWER,
+        request_id=rid,
+        space_id="sp-other",
+        answer="busy",
+    )
+    with pytest.raises(ValueError, match="no pending request"):
+        await a.gfsjoin.join.handle_body(body)
+    assert (await a.space_repo.get_join_request(rid))["status"] == "pending"
 
 
 def test_a_version_that_is_no_number_reads_as_one():

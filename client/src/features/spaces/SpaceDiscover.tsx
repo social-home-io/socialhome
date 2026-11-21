@@ -81,15 +81,17 @@ async function loadDiscover(): Promise<{ lists: Lists; failed: Set<DiscoverSourc
     soft(null, api.get('/api/me/subscriptions'), { subscriptions: [] as MySubscription[] }),
     soft(null, api.get('/api/me/join-requests'), {
       pending_space_ids: [] as string[], joining_space_ids: [] as string[],
+      busy_space_ids: [] as string[],
     }),
     soft<GfsConnection[] | null>(null, api.get('/api/gfs/connections'), null),
   ])
   const subIds = new Set(((rawSubs as { subscriptions?: MySubscription[] }).subscriptions ?? []).map((s) => s.space_id))
   const pendingIds = new Set((rawPending as { pending_space_ids?: string[] }).pending_space_ids ?? [])
   const joiningIds = new Set((rawPending as { joining_space_ids?: string[] }).joining_space_ids ?? [])
+  const busyIds = new Set((rawPending as { busy_space_ids?: string[] }).busy_space_ids ?? [])
   const household = buildHouseholdEntries(Array.isArray(rawHome) ? rawHome : [], { subIds, pendingIds })
   const homeIds = new Set(household.map((e) => e.space_id))
-  const mine = { memberIds: new Set<string>(), subIds, pendingIds, joiningIds }
+  const mine = { memberIds: new Set<string>(), subIds, pendingIds, joiningIds, busyIds }
   // A space this household hosts is listed under Your household only.
   const remote = (rows: DirectoryEntry[]) => (Array.isArray(rows) ? rows : []).filter((e) => !homeIds.has(e.space_id))
   const lists: Lists = {
@@ -177,7 +179,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
     setLists((prev) => {
       const next = { ...prev }
       for (const k of DISCOVER_SOURCES) {
-        next[k] = prev[k].map((e) => (e.space_id === id ? { ...e, request_pending: true } : e))
+        next[k] = prev[k].map((e) => (e.space_id === id ? { ...e, request_pending: true, request_busy: false } : e))
       }
       return next
     })
@@ -375,6 +377,25 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
               ? [areaShortLabel(radius), verdict ? localAreaVerdictText(verdict) : null]
                 .filter(Boolean).join(' · ')
               : hint ? hintLabel(hint) : ''
+            // The host had no room for our last request: say so next to
+            // "Ask to join" (asking again clears it).
+            const busyText = e.request_busy && a === 'request' ? t('spaces.discover.busy') : ''
+            const placeNote = radius !== null ? (
+              <>
+                <span class="sh-local-area-chip">🏘️ {areaShortLabel(radius)}</span>
+                {verdict && <LocalAreaBadge verdict={verdict} />}
+              </>
+            ) : hint ? (
+              <span class={`sh-place-hint sh-place-hint--${hint.kind}`} data-testid="place-hint">
+                <span aria-hidden="true">📍</span> {hintLabel(hint)}
+              </span>
+            ) : null
+            const busyNote = busyText ? (
+              <span class="sh-place-hint sh-join-busy" data-testid="join-busy">
+                <span aria-hidden="true">⏳</span> {busyText}
+              </span>
+            ) : null
+            const rowLabel = [e.name, meta, areaText, busyText].filter(Boolean).join(', ')
             return (
               <SpaceListRow
                 key={e.space_id}
@@ -383,17 +404,8 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
                 name={e.name}
                 meta={meta}
                 muted={verdict === 'outside'}
-                note={radius !== null ? (
-                  <>
-                    <span class="sh-local-area-chip">🏘️ {areaShortLabel(radius)}</span>
-                    {verdict && <LocalAreaBadge verdict={verdict} />}
-                  </>
-                ) : hint && (
-                  <span class={`sh-place-hint sh-place-hint--${hint.kind}`} data-testid="place-hint">
-                    <span aria-hidden="true">📍</span> {hintLabel(hint)}
-                  </span>
-                )}
-                label={areaText ? `${e.name}, ${meta}, ${areaText}` : `${e.name}, ${meta}`}
+                note={placeNote || busyNote ? <>{placeNote}{busyNote}</> : null}
+                label={rowLabel}
                 action={a && (
                   <Button
                     variant="secondary"

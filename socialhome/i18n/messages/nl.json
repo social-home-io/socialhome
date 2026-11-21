@@ -388,6 +388,8 @@
   "notification.pairing.requested": "{household} wil met je huishouden koppelen",
   "notification.space.join.approved_remote": "Je aanvraag voor {space_name} is goedgekeurd",
   "notification.space.join.approved_remote_unnamed": "Je deelname-aanvraag is goedgekeurd",
+  "notification.space.join.busy": "{space_name} is nu te druk — probeer het later opnieuw",
+  "notification.space.join.busy_unnamed": "De space is nu te druk — probeer het later opnieuw",
   "notification.push.generic": "Nieuwe melding",
   "notification.post.replied": "{author} reageerde op je bericht",
   "notification.space.post.replied": "{author} reageerde op je bericht in {space_name}",

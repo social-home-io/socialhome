@@ -246,6 +246,16 @@ describe('SpacePublicDetailPage — a GFS-listed space whose household we never 
     expect(container.textContent).not.toMatch(/Connect|Connections|pair/i)
   })
 
+  it('a host too busy for the last request says so, and asking again clears it', async () => {
+    cacheDirectoryEntries([{ ...far(false, 'request'), request_busy: true }])
+    api.post.mockResolvedValue({ request_id: 'r-2' })
+    const { container, getByText, findByText } = await renderPage()
+    await findByText(/This space is busy right now\. Try again later\./)
+    fireEvent.click(getByText('Request to join'))
+    fireEvent.click(await findByText('Send request'))
+    await waitFor(() => expect(container.textContent).not.toContain('This space is busy right now'))
+  })
+
   it('offers Follow when the space takes followers', async () => {
     cacheDirectoryEntries([far(true)])
     const { container, getByText } = await renderPage()

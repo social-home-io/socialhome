@@ -1084,6 +1084,10 @@ export interface DirectoryEntry {
   /** Asked through the GFS, approved, the seat still being made (v_84):
    *  "Approved, joining…" instead of "Requested". */
   request_joining?: boolean
+  /** Asked through the GFS lately and the host answered "busy" (no room
+   *  for more requests right now), not asked again since: "Ask to join"
+   *  with a "try again later" note. */
+  request_busy?: boolean
   /** Global rows only (v_84): the GFS listing carries a verified join
    *  contact for its host, so "Ask to join" goes through the GFS without a
    *  pairing. */

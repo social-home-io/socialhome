@@ -380,6 +380,9 @@ export default function SpacePublicDetailPage() {
           </Button>
         </div>
       )}
+      {action === 'request' && entry.request_busy && (
+        <p class="sh-muted sh-space-public__busy-note" role="status"><span aria-hidden="true">⏳</span> {t('space.public.busy')}</p>
+      )}
       {joining && entry.scope === 'global' && (
         <p class="sh-muted sh-space-public__rules-note">{t('space.public.follow_rules')}</p>
       )}

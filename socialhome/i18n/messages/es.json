@@ -388,6 +388,8 @@
   "notification.pairing.requested": "{household} quiere vincularse con tu hogar",
   "notification.space.join.approved_remote": "Tu solicitud para unirte a {space_name} fue aprobada",
   "notification.space.join.approved_remote_unnamed": "Tu solicitud de ingreso fue aprobada",
+  "notification.space.join.busy": "{space_name} está saturado ahora mismo: vuelve a intentarlo más tarde",
+  "notification.space.join.busy_unnamed": "El espacio está saturado ahora mismo: vuelve a intentarlo más tarde",
   "notification.push.generic": "Nueva notificación",
   "notification.post.replied": "{author} comentó tu publicación",
   "notification.space.post.replied": "{author} comentó tu publicación en {space_name}",

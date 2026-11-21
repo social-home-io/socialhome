@@ -134,6 +134,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.dm_mention_many_household
  *   notifications.row.space_join_approved_none
  *   notifications.row.space_join_denied_none
+ *   notifications.row.space_join_busy_none
  *   notifications.row.space_ownership_transferred_none
  *   notifications.row.space_location_enabled_none
  *   notifications.row.space_admins_reconfirm_none
@@ -201,6 +202,7 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   dm_mention: { chat: true },
   space_join_approved: { none: true, noActor: true },
   space_join_denied: { none: true, noActor: true },
+  space_join_busy: { none: true, noActor: true },
   space_ownership_transferred: { none: true, noActor: true },
   space_location_enabled: { none: true, noActor: true },
   space_admins_reconfirm: { none: true, noActor: true },

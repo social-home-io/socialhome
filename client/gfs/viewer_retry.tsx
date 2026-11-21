@@ -48,12 +48,16 @@ export function ViewerError({
   message,
   detail,
   retry,
+  minWaitMs = 0,
   class: className,
 }: {
   message: string
   /** A second line under the message: what to do about it. */
   detail?: string
   retry: RetryControl
+  /** The server asked to wait at least this long (``Retry-After``): the
+   *  automatic retry never comes sooner. */
+  minWaitMs?: number
   class?: string
 }) {
   const button = useRef<HTMLButtonElement | null>(null)
@@ -65,7 +69,10 @@ export function ViewerError({
   }, [])
 
   // Read once: the budget only moves on a retry, which re-mounts this.
-  const [autoDelay] = useState(retry.nextAutoDelayMs)
+  const [autoDelay] = useState(() => {
+    const next = retry.nextAutoDelayMs()
+    return next === null ? null : Math.max(next, minWaitMs)
+  })
 
   useEffect(() => {
     const delay = autoDelay

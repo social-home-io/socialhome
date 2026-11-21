@@ -464,6 +464,9 @@ class AbstractSpaceRepo(Protocol):
     async def list_pending_gfs_join_requests(
         self, *, space_id: str | None = None
     ) -> list[dict]: ...
+    async def list_recent_gfs_join_requests(
+        self, user_id: str, *, status: str, within_hours: int
+    ) -> list[dict]: ...
 
     # ── Sidebar + aliases ──────────────────────────────────────────────
     async def pin_sidebar(
@@ -3160,6 +3163,22 @@ class SqliteSpaceRepo:
                 " ORDER BY requested_at",
                 (space_id,),
             )
+        return rows_to_dicts(rows)
+
+    async def list_recent_gfs_join_requests(
+        self, user_id: str, *, status: str, within_hours: int
+    ) -> list[dict]:
+        """*user_id*'s requests that crossed the GFS (``gfs_relay`` set) and
+        were answered *status* in the last *within_hours*, newest first —
+        the applicant's "busy" answers. The caller tells our own copies
+        (``gfs_relay`` side ``applicant``) from a host's."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM space_join_requests"
+            " WHERE user_id=? AND status=? AND gfs_relay IS NOT NULL"
+            " AND reviewed_at >= datetime('now', ?)"
+            " ORDER BY reviewed_at DESC",
+            (user_id, status, f"-{int(within_hours)} hours"),
+        )
         return rows_to_dicts(rows)
 
     async def list_pending_join_requests(

@@ -604,7 +604,7 @@ def busy_page_response(retry_after: int) -> web.Response:
     <h1>Busy right now</h1>
     <p>Lots of people are opening this page from the same network \u2014
     try again in {retry_after} seconds.</p>
-    <p><a href="">Reload the page</a></p>""",
+    <p><a class="reload" href="">Reload the page</a></p>""",
     )
     resp = html_response(html, inline_styles=[css], status=429)
     resp.headers["Retry-After"] = str(retry_after)
@@ -1373,6 +1373,10 @@ def _invite_page_html(*, title: str, accent: str, body: str) -> tuple[str, str]:
                        border-radius: 8px; }}
     {_COPY_WIDGET_CSS}
     .muted {{ color: var(--ink-soft); font-size: 13px; }}
+    /* The busy page's reload link: a real tap target on a phone. */
+    a.reload {{ display: inline-block; min-height: 44px; box-sizing: border-box;
+                padding: 11px 20px; border-radius: 8px; font-weight: 600;
+                background: var(--primary); color: #fff; text-decoration: none; }}
 """
     html = f"""<!doctype html>
 <html lang="en">

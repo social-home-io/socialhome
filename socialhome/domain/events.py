@@ -1805,6 +1805,18 @@ class RemoteJoinRequestDenied(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class RemoteJoinRequestBusy(DomainEvent):
+    """The host of a global space we asked to join through the GFS refused
+    the request for capacity — too many requests waiting or arriving — and
+    said so ("busy, try again later"). No admin saw it; the person may ask
+    again."""
+
+    request_id: str
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteSpaceInviteAccepted(DomainEvent):
     """Local record that a remote user accepted our private-space invite
     (§D1b). Drives notifications + UI refresh on the host.

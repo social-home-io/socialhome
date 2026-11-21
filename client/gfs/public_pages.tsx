@@ -403,7 +403,7 @@ type State =
   | { status: 'loading' }
   | { status: 'ready'; data: SpacePageData | InvitePageData | PersonPageData }
   | { status: 'not_found'; serverName: string }
-  | { status: 'error'; message: string }
+  | { status: 'error'; message: string; waitMs?: number }
 
 function title(boot: PageBoot, state: State): string {
   const server = state.status === 'ready'
@@ -433,7 +433,9 @@ function PageView({ boot, retry }: { boot: PageBoot; retry: RetryControl }) {
       .catch((err: unknown) => {
         if (cancelled) return
         if (err instanceof PageNotFound) setState({ status: 'not_found', serverName: err.serverName })
-        else setState({ status: 'error', message: err instanceof PageBusy ? busyMessage(err) : t('error.page') })
+        else if (err instanceof PageBusy) {
+          setState({ status: 'error', message: busyMessage(err), waitMs: (err.retryAfter ?? 0) * 1000 })
+        } else setState({ status: 'error', message: t('error.page') })
       })
     return () => { cancelled = true }
   }, [boot])
@@ -450,7 +452,7 @@ function PageView({ boot, retry }: { boot: PageBoot; retry: RetryControl }) {
     return (
       <div class="page">
         <main class="page-main">
-          <ViewerError class="highlight-error" message={state.message} retry={retry} />
+          <ViewerError class="highlight-error" message={state.message} retry={retry} minWaitMs={state.waitMs} />
         </main>
       </div>
     )

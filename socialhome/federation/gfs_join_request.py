@@ -26,7 +26,11 @@ This module carries the "Ask to join" over that same sealed leg:
    that takes requests files an ordinary pending request under the
    applicant's id, keeping the applicant's relay contact and the names it
    sent (shown as "not verified"). A banned person, a repeat or a space
-   that takes no requests is dropped without a word.
+   that takes no requests is dropped without a word. A request refused for
+   CAPACITY (the pending cap or the space's budget) is answered "busy" —
+   at most :data:`PER_SPACE_LIMIT` such answers per space per window — so
+   the applicant hears at once and can ask again instead of waiting out
+   :data:`REQUEST_TTL_DAYS`.
 3. **Answer** — the admins approve or decline. :meth:`send_answer` seals
    ``SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER`` back: an approval carries a
    single-use invite token **bound to the applicant household and person**
@@ -34,6 +38,8 @@ This module carries the "Ask to join" over that same sealed leg:
    over the §D2b bootstrap leg; a redeem that fails (host offline) is
    retried on the next start and GFS reconnect until it seats the person
    or the token expires. The request reads "approved, joining…" meanwhile.
+   A "busy" answer ends the applicant's request (``expired``, marked busy)
+   and tells the person; Discover offers "Ask to join" again.
 """
 
 from __future__ import annotations
@@ -48,7 +54,11 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from ..domain.events import RemoteJoinRequestApproved, RemoteJoinRequestDenied
+from ..domain.events import (
+    RemoteJoinRequestApproved,
+    RemoteJoinRequestBusy,
+    RemoteJoinRequestDenied,
+)
 from ..domain.federation_capabilities import OURS
 from ..domain.space import (
     HostNotReachableError,
@@ -98,13 +108,21 @@ PER_SENDER_WINDOW_S: int = 3600
 
 #: Per-space budget on the host: requests one space takes from the GFS per
 #: window, whoever sends them, so one flooded space never starves another.
-PER_SPACE_LIMIT: int = 30
+#: Sized for a room: a local-community meetup where 40 households ask within
+#: minutes (every edge-of-area join lands here too), with headroom for a
+#: second wave the same hour. The same number bounds the "busy" answers one
+#: space sends per window (its own budget).
+PER_SPACE_LIMIT: int = 120
 PER_SPACE_WINDOW_S: int = 3600
 
 #: Pending requests from the GFS one space keeps. Past it a new one is
-#: REFUSED (dropped, logged) — earlier applicants and the admins' queue stay
-#: as they are; one is admitted again once the admins answer some.
-MAX_PENDING_PER_SPACE: int = 50
+#: REFUSED — answered "busy", never filed — earlier applicants and the
+#: admins' queue stay as they are; one is admitted again once the admins
+#: answer some.
+MAX_PENDING_PER_SPACE: int = 200
+
+#: How long the applicant's Discover keeps saying "busy" after the answer.
+BUSY_SHOWN_HOURS: int = 24
 
 #: How long a request waits for the admins (both sides keep it this long).
 REQUEST_TTL_DAYS: int = 7
@@ -114,9 +132,12 @@ REQUEST_TTL_DAYS: int = 7
 #: then retries the redeem (host offline too) for as long again.
 APPROVAL_TOKEN_TTL: timedelta = timedelta(seconds=2 * RELAY_QUEUE_TTL_SECONDS)
 
-#: The answers the host seals back.
+#: The answers the host seals back. ``busy`` (no admin saw it — the space
+#: had no room) reaches an applicant from before it as an unknown answer,
+#: which it drops: the silence every applicant got before.
 ANSWER_APPROVED: str = "approved"
 ANSWER_DENIED: str = "denied"
+ANSWER_BUSY: str = "busy"
 
 #: Seats the approved person: ``(token, user_id, issuer, bootstrap)`` →
 #: ``{space_id, role}`` (:meth:`SpaceService.redeem_invite_token`).
@@ -285,6 +306,21 @@ class GfsJoinRequestCoordinator:
             relay = _load(row.get("gfs_relay"))
             if row.get("user_id") == user_id and relay.get("approval"):
                 out.append(str(row["space_id"]))
+        return out
+
+    async def busy_space_ids(self, user_id: str) -> list[str]:
+        """Spaces whose host answered *user_id*'s request "busy" in the
+        last :data:`BUSY_SHOWN_HOURS` — Discover says so next to "Ask to
+        join"."""
+        out: list[str] = []
+        for row in await self._spaces.list_recent_gfs_join_requests(
+            user_id, status="expired", within_hours=BUSY_SHOWN_HOURS
+        ):
+            relay = _load(row.get("gfs_relay"))
+            space_id = str(row["space_id"])
+            busy = relay.get("side") == "applicant" and relay.get("busy")
+            if busy and space_id not in out:
+                out.append(space_id)
         return out
 
     async def resume_approvals(self) -> int:
@@ -458,7 +494,7 @@ class GfsJoinRequestCoordinator:
                 space_id,
                 len(pending),
             )
-            return {"ok": True, "filed": False}
+            return await self._refuse_busy(body, gfs_url=gfs_url)
         if await self._spaces.get_join_request(request_id) is not None:
             # An id that names another request already: never two rows
             # under one id (the answer would reach the wrong household).
@@ -473,7 +509,7 @@ class GfsJoinRequestCoordinator:
                 "gfs join request for space %s refused: the space's budget is spent",
                 space_id,
             )
-            return {"ok": True, "filed": False}
+            return await self._refuse_busy(body, gfs_url=gfs_url)
         message = body.get("message")
         user_pk = body.get("user_public_key")
         rid = await file_remote_join_request(
@@ -504,6 +540,36 @@ class GfsJoinRequestCoordinator:
             "gfs join request %s from %s filed for space %s", rid, applicant, space_id
         )
         return {"ok": True, "filed": True}
+
+    async def _refuse_busy(self, body: dict, *, gfs_url: str) -> dict:
+        """Host side: a request refused for capacity is answered "busy" —
+        sealed to the keys the (verified) request carried, through the GFS
+        it came on — so the applicant hears now instead of waiting out the
+        TTL. Nothing is stored. The answers have their own per-space budget:
+        a flood of fresh keypairs at a full space gets at most that many an
+        hour, the rest stay silent."""
+        space_id = str(body["space_id"])
+        if not self._allowed(
+            f"gfs-join:busy:{space_id}", PER_SPACE_LIMIT, PER_SPACE_WINDOW_S
+        ):
+            log.info(
+                "gfs join request for space %s: busy answers spent, not answered",
+                space_id,
+            )
+            return {"ok": True, "filed": False}
+        sent = await self._seal_answer(
+            recipient=str(body["instance_id"]),
+            identity_pk=str(body["identity_pk"]),
+            keywrap_pk=str(body["keywrap_pk"]),
+            keywrap_sig=str(body["keywrap_sig"]),
+            gfs_url=gfs_url,
+            reply={
+                "request_id": str(body["request_id"]),
+                "space_id": space_id,
+                "answer": ANSWER_BUSY,
+            },
+        )
+        return {"ok": True, "filed": False, "busy": sent}
 
     async def _on_answer(self, body: dict, *, gfs_url: str) -> dict:
         """Applicant side: the admins' answer. Taken only for a pending
@@ -547,6 +613,18 @@ class GfsJoinRequestCoordinator:
                     RemoteJoinRequestDenied(request_id=request_id, space_id=space_id)
                 )
             return {"ok": True}
+        if answer == ANSWER_BUSY:
+            # Never filed on the host: the request ends here (``expired`` —
+            # no admin decided), marked busy so Discover says why and offers
+            # "Ask to join" again.
+            relay["busy"] = True
+            await self._spaces.set_join_request_gfs_relay(request_id, _dump(relay))
+            if await self._spaces.answer_join_request(request_id, "expired"):
+                await self._bus.publish(
+                    RemoteJoinRequestBusy(request_id=request_id, space_id=space_id)
+                )
+            log.info("gfs join request %s: %s is busy", request_id, host)
+            return {"ok": True}
         raise ValueError(f"unknown gfs join answer {answer!r}")
 
     # ─── Host side: the answer ────────────────────────────────────────────
@@ -565,10 +643,7 @@ class GfsJoinRequestCoordinator:
         relay = _load(row.get("gfs_relay"))
         if relay.get("side") != "host":
             return False
-        recipient = str(row.get("remote_applicant_instance_id") or "")
         reply: dict[str, Any] = {
-            "kind": KIND_JOIN_REQUEST_ANSWER,
-            "request_nonce": uuid.uuid4().hex,
             "request_id": str(row["id"]),
             "space_id": str(row["space_id"]),
             "answer": answer,
@@ -576,10 +651,35 @@ class GfsJoinRequestCoordinator:
         if invite_token:
             reply["invite_token"] = invite_token
             reply["token_expires_at"] = token_expires_at or ""
+        return await self._seal_answer(
+            recipient=str(row.get("remote_applicant_instance_id") or ""),
+            identity_pk=str(relay.get("identity_pk") or ""),
+            keywrap_pk=str(relay.get("keywrap_pk") or ""),
+            keywrap_sig=str(relay.get("keywrap_sig") or ""),
+            gfs_url=str(relay.get("gfs_url") or ""),
+            reply=reply,
+        )
+
+    async def _seal_answer(
+        self,
+        *,
+        recipient: str,
+        identity_pk: str,
+        keywrap_pk: str,
+        keywrap_sig: str,
+        gfs_url: str,
+        reply: dict[str, Any],
+    ) -> bool:
+        """Seal one ``SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER`` (*reply*: request
+        id, space id, answer, maybe a token) to the applicant household's
+        keys and hand it to the relay. ``True`` when the relay took it.
+        Never raises."""
         try:
             local = await self._federation_repo.get_local_identity()
             envelope = seal_bootstrap_envelope(
                 body={
+                    "kind": KIND_JOIN_REQUEST_ANSWER,
+                    "request_nonce": uuid.uuid4().hex,
                     **reply,
                     "ts": datetime.now(UTC).isoformat(),
                     "instance_id": self._federation.own_instance_id,
@@ -591,14 +691,14 @@ class GfsJoinRequestCoordinator:
                 },
                 identity_seed=self._federation.own_identity_seed,
                 recipient_instance_id=recipient,
-                recipient_identity_pk=str(relay.get("identity_pk") or ""),
-                recipient_keywrap_pk=str(relay.get("keywrap_pk") or ""),
-                recipient_keywrap_sig=str(relay.get("keywrap_sig") or ""),
+                recipient_identity_pk=identity_pk,
+                recipient_keywrap_pk=keywrap_pk,
+                recipient_keywrap_sig=keywrap_sig,
             )
             delivered = await self._relay_sender.send_sealed_envelope(
                 to_instance_id=recipient,
                 envelope=envelope,
-                gfs_url=str(relay.get("gfs_url") or ""),
+                gfs_url=gfs_url,
             )
         except Exception:
             log.exception("gfs join request: answer to %s failed", recipient)
@@ -656,6 +756,7 @@ def _int(raw: object) -> int:
 
 __all__ = [
     "ANSWER_APPROVED",
+    "ANSWER_BUSY",
     "ANSWER_DENIED",
     "APPROVAL_TOKEN_TTL",
     "MAX_PENDING_PER_SPACE",

@@ -129,6 +129,7 @@ from ..domain.events import (
     PostEdited,
     PostReactionChanged,
     RemoteJoinRequestApproved,
+    RemoteJoinRequestBusy,
     RemoteJoinRequestDenied,
     RemoteSchedulePollFinalized,
     RemoteSpaceDissolved,
@@ -729,6 +730,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "space_join_approved",
         "space_ownership_transferred",
         "space_join_denied",
+        "space_join_busy",
         "space_remote_invite_accepted",
         "space_remote_invite_declined",
         "pairing_request",
@@ -1627,6 +1629,7 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(SpaceJoinDenied, self.on_join_request_handled)
         self._subscribe(RemoteJoinRequestApproved, self.on_remote_join_answered)
         self._subscribe(RemoteJoinRequestDenied, self.on_remote_join_answered)
+        self._subscribe(RemoteJoinRequestBusy, self.on_remote_join_answered)
         self._subscribe(LocalSpaceInviteCreated, self.on_local_space_invite)
         self._subscribe(RemoteSpaceInviteReceived, self.on_remote_space_invite)
         self._subscribe(SpaceInviteAnswered, self.on_space_invite_answered)
@@ -6054,12 +6057,17 @@ class NotificationService(ProtectionGateMixin):
         )
 
     async def on_remote_join_answered(
-        self, event: RemoteJoinRequestApproved | RemoteJoinRequestDenied
+        self,
+        event: RemoteJoinRequestApproved
+        | RemoteJoinRequestDenied
+        | RemoteJoinRequestBusy,
     ) -> None:
         """§D2 — another household's space answered our member's join
         request: tell them, from the answer this household already
         receives (no new federation message). Only the person who asked,
-        and only a request this household filed for them."""
+        and only a request this household filed for them. "Busy" (asked
+        through the GFS, the host had no room) says try again later and
+        opens the space's page, where they can ask again."""
         request = await self._spaces.get_join_request(event.request_id)
         if request is None or not request.get("remote_applicant_instance_id"):
             return
@@ -6089,6 +6097,36 @@ class NotificationService(ProtectionGateMixin):
             )
             return
         space_name = await self._space_name(space_id)
+        if isinstance(event, RemoteJoinRequestBusy):
+            await self._save_notif(
+                new_notification(
+                    user_id=user_id,
+                    type="space_join_busy",
+                    title=(
+                        self._t(
+                            "notification.space.join.busy",
+                            locale=locale,
+                            fallback="{space_name} is busy \u2014 try again later",
+                            space_name=space_name,
+                        )
+                        if space_name
+                        else self._t(
+                            "notification.space.join.busy_unnamed",
+                            locale=locale,
+                            fallback="The space is busy \u2014 try again later",
+                        )
+                    ),
+                    link_url=space_about_link(space_id),
+                ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE,
+                    space_id,
+                    space_id=space_id,
+                    space_name=space_name,
+                ),
+                actor_user_id=None,  # an answer to your own request
+            )
+            return
         title = (
             self._t(
                 "notification.space.join.approved_remote",

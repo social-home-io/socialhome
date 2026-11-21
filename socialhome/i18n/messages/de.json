@@ -388,6 +388,8 @@
   "notification.pairing.requested": "{household} möchte sich mit deinem Haushalt koppeln",
   "notification.space.join.approved_remote": "Deine Beitrittsanfrage für {space_name} wurde angenommen",
   "notification.space.join.approved_remote_unnamed": "Deine Beitrittsanfrage wurde angenommen",
+  "notification.space.join.busy": "{space_name} ist gerade ausgelastet – versuch es später noch einmal",
+  "notification.space.join.busy_unnamed": "Der Space ist gerade ausgelastet – versuch es später noch einmal",
   "notification.push.generic": "Neue Mitteilung",
   "notification.post.replied": "{author} hat deinen Beitrag kommentiert",
   "notification.space.post.replied": "{author} hat deinen Beitrag in {space_name} kommentiert",
