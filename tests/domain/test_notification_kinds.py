@@ -70,6 +70,7 @@ def test_d4_reactions_activity_and_games_default_to_in_app_the_rest_push():
         ("calendar_event_updated", NotifKind.PLANS),
         ("calendar_reminder", NotifKind.PLANS),
         ("space_join_approved", NotifKind.ABOUT_YOU),
+        ("space_join_busy", NotifKind.ABOUT_YOU),
         ("join_answer", NotifKind.ABOUT_YOU),
         ("bazaar_bid_placed", NotifKind.ABOUT_YOU),
         ("post_moderated", NotifKind.ABOUT_YOU),

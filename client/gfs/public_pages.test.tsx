@@ -140,10 +140,38 @@ describe('space page', () => {
     await waitFor(() => expect(container.textContent).toContain('couldn’t be loaded'))
   })
 
-  it('says when the GFS is busy', async () => {
+  it('says when the GFS is busy, and for how long', async () => {
+    answer = () => new Response(JSON.stringify({ error: 'rate_limited' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '17' },
+    })
+    const { container, getByRole } = render(<PublicPage boot={boot} />)
+    await waitFor(() =>
+      expect(container.textContent).toContain('Busy right now — try again in 17 seconds.'))
+    // One tap tries again.
+    answer = () => json(SPACE)
+    fireEvent.click(getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(container.querySelector('h1')?.textContent).toBe('Garden Club'))
+  })
+
+  it('does not try again on its own before the GFS said to', async () => {
+    answer = () => new Response('{}', { status: 429, headers: { 'Retry-After': '45' } })
+    const { container } = render(<PublicPage boot={boot} />)
+    await waitFor(() => expect(container.textContent).toContain('Trying again in 45 s.'))
+  })
+
+  it('says busy without a readable wait, in the visitor’s language', async () => {
+    setLocale('de')
     answer = () => json({ error: 'rate_limited' }, 429)
     const { container } = render(<PublicPage boot={boot} />)
-    await waitFor(() => expect(container.textContent).toContain('Too many viewers'))
+    await waitFor(() =>
+      expect(container.textContent).toContain('Gerade ist viel los – versuch es in einer Minute noch einmal.'))
+  })
+
+  it('ignores a nonsense Retry-After', async () => {
+    answer = () => new Response('{}', { status: 429, headers: { 'Retry-After': 'soon' } })
+    const { container } = render(<PublicPage boot={boot} />)
+    await waitFor(() => expect(container.textContent).toContain('try again in a minute'))
   })
 })
 

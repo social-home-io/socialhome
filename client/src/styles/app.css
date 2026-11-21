@@ -14304,6 +14304,9 @@ a.sh-space-hero-members:focus-visible,
   background: color-mix(in srgb, var(--sh-text-muted) 14%, transparent);
   color: var(--sh-text);
 }
+.sh-join-busy {
+  background: color-mix(in srgb, var(--sh-warning) 16%, transparent);
+}
 .sh-place-hint--inside {
   background: color-mix(in srgb, var(--sh-success) 14%, transparent);
 }

@@ -302,6 +302,7 @@ describe('notices about you, in the viewer\'s language', () => {
     const cases: [string, NotifParams, string | null, string, string][] = [
       ['space_join_approved', none(), 's1', "You're in: Familie Alpha", 'Du bist dabei: Familie Alpha'],
       ['space_join_denied', none({ space_name: null }), 's1', 'Your join request was declined', 'Deine Beitrittsanfrage wurde abgelehnt'],
+      ['space_join_busy', none(), 's1', 'Familie Alpha is busy — try again later', 'Familie Alpha ist gerade ausgelastet – versuch es später noch einmal'],
       ['space_ownership_transferred', none(), 's1', 'You now own Familie Alpha', 'Familie Alpha gehört jetzt dir'],
       ['space_location_enabled', params(['Ben']), 's1', 'Location sharing turned on in Familie Alpha', 'Standortfreigabe in Familie Alpha eingeschaltet'],
       ['post_moderated', none(), 's1', 'Your post in Familie Alpha was moderated', 'Dein Beitrag in Familie Alpha wurde moderiert'],
@@ -402,6 +403,7 @@ describe('notices about you, in the viewer\'s language', () => {
 
   it('a space notice whose space name is unknown keeps its title', () => {
     expect(say('space_join_approved', none({ space_name: null }), 's1')).toBe('TITLE')
+    expect(say('space_join_busy', none({ space_name: null }), 's1')).toBe('TITLE')
     expect(say('post_moderated', none({ space_name: null }), 's1')).toBe('TITLE')
   })
 })

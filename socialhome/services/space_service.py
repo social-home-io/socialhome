@@ -1065,6 +1065,18 @@ class SpaceService(
             return []
         return await self._gfs_join.joining_space_ids(user_id)
 
+    async def list_busy_join_request_space_ids(self, user_id: str) -> list[str]:
+        """Spaces whose host answered *user_id*'s GFS request "busy" lately
+        and that they have not asked again since — Discover says "busy, try
+        again later" next to "Ask to join"."""
+        if self._gfs_join is None:
+            return []
+        busy = await self._gfs_join.busy_space_ids(user_id)
+        if not busy:
+            return []
+        pending = set(await self.list_pending_join_request_space_ids(user_id))
+        return [space_id for space_id in busy if space_id not in pending]
+
     def attach_redeem_coordinator(self, coordinator) -> None:
         """Wire the §D2 cross-instance invite-token redeem driver.
 

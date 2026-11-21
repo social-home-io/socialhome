@@ -2550,6 +2550,42 @@ async def test_answer_join_request_moves_a_pending_request_once(env):
         await env.repo.answer_join_request(rid, "pending")
 
 
+async def test_list_recent_gfs_join_requests(env):
+    """A user's GFS requests asked within the window, newest first, any
+    status: not a local request, not another user, not one asked before
+    the window."""
+    await env.repo.save(_space("sp-r"))
+    relay = '{"side": "applicant", "busy": true}'
+
+    async def _asked(user_id: str, status: str | None, *, gfs: bool = True) -> str:
+        rid = await env.repo.save_join_request(
+            "sp-r", user_id, gfs_relay=relay if gfs else None
+        )
+        if status:
+            await env.repo.answer_join_request(rid, status)
+        return rid
+
+    async def _at(rid: str, ago: str) -> None:
+        await env.db.enqueue(
+            "UPDATE space_join_requests SET requested_at=datetime('now', ?) WHERE id=?",
+            (ago, rid),
+        )
+
+    old = await _asked("uid-bob", "expired")
+    await _at(old, "-25 hours")
+    first = await _asked("uid-bob", "expired")
+    await _at(first, "-2 hours")
+    denied = await _asked("uid-bob", "denied")
+    await _at(denied, "-1 hours")
+    latest = await _asked("uid-bob", None)
+    await _asked("uid-bob", "expired", gfs=False)
+    await _asked("uid-ann", "expired")
+
+    rows = await env.repo.list_recent_gfs_join_requests("uid-bob", within_hours=24)
+    assert [r["id"] for r in rows] == [latest, denied, first]
+    assert rows[0]["gfs_relay"] == relay
+
+
 async def test_a_purged_item_is_revived_and_open_items_are_listed(env):
     """The moderation catch-up: an EXPIRED copy (purged while this
     household did not review) is pending again with the re-sent content —

@@ -83,6 +83,9 @@ async def _allow_any_origin(
 ) -> None:
     if is_viewer_cors_path(request.rel_url.path):
         response.headers["Access-Control-Allow-Origin"] = "*"
+        # Not a safelisted response header: without this the viewer could
+        # not read how long a 429 asks it to wait.
+        response.headers["Access-Control-Expose-Headers"] = "Retry-After"
 
 
 def install_viewer_cors(app: web.Application) -> None:

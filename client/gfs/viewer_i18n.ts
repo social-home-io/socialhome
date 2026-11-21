@@ -71,6 +71,9 @@ const en = {
 
   'page.back': 'Back to {server}',
   'page.footer': 'Hosted on {server} · powered by',
+  'page.busy': 'Busy right now — try again in {count} seconds.',
+  'page.busy_one': 'Busy right now — try again in a second.',
+  'page.busy_later': 'Busy right now — try again in a minute.',
 
   'space.members_one': '{count} member',
   'space.members': '{count} members',
@@ -188,6 +191,9 @@ const de: Table = {
 
   'page.back': 'Zurück zu {server}',
   'page.footer': 'Gehostet auf {server} · mit',
+  'page.busy': 'Gerade ist viel los – versuch es in {count} Sekunden noch einmal.',
+  'page.busy_one': 'Gerade ist viel los – versuch es in einer Sekunde noch einmal.',
+  'page.busy_later': 'Gerade ist viel los – versuch es in einer Minute noch einmal.',
 
   'space.members_one': '{count} Mitglied',
   'space.members': '{count} Mitglieder',
@@ -302,6 +308,9 @@ const nl: Table = {
 
   'page.back': 'Terug naar {server}',
   'page.footer': 'Gehost op {server} · mogelijk gemaakt door',
+  'page.busy': 'Het is nu druk — probeer het over {count} seconden opnieuw.',
+  'page.busy_one': 'Het is nu druk — probeer het over een seconde opnieuw.',
+  'page.busy_later': 'Het is nu druk — probeer het over een minuut opnieuw.',
 
   'space.members_one': '{count} lid',
   'space.members': '{count} leden',
@@ -416,6 +425,9 @@ const fr: Table = {
 
   'page.back': 'Retour à {server}',
   'page.footer': 'Hébergé sur {server} · propulsé par',
+  'page.busy': 'Trop de monde en ce moment — réessayez dans {count} secondes.',
+  'page.busy_one': 'Trop de monde en ce moment — réessayez dans une seconde.',
+  'page.busy_later': 'Trop de monde en ce moment — réessayez dans une minute.',
 
   'space.members_one': '{count} membre',
   'space.members': '{count} membres',
@@ -530,6 +542,9 @@ const es: Table = {
 
   'page.back': 'Volver a {server}',
   'page.footer': 'Alojado en {server} · con la tecnología de',
+  'page.busy': 'Hay mucha gente ahora mismo: vuelve a intentarlo en {count} segundos.',
+  'page.busy_one': 'Hay mucha gente ahora mismo: vuelve a intentarlo en un segundo.',
+  'page.busy_later': 'Hay mucha gente ahora mismo: vuelve a intentarlo en un minuto.',
 
   'space.members_one': '{count} miembro',
   'space.members': '{count} miembros',

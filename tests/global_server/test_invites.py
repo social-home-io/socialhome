@@ -38,6 +38,7 @@ from socialhome.global_server.invites import (
     INVITE_MAX_TTL_SECONDS,
     INVITE_MINT_MAX_PER_MINUTE,
 )
+from socialhome.global_server.public import LISTING_MAX_PER_MINUTE
 from socialhome.global_server.server import create_gfs_app
 
 #: A plausible invite blob: base64url text, opaque to this server.
@@ -530,7 +531,7 @@ async def test_join_page_rate_limited_per_ip(client, owner):
     """``/join/`` rides the public-listing limiter — it is the page an
     attacker would hammer to walk the token space."""
     last = None
-    for _ in range(40):
+    for _ in range(LISTING_MAX_PER_MINUTE + 1):
         last = await client.get("/join/whatever")
         if last.status == 429:
             break

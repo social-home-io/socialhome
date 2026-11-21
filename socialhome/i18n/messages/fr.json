@@ -388,6 +388,8 @@
   "notification.pairing.requested": "{household} souhaite se jumeler avec votre foyer",
   "notification.space.join.approved_remote": "Votre demande pour rejoindre {space_name} a été approuvée",
   "notification.space.join.approved_remote_unnamed": "Votre demande d'adhésion a été approuvée",
+  "notification.space.join.busy": "{space_name} est saturé pour le moment — réessayez plus tard",
+  "notification.space.join.busy_unnamed": "L'espace est saturé pour le moment — réessayez plus tard",
   "notification.push.generic": "Nouvelle notification",
   "notification.post.replied": "{author} a commenté votre publication",
   "notification.space.post.replied": "{author} a commenté votre publication dans {space_name}",

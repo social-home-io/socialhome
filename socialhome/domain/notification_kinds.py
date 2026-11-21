@@ -133,6 +133,7 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     # About you — answers and decisions about your requests and posts.
     "space_join_approved": NotifKind.ABOUT_YOU,
     "space_join_denied": NotifKind.ABOUT_YOU,
+    "space_join_busy": NotifKind.ABOUT_YOU,
     "join_answer": NotifKind.ABOUT_YOU,
     "space_remote_invite_accepted": NotifKind.ABOUT_YOU,
     "space_remote_invite_declined": NotifKind.ABOUT_YOU,

@@ -4179,11 +4179,14 @@ it:
    that TTL + 300 s old (future: ±300 s), and the `request_nonce` replay
    entry lives at least as long (`REPLAY_CACHE_WINDOW`, 25 h, durable).
 5. **Filed like any request, within bounds.** Anyone on a GFS can make
-   keypairs, so the host budgets **per space** (30 / hour) on top of per
-   sender (10 / hour), and keeps at most **50** pending requests from the
-   GFS per space — past it new ones are **refused** (dropped, logged; the
-   earlier applicants and the admins' queue stay as they are, nothing is
-   evicted). The per-space budget is spent only by a request that passed
+   keypairs, so the host budgets **per space** (120 / hour) on top of per
+   sender (10 / hour — the sender is signature-verified), and keeps at most
+   **200** pending requests from the GFS per space — past either, a new
+   request is **refused** (logged; the earlier applicants and the admins'
+   queue stay as they are, nothing is evicted) and **answered "busy"**
+   (step 7). Both are sized for a room: a local-community meetup where 40
+   households ask within minutes, edge-of-area joins included (they always
+   come here as a request). The per-space budget is spent only by a request that passed
    every cheap check (the space takes requests, the person is not banned,
    not a repeat, id unused), so junk cannot use it up. A request nobody
    answers **expires** after 7 days (`JoinRequestExpiryScheduler`, hourly),
@@ -4217,6 +4220,32 @@ it:
    (v_89): the applicant's card in the sealed redeem, the host's in the
    sealed ACK, so the GFS later sees each household's one mailbox id
    instead of its instance id ([gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89)).
+7. **"Busy" — refused for capacity, and said so.** A request refused by the
+   pending cap or the per-space budget is not dropped in silence any more
+   (the applicant used to read "Requested" until the 7-day TTL): the host
+   seals `SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER` with `answer: "busy"` back to
+   the keys the verified request carried, through the GFS it came on.
+   Nothing is filed or stored on the host. The applicant ends its request
+   (`expired`, `gfs_relay.busy`), the person gets a bell ("X is busy — try
+   again later", `space_join_busy`) and Discover shows "Busy — try again
+   later" next to an enabled **Ask to join** for 24 h
+   (`GET /api/me/join-requests` `busy_space_ids`; asking again clears it).
+   Only capacity refusals are answered: a banned person, a repeat and a
+   space that takes no requests are still dropped without a word (an answer
+   there would tell a banned person, or a prober, something). Capacity is
+   checked **before** anything about the person, so at a full space every
+   request hears "busy" alike — banned, repeat or new — and the answer can
+   never be used to read the ban list. A "busy" never ends a request whose
+   approval is still being seated, and a later request for the same space
+   (whatever its answer) replaces the note. An answer to a made-up
+   applicant id waits in the GFS queue for its TTL like any undelivered
+   envelope (bounded by the budget below). The answers
+   have their **own** per-space budget (120 / hour), so a flood of fresh
+   keypairs at a full space gets at most that many replies; the rest stay
+   silent. **No `proto_version` gate:** an applicant from before this
+   answer reads `busy` as an unknown answer and drops it (`ValueError`,
+   logged) — exactly the silence it got before; an existing `denied` was
+   not reused, since that would tell older applicants the admins said no.
 
 **What the GFS learns.** Nothing beyond what it relays: the size and time
 of each sealed blob and its recipient. It is not asked for anyone's keys,
@@ -4252,8 +4281,14 @@ signed by the old owner here first.
 answer, ~1–2 KB each), then the §D2b redeem (the space snapshot, bounded
 by the relay cap), once per person — no fan-out. The listing grows by one
 contact (~0.5 KB) per global space that takes requests. Worst case for a
-host (a flood): 30 filed requests per space per hour and at most 50
-waiting, one bell per admin.
+host (a flood): 120 filed requests per space per hour and at most 200
+waiting, one bell per admin. A capacity refusal costs one sealed "busy"
+answer (~1–2 KB) to the one household that asked — targeted, never a
+fan-out: at most 10 per applicant household per hour (its per-sender
+budget) and at most 120 per space per hour whoever asks (≈ 240 KB/h of
+relay traffic for a space under a sustained flood). The meetup case — 40
+households asking within minutes — files all 40 under the new budgets and
+sends no "busy" at all.
 
 ## Peer directory sync (§D1a)
 

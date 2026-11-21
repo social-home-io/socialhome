@@ -43,7 +43,25 @@ export class PageNotFound extends Error {
   }
 }
 
-class PageBusy extends Error {}
+/** The GFS shed the request (429). ``retryAfter`` is its ``Retry-After``
+ *  in seconds when readable (1–3600), else ``null``. */
+class PageBusy extends Error {
+  constructor(readonly retryAfter: number | null) {
+    super('busy')
+  }
+}
+
+/** Whole seconds from a ``Retry-After`` header; ``null`` for a date, junk
+ *  or an implausible wait. */
+function retryAfterSeconds(raw: string | null): number | null {
+  if (!raw || !/^\d{1,4}$/.test(raw.trim())) return null
+  const n = Number(raw.trim())
+  return n >= 1 && n <= 3600 ? n : null
+}
+
+function busyMessage(err: PageBusy): string {
+  return err.retryAfter === null ? t('page.busy_later') : tn('page.busy', err.retryAfter)
+}
 
 // ─── Response checks ──────────────────────────────────────────────────────
 
@@ -177,7 +195,7 @@ export async function fetchPage<T>(
     }
     throw new PageNotFound(name)
   }
-  if (r.status === 429) throw new PageBusy('busy')
+  if (r.status === 429) throw new PageBusy(retryAfterSeconds(r.headers.get('Retry-After')))
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return parse(await r.json())
 }
@@ -385,7 +403,7 @@ type State =
   | { status: 'loading' }
   | { status: 'ready'; data: SpacePageData | InvitePageData | PersonPageData }
   | { status: 'not_found'; serverName: string }
-  | { status: 'error'; message: string }
+  | { status: 'error'; message: string; waitMs?: number }
 
 function title(boot: PageBoot, state: State): string {
   const server = state.status === 'ready'
@@ -415,7 +433,9 @@ function PageView({ boot, retry }: { boot: PageBoot; retry: RetryControl }) {
       .catch((err: unknown) => {
         if (cancelled) return
         if (err instanceof PageNotFound) setState({ status: 'not_found', serverName: err.serverName })
-        else setState({ status: 'error', message: t(err instanceof PageBusy ? 'error.busy' : 'error.page') })
+        else if (err instanceof PageBusy) {
+          setState({ status: 'error', message: busyMessage(err), waitMs: (err.retryAfter ?? 0) * 1000 })
+        } else setState({ status: 'error', message: t('error.page') })
       })
     return () => { cancelled = true }
   }, [boot])
@@ -432,7 +452,7 @@ function PageView({ boot, retry }: { boot: PageBoot; retry: RetryControl }) {
     return (
       <div class="page">
         <main class="page-main">
-          <ViewerError class="highlight-error" message={state.message} retry={retry} />
+          <ViewerError class="highlight-error" message={state.message} retry={retry} minWaitMs={state.waitMs} />
         </main>
       </div>
     )

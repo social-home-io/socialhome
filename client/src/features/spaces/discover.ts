@@ -80,7 +80,7 @@ export function withMembership(
   scope: 'public' | 'global',
   mine: {
     memberIds: Set<string>; subIds: Set<string>; pendingIds: Set<string>
-    joiningIds?: Set<string>
+    joiningIds?: Set<string>; busyIds?: Set<string>
   },
 ): DirectoryEntry[] {
   return entries.map((e) => ({
@@ -94,6 +94,7 @@ export function withMembership(
     already_subscribed: mine.subIds.has(e.space_id),
     request_pending:    mine.pendingIds.has(e.space_id),
     request_joining:    mine.joiningIds?.has(e.space_id) ?? false,
+    request_busy:       mine.busyIds?.has(e.space_id) ?? false,
   }))
 }
 

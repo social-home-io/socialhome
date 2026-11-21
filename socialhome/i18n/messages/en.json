@@ -388,6 +388,8 @@
   "notification.pairing.requested": "{household} wants to pair with your household",
   "notification.space.join.approved_remote": "Your request to join {space_name} was approved",
   "notification.space.join.approved_remote_unnamed": "Your join request was approved",
+  "notification.space.join.busy": "{space_name} is busy — try again later",
+  "notification.space.join.busy_unnamed": "The space is busy — try again later",
   "notification.push.generic": "New notification",
   "notification.post.replied": "{author} commented on your post",
   "notification.space.post.replied": "{author} commented on your post in {space_name}",

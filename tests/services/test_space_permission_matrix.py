@@ -158,6 +158,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_subscriptions",
         "list_pending_join_request_space_ids",  # caller's own pending requests
         "list_joining_space_ids",  # caller's own approved-and-joining GFS requests
+        "list_busy_join_request_space_ids",  # caller's own GFS requests answered "busy"
         "expire_due_join_requests",  # system sweep, no actor
         "is_subscribed",
         # Self-service joins / leaves — gate is on the *invite* / *request*,

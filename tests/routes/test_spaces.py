@@ -2834,7 +2834,48 @@ async def test_my_join_requests_leave_out_another_households(client):
 async def test_my_join_requests_empty(client):
     r = await client.get("/api/me/join-requests", headers=_auth(client._bob_token))
     assert r.status == 200
-    assert (await r.json())["pending_space_ids"] == []
+    body = await r.json()
+    assert body["pending_space_ids"] == []
+    assert body["busy_space_ids"] == []
+
+
+async def test_my_join_requests_say_which_hosts_were_busy(client):
+    """A GFS request the host answered "busy" ends (``expired``) and shows
+    in ``busy_space_ids`` — until bob asks again (pending wins). Another
+    user's busy answer and a host's own copy never show."""
+    repo = client.app[space_repo_key]
+
+    async def _busy(space_id: str, user_id: str, *, side: str = "applicant") -> str:
+        rid = await repo.save_join_request(
+            space_id,
+            user_id,
+            remote_applicant_instance_id="host-far",
+            gfs_relay=f'{{"side": "{side}", "busy": true}}',
+        )
+        await repo.answer_join_request(rid, "expired")
+        return rid
+
+    await _busy("sp-busy", client._bob_uid)
+    await _busy("sp-asked-again", client._bob_uid)
+    await repo.save_join_request(
+        "sp-asked-again", client._bob_uid, remote_applicant_instance_id="host-far"
+    )
+    await _busy("sp-host-copy", client._bob_uid, side="host")
+    await _busy("sp-admins", client._admin_uid)
+    # Expired without a busy answer: nothing to say.
+    quiet = await repo.save_join_request(
+        "sp-quiet",
+        client._bob_uid,
+        remote_applicant_instance_id="host-far",
+        gfs_relay='{"side": "applicant"}',
+    )
+    await repo.answer_join_request(quiet, "expired")
+
+    r = await client.get("/api/me/join-requests", headers=_auth(client._bob_token))
+    assert r.status == 200
+    body = await r.json()
+    assert body["busy_space_ids"] == ["sp-busy"]
+    assert body["pending_space_ids"] == ["sp-asked-again"]
 
 
 async def test_subscribe_maps_gfs_outage_to_502(client):
@@ -3463,6 +3504,8 @@ async def test_invite_link_code_is_rate_limited_per_ip(client):
     a uuid4 token is not guessable — just ordinary shedding."""
     from socialhome.routes.spaces import INVITE_CODE_RATE_LIMIT
 
+    # A room of phones behind one address opening one projected link.
+    assert INVITE_CODE_RATE_LIMIT == 120
     sid = await _invite_space(client)
     minted = await client.post(
         f"/api/spaces/{sid}/invite-tokens",

@@ -429,12 +429,53 @@ async def test_landing_unknown_category_shows_all_with_all_tab_active(client):
 
 
 async def test_landing_listing_rate_limit(client):
-    """Spec §24.7.3: 30 GETs/min/IP on the public listing."""
-    for _ in range(30):
-        resp = await client.get("/")
-        assert resp.status == 200
-    resp = await client.get("/")
+    """120 page views/min/IP on the public pages, then a readable busy
+    page — a room of phones on one Wi-Fi opening a projected invite link
+    must all get in."""
+    assert LISTING_MAX_PER_MINUTE == 120
+    paths = ["/", "/spaces/sp-none", "/join/tok-none"]
+    statuses = [
+        (await client.get(paths[i % 3])).status for i in range(LISTING_MAX_PER_MINUTE)
+    ]
+    assert 429 not in statuses
+    resp = await client.get("/join/tok-none")
     assert resp.status == 429
+    assert resp.content_type == "text/html"
+    retry = int(resp.headers["Retry-After"])
+    assert 1 <= retry <= 60
+    text = await resp.text()
+    assert "Busy right now" in text
+    assert f"try again in {retry} seconds" in text
+    # A plain reload link — no script, works on any phone.
+    assert 'href=""' in text
+    assert_strict_public_page(resp, text)
+
+
+async def test_the_viewer_json_is_not_a_second_hit(client):
+    """A page opened through the viewer is the page plus its JSON: the
+    JSON has its own equal window, so the visitor costs one hit of each
+    and 120 visitors behind one address all get in."""
+    for _ in range(LISTING_MAX_PER_MINUTE):
+        assert (await client.get("/join/tok-none")).status != 429
+        resp = await client.post("/gfs/pages/invite", json={"token": "tok-none"})
+        assert resp.status != 429
+    # The JSON's own window is spent now — and it stays JSON for the viewer.
+    resp = await client.post("/gfs/pages/invite", json={"token": "tok-none"})
+    assert resp.status == 429
+    assert await resp.json() == {"error": "rate_limited"}
+    assert 1 <= int(resp.headers["Retry-After"]) <= 60
+
+
+def test_retry_after_is_when_the_oldest_hit_leaves_the_window():
+    counter = SlidingWindowCounter(limit=2)
+    assert counter.allow("a", now=1000.0)
+    assert counter.allow("a", now=1010.0)
+    assert not counter.allow("a", now=1020.0)
+    assert counter.retry_after("a", now=1020.0) == 40
+    assert counter.retry_after("a", now=1059.5) == 1
+    # A per-call (cluster share) limit counts from that many hits back.
+    assert counter.retry_after("a", now=1020.0, limit=1) == 50
+    assert counter.retry_after("unknown", now=1020.0) == 1
 
 
 # ─── Space page ───────────────────────────────────────────────────────

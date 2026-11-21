@@ -547,7 +547,11 @@ async def test_no_cors_beyond_the_page_routes(client, method, path):
     assert "Access-Control-Allow-Origin" not in resp.headers
 
 
-async def test_the_page_json_shares_the_pages_rate_limit(client):
+async def test_the_page_json_has_its_own_rate_limit(client):
+    """Its own window, equal to the pages' — the pages a visitor opened
+    spent none of it (``test_the_viewer_json_is_not_a_second_hit``)."""
+    for _ in range(LISTING_MAX_PER_MINUTE):
+        await client.get("/", headers={"X-Forwarded-For": "198.51.100.9"})
     statuses = [
         (
             await client.get(

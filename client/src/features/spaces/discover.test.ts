@@ -59,6 +59,15 @@ describe('withMembership', () => {
     })
     expect(g.join_mode).toBe('invite_only')
     expect(g.allow_subscribers).toBe(false)
+    expect(g.request_busy).toBe(false)
+  })
+  it('marks a space whose host answered the last request "busy"', () => {
+    const [busy, other] = withMembership(
+      [entry({ space_id: 'b' }), entry({ space_id: 'o' })], 'global',
+      { memberIds: new Set(), subIds: new Set(), pendingIds: new Set(), busyIds: new Set(['b']) },
+    )
+    expect(busy.request_busy).toBe(true)
+    expect(other.request_busy).toBe(false)
   })
 })
 
@@ -95,6 +104,8 @@ describe('discoverAction', () => {
     expect(discoverAction({ ...far, gfs_askable: false, allow_subscribers: false })).toBeNull()
     // Approved through the GFS, the seat still being made.
     expect(discoverAction({ ...far, request_pending: true, request_joining: true })).toBe('joining')
+    // The host was too busy for the last request: ask again.
+    expect(discoverAction({ ...far, request_busy: true })).toBe('request')
     expect(discoverAction({ ...far, allow_subscribers: true })).toBe('request')
     expect(approvalSeatsUs(far)).toBe(true)
     // A paired household's public space still needs the pairing.

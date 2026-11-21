@@ -564,6 +564,33 @@ describe('SpaceListPage — Discover', () => {
     expect((button as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('a host that was too busy for the request says so, and Ask to join works again', async () => {
+    // A meetup: 40 households asked at once and the host had no room. The
+    // request ended with a "busy" answer — not "Requested" for a week.
+    wire({
+      gfs: [{ id: 'g1', status: 'active' }],
+      global: [{
+        space_id: 'gBusy', host_instance_id: 'iid-far', host_display_name: null, host_is_paired: false,
+        name: 'Busy meetup', description: null, emoji: null, member_count: 40, join_mode: 'request',
+        min_age: 0, allow_subscribers: false, gfs_askable: true,
+      }],
+    })
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (
+      url === '/api/me/join-requests'
+        ? { pending_space_ids: [], joining_space_ids: [], busy_space_ids: ['gBusy'] }
+        : base(url)))
+    const r = await renderPage('/spaces?discover=global')
+    const row = (await r.findByText('Busy meetup')).closest('li')!
+    expect(row.textContent).toContain('Busy — try again later')
+    const ask = r.getByRole('button', { name: 'Ask to join: Busy meetup' })
+    expect((ask as HTMLButtonElement).disabled).toBe(false)
+    r.fireEvent.click(ask)
+    r.fireEvent.click(await r.findByRole('button', { name: 'Send request' }))
+    await r.findByRole('button', { name: 'Requested: Busy meetup' })
+    expect(row.textContent).not.toContain('Busy — try again later')
+  })
+
   it('a global space you can neither join nor follow: no button, never "pair"', async () => {
     wire({
       gfs: [{ id: 'g1', status: 'active' }],

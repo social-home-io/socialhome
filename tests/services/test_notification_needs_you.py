@@ -26,6 +26,7 @@ from socialhome.domain.events import (
     AutoPairRequestIncoming,
     NotificationReadChanged,
     RemoteJoinRequestApproved,
+    RemoteJoinRequestBusy,
     RemoteJoinRequestDenied,
     RemoteSpaceInviteReceived,
     SpaceJoinApproved,
@@ -706,6 +707,29 @@ async def test_a_remote_answer_names_a_space_this_household_holds(env):
     )
     (yes,) = await _rows(env, kim.user_id, "space_join_approved")
     assert yes.title == "Your request to join Salon was approved"
+
+
+async def test_a_busy_host_tells_the_applicant_to_try_again_later(env):
+    """The host had no room for the request (capacity, not the admins): the
+    person who asked is told so — and where to ask again."""
+    anna = await env.user("anna")
+    kim = await env.user("kim")
+    space = await _salon(env)
+    far = await env.spaces.save_join_request(
+        "sp-far", kim.user_id, remote_applicant_instance_id="host-house"
+    )
+    held = await env.spaces.save_join_request(
+        space.id, kim.user_id, remote_applicant_instance_id="host-house"
+    )
+    await env.bus.publish(RemoteJoinRequestBusy(request_id=far, space_id="sp-far"))
+    await env.bus.publish(RemoteJoinRequestBusy(request_id=held, space_id=space.id))
+    rows = await _rows(env, kim.user_id, "space_join_busy")
+    by_space = {n.space_id: n for n in rows}
+    assert by_space["sp-far"].title == "The space is busy — try again later"
+    assert by_space["sp-far"].link_url == "/spaces/sp-far/about"
+    assert by_space[space.id].title == "Salon is busy — try again later"
+    # Nobody else hears of it.
+    assert await _rows(env, anna.user_id, "space_join_busy") == []
 
 
 async def test_a_remote_answer_for_no_request_of_ours_is_ignored(env):

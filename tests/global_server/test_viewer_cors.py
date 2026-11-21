@@ -203,3 +203,15 @@ async def test_rate_limit_still_applies_and_is_readable(client):
         statuses.append(resp.status)
         _assert_cors(resp)
     assert statuses[-1] == 429
+
+
+async def test_the_viewer_can_read_retry_after_on_a_busy_page(client):
+    """The page JSON's 429 exposes ``Retry-After`` cross-origin, so the
+    viewer can say "try again in N seconds" instead of guessing."""
+    for _ in range(gfs_public.LISTING_MAX_PER_MINUTE):
+        await client.get("/gfs/pages/spaces/nope", headers={"Origin": ORIGIN})
+    resp = await client.get("/gfs/pages/spaces/nope", headers={"Origin": ORIGIN})
+    assert resp.status == 429
+    _assert_cors(resp)
+    assert resp.headers["Access-Control-Expose-Headers"] == "Retry-After"
+    assert 1 <= int(resp.headers["Retry-After"]) <= 60
