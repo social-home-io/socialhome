@@ -440,9 +440,14 @@ class SyncPageService:
         space = await self._spaces.get(space_id)
         if space is None or not space.identity_public_key:
             return False
-        plaintext = await self._crypto.decrypt_chunk(
-            space_id=space_id, epoch=epoch, sync_id=sync_id, ciphertext=ciphertext
-        )
+        try:
+            plaintext = await self._crypto.decrypt_chunk(
+                space_id=space_id, epoch=epoch, sync_id=sync_id, ciphertext=ciphertext
+            )
+        except Exception as exc:
+            raise PageRefused(
+                f"page_sealed does not open ({type(exc).__name__})"
+            ) from exc
         try:
             body = orjson.loads(plaintext)
         except orjson.JSONDecodeError as exc:
@@ -461,6 +466,16 @@ class SyncPageService:
             self._note_conflict(space_id, held.page, page, provider)
         if held is not None and not page.is_newer_than(held.page):
             return False
+        if (
+            held is not None
+            and held.page.signer == self._own_instance_id
+            and page.signer != self._own_instance_id
+        ):
+            # We sign this space too (the owner and a delegated admin): our
+            # own page and its delta chain stay; another signer's page is
+            # never stored over it (it would break our chain and make our
+            # next page look like equivocation to the members).
+            return False
         if "vector" in body:
             vector = vector_from_wire(body["vector"])
         elif (
@@ -471,10 +486,10 @@ class SyncPageService:
         ):
             vector = apply_delta(held.row.vector, delta_from_wire(body["delta"]))
         else:
-            # A delta against a page we no longer hold: drop ours, so our
-            # next BEGIN carries no page and the provider sends the vector.
-            if held is not None:
-                await self._repo.delete(space_id)
+            # A delta against a page we do not hold. Refused WITHOUT
+            # dropping ours: an honest provider sends a delta only for the
+            # page our BEGIN named, so this is a stale race or a relay trying
+            # to roll us back (drop the newer page, then offer an older one).
             raise PageRefused("a delta without its previous page")
         if root_of(vector) != page.root:
             raise PageRefused("the vector does not hash to the page's root")

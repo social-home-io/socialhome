@@ -58,12 +58,15 @@ CREATE TABLE IF NOT EXISTS space_sync_pages (
 ) WITHOUT ROWID;
 
 -- A space-authority rotation retires the key every held page was signed
--- with: the page goes in the same statement that moves the epoch, on every
--- path that moves it (the owner's ``rotate_authority_key``, a member's
--- ``adopt_authority_key``). The next BEGIN seals or carries a new one.
+-- with: the page goes in the same statement that moves the epoch or the
+-- pinned key, on every path that moves them (the owner's
+-- ``rotate_authority_key``, a member's ``adopt_authority_key``, a re-pin
+-- that keeps the epoch — ``set_space_pubkey``, ``adopt_gfs_pin``). The
+-- next BEGIN seals or carries a new one.
 CREATE TRIGGER IF NOT EXISTS spaces_rotation_drops_sync_page
-AFTER UPDATE OF authority_key_epoch ON spaces
+AFTER UPDATE OF authority_key_epoch, identity_public_key ON spaces
 WHEN NEW.authority_key_epoch IS NOT OLD.authority_key_epoch
+  OR NEW.identity_public_key IS NOT OLD.identity_public_key
 BEGIN
     DELETE FROM space_sync_pages WHERE space_id = NEW.id;
 END;

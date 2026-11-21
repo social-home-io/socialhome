@@ -184,6 +184,24 @@ def test_post_commit_form_golden():
     )
 
 
+def test_leaf_golden_with_string_lists():
+    """Pins the leaf bytes of a commit form with a string list (plain
+    code-point order) — a change here is a new page suite."""
+    task = {
+        "id": "t-1",
+        "title": "Dishes",
+        "assignees": ["b", 'a"', "a#", "é"],
+        "created_at": "2026-11-01 09:00:00",
+    }
+    form = commit_form("tasks", task, _no_files)
+    assert form is not None
+    assert form["v"]["assignees"] == ['a"', "a#", "b", "é"]
+    assert (
+        leaf_of(form).hex()
+        == "50515e76a6a690757bae120209204f5d1753edf67c0558359d07a1b53ba58cd4"
+    )
+
+
 def test_item_state_and_counts_never_change_a_leaf():
     """Rule 1 / 2: reactions, counts, receipt-local fields are uncommitted."""
     base = {"id": "p", "author": "u", "type": "text", "content": "x"}

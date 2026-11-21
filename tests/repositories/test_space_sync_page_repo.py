@@ -69,6 +69,10 @@ async def test_an_authority_rotation_drops_the_page(env):
         "UPDATE spaces SET authority_key_epoch=authority_key_epoch+1 WHERE id='sp'"
     )
     assert await repo.get("sp") is None
+    # A re-pin that keeps the epoch drops it too.
+    await repo.put(StoredSyncPage("sp", "{}", VECTOR))
+    await db.enqueue("UPDATE spaces SET identity_public_key='cd' WHERE id='sp'")
+    assert await repo.get("sp") is None
 
 
 async def test_storage_stays_within_the_documented_bound(env):
