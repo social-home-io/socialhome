@@ -110,8 +110,8 @@ same way.
 **Why no leaf cache (C) yet.** Storage comes first, and the lazy seal
 bounds the CPU: ≤ 96 recomputes a day for a space that changes all day,
 and none for a quiet one. If profiling on a Pi shows that seals hurt in
-very big spaces, C can be added later without a wire change (see open
-questions).
+very big spaces, C can be added later without a wire change (see
+[Decisions](#decisions-owner-2026-11-21)).
 
 ### Shape
 
@@ -505,31 +505,27 @@ ships in the same release, otherwise v_96).
    - A deliberately tampered row is refused (`verify: ok` twice).
    - Show `pytest tests/protocol/ -m security -n 4` green.
 
-## Open questions
+## Decisions (owner, 2026-11-21)
 
-These need an owner decision.
-
-1. **State, not a log.** Is option B acceptable instead of the literal
-   "pages of the applied sequence"? The page keeps the name and the
-   `prev_root` chain.
-2. **Leaf cache (C).** Do we take the 2.8 MB per 50 k rows on the host to
-   make seals O(changes)? The recommendation is not now, and to measure a
-   seal on a Pi first.
-3. **Seal interval.** 15 min (`PAGE_MIN_INTERVAL_S`) and the member root
-   check at most hourly: are these right? A shorter interval gives fresher
-   proofs (smaller *k*) for more CPU.
-4. **Roster.** Should `members` / `bans` be committed in Phase 3, so a
-   catch-up from members also brings new authors? That needs a removal
-   tombstone or the roster digest folded into the page.
-5. **Phase-3 deliverers.** Any member household (recommended, because
-   the proof makes trust unnecessary), or still admins and moderators
-   first?
-6. **Post fields the sync receiver drops** (`location`, `linked_event_id`
-   and others). Do we fix the receiver so they can be committed, or keep
-   them uncommitted as listed in §2?
-7. **Bucket count.** 256 now, with a sibling suite for more later, or
-   1 024 from day one? 1 024 means a 32 KiB vector and 4× smaller
-   listings.
+1. **A state checksum (option B), not a change log.** The page keeps its
+   name and the `prev_root` chain.
+2. **Any member household may deliver verified rows in Phase 3.** The
+   proof makes trust in the deliverer unnecessary. Admins and moderators
+   get no priority; the request rotates with the stable offset from
+   `trusted_helpers.py`.
+3. **256 buckets now** (`sha256-b256-c1`). If big spaces need more, that
+   comes later as a sibling suite.
+4. **No leaf cache (C).** Measure a real seal on a Pi first, in the
+   Phase 2 PR, and decide on C from that number.
+5. **Timings:** a seal at most every 15 min (`PAGE_MIN_INTERVAL_S`), and a
+   member root check at most once an hour.
+6. **`members` / `bans` stay host-only for now.** Committing them is a
+   later step, after Phase 3. It needs a removal tombstone, or the roster
+   digest folded into the page.
+7. **Post fields the sync receiver drops stay uncommitted.** These are
+   `location`, `bot_id`, `linked_highlight_id`, `linked_event_id`,
+   `no_link_preview`, `pinned` and `moderated` (§2). This is a known limit,
+   with no receiver change.
 
 ## Implementation pointers (planned)
 
