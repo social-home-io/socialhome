@@ -117,6 +117,8 @@ space_page_service_key: AppKey = AppKey("space_page_service")
 #: The §4.3 space moderation queue (every MODERATED feature, host-local).
 space_moderation_service_key: AppKey = AppKey("space_moderation_service")
 rate_limiter_key: AppKey = AppKey("rate_limiter")
+#: Failures-only throttle for ``/api/auth/token`` and password reset.
+login_throttle_key: AppKey = AppKey("login_throttle")
 presence_service_key: AppKey = AppKey("presence_service")
 online_status_service_key: AppKey = AppKey("online_status_service")
 friends_service_key: AppKey = AppKey("friends_service")

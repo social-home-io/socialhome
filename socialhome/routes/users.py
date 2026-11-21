@@ -30,11 +30,11 @@ from ..app_keys import (
     auth_audit_log_repo_key,
     child_protection_service_key,
     data_export_service_key,
+    login_throttle_key,
     media_signer_key,
     password_reset_repo_key,
     platform_adapter_key,
     profile_picture_repo_key,
-    rate_limiter_key,
     user_repo_key,
     user_service_key,
 )
@@ -51,12 +51,6 @@ from ..services.user_service import _UNSET
 from .base import BaseView
 
 log = logging.getLogger(__name__)
-
-#: Brute-force budget for ``/api/auth/token`` (section 25.7). Both valid and
-#: invalid attempts burn the quota — a throttle that only reacts to
-#: failed attempts lets attackers tell valid usernames apart.
-AUTH_TOKEN_RATE_LIMIT = 5
-AUTH_TOKEN_RATE_WINDOW_S = 15 * 60
 
 #: ``PATCH /api/me`` keys that go to :meth:`UserService.set_status`.
 _STATUS_KEYS = ("status_emoji", "status_text", "status_clear_after")
@@ -119,6 +113,16 @@ async def _read_multipart_image(request: web.Request) -> bytes:
             raise ImageTooLargeError(PROFILE_PICTURE_MAX_UPLOAD_BYTES)
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _too_many_attempts(retry_after: int, detail: str) -> web.Response:
+    """429 for the login / reset throttle, with ``Retry-After`` in the
+    header and ``retry_after`` (seconds) in the body for the SPA."""
+    resp = error_response(
+        429, "RATE_LIMITED", detail, extra={"retry_after": retry_after}
+    )
+    resp.headers["Retry-After"] = str(retry_after)
+    return resp
 
 
 class MeView(BaseView):
@@ -741,24 +745,6 @@ class RedeemPasswordResetView(BaseView):
                 "Password reset is not available on this platform.",
             )
 
-        # Same IP-bucket throttle as /api/auth/token. The reset path
-        # is the obvious target for a brute-force attempt at guessing
-        # tokens, so we share the bucket budget with login attempts.
-        limiter = self.request.app.get(rate_limiter_key)
-        if limiter is not None:
-            client_ip = client_bucket(self.request.remote)
-            bucket = f"password-reset:{client_ip}"
-            if not limiter.is_allowed(
-                bucket,
-                limit=AUTH_TOKEN_RATE_LIMIT,
-                window_s=AUTH_TOKEN_RATE_WINDOW_S,
-            ):
-                return error_response(
-                    429,
-                    "RATE_LIMITED",
-                    "Too many attempts — wait a few minutes.",
-                )
-
         body = await self.body()
         token = str(body.get("token") or "")
         new_password = str(body.get("new_password") or "")
@@ -774,6 +760,15 @@ class RedeemPasswordResetView(BaseView):
                 "UNPROCESSABLE",
                 "Password must be at least 8 characters.",
             )
+        # Wrong links only (§25.7): counted before the lookup, handed back
+        # when the link turns out good. The request names no user and the
+        # link is a single-use 256-bit token, so the client address is the
+        # only bucket that means anything.
+        throttle = self.svc(login_throttle_key)
+        client = client_bucket(self.request.remote)
+        wait = throttle.begin_reset(client)
+        if wait:
+            return _too_many_attempts(wait, "Too many attempts — wait a few minutes.")
         repo = self.svc(password_reset_repo_key)
         audit = self.svc(auth_audit_log_repo_key)
         username = await repo.consume_token(token)
@@ -788,6 +783,7 @@ class RedeemPasswordResetView(BaseView):
                 "This reset link has expired or already been used.",
             )
         await adapter.change_password(username, new_password)
+        throttle.reset_succeeded(client, username)
         await audit.record(
             "reset_redeem_success",
             username=username,
@@ -831,22 +827,6 @@ class AuthTokenView(BaseView):
                 "Token auth is not available on this platform.",
             )
 
-        # IP-bucket throttle — independent of the authenticated rate limiter.
-        limiter = self.request.app.get(rate_limiter_key)
-        if limiter is not None:
-            client_ip = client_bucket(self.request.remote)
-            bucket = f"auth-token:{client_ip}"
-            if not limiter.is_allowed(
-                bucket,
-                limit=AUTH_TOKEN_RATE_LIMIT,
-                window_s=AUTH_TOKEN_RATE_WINDOW_S,
-            ):
-                return error_response(
-                    429,
-                    "RATE_LIMITED",
-                    "Too many login attempts — wait a few minutes.",
-                )
-
         body = await self.body()
         username = str(body.get("username") or "")
         password = str(body.get("password") or "")
@@ -855,6 +835,18 @@ class AuthTokenView(BaseView):
                 422,
                 "UNPROCESSABLE",
                 "username and password are required.",
+            )
+        # Wrong passwords only (§25.7): 10 per client address and 5 per
+        # username a rolling 15 min. The attempt is counted before the
+        # check (so concurrent guesses can't overtake it) and handed back
+        # on success. The username bucket never depends on whether the
+        # user exists, so neither does the answer.
+        throttle = self.svc(login_throttle_key)
+        client = client_bucket(self.request.remote)
+        wait = throttle.begin_login(client, username)
+        if wait:
+            return _too_many_attempts(
+                wait, "Too many login attempts — wait a few minutes."
             )
         token = await adapter.issue_bearer_token(username, password)
         audit = self.svc(auth_audit_log_repo_key)
@@ -865,6 +857,7 @@ class AuthTokenView(BaseView):
                 ip_address=self.request.remote,
             )
             return error_response(401, "UNAUTHENTICATED", "Invalid credentials.")
+        throttle.login_succeeded(client, username)
         await audit.record(
             "login_success",
             username=username,

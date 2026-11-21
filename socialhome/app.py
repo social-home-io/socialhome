@@ -201,6 +201,7 @@ from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.user_identity import ensure_user_identities
 from .infrastructure.user_status_expiry_scheduler import UserStatusExpiryScheduler
 from .json_text import dumps_str
+from .login_throttle import LoginThrottle
 from .media.image_processor import ImageProcessor
 from .media.profile_picture import PublicPictureCache
 from .media.video_processor import VideoProcessor
@@ -4390,6 +4391,8 @@ def create_app(config: Config | None = None) -> web.Application:
     # can implement IP-bucket brute-force protection without rebuilding
     # a second instance.
     app[K.rate_limiter_key] = limiter
+    # Wrong passwords / reset links only (§25.7): /api/auth/token, reset.
+    app[K.login_throttle_key] = LoginThrottle()
     app[K.db_key] = db
     app[K.instance_config_repo_key] = repos.instance_config
     app[K.event_bus_key] = bus
