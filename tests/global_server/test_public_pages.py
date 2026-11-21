@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import replace
@@ -10,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from socialhome.crypto import derive_instance_id, ed25519_public_key
+from socialhome.global_server import public
 from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
@@ -28,6 +31,17 @@ from socialhome.global_server.public import (
 from socialhome.global_server.server import create_gfs_app
 
 from .conftest import assert_strict_public_page
+
+
+def _register_body(token: str, label: str) -> dict:
+    """A registration for a household whose key derives from *label*."""
+    pk = ed25519_public_key(hashlib.sha256(label.encode()).digest())
+    return {
+        "token": token,
+        "instance_id": derive_instance_id(pk),
+        "public_key": pk.hex(),
+        "display_name": "Home",
+    }
 
 
 def _config(tmp_dir):
@@ -570,22 +584,100 @@ async def test_invite_page_unknown_token_404(client):
     assert resp.status == 404
 
 
-# ─── Pairing token rate-limit (spec §24.7.4) ──────────────────────────
+# ─── Pairing tokens: one fresh code per view (spec §24.7.4) ────────────
+
+_PAIR_TOKEN_RE = re.compile(r'data-pair-token="([^"]+)"')
 
 
-async def test_pairing_token_rate_limit_per_ip(client):
-    """A fresh token is issued on first visit; second visit within the
-    30-second window gets a ``please-wait`` placeholder token instead.
-    """
+def _pair_token(text: str) -> str | None:
+    m = _PAIR_TOKEN_RE.search(text)
+    return m.group(1) if m else None
+
+
+async def test_every_landing_view_from_one_address_gets_its_own_code(client):
+    """Regression (community event): one token per address per 30 s left
+    everyone else behind the same NAT — and anyone who reloaded or opened a
+    category tab — with the literal token ``please-wait``, which the GFS
+    then refused at ``/gfs/register``. Every view now mints a real,
+    single-use code of its own."""
+    tokens = []
+    for _ in range(10):
+        resp = await client.get("/")
+        assert resp.status == 200
+        text = await resp.text()
+        assert "please-wait" not in text
+        tokens.append(_pair_token(text))
+    assert None not in tokens
+    assert len(set(tokens)) == 10
+    # Each one is a real token the GFS will accept (two neighbours on the
+    # same network, each with their own code).
+    for i, token in enumerate(tokens[:2]):
+        reg = await client.post("/gfs/register", json=_register_body(token, f"n{i}"))
+        assert reg.status == 200, await reg.text()
+
+
+async def test_landing_says_so_when_the_address_has_too_many_live_codes(
+    client, monkeypatch
+):
+    """At the per-address cap of LIVE codes the page says so honestly — no
+    QR, no code, and never a fake token."""
+    monkeypatch.setattr(public, "PAIR_TOKEN_MAX_LIVE_PER_CLIENT", 3)
+    for _ in range(3):
+        assert _pair_token(await (await client.get("/")).text()) is not None
     resp = await client.get("/")
     assert resp.status == 200
-    text_a = await resp.text()
-    # Second immediate visit — rate-limited.
-    resp = await client.get("/")
-    text_b = await resp.text()
-    assert "please-wait" in text_b
-    # (The first token was real.)
-    assert "please-wait" not in text_a
+    text = await resp.text()
+    assert _pair_token(text) is None
+    assert "please-wait" not in text
+    assert "socialhome://gfs-pair/" not in text
+    assert "Pairing QR" not in text
+    assert "Too many pairing codes from your network right now" in text
+    # The rest of the page still renders.
+    assert "Connect your Social Home" in text
+    # Another address is unaffected.
+    other = await client.get("/", headers={"X-Forwarded-For": "198.51.100.77"})
+    assert _pair_token(await other.text()) is not None
+
+
+async def test_a_used_code_frees_its_slot(client, monkeypatch):
+    """The cap counts LIVE codes: one registered with frees its place."""
+    monkeypatch.setattr(public, "PAIR_TOKEN_MAX_LIVE_PER_CLIENT", 1)
+    token = _pair_token(await (await client.get("/")).text())
+    assert _pair_token(await (await client.get("/")).text()) is None
+    reg = await client.post("/gfs/register", json=_register_body(token, "used"))
+    assert reg.status == 200
+    assert _pair_token(await (await client.get("/")).text()) is not None
+
+
+async def test_landing_says_so_when_the_server_has_too_many_live_codes(
+    client, monkeypatch
+):
+    """Past its guaranteed few, an address is held to the server-wide cap —
+    and the page then blames this GFS, not the visitor's network."""
+    monkeypatch.setattr(public, "PAIR_TOKEN_MAX_LIVE_TOTAL", 2)
+    monkeypatch.setattr(public, "PAIR_TOKEN_GUARANTEED_PER_CLIENT", 1)
+    for n in (1, 2):
+        resp = await client.get("/", headers={"X-Forwarded-For": f"198.51.100.{n}"})
+        assert _pair_token(await resp.text()) is not None
+    # 198.51.100.1 already holds its guaranteed one: the full server says no.
+    resp = await client.get("/", headers={"X-Forwarded-For": "198.51.100.1"})
+    text = await resp.text()
+    assert _pair_token(text) is None
+    assert "please-wait" not in text
+    assert "This GFS is handing out too many pairing codes right now" in text
+    assert "from your network" not in text
+
+
+async def test_a_full_server_still_gives_a_fresh_address_a_code(client, monkeypatch):
+    """A few heavy sources filling the server-wide cap must not deny every
+    other visitor a code: an address holding fewer than its guaranteed few
+    always gets one."""
+    monkeypatch.setattr(public, "PAIR_TOKEN_MAX_LIVE_TOTAL", 3)
+    for _ in range(5):
+        await client.get("/", headers={"X-Forwarded-For": "203.0.113.66"})
+    for n in range(1, 4):
+        resp = await client.get("/", headers={"X-Forwarded-For": f"198.51.100.{n}"})
+        assert _pair_token(await resp.text()) is not None
 
 
 # ─── Pairing-code copy/paste fallback (socialhome:// scheme) ──────────

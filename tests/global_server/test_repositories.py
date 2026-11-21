@@ -458,9 +458,69 @@ async def test_appeal_persist_list_and_decide(admin):
     assert got.status == "lifted"
 
 
+#: Caps far above what a test mints, for tests about something else.
+_CAPS = {"max_live_per_ip": 100, "max_live_total": 1000}
+
+
+async def test_pair_token_per_address_cap_counts_live_tokens_only(admin, gfs_db):
+    """The per-address cap counts LIVE tokens (unexpired, unconsumed): a
+    used or an expired one frees its place."""
+    caps = {"max_live_per_ip": 2, "max_live_total": 100}
+    assert await admin.save_pair_token("a1", "1.2.3.4", **caps)
+    assert await admin.save_pair_token("a2", "1.2.3.4", **caps)
+    assert not await admin.save_pair_token("a3", "1.2.3.4", **caps)
+    # Never stored when refused.
+    assert await admin.consume_pair_token("a3") is False
+    # Another address has its own count.
+    assert await admin.save_pair_token("b1", "5.6.7.8", **caps)
+    # Using one frees a place.
+    assert await admin.consume_pair_token("a1") is True
+    assert await admin.save_pair_token("a4", "1.2.3.4", **caps)
+    assert not await admin.save_pair_token("a5", "1.2.3.4", **caps)
+    # So does expiry.
+    await gfs_db.enqueue(
+        "UPDATE gfs_pair_tokens SET created_at=? WHERE token=?",
+        (int(time.time()) - 601, "a2"),
+    )
+    assert await admin.save_pair_token("a6", "1.2.3.4", **caps)
+
+
+async def test_pair_token_server_cap_holds_across_addresses(admin):
+    caps = {"max_live_per_ip": 10, "max_live_total": 3}
+    for i in range(3):
+        assert await admin.save_pair_token(f"t{i}", f"10.0.0.{i}", **caps)
+    assert not await admin.save_pair_token("t9", "10.0.0.9", **caps)
+    assert await admin.consume_pair_token("t0") is True
+    assert await admin.save_pair_token("t10", "10.0.0.10", **caps)
+
+
+async def test_pair_token_guaranteed_few_ignore_a_full_server(admin):
+    """An address below its guaranteed few gets a token even when the
+    server cap is reached; past them, the server cap holds again."""
+    caps = {"max_live_per_ip": 10, "max_live_total": 2, "guaranteed_per_ip": 2}
+    assert await admin.save_pair_token("h1", "9.9.9.9", **caps)
+    assert await admin.save_pair_token("h2", "9.9.9.9", **caps)
+    assert not await admin.save_pair_token("h3", "9.9.9.9", **caps)
+    assert await admin.save_pair_token("f1", "8.8.8.8", **caps)
+    assert await admin.save_pair_token("f2", "8.8.8.8", **caps)
+    assert not await admin.save_pair_token("f3", "8.8.8.8", **caps)
+    assert await admin.count_live_pair_tokens("8.8.8.8") == 2
+    assert await admin.count_live_pair_tokens("7.7.7.7") == 0
+
+
+async def test_pair_token_caps_hold_under_concurrent_mints(admin):
+    """The capped insert is ONE statement: concurrent mints never overshoot
+    the cap (a count-then-insert would let them all see room)."""
+    caps = {"max_live_per_ip": 5, "max_live_total": 100}
+    results = await asyncio.gather(
+        *[admin.save_pair_token(f"c{i}", "1.2.3.4", **caps) for i in range(20)]
+    )
+    assert results.count(True) == 5
+
+
 async def test_pair_token_single_use_and_ttl(admin):
     # Single-use + expired behaviour covered here.
-    await admin.save_pair_token("tok-1", "1.2.3.4")
+    assert await admin.save_pair_token("tok-1", "1.2.3.4", **_CAPS)
     assert await admin.consume_pair_token("tok-1") is True
     # Already consumed.
     assert await admin.consume_pair_token("tok-1") is False
@@ -471,7 +531,7 @@ async def test_pair_token_single_use_and_ttl(admin):
 async def test_pair_token_concurrent_consume_succeeds_once(admin):
     """The consume is ONE conditional UPDATE: of many concurrent consumers of
     the same token exactly one wins."""
-    await admin.save_pair_token("tok-race", "1.2.3.4")
+    assert await admin.save_pair_token("tok-race", "1.2.3.4", **_CAPS)
     results = await asyncio.gather(
         *[admin.consume_pair_token("tok-race") for _ in range(25)]
     )
@@ -479,7 +539,7 @@ async def test_pair_token_concurrent_consume_succeeds_once(admin):
 
 
 async def test_pair_token_expired_is_refused(admin, gfs_db):
-    await admin.save_pair_token("tok-old", "1.2.3.4")
+    assert await admin.save_pair_token("tok-old", "1.2.3.4", **_CAPS)
     await gfs_db.enqueue(
         "UPDATE gfs_pair_tokens SET created_at=? WHERE token=?",
         (int(time.time()) - 601, "tok-old"),

@@ -415,9 +415,12 @@ class SignupTokenView(GfsBaseView):
 
     The request carries no body and no identity: the GFS learns nothing here
     it would not learn from a landing-page visit. When open sign-up is off
-    the answer is one uniform ``404 {"error": "not_found"}``. A second token
-    for the same address inside the token service's interval is a ``429``
-    with ``Retry-After``; the per-IP and global floods are shed earlier by
+    the answer is one uniform ``404 {"error": "not_found"}``. There is no
+    per-address interval (several households on one network may connect in
+    the same minute); at a live-token cap
+    (:data:`~socialhome.global_server.public.PAIR_TOKEN_MAX_LIVE_PER_CLIENT`
+    / ``…_TOTAL``) the answer is ``429`` with ``Retry-After``. The per-IP and
+    global floods are shed earlier by
     :func:`~socialhome.global_server.public.build_signup_rate_limit`.
     """
 

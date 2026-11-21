@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import orjson
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
@@ -439,3 +440,46 @@ async def test_signed_client_key_picks_the_per_client_bucket():
 
     assert [await hit("a") for _ in range(3)] == [200, 200, 429]
     assert await hit("b") == 200
+
+
+async def _response(mw, path: str, *, method: str = "POST"):
+    request = make_mocked_request(method, path)
+    request[USER_KEY] = SimpleNamespace(user_id="u1")
+
+    async def handler(_req):
+        return web.Response(status=204)
+
+    return await mw(request, handler)
+
+
+async def test_every_429_carries_retry_after_from_the_sliding_window():
+    """Every 429 the middleware answers says when to come back: the whole
+    seconds until the oldest request in the window leaves it — for a rule
+    bucket and for the default per-path bucket alike. ``docs/api.md``
+    promised the header; the middleware never sent it."""
+    clock = [100.0]
+    mw = build_rate_limit_middleware(
+        RateLimiter(monotonic=lambda: clock[0]),
+        default_limit=1,
+        limits={"/api/pairing": (2, 60)},
+    )
+    assert (await _response(mw, "/api/pairing/initiate")).status == 204
+    clock[0] = 110.0
+    assert (await _response(mw, "/api/pairing/initiate")).status == 204
+    clock[0] = 125.5
+    refused = await _response(mw, "/api/pairing/initiate")
+    assert refused.status == 429
+    # Oldest hit at 100 leaves the 60 s window at 160 → 34.5 s → 35.
+    assert refused.headers["Retry-After"] == "35"
+    # The canonical body also carries it, for a client that can't read
+    # headers through its API wrapper.
+    body = orjson.loads(refused.body)
+    assert body["error"]["code"] == "RATE_LIMITED"
+    assert body["error"]["retry_after"] == 35
+
+    assert (await _response(mw, "/api/other/x", method="GET")).status == 204
+    clock[0] = 126.0
+    default = await _response(mw, "/api/other/x", method="GET")
+    assert default.status == 429
+    assert default.headers["Retry-After"] == "60"
+    assert orjson.loads(default.body)["error"]["retry_after"] == 60

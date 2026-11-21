@@ -452,19 +452,31 @@ async def test_pair_answers_409_already_connected(client):
     assert session.posted == []
 
 
-async def test_pair_answers_422_gfs_pairing_failed_when_the_gfs_refuses_the_token(
+async def test_pair_answers_422_gfs_code_expired_for_a_stale_or_used_token(
     client,
 ):
-    """The GFS answered ``/gfs/register`` with a 4xx (stale / used token):
-    that IS "the GFS didn't accept this household" — in our words."""
+    """Regression (community event): the GFS answers ``/gfs/register`` with
+    401 for a token that expired or was already used. That is not "the GFS
+    didn't accept this household" — it is a code to fetch afresh."""
     session = _StubSession(
-        get_body=_GFS_INFO, status=401, body={"error": "token already used"}
+        get_body=_GFS_INFO, status=401, body={"error": "invalid_or_expired_token"}
     )
     r = await _pair(client, session)
     assert r.status == 422, await r.text()
     body = await r.json()
+    assert body["error"]["code"] == "GFS_CODE_EXPIRED"
+    assert "invalid_or_expired_token" not in json.dumps(body)
+
+
+async def test_pair_answers_422_gfs_pairing_failed_when_the_gfs_refuses(client):
+    """Any other 4xx from ``/gfs/register`` IS "the GFS didn't accept this
+    household" — in our words, never the GFS's."""
+    session = _StubSession(get_body=_GFS_INFO, status=409, body={"error": "id_in_use"})
+    r = await _pair(client, session)
+    assert r.status == 422, await r.text()
+    body = await r.json()
     assert body["error"]["code"] == "GFS_PAIRING_FAILED"
-    assert "token already used" not in json.dumps(body)
+    assert "id_in_use" not in json.dumps(body)
 
 
 async def test_pair_answers_422_gfs_pairing_failed_for_an_insecure_url(client):

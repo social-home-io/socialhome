@@ -107,7 +107,7 @@ class RateLimiter:
 
     async def check(self, user_id: str, path: str, limit: int, window_s: int) -> bool:
         """Return ``True`` if the request is allowed, ``False`` if not."""
-        bucket = self._bucket(user_id, path)
+        bucket = self.bucket_key(user_id, path)
         now = self._monotonic()
         cutoff = now - window_s
         times = [t for t in self._windows.get(bucket, ()) if t > cutoff]
@@ -188,7 +188,9 @@ class RateLimiter:
             self._windows.pop(bucket_or_key, None)
 
     @staticmethod
-    def _bucket(user_id: str, path: str) -> str:
+    def bucket_key(user_id: str, path: str) -> str:
+        """The key :meth:`check` counts *path* under for *user_id* (its first
+        two path segments) — for :meth:`retry_after_s` on a refusal."""
         parts = path.strip("/").split("/")[:2]
         return f"{user_id}:{'/'.join(parts)}"
 
@@ -317,17 +319,23 @@ def build_rate_limit_middleware(
                     limiter.prune(
                         window_s=per_client_window_s, prefix=per_client_prefix
                     )
-            allowed = limiter.is_allowed(
-                f"{owner}:rule:{rule}", limit=limit, window_s=window_s
-            )
+            key = f"{owner}:rule:{rule}"
+            allowed = limiter.is_allowed(key, limit=limit, window_s=window_s)
         else:
+            key = RateLimiter.bucket_key(user_id, request.path)
             allowed = await limiter.check(user_id, request.path, limit, window_s)
         if not allowed:
-            return error_response(
+            # When the sliding window frees a slot — never a guess, so a
+            # client that waits exactly this long is let through.
+            retry_after = limiter.retry_after_s(key, window_s=window_s) or window_s
+            resp = error_response(
                 429,
                 "RATE_LIMITED",
                 "Too many requests — wait a moment.",
+                extra={"retry_after": retry_after},
             )
+            resp.headers["Retry-After"] = str(retry_after)
+            return resp
         return await handler(request)
 
     return middleware

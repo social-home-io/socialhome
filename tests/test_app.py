@@ -973,6 +973,51 @@ async def test_signed_media_gets_have_their_own_per_client_limit(path, tmp_path)
     assert await _signed_get(rate_mw, path, "10.0.0.2") == 200
 
 
+async def _admin_call(mw, method: str, path: str) -> int:
+    request = make_mocked_request(method, path)
+    request[USER_KEY] = type("Ctx", (), {"user_id": "admin-1"})()
+
+    async def handler(_req):
+        return web.Response(status=200)
+
+    return (await mw(request, handler)).status
+
+
+async def test_pairing_handshakes_allow_a_room_of_households(tmp_path):
+    """Regression (community event): every pairing handshake shared 5 / min
+    per admin, so pairing a third household in a row 429'd mid-handshake.
+    The admin-only, authenticated handshakes now get 30 / min."""
+    _, _, rate_mw, _ = _build_middleware(
+        Config(data_dir=str(tmp_path), db_path=str(tmp_path / "x.db")), RateLimiter()
+    )
+    steps = ["/api/pairing/initiate", "/api/pairing/accept", "/api/pairing/confirm"]
+    for i in range(30):
+        assert await _admin_call(rate_mw, "POST", steps[i % 3]) == 200
+    assert await _admin_call(rate_mw, "POST", "/api/pairing/confirm") == 429
+
+
+async def test_pairing_inbox_reads_have_their_own_bucket(tmp_path):
+    """The read-only inbox lists (auto-pair and relay requests) refetch on
+    WS events; they must neither spend nor be starved by the handshakes."""
+    _, _, rate_mw, _ = _build_middleware(
+        Config(data_dir=str(tmp_path), db_path=str(tmp_path / "x.db")), RateLimiter()
+    )
+    for _ in range(30):
+        assert await _admin_call(rate_mw, "POST", "/api/pairing/initiate") == 200
+    assert await _admin_call(rate_mw, "POST", "/api/pairing/initiate") == 429
+    lists = ["/api/pairing/auto-pair-requests", "/api/pairing/relay-requests"]
+    for i in range(30):
+        assert await _admin_call(rate_mw, "GET", lists[i % 2]) == 200
+    assert await _admin_call(rate_mw, "GET", lists[0]) == 429
+    # Approving from the inbox is a handshake step, not a read.
+    assert (
+        await _admin_call(rate_mw, "POST", "/api/pairing/auto-pair-requests/r1/approve")
+        == 429
+    )
+    # Connection management keeps its own bucket too.
+    assert await _admin_call(rate_mw, "GET", "/api/pairing/connections") == 200
+
+
 async def test_gfs_picture_proxy_limit_stays_household_wide(tmp_path):
     """Every GFS-proxied avatar is an upstream fetch, so its signed-URL
     bucket is shared across clients — a leaked URL can't multiply it."""

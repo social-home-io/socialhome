@@ -232,6 +232,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   GFS_IDENTITY_MISMATCH: () => t('error.gfs_identity_mismatch'),
   GFS_PROOF_FAILED: () => t('error.gfs_proof_failed'),
   GFS_PAIRING_FAILED: () => t('error.gfs_pairing_failed'),
+  GFS_CODE_EXPIRED: () => t('error.gfs_code_expired'),
   ALREADY_CONNECTED: () => t('error.gfs_already_connected'),
   // Server-side outages the user can act on or wait out.
   GFS_UNAVAILABLE: () => t('error.gfs_unavailable'),
