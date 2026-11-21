@@ -142,3 +142,9 @@ def test_parse_result_refuses_unknown_values():
     assert SpaceSyncResult.parse("ok") is SpaceSyncResult.OK
     assert SpaceSyncResult.parse("bogus") is None
     assert SpaceSyncResult.parse(None) is None
+
+
+def test_an_unclean_first_stream_is_behind_not_never():
+    state, last_ok = sync_state([_o("h", SpaceSyncResult.UNCLEAN, None)], now=NOW)
+    assert state is SpaceSyncState.BEHIND
+    assert last_ok is None

@@ -109,8 +109,8 @@ def sync_state(
     :data:`STALE_OK_S`, or its ``ok`` is within :data:`FRESH_OK_S` and only a
     refusal followed; **catching up** while a stream from one is running
     (*receiving*); **host offline** when a host was found unreachable and
-    none answered since; **never** with no ``ok`` from any; else
-    **behind**."""
+    none answered since; **never** while no stream arrived (no ``ok``, no
+    unclean one); else **behind**."""
     rows = list(outcomes)
     oks = [(parse_utc(o.ok_at), o) for o in rows]
     newest = max(
@@ -138,6 +138,7 @@ def sync_state(
     )
     if unreachable and not answering:
         return SpaceSyncState.HOST_OFFLINE, last_ok
-    if last_ok is None:
+    if last_ok is None and not any(o.result is SpaceSyncResult.UNCLEAN for o in rows):
+        # Nothing arrived yet (a refusal is no stream).
         return SpaceSyncState.NEVER, None
     return SpaceSyncState.BEHIND, last_ok

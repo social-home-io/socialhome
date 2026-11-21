@@ -28,11 +28,12 @@ here goes on the wire to another household.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..domain.events import (
     SpaceSyncComplete,
@@ -44,6 +45,7 @@ from ..domain.space_sync_status import (
     SpaceSyncResult,
     SpaceSyncState,
     SpaceSyncStatus,
+    parse_utc,
     sync_state,
 )
 from .bus_publisher import BusPublisherMixin
@@ -59,7 +61,7 @@ log = logging.getLogger(__name__)
 #: land close together ("Sync now" next to a periodic round).
 OK_REFRESH_S: float = 15 * 60
 
-#: Spaces (and (space, host) pairs) whose last state / write is remembered.
+#: Spaces whose last computed state is remembered (frame on change).
 MAX_TRACKED: int = 4096
 
 
@@ -103,7 +105,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         "_own_instance_id",
         "_receiving",
         "_space_repo",
-        "_written",
+        "_tasks",
     )
 
     def __init__(
@@ -131,10 +133,8 @@ class SpaceSyncStatusService(BusPublisherMixin):
         self._clock = clock
         #: space → the state last computed after an outcome (frame on change).
         self._last_state: OrderedDict[str, SpaceSyncState] = OrderedDict()
-        #: (space, host) → (result last written, when an ``ok`` was written).
-        self._written: OrderedDict[
-            tuple[str, str], tuple[SpaceSyncResult, datetime | None]
-        ] = OrderedDict()
+        #: Outcomes being recorded (:meth:`_spawn`).
+        self._tasks: set[asyncio.Task] = set()
 
     def wire(self) -> None:
         """Subscribe to the outcomes on the bus."""
@@ -177,17 +177,40 @@ class SpaceSyncStatusService(BusPublisherMixin):
 
     async def _on_complete(self, event: SpaceSyncComplete) -> None:
         result = SpaceSyncResult.OK if event.clean else SpaceSyncResult.UNCLEAN
-        await self.record(
-            event.space_id, event.from_instance, result, ignore_sync_id=event.sync_id
+        self._spawn(
+            self.record(
+                event.space_id,
+                event.from_instance,
+                result,
+                ignore_sync_id=event.sync_id,
+            )
         )
 
     async def _on_deferred(self, event: SpaceSyncDeferred) -> None:
-        await self.record(
-            event.space_id,
-            event.provider_instance_id,
-            SpaceSyncResult.DEFERRED,
-            ignore_sync_id=event.sync_id,
+        self._spawn(
+            self.record(
+                event.space_id,
+                event.provider_instance_id,
+                SpaceSyncResult.DEFERRED,
+                ignore_sync_id=event.sync_id,
+            )
         )
+
+    def _spawn(self, work: Coroutine[Any, Any, None]) -> None:
+        """Record in a task of our own, never in the publisher's: the
+        receiver publishes the end of a stream from the session's drain
+        task, and the federation service's own handler of the same event
+        closes that session — which cancels the drain task while the bus is
+        still calling handlers. Inline, our write died with it, silently
+        (``CancelledError`` is no ``Exception``)."""
+        task = asyncio.create_task(work, name="space-sync-status")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def settle(self) -> None:
+        """Wait for the outcomes being recorded (tests; shutdown)."""
+        while pending := [t for t in self._tasks if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def host_unreachable(self, space_id: str, hosts: Iterable[str]) -> None:
         """The scheduler waited a round's full while for *hosts* (the
@@ -238,21 +261,24 @@ class SpaceSyncStatusService(BusPublisherMixin):
     async def _write(
         self, space_id: str, provider: str, result: SpaceSyncResult
     ) -> None:
+        """Write only what changes the stored row — read first (one small
+        SELECT per answer, once per round): never a write the row already
+        says, and an ``ok`` refreshes its time at most every
+        :data:`OK_REFRESH_S`. The row decides, not memory: a household whose
+        seat row arrives after its first answer still gets the next one."""
         now = self._clock()
-        key = (space_id, provider)
-        held = self._written.get(key)
-        if held is not None and held[0] is result:
+        held = await self._outcomes.outcomes(space_id, [provider])
+        if not held:
+            return  # no seat row for that household: nothing to keep
+        stored = held[0]
+        if stored.result is result:
             if result is not SpaceSyncResult.OK:
                 return  # unchanged
-            if held[1] is not None and (now - held[1]).total_seconds() < OK_REFRESH_S:
+            last_ok = parse_utc(stored.ok_at)
+            if last_ok is not None and (now - last_ok).total_seconds() < OK_REFRESH_S:
                 return  # refreshed this round already
         ok_at = now.isoformat() if result is SpaceSyncResult.OK else None
         await self._outcomes.record_outcome(space_id, provider, result, ok_at=ok_at)
-        ok_written = now if ok_at is not None else (held[1] if held else None)
-        self._written[key] = (result, ok_written)
-        self._written.move_to_end(key)
-        while len(self._written) > MAX_TRACKED:
-            self._written.popitem(last=False)
 
     async def _recheck(self, space: Space, *, ignore_sync_id: str = "") -> None:
         status = await self._status_of(space, ignore_sync_id=ignore_sync_id)

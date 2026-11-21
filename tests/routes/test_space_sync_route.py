@@ -15,6 +15,7 @@ from socialhome.app_keys import (
 from socialhome.app_keys import (
     event_bus_key,
     federation_repo_key,
+    space_sync_status_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
@@ -231,6 +232,8 @@ async def test_a_members_space_reads_never_then_up_to_date_after_the_host_answer
     await client.server.app[event_bus_key].publish(
         SpaceSyncComplete(space_id=space_id, from_instance="host-x", clean=True)
     )
+    # Recorded in a task of its own (never in the publisher's).
+    await client.server.app[space_sync_status_key].settle()
     r = await client.get(f"/api/spaces/{space_id}", headers=_auth(client._admin_token))
     sync = (await r.json())["sync"]
     assert sync["state"] == "up_to_date"

@@ -515,7 +515,7 @@ class SpaceSyncScheduler:
             await self._mesh_incremental(space, host, periodic=True, done=True)
 
     async def sync_now(self, space_id: str) -> list[str]:
-        """ "Sync now" for one space: what one periodic tick does for it,
+        """The "Sync now" of one space: what one periodic tick does for it,
         right away — the small incremental BEGIN (never a full stream) to
         each household acting as its host here, a mesh-only one over the
         mesh (:meth:`_mesh_incremental`), and to every paired co-member

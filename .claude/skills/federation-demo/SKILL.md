@@ -180,6 +180,11 @@ That single command runs the full sequence:
      attempt on) and the sealed redeem body carries the redeemer's (what
      the issuer stamps on the seat). Both land on the seats, so the seats
      are where the round-trip is provable.
+   - **Sync status (migration 0150).** Beta reads its own space
+     ``up_to_date`` (``GET /api/spaces/{id}`` ``sync``), and so must Alpha
+     and Gamma — their host answered a sync with ``ok``. A member that
+     doesn't yet presses "Sync now" once (``POST …/sync``, the incremental
+     BEGIN) and must read ``up_to_date`` within 90 s.
    - **v_39 space timetable.** Alpha and Gamma (plain members of Beta's
      space) ``GET /api/spaces/{id}/timetables`` and must see Beta's
      timetable at its latest version with the "Mathe" lesson — which also

@@ -3,6 +3,7 @@ of a space's acting hosts and telling a member whether it needs sync."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -46,6 +47,7 @@ class _Spaces:
         self.spaces = {s.id: s for s in spaces}
 
     async def get(self, space_id: str) -> Space | None:
+        await asyncio.sleep(0)  # a real read suspends (the executor)
         return self.spaces.get(space_id)
 
 
@@ -142,6 +144,12 @@ def env():
     return e
 
 
+async def _pub(env, event) -> None:
+    """Publish and wait for the outcome to be recorded (its own task)."""
+    await env.bus.publish(event)
+    await env.svc.settle()
+
+
 async def _state(env, space_id: str = "sp") -> SpaceSyncState:
     status = await env.svc.status(space_id)
     assert status is not None
@@ -158,10 +166,11 @@ async def test_nothing_recorded_reads_never(env):
 
 
 async def test_a_clean_stream_from_the_host_is_ok(env):
-    await env.bus.publish(
+    await _pub(
+        env,
         SpaceSyncComplete(
             space_id="sp", from_instance="owner", sync_id="s1", clean=True
-        )
+        ),
     )
     assert env.outcomes.writes == [("sp", "owner", SpaceSyncResult.OK, NOW.isoformat())]
     status = await env.svc.status("sp")
@@ -172,18 +181,14 @@ async def test_a_clean_stream_from_the_host_is_ok(env):
 async def test_the_quiet_sentinel_is_ok(env):
     """An up-to-date space's whole answer is the sentinel of an empty
     session — the receiver publishes it as a clean ``SpaceSyncComplete``."""
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert await _state(env) is SpaceSyncState.UP_TO_DATE
 
 
 async def test_an_unclean_stream_is_behind(env):
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=False)
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
+    await _pub(
+        env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=False)
     )
     assert env.outcomes.rows[("sp", "owner")] == (
         SpaceSyncResult.UNCLEAN,
@@ -193,18 +198,17 @@ async def test_an_unclean_stream_is_behind(env):
 
 
 async def test_a_deferral_is_recorded(env):
-    await env.bus.publish(
+    await _pub(
+        env,
         SpaceSyncDeferred(
             space_id="sp", provider_instance_id="owner", reason="too_many_sessions"
-        )
+        ),
     )
     assert env.outcomes.rows[("sp", "owner")] == (SpaceSyncResult.DEFERRED, None)
 
 
 async def test_a_silent_host_is_unreachable_and_reads_host_offline(env):
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     env.clock.now = NOW + timedelta(hours=3)
     await env.svc.host_unreachable("sp", ["owner"])
     status = await env.svc.status("sp")
@@ -213,8 +217,8 @@ async def test_a_silent_host_is_unreachable_and_reads_host_offline(env):
 
 
 async def test_an_answer_from_a_household_not_acting_as_host_is_not_recorded(env):
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="member-x", clean=True)
+    await _pub(
+        env, SpaceSyncComplete(space_id="sp", from_instance="member-x", clean=True)
     )
     await env.svc.host_unreachable("sp", ["member-x"])
     assert env.outcomes.writes == []
@@ -222,31 +226,25 @@ async def test_an_answer_from_a_household_not_acting_as_host_is_not_recorded(env
 
 async def test_a_repeated_refusal_is_written_once(env):
     for _ in range(3):
-        await env.bus.publish(
-            SpaceSyncDeferred(space_id="sp", provider_instance_id="owner")
-        )
+        await _pub(env, SpaceSyncDeferred(space_id="sp", provider_instance_id="owner"))
     assert len(env.outcomes.writes) == 1
 
 
 async def test_ok_answers_refresh_the_time_at_most_once_per_round(env):
     for _ in range(3):
-        await env.bus.publish(
-            SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
+        await _pub(
+            env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
         )
     assert len(env.outcomes.writes) == 1
     env.clock.now = NOW + timedelta(seconds=OK_REFRESH_S + 1)
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert len(env.outcomes.writes) == 2
 
 
 async def test_a_new_process_reads_the_recorded_outcome(env):
     """The outcome lives in the database: a fresh service (a restart)
     reads it back instead of "never"."""
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     fresh = SpaceSyncStatusService(
         bus=EventBus(),
         space_repo=_Spaces(_space("sp")),
@@ -283,9 +281,7 @@ async def test_a_running_stream_reads_catching_up(env):
 
 
 async def test_no_ok_for_over_two_hours_reads_behind(env):
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     env.clock.now = NOW + timedelta(hours=2, minutes=5)
     assert await _state(env) is SpaceSyncState.BEHIND
 
@@ -294,9 +290,7 @@ async def test_a_delegated_admin_acting_as_host_keeps_the_space_up_to_date(env):
     env.hosts["sp"] = ["owner", "admin"]
     await env.svc.host_unreachable("sp", ["owner"])
     assert await _state(env) is SpaceSyncState.HOST_OFFLINE
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="admin", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="admin", clean=True))
     assert await _state(env) is SpaceSyncState.UP_TO_DATE
 
 
@@ -304,9 +298,7 @@ async def test_a_mesh_only_host_counts_like_a_paired_one(env):
     """Where the answer came from (paired, mesh, GFS) does not matter: the
     receiver publishes the same event for each."""
     await env.svc.host_unreachable("sp", ["owner"])
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert await _state(env) is SpaceSyncState.UP_TO_DATE
 
 
@@ -319,14 +311,10 @@ async def test_waiting_to_send_counts_the_spaces_outbox(env):
 
 
 async def test_a_frame_goes_out_only_when_the_state_changes(env):
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert [f.sync["state"] for f in env.frames] == ["up_to_date"]
     env.clock.now = NOW + timedelta(seconds=OK_REFRESH_S + 1)
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
-    )
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert len(env.frames) == 1  # still up to date: no frame
     await env.svc.host_unreachable("sp", ["owner"])
     env.clock.now = NOW + timedelta(hours=3)
@@ -355,7 +343,53 @@ async def test_a_stream_from_a_non_host_sends_nothing(env):
 
 async def test_no_frame_for_a_space_hosted_here(env):
     await env.svc.stream_started("mine", "self")
-    await env.bus.publish(
-        SpaceSyncComplete(space_id="mine", from_instance="peer", clean=True)
+    await _pub(
+        env, SpaceSyncComplete(space_id="mine", from_instance="peer", clean=True)
     )
     assert env.frames == []
+
+
+async def test_an_answer_before_the_hosts_seat_row_is_not_remembered_as_written(env):
+    """Regression (demo): the host's seat row can arrive after its first
+    answer. That answer has nowhere to go — but the next one, right after,
+    must still be written, not skipped as "refreshed this round"."""
+    env.hosts["sp"] = ["owner", "late"]
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="late", clean=True))
+    assert ("sp", "late") not in env.outcomes.rows
+    env.outcomes.rows[("sp", "late")] = (None, None)
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="late", clean=True))
+    assert env.outcomes.rows[("sp", "late")] == (SpaceSyncResult.OK, NOW.isoformat())
+    assert await _state(env) is SpaceSyncState.UP_TO_DATE
+
+
+async def test_the_outcome_survives_the_publisher_being_cancelled(env):
+    """Regression (demo): the receiver publishes a stream's end from the
+    session's drain task, and the federation service's handler of the same
+    event — subscribed earlier — closes the session, which cancels that very
+    task while the bus goes on to the next handlers. The outcome must still
+    be recorded."""
+    bus = EventBus()
+
+    async def _closes_the_session(_event) -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel()
+
+    bus.subscribe(SpaceSyncComplete, _closes_the_session)
+    svc = SpaceSyncStatusService(
+        bus=bus,
+        space_repo=_Spaces(_space("sp")),
+        outcomes=env.outcomes,
+        outbox=env.outbox,
+        hosts=_owner_only,
+        own_instance_id="self",
+        clock=env.clock,
+    )
+    svc.wire()
+    publisher = asyncio.create_task(
+        bus.publish(SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
+    )
+    await asyncio.gather(publisher, return_exceptions=True)
+    assert publisher.cancelled()
+    await svc.settle()
+    assert env.outcomes.rows[("sp", "owner")] == (SpaceSyncResult.OK, NOW.isoformat())

@@ -12402,6 +12402,66 @@ def _highlight_captions(state: dict, viewer_label: str) -> set[str]:
     return {f["caption_text"] or "" for h in hls for f in h["frames"]}
 
 
+def _sync_state_of(state: dict, label: str, space_id: str) -> dict | None:
+    """``GET /api/spaces/{id}`` ``sync`` as ``label`` sees it (``None`` on
+    an error or a follower's seat)."""
+    inst = state["instances"][label]
+    s, body = _request(
+        f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}", token=inst["token"]
+    )
+    if s != 200 or not isinstance(body, dict):
+        return None
+    sync = body.get("sync")
+    return sync if isinstance(sync, dict) else None
+
+
+def _verify_space_sync_state(state: dict, space_id: str) -> list[str]:
+    """Migration 0150: the host (b) and its member households (a, c) read
+    Beta's space ``up_to_date``. A member that does not yet (its last
+    stream unclean, or none since boot) presses "Sync now" once — the
+    incremental BEGIN — and must reach it within 90 s: proves the outcome
+    is recorded, the state computed and Sync now served end to end."""
+    out: list[str] = []
+    host = _sync_state_of(state, "b", space_id)
+    if (host or {}).get("state") == "up_to_date":
+        print("  b (host) reads its space up to date ✓")
+    else:
+        out.append(f"b (host) reads its own space {host!r}, not up_to_date")
+    for label in ("a", "c"):
+        now = _sync_state_of(state, label, space_id)
+        if (now or {}).get("state") != "up_to_date":
+            inst = state["instances"][label]
+            s, body = _request(
+                f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}/sync",
+                token=inst["token"],
+                method="POST",
+                body={},
+            )
+            if s != 202:
+                out.append(f"{label}: Sync now answered {s} {body!r}")
+                continue
+            try:
+                now = _poll(
+                    f"{label} to read the space up to date after Sync now",
+                    lambda lb=label: (
+                        (got := _sync_state_of(state, lb, space_id))
+                        and got.get("state") == "up_to_date"
+                        and got
+                    ),
+                    timeout=90.0,
+                    interval=3.0,
+                )
+            except SystemExit as exc:
+                out.append(
+                    f"{label}: {exc} (last: {_sync_state_of(state, label, space_id)!r})"
+                )
+                continue
+        print(
+            f"  {label} reads the space up to date (last ok {now.get('last_ok_at')}) ✓"
+        )
+    return out
+
+
 def cmd_verify() -> None:
     """Assert each household sees the others' federated content."""
     state = _load()
@@ -13689,6 +13749,12 @@ def cmd_verify() -> None:
                     f"{viewer}'s roster mirror lacks {other} ({s}) — the "
                     "v_32 roster snapshot / gossip did not converge"
                 )
+        # Sync status (migration 0150): after the traffic every member
+        # household reads the space up to date — its host answered a sync
+        # with ``ok``. One "Sync now" (the incremental BEGIN) is allowed for
+        # a household whose last stream was unclean (a record held back for
+        # a seat that arrived later); the host itself always reads it.
+        failures.extend(_verify_space_sync_state(state, state["space_id"]))
 
     # 5. Trust-relay pair — a ↔ d should be CONFIRMED on both sides
     #    *if* :func:`cmd_relay_pair` was run (excluded from ``all``).
