@@ -109,7 +109,7 @@ from ..peer_http import post_to_peer
 from ..rate_limiter import RateLimiter
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
-from ..sync_page import parse_page_ref
+from ..sync_page import parse_bucket_request, parse_page_ref
 from ..task_drain import wait_tasks_done
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
@@ -3279,6 +3279,61 @@ class FederationService:
                 )
         return DeliveryResult(instance_id=to_instance_id, ok=True)
 
+    async def begin_bucket_listing(
+        self, space_id: str, host_instance_id: str, page_ref: dict, buckets: list[int]
+    ) -> str | None:
+        """v_95 sync pages: ask *host_instance_id* (a household acting as
+        the space's host) for the listings of *buckets* of the page we hold
+        (*page_ref*) — a ``SPACE_SYNC_BEGIN`` with ``sync_mode: "buckets"``,
+        answered over the relay as ``__listing__`` chunks under the content
+        key and a sentinel (``docs/protocol/sync-pages.md``; Phase 3 sends
+        the same request to any member). Everything but the routing fields
+        rides the encrypted payload. The session id, or ``None`` when the
+        BEGIN could not go out. Fail-soft."""
+        if self._sync_manager is None or not buckets:
+            return None
+        try:
+            if not await self.space_member_supports(
+                host_instance_id, min_version=FederationCapability.MIN_FOR_SYNC_PAGES
+            ):
+                return None
+            sync_id = uuid.uuid4().hex
+            self._sync_manager.record_sync_request(
+                sync_id=sync_id,
+                space_id=space_id,
+                provider_instance_id=host_instance_id,
+                sync_mode="buckets",
+                page_ref=page_ref,
+            )
+            self._sync_manager.register_requester_https_session(
+                sync_id=sync_id,
+                space_id=space_id,
+                requester_instance_id=self._own_instance_id,
+                provider_instance_id=host_instance_id,
+            )
+            result = await self.send_with_mesh_fallback(
+                to_instance_id=host_instance_id,
+                event_type=FederationEventType.SPACE_SYNC_BEGIN,
+                payload={
+                    "sync_id": sync_id,
+                    "space_id": space_id,
+                    "sync_mode": "buckets",
+                    "prefer_direct": False,
+                    "page": page_ref,
+                    "buckets": list(buckets),
+                },
+                space_id=space_id,
+            )
+        except Exception:
+            log.warning(
+                "sync pages: asking %s for bucket listings of %s failed",
+                host_instance_id,
+                space_id,
+                exc_info=True,
+            )
+            return None
+        return sync_id if getattr(result, "ok", False) else None
+
     async def begin_mesh_catchup_sync(
         self,
         *,
@@ -5532,6 +5587,8 @@ class FederationService:
             # v_95: the sync page the requester holds (absent / malformed →
             # it gets our newest page, if we hold one).
             page_ref=parse_page_ref(payload.get("page")),
+            # v_95: the buckets a ``sync_mode: "buckets"`` session lists.
+            buckets=parse_bucket_request(payload.get("buckets")),
         )
         if not decision.accepted and decision.next_event is not None:
             if (

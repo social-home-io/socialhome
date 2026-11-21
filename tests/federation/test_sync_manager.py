@@ -1062,6 +1062,20 @@ async def test_begin_session_records_the_requesters_sync_page():
     assert mgr.get_session("s-page").page_ref == ref
 
 
+async def test_begin_session_records_the_asked_buckets():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    await mgr.begin_session(
+        sync_id="s-b",
+        space_id="sp-1",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="buckets",
+        buckets=[3, 9],
+    )
+    session = mgr.get_session("s-b")
+    assert (session.sync_mode, session.buckets) == ("buckets", [3, 9])
+
+
 # ─── Sync status: is a stream of a space arriving? ─────────────────────────
 
 

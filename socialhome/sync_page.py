@@ -944,11 +944,176 @@ def parse_page_ref(raw: object) -> dict[str, Any] | None:
         return None
 
 
+# ─── Bucket listings (Phase 2 mismatch, reused by Phase 3) ───────────────
+
+#: A requester asks for at most this many bucket listings per compare.
+MAX_LISTING_BUCKETS: int = 8
+#: A served bucket lists at most this many rows (the b256 suite's bound).
+MAX_LISTING_ROWS: int = 4096
+#: One listing entry's row id / resource name / marker are at most this long.
+MAX_LISTING_FIELD: int = 256
+
+#: The fields whose newest value is a row's change time — what tells a
+#: newer local version from an older one (``updated_at`` is left out of the
+#: commit form but kept in the record for exactly this).
+CHANGE_TIME_FIELDS: tuple[str, ...] = (
+    "created_at",
+    "edited_at",
+    "updated_at",
+    "last_edited_at",
+    "archived_at",
+    "sold_at",
+    "deleted_at",
+)
+
+#: A row of the key resource that is gone because the row moved to the
+#: value resource (deleted → its tombstone; a task archived / unarchived).
+SUPERSEDED_BY: Mapping[str, str] = MappingProxyType(
+    {
+        "posts_deleted": "posts",
+        "comments_deleted": "comments",
+        "task_lists_deleted": "task_lists",
+        "tasks_deleted": "tasks",
+        "pages_deleted": "pages",
+        "stickies_deleted": "stickies",
+        "calendar_deleted": "calendar",
+        "gallery_albums_deleted": "gallery",
+        "gallery_items_deleted": "gallery",
+        "space_zones_deleted": "space_zones",
+        "timetables_deleted": "timetables",
+        "tasks_archived": "tasks",
+    }
+)
+
+#: Resources keyed by their post: gone with the post.
+POST_KEYED: frozenset[str] = frozenset({"polls", "schedules", "bazaar"})
+
+
+def change_time(record: Mapping[str, Any]) -> str | None:
+    """The newest change time a record carries, in one UTC form
+    (:func:`_stamp`), or ``None``."""
+    found = [
+        v
+        for name in CHANGE_TIME_FIELDS
+        if isinstance(v := _stamp(record.get(name)), str) and v
+    ]
+    return max(found) if found else None
+
+
+def page_time(page: SyncPage) -> str:
+    """The page's ``issued_at`` in the :func:`change_time` form."""
+    return datetime.fromtimestamp(page.issued_at / 1000, UTC).isoformat(
+        timespec="microseconds"
+    )
+
+
+def superseded_key(resource: str, row_id: str) -> tuple[str, str] | None:
+    """The live row a tombstone / archive record stands for, or ``None``."""
+    live = SUPERSEDED_BY.get(resource)
+    return (live, row_id) if live is not None else None
+
+
+def is_superseded(
+    resource: str, row_id: str, gone: set[tuple[str, str]] | frozenset
+) -> bool:
+    """Whether a row we lack is gone here for a later reason: deleted or
+    archived after the page (its tombstone / archived copy is held), or a
+    poll / schedule / listing whose post was deleted."""
+    if (resource, row_id) in gone:
+        return True
+    return resource in POST_KEYED and ("posts", row_id) in gone
+
+
+@dataclass(slots=True, frozen=True)
+class ListingRow:
+    """One row of a bucket listing: identity, leaf, change time."""
+
+    resource: str
+    row_id: str
+    leaf: bytes
+    marker: str | None
+
+
+def listing_to_wire(index: int, rows: Sequence[ListingRow] | None) -> dict:
+    """A ``__listing__`` record: the bucket and its rows, or
+    ``held: false`` when the provider cannot prove that bucket."""
+    if rows is None:
+        return {"i": index, "held": False}
+    return {
+        "i": index,
+        "held": True,
+        "rows": [[r.resource, r.row_id, b64url_encode(r.leaf), r.marker] for r in rows],
+    }
+
+
+def parse_listing(raw: object) -> tuple[int, list[ListingRow] | None]:
+    """A received ``__listing__`` record, strictly parsed and bounded.
+    Raises :class:`PageRefused`."""
+    if not isinstance(raw, dict):
+        raise PageRefused("listing is not an object")
+    index = raw.get("i")
+    if (
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < BUCKETS
+    ):
+        raise PageRefused("malformed listing bucket")
+    if raw.get("held") is not True:
+        return index, None
+    rows_raw = raw.get("rows")
+    if not isinstance(rows_raw, list) or len(rows_raw) > MAX_LISTING_ROWS:
+        raise PageRefused("malformed listing rows")
+    rows: list[ListingRow] = []
+    for item in rows_raw:
+        if not (isinstance(item, list) and len(item) == 4):
+            raise PageRefused("malformed listing row")
+        resource, row_id, leaf, marker = item
+        if (
+            not isinstance(resource, str)
+            or resource not in COMMITTED_RESOURCES
+            or not isinstance(row_id, str)
+            or not row_id
+            or len(row_id) > MAX_LISTING_FIELD
+            or not (marker is None or (isinstance(marker, str) and len(marker) <= 64))
+        ):
+            raise PageRefused("malformed listing row")
+        value = _hash_field(leaf, "listing leaf")
+        if row_key(resource, row_id)[0] != index:
+            raise PageRefused("a listing row of another bucket")
+        rows.append(ListingRow(resource, row_id, value, marker))
+    return index, rows
+
+
+def verify_listing(index: int, rows: Sequence[ListingRow], vector: bytes) -> None:
+    """A listing must hash to the page's signed bucket. Raises
+    :class:`PageRefused` (forged, truncated or padded)."""
+    expected = vector[index * HASH_BYTES : (index + 1) * HASH_BYTES]
+    if bucket_hash(index, (r.leaf for r in rows)) != expected:
+        raise PageRefused(f"listing of bucket {index} does not hash to the page")
+
+
+def parse_bucket_request(raw: object) -> list[int] | None:
+    """The ``buckets`` of a ``sync_mode: "buckets"`` BEGIN: 1 to
+    :data:`MAX_LISTING_BUCKETS` distinct indices, or ``None``."""
+    if not isinstance(raw, list) or not 0 < len(raw) <= MAX_LISTING_BUCKETS:
+        return None
+    out: list[int] = []
+    for v in raw:
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v < BUCKETS:
+            return None
+        if v not in out:
+            out.append(v)
+    return out
+
+
 __all__ = [
     "BUCKETS",
+    "CHANGE_TIME_FIELDS",
     "COMMITTED_RESOURCES",
     "COMMIT_SPECS",
     "HASH_BYTES",
+    "MAX_LISTING_BUCKETS",
+    "MAX_LISTING_ROWS",
     "MAX_PAGE_FUTURE_SKEW_MS",
     "PAGE_MIN_INTERVAL_S",
     "PAGE_SUITE_SHA256_B256",
@@ -956,12 +1121,14 @@ __all__ = [
     "VECTOR_BYTES",
     "CommitSpec",
     "FileHashOf",
+    "ListingRow",
     "PageRefused",
     "SyncPage",
     "UnsupportedPageSuite",
     "VectorBuilder",
     "apply_delta",
     "bucket_hash",
+    "change_time",
     "commit_form",
     "delta_from_bytes",
     "delta_from_wire",
@@ -970,7 +1137,12 @@ __all__ = [
     "differing_buckets",
     "file_refs",
     "is_conflict",
+    "is_superseded",
     "leaf_of",
+    "listing_to_wire",
+    "page_time",
+    "parse_bucket_request",
+    "parse_listing",
     "parse_page",
     "parse_page_ref",
     "record_leaf",
@@ -978,8 +1150,10 @@ __all__ = [
     "row_id_of",
     "row_key",
     "sign_page",
+    "superseded_key",
     "vector_delta",
     "vector_from_wire",
     "vector_to_wire",
+    "verify_listing",
     "verify_page",
 ]

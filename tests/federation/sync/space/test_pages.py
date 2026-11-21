@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 from dataclasses import replace
 
@@ -23,15 +24,20 @@ from socialhome.domain.space import (
 )
 from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
+from socialhome.federation.sync.space.page_state import BucketRows
 from socialhome.federation.sync.space.pages import SyncPageService
 from socialhome.sync_page import (
     PAGE_MIN_INTERVAL_S,
     VECTOR_BYTES,
+    ListingRow,
     apply_delta,
+    bucket_hash,
     delta_from_wire,
+    listing_to_wire,
     parse_page,
     parse_page_ref,
     root_of,
+    row_key,
     sign_page,
     vector_from_wire,
 )
@@ -144,6 +150,9 @@ class _State:
         self.calls += 1
         self.cutoffs.append(cutoff)
         return self.vec, self.rows
+
+    async def rows_in(self, space_id, buckets, *, cutoff=None):
+        return BucketRows(rows={i: [] for i in buckets}, gone=set())
 
 
 class _Exporter:
@@ -669,28 +678,7 @@ async def test_malformed_page_sealed_is_refused():
     await env.svc.wait_idle()
 
 
-# ── Root check and status ────────────────────────────────────────────────
-
-
-async def test_position_applied_when_we_applied_the_signers_stream():
-    env = _Env(own=ME, seed=None)
-    page = _signed(seq=50)
-    await env.svc.receive(
-        space_id=SPACE,
-        sync_id="s-1",
-        provider=HOST,
-        sealed=await _sealed_for_member(page),
-    )
-    await env.svc.wait_idle()
-    env.seqs.applied[HOST] = 49
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.applied is False  # a newer page exists
-    assert pos.seq == 50 and pos.signer_role == "owner"
-    env.seqs.applied[HOST] = 50
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.applied is True
-    pos = await env.svc.position(env.spaces.space, ["someone-else"])
-    assert pos is not None and pos.applied is None
+# ── Compare, bucket listings and status ──────────────────────────────────
 
 
 async def _take(env: _Env, page, vector) -> bool:
@@ -704,105 +692,294 @@ async def _take(env: _Env, page, vector) -> bool:
     return stored
 
 
-def _differing(n: int) -> bytes:
-    """Our local vector differing from ``_vec(2)`` in *n* buckets."""
-    out = bytearray(_vec(2))
-    out[0 : 32 * n] = b"\x08" * (32 * n)
-    return bytes(out)
+OLD = "2026-01-01T00:00:00.000000+00:00"  # before the page (T0 = 2027-01-15)
+NEW = "2027-02-01T00:00:00.000000+00:00"  # after the page
+
+
+def _row(rid: str, version: int = 1, marker: str | None = OLD, resource="posts"):
+    leaf = hashlib.sha256(f"{resource}|{rid}|{version}".encode()).digest()
+    return ListingRow(resource, rid, leaf, marker)
+
+
+def _vector_of(rows) -> bytes:
+    buckets: list[list[bytes]] = [[] for _ in range(256)]
+    for r in rows:
+        buckets[row_key(r.resource, r.row_id)[0]].append(r.leaf)
+    return b"".join(bucket_hash(i, leaves) for i, leaves in enumerate(buckets))
+
+
+def _bucket(r) -> int:
+    return row_key(r.resource, r.row_id)[0]
+
+
+def _ids_in_distinct_buckets(n: int, prefix: str) -> list[str]:
+    out: list[str] = []
+    seen: set[int] = set()
+    k = 0
+    while len(out) < n:
+        rid = f"{prefix}{k}"
+        k += 1
+        i = row_key("posts", rid)[0]
+        if i not in seen:
+            seen.add(i)
+            out.append(rid)
+    return out
+
+
+class _Listed:
+    """A member env whose own rows and the host's page are real rows."""
+
+    def __init__(self, host_rows, member_rows, *, gone=(), signer=HOST) -> None:
+        self.env = _Env(own=ME, seed=None)
+        self.host_rows = list(host_rows)
+        self.page_vector = _vector_of(self.host_rows)
+        self.env.state.vec = _vector_of(member_rows)
+        self.member_rows = list(member_rows)
+        self.gone = set(gone)
+        self.asks: list[tuple[str, list[int]]] = []
+        self.forge = None  # a function(records) -> records
+        self.signer = signer
+
+        async def rows_in(space_id, buckets, *, cutoff=None):
+            wanted = set(buckets)
+            rows = {
+                i: [r for r in self.member_rows if _bucket(r) in {i}] for i in wanted
+            }
+            return BucketRows(rows=rows, gone=set(self.gone))
+
+        async def listing(space_id, host, page_ref, buckets):
+            self.asks.append((host, list(buckets)))
+            return f"L{len(self.asks)}"
+
+        self.env.state.rows_in = rows_in
+        self.env.svc.attach_sync_requests(
+            hosts=self.env_hosts, request=self.env_request, listing=listing
+        )
+
+    async def env_hosts(self, space):
+        return list(self.env.hosts)
+
+    async def env_request(self, space_id, host):
+        self.env.requests.append((space_id, host))
+
+    async def take_page(self) -> None:
+        page = _signed(vector=self.page_vector, signer=self.signer)
+        assert await _take(self.env, page, self.page_vector)
+
+    async def deliver(self, n: int = 1) -> None:
+        """Answer ask *n* like an honest host (or ``forge``)."""
+        host, buckets = self.asks[n - 1]
+        records = [
+            listing_to_wire(i, [r for r in self.host_rows if _bucket(r) == i])
+            for i in buckets
+        ]
+        if self.forge is not None:
+            records = self.forge(records)
+        await self.env.svc.take_listing(
+            space_id=SPACE, sync_id=f"L{n}", provider=host, records=records
+        )
+        await self.env.svc.listing_done(space_id=SPACE, sync_id=f"L{n}", provider=host)
+
+    async def position(self):
+        return await self.env.svc.position(self.env.spaces.space, [HOST])
 
 
 async def test_a_new_page_is_compared_and_a_match_reads_up_to_date():
-    env = _Env(own=ME, seed=None)
-    env.state.vec = _vec(2)
-    assert await _take(env, _signed(vector=_vec(2)), _vec(2))
-    assert env.state.calls == 1
-    assert env.state.cutoffs == [None]  # the page's cutoff, not our clock
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.match is True and pos.differing_buckets == 0
+    rows = [_row(f"p{k}") for k in range(20)]
+    t = _Listed(rows, rows)
+    await t.take_page()
+    assert t.env.state.calls == 1
+    assert t.env.state.cutoffs == [None]  # the page's cutoff, not our clock
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing, pos.differing_buckets) == (
+        True,
+        0,
+        0,
+    )
     assert state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is (
         SpaceSyncState.UP_TO_DATE
     )
-    assert env.requests == []  # nothing to ask for
-    assert env.changes[-1] == SPACE  # the status rechecks after the compare
+    assert t.asks == [] and t.env.requests == []
+    assert t.env.changes[-1] == SPACE  # the status rechecks after the compare
 
 
 async def test_a_repeated_page_is_not_compared_again():
     """A sentinel without a page (we hold it) or the same page again: no
     compare — the next comparison comes only with the next page."""
-    env = _Env(own=ME, seed=None)
-    env.state.vec = _vec(2)
-    page = _signed(vector=_vec(2))
-    await _take(env, page, _vec(2))
-    assert not await _take(env, page, _vec(2))
-    assert not await env.svc.receive(
+    rows = [_row("p1")]
+    t = _Listed(rows, rows)
+    await t.take_page()
+    page = _signed(vector=t.page_vector)
+    assert not await _take(t.env, page, t.page_vector)
+    assert not await t.env.svc.receive(
         space_id=SPACE, sync_id="s-1", provider=HOST, sealed=None
     )
-    await env.svc.wait_idle()
-    assert env.state.calls == 1
+    await t.env.svc.wait_idle()
+    assert t.env.state.calls == 1
 
 
-async def test_a_mismatch_reads_needs_sync_and_asks_one_host_once():
-    env = _Env(own=ME, seed=None)
-    env.state.vec = _differing(3)
-    assert await _take(env, _signed(vector=_vec(2)), _vec(2))
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.match is False and pos.differing_buckets == 3
-    assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND
-    assert env.requests == [(SPACE, HOST)]  # exactly one BEGIN, to the signer
-    # The same page again (or none): no new compare, no new BEGIN.
-    await _take(env, _signed(vector=_vec(2)), _vec(2))
-    assert env.requests == [(SPACE, HOST)]
+async def test_a_busy_member_ahead_in_many_buckets_fetches_nothing_and_matches():
+    """Live events between pages: every differing bucket holds a row changed
+    after the page — explained locally, no listing on the wire."""
+    old = [_row(f"p{k}") for k in range(30)]
+    newer = [_row(f"live{k}", marker=NEW) for k in range(40)]
+    edited = [_row("p3", version=2, marker=NEW)]
+    member = [r for r in old if r.row_id != "p3"] + edited + newer
+    t = _Listed(old, member)
+    await t.take_page()
+    pos = await t.position()
+    assert pos is not None and pos.differing_buckets and pos.differing_buckets > 30
+    assert (pos.match, pos.missing) == (True, 0)
+    assert t.asks == [] and t.env.requests == []
 
 
-async def test_a_member_ahead_of_the_page_matches():
-    """UX review: a member that applied the signer's stream past the page
-    holds everything the page commits to — its differing buckets are newer
-    content (normal in a busy space), not missing content. It reads
-    ``match: true`` and asks nobody."""
-    env = _Env(own=ME, seed=None)
-    env.seqs.applied[HOST] = 60  # applied a stream past page 50
-    env.state.vec = _differing(3)  # rows newer than the page
-    await _take(env, _signed(vector=_vec(2), seq=50), _vec(2))
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.match is True and pos.differing_buckets == 0
-    assert state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is (
-        SpaceSyncState.UP_TO_DATE
-    )
-    assert env.requests == []
-
-
-async def test_a_member_missing_a_row_reads_a_mismatch_until_its_sync_lands():
-    """A member that did not apply the signer's stream up to the page and
-    differs may lack content: mismatch, one BEGIN. Once that sync lands
-    (applied ≥ the page's seq) the same compare reads as a match."""
-    env = _Env(own=ME, seed=None)
-    env.seqs.applied[HOST] = 40
-    env.state.vec = _differing(2)
-    await _take(env, _signed(vector=_vec(2), seq=50), _vec(2))
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.match is False and pos.differing_buckets == 2
-    assert env.requests == [(SPACE, HOST)]
-    env.seqs.applied[HOST] = 55  # the triggered sync applied cleanly
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.match is True and pos.differing_buckets == 0
-    assert env.state.calls == 1  # no second compare
-
-
-async def test_applied_past_the_page_matches_before_any_compare():
-    env = _Env(own=ME, seed=None)
-    env.seqs.applied[HOST] = 50
-    page = _signed(vector=_vec(2), seq=50)
-    env.repo.rows[SPACE] = StoredSyncPage(SPACE, canonical_str(page.to_wire()), _vec(2))
-    pos = await env.svc.position(env.spaces.space, [HOST])
+async def test_a_signer_not_our_host_and_a_member_ahead_matches():
+    old = [_row(f"p{k}") for k in range(5)]
+    t = _Listed(old, old + [_row("live", marker=NEW)], signer=ADMIN)
+    t.env.hosts = ["owner-x"]
+    await t.take_page()
+    pos = await t.position()
     assert pos is not None and pos.match is True
+    assert t.asks == []
 
 
-async def test_a_page_of_a_signer_that_is_not_our_host_asks_our_host():
-    env = _Env(own=ME, seed=None)
-    env.hosts = ["owner-x"]
-    env.state.vec = _differing(1)
-    await _take(env, _signed(vector=_vec(2), signer=ADMIN), _vec(2))
-    assert env.requests == [(SPACE, "owner-x")]
+async def test_a_missing_row_is_proven_by_one_listing_and_asks_one_sync():
+    """A bucket that differs with no newer row of ours: only it is listed;
+    the listing proves the row missing — behind, one BEGIN. Applied stream
+    watermarks play no part (the old shortcut is gone)."""
+    present = [_row(f"p{k}") for k in range(10)]
+    lost = _row("lost")
+    t = _Listed(present + [lost], present)
+    t.env.seqs.applied[HOST] = 10**6  # far past the page: no effect now
+    await t.take_page()
+    assert t.asks == [(HOST, [_bucket(lost)])]  # only the differing bucket
+    pos = await t.position()
+    assert pos is not None and pos.match is None  # listing pending
+    await t.deliver()
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing) == (False, 1)
+    assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND
+    assert t.env.requests == [(SPACE, HOST)]
+
+
+async def test_an_older_local_version_is_missing_a_newer_one_is_ahead():
+    host = [_row("p1", version=2, marker="2026-06-01T00:00:00.000000+00:00")]
+    t = _Listed(host, [_row("p1", version=1, marker=OLD)])
+    await t.take_page()
+    await t.deliver()
+    assert (await t.position()).match is False
+    # The same row edited here after the host's version (still before the
+    # page) and a row of ours the page does not list: ahead.
+    mine = [
+        _row("p1", version=3, marker="2026-07-01T00:00:00.000000+00:00"),
+        _row("ours", marker=OLD),
+    ]
+    t = _Listed(host, mine)
+    await t.take_page()
+    for n in range(1, len(t.asks) + 1):
+        await t.deliver(n)
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing) == (True, 0)
+    assert t.env.requests == []
+
+
+async def test_a_row_deleted_here_after_the_page_is_not_missing():
+    host = [_row("p1"), _row("p2")]
+    t = _Listed(host, [_row("p2")], gone={("posts", "p1")})
+    await t.take_page()
+    await t.deliver()
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing) == (True, 0)
+
+
+async def test_at_most_eight_listings_per_compare():
+    lost = [_row(rid) for rid in _ids_in_distinct_buckets(12, "lost")]
+    t = _Listed(lost, [])
+    await t.take_page()
+    ((_host, buckets),) = t.asks
+    assert len(buckets) == 8
+    assert set(buckets) <= {_bucket(r) for r in lost}
+    await t.deliver()
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing) == (False, 8)
+
+
+async def test_a_forged_or_truncated_listing_is_refused(caplog):
+    host = [_row("lost"), _row("p1")]
+    same = [r for r in host if _bucket(r) == _bucket(host[0])]
+    for forge in (
+        lambda recs: [{**recs[0], "rows": recs[0]["rows"][:-1]}],  # truncated
+        lambda recs: [
+            {**recs[0], "rows": [[*recs[0]["rows"][0][:2], "A" * 43, None]]}
+        ],  # forged leaf
+        lambda recs: [*recs, *recs],  # repeated bucket
+    ):
+        t = _Listed(host, [r for r in host if r not in same[:1]])
+        await t.take_page()
+        t.forge = forge
+        with caplog.at_level(logging.WARNING):
+            await t.deliver()
+        pos = await t.position()
+        assert pos is not None and pos.match is None  # unresolved, not missing
+        assert t.env.requests == []
+    assert "refused the listings" in caplog.text
+
+
+async def test_an_unasked_listing_is_dropped():
+    host = [_row("lost")]
+    t = _Listed(host, [])
+    await t.take_page()
+    await t.env.svc.take_listing(
+        space_id=SPACE, sync_id="L1", provider="evil", records=[{"i": 0}]
+    )
+    await t.env.svc.take_listing(
+        space_id=SPACE, sync_id="L9", provider=HOST, records=[{"i": 0}]
+    )
+    await t.deliver()
+    assert (await t.position()).missing == 1
+
+
+async def test_the_host_lists_only_buckets_unchanged_since_the_page():
+    env = _Env()
+    host_rows = [_row(f"p{k}") for k in range(6)]
+    env.state.vec = _vector_of(host_rows)
+
+    async def rows_in(space_id, buckets, *, cutoff=None):
+        rows = {i: [r for r in host_rows if _bucket(r) == i] for i in buckets}
+        return BucketRows(rows=rows, gone=set())
+
+    env.state.rows_in = rows_in
+    page = await env.svc.seal_if_due(SPACE)
+    assert page is not None
+    b0, b1 = _bucket(host_rows[0]), _bucket(host_rows[1])
+    host_rows[1] = _row("p1", version=2)  # changed here since the page
+    recs = await env.svc.listing_records(
+        space_id=SPACE,
+        page_ref=parse_page_ref(page.ref()),
+        buckets=[b0, b1],
+        requester_version=V,
+    )
+    by_bucket = {r["i"]: r for r in recs}
+    assert by_bucket[b0]["held"] is True and by_bucket[b1]["held"] is False
+    # Another page than ours: nothing held.
+    other = _signed(vector=_vec(9))
+    recs = await env.svc.listing_records(
+        space_id=SPACE,
+        page_ref=parse_page_ref(other.ref()),
+        buckets=[b0],
+        requester_version=V,
+    )
+    assert recs == [{"i": b0, "held": False}]
+    # An older requester gets no listing at all.
+    assert (
+        await env.svc.listing_records(
+            space_id=SPACE,
+            page_ref=parse_page_ref(page.ref()),
+            buckets=[b0],
+            requester_version=V - 1,
+        )
+        == []
+    )
 
 
 async def test_compares_are_coalesced_to_one_per_15_minutes():

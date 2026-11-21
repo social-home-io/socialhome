@@ -47,6 +47,7 @@ from ....domain.space_media_ref import (
 )
 from ....services.space_media_names import space_own_files
 from .exporter import (
+    LISTING_RESOURCE,
     RESOURCE_ORDER,
     BatchedExporter,
     ChunkBuilder,
@@ -354,6 +355,15 @@ class _FileHasher(Protocol):
 
 
 class _SyncPages(Protocol):
+    async def listing_records(
+        self,
+        *,
+        space_id: str,
+        page_ref: Any,
+        buckets: list[int],
+        requester_version: int,
+    ) -> list[dict]: ...
+
     async def sentinel_page(
         self,
         *,
@@ -922,6 +932,9 @@ class SpaceSyncService:
         logged, not re-raised. Callers rely on the session record's
         task slot to cancel this if the channel dies.
         """
+        if getattr(session, "sync_mode", "") == "buckets":
+            await self._stream_listings(session)
+            return
         sync_id = session.sync_id
         space_id = session.space_id
         consecutive_failures = 0
@@ -1040,6 +1053,64 @@ class SpaceSyncService:
             # Same reasoning as the abandon path above — a session whose
             # stream died is garbage, and holding it blocks the retry.
             self._close_session(sync_id)
+
+    async def _stream_listings(self, session: SyncSessionRecord) -> None:
+        """A ``sync_mode: "buckets"`` session (v_95, sync pages): the bucket
+        listings the requester asked for, as ``__listing__`` chunks under
+        the content key, then the sentinel — no rows, no watermark, no
+        media. Only to a member household (a writer seat) at
+        ``MIN_FOR_SYNC_PAGES``; anyone else gets the bare sentinel."""
+        session.stream_clean = False
+        session.snapshot_seq = None
+        session.since_seq = None
+        records: list[dict] = []
+        try:
+            allowed = (
+                self._sync_pages is not None
+                and self._member_gate is not None
+                and await self._member_gate(
+                    session.space_id, session.requester_instance_id
+                )
+            )
+            if allowed and self._sync_pages is not None:
+                # The page service gates on the requester's version (a
+                # listing changes no stream record: no sync line).
+                records = await self._sync_pages.listing_records(
+                    space_id=session.space_id,
+                    page_ref=getattr(session, "page_ref", None),
+                    buckets=list(getattr(session, "buckets", None) or []),
+                    requester_version=await self._session_version(session),
+                )
+            waits: dict[str, int] = {}
+            clean = True
+            next_index = _allocator(session)
+            async for envelope in self._builder.build_chunks(
+                exporter=_Listings(records),
+                space_id=session.space_id,
+                sync_id=session.sync_id,
+                sig_suite=self._sig_suite,
+                next_index=next_index,
+            ):
+                if await self._send_chunk(session, envelope, waits):
+                    session.touch()
+                else:
+                    clean = False
+            sentinel = await self._builder.build_sentinel(
+                space_id=session.space_id,
+                sync_id=session.sync_id,
+                sig_suite=self._sig_suite,
+                chunk_count=int(getattr(session, "next_chunk_index", 0)),
+            )
+            session.stream_clean = clean
+            if not (await self._send(session, sentinel)).ok:
+                session.stream_clean = False
+        except Exception:  # pragma: no cover — fail-soft
+            log.exception(
+                "sync %s: listings of space %s failed",
+                session.sync_id,
+                session.space_id,
+            )
+            self._close_session(session.sync_id)
 
     async def _plan(self, session: SyncSessionRecord) -> list[ResourceExporter]:
         """The exporters this session streams, in :data:`RESOURCE_ORDER`,
@@ -1587,6 +1658,20 @@ class SpaceSyncService:
         raise ValueError(
             f"Unknown transport_mode {mode!r} on session {session.sync_id}",
         )
+
+
+class _Listings:
+    """The bucket listings of a ``buckets`` session as an exporter."""
+
+    resource = LISTING_RESOURCE
+
+    __slots__ = ("_records",)
+
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self._records = records
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return list(self._records)
 
 
 def _series_rows(version: int) -> bool:

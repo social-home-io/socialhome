@@ -340,7 +340,7 @@ outsider's `403 "Not a space member."`, and an unknown id the same. The
 live `space.proposal.updated`, `space_zone_changed`,
 `space.sync_state` (`{space_id, sync: {state, last_ok_at, waiting_to_send,
 page?}}`, sent only when the space's sync state changes; `page` (v_95) —
-`{seq, at, signer_role, applied, match, differing_buckets, conflict}` from
+`{seq, at, signer_role, match, missing, differing_buckets, conflict}` from
 the newest signed sync page held, absent without one, see
 [protocol/sync-pages.md](protocol/sync-pages.md#phase-2-as-built-v_95)) and
 `space_location_updated` frames skip followers likewise, and so do the

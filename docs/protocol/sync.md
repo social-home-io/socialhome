@@ -414,10 +414,12 @@ root). Every sentinel carries the newest page the provider holds — sealed
 under the content key, only to a v_95 requester whose BEGIN `page` is
 older — and any member relays it. A member keeps the newest page and its
 vector, compares its own rows with each newer page (at most every 15
-minutes), and its status adds `sync.page`: a match is **up to date ·
-checked against page N** even while the host is offline; a mismatch reads
-**needs sync · N parts differ** (state `behind`) and asks one acting host
-for an incremental sync. See [sync-pages.md](./sync-pages.md).
+minutes): differences explained by its own newer rows cost nothing; the
+rest is settled by at most 8 bucket listings from an acting host
+(`sync_mode: "buckets"`). Its status adds `sync.page`: `match: true` is up
+to date even while the host is offline; a row a listing proves missing is
+`behind` and asks one acting host for an incremental sync. See
+[sync-pages.md](./sync-pages.md).
 
 ## What a sync streams
 

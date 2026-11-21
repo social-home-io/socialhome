@@ -68,10 +68,11 @@ household ignores them.
 
 - `SPACE_SYNC_CHUNK` sentinel (`__complete__`): `page_sealed` (Phase 2).
 - `SPACE_SYNC_BEGIN`: `page` (a reference to the requester's newest page,
-  Phase 2); `sync_mode: "buckets"` with `buckets` and `vector_hint`, and
-  `page_match` (Phase 3).
-- New in-stream resources (Phase 3), carried in ordinary chunks:
-  `__listing__` (the leaves of one bucket).
+  Phase 2); `sync_mode: "buckets"` with `buckets` (≤ 8, Phase 2: listings
+  only, to an acting host; Phase 3 adds `vector_hint`, the rows and any
+  member household), and `page_match` (Phase 3).
+- New in-stream resource, carried in ordinary chunks: `__listing__` (one
+  bucket's rows — identity, leaf, change time; Phase 2).
 
 ## 1. Log or state? (decision)
 
@@ -519,8 +520,10 @@ ships in the same release, otherwise v_96).
    comes later as a sibling suite.
 4. **No leaf cache (C).** Measure a real seal on a Pi first, in the
    Phase 2 PR, and decide on C from that number.
-5. **Timings:** a seal at most every 15 min (`PAGE_MIN_INTERVAL_S`), and a
-   member root check at most once an hour.
+5. **Timings:** a seal at most every 15 min (`PAGE_MIN_INTERVAL_S`). A
+   member compares its copy on each newer page, at most once per 15 min per
+   space; a mismatch resolves through the bucket listing (revised by the
+   owner on 2026-11-21: it replaced the hourly root check).
 6. **`members` / `bans` stay host-only for now.** Committing them is a
    later step, after Phase 3. It needs a removal tombstone, or the roster
    digest folded into the page.
@@ -585,46 +588,78 @@ What shipped, where it is more exact than the design above:
   that moves `authority_key_epoch` or `identity_public_key` (every path:
   rotate, adopt, re-pin). A held page of another epoch is ignored anyway.
 - **Lazy seal.** As in §4, plus: a signer that holds another signer's page
-  younger than 15 min does not seal on top of it. The seal reads the
+  younger than 15 min does not seal on top of it. Accepted exception: when
+  the retention cutoff rolls over to a new day, a changed space re-seals
+  even if its page is younger than 15 min — at most once a day. The seal reads the
   `sync_seq` snapshot before the export, exports with the window cutoff of
   now (stored in the page) and hashes page by page in a worker thread.
-- **Compare (owner decision 2026-11-21, replaces the hourly root
-  check).** A member compares its own bucket vector with the page's when a
-  **newer** page is stored — never on a repeat (a sentinel without a page,
-  or the same page again) — and at most once per 15 min per space (the
-  seal cadence): a page arriving sooner waits out the rest once and the
-  compare then takes the newest page. The recompute is the seal's
-  (`PageStateHasher`, hashing in `asyncio.to_thread`); never for a page we
-  signed. The result goes to the status through its one coalesced recheck
-  (`SpaceSyncStatusService._request_recheck`). A **mismatch** asks ONE
-  household acting as the space's host (the signer when it is one) for an
-  incremental BEGIN (`SpaceSyncScheduler.sync_with`), within the
-  provider's 5 BEGINs / h budget; the next compare comes only with the
-  next page, so a mismatch never loops.
-- **A mismatch means "may lack content the page commits to"**, never "holds
-  newer content". The member knows, for the page's signer, the snapshot of
-  the last stream from it that it applied cleanly
-  (`space_instances.applied_seq`, the same counter as the page's `seq`).
-  When that is at or past the page's `seq`, it holds everything the page
-  commits to, so differing buckets are only content newer than the page
-  (normal in a busy space): `match: true`, no BEGIN. Only a member that did
-  not apply the signer's stream up to the page (a relayed page while the
-  host is away, an unclean stream) reads `match: false` — and the BEGIN the
-  compare sends settles it: once that stream lands, `applied` passes the
-  page's `seq` and the same compare reads `match: true` (no second
-  recompute). A page of a signer we do not sync from has no `applied`, so
-  its compare alone decides.
+- **Compare (owner decisions 2026-11-21).** A member compares its own
+  bucket vector with the page's when a **newer** page is stored — never on
+  a repeat — at most once per 15 min per space (a page arriving sooner
+  waits out the rest once; the compare then takes the newest page). Never
+  for a page we signed. Hashing runs in `asyncio.to_thread`.
+  1. **Explain locally, no wire cost.** A differing bucket in which we hold
+     a row whose change time (the newest of `created_at`, `edited_at`,
+     `updated_at`, `last_edited_at`, `archived_at`, `sold_at`, `deleted_at`
+     the record carries) is after the page's `issued_at` is explained: we
+     are ahead there (live events between pages). Not fetched, not counted.
+  2. **Listings only for unexplained buckets**, at most
+     `MAX_LISTING_BUCKETS` = 8 per compare; the rest stay unresolved until
+     the next page. They are asked of ONE household acting as host (the
+     signer if it is one, else the first) — see *Bucket listings* below.
+  3. **Classify** each listed row against our rows of that bucket: listed
+     and absent here → **missing**, unless we hold its tombstone or its
+     archived copy, or its post is deleted (gone after the page → ahead);
+     listed with another leaf → **missing** unless our change time is newer
+     than the listed one (→ ahead); a row of ours not listed was created
+     after the page → ahead.
+  4. Only a **proven missing** row makes `match: false` (state `behind`)
+     and sends the ONE incremental BEGIN (`SpaceSyncScheduler.sync_with`).
+     The next compare comes only with the next page — no loop.
+- **Bucket listings — the general shape (Phase 3 reuses it).** The member
+  sends `SPACE_SYNC_BEGIN` with `sync_mode: "buckets"`, `prefer_direct:
+  false`, `page` (the page it holds) and `buckets` (≤ 8 indices), all in
+  the encrypted payload (`FederationService.begin_bucket_listing`, only to
+  a household at v_95). The provider answers over the relay with
+  `__listing__` chunks under the space content key (the chunk AAD) and the
+  sentinel — no rows, no watermark, no media
+  (`SpaceSyncService._stream_listings`); only to a member household (a
+  writer seat). Each record is `{i, held: true, rows: [[resource, row_id,
+  leaf, change_time], …]}` or `{i, held: false}`: a provider lists a bucket
+  only when its own rows of it still hash to the requester's page (the
+  same page it holds) — a bucket changed since the page cannot be proven
+  (no leaf cache) and stays unresolved. The requester takes listings only
+  for a session it asked for, from the household it asked; a listing must
+  hash to the page's signed bucket, name only rows of that bucket and
+  committed resources, and stay within 4 096 rows — otherwise the whole
+  answer is refused (WARNING) and those buckets stay unresolved. Phase 3
+  adds: from any member household, and the rows themselves.
+- **Accepted gap.** A missing row that shares a bucket with a row we
+  changed after the page stays hidden (the bucket is explained) until a
+  later page or the 30-min sync heals it. Change times come from the
+  authors' clocks, so a clock far ahead can hide a bucket the same way.
+- **Cost.** Normally ≈ 0 on the wire: every differing bucket of a busy
+  member is explained locally. Per unexplained bucket ≈ 6 KB of listing
+  (50 000 rows: ≈ 195 rows per bucket × ~32 B, base64 and JSON);
+  ≤ 8 per compare ≈ 50 KB; at most one compare per 15 min per member and
+  space, and only on a mismatch. The provider pays one export of the
+  space per listing request (as a seal: ~6 s at 50 000 rows, see
+  *Measured*).
 - **Status** (`GET /api/spaces/{id}` `sync.page`, also in the
   `space.sync_state` frame): `{seq, at, signer_role, applied, match,
   differing_buckets, conflict}`. `applied` — we applied a clean stream from
   the page's signer at or past its `seq` (`space_instances.applied_seq`;
   `null` when that signer is not one of our acting hosts). Rules
   (`domain/space_sync_page.state_with_page`): a running stream stays
-  **catching up**; `match: true` (compared equal, or applied past the
-  page) → **up to date**, also while the host is offline, and `match:
-  false` (differs and not applied that far) → **behind**, whatever the host
-  last answered; `differing_buckets` is the compare's count when `match` is
-  false, else `0`. (SPA copy for these is a separate UX step.) Not compared yet: `applied` →
+  **catching up**; `match: true` (nothing missing: no unexplained
+  bucket, or every listing showed none) → **up to date**, also while the
+  host is offline; `match: false` (a listing proved a row missing) →
+  **behind**; `match: null` (not compared yet, a listing pending or a
+  bucket unresolved) → the Phase-1 state. The field is `{seq, at,
+  signer_role, match, missing, differing_buckets, conflict}`: `missing` —
+  rows proven missing (`0` with a match); `differing_buckets` — buckets
+  that differ at all, being ahead included. (SPA copy for these is a
+  separate UX step.) Not compared yet: `applied` →
   **up to date**; a newer page than we applied → **catching up** while the
   host answers, **behind** while it is silent. No page (an older host):
   the answer-based status, unchanged.

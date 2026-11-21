@@ -156,6 +156,12 @@ REMOVAL_RESOURCES: frozenset[str] = frozenset(
 )
 
 
+#: A ``sync_mode: "buckets"`` session's chunks (v_95, sync pages): each
+#: record one bucket listing (``socialhome.sync_page.listing_to_wire``).
+#: Never part of a content stream, so not in :data:`ALLOWED_RESOURCES`.
+LISTING_RESOURCE: str = "__listing__"
+
+
 #: Sentinel resource sent over the channel after all real chunks.
 #: Not encrypted (no payload to hide); only signed.
 SENTINEL_RESOURCE: str = "__complete__"
@@ -446,7 +452,7 @@ class ChunkBuilder:
         is_last: bool,
         chunk_index: int | None = None,
     ) -> dict[str, Any]:
-        if resource not in ALLOWED_RESOURCES:
+        if resource not in ALLOWED_RESOURCES and resource != LISTING_RESOURCE:
             raise ValueError(f"resource {resource!r} not in ALLOWED_RESOURCES")
         body: dict[str, Any] = {"records": records}
         if chunk_index is not None:

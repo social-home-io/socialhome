@@ -23,11 +23,13 @@ from socialhome.sync_page import (
     PAGE_SUITE_SHA256_B256,
     SUPPORTED_PAGE_SUITES,
     VECTOR_BYTES,
+    ListingRow,
     PageRefused,
     UnsupportedPageSuite,
     VectorBuilder,
     apply_delta,
     bucket_hash,
+    change_time,
     commit_form,
     delta_from_bytes,
     delta_from_wire,
@@ -36,15 +38,22 @@ from socialhome.sync_page import (
     differing_buckets,
     file_refs,
     is_conflict,
+    is_superseded,
     leaf_of,
+    listing_to_wire,
+    page_time,
+    parse_bucket_request,
+    parse_listing,
     parse_page_ref,
     record_leaf,
     root_of,
     row_key,
     sign_page,
+    superseded_key,
     vector_delta,
     vector_from_wire,
     vector_to_wire,
+    verify_listing,
     verify_page,
 )
 
@@ -555,3 +564,98 @@ def test_page_ref():
     }
     assert parse_page_ref({"signer": "x"}) is None
     assert parse_page_ref("nope") is None
+
+
+# ── Bucket listings ──────────────────────────────────────────────────────
+
+
+def _listing_rows(n: int, index: int | None = None) -> tuple[int, list[ListingRow]]:
+    rows: list[ListingRow] = []
+    k = 0
+    target = index
+    while len(rows) < n:
+        rid = f"r{k}"
+        k += 1
+        i = row_key("posts", rid)[0]
+        if target is None:
+            target = i
+        if i == target:
+            rows.append(
+                ListingRow("posts", rid, hashlib.sha256(rid.encode()).digest(), None)
+            )
+    assert target is not None
+    return target, rows
+
+
+def test_change_time_is_the_newest_known_stamp():
+    assert change_time({"created_at": "2026-01-01 00:00:00"}) == (
+        "2026-01-01T00:00:00.000000+00:00"
+    )
+    assert change_time(
+        {"created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-03-01 10:00:00"}
+    ) == ("2026-03-01T10:00:00.000000+00:00")
+    assert change_time({"title": "x"}) is None
+    page = _page(issued_at=NOW)
+    assert page_time(page) < change_time({"edited_at": "2030-01-01 00:00:00"})
+
+
+def test_a_listing_round_trips_and_verifies():
+    index, rows = _listing_rows(3)
+    vector = bytearray(VECTOR_BYTES)
+    vector[index * 32 : (index + 1) * 32] = bucket_hash(index, (r.leaf for r in rows))
+    wire = listing_to_wire(index, rows)
+    got_index, got_rows = parse_listing(wire)
+    assert got_index == index and got_rows == rows
+    verify_listing(index, got_rows, bytes(vector))
+    with pytest.raises(PageRefused):
+        verify_listing(index, got_rows[:-1], bytes(vector))  # truncated
+    assert parse_listing(listing_to_wire(index, None)) == (index, None)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "x",
+        {"i": 256, "held": True, "rows": []},
+        {"i": True, "held": True, "rows": []},
+        {"i": 0, "held": True, "rows": "x"},
+        {"i": 0, "held": True, "rows": [["members", "u", "A" * 43, None]]},
+        {"i": 0, "held": True, "rows": [["posts", "", "A" * 43, None]]},
+        {"i": 0, "held": True, "rows": [["posts", "p", "AA", None]]},
+        {"i": 0, "held": True, "rows": [["posts", "p", "A" * 43, 5]]},
+    ],
+)
+def test_malformed_listings_are_refused(bad):
+    with pytest.raises(PageRefused):
+        parse_listing(bad)
+
+
+def test_a_listing_row_of_another_bucket_is_refused():
+    index, rows = _listing_rows(1)
+    wire = listing_to_wire((index + 1) % 256, rows)
+    with pytest.raises(PageRefused):
+        parse_listing(wire)
+
+
+def test_an_oversized_listing_is_refused():
+    wire = {"i": 0, "held": True, "rows": [["posts", "p", "A" * 43, None]] * 4097}
+    with pytest.raises(PageRefused):
+        parse_listing(wire)
+
+
+def test_bucket_request_is_bounded():
+    assert parse_bucket_request([3, 1, 3]) == [3, 1]
+    assert parse_bucket_request(list(range(8))) == list(range(8))
+    for bad in ([], list(range(9)), [256], [True], "x", None):
+        assert parse_bucket_request(bad) is None
+
+
+def test_superseded_rows_are_not_missing():
+    gone = {("posts", "p1"), ("tasks", "t1")}
+    assert is_superseded("posts", "p1", gone)
+    assert is_superseded("polls", "p1", gone)  # its post is gone
+    assert is_superseded("tasks", "t1", gone)
+    assert not is_superseded("posts", "p2", gone)
+    assert superseded_key("posts_deleted", "p1") == ("posts", "p1")
+    assert superseded_key("tasks_archived", "t1") == ("tasks", "t1")
+    assert superseded_key("posts", "p1") is None

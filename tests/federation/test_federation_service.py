@@ -2051,6 +2051,46 @@ async def test_send_with_mesh_fallback_returns_failure_when_mesh_not_attached():
     assert result.error == "not_confirmed"
 
 
+# ─── begin_bucket_listing (v_95) ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supports", [True, False])
+async def test_begin_bucket_listing_asks_the_host_over_the_relay(supports):
+    """v_95 sync pages: a ``sync_mode: "buckets"`` BEGIN (page + buckets in
+    the encrypted payload) to a v_95 host, answered over the relay into a
+    requester session; nothing to an older household."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(return_value=DeliveryResult(instance_id="host-1", ok=True))
+    ref = {"signer": "host-1", "epoch": 1, "seq": 3, "issued_at": 4, "root": "r"}
+    with (
+        patch.object(
+            FederationService, "space_member_supports", AsyncMock(return_value=supports)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        sync_id = await svc.begin_bucket_listing("sp-1", "host-1", ref, [7, 2])
+    if not supports:
+        assert sync_id is None
+        send_mock.assert_not_awaited()
+        return
+    assert sync_id
+    req = sync_manager.record_sync_request.call_args.kwargs
+    assert (req["sync_mode"], req["page_ref"]) == ("buckets", ref)
+    payload = send_mock.call_args.kwargs["payload"]
+    assert payload == {
+        "sync_id": sync_id,
+        "space_id": "sp-1",
+        "sync_mode": "buckets",
+        "prefer_direct": False,
+        "page": ref,
+        "buckets": [7, 2],
+    }
+
+
 # ─── begin_mesh_catchup_sync ──────────────────────────────────────────────
 
 

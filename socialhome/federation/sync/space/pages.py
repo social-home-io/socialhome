@@ -22,12 +22,20 @@
   household pins, be newer than the one held, and come with a vector that
   hashes to its root. Two pages of one signer that cannot both be honest
   are logged at WARNING and flagged in the status (equivocation).
-* **Root check (member).** At most once an hour per space, the member
-  recomputes its own vector with the page's cutoff and counts the buckets
-  that differ (status only — Phase 3 fetches them).
+* **Compare (member).** On each newer page — at most once per 15 min per
+  space — the member recomputes its own vector with the page's cutoff. A
+  differing bucket in which it holds a row changed after the page is
+  explained (it is ahead there). At most :data:`MAX_LISTING_BUCKETS` of the
+  unexplained ones are asked of a household acting as host as **bucket
+  listings** (a ``sync_mode: "buckets"`` session — the shape Phase 3 asks
+  any member for): verified against the page's signed bucket hashes, each
+  listed row is classified missing or ahead. Only a proven missing row
+  makes the space ``behind`` and asks for ONE incremental sync.
+* **Listings (provider).** A household holding the page serves a bucket's
+  listing only while its own rows of that bucket still hash to the page.
 
-Storage: one ``space_sync_pages`` row per space (migration 0151). The
-root-check result and conflict flags are memory only.
+Storage: one ``space_sync_pages`` row per space (migration 0151). Compare
+results, pending listings and conflict flags are memory only.
 """
 
 from __future__ import annotations
@@ -37,7 +45,7 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -49,8 +57,11 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.space_sync_page import StoredSyncPage, SyncPagePosition
 from ....sync_page import (
     COMMITTED_RESOURCES,
+    MAX_LISTING_BUCKETS,
+    MAX_LISTING_ROWS,
     PAGE_MIN_INTERVAL_S,
     PAGE_SUITE_SHA256_B256,
+    ListingRow,
     PageRefused,
     SyncPage,
     UnsupportedPageSuite,
@@ -61,12 +72,17 @@ from ....sync_page import (
     delta_to_wire,
     differing_buckets,
     is_conflict,
+    is_superseded,
+    listing_to_wire,
+    page_time,
+    parse_listing,
     parse_page,
     root_of,
     sign_page,
     vector_delta,
     vector_from_wire,
     vector_to_wire,
+    verify_listing,
     verify_page,
 )
 from ...host_equivalence import serves_as_host
@@ -84,8 +100,11 @@ log = logging.getLogger(__name__)
 #: (a ≤ 1 KiB page + an 8 KiB vector, base64 and AES-GCM overhead).
 MAX_SEALED_PAGE_CHARS: int = 24 * 1024
 
-#: Spaces whose root-check result / conflict flag is remembered.
+#: Spaces whose compare result / conflict flag is remembered.
 MAX_TRACKED: int = 4096
+
+#: Listing sessions we asked for and wait on.
+MAX_PENDING_LISTINGS: int = 64
 
 
 class _Spaces(Protocol):
@@ -104,6 +123,10 @@ class _Seqs(Protocol):
     async def applied_seq(self, space_id: str, instance_id: str) -> int | None: ...
 
 
+#: ``(space_id, host, page_ref, buckets) ->`` the listing session's id.
+ListingRequest = Callable[[str, str, dict, list[int]], Awaitable[str | None]]
+
+
 class _Crypto(Protocol):
     async def encrypt_chunk(
         self, *, space_id: str, sync_id: str, plaintext: bytes
@@ -118,6 +141,72 @@ class _Crypto(Protocol):
 class _Held:
     page: SyncPage
     row: StoredSyncPage
+
+
+@dataclass(slots=True, frozen=True)
+class _Compare:
+    """One compare of our copy with a page (memory only)."""
+
+    root: bytes
+    differing: int
+    #: Differing buckets with no newer local row.
+    unexplained: int
+    #: Rows a listing proved missing; ``None`` while listings are pending.
+    missing: int | None
+    #: Unexplained buckets no listing settled (over the cap, not held, refused).
+    unresolved: int
+
+
+@dataclass(slots=True)
+class _PendingListing:
+    """A listing session we asked for (memory only, bounded)."""
+
+    space_id: str
+    host: str
+    root: bytes
+    vector: bytes
+    buckets: frozenset[int]
+    local: dict[int, list[ListingRow]]
+    gone: frozenset[tuple[str, str]]
+    received: list[object] = field(default_factory=list)
+
+
+def _classify(pending: _PendingListing) -> tuple[int, int]:
+    """``(missing rows, unresolved buckets)`` of a finished listing session.
+    Raises :class:`PageRefused` for a listing that is malformed, of a bucket
+    not asked, repeated, or that does not hash to the signed bucket."""
+    seen: set[int] = set()
+    missing = 0
+    for raw in pending.received:
+        index, rows = parse_listing(raw)
+        if index not in pending.buckets or index in seen:
+            raise PageRefused(f"a listing of bucket {index} not asked for")
+        seen.add(index)
+        if rows is None:
+            continue
+        verify_listing(index, rows, pending.vector)
+        mine = {(r.resource, r.row_id): r for r in pending.local.get(index, [])}
+        for row in rows:
+            have = mine.get((row.resource, row.row_id))
+            if have is None:
+                if not is_superseded(row.resource, row.row_id, pending.gone):
+                    missing += 1
+            elif have.leaf != row.leaf and not (
+                have.marker is not None
+                and (row.marker is None or have.marker > row.marker)
+            ):
+                missing += 1
+        # A row of ours not listed was created after the page: ahead.
+    unresolved = (
+        len(pending.buckets)
+        - len(seen)
+        + sum(
+            1
+            for raw in pending.received
+            if isinstance(raw, dict) and raw.get("held") is not True
+        )
+    )
+    return missing, unresolved
 
 
 def _now_ms() -> int:
@@ -140,11 +229,13 @@ class SyncPageService:
         "_crypto",
         "_exporters",
         "_hosts",
+        "_listings",
         "_locks",
         "_monotonic",
         "_on_change",
         "_own_instance_id",
         "_repo",
+        "_request_listing",
         "_request_sync",
         "_seqs",
         "_sleep",
@@ -184,13 +275,16 @@ class SyncPageService:
         #: v_95 compare on a mismatch (:meth:`attach_sync_requests`).
         self._hosts: Callable[[Space], Awaitable[list[str]]] | None = None
         self._request_sync: Callable[[str, str], Awaitable[None]] | None = None
+        self._request_listing: ListingRequest | None = None
+        #: sync_id → a listing session we asked for (bounded, oldest out).
+        self._listings: OrderedDict[str, _PendingListing] = OrderedDict()
         #: Spaces with a compare pending; space → when it last compared.
         self._comparing: set[str] = set()
         self._compared_at: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task] = set()
-        #: space → (root compared, differing bucket count).
-        self._checks: OrderedDict[str, tuple[bytes, int]] = OrderedDict()
+        #: space → the last compare of our copy with its page.
+        self._checks: OrderedDict[str, _Compare] = OrderedDict()
         #: space → the (epoch, signer) whose equivocation we saw.
         self._conflicts: OrderedDict[str, tuple[int, str]] = OrderedDict()
 
@@ -558,12 +652,17 @@ class SyncPageService:
         *,
         hosts: Callable[[Space], Awaitable[list[str]]],
         request: Callable[[str, str], Awaitable[None]],
+        listing: ListingRequest | None = None,
     ) -> None:
         """Wire what a mismatch does: ``hosts(space)`` — the households
         acting as its host here; ``request(space_id, host)`` — one
-        incremental BEGIN to that host (the scheduler's ``sync_with``)."""
+        incremental BEGIN to that host (the scheduler's ``sync_with``);
+        ``listing(space_id, host, page_ref, buckets)`` — ask that host for
+        the listings of *buckets* (a ``sync_mode: "buckets"`` BEGIN; the
+        session id, or ``None`` when it could not go out)."""
         self._hosts = hosts
         self._request_sync = request
+        self._request_listing = listing
 
     def compare_soon(self, space_id: str) -> None:
         """A newer page was stored: compare our copy with it — at once, or,
@@ -592,14 +691,19 @@ class SyncPageService:
         finally:
             self._comparing.discard(space_id)
 
-    async def compare(self, space_id: str) -> int | None:
-        """Compare our own bucket vector with the held page's (never for a
-        page we signed): the differing bucket count, or ``None`` when
-        skipped. A difference that may be missing content (we did not apply
-        the signer's stream up to the page) asks ONE household acting as the
-        space's host for an incremental sync — the signer when it is one;
-        once that sync lands, :meth:`position` reads a match. The status
-        rechecks either way. Fail-soft."""
+    async def compare(self, space_id: str) -> _Compare | None:
+        """Compare our copy of the space with the held page (never a page we
+        signed). Fail-soft; ``None`` when skipped.
+
+        1. Our bucket vector against the page's: the differing buckets.
+        2. A differing bucket in which we hold a row changed after the page
+           is explained — we are ahead there (live events between pages).
+           No wire cost.
+        3. The unexplained ones, at most :data:`MAX_LISTING_BUCKETS`, are
+           asked of a household acting as host as bucket listings
+           (:meth:`take_listing` / :meth:`listing_done` classify the rows);
+           the rest wait for the next page.
+        """
         try:
             space = await self._spaces.get(space_id)
             if space is None:
@@ -607,88 +711,225 @@ class SyncPageService:
             held = await self._held(space)
             if held is None or held.page.signer == self._own_instance_id:
                 return None
+            page = held.page
             self._compared_at[space_id] = self._monotonic()
-            started = time.perf_counter()
-            vector, _rows = await self._state.vector(space_id, cutoff=held.page.cutoff)
-            differing = len(differing_buckets(vector, held.row.vector))
-            log.info(
-                "sync page: space %s against page %d: %d bucket(s) differ (%.2f s)",
-                space_id,
-                held.page.seq,
-                differing,
-                time.perf_counter() - started,
-            )
-            self._checks[space_id] = (held.page.root, differing)
-            self._checks.move_to_end(space_id)
-            while len(self._checks) > MAX_TRACKED:
-                self._checks.popitem(last=False)
             while len(self._compared_at) > MAX_TRACKED:
                 self._compared_at.pop(next(iter(self._compared_at)))
-            await self._changed(space_id)
+            started = time.perf_counter()
+            vector, _rows = await self._state.vector(space_id, cutoff=page.cutoff)
+            differing = differing_buckets(vector, held.row.vector)
+            unexplained: list[int] = []
+            gone: set[tuple[str, str]] = set()
+            local: dict[int, list[ListingRow]] = {}
             if differing:
-                await self._ask_host(space, held.page)
-            return differing
+                scan = await self._state.rows_in(
+                    space_id, differing, cutoff=page.cutoff
+                )
+                newer_than = page_time(page)
+                gone = scan.gone
+                for index in differing:
+                    rows = scan.rows.get(index, [])
+                    if any(
+                        r.marker is not None and r.marker > newer_than for r in rows
+                    ):
+                        continue  # ahead in this bucket
+                    unexplained.append(index)
+                    local[index] = rows
+            asked = unexplained[:MAX_LISTING_BUCKETS]
+            result = _Compare(
+                root=page.root,
+                differing=len(differing),
+                unexplained=len(unexplained),
+                missing=0 if not unexplained else None,
+                unresolved=len(unexplained) - len(asked),
+            )
+            self._remember(space_id, result)
+            log.info(
+                "sync page: space %s against page %d: %d bucket(s) differ, %d "
+                "unexplained (%.2f s)",
+                space_id,
+                page.seq,
+                len(differing),
+                len(unexplained),
+                time.perf_counter() - started,
+            )
+            await self._changed(space_id)
+            if asked:
+                await self._ask_listing(space, held, asked, local, gone)
+            return result
         except Exception:
             log.exception("sync page: comparing space %s failed", space_id)
             return None
 
-    async def _applied(
-        self, space_id: str, page: SyncPage, hosts: list[str]
-    ) -> bool | None:
-        """Whether a clean stream from the page's signer at or past its seq
-        was applied here (``None``: we do not sync from that signer)."""
-        if page.signer not in hosts:
-            return None
-        seq = await self._seqs.applied_seq(space_id, page.signer)
-        return seq is not None and seq >= page.seq
+    def _remember(self, space_id: str, result: _Compare) -> None:
+        self._checks[space_id] = result
+        self._checks.move_to_end(space_id)
+        while len(self._checks) > MAX_TRACKED:
+            self._checks.popitem(last=False)
 
-    async def _ask_host(self, space: Space, page: SyncPage) -> None:
-        """A mismatch that may be missing content: one incremental BEGIN to
-        a household acting as host (the signer when it is one) — never when
-        we applied the signer's stream past the page (then the differences
-        are newer content, nothing is missing)."""
-        if self._hosts is None or self._request_sync is None:
+    async def _host_for(self, space: Space, signer: str) -> str | None:
+        if self._hosts is None:
+            return None
+        hosts = await self._hosts(space)
+        if not hosts:
+            return None
+        return signer if signer in hosts else hosts[0]
+
+    async def _ask_listing(
+        self,
+        space: Space,
+        held: _Held,
+        buckets: list[int],
+        local: dict[int, list[ListingRow]],
+        gone: set[tuple[str, str]],
+    ) -> None:
+        if self._request_listing is None:
             return
         try:
-            hosts = await self._hosts(space)
-            if not hosts or await self._applied(space.id, page, hosts):
+            host = await self._host_for(space, held.page.signer)
+            if host is None:
                 return
-            host = page.signer if page.signer in hosts else hosts[0]
-            await self._request_sync(space.id, host)
+            sync_id = await self._request_listing(
+                space.id, host, held.page.ref(), buckets
+            )
         except Exception:
-            log.exception("sync page: asking the host of %s failed", space.id)
+            log.exception("sync page: asking for listings of %s failed", space.id)
+            return
+        if not sync_id:
+            return
+        self._listings[sync_id] = _PendingListing(
+            space_id=space.id,
+            host=host,
+            root=held.page.root,
+            vector=held.row.vector,
+            buckets=frozenset(buckets),
+            local={i: local.get(i, []) for i in buckets},
+            gone=frozenset(gone),
+        )
+        while len(self._listings) > MAX_PENDING_LISTINGS:
+            self._listings.popitem(last=False)
+
+    async def take_listing(
+        self, *, space_id: str, sync_id: str, provider: str, records: object
+    ) -> None:
+        """``__listing__`` chunk records of a session WE asked for, from the
+        household we asked. Anything else is dropped."""
+        pending = self._listings.get(sync_id)
+        if (
+            pending is None
+            or pending.space_id != space_id
+            or pending.host != provider
+            or not isinstance(records, list)
+        ):
+            log.debug("sync page: an unasked listing from %s dropped", provider)
+            return
+        pending.received.extend(records[: MAX_LISTING_BUCKETS - len(pending.received)])
+
+    async def listing_done(self, *, space_id: str, sync_id: str, provider: str) -> None:
+        """The listing session's sentinel: verify every listing against the
+        page's signed buckets and classify the rows. A missing row makes
+        the space ``behind`` and asks the host for ONE incremental sync."""
+        pending = self._listings.get(sync_id)
+        if pending is None or pending.space_id != space_id or pending.host != provider:
+            return
+        self._listings.pop(sync_id, None)
+        try:
+            missing, unresolved = _classify(pending)
+        except PageRefused as exc:
+            log.warning(
+                "sync page: refused the listings of space %s from %s: %s",
+                space_id,
+                provider,
+                exc,
+            )
+            missing, unresolved = 0, len(pending.buckets)
+        check = self._checks.get(space_id)
+        if check is None or check.root != pending.root:
+            return  # a newer page came meanwhile; its compare decides
+        result = _Compare(
+            root=check.root,
+            differing=check.differing,
+            unexplained=check.unexplained,
+            missing=missing,
+            unresolved=check.unresolved + unresolved,
+        )
+        self._remember(space_id, result)
+        await self._changed(space_id)
+        if missing and self._request_sync is not None:
+            try:
+                await self._request_sync(space_id, provider)
+            except Exception:
+                log.exception("sync page: asking the host of %s failed", space_id)
+
+    # ─── Listings (provider) ──────────────────────────────────────────
+
+    async def listing_records(
+        self,
+        *,
+        space_id: str,
+        page_ref: Mapping[str, Any] | None,
+        buckets: list[int],
+        requester_version: int,
+    ) -> list[dict]:
+        """The ``__listing__`` records of a ``sync_mode: "buckets"`` session:
+        per asked bucket its rows (identity, leaf, change time) when our
+        rows of it still hash to the page the requester holds — the same
+        page we hold — else ``held: false``. One export of the space."""
+        if requester_version < FederationCapability.MIN_FOR_SYNC_PAGES:
+            return []
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return []
+        held = await self._held(space)
+        asked = buckets[:MAX_LISTING_BUCKETS]
+        if held is None or not page_ref or page_ref.get("root") != held.page.root:
+            return [listing_to_wire(i, None) for i in asked]
+        scan = await self._state.rows_in(space_id, asked, cutoff=held.page.cutoff)
+        out: list[dict] = []
+        for index in asked:
+            rows = scan.rows.get(index, [])
+            proven = len(rows) <= MAX_LISTING_ROWS
+            if proven:
+                try:
+                    verify_listing(index, rows, held.row.vector)
+                except PageRefused:
+                    proven = False  # changed here since the page
+            out.append(listing_to_wire(index, rows if proven else None))
+        return out
 
     # ─── Status ───────────────────────────────────────────────────────
 
     async def position(self, space: Space, hosts: list[str]) -> SyncPagePosition | None:
         """What the newest page says about our copy of *space* (``None``:
-        no page held). *hosts*: the households acting as its host here —
-        only their pages can be compared with what we applied."""
+        no page held). ``match``: nothing the page commits to is missing
+        here — no unexplained differing bucket, or every listing asked
+        showed no missing row; ``False`` only when a listing PROVED a
+        missing row; ``None`` while not compared, a listing is pending, or
+        a bucket stayed unresolved."""
+        del hosts  # kept for the status service's signature
         held = await self._held(space)
         if held is None:
             return None
         page = held.page
-        applied = await self._applied(space.id, page, hosts)
-        # ``match`` means "nothing the page commits to is missing here". A
-        # clean stream from the signer at or past the page's seq brought all
-        # of it, so differing buckets are only content NEWER than the page
-        # (normal in a busy space) — a match. Otherwise the last compare
-        # with this page decides; ``None``: not compared yet.
         check = self._checks.get(space.id)
         match: bool | None = None
+        missing: int | None = None
         differing: int | None = None
-        if applied:
-            match, differing = True, 0
-        elif check is not None and check[0] == page.root:
-            differing = check[1]
-            match = differing == 0
+        if check is not None and check.root == page.root:
+            differing = check.differing
+            if check.missing:
+                match, missing = False, check.missing
+            elif check.unexplained == 0 or (
+                check.missing == 0 and check.unresolved == 0
+            ):
+                match, missing = True, 0
         conflict = self._conflicts.get(space.id) == (page.epoch, page.signer)
         return SyncPagePosition(
             seq=page.seq,
             at=datetime.fromtimestamp(page.issued_at / 1000, UTC).isoformat(),
             signer_role="owner" if page.signer == space.owner_instance_id else "admin",
-            applied=applied,
             match=match,
+            missing=missing,
             differing_buckets=differing,
             conflict=conflict,
         )

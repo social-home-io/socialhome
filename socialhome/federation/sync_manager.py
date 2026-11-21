@@ -468,6 +468,7 @@ class SyncSessionManager:
         ice_servers: list[dict] | None = None,
         have_seq: int | None = None,
         page_ref: dict | None = None,
+        buckets: list[int] | None = None,
     ) -> SyncDecision:
         """Admit a new sync session.
 
@@ -598,6 +599,7 @@ class SyncSessionManager:
             created_at=time.time(),
             have_seq=have_seq,
             page_ref=page_ref,
+            buckets=buckets,
         )
         self._sessions[sync_id] = record
         return SyncDecision(accepted=True)

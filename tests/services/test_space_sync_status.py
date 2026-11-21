@@ -645,17 +645,17 @@ def _position(**over) -> SyncPagePosition:
         "seq": 812,
         "at": NOW.isoformat(),
         "signer_role": "owner",
-        "applied": True,
-        "match": None,
-        "differing_buckets": None,
+        "match": True,
+        "missing": 0,
+        "differing_buckets": 0,
     }
     fields.update(over)
     return SyncPagePosition(**fields)
 
 
 async def test_up_to_date_as_of_the_page_while_the_host_is_offline(env):
-    """The host went silent, but we applied its stream at or past its
-    newest page (relayed by any member): up to date as of page N."""
+    """The host went silent, but our copy matches its newest page
+    (relayed by any member): up to date, checked against page N."""
     seen: list[tuple[str, list[str]]] = []
 
     async def position(space, hosts):
@@ -670,15 +670,25 @@ async def test_up_to_date_as_of_the_page_while_the_host_is_offline(env):
     assert seen[-1] == ("sp", ["owner"])
 
 
-async def test_behind_when_a_newer_signed_page_exists(env):
+async def test_behind_when_a_listing_proved_a_row_missing(env):
     async def position(space, hosts):
-        return _position(applied=False)
+        return _position(match=False, missing=2, differing_buckets=3)
 
     env.svc.attach_pages(position)
     await env.svc.host_unreachable("sp", ["owner"])
     status = await env.svc.status("sp")
     assert status.state is SpaceSyncState.BEHIND
-    assert status.to_wire()["page"]["applied"] is False
+    assert status.to_wire()["page"]["missing"] == 2
+
+
+async def test_no_verdict_yet_keeps_the_phase_1_state(env):
+    async def position(space, hosts):
+        return _position(match=None, missing=None, differing_buckets=3)
+
+    env.svc.attach_pages(position)
+    await env.svc.host_unreachable("sp", ["owner"])
+    status = await env.svc.status("sp")
+    assert status.state is SpaceSyncState.HOST_OFFLINE
 
 
 async def test_no_page_keeps_the_phase_1_status_and_wire(env):

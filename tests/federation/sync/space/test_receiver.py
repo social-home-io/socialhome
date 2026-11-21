@@ -124,10 +124,18 @@ async def test_on_chunk_sentinel_publishes_completion(bus, receiver, peer_setup)
 class _PageSink:
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.listings: list[dict] = []
+        self.done: list[dict] = []
 
     async def receive(self, **kwargs):
         self.calls.append(kwargs)
         return True
+
+    async def take_listing(self, **kwargs):
+        self.listings.append(kwargs)
+
+    async def listing_done(self, **kwargs):
+        self.done.append(kwargs)
 
 
 async def test_a_verified_sentinel_hands_its_sync_page_on(bus, receiver, peer_setup):
@@ -159,6 +167,53 @@ async def test_a_verified_sentinel_hands_its_sync_page_on(bus, receiver, peer_se
     forged = {**sentinel, "page_sealed": {"epoch": 2, "payload": "other"}}
     await r.on_chunk(serialise_chunk(forged), from_instance="peer-a")
     assert len(sink.calls) == 1
+
+
+async def test_listing_chunks_and_their_sentinel_reach_the_page_service(
+    bus, receiver, peer_setup
+):
+    """v_95: ``__listing__`` chunks of a ``buckets`` session go to the page
+    service (which checks the session was ours), never to a content
+    resource; the session's sentinel closes the listing."""
+    r, _, _ = receiver
+    _peer, kp = peer_setup
+    sink = _PageSink()
+    r.attach_sync_pages(sink)
+    records = [{"i": 3, "held": False}]
+    _, ciphertext = await _FakeCrypto().encrypt_chunk(
+        space_id="sp-1",
+        sync_id="L1",
+        plaintext=orjson.dumps({"records": records, "chunk_index": 0}),
+    )
+    chunk = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "L1",
+            "resource": "__listing__",
+            "space_id": "sp-1",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 1,
+            "is_last": False,
+            "encrypted_payload": ciphertext,
+        },
+    )
+    await r.on_chunk(serialise_chunk(chunk), from_instance="peer-a")
+    assert sink.listings == [
+        {"space_id": "sp-1", "sync_id": "L1", "provider": "peer-a", "records": records}
+    ]
+    sentinel = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "L1",
+            "resource": SENTINEL_RESOURCE,
+            "space_id": "sp-1",
+            "is_last": True,
+            "chunk_count": 1,
+        },
+    )
+    await r.on_chunk(serialise_chunk(sentinel), from_instance="peer-a")
+    assert sink.done == [{"space_id": "sp-1", "sync_id": "L1", "provider": "peer-a"}]
 
 
 async def test_on_chunk_rejects_unknown_peer(receiver, peer_setup):

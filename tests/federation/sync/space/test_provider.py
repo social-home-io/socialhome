@@ -140,6 +140,54 @@ async def test_the_sentinel_carries_the_sync_page_for_the_requester(provider):
     ]
 
 
+class _ListingPages(_FakePages):
+    async def listing_records(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs["requester_version"] < 95:
+            return []
+        return [{"i": b, "held": False} for b in kwargs["buckets"]]
+
+
+async def _listing_session(provider, *, version=95, member=True):
+    pages = _ListingPages()
+    provider.attach_sync_pages(pages)
+
+    async def gate(space_id, requester):
+        return member
+
+    provider.attach_member_gate(gate)
+    session = _FakeSession(sync_mode="buckets")
+    session.peer_version = version
+    session.page_ref = {"root": b"\x01" * 32}
+    session.buckets = [4, 9]
+    await provider.stream_initial(session)
+    frames = [orjson.loads(f) for f in session.rtc.sent]
+    return pages, session, frames
+
+
+async def test_a_buckets_session_streams_only_its_listings(provider):
+    """v_95: a ``sync_mode: "buckets"`` session answers with the asked
+    buckets' listings as ``__listing__`` chunks under the content key, then
+    the sentinel — no rows, no watermark."""
+    pages, session, frames = await _listing_session(provider)
+    assert [f["resource"] for f in frames] == ["__listing__", "__complete__"]
+    plain = orjson.loads(base64.urlsafe_b64decode(frames[0]["encrypted_payload"]))
+    assert plain["records"] == [{"i": 4, "held": False}, {"i": 9, "held": False}]
+    assert pages.calls[-1]["buckets"] == [4, 9]
+    assert session.snapshot_seq is None and session.stream_clean is True
+    assert frames[1]["chunk_count"] == 1
+
+
+@pytest.mark.parametrize(("version", "member"), [(94, True), (95, False)])
+async def test_listings_only_for_a_v95_member(provider, version, member):
+    pages, _session, frames = await _listing_session(
+        provider, version=version, member=member
+    )
+    assert [f["resource"] for f in frames] == ["__complete__"]
+    if not member:
+        assert not any("buckets" in c for c in pages.calls)
+
+
 async def test_no_page_service_no_page_field(provider):
     session = _FakeSession()
     await provider.stream_initial(session)

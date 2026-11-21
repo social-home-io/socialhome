@@ -21,11 +21,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ....services.inbound_media_store import media_basename
-from ....sync_page import COMMITTED_RESOURCES, VectorBuilder, file_refs
+from ....sync_page import (
+    COMMITTED_RESOURCES,
+    ListingRow,
+    VectorBuilder,
+    change_time,
+    file_refs,
+    record_leaf,
+    row_id_of,
+    row_key,
+    superseded_key,
+)
 from .exporter import RESOURCE_ORDER, record_batches
 from .window import pinned_cutoff
 
@@ -92,6 +103,31 @@ class PageStateHasher:
         vector = await asyncio.to_thread(builder.finish)
         return vector, builder.rows
 
+    async def rows_in(
+        self, space_id: str, buckets: Iterable[int], *, cutoff: str | None
+    ) -> BucketRows:
+        """The committed rows of *buckets* (with the page's *cutoff*): per
+        bucket its rows as :class:`~socialhome.sync_page.ListingRow`
+        (resource, id, leaf, change time); and every live row this household
+        holds as gone — deleted, archived — (:data:`SUPERSEDED_BY`). One
+        export of the space, like :meth:`vector`; only the asked buckets'
+        rows are kept."""
+        wanted = frozenset(buckets)
+        out = BucketRows(rows={i: [] for i in wanted}, gone=set())
+        with pinned_cutoff(space_id, cutoff):
+            for resource in RESOURCE_ORDER:
+                if resource not in COMMITTED_RESOURCES:
+                    continue
+                exporter = self._exporters.get(resource)
+                if exporter is None:
+                    continue
+                async for batch in record_batches(exporter, space_id):
+                    hashes = await self._hash_files(resource, batch)
+                    await asyncio.to_thread(
+                        _collect, out, wanted, resource, batch, hashes
+                    )
+        return out
+
     async def _hash_files(
         self, resource: str, batch: list[dict[str, Any]]
     ) -> dict[str, str]:
@@ -109,6 +145,38 @@ class PageStateHasher:
         return out
 
 
+@dataclass(slots=True)
+class BucketRows:
+    """:meth:`PageStateHasher.rows_in` — working data, never stored."""
+
+    rows: dict[int, list[ListingRow]]
+    gone: set[tuple[str, str]]
+
+
+def _collect(
+    out: BucketRows,
+    wanted: frozenset[int],
+    resource: str,
+    batch: list[dict[str, Any]],
+    hashes: dict[str, str],
+) -> None:
+    for record in batch:
+        row_id = row_id_of(resource, record)
+        if row_id is None:
+            continue
+        key = superseded_key(resource, row_id)
+        if key is not None:
+            out.gone.add(key)
+        index = row_key(resource, row_id)[0]
+        if index not in wanted:
+            continue
+        found = record_leaf(resource, record, hashes.get)
+        if found is not None:
+            out.rows[index].append(
+                ListingRow(resource, row_id, found[1], change_time(record))
+            )
+
+
 def _add_all(
     builder: VectorBuilder,
     resource: str,
@@ -119,4 +187,4 @@ def _add_all(
         builder.add(resource, record, hashes.get)
 
 
-__all__ = ["PageStateHasher"]
+__all__ = ["BucketRows", "PageStateHasher"]

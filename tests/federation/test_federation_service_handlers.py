@@ -534,6 +534,26 @@ async def test_handle_space_sync_begin_parses_the_sync_page(svc):
         assert kwargs["page_ref"] == parsed
 
 
+async def test_handle_space_sync_begin_parses_the_buckets(svc):
+    """v_95: a ``buckets`` session's bucket list reaches the session parsed
+    and bounded (≤ 8 distinct indices), anything else dropped."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(accepted=False, next_event=None)
+    )
+    for wire, parsed in (([5, 1, 5], [5, 1]), (list(range(9)), None), ("x", None)):
+        payload = {
+            "sync_id": "s",
+            "space_id": "sp",
+            "sync_mode": "buckets",
+            "buckets": wire,
+        }
+        await svc._handle_space_sync_begin(
+            _event("SPACE_SYNC_BEGIN", payload, space_id="sp")
+        )
+        assert svc._sync_manager.begin_session.await_args.kwargs["buckets"] == parsed
+
+
 async def test_handle_space_sync_begin_offer_has_no_signaling_node(svc):
     """The OFFER carries only the SDP + ICE servers — the GFS is never asked
     for a signaling node, so it learns nothing about the sync."""

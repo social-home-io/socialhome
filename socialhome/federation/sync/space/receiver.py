@@ -72,6 +72,7 @@ from ...owner_bound_id import (
 from ...space_scope import archive_refusal
 from .exporter import (
     ALLOWED_RESOURCES,
+    LISTING_RESOURCE,
     REMOVAL_RESOURCES,
     ROSTER_RESOURCES,
     SENTINEL_RESOURCE,
@@ -148,6 +149,14 @@ class _SyncPageSink(Protocol):
     async def receive(
         self, *, space_id: str, sync_id: str, provider: str, sealed: object
     ) -> bool: ...
+
+    async def take_listing(
+        self, *, space_id: str, sync_id: str, provider: str, records: object
+    ) -> None: ...
+
+    async def listing_done(
+        self, *, space_id: str, sync_id: str, provider: str
+    ) -> None: ...
 
 
 class SpaceSyncReceiver(
@@ -577,6 +586,9 @@ class SpaceSyncReceiver(
                     provider=from_instance,
                     sealed=envelope.get("page_sealed"),
                 )
+                await self._sync_pages.listing_done(
+                    space_id=space_id, sync_id=sync_id, provider=from_instance
+                )
             await self._bus.publish(
                 SpaceSyncComplete(
                     space_id=space_id,
@@ -674,6 +686,19 @@ class SpaceSyncReceiver(
                 return
             self._health.failed(sync_id)
             log.warning("sync chunk plaintext parse failed: %s", exc)
+            return
+
+        if resource == LISTING_RESOURCE:
+            # v_95: bucket listings of a ``buckets`` session we asked for —
+            # the page service checks the session and the sender.
+            if self._sync_pages is not None:
+                await self._sync_pages.take_listing(
+                    space_id=space_id,
+                    sync_id=sync_id,
+                    provider=from_instance,
+                    records=records,
+                )
+            self._health.applied(sync_id, index)
             return
 
         if resource not in ALLOWED_RESOURCES:
