@@ -459,8 +459,9 @@ class SqliteSpacePostRepo:
         changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
-                "SELECT rowid AS sync_rowid, * FROM space_posts"
-                " WHERE space_id=? AND deleted=0"
+                "SELECT rowid AS sync_rowid, * FROM "
+                + _sync_page_source(since, cursor)
+                + " WHERE space_id=? AND deleted=0"
                 + window
                 + changed
                 + " AND rowid <= ? ORDER BY rowid DESC LIMIT ?",
@@ -487,8 +488,9 @@ class SqliteSpacePostRepo:
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, id, author, type, created_at,"
-                " moderated, moderated_by FROM space_posts"
-                " WHERE space_id=? AND deleted=1"
+                " moderated, moderated_by FROM "
+                + _sync_page_source(since, cursor)
+                + " WHERE space_id=? AND deleted=1"
                 + changed
                 + " AND rowid <= ? ORDER BY rowid DESC LIMIT ?",
                 (space_id, *changed_params, sync_page_below(cursor), int(limit)),
@@ -1157,6 +1159,27 @@ class SqliteSpacePostRepo:
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
+
+
+def _sync_page_source(since: int | None, cursor: int | None) -> str:
+    """The table a §25.6 posts / tombstones page reads, with the index it
+    must use where the planner's choice would be wrong.
+
+    The first page of an incremental run (``since`` set, no cursor) reads
+    the change stamps, ``idx_space_posts_sync_seq``: the quiet check
+    (``provider.is_quiet``) reads only this page every 30 min per
+    (household, space) and usually finds nothing — ~0.1 ms, where the
+    planner's pick, the keyset index (migration 0152), walks the whole
+    space (~7 ms for 40k posts). Every other page — a full export, or an
+    incremental run past its first full page, i.e. many changes — walks
+    ``idx_space_posts_sync_keyset`` from the cursor: the stamp index would
+    re-sort every changed row for every page (3.3 s for 38k changed).
+    ``since`` set means the query has ``sync_seq > ?``, which the partial
+    index requires. Same rows either way; only the plan differs.
+    """
+    if since is not None and cursor is None:
+        return "space_posts INDEXED BY idx_space_posts_sync_seq"
+    return "space_posts"
 
 
 def _row_to_space_post(row: dict) -> Post:

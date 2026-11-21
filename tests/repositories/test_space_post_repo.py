@@ -1443,10 +1443,36 @@ _SYNC_PAGE_READS = {
     "tombstones": lambda env: env.repo.list_post_tombstones_page(
         env.space_id, limit=50
     ),
-    # An incremental run: the keyset index beats ``idx_space_posts_sync_seq``
-    # here — that one would sort every changed row on every page.
-    "posts-since": lambda env: env.repo.list_sync_page(env.space_id, since=0, limit=50),
+    # Past the first page of an incremental run (more than ``limit``
+    # changed): the keyset walk, never a re-sort of every changed row.
+    "posts-since-page-2": lambda env: env.repo.list_sync_page(
+        env.space_id, since=0, cursor=2**40, limit=50
+    ),
+    "tombstones-since-page-2": lambda env: env.repo.list_post_tombstones_page(
+        env.space_id, since=0, cursor=2**40, limit=50
+    ),
 }
+
+# The first page of an incremental run — the quiet check reads only this,
+# every 30 min per (household, space), and usually finds nothing.
+_FIRST_CHANGED_PAGE_READS = {
+    "posts-since": lambda env, since: env.repo.list_sync_page(
+        env.space_id, since=since, limit=50
+    ),
+    "tombstones-since": lambda env, since: env.repo.list_post_tombstones_page(
+        env.space_id, since=since, limit=50
+    ),
+}
+
+
+async def _big_space_among_many(env, *, stats: bool) -> None:
+    await _seed_interleaved(env, 3000, spaces=50, big=True)
+    if stats:
+        await env.db.optimize()
+    else:
+        await env.db.transact(
+            lambda conn: conn.execute("DROP TABLE IF EXISTS sqlite_stat1")
+        )
 
 
 _KEYSET_SEEK = "idx_space_posts_sync_keyset (space_id=? AND deleted=? AND rowid<?)"
@@ -1460,18 +1486,64 @@ async def test_a_big_space_among_many_seeks_the_keyset_index(env, read, stats):
     whole space per page (that made a 40k-post export O(n²), ~1.1 s). With
     many spaces the planner's averages make the space look small, so
     statistics alone did not get here (migration 0152)."""
-    await _seed_interleaved(env, 3000, spaces=50, big=True)
-    if stats:
-        await env.db.optimize()
-    else:
-        await env.db.transact(
-            lambda conn: conn.execute("DROP TABLE IF EXISTS sqlite_stat1")
-        )
+    await _big_space_among_many(env, stats=stats)
     plans = await _page_plans(env, lambda: _SYNC_PAGE_READS[read](env))
     assert plans, "the read issued no query"
     for plan in plans:
         assert "TEMP B-TREE" not in plan, plan
         assert _KEYSET_SEEK in plan, plan
+
+
+@pytest.mark.parametrize("stats", [False, True], ids=["no-stats", "optimized"])
+@pytest.mark.parametrize("read", sorted(_FIRST_CHANGED_PAGE_READS))
+async def test_the_first_changed_page_reads_the_change_stamp_index(env, read, stats):
+    """A quiet check or a small incremental run touches only the changed
+    rows (``idx_space_posts_sync_seq``, ~0.1 ms) — the keyset index would
+    walk the whole space (~7 ms for 40k posts) for every household, every
+    round."""
+    await _big_space_among_many(env, stats=stats)
+    mark = await env.db.fetchval("SELECT max(sync_seq) FROM space_posts")
+    plans = await _page_plans(env, lambda: _FIRST_CHANGED_PAGE_READS[read](env, mark))
+    assert plans, "the read issued no query"
+    for plan in plans:
+        assert "idx_space_posts_sync_seq (space_id=? AND sync_seq>?)" in plan, plan
+
+
+@pytest.mark.parametrize("cutoff", [None, "2025-01-01 00:00:00"])
+async def test_an_incremental_run_pages_exactly_like_the_old_or_cursor(env, cutoff):
+    """First page by change stamp, later pages by the keyset: the same rows,
+    order and cursors as the one old query."""
+    await _seed_interleaved(env, 121)
+    mark = await env.db.fetchval("SELECT sync_seq FROM space_posts WHERE id='kp-40'")
+    window = " AND datetime(created_at) >= datetime(?)" if cutoff else ""
+    old = await _old_pages(
+        env,
+        _OLD_POSTS_PAGE.format(window=window + " AND sync_seq > ?"),
+        (env.space_id, *((cutoff,) if cutoff else ()), mark),
+        4,
+    )
+    new = await _new_pages(
+        lambda **kw: env.repo.list_sync_page(
+            env.space_id, cutoff=cutoff, since=mark, **kw
+        ),
+        4,
+    )
+    assert len(new) >= 3
+    assert new == old
+    old_gone = await _old_pages(
+        env,
+        _OLD_TOMBSTONES_PAGE.replace(
+            " AND (? IS NULL", " AND sync_seq > ? AND (? IS NULL"
+        ),
+        (env.space_id, mark),
+        2,
+    )
+    new_gone = await _new_pages(
+        lambda **kw: env.repo.list_post_tombstones_page(env.space_id, since=mark, **kw),
+        2,
+    )
+    assert len(new_gone) >= 3
+    assert new_gone == old_gone
 
 
 async def test_a_small_space_among_many_pages_every_row_once(env):

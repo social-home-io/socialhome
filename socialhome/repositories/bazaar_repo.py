@@ -496,11 +496,31 @@ class SqliteBazaarRepo:
         )
         # A listing change touches its wrapper post (migration 0086), so
         # the post's stamp covers both.
-        changed, changed_params = changed_since_sql("p.sync_seq", since)
+        #
+        # The join is spelled per page so the plan never depends on the
+        # planner's guess (same rows either way). The first page of an
+        # incremental run — all the quiet check (``provider.is_quiet``)
+        # reads, every 30 min per (household, space) — starts from the
+        # changed wrapper posts (``idx_space_posts_sync_seq``; CROSS JOIN
+        # fixes that order) and sorts only those. Every later page walks
+        # the listings by rowid from the cursor; ``+p.sync_seq`` keeps the
+        # stamp index out, which would re-sort every changed listing for
+        # every page (O(n²): ~240 ms for 4k listings).
+        first_changed_page = since is not None and cursor is None
+        changed, changed_params = changed_since_sql(
+            "p.sync_seq" if first_changed_page else "+p.sync_seq", since
+        )
+        source = (
+            "space_posts p INDEXED BY idx_space_posts_sync_seq"
+            " CROSS JOIN bazaar_listings l"
+            if first_changed_page
+            else "bazaar_listings l JOIN space_posts p"
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
-                "SELECT l.rowid AS sync_rowid, l.* FROM bazaar_listings l"
-                " JOIN space_posts p ON p.id = l.post_id AND p.space_id = l.space_id"
+                "SELECT l.rowid AS sync_rowid, l.* FROM "
+                + source
+                + " ON p.id = l.post_id AND p.space_id = l.space_id"
                 " WHERE l.space_id=? AND p.deleted=0"
                 + window
                 + changed
