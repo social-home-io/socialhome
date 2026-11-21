@@ -124,14 +124,31 @@ async def test_signup_registration_is_pending_when_auto_accept_is_off(open_clien
     assert (await reg.json())["status"] == "pending"
 
 
-async def test_signup_token_one_per_address_window(open_client):
-    """The token service keeps its per-address interval: a second request from
-    the same address right away is shed with 429 + Retry-After."""
-    first = await open_client.post("/gfs/signup-token", headers=_ip(6))
+async def test_signup_token_has_no_per_address_interval(open_client):
+    """Regression (community event): the token service used to hand one
+    token per address per 30 s, so a second household on the same network
+    connecting right away got a 429. Several in a row now each get their own
+    token — the 5 / min per-address window is the only per-address limit."""
+    tokens = []
+    for _ in range(3):
+        resp = await open_client.post("/gfs/signup-token", headers=_ip(6))
+        assert resp.status == 200
+        tokens.append((await resp.json())["token"])
+    assert len(set(tokens)) == 3
+
+
+async def test_signup_token_at_the_live_cap_is_429_with_retry_after(
+    open_client, monkeypatch
+):
+    """At the cap of live codes for the address the answer is an honest 429
+    with ``Retry-After`` — never a placeholder token."""
+    monkeypatch.setattr(public, "PAIR_TOKEN_MAX_LIVE_PER_CLIENT", 1)
+    first = await open_client.post("/gfs/signup-token", headers=_ip(16))
     assert first.status == 200
-    second = await open_client.post("/gfs/signup-token", headers=_ip(6))
+    second = await open_client.post("/gfs/signup-token", headers=_ip(16))
     assert second.status == 429
-    assert second.headers.get("Retry-After") == str(public.PAIR_TOKEN_MIN_INTERVAL)
+    assert await second.json() == {"error": "rate_limited"}
+    assert second.headers.get("Retry-After") == str(public.PAIR_TOKEN_CAP_RETRY_S)
 
 
 async def test_signup_token_per_ip_flood_is_rate_limited(open_client):

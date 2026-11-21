@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, screen, cleanup, waitFor } from '@testing-library/preact'
 import en from '@/i18n/locales/en.json'
 
@@ -177,6 +177,110 @@ describe('PairingFlow — entering the code for a household we share a space wit
     await enterCode({ instance_id: 'peer-d', display_name: 'Delta House', status: 'confirmed' })
     await screen.findByText('pairing.success')
     expect(showToastSpy).not.toHaveBeenCalledWith('connections.meta.waiting_approval Delta House', 'info')
+  })
+})
+
+describe('PairingFlow — a busy household server (429)', () => {
+  async function toCodeEntry() {
+    apiPost.mockResolvedValueOnce({
+      token: 'tok-xyz', identity_pk: 'ed25519:bb', dh_pk: 'x25519:cc',
+      inbox_url: 'https://h.example/inbox/abc', expires_at: '2026-05-18T10:05:00Z',
+    })
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')
+    await screen.findByText('pairing.role_show')
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await screen.findByText('pairing.copy_code')
+    fireWs('pairing.accept_received', { token: 'tok-xyz', verification_code: '123456' })
+  }
+
+  function rateLimited(path: string, retryAfter: number | undefined) {
+    return import('@/api').then(({ ApiError }) => new ApiError(429, path, {
+      code: 'RATE_LIMITED', detail: 'Too many requests — wait a moment.',
+      ...(retryAfter === undefined ? {} : { retry_after: retryAfter }),
+    }))
+  }
+
+  afterEach(() => { vi.useRealTimers() })
+
+  it('confirm: waits out Retry-After once and confirms — the handshake does not fail', async () => {
+    await toCodeEntry()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/confirm', 7))
+    apiPost.mockResolvedValueOnce({ instance_id: 'peer-d', display_name: 'Delta House', status: 'confirmed' })
+    fireEvent.click(await screen.findByText('pairing.verify'))
+    await vi.advanceTimersByTimeAsync(6_000)
+    // Still verifying: not retried early, not failed.
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText('pairing.failed')).toBeNull()
+    await vi.advanceTimersByTimeAsync(1_500)
+    expect(apiPost).toHaveBeenCalledTimes(3)
+    expect(apiPost).toHaveBeenLastCalledWith('/api/pairing/confirm', { token: 'tok-xyz', verification_code: '123456' })
+    vi.useRealTimers()
+    await screen.findByText('pairing.success')
+  })
+
+  it('confirm: says it is waiting while it waits', async () => {
+    await toCodeEntry()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/confirm', 5))
+    apiPost.mockResolvedValueOnce({ instance_id: 'peer-d', display_name: 'Delta House', status: 'confirmed' })
+    fireEvent.click(await screen.findByText('pairing.verify'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(screen.getByText('pairing.confirm_retrying')).toBeTruthy()
+    await vi.advanceTimersByTimeAsync(4_500)
+    vi.useRealTimers()
+    await screen.findByText('pairing.success')
+    expect(screen.queryByText('pairing.confirm_retrying')).toBeNull()
+  })
+
+  it('confirm: closed during the wait — no retry, and nothing flips to "failed"', async () => {
+    await toCodeEntry()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/confirm', 5))
+    fireEvent.click(await screen.findByText('pairing.verify'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    fireEvent.click(screen.getByLabelText('modal.close'))
+    await vi.advanceTimersByTimeAsync(5_000)
+    vi.useRealTimers()
+    // initiate + the one refused confirm; no stale retry.
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText('pairing.failed')).toBeNull()
+  })
+
+  it('confirm: a second 429 fails with the rate-limit words, not "status 429"', async () => {
+    await toCodeEntry()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/confirm', 2))
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/confirm', 2))
+    fireEvent.click(await screen.findByText('pairing.verify'))
+    await vi.advanceTimersByTimeAsync(2_500)
+    vi.useRealTimers()
+    expect(await screen.findByText('pairing.failed')).toBeTruthy()
+    expect(screen.getByText('error.rate_limited')).toBeTruthy()
+    expect(apiPost).toHaveBeenCalledTimes(3)
+  })
+
+  it('confirm: no retry when the wait is missing or too long', async () => {
+    await toCodeEntry()
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/confirm', 600))
+    fireEvent.click(await screen.findByText('pairing.verify'))
+    expect(await screen.findByText('pairing.failed')).toBeTruthy()
+    expect(screen.getByText('error.rate_limited')).toBeTruthy()
+    expect(apiPost).toHaveBeenCalledTimes(2)
+  })
+
+  it('initiate: a 429 says "too many tries", never "status 429"', async () => {
+    apiPost.mockRejectedValueOnce(await rateLimited('/api/pairing/initiate', 30))
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')
+    await screen.findByText('pairing.role_show')
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    expect(await screen.findByText('pairing.failed')).toBeTruthy()
+    expect(screen.getByText('error.rate_limited')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('pairing.error.status')
   })
 })
 
@@ -365,6 +469,8 @@ describe('PairingFlow — GFS connect failures', () => {
   it.each([
     ['GFS_IDENTITY_MISMATCH', 422, 'error.gfs_identity_mismatch'],
     ['GFS_PAIRING_FAILED', 422, 'error.gfs_pairing_failed'],
+    // An expired / used code says so — never "didn't accept this household".
+    ['GFS_CODE_EXPIRED', 422, 'error.gfs_code_expired'],
     ['GFS_SIGNUP_CLOSED', 409, 'error.gfs_signup_closed'],
     ['ALREADY_CONNECTED', 409, 'error.gfs_already_connected'],
     ['GFS_BUSY', 503, 'error.gfs_busy'],

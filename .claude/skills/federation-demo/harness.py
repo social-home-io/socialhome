@@ -4121,8 +4121,8 @@ def cmd_gfs_open_signup() -> None:
         _request(
             f"{base}/api/gfs/connections/{conn_id}", token=c["token"], method="DELETE"
         )
-        # The GFS hands one sign-up token per address per 30 s.
-        time.sleep(31)
+        # No wait: the GFS mints a sign-up token per request (bounded only
+        # by its live-token caps), so reconnecting right away works.
     elif not offer.get("available"):
         raise SystemExit(f"gfs-open-signup: step not offered: {offer!r}")
 

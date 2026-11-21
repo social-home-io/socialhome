@@ -95,6 +95,14 @@ _CONNECT_ERRORS: dict[str, tuple[int, str, str]] = {
         "GFS_BUSY",
         "The GFS is busy. Try again in a minute.",
     ),
+    "code_expired": (
+        422,
+        "GFS_CODE_EXPIRED",
+        (
+            "This pairing code expired or was already used. Get a fresh code "
+            "from the GFS page."
+        ),
+    ),
     "refused": (
         422,
         "GFS_PAIRING_FAILED",
@@ -159,8 +167,10 @@ class GfsConnectionCollectionView(BaseView):
     ``GFS_UNREACHABLE`` (502 — no answer, or a 5xx), ``GFS_IDENTITY_MISMATCH``
     (422 — the address answers, but not as a GFS), ``GFS_PROOF_FAILED`` (422
     — the GFS offers proof of possession and failed it at this address) or
-    ``GFS_PAIRING_FAILED`` (422 — a missing field, an unusable URL, or the GFS
-    refused the token).
+    ``GFS_CODE_EXPIRED`` (422 — the GFS refused the token: it expired or was
+    already used), ``GFS_BUSY`` (503 — the GFS rate-limited the
+    registration) or ``GFS_PAIRING_FAILED`` (422 — a missing field, an
+    unusable URL, or the GFS refused the registration).
     Details are the household's own sentences, never the GFS's words.
     """
 
@@ -227,11 +237,12 @@ class GfsDefaultConnectionView(BaseView):
     with the connection (``status`` ``active`` or ``pending``), or an error
     code the SPA turns into plain words: ``GFS_DEFAULT_DISABLED`` (404),
     ``ALREADY_CONNECTED`` (409), ``GFS_SIGNUP_CLOSED`` (409),
-    ``GFS_UNREACHABLE`` (502), ``GFS_BUSY``
-    (503), ``GFS_IDENTITY_MISMATCH`` (422 — ``/gfs/info`` doesn't match the
+    ``GFS_UNREACHABLE`` (502), ``GFS_BUSY`` (503 — still rate-limited after
+    one retry when the GFS asked for a wait of at most a minute),
+    ``GFS_IDENTITY_MISMATCH`` (422 — ``/gfs/info`` doesn't match the
     pinned ``[gfs] default_instance_id`` / ``default_public_key``),
-    ``GFS_PROOF_FAILED`` (422 — failed proof of possession) or
-    ``GFS_PAIRING_FAILED`` (422).
+    ``GFS_PROOF_FAILED`` (422 — failed proof of possession),
+    ``GFS_CODE_EXPIRED`` (422) or ``GFS_PAIRING_FAILED`` (422).
     """
 
     async def _existing(self, url: str):

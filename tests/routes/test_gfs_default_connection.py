@@ -21,9 +21,11 @@ from socialhome.app_keys import config_key, db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
+from socialhome.global_server import public
 from socialhome.global_server.app_keys import gfs_admin_repo_key, gfs_fed_repo_key
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.server import create_gfs_app
+from socialhome.services import gfs_connection_service
 
 from .conftest import _auth
 
@@ -221,16 +223,39 @@ async def test_post_signup_closed(aiohttp_client, tmp_dir):
     assert await gfs.server.app[gfs_fed_repo_key].list_instances() == []
 
 
-async def test_post_gfs_busy(aiohttp_client, tmp_dir):
-    """The GFS hands one token per address per interval: a second sign-up
-    right after (here: after disconnecting) is 'busy', not an error."""
+async def test_post_again_right_after_is_not_busy(aiohttp_client, tmp_dir):
+    """Regression (community event): the GFS used to hand one token per
+    address per 30 s, so a second sign-up from the same network right after
+    (here: reconnecting after a disconnect) was 'busy'. It connects now."""
     gfs = await _gfs(aiohttp_client, tmp_dir)
     home = await _household(aiohttp_client, tmp_dir, default_url=_url(gfs))
     first = await (await home.post(PATH, headers=ADMIN)).json()
     await home.delete(f"/api/gfs/connections/{first['id']}", headers=ADMIN)
     r = await home.post(PATH, headers=ADMIN)
+    assert r.status == 201, await r.text()
+
+
+async def test_post_gfs_busy(aiohttp_client, tmp_dir, monkeypatch):
+    """The GFS has no token to give (its live-code cap is reached): codes
+    hold their place for 10 minutes, so the GFS asks for a wait longer than
+    the household sits out in-request — 'busy' at once, not a minute of
+    spinner, and not an error."""
+    waited: list[float] = []
+
+    async def _sleep(seconds: float) -> None:
+        waited.append(seconds)
+
+    monkeypatch.setattr(gfs_connection_service.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(public, "PAIR_TOKEN_MAX_LIVE_PER_CLIENT", 0)
+    gfs = await _gfs(aiohttp_client, tmp_dir)
+    home = await _household(aiohttp_client, tmp_dir, default_url=_url(gfs))
+    r = await home.post(PATH, headers=ADMIN)
     assert r.status == 503
     assert (await r.json())["error"]["code"] == "GFS_BUSY"
+    assert (
+        public.PAIR_TOKEN_CAP_RETRY_S > gfs_connection_service.SIGNUP_RETRY_MAX_WAIT_S
+    )
+    assert waited == []
 
 
 async def test_post_gfs_unreachable(aiohttp_client, tmp_dir):

@@ -45,11 +45,47 @@ export const autoPairRequests = signal<AutoPairRequest[]>([])
 /** Admin-only inbox. A failure keeps the last list: the inbox is an
  *  addition to the page, not something a banner should be raised for. */
 export async function loadAutoPairRequests(): Promise<void> {
+  lastInboxLoadAt = Date.now()
   try {
     autoPairRequests.value = await api.get('/api/pairing/auto-pair-requests') as AutoPairRequest[]
   } catch {
     /* keep the last known inbox */
   }
+}
+
+/** Least time between two event-driven inbox reads: ≤ 20 a minute, under
+ *  the inbox's own 30 / min rate-limit bucket. */
+export const INBOX_RELOAD_GAP_MS = 3_000
+
+let lastInboxLoadAt = Number.NEGATIVE_INFINITY
+let inboxReloadTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Reload the inbox for a ``pairing.auto_pair_requested`` WS event.
+ *
+ *  Throttled: a room of households asking at once fires one event each,
+ *  and a read per event spent the inbox's rate-limit bucket in one burst.
+ *  The first event reads at once; the rest of a burst share ONE trailing
+ *  read when the gap is over, so the list still ends up current. Timers,
+ *  not a shared in-flight promise, so a read that never answers can't
+ *  stall later ones. */
+/** Drop a pending trailing read — the page left, nobody shows the inbox. */
+export function cancelAutoPairReload(): void {
+  if (inboxReloadTimer !== null) clearTimeout(inboxReloadTimer)
+  inboxReloadTimer = null
+}
+
+export function reloadAutoPairRequestsSoon(): void {
+  if (inboxReloadTimer !== null) return
+  // Capped at one gap: a wall clock set back can't hold the inbox for hours.
+  const wait = Math.min(lastInboxLoadAt + INBOX_RELOAD_GAP_MS - Date.now(), INBOX_RELOAD_GAP_MS)
+  if (wait <= 0) {
+    void loadAutoPairRequests()
+    return
+  }
+  inboxReloadTimer = setTimeout(() => {
+    inboxReloadTimer = null
+    void loadAutoPairRequests()
+  }, wait)
 }
 
 export function dropAutoPairRequest(requestId: string): void {

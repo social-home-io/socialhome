@@ -66,10 +66,11 @@ _ADMIN_LOGIN_ATTEMPT_RETENTION_SECONDS = 86400
 _MAX_ROTATION_SEQ = MAX_AUTHORITY_KEY_EPOCH
 
 # Retention for ``gfs_pair_tokens``. Tokens are single-use with a 10-min TTL
-# and only counted within a short rate-limit window, so a row older than this
-# is dead weight. 24h comfortably exceeds the TTL; the GFS maintenance loop
-# prunes anything older to keep the table bounded.
-PAIR_TOKEN_RETENTION_SECONDS = 86400
+# and only LIVE ones (unexpired, unconsumed) are counted against the mint
+# caps, so a row past the TTL is dead weight. The server-wide live count
+# scans the table, so keep it short: an hour comfortably exceeds the TTL, and
+# the (hourly) GFS maintenance loop prunes anything older.
+PAIR_TOKEN_RETENTION_SECONDS = 3600
 
 # A pairing token is valid for this many seconds after it was minted
 # (§24.7.4). Mirrors ``public.PAIR_TOKEN_TTL_SECONDS`` — this module must not
@@ -901,9 +902,17 @@ class AbstractGfsAdminRepo(Protocol):
     ) -> None: ...
 
     # Pair tokens
-    async def save_pair_token(self, token: str, ip: str) -> None: ...
+    async def save_pair_token(
+        self,
+        token: str,
+        ip: str,
+        *,
+        max_live_per_ip: int,
+        max_live_total: int,
+        guaranteed_per_ip: int = 0,
+    ) -> bool: ...
+    async def count_live_pair_tokens(self, ip: str) -> int: ...
     async def consume_pair_token(self, token: str) -> bool: ...
-    async def count_pair_tokens(self, ip: str, since: int) -> int: ...
     async def prune_old_pair_tokens(self, cutoff: int) -> int: ...
 
 
@@ -1252,10 +1261,58 @@ class SqliteGfsAdminRepo:
 
     # ── Pair tokens ───────────────────────────────────────────────────
 
-    async def save_pair_token(self, token: str, ip: str) -> None:
-        await self._db.enqueue(
-            "INSERT INTO gfs_pair_tokens(token, ip) VALUES(?, ?)",
-            (token, ip),
+    async def save_pair_token(
+        self,
+        token: str,
+        ip: str,
+        *,
+        max_live_per_ip: int,
+        max_live_total: int,
+        guaranteed_per_ip: int = 0,
+    ) -> bool:
+        """Store *token* for *ip* unless a live-token cap is reached.
+
+        Live = unconsumed and inside the TTL. *ip* may hold at most
+        *max_live_per_ip*; the server-wide *max_live_total* applies only once
+        *ip* already holds *guaranteed_per_ip* — so a few heavy sources that
+        fill the server cap can't deny a code to an address holding none.
+
+        ONE conditional ``INSERT … SELECT``: the counts and the insert are a
+        single statement, atomic in SQLite — also across cluster nodes
+        sharing the file — so concurrent mints can never overshoot a cap the
+        way count-then-insert would. Returns ``True`` iff the token was stored.
+        """
+        since = int(time.time()) - PAIR_TOKEN_TTL_SECONDS
+        changed = await self._db.enqueue_rowcount(
+            "INSERT INTO gfs_pair_tokens(token, ip) SELECT ?, ? FROM ("
+            "SELECT (SELECT COUNT(*) FROM gfs_pair_tokens WHERE ip=? "
+            "AND created_at >= ? AND consumed_at IS NULL) AS per_ip, "
+            "(SELECT COUNT(*) FROM gfs_pair_tokens "
+            "WHERE created_at >= ? AND consumed_at IS NULL) AS total) "
+            "WHERE per_ip < ? AND (per_ip < ? OR total < ?)",
+            (
+                token,
+                ip,
+                ip,
+                since,
+                since,
+                max_live_per_ip,
+                guaranteed_per_ip,
+                max_live_total,
+            ),
+        )
+        return changed == 1
+
+    async def count_live_pair_tokens(self, ip: str) -> int:
+        """Live (unexpired, unconsumed) pairing tokens held by *ip* — read
+        only after a refused mint, to say which cap was hit."""
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM gfs_pair_tokens WHERE ip=? "
+                "AND created_at >= ? AND consumed_at IS NULL",
+                (ip, int(time.time()) - PAIR_TOKEN_TTL_SECONDS),
+                default=0,
+            )
         )
 
     async def consume_pair_token(self, token: str) -> bool:
@@ -1275,20 +1332,11 @@ class SqliteGfsAdminRepo:
         )
         return changed == 1
 
-    async def count_pair_tokens(self, ip: str, since: int) -> int:
-        return int(
-            await self._db.fetchval(
-                "SELECT COUNT(*) FROM gfs_pair_tokens WHERE ip=? AND created_at >= ?",
-                (ip, since),
-                default=0,
-            )
-        )
-
     async def prune_old_pair_tokens(self, cutoff: int) -> int:
         """Delete pair tokens created before ``cutoff`` (unix seconds).
 
-        Tokens are single-use with a 10-min TTL and only counted within a
-        short rate-limit window, so older rows are dead weight.
+        Tokens are single-use with a 10-min TTL and only live ones count
+        against the mint caps, so older rows are dead weight.
         """
 
         def _run(conn) -> int:

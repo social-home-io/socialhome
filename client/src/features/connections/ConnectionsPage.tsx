@@ -66,6 +66,8 @@ import {
   loadGfsConnections,
   loadHouseholdAdmins,
   loadSelfHome,
+  cancelAutoPairReload,
+  reloadAutoPairRequestsSoon,
   type AutoPairRequest,
 } from './connectionsData'
 import {
@@ -187,7 +189,7 @@ export default function ConnectionsPage() {
     const offs = [
       ws.on('pairing.aborted', () => { void reloadConnections() }),
       ws.on('pairing.auto_pair_requested', () => {
-        if (currentUser.value?.is_admin) void loadAutoPairRequests()
+        if (currentUser.value?.is_admin) reloadAutoPairRequestsSoon()
       }),
       ws.on('peer.transport_changed', (msg) => {
         const { instance_id, transport } = msg.data as { instance_id: string; transport: TransportState }
@@ -196,7 +198,10 @@ export default function ConnectionsPage() {
         )
       }),
     ]
-    return () => { offs.forEach((off) => off()) }
+    return () => {
+      offs.forEach((off) => off())
+      cancelAutoPairReload()
+    }
   }, [])
 
   const compatById = new Map(compatPeers.value.map((p) => [p.instance_id, p]))

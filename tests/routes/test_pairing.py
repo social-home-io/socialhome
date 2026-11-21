@@ -2168,7 +2168,7 @@ async def test_patch_both_fields_a_refused_switch_applies_neither(make_client):
 
 async def test_managing_connections_has_its_own_rate_limit_bucket(client):
     """Opening Manage spends two ``/api/pairing/connections/*`` reads and a
-    switch one more; in the 5/min handshake bucket that 429'd after two
+    switch one more; in the old 5/min handshake bucket that 429'd after two
     opens and a toggle. Connection management gets 30/min of its own."""
     await _seed_peer(client, "peer-rl", proto_version=54)
     _record_switch(client)
@@ -2185,8 +2185,10 @@ async def test_managing_connections_has_its_own_rate_limit_bucket(client):
         assert r.status == 200
     r = await _patch_relay(client, "peer-rl", True)
     assert r.status == 200
-    # …while the handshake endpoints keep the tight bucket of their own.
-    statuses = [(await _initiate(client)).status for _ in range(6)]
+    # …while the handshake endpoints keep a bucket of their own (30/min),
+    # which the nine management calls above did not spend.
+    statuses = [(await _initiate(client)).status for _ in range(31)]
+    assert statuses[:30].count(429) == 0
     assert statuses[-1] == 429
 
 

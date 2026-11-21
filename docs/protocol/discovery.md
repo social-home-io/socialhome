@@ -617,7 +617,21 @@ sequenceDiagram
 ### Connecting a household: QR code or open sign-up
 
 A household pairs with a GFS by registering with a **single-use pairing
-token** (10-minute TTL). There are two ways to get one:
+token** (10-minute TTL). Every landing-page view and every sign-up request
+gets a fresh one — a room of people behind one NAT each get their own. The
+GFS bounds them by LIVE tokens (unexpired, unused): 50 per client address
+(IPv6 by /64) and 2 000 per server, cluster-wide in the shared database; an
+address holding fewer than 3 always gets one, so a few heavy sources filling
+the server cap can't lock everyone else out. At a cap the landing page says
+so — "Too many pairing codes from your network right now", or "This GFS is
+handing out too many pairing codes right now" — instead of showing a code,
+and `POST /gfs/signup-token` answers 429 + `Retry-After: 120` (codes hold
+their place for 10 minutes, so the one-click connect reports "busy" at
+once). The one-click connect waits out a shorter `Retry-After` (the sign-up
+windows' 60 s) once and asks again before it reports "busy". A token that expired or
+was already used fails `/gfs/register` with 401, which the household
+reports as "this pairing code expired or was already used"
+(`422 GFS_CODE_EXPIRED`), not as a refusal. There are two ways to get one:
 
 - **QR code / pairing code** — scanned or pasted from the GFS landing page
   (`socialhome://gfs-pair/{base_url}?token=…`, see
@@ -1716,7 +1730,7 @@ POST /gfs/member-publish-anon
   `auto_accept_clients = false`** and approve households in the admin
   console; onboarding tells the household it is waiting for approval. The
   token endpoint is rate-limited (5 / min per address, 30 / min
-  server-wide, one token per address per 30 s), but at the global limit that
+  server-wide, and the live-token caps the landing page shares), but at the global limit that
   is still about 43 000 registrations a day, and a determined operator of
   many addresses can register many households — approval is your lever.
   Turn `auto_accept_clients` on only for a GFS whose audience you already
