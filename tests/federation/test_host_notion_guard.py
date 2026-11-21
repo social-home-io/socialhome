@@ -34,6 +34,10 @@ GUARDED: tuple[str, ...] = (
 
 #: (module, function) → why comparing with ``owner_instance_id`` is right.
 ALLOWED: dict[tuple[str, str], str] = {
+    ("federation/sync/space/pages.py", "position"): (
+        "a label, not a host check: the status says whether the sync page "
+        "was signed by the owner or by a delegated admin"
+    ),
     ("services/space_member_directory.py", "_owns"): (
         "are WE the owner: only the owner takes a card a delegated admin "
         "passes on, and a delegated admin passes cards on to it"
