@@ -38,7 +38,6 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import EnvelopeMailboxConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.envelope_relay import (
-    ENVELOPE_MAX_PER_MINUTE,
     ENVELOPE_MULTI_MAX_BODY_BYTES,
     ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS,
     ENVELOPE_MULTI_MAX_FIELD_CHARS,
@@ -465,12 +464,17 @@ def _ids(n: int, start: int = 0) -> list[str]:
     ]
 
 
-async def test_recipient_budget_matches_the_single_route(gfs):
-    # One upload must never buy more queue work than the same recipients
-    # sent one by one through ``/gfs/envelope`` (600 a minute per address).
-    assert ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE == ENVELOPE_MAX_PER_MINUTE
-    assert (await _multi(gfs, _ids(MULTI_MAX_RECIPIENTS))).status == 202
-    assert (await _multi(gfs, _ids(100, start=1000))).status == 202
+async def test_recipient_budget_is_a_community_fan_out_per_address(gfs):
+    # 2400 distinct recipients a minute per address on this node: four full
+    # 500-member fan-outs and then some. Bounded durable cost: each recipient
+    # is one reference row inside its mailbox's own caps (2000 rows / 64 MiB).
+    assert ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE == 2400
+    assert ENVELOPE_MULTI_MAX_PER_MINUTE == 60  # uploads, unchanged
+    for start in range(0, 2000, MULTI_MAX_RECIPIENTS):
+        assert (
+            await _multi(gfs, _ids(MULTI_MAX_RECIPIENTS, start=start))
+        ).status == 202
+    assert (await _multi(gfs, _ids(400, start=3000))).status == 202  # 2400
     over = await _multi(gfs, _ids(1, start=5000))
     assert over.status == 429
     assert over.headers["Retry-After"] == "60"
@@ -482,8 +486,12 @@ async def test_recipient_budget_charges_unique_mailboxes_once(gfs):
     for _ in range(3):
         resp = await _multi(gfs, ["q" * 32] * MULTI_MAX_RECIPIENTS)
         assert resp.status == 202
-    assert (await _multi(gfs, _ids(MULTI_MAX_RECIPIENTS))).status == 202  # 503
-    assert (await _multi(gfs, _ids(97, start=1000))).status == 202  # 600
+    for start in range(0, 1500, MULTI_MAX_RECIPIENTS):  # 1503
+        assert (
+            await _multi(gfs, _ids(MULTI_MAX_RECIPIENTS, start=start))
+        ).status == 202
+    assert (await _multi(gfs, _ids(397, start=3000))).status == 202  # 1900
+    assert (await _multi(gfs, _ids(500, start=4000))).status == 202  # 2400
     assert (await _multi(gfs, _ids(1, start=5000))).status == 429
     await _settle(gfs._app)
 
