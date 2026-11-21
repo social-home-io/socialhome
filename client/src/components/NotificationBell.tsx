@@ -52,8 +52,11 @@ const panelPending = signal<ReadonlySet<string>>(new Set())
 
 // 30 s polling fallback for the rare case the WS connection is
 // down. Kept as a belt-and-suspenders guard — the WS path is the
-// primary signal.
+// primary signal. Nothing while the tab is hidden (a background tab
+// left open all day polled ~2 900 times); one poll on coming back.
+const POLL_INTERVAL_MS = 30_000
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let onPollVisibility: (() => void) | null = null
 export function startNotificationPolling() {
   // Idempotent: clear any prior timer before arming a new one so a
   // double-start (or a stray render-phase call) can never leak an
@@ -69,14 +72,29 @@ export function startNotificationPolling() {
       }
     } catch { /* transient — WS will catch up */ }
   }
-  poll()
-  pollTimer = setInterval(poll, 30000)
+  const arm = () => {
+    if (pollTimer !== null) clearInterval(pollTimer)
+    pollTimer = setInterval(() => { if (!document.hidden) void poll() }, POLL_INTERVAL_MS)
+  }
+  onPollVisibility = () => {
+    if (document.hidden) return
+    // Back on screen: catch up once, the next poll a full period later.
+    void poll()
+    arm()
+  }
+  document.addEventListener('visibilitychange', onPollVisibility)
+  if (!document.hidden) void poll()
+  arm()
 }
 
 export function stopNotificationPolling() {
   if (pollTimer !== null) {
     clearInterval(pollTimer)
     pollTimer = null
+  }
+  if (onPollVisibility !== null) {
+    document.removeEventListener('visibilitychange', onPollVisibility)
+    onPollVisibility = null
   }
 }
 

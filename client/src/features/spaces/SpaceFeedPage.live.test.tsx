@@ -6,10 +6,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const apiGet = vi.fn()
+const apiPost = vi.fn(async (..._a: unknown[]) => ({}))
 vi.mock('@/api', () => ({
   api: {
     get: (...a: unknown[]) => apiGet(...a),
-    post: vi.fn().mockResolvedValue({}),
+    post: (...a: unknown[]) => apiPost(...a),
     patch: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue(undefined),
   },
@@ -108,6 +109,30 @@ describe('new space posts land from the frame', () => {
     expect(r.queryByTestId('post-elsewhere')).toBeNull()
     expect(r.queryByTestId('post-anchor')).toBeNull()
     expect(feedGets()).toBe(before)
+  })
+
+  it('marks the feed read once on open, then at most once per 5 s as posts arrive', async () => {
+    apiPost.mockClear()
+    const { tl } = await renderFeed()
+    const reads = () => apiPost.mock.calls.filter(c => c[0] === '/api/spaces/s1/feed/read').length
+    await tl.waitFor(() => expect(reads()).toBe(1))
+    vi.useFakeTimers()
+    // Let any effect still queued from the load settle: still one.
+    await tl.act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(reads()).toBe(1)
+    for (let i = 0; i < 19; i++) {
+      await tl.act(async () => {
+        emit('space.post.created', { space_id: 's1', post: post(`r${i}`) })
+        await vi.advanceTimersByTimeAsync(200)
+      })
+    }
+    // 19 posts over ~4 s: inside the gap after the open's read → one
+    // trailing read at the end of it.
+    expect(reads()).toBe(1)
+    await tl.act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+    expect(reads()).toBe(2)
+    await tl.act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    expect(reads()).toBe(2)
   })
 
   it('bot posts refetch the feed at most once per 5 s, with one trailing refetch', async () => {

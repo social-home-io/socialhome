@@ -129,6 +129,33 @@ describe('MomentumInboxTab when a load fails', () => {
   })
 })
 
+describe('MomentumInboxTab live frames', () => {
+  beforeEach(() => { wsHandlers.clear(); vi.mocked(api.get).mockReset(); signIn() })
+
+  it('a burst of moment frames refetches at most once per 3 s', async () => {
+    onGet(async (path) => (path === '/api/moments'
+      ? [moment('m-1', 'uid-bob', { author: { display_name: 'Bob', picture_url: null } })]
+      : []))
+    const { container } = render(<MomentumInboxTab tag={null} />)
+    await waitFor(() => expect(container.textContent).toContain('Bob'))
+    const lists = () => vi.mocked(api.get).mock.calls.filter(c => c[0] === '/api/moments').length
+    vi.useFakeTimers()
+    try {
+      const before = lists()
+      for (let i = 0; i < 20; i++) {
+        wsHandlers.get(['moment.created', 'moment.reaction_changed', 'moment.deleted'][i % 3])!()
+      }
+      expect(lists()).toBe(before + 1)
+      await vi.advanceTimersByTimeAsync(3_100)
+      expect(lists()).toBe(before + 2)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(lists()).toBe(before + 2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('MomentumInboxTab time without unit formatting', () => {
   it('falls back to the translated short form, never a hard-coded "5m"', async () => {
     const { setLocale } = await import('@/i18n/i18n')

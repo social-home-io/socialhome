@@ -3,7 +3,10 @@ import { render, screen, waitFor } from '@testing-library/preact'
 
 const get = vi.fn()
 vi.mock('@/api', () => ({ api: { get: (...a: unknown[]) => get(...a), post: vi.fn() } }))
-vi.mock('@/ws', () => ({ ws: { on: () => () => {} } }))
+const wsHandlers = vi.hoisted(() => new Map<string, (e: { data: unknown }) => void>())
+vi.mock('@/ws', () => ({
+  ws: { on: (type: string, fn: (e: { data: unknown }) => void) => { wsHandlers.set(type, fn); return () => {} } },
+}))
 
 import { PollUI, type PollData } from './PollUI'
 
@@ -27,6 +30,26 @@ function poll(over: Partial<PollData> = {}): PollData {
 
 describe('PollUI', () => {
   beforeEach(() => get.mockReset())
+
+  it('a burst of votes reloads the poll at most once per 2 s; other polls\' votes don\'t count', async () => {
+    get.mockResolvedValue(poll())
+    render(<PollUI postId="p1" currentUserId="u1" />)
+    await waitFor(() => expect(screen.getByText('Pizza')).toBeTruthy())
+    expect(get).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers()
+    try {
+      wsHandlers.get('poll.voted')!({ data: { post_id: 'p9' } })
+      expect(get).toHaveBeenCalledTimes(1)
+      for (let i = 0; i < 25; i++) wsHandlers.get('poll.voted')!({ data: { post_id: 'p1' } })
+      expect(get).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(2_100)
+      expect(get).toHaveBeenCalledTimes(3)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(get).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 
   it('a poll past its deadline says Closed once — no "voting ended" beside it', async () => {
     get.mockResolvedValue(poll({ closed: true, closes_at: '2020-01-01T00:00:00+00:00' }))
