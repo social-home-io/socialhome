@@ -99,3 +99,19 @@ describe('the space GFS notice', () => {
     await m.tl.waitFor(() => expect(m.r.getByTestId('space-gfs-notice-optional')).toBeTruthy())
   }, 20000)
 })
+
+describe('the space sync chip', () => {
+  it('shows only while the space is not up to date here', async () => {
+    wire({ space_type: 'private', sync: { state: 'up_to_date', last_ok_at: null, waiting_to_send: 0 } })
+    let m = await open()
+    await m.tl.waitFor(() => expect(m.r.container.querySelector('.sh-space-hero')).toBeTruthy())
+    expect(m.r.queryByTestId('space-sync-chip')).toBeNull()
+    m.tl.cleanup()
+    vi.resetModules()
+    wire({ space_type: 'private', sync: { state: 'host_offline', last_ok_at: null, waiting_to_send: 2 } })
+    m = await open()
+    const chip = await m.tl.waitFor(() => m.r.getByTestId('space-sync-chip'))
+    expect(chip.textContent).toBe('Host offline · 2 waiting to send')
+    expect(chip.getAttribute('href')).toBe('/spaces/s1/settings/sync')
+  }, 20000)
+})

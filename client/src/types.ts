@@ -403,6 +403,13 @@ export interface Comment {
   created_at: string
 }
 
+/** ``GET /api/spaces/{id}`` ``sync`` (see ``features/spaces/spaceSync``). */
+export interface SpaceSyncWire {
+  state: 'up_to_date' | 'catching_up' | 'behind' | 'host_offline' | 'never'
+  last_ok_at: string | null
+  waiting_to_send: number
+}
+
 export interface Space {
   id: string
   name: string
@@ -461,6 +468,10 @@ export interface Space {
   /** ``GET /api/spaces/{id}`` only: global but listed on no GFS ("global,
    *  not listed") — the SPA shows a banner until the owner picks one. */
   gfs_unlisted?: boolean
+  /** ``GET /api/spaces/{id}`` only: is this household up to date with the
+   *  space — ``{state, last_ok_at, waiting_to_send}`` for a member, ``null``
+   *  for a follower (``features/spaces/spaceSync``). */
+  sync?: SpaceSyncWire | null
   /** ``GET /api/spaces`` rows: the caller's seat (``subscriber`` = follows). */
   my_role?: string
   /** ``GET /api/spaces`` rows: members (local + remote, never followers). */

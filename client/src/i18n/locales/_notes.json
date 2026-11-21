@@ -916,5 +916,9 @@
   "admin_grant.warning": "Shown to a space's owner right before they make a person from ANOTHER household an admin of the space, when the space's 'Let admins act for me' switch (space.admin_authority.toggle) is on. 'act for the space' = that household may then sign the space's changes itself. Calm, one sentence, no alarm words.",
   "admin_grant.check": "Follows admin_grant.warning, under the other household's ID. 'them' = the people of that household. 'Connections' is the page name (nav.connections) — use the same word.",
   "connections.own_id.title": "Heading on the Connections page above this household's own ID (same term as connections.detail.household_id).",
-  "connections.own_id.desc": "Under connections.own_id.title. 'this' = the household ID. 'space' as in the glossary."
+  "connections.own_id.desc": "Under connections.own_id.title. 'this' = the household ID. 'space' as in the glossary.",
+  "space.sync.chip.behind": "{time} is a relative time like \"5 min ago\". Shown in a small chip under the space's top bar — keep short.",
+  "space.sync.chip.host_offline": "{time} is a clock time or a day + time (\"09:12\", \"Mon 18:40\"): when this household was last up to date with the space. \"Host\" = the household the space lives on.",
+  "space.sync.chip_aria": "{status} is the chip's own text (e.g. \"Behind — last up to date 5 min ago\"). Read by screen readers.",
+  "space.sync.last_ok": "{time} is a relative time like \"5 min ago\"."
 }

@@ -63,6 +63,7 @@ import { SpaceNeedsYou } from './SpaceNeedsYou'
 import { SpaceSetupCard } from './SpaceSetupCard'
 import { SpaceInviteFirst } from './SpaceInviteFirst'
 import { SpaceGfsNotice } from '@/components/SpaceGfsNotice'
+import { SpaceSyncChip } from './SpaceSyncChip'
 import { isSetupPending } from './spaceSetup'
 import { useSpaceNotifLevel } from './SpaceNotifLevels'
 import {
@@ -150,6 +151,9 @@ interface SpaceDetail {
   category?: string | null
   /** "Needs you" (owners / admins / moderators); ``null`` otherwise. */
   attention?: WireAttention | null
+  /** Is this household up to date with the space? Members only
+   *  (``null`` for a follower) — see ``spaceSync``. */
+  sync?: unknown
 }
 
 /** A ``/members`` row, as far as this page reads it. */
@@ -706,6 +710,9 @@ export default function SpaceFeedPage() {
           : isWriterRole(viewerRole.value) ? 'member' : null}
         onLeave={() => { void leaveSpace() }}
       />
+      {/* Only when this household is not up to date with the space (or
+       *  our own items still wait to go out) — on every section. */}
+      {s && !s.archived && <SpaceSyncChip spaceId={spaceId} sync={s.sync} />}
       {/* The hero and "Needs you" open the Feed only: the other sections
        *  are tools, and the top bar already names the space. */}
       {s && feedList && (

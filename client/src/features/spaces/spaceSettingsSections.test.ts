@@ -8,7 +8,7 @@ describe('space settings sections', () => {
   it('admins get every section, Danger last; never a one-item index', () => {
     expect(settingsSections('admin')).toEqual([
       'basics', 'find', 'members', 'sections', 'notifications',
-      'location', 'moderation', 'bots', 'danger',
+      'location', 'moderation', 'sync', 'bots', 'danger',
     ])
     for (const v of ['admin', 'remote-admin', 'member', 'follower'] as const) {
       expect(settingsSections(v).length).toBeGreaterThan(1)
@@ -16,18 +16,28 @@ describe('space settings sections', () => {
   })
 
   it('a member gets their own surface; a follower notifications + Unfollow only', () => {
-    expect(settingsSections('member')).toEqual(['notifications', 'you', 'bots', 'leave'])
+    expect(settingsSections('member')).toEqual(['notifications', 'you', 'sync', 'bots', 'leave'])
     expect(settingsSections('follower')).toEqual(['notifications', 'unfollow'])
+  })
+
+  it('Sync — every viewer with a seat but a follower (no sync status for them)', () => {
+    for (const v of ['admin', 'remote-admin', 'member'] as const) {
+      expect(settingsSections(v)).toContain('sync')
+    }
+    expect(settingsSections('follower')).not.toContain('sync')
+    expect(resolveSettingsSection('sync', 'follower')).toBe('notifications')
+    expect(parseSettingsSection('sync')).toBe('sync')
+    expect(settingsSectionLabel('sync')).toBe('Sync')
   })
 
   it('Games — for an admin after Sections, for a moderator after Notifications (D9)', () => {
     expect(settingsSections('admin', { games: true })).toEqual([
       'basics', 'find', 'members', 'sections', 'games', 'notifications',
-      'location', 'moderation', 'bots', 'danger',
+      'location', 'moderation', 'sync', 'bots', 'danger',
     ])
     expect(settingsSections('remote-admin', { games: true })).toContain('games')
     expect(settingsSections('member', { games: true }))
-      .toEqual(['notifications', 'games', 'you', 'bots', 'leave'])
+      .toEqual(['notifications', 'games', 'you', 'sync', 'bots', 'leave'])
     // A follower never; nobody without the flag (a plain member, a
     // global space).
     expect(settingsSections('follower', { games: true })).not.toContain('games')

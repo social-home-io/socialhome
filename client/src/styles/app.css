@@ -30686,3 +30686,70 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
 .sh-length-counter--full { color: var(--sh-danger); }
 /* Directly under its field, not a form gap away. */
 .sh-form > .sh-length-counter { margin-top: calc(2px - var(--sh-space-md)); }
+
+/* ── Space sync status (header chip + settings' Sync section) ────────── */
+/* The chip shows only when a space is not up to date here; it links to
+   the settings' Sync section. Text stays --sh-text on a light tint, so
+   it reads in both themes; the state is in the dot's colour AND the
+   words. */
+.sh-sync-chip-row {
+  display: flex;
+  padding: var(--sh-space-xs) 0 0;
+  min-width: 0;
+}
+.sh-sync-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  min-height: 36px;
+  max-width: 100%;
+  padding: 0 var(--sh-space-sm);
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-sm);
+  text-decoration: none;
+}
+.sh-sync-chip:hover { background: var(--sh-bg-tertiary); }
+.sh-sync-chip:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-sync-chip__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sh-sync-chip__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sh-text-muted);
+}
+.sh-sync-chip--behind,
+.sh-sync-chip--host_offline {
+  border-color: var(--sh-warning);
+  background: color-mix(in srgb, var(--sh-warning) 12%, var(--sh-bg-secondary));
+}
+.sh-sync-chip--behind .sh-sync-chip__dot,
+.sh-sync-chip--host_offline .sh-sync-chip__dot,
+.sh-sync-card__state--behind .sh-sync-chip__dot,
+.sh-sync-card__state--host_offline .sh-sync-chip__dot { background: var(--sh-warning); }
+.sh-sync-chip--catching_up .sh-sync-chip__dot,
+.sh-sync-card__state--catching_up .sh-sync-chip__dot { background: var(--sh-primary); }
+.sh-sync-card__state--up_to_date .sh-sync-chip__dot { background: var(--sh-success); }
+.sh-sync-card__state {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  margin: 0;
+}
+.sh-sync-card__body { margin: 0; }
+.sh-sync-card__facts {
+  margin: 0;
+  padding-left: var(--sh-space-lg);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-sync-card__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
