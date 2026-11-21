@@ -72,6 +72,8 @@ class _FakeFederation:
         self.version_asks: list[tuple[str, int]] = []
         #: The ``roster_digest`` recorded with each request (relay retry).
         self.request_digests: list[dict | None] = []
+        #: The v_95 ``page`` recorded with each request (relay retry).
+        self.request_pages: list[dict | None] = []
 
     async def space_member_supports(self, instance_id, *, min_version):
         self.version_asks.append((instance_id, min_version))
@@ -86,6 +88,7 @@ class _FakeFederation:
         sync_mode="initial",
         have_seq=None,
         roster_digest=None,
+        page_ref=None,
     ):
         """A requester notes the sync_id it is about to ask for, so the
         provider's SPACE_SYNC_OFFER can be recognised as an answer."""
@@ -93,6 +96,7 @@ class _FakeFederation:
             (sync_id, space_id, provider_instance_id, sync_mode, have_seq)
         )
         self.request_digests.append(roster_digest)
+        self.request_pages.append(page_ref)
 
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
@@ -704,6 +708,7 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
             "have_seq": None,
             "mod_held": None,
             "roster_digest": None,
+            "page_ref": None,
         },
         {
             "dir_seq": None,
@@ -711,6 +716,7 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
             "have_seq": None,
             "mod_held": None,
             "roster_digest": None,
+            "page_ref": None,
         },
     ]
     # The startup sweep sends it only for the directory echo.
@@ -2429,6 +2435,7 @@ async def test_a_capped_mesh_only_host_still_gets_the_incremental_begin(
             "have_seq": None,
             "mod_held": None,
             "roster_digest": None,
+            "page_ref": None,
         }
     ]
     assert sched._mesh_catchup_attempts[("sp-1", "host")] == MAX_MESH_CATCHUP_ATTEMPTS
@@ -2997,3 +3004,66 @@ async def test_sync_now_for_an_unknown_or_followed_space_asks_nobody(
     )
     assert await sched.sync_now("nope") == []
     assert await sched.sync_now("sp-1") == []
+
+
+async def test_begin_carries_our_sync_page_only_to_a_v95_provider(
+    bus, queue, sync_manager
+):
+    """v_95: the BEGIN names the sync page we hold (``page``) so the
+    provider sends its page only when newer — only to a provider at
+    ``MIN_FOR_SYNC_PAGES``, recorded with the request for the relay retry.
+    A failing reference never costs the BEGIN."""
+    fed = _FakeFederation(confirmed={"owner-o", "peer-b"})
+    fed.older = {"peer-b"}
+    sched, _ = _echo_sched(bus, queue, sync_manager, fed)
+    ref = {"signer": "owner-o", "epoch": 1, "seq": 9, "issued_at": 5, "root": "r"}
+
+    async def _ref_for(space_id):
+        if space_id == "sp-boom":
+            raise RuntimeError("boom")
+        return ref
+
+    sched.attach_sync_pages(_ref_for)
+    await queue.start()
+    try:
+        for space_id, to in (
+            ("sp-1", "owner-o"),
+            ("sp-1", "peer-b"),
+            ("sp-boom", "owner-o"),
+        ):
+            await sched.enqueue_sync_for_space(space_id=space_id, peer_instance_id=to)
+        for _ in range(50):
+            if len(fed.sent) == 3:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.stop()
+    by_key = {(m["payload"]["space_id"], m["to"]): m["payload"] for m in fed.sent}
+    assert by_key[("sp-1", "owner-o")]["page"] == ref
+    assert "page" not in by_key[("sp-1", "peer-b")]
+    assert "page" not in by_key[("sp-boom", "owner-o")]
+    assert ref in fed.request_pages
+    assert (
+        "owner-o",
+        scheduler_mod.FederationCapability.MIN_FOR_SYNC_PAGES,
+    ) in fed.version_asks
+
+
+async def test_a_mesh_begin_carries_our_sync_page(bus, queue, sync_manager):
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus, queue, sync_manager, fed, [_space("sp-mesh", owner_instance_id="host-x")]
+    )
+    ref = {"signer": "host-x", "epoch": 1, "seq": 9, "issued_at": 5, "root": "r"}
+
+    async def _ref_for(space_id):
+        return ref
+
+    sched.attach_sync_pages(_ref_for)
+    await sched._tick_once()
+    assert fed.mesh_fields[-1]["page_ref"] == ref
+    sched._mesh_catchup_done.add(("sp-mesh", "host-x"))
+    fed.mesh_fields.clear()
+    await sched._tick_once()
+    assert fed.mesh_fields[-1]["sync_mode"] == "incremental"
+    assert fed.mesh_fields[-1]["page_ref"] == ref

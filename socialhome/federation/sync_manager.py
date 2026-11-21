@@ -112,6 +112,9 @@ class PendingSyncRequest:
     #: The ``roster_digest`` the BEGIN carried — a relay re-BEGIN carries it
     #: too (the host repairs a roster mirror only on a digest mismatch).
     roster_digest: dict | None = None
+    #: The ``page`` the BEGIN carried (v_95, the sync page we hold, wire
+    #: form) — a relay re-BEGIN carries it too.
+    page_ref: dict | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -228,6 +231,7 @@ class SyncSessionManager:
         sync_mode: str = "initial",
         have_seq: int | None = None,
         roster_digest: dict | None = None,
+        page_ref: dict | None = None,
     ) -> None:
         """Remember a ``SPACE_SYNC_BEGIN`` we are about to send.
 
@@ -246,6 +250,7 @@ class SyncSessionManager:
             sync_mode=sync_mode,
             have_seq=have_seq,
             roster_digest=roster_digest,
+            page_ref=page_ref,
         )
 
     def pending_sync_request(self, sync_id: str) -> PendingSyncRequest | None:
@@ -462,12 +467,15 @@ class SyncSessionManager:
         sync_mode: str = "initial",
         ice_servers: list[dict] | None = None,
         have_seq: int | None = None,
+        page_ref: dict | None = None,
     ) -> SyncDecision:
         """Admit a new sync session.
 
         ``have_seq`` — the requester's echo from its BEGIN (§25.6,
         migration 0087), already parsed; kept on the session for the
-        provider's watermark decision.
+        provider's watermark decision. ``page_ref`` — the sync page the
+        requester holds (v_95), already parsed; the sentinel carries ours
+        only when newer.
 
         Runs the S-6 rate limit (5/h + 3 concurrent) and the S-8 cap.
         On rejection returns a :class:`SyncDecision` with
@@ -589,6 +597,7 @@ class SyncSessionManager:
             rtc=rtc,
             created_at=time.time(),
             have_seq=have_seq,
+            page_ref=page_ref,
         )
         self._sessions[sync_id] = record
         return SyncDecision(accepted=True)
@@ -643,6 +652,7 @@ class SyncSessionManager:
         ice_servers: list[dict] | None = None,
         have_seq: int | None = None,
         roster_digest: dict | None = None,
+        page_ref: dict | None = None,
     ) -> str:
         """Requester-side handling of ``SPACE_SYNC_OFFER``.
 
@@ -685,6 +695,7 @@ class SyncSessionManager:
                 created_at=time.time(),
                 have_seq=have_seq,
                 roster_digest=roster_digest,
+                page_ref=page_ref,
             )
             self._sessions[sync_id] = record
 
@@ -776,6 +787,10 @@ class SyncSessionManager:
         # household's to the host, which repairs its mirror by the echo.
         if record.roster_digest is not None:
             payload["roster_digest"] = record.roster_digest
+        # …and the sync page we hold (v_95), so the provider sends its page
+        # only when newer.
+        if record.page_ref is not None:
+            payload["page"] = record.page_ref
         return SyncDecision(
             accepted=True,
             reason="relay_fallback",

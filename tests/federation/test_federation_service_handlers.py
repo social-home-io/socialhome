@@ -9,6 +9,7 @@ fields, etc.) is exercised.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -504,6 +505,35 @@ async def test_handle_space_sync_begin_parses_the_have_seq_echo(svc, wire, parse
     assert kwargs["sync_mode"] == "incremental"
 
 
+async def test_handle_space_sync_begin_parses_the_sync_page(svc):
+    """v_95: the BEGIN's ``page`` reaches the session parsed (root as raw
+    bytes); a malformed one is dropped — the requester then gets the full
+    vector."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(accepted=False, next_event=None)
+    )
+    root = b"\x07" * 32
+    good = {
+        "signer": "h",
+        "epoch": 2,
+        "seq": 5,
+        "issued_at": 6,
+        "root": base64.urlsafe_b64encode(root).decode().rstrip("="),
+    }
+    for wire, parsed in (
+        (good, {**good, "root": root}),
+        ({"signer": "h"}, None),
+        ("x", None),
+    ):
+        payload = {"sync_id": "s", "space_id": "sp", "page": wire}
+        await svc._handle_space_sync_begin(
+            _event("SPACE_SYNC_BEGIN", payload, space_id="sp")
+        )
+        kwargs = svc._sync_manager.begin_session.await_args.kwargs
+        assert kwargs["page_ref"] == parsed
+
+
 async def test_handle_space_sync_begin_offer_has_no_signaling_node(svc):
     """The OFFER carries only the SDP + ICE servers — the GFS is never asked
     for a signaling node, so it learns nothing about the sync."""
@@ -924,6 +954,7 @@ def _solicited(svc, *, provider="peer-1", space_id="sp"):
             sync_mode="incremental",
             have_seq=41,
             roster_digest=None,
+            page_ref=None,
         ),
     )
 

@@ -81,13 +81,19 @@ class SpaceSyncStatus:
     state: SpaceSyncState
     last_ok_at: str | None
     waiting_to_send: int
+    #: v_95 — what the newest signed sync page says (``SyncPagePosition``
+    #: wire form; ``None``: no page held).
+    page: dict | None = None
 
     def to_wire(self) -> dict:
-        return {
+        wire: dict = {
             "state": self.state.value,
             "last_ok_at": self.last_ok_at,
             "waiting_to_send": self.waiting_to_send,
         }
+        if self.page is not None:
+            wire["page"] = self.page
+        return wire
 
 
 def parse_utc(raw: str | None) -> datetime | None:

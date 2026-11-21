@@ -328,6 +328,7 @@ class SpaceSyncScheduler:
         "_status",
         "_stop",
         "_sync_manager",
+        "_sync_page_ref",
         "_task",
     )
 
@@ -377,6 +378,8 @@ class SpaceSyncScheduler:
         self._roster_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: Roster digest builder (see :meth:`attach_roster_digest`).
         self._roster_digest: Callable[[str, str], Awaitable[dict | None]] | None = None
+        #: v_95 — ``space_id ->`` the sync page we hold (BEGIN ``page``).
+        self._sync_page_ref: Callable[[str], Awaitable[dict | None]] | None = None
         #: v_89 member directory version echo (see :meth:`attach_directory_echo`).
         self._directory_echo: Callable[[str, str], Awaitable[int | None]] | None = None
         #: Moderation queue echo (see :meth:`attach_moderation_echo`).
@@ -594,6 +597,28 @@ class SpaceSyncScheduler:
             log.exception("roster digest for %s failed", space_id)
             return None
 
+    def attach_sync_pages(
+        self, ref_for: Callable[[str], Awaitable[dict | None]]
+    ) -> None:
+        """``ref_for(space_id)`` → the sync page we hold for the space, as a
+        BEGIN's ``page`` (v_95, ``SyncPageService.ref_for``), or ``None``.
+        Carried on every BEGIN path to a provider at ``MIN_FOR_SYNC_PAGES``
+        so it sends its page only when newer than ours."""
+        self._sync_page_ref = ref_for
+
+    async def _page_ref_for(self, space_id: str, to_instance_id: str) -> dict | None:
+        if self._sync_page_ref is None:
+            return None
+        try:
+            if not await self._federation.space_member_supports(
+                to_instance_id, min_version=FederationCapability.MIN_FOR_SYNC_PAGES
+            ):
+                return None
+            return await self._sync_page_ref(space_id)
+        except Exception:
+            log.exception("sync page reference for %s failed", space_id)
+            return None
+
     def attach_mesh_announce(self, announce: Callable[[str], Awaitable[bool]]) -> None:
         """``announce(instance_id)`` → ``True`` once nothing more is needed
         (``CapabilitiesOutbound.announce_over_mesh``). Run by the mesh sweep
@@ -689,6 +714,7 @@ class SpaceSyncScheduler:
             # Every member BEGIN to the host carries the digest: one without
             # it from this version asks for no roster repair.
             roster_digest=await self._roster_digest_for(event.space_id, owner),
+            page_ref=await self._page_ref_for(event.space_id, owner),
         )
 
     async def _on_inviter_reproof_due(self, event: SpaceInviterReproofDue) -> None:
@@ -1022,6 +1048,7 @@ class SpaceSyncScheduler:
                 sync_mode=sync_mode,
             )
             roster_digest = await self._roster_digest_for(space_id, peer_instance_id)
+            page_ref = await self._page_ref_for(space_id, peer_instance_id)
             # Record what we are asking for, so the provider's
             # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An
             # offer for a sync_id nobody here issued is refused. The mode
@@ -1034,6 +1061,7 @@ class SpaceSyncScheduler:
                 sync_mode=sync_mode,
                 have_seq=fields.get("have_seq"),
                 roster_digest=roster_digest,
+                page_ref=page_ref,
             )
             payload: dict = {
                 "sync_id": sync_id,
@@ -1052,6 +1080,8 @@ class SpaceSyncScheduler:
                 payload["roster_echo"] = roster_echo
             if roster_digest is not None:
                 payload["roster_digest"] = roster_digest
+            if page_ref is not None:
+                payload["page"] = page_ref
             dir_seq = await self._directory_echo_for(space_id, peer_instance_id)
             if dir_seq is not None:
                 payload["dir_seq"] = dir_seq
@@ -1408,6 +1438,7 @@ class SpaceSyncScheduler:
                     ),
                     dir_seq=dir_seq,
                     roster_digest=await self._roster_digest_for(space.id, host),
+                    page_ref=await self._page_ref_for(space.id, host),
                 )
             except Exception:  # pragma: no cover — begin_* is fail-soft
                 log.exception(
@@ -1458,6 +1489,7 @@ class SpaceSyncScheduler:
                     else None
                 ),
                 roster_digest=await self._roster_digest_for(space.id, host),
+                page_ref=await self._page_ref_for(space.id, host),
             )
         except Exception:  # pragma: no cover — fail-soft
             log.debug("mesh incremental BEGIN failed", exc_info=True)

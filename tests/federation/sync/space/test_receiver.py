@@ -121,6 +121,46 @@ async def test_on_chunk_sentinel_publishes_completion(bus, receiver, peer_setup)
     assert captured[0].sync_id == "sync-1"
 
 
+class _PageSink:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def receive(self, **kwargs):
+        self.calls.append(kwargs)
+        return True
+
+
+async def test_a_verified_sentinel_hands_its_sync_page_on(bus, receiver, peer_setup):
+    """v_95: the sealed page of a sentinel whose provider signature
+    verified goes to the page service (which decrypts and verifies it)."""
+    r, _, _ = receiver
+    _peer, kp = peer_setup
+    sink = _PageSink()
+    r.attach_sync_pages(sink)
+    sealed = {"epoch": 2, "payload": "ct"}
+    sentinel = {
+        "sync_id": "sync-1",
+        "resource": SENTINEL_RESOURCE,
+        "space_id": "sp-1",
+        "is_last": True,
+        "page_sealed": sealed,
+    }
+    sentinel = await _sign_as_peer(kp, sentinel)
+    await r.on_chunk(serialise_chunk(sentinel), from_instance="peer-a")
+    assert sink.calls == [
+        {
+            "space_id": "sp-1",
+            "sync_id": "sync-1",
+            "provider": "peer-a",
+            "sealed": sealed,
+        }
+    ]
+    # A tampered sentinel (signature broken) never reaches it.
+    forged = {**sentinel, "page_sealed": {"epoch": 2, "payload": "other"}}
+    await r.on_chunk(serialise_chunk(forged), from_instance="peer-a")
+    assert len(sink.calls) == 1
+
+
 async def test_on_chunk_rejects_unknown_peer(receiver, peer_setup):
     """No paired-peer row AND no stored host key → drop.
 

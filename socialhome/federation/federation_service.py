@@ -109,6 +109,7 @@ from ..peer_http import post_to_peer
 from ..rate_limiter import RateLimiter
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
+from ..sync_page import parse_page_ref
 from ..task_drain import wait_tasks_done
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
@@ -1168,6 +1169,7 @@ class FederationService:
         sync_mode: str = "initial",
         have_seq: int | None = None,
         roster_digest: dict | None = None,
+        page_ref: dict | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -1185,6 +1187,7 @@ class FederationService:
             sync_mode=sync_mode,
             have_seq=have_seq,
             roster_digest=roster_digest,
+            page_ref=page_ref,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -3287,6 +3290,7 @@ class FederationService:
         have_seq: int | None = None,
         mod_held: dict | None = None,
         roster_digest: dict | None = None,
+        page_ref: dict | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
@@ -3330,6 +3334,7 @@ class FederationService:
                 sync_mode=sync_mode,
                 have_seq=have_seq,
                 roster_digest=roster_digest,
+                page_ref=page_ref,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -3353,6 +3358,9 @@ class FederationService:
                 payload["mod_held"] = mod_held
             if roster_digest is not None:
                 payload["roster_digest"] = roster_digest
+            if page_ref is not None:
+                # v_95: the sync page we hold (the caller gated it).
+                payload["page"] = page_ref
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
@@ -5521,6 +5529,9 @@ class FederationService:
             # §25.6 (migration 0087): the requester's echo of the last
             # stream it applied cleanly. Absent / malformed → a full stream.
             have_seq=parse_have_seq(payload.get("have_seq")),
+            # v_95: the sync page the requester holds (absent / malformed →
+            # it gets our newest page, if we hold one).
+            page_ref=parse_page_ref(payload.get("page")),
         )
         if not decision.accepted and decision.next_event is not None:
             if (
@@ -5775,6 +5786,7 @@ class FederationService:
                 sync_mode=pending.sync_mode,
                 have_seq=pending.have_seq,
                 roster_digest=pending.roster_digest,
+                page_ref=pending.page_ref,
             )
         except ConnectionError:
             # Closed while the offer was applied (reaped, superseded):

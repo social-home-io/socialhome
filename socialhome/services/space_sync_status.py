@@ -44,6 +44,7 @@ from ..domain.events import (
     SpaceSyncDeferred,
     SpaceSyncStateChanged,
 )
+from ..domain.space_sync_page import SyncPagePosition, state_with_page
 from ..domain.space_sync_status import (
     SpaceSyncOutcome,
     SpaceSyncResult,
@@ -130,6 +131,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         "_outbox",
         "_outcomes",
         "_own_instance_id",
+        "_pages",
         "_receiving",
         "_recheck_spacing_s",
         "_rechecks",
@@ -170,8 +172,29 @@ class SpaceSyncStatusService(BusPublisherMixin):
         self._recheck_spacing_s = recheck_spacing_s
         #: Set by :meth:`stop`: no new work, a spacing wait ends.
         self._stop = asyncio.Event()
+        #: v_95 — ``(space, acting hosts) ->`` what the newest signed sync
+        #: page says about our copy (``SyncPageService.position``). ``None``:
+        #: the Phase-1 rules alone.
+        self._pages: (
+            Callable[[Space, list[str]], Awaitable[SyncPagePosition | None]] | None
+        ) = None
         #: Outcomes being recorded and rechecks running (:meth:`_spawn`).
         self._tasks: set[asyncio.Task] = set()
+
+    def attach_pages(
+        self,
+        position: Callable[[Space, list[str]], Awaitable[SyncPagePosition | None]],
+    ) -> None:
+        """Wire the v_95 sync pages: the state also says "up to date as of
+        page N" (even while the host is offline) or "behind: a newer page
+        exists" (``domain/space_sync_page.state_with_page``)."""
+        self._pages = position
+
+    async def page_changed(self, space_id: str) -> None:
+        """The sync page held for the space changed (a new page stored, a
+        root check done): the one coalesced recheck
+        (:meth:`_request_recheck`)."""
+        self._request_recheck(space_id)
 
     def wire(self) -> None:
         """Subscribe to the outcomes on the bus."""
@@ -208,7 +231,13 @@ class SpaceSyncStatusService(BusPublisherMixin):
             else False
         )
         state, last_ok = sync_state(outcomes, receiving=receiving, now=self._clock())
-        return SpaceSyncStatus(state=state, last_ok_at=last_ok, waiting_to_send=waiting)
+        page = await self._pages(space, hosts) if self._pages is not None else None
+        return SpaceSyncStatus(
+            state=state_with_page(state, page),
+            last_ok_at=last_ok,
+            waiting_to_send=waiting,
+            page=page.to_wire() if page is not None else None,
+        )
 
     # ─── Outcomes ─────────────────────────────────────────────────────
 

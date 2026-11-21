@@ -379,8 +379,16 @@ class ChunkBuilder:
         snapshot_seq: int | None = None,
         owner_statement: dict | None = None,
         inviter_proof: dict | None = None,
+        page_sealed: dict | None = None,
     ) -> dict[str, Any]:
         """Build the final ``__complete__`` envelope for the session.
+
+        ``page_sealed`` (v_95, ``docs/protocol/sync-pages.md``) — the
+        provider's newest signed sync page with its vector or delta, already
+        sealed under the space content key (``{epoch, payload}``, like a
+        chunk's ``encrypted_payload``): the sentinel's signature covers the
+        ciphertext; nothing of the page rides in the clear. An older
+        receiver ignores it.
 
         ``owner_statement`` (migration 0093) — the space owner's signed
         ownership statement (fresh from the owner, relayed by a member):
@@ -416,6 +424,8 @@ class ChunkBuilder:
             # delegated admin): households it invited re-confirm it after a
             # rotation (migration 0093). Public; an older receiver ignores it.
             envelope["inviter_proof"] = inviter_proof
+        if page_sealed is not None:
+            envelope["page_sealed"] = page_sealed
         bytes_to_sign = _orjson.dumps(envelope)
         envelope["signatures"] = self._encoder.sign_envelope_all(
             bytes_to_sign,

@@ -562,6 +562,11 @@ class SyncSessionRecord:
     #: … (requester side) the ``roster_digest`` our BEGIN carried, re-sent
     #: by a relay re-BEGIN after an ICE timeout …
     roster_digest: dict | None = None
+    #: … the sync page the requester holds (v_95, ``page`` on its BEGIN,
+    #: parsed by :func:`socialhome.sync_page.parse_page_ref`): the provider
+    #: sends its own page only when newer. On the requester side, the
+    #: ``page`` our BEGIN carried, re-sent by a relay re-BEGIN …
+    page_ref: dict | None = None
     #: … the requester's protocol version, read once when the session is
     #: planned (``None``: not yet) — the exporter choice, the shape and the
     #: chunk numbering all follow it …
