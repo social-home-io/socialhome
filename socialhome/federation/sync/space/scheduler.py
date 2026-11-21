@@ -55,13 +55,16 @@ Triggers:
     admin gets the incremental BEGIN now; its sentinel's inviter proof for
     the new key makes it count as host here again (migration 0093).
 10. **Host offline: trusted helpers** (v_92) — for every space this
-    household holds a member seat in but does not host (nor hold its roster
-    authority), a round's BEGIN to the household acting as host — from the
-    moment it actually goes out (not when queued; a parked or skipped BEGIN
-    expects no answer) — waits :data:`HOST_ANSWER_WAIT_S` (fixed) for its
-    answer (:class:`~.host_contact.HostContact`, marked by the receiver — an
-    empty session's sentinel counts — and by any signed refusal of the BEGIN). No
-    answer: ONE trusted helper (:mod:`.trusted_helpers`: a live ``admin`` /
+    household holds a member seat in but does not host, a round's BEGIN to
+    the household acting as host — from the moment it actually goes out
+    (not when queued; a parked or skipped BEGIN expects no answer) — waits
+    :data:`HOST_ANSWER_WAIT_S` (fixed) for its answer
+    (:class:`~.host_contact.HostContact`, marked by the receiver — an empty
+    session's sentinel counts — and by any signed refusal of the BEGIN). No
+    answer: the hosts are recorded unreachable (the sync status, migration
+    0150, :meth:`SpaceSyncScheduler.attach_status`), and — unless we hold
+    the space's roster authority (host-equivalent: nothing to fall back
+    from) — ONE trusted helper (:mod:`.trusted_helpers`: a live ``admin`` /
     ``moderator`` seat household at v_92 other than us and the host,
     sorted, starting at a stable per-household offset so a space's members
     spread over its helpers, one step further each round; none at v_92 →
@@ -515,14 +518,17 @@ class SpaceSyncScheduler:
             await self._mesh_incremental(space, host, periodic=True, done=True)
 
     async def sync_now(self, space_id: str) -> list[str]:
-        """The "Sync now" of one space: what one periodic tick does for it,
-        right away — the small incremental BEGIN (never a full stream) to
-        each household acting as its host here, a mesh-only one over the
-        mesh (:meth:`_mesh_incremental`), and to every paired co-member
-        household. Returns the households asked. Only for a space one of
-        our people holds a member seat in (a follower never contacts the
-        host); a space hosted here asks its paired members. The providers'
-        own BEGIN budget (5 / h per household and space) still applies."""
+        """The "Sync now" of one space: the small incremental BEGIN (never a
+        full stream) of one round, right away, to each household acting as
+        its host here — a mesh-only one over the mesh
+        (:meth:`_mesh_incremental`). Never to a paired co-member: its BEGIN
+        budget (5 / h per household and space) would go on 3 Sync now plus
+        2 periodic rounds, and the host is the one whose view the status
+        reads. Returns the households asked. Only for a space one of our
+        people holds a member seat in (a follower never contacts the host);
+        a space hosted here has no host to ask, so it asks its paired member
+        households — the only source of what it lacks. The providers' own
+        budget still applies."""
         space = await self._space_repo.get(space_id)
         if space is None or space.dissolved:
             return []
@@ -541,13 +547,10 @@ class SpaceSyncScheduler:
                 else:
                     await self._mesh_incremental(space, host, periodic=True, done=True)
                 asked.append(host)
+            return asked
         peers = {p.id for p in await self._sweep_peers()}
         for member in await self._space_repo.list_member_instances(space.id):
-            if (
-                member in asked
-                or member == self._own_instance_id
-                or member not in peers
-            ):
+            if member == self._own_instance_id or member not in peers:
                 continue
             await self.enqueue_sync_for_space(
                 space_id=space.id, peer_instance_id=member, sync_mode="incremental"
@@ -958,9 +961,10 @@ class SpaceSyncScheduler:
         ``sync_mode`` ``"incremental"`` is the periodic re-sync of a space
         we already hold: the provider re-ships no media and streams only the
         rows changed since the last stream we confirmed (its per-household
-        watermark, migration 0086 — a full stream when it has none). A
-        pairing, an echo or "Sync now" is ``"initial"`` and also enqueues
-        the catch-up media; a deferred retry asks for what was refused.
+        watermark, migration 0086 — a full stream when it has none); "Sync
+        now" asks for it too (:meth:`sync_now`). A pairing or an echo is
+        ``"initial"`` and also enqueues the catch-up media; a deferred retry
+        asks for what was refused.
         While the provider has no free slot for us (trigger 8) the sync
         waits for one rather than being sent.
 
@@ -1190,20 +1194,15 @@ class SpaceSyncScheduler:
 
     async def _fallback_spaces(self) -> dict[str, set[str]]:
         """``space_id -> the households acting as its host here`` for every
-        space we hold a member seat in but neither host nor hold the roster
-        authority of — the spaces whose host could go silent on us. Empty
-        when trigger 10 is not wired."""
-        if (
-            self._host_contact is None
-            or self._resume is None
-            or self._roster_authority is None
-            or self._seat_repo is None
-        ):
+        space hosted elsewhere we hold a member seat in — the spaces whose
+        host could go silent on us. Its silence is recorded for each (the
+        sync status); whether a helper is asked is decided once it is found
+        silent (:meth:`_await_host_answer`). Empty when no host contact is
+        wired (nothing tells us the host answered)."""
+        if self._host_contact is None:
             return {}
         out: dict[str, set[str]] = {}
         for space in await self._list_joined_remote_spaces():
-            if await self._roster_authority(space.id):
-                continue
             out[space.id] = set(await self._mesh_targets(space))
         return out
 
@@ -1216,24 +1215,36 @@ class SpaceSyncScheduler:
         self, space_id: str, hosts: set[str], asked: float
     ) -> None:
         """Wait :data:`HOST_ANSWER_WAIT_S` for the host's answer to this
-        round's BEGIN; none (offline, or no path) → ask one helper."""
+        round's BEGIN; none (offline, or no path) → record it unreachable
+        (the sync status) and, unless we hold the roster authority, ask one
+        helper."""
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=HOST_ANSWER_WAIT_S)
             return  # stopped while waiting
         except TimeoutError:
             pass
-        contact, resume, seats = self._host_contact, self._resume, self._seat_repo
-        newest_from = self._newest_from
-        if contact is None or resume is None or seats is None or newest_from is None:
+        contact = self._host_contact
+        if contact is None or contact.heard_since(space_id, asked):
             return
-        if contact.heard_since(space_id, asked):
-            return
-        contact.went_silent(space_id, hosts)
         if self._status is not None:
             try:
                 await self._status.host_unreachable(space_id, hosts)
             except Exception:
                 log.exception("space %s: recording the silent host failed", space_id)
+        # A helper only where trigger 10 is wired and we do not hold the
+        # roster authority (then we are host-equivalent: nothing to fall
+        # back from).
+        resume, seats, newest_from = self._resume, self._seat_repo, self._newest_from
+        authority = self._roster_authority
+        if resume is None or seats is None or newest_from is None or authority is None:
+            return
+        try:
+            if await authority(space_id):
+                return
+        except Exception:
+            log.exception("space %s: reading the roster authority failed", space_id)
+            return
+        contact.went_silent(space_id, hosts)
         if self._row_marks is None:
             # No boot cut (the startup read failed): a resume could start
             # past rows still missing — ask no helper rather than guess.

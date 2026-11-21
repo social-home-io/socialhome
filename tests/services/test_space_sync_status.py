@@ -21,7 +21,7 @@ from socialhome.domain.space_sync_status import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.space_sync_status import (
-    OK_REFRESH_S,
+    RESULT_REFRESH_S,
     SpaceSyncStatusService,
 )
 
@@ -59,18 +59,23 @@ class _Outcomes:
             seat: (None, None) for seat in seats
         }
         self.writes: list[tuple[str, str, SpaceSyncResult, str | None]] = []
+        #: ``(space, household) ->`` when its last result came.
+        self.at: dict[tuple[str, str], str] = {}
 
-    async def record_outcome(self, space_id, instance_id, result, *, ok_at=None):
+    async def record_outcome(self, space_id, instance_id, result, *, at, ok_at=None):
         self.writes.append((space_id, instance_id, result, ok_at))
         key = (space_id, instance_id)
         if key not in self.rows:
             return
         _, old_ok = self.rows[key]
         self.rows[key] = (result, ok_at if ok_at is not None else old_ok)
+        self.at[key] = at
 
     async def outcomes(self, space_id, instance_ids):
         return [
-            SpaceSyncOutcome(instance_id=i, result=r, ok_at=ok)
+            SpaceSyncOutcome(
+                instance_id=i, result=r, ok_at=ok, result_at=self.at.get((space_id, i))
+            )
             for i in instance_ids
             if (space_id, i) in self.rows
             for r, ok in [self.rows[(space_id, i)]]
@@ -101,13 +106,14 @@ def env():
     outbox = _Outbox()
     clock = _Clock()
     hosts = {"sp": ["owner"]}
-    running: set[str] = set()
+    #: ``(space, provider)`` of the streams arriving now.
+    running: set[tuple[str, str]] = set()
 
     async def acting_hosts(space: Space) -> list[str]:
         return list(hosts.get(space.id, [space.owner_instance_id]))
 
-    def receiving(space_id: str, ignore_sync_id: str = "") -> bool:
-        return space_id in running
+    def receiving(space_id: str, providers, ignore_sync_id: str = "") -> bool:
+        return any((space_id, p) in running for p in providers)
 
     svc = SpaceSyncStatusService(
         bus=bus,
@@ -230,13 +236,26 @@ async def test_a_repeated_refusal_is_written_once(env):
     assert len(env.outcomes.writes) == 1
 
 
+async def test_a_repeated_result_refreshes_its_time_once_per_round(env):
+    """A host that keeps refusing still answers: its result's time moves
+    (at most once a round), so it never reads as gone quiet."""
+    await _pub(env, SpaceSyncDeferred(space_id="sp", provider_instance_id="owner"))
+    assert env.outcomes.at[("sp", "owner")] == NOW.isoformat()
+    later = NOW + timedelta(seconds=RESULT_REFRESH_S + 1)
+    env.clock.now = later
+    await _pub(env, SpaceSyncDeferred(space_id="sp", provider_instance_id="owner"))
+    assert len(env.outcomes.writes) == 2
+    assert env.outcomes.at[("sp", "owner")] == later.isoformat()
+    assert env.outcomes.rows[("sp", "owner")] == (SpaceSyncResult.DEFERRED, None)
+
+
 async def test_ok_answers_refresh_the_time_at_most_once_per_round(env):
     for _ in range(3):
         await _pub(
             env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
         )
     assert len(env.outcomes.writes) == 1
-    env.clock.now = NOW + timedelta(seconds=OK_REFRESH_S + 1)
+    env.clock.now = NOW + timedelta(seconds=RESULT_REFRESH_S + 1)
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert len(env.outcomes.writes) == 2
 
@@ -276,14 +295,34 @@ async def test_an_unknown_space_has_no_status(env):
 
 
 async def test_a_running_stream_reads_catching_up(env):
-    env.running.add("sp")
+    env.running.add(("sp", "owner"))
     assert await _state(env) is SpaceSyncState.CATCHING_UP
+
+
+async def test_a_stream_from_a_household_not_acting_as_host_is_not_catching_up(env):
+    """A co-member's stream says nothing about the host's view of the
+    space: only a stream from an acting host is "catching up"."""
+    env.running.add(("sp", "member-x"))
+    assert await _state(env) is SpaceSyncState.NEVER
 
 
 async def test_no_ok_for_over_two_hours_reads_behind(env):
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     env.clock.now = NOW + timedelta(hours=2, minutes=5)
     assert await _state(env) is SpaceSyncState.BEHIND
+
+
+async def test_a_silent_host_reads_host_offline_despite_a_stale_answer(env):
+    """The delegated admin answered ``ok`` once; 90 minutes on (two rounds
+    without an answer) the owner is found unreachable: nobody answers —
+    host offline, not up to date."""
+    env.hosts["sp"] = ["owner", "admin"]
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="admin", clean=True))
+    env.clock.now = NOW + timedelta(minutes=90)
+    await env.svc.host_unreachable("sp", ["owner"])
+    status = await env.svc.status("sp")
+    assert status.state is SpaceSyncState.HOST_OFFLINE
+    assert status.last_ok_at == NOW.isoformat()
 
 
 async def test_a_delegated_admin_acting_as_host_keeps_the_space_up_to_date(env):
@@ -310,10 +349,66 @@ async def test_waiting_to_send_counts_the_spaces_outbox(env):
 # ── The frame: only when the state changes ────────────────────────────────
 
 
+async def test_an_outbox_change_frames_the_new_waiting_count_once(env):
+    """The "N waiting to send" chip follows the outbox: a change of the
+    space's pending count sends a frame, the same count none."""
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
+    assert [f.sync["waiting_to_send"] for f in env.frames] == [0]
+    env.outbox.pending["sp"] = 2
+    env.svc.outbox_changed("sp")
+    await env.svc.settle()
+    assert [f.sync["waiting_to_send"] for f in env.frames] == [0, 2]
+    assert env.frames[-1].sync["state"] == "up_to_date"
+    env.svc.outbox_changed("sp")  # a row of the same payload went: still 2
+    await env.svc.settle()
+    assert len(env.frames) == 2
+    env.outbox.pending["sp"] = 0
+    env.svc.outbox_changed("sp")
+    await env.svc.settle()
+    assert [f.sync["waiting_to_send"] for f in env.frames] == [0, 2, 0]
+
+
+async def test_an_outbox_change_on_a_space_hosted_here_frames_the_count(env):
+    env.outbox.pending["mine"] = 1
+    env.svc.outbox_changed("mine")
+    await env.svc.settle()
+    assert [(f.space_id, f.sync["waiting_to_send"]) for f in env.frames] == [
+        ("mine", 1)
+    ]
+
+
+async def test_a_burst_of_outbox_changes_reads_the_count_a_bounded_number_of_times(
+    env,
+):
+    """A broadcast settling hundreds of rows must not read the count once
+    per row: changes while a recheck runs fold into one more."""
+    reads = 0
+    original = env.outbox.count_pending_for_space
+
+    async def _counting(space_id: str) -> int:
+        nonlocal reads
+        reads += 1
+        await asyncio.sleep(0)
+        return await original(space_id)
+
+    env.outbox.count_pending_for_space = _counting
+    for _ in range(200):
+        env.svc.outbox_changed("sp")
+    await env.svc.settle()
+    assert reads <= 2
+
+
+async def test_an_outbox_change_for_an_unknown_space_is_ignored(env):
+    env.svc.outbox_changed("nope")
+    env.svc.outbox_changed("")
+    await env.svc.settle()
+    assert env.frames == []
+
+
 async def test_a_frame_goes_out_only_when_the_state_changes(env):
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert [f.sync["state"] for f in env.frames] == ["up_to_date"]
-    env.clock.now = NOW + timedelta(seconds=OK_REFRESH_S + 1)
+    env.clock.now = NOW + timedelta(seconds=RESULT_REFRESH_S + 1)
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert len(env.frames) == 1  # still up to date: no frame
     await env.svc.host_unreachable("sp", ["owner"])
@@ -323,12 +418,12 @@ async def test_a_frame_goes_out_only_when_the_state_changes(env):
     assert env.frames[-1].space_id == "sp"
     assert (
         env.frames[-1].sync["last_ok_at"]
-        == (NOW + timedelta(seconds=OK_REFRESH_S + 1)).isoformat()
+        == (NOW + timedelta(seconds=RESULT_REFRESH_S + 1)).isoformat()
     )
 
 
 async def test_a_stream_starting_on_a_behind_space_sends_catching_up(env):
-    env.running.add("sp")
+    env.running.add(("sp", "owner"))
     await env.svc.stream_started("sp", "owner")
     assert [f.sync["state"] for f in env.frames] == ["catching_up"]
     await env.svc.stream_started("sp", "owner")
@@ -336,7 +431,7 @@ async def test_a_stream_starting_on_a_behind_space_sends_catching_up(env):
 
 
 async def test_a_stream_from_a_non_host_sends_nothing(env):
-    env.running.add("sp")
+    env.running.add(("sp", "member-x"))
     await env.svc.stream_started("sp", "member-x")
     assert env.frames == []
 

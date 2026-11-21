@@ -725,17 +725,19 @@ def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
         wake = None
         still_wanted = None
 
-        def attach_outbox_wake(self, wake, *, still_wanted=None):
+        def attach_outbox_wake(self, wake, *, still_wanted=None, space_changed=None):
             self.wake = wake
             self.still_wanted = still_wanted
+            self.space_changed = space_changed
 
     class _Unpair:
         async def sweep_tombstones(self):
             return 0
 
     fed = _Fed()
+    app = web.Application()
     processor = _build_outbox_processor(
-        web.Application(),
+        app,
         object(),
         fed,  # type: ignore[arg-type]
         object(),
@@ -744,6 +746,22 @@ def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
     assert fed.wake == processor.wake
     assert processor._multi is fed
     assert fed.still_wanted is not None and fed.still_wanted() is None
+    # The sync status hears of each queued / delivered space row once it
+    # is wired; before that (or without it) the hook does nothing.
+    assert fed.space_changed is processor._space_changed
+    fed.space_changed("sp")
+
+    class _Status:
+        def __init__(self) -> None:
+            self.changed: list[str] = []
+
+        def outbox_changed(self, space_id: str) -> None:
+            self.changed.append(space_id)
+
+    status = _Status()
+    app[K.space_sync_status_key] = status
+    fed.space_changed("sp")
+    assert status.changed == ["sp"]
 
 
 def test_build_gfs_relay_inbound_returns_the_service():

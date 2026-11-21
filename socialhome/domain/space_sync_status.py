@@ -56,16 +56,21 @@ FRESH_OK_S: float = 60 * 60
 #: With ``ok`` as the last result, up to date until no ``ok`` came for this
 #: long (two missed rounds and slack); past it the space is behind.
 STALE_OK_S: float = 2 * 60 * 60
+#: A host's last answer (any result) older than this — two missed rounds —
+#: no longer counts as the host answering: with another host found
+#: unreachable, the space reads "host offline".
+ANSWER_STALE_S: float = 60 * 60
 
 
 @dataclass(slots=True, frozen=True)
 class SpaceSyncOutcome:
-    """One acting host's row: its last result and its last ``ok`` (UTC ISO
-    8601, ``None`` if never)."""
+    """One acting host's row: its last result, its last ``ok`` and when
+    that last result came (UTC ISO 8601, ``None`` if never / not known)."""
 
     instance_id: str
     result: SpaceSyncResult | None
     ok_at: str | None
+    result_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -97,6 +102,18 @@ def parse_utc(raw: str | None) -> datetime | None:
     return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
 
+def answered_at(outcome: SpaceSyncOutcome) -> datetime | None:
+    """When *outcome*'s host last answered (any result but ``unreachable``):
+    the time of its last result, or for an ``ok`` without one its ``ok``
+    time; ``None`` when it never answered or the time is not known."""
+    if outcome.result is None or outcome.result is SpaceSyncResult.UNREACHABLE:
+        return None
+    at = parse_utc(outcome.result_at)
+    if at is None and outcome.result is SpaceSyncResult.OK:
+        at = parse_utc(outcome.ok_at)
+    return at
+
+
 def sync_state(
     outcomes: Iterable[SpaceSyncOutcome],
     *,
@@ -105,12 +122,14 @@ def sync_state(
 ) -> tuple[SpaceSyncState, str | None]:
     """The state and the newest ``ok`` over the acting hosts' *outcomes*.
 
-    In order: **up to date** when a host answered ``ok`` within
-    :data:`STALE_OK_S`, or its ``ok`` is within :data:`FRESH_OK_S` and only a
-    refusal followed; **catching up** while a stream from one is running
-    (*receiving*); **host offline** when a host was found unreachable and
-    none answered since; **never** while no stream arrived (no ``ok``, no
-    unclean one); else **behind**."""
+    A host is **offline** for the space when one was found unreachable and
+    none answered (any result) within :data:`ANSWER_STALE_S` — a last
+    answer two rounds old is no answer, whatever it said. Then, in order:
+    **up to date** (not offline) when a host answered ``ok`` within
+    :data:`STALE_OK_S`, or its ``ok`` is within :data:`FRESH_OK_S` and only
+    a refusal followed; **catching up** while a stream from one is running
+    (*receiving*); **host offline**; **never** while no stream arrived (no
+    ``ok``, no unclean one); else **behind**."""
     rows = list(outcomes)
     oks = [(parse_utc(o.ok_at), o) for o in rows]
     newest = max(
@@ -119,7 +138,13 @@ def sync_state(
         default=None,
     )
     last_ok = newest[1].ok_at if newest is not None else None
-    for at, o in oks:
+    unreachable = any(o.result is SpaceSyncResult.UNREACHABLE for o in rows)
+    answering = any(
+        at is not None and now - at <= timedelta(seconds=ANSWER_STALE_S)
+        for at in map(answered_at, rows)
+    )
+    offline = unreachable and not answering
+    for at, o in [] if offline else oks:
         if at is None:
             continue
         age = now - at
@@ -131,12 +156,7 @@ def sync_state(
             return SpaceSyncState.UP_TO_DATE, last_ok
     if receiving:
         return SpaceSyncState.CATCHING_UP, last_ok
-    unreachable = any(o.result is SpaceSyncResult.UNREACHABLE for o in rows)
-    answering = any(
-        o.result is not None and o.result is not SpaceSyncResult.UNREACHABLE
-        for o in rows
-    )
-    if unreachable and not answering:
+    if offline:
         return SpaceSyncState.HOST_OFFLINE, last_ok
     if last_ok is None and not any(o.result is SpaceSyncResult.UNCLEAN for o in rows):
         # Nothing arrived yet (a refusal is no stream).

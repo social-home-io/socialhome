@@ -379,18 +379,29 @@ kept on that household's `space_instances` row (migration 0150):
 | `deferred` | `SpaceSyncDeferred` (a refusal, or a stream cut mid-way) |
 | `unreachable` | the scheduler's silent-host verdict (`HOST_ANSWER_WAIT_S`, trigger 10) |
 
-A result is written only when it changes, an `ok` refreshes its time at most
-every 15 minutes — never per chunk. `SpaceSyncStatusService` computes the
-state at read time: **up to date** (an `ok` within 2 h; a refusal right after
-an `ok` within 1 h keeps it), **catching up** (a chunk of a stream from a host
-moved within 2 minutes), **host offline** (a host found unreachable and none
-answering since), **never** (no `ok` yet), else **behind**. The space's owner
-household is always up to date. It rides `GET /api/spaces/{id}` (`sync`, with
-`waiting_to_send` — our pending outbox items of the space) and, on a change,
-the local `space.sync_state` frame, members only. **Sync now**
-(`POST /api/spaces/{id}/sync`) sends the incremental BEGIN of one round right
-away — to a mesh-only host over the mesh too — within 3 per hour per space,
-inside the host's 5 BEGINs / h budget next to the 2 periodic ones.
+A result is written with its time (`sync_result_at`) when it changes; the
+same result refreshes that time (an `ok` its `sync_ok_at` too) at most every
+15 minutes — never per chunk. The silent-host check runs for every space
+hosted elsewhere that one of our people holds a member seat in, a household
+holding the roster authority included (it records the host `unreachable`,
+it just asks no helper). `SpaceSyncStatusService` computes the state at read
+time: **host offline** when a host was found unreachable and no host
+answered (any result) within 1 h — a last answer two rounds old is no
+answer, whatever it said; otherwise **up to date** (an `ok` within 2 h; a
+refusal right after an `ok` within 1 h keeps it); **catching up** (a chunk
+of a stream from a household acting as host moved within 2 minutes — a
+co-member's stream does not count; it also beats host offline); then host
+offline, **never** (no `ok` yet), else **behind**. The space's owner
+household is always up to date. It rides `GET /api/spaces/{id}` (`sync`,
+with `waiting_to_send` — our pending outbox items of the space) and, when
+the state or the waiting count changes, the local `space.sync_state` frame,
+members only — the outbox tells the status when a space's rows are queued,
+delivered or dropped (rechecks of a space coalesced, never one per row, no
+timer). **Sync now** (`POST /api/spaces/{id}/sync`) sends the incremental
+BEGIN of one round right away to the households acting as host only — a
+mesh-only one over the mesh too, never a paired co-member — within 3 per
+hour per space, inside the host's 5 BEGINs / h budget next to the 2
+periodic ones; a space hosted here asks its paired member households.
 
 ## What a sync streams
 

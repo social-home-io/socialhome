@@ -147,18 +147,21 @@ async def test_no_outcome_until_one_is_recorded(env):
 
 async def test_an_ok_records_the_time_and_a_later_refusal_keeps_it(env):
     _db, repo = env
-    await repo.record_outcome("sp", "peer", SpaceSyncResult.OK, ok_at="t1")
-    await repo.record_outcome("sp", "peer", SpaceSyncResult.DEFERRED)
+    await repo.record_outcome("sp", "peer", SpaceSyncResult.OK, at="t1", ok_at="t1")
+    await repo.record_outcome("sp", "peer", SpaceSyncResult.DEFERRED, at="t2")
     assert await repo.outcomes("sp", ["peer"]) == [
         SpaceSyncOutcome(
-            instance_id="peer", result=SpaceSyncResult.DEFERRED, ok_at="t1"
+            instance_id="peer",
+            result=SpaceSyncResult.DEFERRED,
+            ok_at="t1",
+            result_at="t2",
         )
     ]
 
 
 async def test_an_outcome_for_a_household_without_a_seat_records_nothing(env):
     _db, repo = env
-    await repo.record_outcome("sp", "stranger", SpaceSyncResult.OK, ok_at="t1")
+    await repo.record_outcome("sp", "stranger", SpaceSyncResult.OK, at="t1", ok_at="t1")
     assert await repo.outcomes("sp", ["stranger"]) == []
 
 
@@ -170,7 +173,7 @@ async def test_the_outcome_survives_a_restart(tmp_dir):
         "INSERT INTO space_instances(space_id, instance_id) VALUES('sp','host')"
     )
     await SqliteSpaceSyncWatermarkRepo(db).record_outcome(
-        "sp", "host", SpaceSyncResult.UNREACHABLE
+        "sp", "host", SpaceSyncResult.UNREACHABLE, at="t1"
     )
     await db.shutdown()
     db = AsyncDatabase(path, batch_timeout_ms=1)
@@ -178,7 +181,10 @@ async def test_the_outcome_survives_a_restart(tmp_dir):
     try:
         assert await SqliteSpaceSyncWatermarkRepo(db).outcomes("sp", ["host"]) == [
             SpaceSyncOutcome(
-                instance_id="host", result=SpaceSyncResult.UNREACHABLE, ok_at=None
+                instance_id="host",
+                result=SpaceSyncResult.UNREACHABLE,
+                ok_at=None,
+                result_at="t1",
             )
         ]
     finally:

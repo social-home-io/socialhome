@@ -19,11 +19,17 @@ def _ago(minutes: float) -> str:
     return (NOW - timedelta(minutes=minutes)).isoformat()
 
 
-def _o(host: str, result: SpaceSyncResult | None, ok_min: float | None):
+def _o(
+    host: str,
+    result: SpaceSyncResult | None,
+    ok_min: float | None,
+    at_min: float | None = None,
+):
     return SpaceSyncOutcome(
         instance_id=host,
         result=result,
         ok_at=None if ok_min is None else _ago(ok_min),
+        result_at=None if at_min is None else _ago(at_min),
     )
 
 
@@ -94,7 +100,7 @@ def test_one_host_answering_not_ok_while_the_other_is_silent_is_behind():
     state, last_ok = sync_state(
         [
             _o("owner", SpaceSyncResult.UNREACHABLE, None),
-            _o("admin", SpaceSyncResult.UNCLEAN, 400),
+            _o("admin", SpaceSyncResult.UNCLEAN, 400, at_min=20),
         ],
         now=NOW,
     )
@@ -148,3 +154,66 @@ def test_an_unclean_first_stream_is_behind_not_never():
     state, last_ok = sync_state([_o("h", SpaceSyncResult.UNCLEAN, None)], now=NOW)
     assert state is SpaceSyncState.BEHIND
     assert last_ok is None
+
+
+# ── A host that stopped answering (stale last result) ─────────────────────
+
+
+def test_a_stale_ok_from_a_host_gone_quiet_is_host_offline():
+    """The owner was found unreachable; the delegated admin's last answer,
+    an ``ok`` 90 minutes ago, is older than two rounds: nobody answers —
+    host offline, not up to date."""
+    state, last_ok = sync_state(
+        [
+            _o("owner", SpaceSyncResult.UNREACHABLE, 300, at_min=5),
+            _o("admin", SpaceSyncResult.OK, 90, at_min=90),
+        ],
+        now=NOW,
+    )
+    assert state is SpaceSyncState.HOST_OFFLINE
+    assert last_ok == _ago(90)
+
+
+def test_a_stale_refusal_or_unclean_answer_is_no_answer_either():
+    for result in (SpaceSyncResult.DEFERRED, SpaceSyncResult.UNCLEAN):
+        state, _ = sync_state(
+            [
+                _o("owner", SpaceSyncResult.UNREACHABLE, None, at_min=5),
+                _o("admin", result, 400, at_min=70),
+            ],
+            now=NOW,
+        )
+        assert state is SpaceSyncState.HOST_OFFLINE, result
+
+
+def test_a_fresh_answer_keeps_a_space_with_a_silent_host_online():
+    state, _ = sync_state(
+        [
+            _o("owner", SpaceSyncResult.UNREACHABLE, None, at_min=5),
+            _o("admin", SpaceSyncResult.DEFERRED, 400, at_min=40),
+        ],
+        now=NOW,
+    )
+    assert state is SpaceSyncState.BEHIND
+
+
+def test_a_stream_arriving_beats_host_offline():
+    state, _ = sync_state(
+        [_o("owner", SpaceSyncResult.UNREACHABLE, 300, at_min=5)],
+        receiving=True,
+        now=NOW,
+    )
+    assert state is SpaceSyncState.CATCHING_UP
+
+
+def test_an_ok_without_a_result_time_answered_at_its_ok_time():
+    """A row written before ``sync_result_at`` was kept reads its ``ok``
+    time as the time of its answer."""
+    state, _ = sync_state(
+        [
+            _o("owner", SpaceSyncResult.UNREACHABLE, None, at_min=5),
+            _o("admin", SpaceSyncResult.OK, 20),
+        ],
+        now=NOW,
+    )
+    assert state is SpaceSyncState.UP_TO_DATE

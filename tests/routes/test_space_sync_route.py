@@ -171,7 +171,9 @@ async def test_sync_trigger_skips_unconfirmed_peers(client):
     assert body["targets"] == []
 
 
-async def test_sync_trigger_forbidden_for_non_admin(client):
+async def test_sync_trigger_forbidden_for_a_non_member(client):
+    """Bob holds no seat in the space: Sync now is any member's, never a
+    stranger's."""
     space_id = await _create_space(client)
     resp = await client.post(
         f"/api/spaces/{space_id}/sync",
@@ -297,6 +299,44 @@ async def test_sync_now_asks_a_paired_host_incrementally(client):
     enqueue.assert_awaited_once_with(
         space_id=space_id, peer_instance_id="host-x", sync_mode="incremental"
     )
+
+
+async def test_sync_now_never_asks_a_paired_co_member(client):
+    """Only the households acting as the host are asked: a paired
+    co-member's BEGIN budget is not spent on our Sync now."""
+    space_id = await _remote_space(client)
+    app = client.server.app
+    await app[federation_repo_key].save_instance(
+        RemoteInstance(
+            id="co-member",
+            display_name="Co-member",
+            remote_identity_pk="dd" * 32,
+            key_self_to_remote="enc",
+            key_remote_to_self="enc",
+            remote_inbox_url="https://co/wh",
+            local_inbox_id="wh-co",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        )
+    )
+    await app[_db_key].enqueue(
+        "INSERT INTO space_instances(space_id, instance_id) VALUES(?, 'co-member')",
+        (space_id,),
+    )
+    with (
+        patch.object(
+            FederationService, "begin_mesh_catchup_sync", AsyncMock(return_value=True)
+        ),
+        patch.object(
+            SpaceSyncScheduler, "enqueue_sync_for_space", AsyncMock()
+        ) as enqueue,
+    ):
+        resp = await client.post(
+            f"/api/spaces/{space_id}/sync", headers=_auth(client._admin_token)
+        )
+    assert resp.status == 202
+    assert (await resp.json())["targets"] == ["host-x"]
+    enqueue.assert_not_awaited()
 
 
 async def test_any_member_may_ask_for_sync_now(client):

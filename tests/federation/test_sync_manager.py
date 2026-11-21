@@ -1028,15 +1028,33 @@ def test_receiving_needs_a_chunk_that_moved_lately():
         provider_instance_id="h",
     )
     now = mgr.get_session("s1").created_at + 1
+    hosts = ["h"]
     # Registered before the BEGIN (a mesh host): no chunk yet, not running.
-    assert not mgr.receiving("sp", "me", now=now)
+    assert not mgr.receiving("sp", "me", hosts, now=now)
     mgr.touch_session("s1", now=now)
-    assert mgr.receiving("sp", "me", now=now + 10)
-    assert not mgr.receiving("other", "me", now=now + 10)
-    assert not mgr.receiving("sp", "someone-else", now=now + 10)
-    assert not mgr.receiving("sp", "me", ignore_sync_id="s1", now=now + 10)
+    assert mgr.receiving("sp", "me", hosts, now=now + 10)
+    assert not mgr.receiving("other", "me", hosts, now=now + 10)
+    assert not mgr.receiving("sp", "someone-else", hosts, now=now + 10)
+    assert not mgr.receiving("sp", "me", hosts, ignore_sync_id="s1", now=now + 10)
     # Idle past the window: no longer running.
-    assert not mgr.receiving("sp", "me", now=now + RECEIVING_IDLE_S + 1)
+    assert not mgr.receiving("sp", "me", hosts, now=now + RECEIVING_IDLE_S + 1)
     # The sentinel landed: the stream is over.
     mgr.get_session("s1").sentinel_landed = True
-    assert not mgr.receiving("sp", "me", now=now + 10)
+    assert not mgr.receiving("sp", "me", hosts, now=now + 10)
+
+
+def test_receiving_counts_only_a_stream_from_an_acting_host():
+    """A paired co-member's stream of the space is no "catching up": only
+    a stream from a household acting as the space's host counts."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    mgr.register_requester_https_session(
+        sync_id="s1",
+        space_id="sp",
+        requester_instance_id="me",
+        provider_instance_id="co-member",
+    )
+    now = mgr.get_session("s1").created_at + 1
+    mgr.touch_session("s1", now=now)
+    assert not mgr.receiving("sp", "me", ["owner", "admin"], now=now + 10)
+    assert mgr.receiving("sp", "me", ["owner", "co-member"], now=now + 10)
+    assert not mgr.receiving("sp", "me", [], now=now + 10)

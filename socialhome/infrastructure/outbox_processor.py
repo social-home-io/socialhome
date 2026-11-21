@@ -155,6 +155,11 @@ class OutboxMulti(Protocol):
 #: (the unpair-tombstone purge keys off "no UNPAIR still pending").
 AfterPrune = Callable[[], Awaitable[object]]
 
+#: Told the space of a row that left the queue (delivered, refused for
+#: good, given up on) — the sync status's "N waiting to send". Must not
+#: block: the sync status coalesces and reads in a task of its own.
+SpaceChanged = Callable[[str], None]
+
 
 class OutboxProcessor:
     """Long-running coroutine that drains the outbox on a timer.
@@ -186,6 +191,7 @@ class OutboxProcessor:
         "_poll_interval",
         "_prune_interval",
         "_repo",
+        "_space_changed",
         "_stop",
         "_task",
         "_wake",
@@ -201,9 +207,11 @@ class OutboxProcessor:
         rng: Callable[[], float] | None = None,
         after_prune: AfterPrune | None = None,
         multi: OutboxMulti | None = None,
+        space_changed: SpaceChanged | None = None,
     ) -> None:
         self._repo = repo
         self._multi = multi
+        self._space_changed = space_changed
         self._after_prune = after_prune
         self._deliver = deliver
         self._poll_interval = poll_interval_seconds
@@ -478,6 +486,7 @@ class OutboxProcessor:
         """Apply one delivery outcome to *entry*'s row."""
         if outcome is DeliveryOutcome.SUCCESS:
             await self._repo.mark_delivered(entry.id)
+            self._left_queue(entry)
             # The ordering gate (``list_due``) may have held the household's
             # next row behind this one: run the next pass now, not at the poll.
             self.wake()
@@ -493,6 +502,7 @@ class OutboxProcessor:
                 entry.id,
             )
             await self._repo.mark_failed(entry.id)
+            self._left_queue(entry)
             return
 
         # TRANSIENT, or a RetryAfter (a 429 that named its window).
@@ -533,6 +543,7 @@ class OutboxProcessor:
                 new_attempts,
             )
             await self._repo.mark_failed(entry.id)
+            self._left_queue(entry)
             return
         delay = max(self._delay_for(new_attempts), floor_s)
         next_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
@@ -541,6 +552,16 @@ class OutboxProcessor:
             next_at,
             attempts=new_attempts,
         )
+
+    def _left_queue(self, entry: OutboxEntry) -> None:
+        """*entry* is no longer pending: tell the sync status its space's
+        waiting count may have moved. Never raises."""
+        if self._space_changed is None or not entry.space_id:
+            return
+        try:
+            self._space_changed(entry.space_id)
+        except Exception:
+            log.exception("OutboxProcessor: space %s change hook", entry.space_id)
 
     async def prune_once(self) -> int:
         """Retention sweep (§4.4.7). First, drop rows addressed to a

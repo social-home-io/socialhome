@@ -574,6 +574,8 @@ def _build_outbox_processor(
     payload to mailbox seats on one GFS go up as ONE upload (v_91); rows the
     moderation check refuses stay single. The federation service wakes it
     when a broadcast queued a multi payload — it is the only multi sender.
+    Both tell the sync status when a space's rows are queued or leave the
+    queue (its "N waiting to send", migration 0150).
     """
 
     def _still_wanted():
@@ -590,13 +592,23 @@ def _build_outbox_processor(
             still_wanted=_still_wanted(),
         )
 
+    def _space_changed(space_id: str) -> None:
+        """A space's rows were queued or left the queue: the sync status
+        frames its "N waiting to send" if it moved (once it is wired)."""
+        status = app.get(K.space_sync_status_key)
+        if status is not None:
+            status.outbox_changed(space_id)
+
     processor = OutboxProcessor(
         outbox_repo,
         _deliver,
         after_prune=peer_unpair.sweep_tombstones,
         multi=federation_service,
+        space_changed=_space_changed,
     )
-    federation_service.attach_outbox_wake(processor.wake, still_wanted=_still_wanted)
+    federation_service.attach_outbox_wake(
+        processor.wake, still_wanted=_still_wanted, space_changed=_space_changed
+    )
     return processor
 
 
@@ -2600,9 +2612,11 @@ def _build_space_sync_status(
             space_repo, seat_repo, space, own_instance_id=own_instance_id
         )
 
-    def _receiving(space_id: str, ignore_sync_id: str = "") -> bool:
+    def _receiving(
+        space_id: str, providers: list[str], ignore_sync_id: str = ""
+    ) -> bool:
         return sync_manager.receiving(
-            space_id, own_instance_id, ignore_sync_id=ignore_sync_id
+            space_id, own_instance_id, providers, ignore_sync_id=ignore_sync_id
         )
 
     status = SpaceSyncStatusService(

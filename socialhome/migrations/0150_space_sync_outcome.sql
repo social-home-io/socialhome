@@ -1,7 +1,7 @@
 -- 0150 — §25.6 sync status: the last outcome of a sync from a household.
 --
--- ``space_instances.sync_result TEXT`` and ``space_instances.sync_ok_at
--- TEXT`` (both NULL by default) — on the REQUESTER's row for a (space,
+-- ``space_instances.sync_result TEXT``, ``space_instances.sync_result_at
+-- TEXT`` and ``space_instances.sync_ok_at TEXT`` (all NULL by default) — on the REQUESTER's row for a (space,
 -- provider household) that acts as the space's host here (the owner, or the
 -- trusted inviting admin — ``federation/host_equivalence.acting_hosts``):
 --
@@ -11,13 +11,16 @@
 --   lost — the next round streams again), ``deferred`` (it refused for now:
 --   busy, its hourly budget spent, or the stream broke off), ``unreachable``
 --   (a round's BEGIN went unanswered for the scheduler's full wait).
+-- * ``sync_result_at`` — when that last result came (UTC ISO 8601): a last
+--   answer two rounds old is no answer — with another acting host found
+--   unreachable, the space reads "host offline" whatever that answer said.
 -- * ``sync_ok_at`` — when it last answered ``ok`` (UTC ISO 8601).
 --
 -- Read at request time by ``SpaceSyncStatusService`` to tell a member
 -- whether the space is up to date, catching up, behind or its host offline
 -- (``GET /api/spaces/{id}`` ``sync``). Written at most once per sync round
--- per (space, acting host): a change of result, or an ``ok`` refreshing
--- ``sync_ok_at`` (throttled) — never per chunk.
+-- per (space, acting host): a change of result, or the same result
+-- refreshing its time (throttled to once per round) — never per chunk.
 --
 -- CLAUDE.md "audit before a migration":
 --
@@ -45,14 +48,16 @@
 --         would outlive the seat (no cleanup on leave).
 --       * Reuse ``applied_seq`` (0087) — it moves only on a clean stream
 --         and says nothing about when, nor about a refusal or silence.
---       * A ``sync_checked_at`` column (last answer of any kind) — the
---         status needs only the result and the last ok; dropping it keeps
---         writes to a change of result plus the ok refresh.
+--       * Reading a host's last answer time off ``sync_ok_at`` alone — a
+--         host that keeps refusing or streaming unclean has no ``ok`` time,
+--         so a stale ``deferred`` from a host gone quiet would still count
+--         as answering and hide "host offline" (spec review, Phase 1).
 --       * A history table — the status reads the latest outcome only.
---   (3) Smallest possible change: two NULL-default columns (metadata-only
+--   (3) Smallest possible change: three NULL-default columns (metadata-only
 --       ALTERs — no table rewrite, no backfill). NULL result = never
 --       answered; NULL ``sync_ok_at`` = never up to date from that household.
 
 ALTER TABLE space_instances ADD COLUMN sync_result TEXT
     CHECK (sync_result IN ('ok', 'unclean', 'deferred', 'unreachable'));
+ALTER TABLE space_instances ADD COLUMN sync_result_at TEXT;
 ALTER TABLE space_instances ADD COLUMN sync_ok_at TEXT;

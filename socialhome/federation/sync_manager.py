@@ -24,6 +24,7 @@ import logging
 import secrets
 import time
 from collections import defaultdict, deque
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from ..domain.federation import FederationEventType, PairingStatus
@@ -321,13 +322,16 @@ class SyncSessionManager:
         self,
         space_id: str,
         requester_instance_id: str,
+        providers: Collection[str],
         *,
         ignore_sync_id: str = "",
         now: float | None = None,
     ) -> bool:
-        """Whether a stream of ``space_id`` is arriving here now: a session
-        we requested whose sentinel has not landed, with a chunk moved in
-        the last :data:`RECEIVING_IDLE_S`. A session registered before its
+        """Whether a stream of ``space_id`` from one of ``providers`` (the
+        households acting as its host here) is arriving now: a session we
+        requested whose sentinel has not landed, with a chunk moved in the
+        last :data:`RECEIVING_IDLE_S`. A co-member's stream says nothing
+        about how far the host's view got. A session registered before its
         BEGIN (a mesh host) that never got a chunk does not count — an
         offline host must not read as "catching up". ``ignore_sync_id``:
         a stream that is ending right now."""
@@ -335,6 +339,7 @@ class SyncSessionManager:
         return any(
             s.space_id == space_id
             and s.requester_instance_id == requester_instance_id
+            and s.provider_instance_id in providers
             and s.sync_id != ignore_sync_id
             and not s.sentinel_landed
             and s.last_activity > s.created_at

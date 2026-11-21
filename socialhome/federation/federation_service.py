@@ -481,6 +481,7 @@ class FederationService:
         "_online_status_service",
         "_outbox_payload_key",
         "_outbox_repo",
+        "_outbox_space_changed",
         "_outbox_still_wanted",
         "_outbox_wake",
         "_own_identity_pk",
@@ -623,6 +624,9 @@ class FederationService:
         #: send under way (:meth:`_seat_turn`); empty when none is.
         self._seat_send_locks: dict[str, _SeatTurn] = {}
         self._outbox_still_wanted: StillWantedOf | None = None
+        #: Told the space of every payload queued for it — the sync
+        #: status's "N waiting to send" (:meth:`attach_outbox_wake`).
+        self._outbox_space_changed: Callable[[str], None] | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
         # dropped (no app bridge wired on this instance).
@@ -1501,14 +1505,28 @@ class FederationService:
         wake: Callable[[], None],
         *,
         still_wanted: StillWantedOf | None = None,
+        space_changed: Callable[[str], None] | None = None,
     ) -> None:
         """Wire ``OutboxProcessor.wake`` — the outbox is the only multi
         sender (v_91), and a broadcast that queued a multi payload wakes it.
         *still_wanted* resolves the moderation queue's per-row check (or
         ``None`` until it is wired): :meth:`outbox_multi_groups` keeps a row
-        it refuses out of every group (it goes single and is dropped)."""
+        it refuses out of every group (it goes single and is dropped).
+        *space_changed* is told the space of every payload queued for one
+        (the sync status's "N waiting to send"); it must not block."""
         self._outbox_wake = wake
         self._outbox_still_wanted = still_wanted
+        self._outbox_space_changed = space_changed
+
+    def _queued_for_space(self, space_id: str | None) -> None:
+        """A payload of *space_id* was queued: tell the sync status. Never
+        raises."""
+        if self._outbox_space_changed is None or not space_id:
+            return
+        try:
+            self._outbox_space_changed(space_id)
+        except Exception:
+            log.exception("outbox: space %s change hook failed", space_id)
 
     def attach_call_signaling(self, call_signaling) -> None:
         """Attach a :class:`CallSignalingService` after construction."""
@@ -2379,6 +2397,8 @@ class FederationService:
             supersede_key=state_key,
             payload_ref=self._outbox_payload(event_type, space_id, payload),
         )
+        if queued is not None:
+            self._queued_for_space(space_id)
         if queued is None:
             # The pairing ended while this send was in flight (an unpair
             # purged the peer between our lookup and here) — nothing was
@@ -2478,6 +2498,7 @@ class FederationService:
             return DeliveryResult(
                 instance_id=to_instance_id, ok=False, error="unknown_instance"
             )
+        self._queued_for_space(space_id)
         log.info(
             "fed send: %s for %s queued behind its pending outbox row(s)",
             event_type.value,
@@ -4177,6 +4198,8 @@ class FederationService:
                 event_type, space_id, payload, msg_id=str(uuid.uuid4())
             ),
         )
+        if written:
+            self._queued_for_space(space_id)
         if written and self._outbox_wake is not None:
             self._outbox_wake()
         return {

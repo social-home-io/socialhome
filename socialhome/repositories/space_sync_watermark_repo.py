@@ -11,9 +11,10 @@
   for a (space, provider household): that provider's snapshot of the last
   stream applied cleanly here. Sent as ``have_seq`` in a periodic BEGIN; it
   lives in this database, so it rolls back with the rows it describes.
-* ``space_instances.sync_result`` / ``sync_ok_at`` (migration 0150) — the
-  REQUESTER's last outcome of a sync from a household acting as the space's
-  host, and when it last answered ``ok``: what ``SpaceSyncStatusService``
+* ``space_instances.sync_result`` / ``sync_result_at`` / ``sync_ok_at``
+  (migration 0150) — the REQUESTER's last outcome of a sync from a household
+  acting as the space's host, when it came, and when it last answered
+  ``ok``: what ``SpaceSyncStatusService``
   tells a member at read time.
 """
 
@@ -67,11 +68,13 @@ class AbstractSpaceSyncWatermarkRepo(Protocol):
         instance_id: str,
         result: SpaceSyncResult,
         *,
+        at: str,
         ok_at: str | None = None,
     ) -> None:
         """Record the last answer of ``instance_id`` to our sync of the
-        space; ``ok_at`` (UTC ISO 8601) moves the last ``ok`` time, ``None``
-        keeps it. No seat row for that household: no-op."""
+        space, which came ``at`` (UTC ISO 8601); ``ok_at`` moves the last
+        ``ok`` time, ``None`` keeps it. No seat row for that household:
+        no-op."""
         ...
 
     async def outcomes(
@@ -150,13 +153,14 @@ class SqliteSpaceSyncWatermarkRepo:
         instance_id: str,
         result: SpaceSyncResult,
         *,
+        at: str,
         ok_at: str | None = None,
     ) -> None:
         await self._db.enqueue(
-            "UPDATE space_instances SET sync_result=?,"
+            "UPDATE space_instances SET sync_result=?, sync_result_at=?,"
             " sync_ok_at=COALESCE(?, sync_ok_at)"
             " WHERE space_id=? AND instance_id=?",
-            (SpaceSyncResult(result).value, ok_at, space_id, instance_id),
+            (SpaceSyncResult(result).value, at, ok_at, space_id, instance_id),
         )
 
     async def outcomes(
@@ -167,7 +171,8 @@ class SqliteSpaceSyncWatermarkRepo:
             return []
         marks = ",".join("?" * len(wanted))
         rows = await self._db.fetchall(
-            "SELECT instance_id, sync_result, sync_ok_at FROM space_instances"
+            "SELECT instance_id, sync_result, sync_ok_at, sync_result_at"
+            " FROM space_instances"
             f" WHERE space_id=? AND instance_id IN ({marks})",
             (space_id, *wanted),
         )
@@ -176,6 +181,7 @@ class SqliteSpaceSyncWatermarkRepo:
                 instance_id=str(r["instance_id"]),
                 result=SpaceSyncResult.parse(r["sync_result"]),
                 ok_at=r["sync_ok_at"],
+                result_at=r["sync_result_at"],
             )
             for r in rows
         }

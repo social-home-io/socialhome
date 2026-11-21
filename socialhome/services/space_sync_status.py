@@ -14,15 +14,19 @@ host here (the owner, or the trusted inviting admin —
 * ``unreachable`` — the scheduler's host-silent verdict
   (:meth:`host_unreachable`, after the round's answer wait).
 
-Writes are rare: a result is written when it changes, an ``ok`` refreshes its
-time at most every :data:`OK_REFRESH_S` — never per chunk.
+Writes are rare: a result is written when it changes, and the same result
+refreshes its time (and an ``ok`` its ``ok`` time) at most every
+:data:`RESULT_REFRESH_S` — never per chunk. A last answer older than two
+rounds no longer counts as the host answering (``sync_state``).
 
 :meth:`status` turns the rows into one state at read time
 (:func:`~socialhome.domain.space_sync_status.sync_state`), plus how many of
 our own items of the space still wait in the outbox. The space's owner
-household is always up to date. When the computed state changes after an
-outcome or a stream start, :class:`SpaceSyncStateChanged` goes on the bus —
-the realtime layer sends the members a ``space.sync_state`` frame. Nothing
+household is always up to date. When the computed state or the waiting count
+changes after an outcome, a stream start or a change of the space's outbox
+rows (:meth:`SpaceSyncStatusService.outbox_changed`),
+:class:`SpaceSyncStateChanged` goes on the bus — the realtime layer sends
+the members a ``space.sync_state`` frame. Nothing
 here goes on the wire to another household.
 """
 
@@ -56,12 +60,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: An ``ok`` refreshes its stored time at most this often per (space,
+#: The same result refreshes its stored time at most this often per (space,
 #: host) — one write per 30-minute round, never one per stream when several
 #: land close together ("Sync now" next to a periodic round).
-OK_REFRESH_S: float = 15 * 60
+RESULT_REFRESH_S: float = 15 * 60
 
-#: Spaces whose last computed state is remembered (frame on change).
+#: Spaces whose last framed status is remembered (frame on change).
 MAX_TRACKED: int = 4096
 
 
@@ -76,6 +80,7 @@ class _Outcomes(Protocol):
         instance_id: str,
         result: SpaceSyncResult,
         *,
+        at: str,
         ok_at: str | None = None,
     ) -> None: ...
 
@@ -99,8 +104,9 @@ class SpaceSyncStatusService(BusPublisherMixin):
         "_bus",
         "_clock",
         "_hosts",
-        "_last_state",
+        "_last_sent",
         "_outbox",
+        "_outbox_due",
         "_outcomes",
         "_own_instance_id",
         "_receiving",
@@ -117,7 +123,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         outbox: _Outbox,
         hosts: Callable[[Space], Awaitable[list[str]]],
         own_instance_id: str,
-        receiving: Callable[[str, str], bool] | None = None,
+        receiving: Callable[[str, list[str], str], bool] | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._bus = bus
@@ -127,12 +133,16 @@ class SpaceSyncStatusService(BusPublisherMixin):
         #: The households acting as a space's host here, owner first.
         self._hosts = hosts
         self._own_instance_id = own_instance_id
-        #: ``(space_id, ignore_sync_id) ->`` whether a stream of the space is
-        #: arriving here now (the session manager). ``None``: never.
+        #: ``(space_id, providers, ignore_sync_id) ->`` whether a stream of
+        #: the space from one of *providers* (its acting hosts) is arriving
+        #: here now (the session manager). ``None``: never.
         self._receiving = receiving
         self._clock = clock
-        #: space → the state last computed after an outcome (frame on change).
-        self._last_state: OrderedDict[str, SpaceSyncState] = OrderedDict()
+        #: space → the (state, waiting count) last framed (frame on change).
+        self._last_sent: OrderedDict[str, tuple[SpaceSyncState, int]] = OrderedDict()
+        #: space → whether its outbox changed again while its recheck runs
+        #: (:meth:`outbox_changed`: one recheck at a time per space).
+        self._outbox_due: dict[str, bool] = {}
         #: Outcomes being recorded (:meth:`_spawn`).
         self._tasks: set[asyncio.Task] = set()
 
@@ -166,8 +176,8 @@ class SpaceSyncStatusService(BusPublisherMixin):
         hosts = await self._hosts(space)
         outcomes = await self._outcomes.outcomes(space.id, hosts)
         receiving = (
-            self._receiving(space.id, ignore_sync_id)
-            if self._receiving is not None
+            self._receiving(space.id, hosts, ignore_sync_id)
+            if self._receiving is not None and hosts
             else False
         )
         state, last_ok = sync_state(outcomes, receiving=receiving, now=self._clock())
@@ -214,9 +224,38 @@ class SpaceSyncStatusService(BusPublisherMixin):
 
     async def host_unreachable(self, space_id: str, hosts: Iterable[str]) -> None:
         """The scheduler waited a round's full while for *hosts* (the
-        households acting as the space's host) and none answered."""
+        households acting as the space's host) and none answered — for any
+        space one of our people holds a member seat in."""
         for host in hosts:
             await self.record(space_id, host, SpaceSyncResult.UNREACHABLE)
+
+    def outbox_changed(self, space_id: str) -> None:
+        """Rows of *space_id*'s outbox were queued, delivered or dropped
+        (the federation service, the outbox processor): frame the waiting
+        count if it moved. Never blocks the caller and never reads per row —
+        changes that land while the space's recheck runs fold into one more
+        recheck after it."""
+        if not space_id:
+            return
+        if space_id in self._outbox_due:
+            self._outbox_due[space_id] = True
+            return
+        self._outbox_due[space_id] = False
+        self._spawn(self._outbox_recheck(space_id))
+
+    async def _outbox_recheck(self, space_id: str) -> None:
+        try:
+            while True:
+                space = await self._space_repo.get(space_id)
+                if space is not None:
+                    await self._recheck(space)
+                if not self._outbox_due.get(space_id):
+                    return
+                self._outbox_due[space_id] = False
+        except Exception:
+            log.exception("sync status: rechecking space %s failed", space_id)
+        finally:
+            self._outbox_due.pop(space_id, None)
 
     async def stream_started(self, space_id: str, provider: str) -> None:
         """A stream of the space from *provider* began arriving here: a
@@ -263,34 +302,39 @@ class SpaceSyncStatusService(BusPublisherMixin):
     ) -> None:
         """Write only what changes the stored row — read first (one small
         SELECT per answer, once per round): never a write the row already
-        says, and an ``ok`` refreshes its time at most every
-        :data:`OK_REFRESH_S`. The row decides, not memory: a household whose
-        seat row arrives after its first answer still gets the next one."""
+        says, and the same result refreshes its time at most every
+        :data:`RESULT_REFRESH_S`. The row decides, not memory: a household
+        whose seat row arrives after its first answer still gets the next
+        one."""
         now = self._clock()
         held = await self._outcomes.outcomes(space_id, [provider])
         if not held:
             return  # no seat row for that household: nothing to keep
         stored = held[0]
         if stored.result is result:
-            if result is not SpaceSyncResult.OK:
-                return  # unchanged
-            last_ok = parse_utc(stored.ok_at)
-            if last_ok is not None and (now - last_ok).total_seconds() < OK_REFRESH_S:
+            last = parse_utc(stored.result_at)
+            if last is None and result is SpaceSyncResult.OK:
+                last = parse_utc(stored.ok_at)
+            if last is not None and (now - last).total_seconds() < RESULT_REFRESH_S:
                 return  # refreshed this round already
-        ok_at = now.isoformat() if result is SpaceSyncResult.OK else None
-        await self._outcomes.record_outcome(space_id, provider, result, ok_at=ok_at)
+        stamp = now.isoformat()
+        ok_at = stamp if result is SpaceSyncResult.OK else None
+        await self._outcomes.record_outcome(
+            space_id, provider, result, at=stamp, ok_at=ok_at
+        )
 
     async def _recheck(self, space: Space, *, ignore_sync_id: str = "") -> None:
         status = await self._status_of(space, ignore_sync_id=ignore_sync_id)
-        if self._last_state.get(space.id) is status.state:
+        sent = (status.state, status.waiting_to_send)
+        if self._last_sent.get(space.id) == sent:
             return
-        self._last_state[space.id] = status.state
-        self._last_state.move_to_end(space.id)
-        while len(self._last_state) > MAX_TRACKED:
-            self._last_state.popitem(last=False)
+        self._last_sent[space.id] = sent
+        self._last_sent.move_to_end(space.id)
+        while len(self._last_sent) > MAX_TRACKED:
+            self._last_sent.popitem(last=False)
         await self._emit(
             SpaceSyncStateChanged(space_id=space.id, sync=status.to_wire())
         )
 
 
-__all__ = ["OK_REFRESH_S", "SpaceSyncStatusService"]
+__all__ = ["RESULT_REFRESH_S", "SpaceSyncStatusService"]

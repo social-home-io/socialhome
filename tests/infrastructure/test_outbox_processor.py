@@ -1150,3 +1150,71 @@ async def test_a_delivered_row_wakes_the_next_pass_for_the_rows_it_held():
     )
     await failed.drain_once()
     assert not failed._wake.is_set()
+
+
+# ── Sync status: a space's waiting count follows its rows ────────────────
+
+
+def _space_entry(entry_id: str, space_id: str | None, attempts: int = 0):
+    return OutboxEntry(
+        id=entry_id,
+        instance_id=f"inst-{entry_id}",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="",
+        status="pending",
+        attempts=attempts,
+        next_attempt_at=datetime.now(UTC).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
+        space_id=space_id,
+    )
+
+
+async def test_a_delivered_or_dropped_space_row_tells_the_sync_status():
+    """A space row that leaves the queue (delivered, refused for good, or
+    given up on) changes the space's "N waiting to send"; a retry that
+    stays queued, or a row of no space, does not."""
+    outcomes = {
+        "ok": DeliveryOutcome.SUCCESS,
+        "gone": DeliveryOutcome.PERMANENT,
+        "last": DeliveryOutcome.TRANSIENT,
+        "again": DeliveryOutcome.TRANSIENT,
+        "dm": DeliveryOutcome.SUCCESS,
+    }
+    entries = [
+        _space_entry("ok", "sp-1"),
+        _space_entry("gone", "sp-2"),
+        _space_entry("last", "sp-3", attempts=MAX_ATTEMPTS - 1),
+        _space_entry("again", "sp-4"),
+        _space_entry("dm", None),
+    ]
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=entries)
+    repo.mark_delivered = AsyncMock()
+    repo.mark_failed = AsyncMock()
+    repo.reschedule = AsyncMock()
+    changed: list[str] = []
+
+    async def _deliver(entry):
+        return outcomes[entry.id]
+
+    proc = OutboxProcessor(
+        repo, _deliver, rng=lambda: 0.5, space_changed=changed.append
+    )
+    await proc.drain_once()
+    assert sorted(changed) == ["sp-1", "sp-2", "sp-3"]
+
+
+async def test_a_failing_sync_status_hook_never_costs_the_delivery():
+    entry = _space_entry("ok", "sp-1")
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[entry])
+    repo.mark_delivered = AsyncMock()
+
+    def _boom(space_id: str) -> None:
+        raise RuntimeError("status down")
+
+    proc = OutboxProcessor(
+        repo, AsyncMock(return_value=DeliveryOutcome.SUCCESS), space_changed=_boom
+    )
+    await proc.drain_once()
+    repo.mark_delivered.assert_awaited_once_with("ok")

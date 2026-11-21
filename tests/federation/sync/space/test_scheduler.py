@@ -2344,7 +2344,7 @@ async def test_a_host_equivalent_household_never_falls_back(
 ):
     """We host the space, or hold its roster authority (a seed-holding
     delegated admin): nobody to fall back from."""
-    sched, _contact, resume = _helper_sched(
+    sched, contact, resume = _helper_sched(
         bus,
         queue,
         sync_manager,
@@ -2355,7 +2355,39 @@ async def test_a_host_equivalent_household_never_falls_back(
     await _round(sched)
     await _wait_checks(sched)
     assert resume.requests == []
+    assert not contact.is_silent("sp-1")
     assert sched._helper_checks == {}
+
+
+async def test_a_roster_authority_household_records_its_silent_host(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """Holding the roster authority means no helper fallback — but the
+    owner going silent is still what the member reads ("host offline"):
+    the silence check runs for every space we hold a member seat in."""
+    sched, contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"], authority=True
+    )
+    status = _Unreachable()
+    sched.attach_status(status)
+    await _round(sched)
+    await _wait_checks(sched)
+    assert status.calls == [("sp-1", frozenset({"host"}))]
+    assert resume.requests == []
+    assert not contact.is_silent("sp-1")
+
+
+async def test_a_space_hosted_here_records_no_silent_host(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"], owner="self"
+    )
+    status = _Unreachable()
+    sched.attach_status(status)
+    await _round(sched)
+    await _wait_checks(sched)
+    assert status.calls == []
 
 
 async def test_a_caught_up_mesh_only_host_is_asked_every_tick_and_waited_for(
@@ -2868,9 +2900,12 @@ async def test_a_failing_status_write_never_costs_the_helper(
     assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
 
 
-async def test_sync_now_asks_a_paired_host_for_an_incremental_stream(
+async def test_sync_now_asks_only_the_paired_host_never_a_co_member(
     bus, queue, sync_manager
 ):
+    """Sync now of a space hosted elsewhere asks the households acting as
+    its host — never a paired co-member: 3 Sync now next to 2 periodic
+    rounds would spend that household's whole 5 BEGINs / h for us."""
     fed = _FakeFederation(confirmed={"host", "peer-b"})
     sched = SpaceSyncScheduler(
         bus=bus,
@@ -2892,12 +2927,11 @@ async def test_sync_now_asks_a_paired_host_for_an_incremental_stream(
         await asyncio.sleep(0.1)
     finally:
         await queue.stop()
-    assert targets == ["host", "peer-b"]
+    assert targets == ["host"]
     begins = [s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN]
-    assert {(b["to"], b["payload"]["sync_mode"]) for b in begins} == {
-        ("host", "incremental"),
-        ("peer-b", "incremental"),
-    }
+    assert [(b["to"], b["payload"]["sync_mode"]) for b in begins] == [
+        ("host", "incremental")
+    ]
     assert fed.mesh_catchups == []
 
 
