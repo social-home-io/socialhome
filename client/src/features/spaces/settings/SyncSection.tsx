@@ -13,7 +13,7 @@ import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import {
-  syncLastOkLine, syncStateBody, syncStateLabel, syncWaitingLine, useSpaceSync,
+  syncBody, syncHeading, syncLastOkLine, syncWaitingLine, useSpaceSync,
 } from '../spaceSync'
 
 export function SyncSection({ spaceId, sync, hostedHere }: {
@@ -50,9 +50,9 @@ export function SyncSection({ spaceId, sync, hostedHere }: {
     <div class="sh-ss-card sh-sync-card" data-testid="space-sync-section">
       <p class={`sh-sync-card__state sh-sync-card__state--${live.state}`}>
         <span class="sh-sync-chip__dot" aria-hidden="true" />
-        <strong>{syncStateLabel(live.state)}</strong>
+        <strong>{syncHeading(live)}</strong>
       </p>
-      <p class="sh-muted sh-sync-card__body">{syncStateBody(live.state, hostedHere)}</p>
+      <p class="sh-muted sh-sync-card__body">{syncBody(live, hostedHere)}</p>
       {(lastOk || waiting) && (
         <ul class="sh-sync-card__facts">
           {lastOk && <li>{lastOk}</li>}

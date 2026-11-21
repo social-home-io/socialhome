@@ -10,7 +10,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import { isOne, t } from '@/i18n/i18n'
 import { localSinceTime, relativeDocsTime } from '@/utils/relativeTime'
-import type { SpaceSyncWire } from '@/types'
+import type { SpaceSyncPageWire, SpaceSyncWire } from '@/types'
 import { ws } from '@/ws'
 
 /** ``state``; ``last_ok_at`` — UTC ISO 8601 of the host's last "you're up
@@ -23,12 +23,26 @@ function waitingText(n: number): string {
   return isOne(n) ? t('space.sync.waiting_one') : t('space.sync.waiting', { n: String(n) })
 }
 
+/** Our copy was compared with the host's newest signed page and
+ *  differs (v_95) — the server reads it ``behind``. */
+function needsSync(sync: SpaceSync): boolean {
+  return sync.state === 'behind' && sync.page?.match === false
+}
+
+function needsSyncText(sync: SpaceSync): string {
+  const n = sync.page?.differing_buckets ?? 0
+  return isOne(n)
+    ? t('space.sync.chip.needs_sync_one')
+    : t('space.sync.chip.needs_sync', { n: String(n) })
+}
+
 /** The state's own words, without the waiting count. */
 function stateText(sync: SpaceSync): string | null {
   switch (sync.state) {
     case 'catching_up':
       return t('space.sync.state.catching_up')
     case 'behind':
+      if (needsSync(sync)) return needsSyncText(sync)
       return sync.last_ok_at
         ? t('space.sync.chip.behind', { time: relativeDocsTime(sync.last_ok_at) })
         : t('space.sync.state.behind')
@@ -65,6 +79,22 @@ export function syncStateLabel(state: SpaceSyncState): string {
   }
 }
 
+/** The settings' heading: the state, or — compared with the newest
+ *  signed page — "Up to date · checked against page N" / "Needs sync". */
+export function syncHeading(sync: SpaceSync): string {
+  if (needsSync(sync)) return t('space.sync.state.needs_sync')
+  if (sync.state === 'up_to_date' && sync.page?.match === true) {
+    return t('space.sync.page_checked', { n: String(sync.page.seq) })
+  }
+  return syncStateLabel(sync.state)
+}
+
+/** :func:`syncStateBody`, worded for a compare that found a difference. */
+export function syncBody(sync: SpaceSync, hostedHere: boolean): string {
+  if (!hostedHere && needsSync(sync)) return t('space.sync.body.needs_sync')
+  return syncStateBody(sync.state, hostedHere)
+}
+
 /** One sentence on what the state means for the reader. */
 export function syncStateBody(state: SpaceSyncState, hostedHere: boolean): string {
   if (hostedHere) return t('space.sync.hosted_here')
@@ -94,11 +124,27 @@ export function parseSpaceSync(raw: unknown): SpaceSync | null {
   const r = raw as Record<string, unknown>
   const states: SpaceSyncState[] = ['up_to_date', 'catching_up', 'behind', 'host_offline', 'never']
   if (!states.includes(r.state as SpaceSyncState)) return null
-  return {
+  const sync: SpaceSync = {
     state: r.state as SpaceSyncState,
     last_ok_at: typeof r.last_ok_at === 'string' ? r.last_ok_at : null,
     waiting_to_send: typeof r.waiting_to_send === 'number' && r.waiting_to_send > 0
       ? Math.floor(r.waiting_to_send) : 0,
+  }
+  const page = parsePage(r.page)
+  if (page) sync.page = page
+  return sync
+}
+
+function parsePage(raw: unknown): SpaceSyncPageWire | null {
+  if (!raw || typeof raw !== 'object') return null
+  const p = raw as Record<string, unknown>
+  if (typeof p.seq !== 'number' || typeof p.at !== 'string') return null
+  return {
+    seq: p.seq,
+    at: p.at,
+    match: typeof p.match === 'boolean' ? p.match : null,
+    differing_buckets: typeof p.differing_buckets === 'number' && p.differing_buckets >= 0
+      ? Math.floor(p.differing_buckets) : null,
   }
 }
 

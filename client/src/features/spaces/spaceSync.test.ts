@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
-  parseSpaceSync, syncChipLabel, syncLastOkLine, syncStateBody, syncStateLabel, syncWaitingLine,
+  parseSpaceSync, syncBody, syncChipLabel, syncHeading, syncLastOkLine, syncStateBody,
+  syncStateLabel, syncWaitingLine,
 } from './spaceSync'
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
@@ -44,5 +45,39 @@ describe('spaceSync', () => {
     expect(syncWaitingLine({ state: 'never', last_ok_at: null, waiting_to_send: 0 })).toBeNull()
     expect(syncWaitingLine({ state: 'never', last_ok_at: null, waiting_to_send: 4 }))
       .toBe('4 waiting to send')
+  })
+
+  describe('signed sync page (v_95)', () => {
+    const page = (match: boolean | null, differing: number | null = null) => ({
+      seq: 812, at: ago(3), match, differing_buckets: differing,
+    })
+
+    it('parses the page and drops a malformed one', () => {
+      expect(parseSpaceSync({ state: 'up_to_date', page: page(true, 0) })?.page)
+        .toEqual({ seq: 812, at: expect.any(String), match: true, differing_buckets: 0 })
+      expect(parseSpaceSync({ state: 'up_to_date', page: { seq: 'x' } })?.page).toBeUndefined()
+      expect(parseSpaceSync({ state: 'up_to_date' })).not.toHaveProperty('page')
+    })
+
+    it('a match reads up to date, checked against page N', () => {
+      const sync = { state: 'up_to_date' as const, last_ok_at: null, waiting_to_send: 0, page: page(true, 0) }
+      expect(syncHeading(sync)).toBe('Up to date · checked against page 812')
+      expect(syncChipLabel(sync)).toBeNull()
+    })
+
+    it('a mismatch reads needs sync with the parts that differ', () => {
+      const sync = { state: 'behind' as const, last_ok_at: ago(5), waiting_to_send: 0, page: page(false, 3) }
+      expect(syncChipLabel(sync)).toBe('Needs sync · 3 parts differ')
+      expect(syncHeading(sync)).toBe('Needs sync')
+      expect(syncBody(sync, false)).toContain('signed')
+      expect(syncChipLabel({ ...sync, page: page(false, 1) })).toBe('Needs sync · 1 part differs')
+    })
+
+    it('without a compared page the answer-based words stay', () => {
+      const sync = { state: 'behind' as const, last_ok_at: null, waiting_to_send: 0, page: page(null) }
+      expect(syncChipLabel(sync)).toBe('Behind')
+      expect(syncHeading(sync)).toBe('Behind')
+      expect(syncBody(sync, false)).toContain('every 30 minutes')
+    })
   })
 })

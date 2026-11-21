@@ -921,5 +921,10 @@
   "space.sync.chip.behind": "{time} is a relative time like \"5 min ago\". Shown in a small chip under the space's top bar — keep short.",
   "space.sync.chip.host_offline": "{time} is a clock time or a day + time (\"09:12\", \"Mon 18:40\"): when this household was last up to date with the space. \"Host\" = the household the space lives on.",
   "space.sync.chip_aria": "{status} is the chip's own text (e.g. \"Behind — last up to date 5 min ago\"). Read by screen readers.",
-  "space.sync.last_ok": "{time} is a relative time like \"5 min ago\"."
+  "space.sync.last_ok": "{time} is a relative time like \"5 min ago\".",
+  "space.sync.state.needs_sync": "Heading in a space's Sync settings: this household's copy of the space was compared with the latest state page the host signed and differs.",
+  "space.sync.chip.needs_sync": "Header chip of a space. {n} = how many of the 256 parts of the space's signed state differ from this household's copy (always 2 or more here).",
+  "space.sync.chip.needs_sync_one": "Header chip of a space: exactly one of the 256 parts of the space's signed state differs from this household's copy.",
+  "space.sync.page_checked": "Heading in a space's Sync settings. 'Page' is a signed snapshot of the space's state (numbered {n}), not a Pages document.",
+  "space.sync.body.needs_sync": "One sentence under the heading: the copy differs from the host's latest signed state snapshot, and a sync was requested automatically."
 }

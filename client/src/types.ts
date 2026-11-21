@@ -404,10 +404,20 @@ export interface Comment {
 }
 
 /** ``GET /api/spaces/{id}`` ``sync`` (see ``features/spaces/spaceSync``). */
+/** v_95: the newest signed sync page held, and how our copy compared
+ *  with it (``match`` / ``differing_buckets`` ``null``: not compared yet). */
+export interface SpaceSyncPageWire {
+  seq: number
+  at: string
+  match: boolean | null
+  differing_buckets: number | null
+}
+
 export interface SpaceSyncWire {
   state: 'up_to_date' | 'catching_up' | 'behind' | 'host_offline' | 'never'
   last_ok_at: string | null
   waiting_to_send: number
+  page?: SpaceSyncPageWire
 }
 
 export interface Space {
