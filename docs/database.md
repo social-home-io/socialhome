@@ -362,6 +362,21 @@ posts: 376 ms → 7 ms). Statistics alone were not enough for posts: the
 planner only has per-table averages (no `STAT4`), so with ~50 spaces the
 big space looked small and was sorted again — hence the index.
 
+Incremental reads (`sync_seq > ?`) never leave the plan to the planner
+(`first_changed_page` / `page_stamp_col` in `repositories/base.py`): the
+first page of an incremental run — all the quiet check
+(`provider.is_quiet`) reads, every 30 min per (household, space) — reads the
+table's change-stamp index (`INDEXED BY idx_…_sync_seq`, with `CROSS JOIN`
+fixing the join order) and sorts only the changed rows; every later page
+keeps that index out with a unary `+` on the stamp column, since past one
+full page it would re-sort every changed row for every page. Posts, post
+tombstones, bazaar, comments, chat messages and gallery items / item
+tombstones follow it (quiet: 0.1–0.3 ms each on a 40k-post space among 50
+spaces, with or without statistics). The other exporters (calendar,
+stickies, zones, timetables, tasks, pages, gallery albums, member pictures)
+have no `sync_seq` index, so their quiet read walks the space's rows of that
+resource (~1 ms for 5k calendar events).
+
 ## Migrations after v1
 
 | File | Purpose |

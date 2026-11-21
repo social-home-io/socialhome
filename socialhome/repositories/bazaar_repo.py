@@ -45,7 +45,9 @@ from .base import (
     bool_col,
     changed_since_sql,
     dump_json,
+    first_changed_page,
     load_json,
+    page_stamp_col,
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
@@ -506,14 +508,13 @@ class SqliteBazaarRepo:
         # the listings by rowid from the cursor; ``+p.sync_seq`` keeps the
         # stamp index out, which would re-sort every changed listing for
         # every page (O(n²): ~240 ms for 4k listings).
-        first_changed_page = since is not None and cursor is None
         changed, changed_params = changed_since_sql(
-            "p.sync_seq" if first_changed_page else "+p.sync_seq", since
+            page_stamp_col("p.sync_seq", since, cursor), since
         )
         source = (
             "space_posts p INDEXED BY idx_space_posts_sync_seq"
             " CROSS JOIN bazaar_listings l"
-            if first_changed_page
+            if first_changed_page(since, cursor)
             else "bazaar_listings l JOIN space_posts p"
         )
         rows = rows_to_dicts(

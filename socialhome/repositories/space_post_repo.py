@@ -47,6 +47,8 @@ from ..utils.datetime import parse_iso8601_optional
 from .base import (
     bool_col,
     changed_since_sql,
+    first_changed_page,
+    page_stamp_col,
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
@@ -456,7 +458,9 @@ class SqliteSpacePostRepo:
         window, window_params = retention_window_sql(
             "created_at", cutoff, type_col="type", exempt_types=exempt_types
         )
-        changed, changed_params = changed_since_sql("sync_seq", since)
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("sync_seq", since, cursor), since
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, * FROM "
@@ -484,7 +488,9 @@ class SqliteSpacePostRepo:
         limit: int = 200,
         since: int | None = None,
     ) -> tuple[list[PostTombstone], int | None]:
-        changed, changed_params = changed_since_sql("sync_seq", since)
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("sync_seq", since, cursor), since
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, id, author, type, created_at,"
@@ -1084,11 +1090,22 @@ class SqliteSpacePostRepo:
         window, window_params = retention_window_sql(
             "p.created_at", cutoff, type_col="p.type", exempt_types=exempt_types
         )
-        changed, changed_params = changed_since_sql("c.sync_seq", since)
+        # See ``first_changed_page``: the first incremental page starts from
+        # the changed comments (CROSS JOIN fixes that order).
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("c.sync_seq", since, cursor), since
+        )
+        source = (
+            "space_post_comments c INDEXED BY idx_space_post_comments_sync_seq"
+            " CROSS JOIN space_posts p"
+            if first_changed_page(since, cursor)
+            else "space_post_comments c JOIN space_posts p"
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
-                "SELECT c.rowid AS sync_rowid, c.* FROM space_post_comments c"
-                " JOIN space_posts p ON p.id = c.post_id"
+                "SELECT c.rowid AS sync_rowid, c.* FROM "
+                + source
+                + " ON p.id = c.post_id"
                 " WHERE p.space_id=? AND c.deleted=?"
                 + ("" if deleted else " AND p.deleted=0")
                 + window
@@ -1177,7 +1194,7 @@ def _sync_page_source(since: int | None, cursor: int | None) -> str:
     ``since`` set means the query has ``sync_seq > ?``, which the partial
     index requires. Same rows either way; only the plan differs.
     """
-    if since is not None and cursor is None:
+    if first_changed_page(since, cursor):
         return "space_posts INDEXED BY idx_space_posts_sync_seq"
     return "space_posts"
 

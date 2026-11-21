@@ -17,6 +17,7 @@ from socialhome.domain.conversation import (
     SystemChatScope,
 )
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
+from tests.repositories.sync_page_plans import query_plans, set_statistics
 
 
 @pytest.fixture
@@ -1539,3 +1540,89 @@ async def test_adopt_media_file_is_bound_to_the_rows_sender_and_blob(
     assert not await _adopt(env, blob=blob, instance=instance)
     msg = await env.repo.get_message("m1")
     assert msg.media_sync_status == "pending"
+
+
+# ── §25.6 chat pages: the first-changed-page rule ────────────────────────
+
+_OLD_CHAT_PAGE = (
+    "SELECT rowid AS sync_rowid, id FROM conversation_messages"
+    " WHERE conversation_id=? AND deleted=? AND sync_seq > ?"
+    " AND rowid > ? ORDER BY rowid LIMIT ?"
+)
+
+
+async def _seed_chat(env, n: int) -> None:
+    """``n`` messages alternating between chats c-a and c-b, every 5th
+    deleted."""
+    for cid in ("c-a", "c-b"):
+        await env.repo.create(_conv(cid, ConversationType.GROUP_DM))
+
+    def _fill(conn):
+        conn.executemany(
+            "INSERT INTO conversation_messages(id, conversation_id,"
+            " sender_user_id, content, created_at, deleted) VALUES(?,?,?,?,?,?)",
+            [
+                (
+                    f"km-{i}",
+                    "c-a" if i % 3 else "c-b",
+                    "uid-alice",
+                    "hi",
+                    "2026-01-01 00:00:00",
+                    int(i % 5 == 0),
+                )
+                for i in range(n)
+            ],
+        )
+
+    await env.db.transact(_fill)
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "deleted"])
+async def test_an_incremental_chat_run_pages_exactly_like_one_query(env, deleted):
+    await _seed_chat(env, 150)
+    mark = await env.db.fetchval(
+        "SELECT sync_seq FROM conversation_messages WHERE id='km-30'"
+    )
+    old, cursor = [], None
+    while True:
+        rows = await env.db.fetchall(
+            _OLD_CHAT_PAGE, ("c-a", int(deleted), mark, cursor or 0, 3)
+        )
+        old.append([r["id"] for r in rows])
+        if len(rows) < 3:
+            break
+        cursor = rows[-1]["sync_rowid"]
+    new, cursor = [], None
+    while True:
+        page, cursor = await env.repo.list_messages_sync_page(
+            "c-a", deleted=deleted, since=mark, cursor=cursor, limit=3
+        )
+        new.append([m.id for m in page])
+        if cursor is None:
+            break
+    assert len(new) >= 3
+    assert new == old
+
+
+@pytest.mark.parametrize("stats", [False, True], ids=["no-stats", "optimized"])
+async def test_a_quiet_chat_check_reads_the_change_stamps(env, stats):
+    """First incremental page — all a quiet check reads: only the changed
+    messages, never a rowid walk of every chat's messages (~1.7 ms per 30k
+    with statistics)."""
+    await _seed_chat(env, 3000)
+    await set_statistics(env.db, on=stats)
+    mark = await env.db.fetchval("SELECT max(sync_seq) FROM conversation_messages")
+    for plan in await query_plans(
+        env.db, lambda: env.repo.list_messages_sync_page("c-a", since=mark)
+    ):
+        assert (
+            "idx_conversation_messages_sync_seq (conversation_id=? AND sync_seq>?)"
+            in plan
+        ), plan
+    for plan in await query_plans(
+        env.db, lambda: env.repo.list_messages_sync_page("c-a", since=0, cursor=1)
+    ):
+        # No ``sync_seq>?`` range: it would re-sort every changed message
+        # for every page. (Without statistics SQLite may still use the
+        # index's ``conversation_id`` prefix — the plain full-export plan.)
+        assert "sync_seq>?" not in plan, plan

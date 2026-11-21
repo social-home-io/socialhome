@@ -14,6 +14,7 @@ from socialhome.crypto import (
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem, ItemCursor, ItemSort
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from tests.repositories.sync_page_plans import query_plans, set_statistics
 
 
 @pytest.fixture
@@ -1688,3 +1689,94 @@ async def test_get_frame_photo_follows_the_same_rule(env):
     await repo.set_album_audience("h-1", "chosen")
     assert await repo.get_frame_photo("p-new", picked) is None
     assert await repo.list_frame_photos(picked, limit=5) == []
+
+
+# ── §25.6 gallery item pages: the first-changed-page rule ────────────────
+
+_OLD_ITEMS_PAGE = (
+    "SELECT i.rowid AS sync_rowid, i.id FROM gallery_items i"
+    " JOIN gallery_albums a ON a.id = i.album_id"
+    " WHERE a.space_id=? AND {where} AND i.sync_seq > ?"
+    " AND i.rowid > ? ORDER BY i.rowid LIMIT ?"
+)
+_LIVE = (
+    "i.source_post_id IS NULL AND a.is_system = 0"
+    " AND i.deleted_at IS NULL AND a.deleted_at IS NULL"
+)
+_GONE = "a.deleted_at IS NULL AND a.is_system = 0 AND i.deleted_at IS NOT NULL"
+
+
+async def _seed_items(db, n: int) -> None:
+    """``n`` items over three albums (two in sp-1, one in sp-2), every 5th
+    deleted."""
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-2', 'Y', 'i', 'alice', 'cd')"
+    )
+
+    def _fill(conn):
+        conn.executemany(
+            "INSERT INTO gallery_albums(id, space_id, name) VALUES(?,?,?)",
+            [("ga-1", "sp-1", "A"), ("ga-2", "sp-1", "B"), ("ga-3", "sp-2", "C")],
+        )
+        conn.executemany(
+            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+            " filename, thumbnail_filename, width, height, deleted_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    f"gi-{i}",
+                    f"ga-{1 + i % 3}",
+                    "a-id",
+                    "photo",
+                    f"f{i}.webp",
+                    f"t{i}.webp",
+                    10,
+                    10,
+                    "2026-01-01 00:00:00" if i % 5 == 0 else None,
+                )
+                for i in range(n)
+            ],
+        )
+
+    await db.transact(_fill)
+
+
+@pytest.mark.parametrize("gone", [False, True], ids=["live", "tombstones"])
+async def test_an_incremental_items_run_pages_exactly_like_one_query(env, gone):
+    db, repo = env
+    await _seed_items(db, 150)
+    mark = await db.fetchval("SELECT sync_seq FROM gallery_items WHERE id='gi-30'")
+    sql = _OLD_ITEMS_PAGE.format(where=_GONE if gone else _LIVE)
+    old, cursor = [], None
+    while True:
+        rows = await db.fetchall(sql, ("sp-1", mark, cursor or 0, 3))
+        old.append([r["id"] for r in rows])
+        if len(rows) < 3:
+            break
+        cursor = rows[-1]["sync_rowid"]
+    read = repo.list_item_tombstones_page if gone else repo.list_items_sync_page
+    new, cursor = [], None
+    while True:
+        page, cursor = await read("sp-1", since=mark, cursor=cursor, limit=3)
+        new.append([i.id for i in page])
+        if cursor is None:
+            break
+    assert len(new) >= 3
+    assert new == old
+
+
+@pytest.mark.parametrize("stats", [False, True], ids=["no-stats", "optimized"])
+@pytest.mark.parametrize("gone", [False, True], ids=["live", "tombstones"])
+async def test_a_quiet_gallery_check_reads_the_change_stamps(env, stats, gone):
+    """First incremental page — all a quiet check reads: only the changed
+    items, never a walk of the space's albums or of every item."""
+    db, repo = env
+    await _seed_items(db, 3000)
+    await set_statistics(db, on=stats)
+    mark = await db.fetchval("SELECT max(sync_seq) FROM gallery_items")
+    read = repo.list_item_tombstones_page if gone else repo.list_items_sync_page
+    for plan in await query_plans(db, lambda: read("sp-1", since=mark)):
+        assert "idx_gallery_items_sync_seq (sync_seq>?)" in plan, plan
+    for plan in await query_plans(db, lambda: read("sp-1", since=0, cursor=1)):
+        assert "idx_gallery_items_sync_seq" not in plan, plan

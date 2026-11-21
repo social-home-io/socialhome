@@ -12,6 +12,7 @@ from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Comment, CommentType, FileMeta, Post, PostType
 from socialhome.domain.space_item import stamp_to_db
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from tests.repositories.sync_page_plans import query_plans, set_statistics
 
 
 @pytest.fixture
@@ -1560,3 +1561,96 @@ async def test_a_small_space_among_many_pages_every_row_once(env):
     )
     assert len(held) > 6
     assert seen == [r["id"] for r in held]
+
+
+# ── Comments: the same first-changed-page rule ───────────────────────────
+
+_OLD_COMMENTS_PAGE = (
+    "SELECT c.rowid AS sync_rowid, c.id FROM space_post_comments c"
+    " JOIN space_posts p ON p.id = c.post_id"
+    " WHERE p.space_id=? AND c.deleted=?{live} AND c.sync_seq > ?"
+    " AND c.rowid > ? ORDER BY c.rowid LIMIT ?"
+)
+
+
+async def _seed_comments(env, posts: int, comments: int) -> None:
+    """``posts`` posts over 5 spaces (sp-1 the big one) and ``comments``
+    comments spread over them, every 5th deleted."""
+    await _seed_interleaved(env, posts, spaces=5, big=True)
+
+    def _fill(conn):
+        conn.executemany(
+            "INSERT INTO space_post_comments(id, post_id, author, type, content,"
+            " created_at, deleted) VALUES(?,?,?,?,?,?,?)",
+            [
+                (
+                    f"kc-{k}",
+                    f"kp-{(k * 7) % posts}",
+                    "uid-alice",
+                    "text",
+                    "c",
+                    "2026-01-01 00:00:00",
+                    int(k % 5 == 0),
+                )
+                for k in range(comments)
+            ],
+        )
+
+    await env.db.transact(_fill)
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "deleted"])
+async def test_an_incremental_comments_run_pages_exactly_like_one_query(env, deleted):
+    await _seed_comments(env, 120, 300)
+    mark = await env.db.fetchval(
+        "SELECT sync_seq FROM space_post_comments WHERE id='kc-60'"
+    )
+    old, cursor = [], None
+    while True:
+        rows = await env.db.fetchall(
+            _OLD_COMMENTS_PAGE.format(live="" if deleted else " AND p.deleted=0"),
+            (env.space_id, int(deleted), mark, cursor or 0, 3),
+        )
+        old.append([r["id"] for r in rows])
+        if len(rows) < 3:
+            break
+        cursor = rows[-1]["sync_rowid"]
+    new, cursor = [], None
+    while True:
+        page, cursor = await env.repo.list_comments_sync_page(
+            env.space_id, deleted=deleted, since=mark, cursor=cursor, limit=3
+        )
+        new.append([c.id for c in page])
+        if cursor is None:
+            break
+    assert len(new) >= 3
+    assert new == old
+
+
+@pytest.mark.parametrize("stats", [False, True], ids=["no-stats", "optimized"])
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "deleted"])
+async def test_a_quiet_comments_check_reads_the_change_stamps(env, stats, deleted):
+    """First incremental page — all a quiet check reads: only the changed
+    comments (``idx_space_post_comments_sync_seq``), never a walk of the
+    space's posts (~10 ms) or of every comment (~0.4 ms per 6k)."""
+    await _seed_comments(env, 600, 900)
+    await set_statistics(env.db, on=stats)
+    mark = await env.db.fetchval("SELECT max(sync_seq) FROM space_post_comments")
+    first = await query_plans(
+        env.db,
+        lambda: env.repo.list_comments_sync_page(
+            env.space_id, deleted=deleted, since=mark, limit=50
+        ),
+    )
+    for plan in first:
+        assert "idx_space_post_comments_sync_seq (sync_seq>?)" in plan, plan
+    # Past the first page (many changed): the stamp index stays out — it
+    # would re-sort every changed comment for every page.
+    later = await query_plans(
+        env.db,
+        lambda: env.repo.list_comments_sync_page(
+            env.space_id, deleted=deleted, since=0, cursor=1, limit=50
+        ),
+    )
+    for plan in later:
+        assert "idx_space_post_comments_sync_seq" not in plan, plan

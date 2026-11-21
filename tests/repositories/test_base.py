@@ -9,7 +9,9 @@ from contextlib import closing
 from socialhome.repositories.base import (
     bool_col,
     dump_json,
+    first_changed_page,
     load_json,
+    page_stamp_col,
     pick,
     retention_window_sql,
     row_to_dict,
@@ -244,3 +246,27 @@ def test_sync_page_below_is_a_seekable_upper_bound():
             )
         )
         assert "INTEGER PRIMARY KEY (rowid<?)" in plan
+
+
+def test_first_changed_page_is_the_first_page_of_an_incremental_run():
+    assert first_changed_page(since=5, cursor=None)
+    assert not first_changed_page(since=5, cursor=10)
+    assert not first_changed_page(since=None, cursor=None)
+    assert not first_changed_page(since=None, cursor=10)
+
+
+def test_page_stamp_col_keeps_the_stamp_index_out_past_the_first_page():
+    assert page_stamp_col("c.sync_seq", since=5, cursor=None) == "c.sync_seq"
+    assert page_stamp_col("c.sync_seq", since=5, cursor=10) == "+c.sync_seq"
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, sync_seq INT)")
+        conn.execute("CREATE INDEX t_seq ON t(sync_seq)")
+        plan = " ".join(
+            r[3]
+            for r in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM t WHERE "
+                + page_stamp_col("sync_seq", 5, 10)
+                + " > 5 AND rowid > 10 ORDER BY rowid"
+            )
+        )
+        assert "t_seq" not in plan, plan
