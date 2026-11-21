@@ -1107,6 +1107,84 @@ async def test_banned_repeat_and_closed_are_still_dropped_without_a_word(
     assert await _answers_to(gfs, a) == before
 
 
+async def test_a_full_space_answers_everyone_alike(households, gfs):
+    """At a full space the answer says nothing about the person: a banned
+    user id, a repeat and anyone else all hear "busy" — never silence for
+    one and "busy" for the other (that would let a prober read the ban
+    list)."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    await b.space_repo.ban_member(space.id, "banned-u", banned_by=b.user_id)
+    assert (
+        await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id="repeat-u", request_id="first")
+        )
+    )["filed"] is True
+    with patch.object(gfs_join_module, "MAX_PENDING_PER_SPACE", 1):
+        outs = [
+            await b.gfsjoin.join.handle_body(
+                _signed(a, space_id=space.id, user_id=user, request_id=rid)
+            )
+            for user, rid in (("banned-u", "x1"), ("repeat-u", "x2"), ("anyone", "x3"))
+        ]
+    assert [o.get("busy") for o in outs] == [True, True, True]
+    # Same with the per-space budget spent instead.
+    b.gfsjoin.join._rate_limiter = RateLimiter()
+    with (
+        patch.object(gfs_join_module, "PER_SPACE_LIMIT", 0),
+        patch.object(gfs_join_module, "PER_SENDER_LIMIT", 100),
+    ):
+        outs = [
+            await b.gfsjoin.join.handle_body(
+                _signed(a, space_id=space.id, user_id=user, request_id=rid)
+            )
+            for user, rid in (("banned-u", "y1"), ("anyone", "y2"))
+        ]
+    assert [o["filed"] for o in outs] == [False, False]
+    assert outs[0] == outs[1]
+
+
+async def test_a_busy_never_cancels_an_approval_being_seated(households, gfs):
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    rid = await _ask(a, b, space)
+    await _settle(gfs, a, b)
+    row = await a.space_repo.get_join_request(rid)
+    relay = orjson.loads(row["gfs_relay"])
+    relay["approval"] = {"invite_token": "t", "expires_at": "2099-01-01T00:00:00+00:00"}
+    await a.space_repo.set_join_request_gfs_relay(rid, orjson.dumps(relay).decode())
+    body = _signed(
+        b,
+        kind=KIND_JOIN_REQUEST_ANSWER,
+        request_id=rid,
+        space_id=space.id,
+        answer="busy",
+    )
+    with pytest.raises(ValueError, match="approved"):
+        await a.gfsjoin.join.handle_body(body)
+    assert (await a.space_repo.get_join_request(rid))["status"] == "pending"
+
+
+async def test_a_later_request_replaces_the_busy_note(households, gfs):
+    """Busy, then asked again and declined: Discover no longer says busy."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    with patch.object(gfs_join_module, "MAX_PENDING_PER_SPACE", 0):
+        await _ask(a, b, space)
+        await _settle(gfs, a, b)
+    assert await a.space_service.list_busy_join_request_space_ids(a.user_id) == [
+        space.id
+    ]
+    again = await _ask(a, b, space)
+    await _settle(gfs, a, b)
+    await b.space_service.deny_join_request(
+        again, actor_username=b.username, space_id=space.id
+    )
+    await _settle(gfs, a, b)
+    assert (await a.space_repo.get_join_request(again))["status"] == "denied"
+    assert await a.space_service.list_busy_join_request_space_ids(a.user_id) == []
+
+
 async def test_busy_answers_are_bounded_per_space(households, gfs):
     """A flood at a full space (fresh keypairs pass the per-sender budget)
     gets at most the space's budget of answers an hour; the rest are

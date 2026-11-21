@@ -2551,40 +2551,38 @@ async def test_answer_join_request_moves_a_pending_request_once(env):
 
 
 async def test_list_recent_gfs_join_requests(env):
-    """A user's GFS requests answered *status* within the window, newest
-    first: not a local request, not another status, not another user, not
-    one answered before the window."""
+    """A user's GFS requests asked within the window, newest first, any
+    status: not a local request, not another user, not one asked before
+    the window."""
     await env.repo.save(_space("sp-r"))
     relay = '{"side": "applicant", "busy": true}'
 
-    async def _answered(user_id: str, status: str, *, gfs: bool = True) -> str:
+    async def _asked(user_id: str, status: str | None, *, gfs: bool = True) -> str:
         rid = await env.repo.save_join_request(
             "sp-r", user_id, gfs_relay=relay if gfs else None
         )
-        await env.repo.answer_join_request(rid, status)
+        if status:
+            await env.repo.answer_join_request(rid, status)
         return rid
 
-    old = await _answered("uid-bob", "expired")
-    await env.db.enqueue(
-        "UPDATE space_join_requests SET reviewed_at=datetime('now', '-25 hours')"
-        " WHERE id=?",
-        (old,),
-    )
-    first = await _answered("uid-bob", "expired")
-    await env.db.enqueue(
-        "UPDATE space_join_requests SET reviewed_at=datetime('now', '-1 hours')"
-        " WHERE id=?",
-        (first,),
-    )
-    latest = await _answered("uid-bob", "expired")
-    await _answered("uid-bob", "denied")
-    await _answered("uid-bob", "expired", gfs=False)
-    await _answered("uid-ann", "expired")
+    async def _at(rid: str, ago: str) -> None:
+        await env.db.enqueue(
+            "UPDATE space_join_requests SET requested_at=datetime('now', ?) WHERE id=?",
+            (ago, rid),
+        )
 
-    rows = await env.repo.list_recent_gfs_join_requests(
-        "uid-bob", status="expired", within_hours=24
-    )
-    assert [r["id"] for r in rows] == [latest, first]
+    old = await _asked("uid-bob", "expired")
+    await _at(old, "-25 hours")
+    first = await _asked("uid-bob", "expired")
+    await _at(first, "-2 hours")
+    denied = await _asked("uid-bob", "denied")
+    await _at(denied, "-1 hours")
+    latest = await _asked("uid-bob", None)
+    await _asked("uid-bob", "expired", gfs=False)
+    await _asked("uid-ann", "expired")
+
+    rows = await env.repo.list_recent_gfs_join_requests("uid-bob", within_hours=24)
+    assert [r["id"] for r in rows] == [latest, denied, first]
     assert rows[0]["gfs_relay"] == relay
 
 

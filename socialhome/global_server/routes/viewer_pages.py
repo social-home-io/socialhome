@@ -10,7 +10,8 @@
   icon) as bytes, for link previews (:mod:`..link_preview`).
 
 Anonymous, cross-origin (:mod:`..viewer_cors`, no credentials), per-IP
-rate limited with the public pages (:data:`..public.LISTING_MAX_PER_MINUTE`)
+rate limited in a window of their own, as large as the public pages'
+(:data:`..public.LISTING_MAX_PER_MINUTE`)
 and pure reads: they show exactly what this server's own HTML pages show,
 through the same loaders (:mod:`..page_models`).
 

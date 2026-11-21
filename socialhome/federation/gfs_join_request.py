@@ -309,17 +309,21 @@ class GfsJoinRequestCoordinator:
         return out
 
     async def busy_space_ids(self, user_id: str) -> list[str]:
-        """Spaces whose host answered *user_id*'s request "busy" in the
-        last :data:`BUSY_SHOWN_HOURS` — Discover says so next to "Ask to
-        join"."""
+        """Spaces whose host answered *user_id*'s NEWEST request through
+        the GFS (asked in the last :data:`BUSY_SHOWN_HOURS`) "busy" —
+        Discover says so next to "Ask to join". A later request, whatever
+        its answer, replaces the note."""
+        seen: set[str] = set()
         out: list[str] = []
         for row in await self._spaces.list_recent_gfs_join_requests(
-            user_id, status="expired", within_hours=BUSY_SHOWN_HOURS
+            user_id, within_hours=BUSY_SHOWN_HOURS
         ):
             relay = _load(row.get("gfs_relay"))
             space_id = str(row["space_id"])
-            busy = relay.get("side") == "applicant" and relay.get("busy")
-            if busy and space_id not in out:
+            if relay.get("side") != "applicant" or space_id in seen:
+                continue
+            seen.add(space_id)
+            if row.get("status") == "expired" and relay.get("busy"):
                 out.append(space_id)
         return out
 
@@ -426,6 +430,11 @@ class GfsJoinRequestCoordinator:
             return await self._on_request(body, gfs_url=gfs_url)
         return await self._on_answer(body, gfs_url=gfs_url)
 
+    def _has_room(self, key: str, limit: int, window_s: int) -> bool:
+        if self._rate_limiter is None:
+            return True
+        return self._rate_limiter.has_room(key, limit=limit, window_s=window_s)
+
     def _allowed(self, key: str, limit: int, window_s: int) -> bool:
         if self._rate_limiter is None:
             return True
@@ -469,6 +478,25 @@ class GfsJoinRequestCoordinator:
                 space_id,
             )
             return {"ok": True, "filed": False}
+        # Capacity FIRST, before anything about the person: a full space
+        # answers "busy" to everyone alike, so the answer can never tell a
+        # prober whether a user id is banned or already asked.
+        space_budget = f"gfs-join:space:{space_id}"
+        pending = await self._spaces.list_pending_gfs_join_requests(space_id=space_id)
+        if len(pending) >= MAX_PENDING_PER_SPACE:
+            log.warning(
+                "gfs join request for space %s refused: %d requests from the GFS"
+                " already wait for its admins",
+                space_id,
+                len(pending),
+            )
+            return await self._refuse_busy(body, gfs_url=gfs_url)
+        if not self._has_room(space_budget, PER_SPACE_LIMIT, PER_SPACE_WINDOW_S):
+            log.warning(
+                "gfs join request for space %s refused: the space's budget is spent",
+                space_id,
+            )
+            return await self._refuse_busy(body, gfs_url=gfs_url)
         if await self._spaces.is_banned(space_id, user_id):
             log.info(
                 "gfs join request from %s refused: applicant banned from %s",
@@ -486,25 +514,14 @@ class GfsJoinRequestCoordinator:
                 "gfs join request from %s for %s: already pending", applicant, space_id
             )
             return {"ok": True, "filed": False}
-        pending = await self._spaces.list_pending_gfs_join_requests(space_id=space_id)
-        if len(pending) >= MAX_PENDING_PER_SPACE:
-            log.warning(
-                "gfs join request for space %s refused: %d requests from the GFS"
-                " already wait for its admins",
-                space_id,
-                len(pending),
-            )
-            return await self._refuse_busy(body, gfs_url=gfs_url)
         if await self._spaces.get_join_request(request_id) is not None:
             # An id that names another request already: never two rows
             # under one id (the answer would reach the wrong household).
             raise ValueError("gfs join request id already in use")
-        # The per-space budget is spent only by a request that passed every
-        # cheap check above — junk (a space that takes none, a banned person,
-        # a repeat) cannot use it up for real applicants.
-        if not self._allowed(
-            f"gfs-join:space:{space_id}", PER_SPACE_LIMIT, PER_SPACE_WINDOW_S
-        ):
+        # The per-space budget (peeked above) is spent only by a request that
+        # passed every cheap check — junk (a space that takes none, a banned
+        # person, a repeat) cannot use it up for real applicants.
+        if not self._allowed(space_budget, PER_SPACE_LIMIT, PER_SPACE_WINDOW_S):
             log.warning(
                 "gfs join request for space %s refused: the space's budget is spent",
                 space_id,
@@ -616,10 +633,12 @@ class GfsJoinRequestCoordinator:
         if answer == ANSWER_BUSY:
             # Never filed on the host: the request ends here (``expired`` —
             # no admin decided), marked busy so Discover says why and offers
-            # "Ask to join" again.
-            relay["busy"] = True
-            await self._spaces.set_join_request_gfs_relay(request_id, _dump(relay))
+            # "Ask to join" again. Never over an approval still being seated.
+            if relay.get("approval"):
+                raise ValueError("gfs join busy answer for an approved request")
             if await self._spaces.answer_join_request(request_id, "expired"):
+                relay["busy"] = True
+                await self._spaces.set_join_request_gfs_relay(request_id, _dump(relay))
                 await self._bus.publish(
                     RemoteJoinRequestBusy(request_id=request_id, space_id=space_id)
                 )

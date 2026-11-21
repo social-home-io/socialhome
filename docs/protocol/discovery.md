@@ -4232,7 +4232,14 @@ it:
    (`GET /api/me/join-requests` `busy_space_ids`; asking again clears it).
    Only capacity refusals are answered: a banned person, a repeat and a
    space that takes no requests are still dropped without a word (an answer
-   there would tell a banned person, or a prober, something). The answers
+   there would tell a banned person, or a prober, something). Capacity is
+   checked **before** anything about the person, so at a full space every
+   request hears "busy" alike — banned, repeat or new — and the answer can
+   never be used to read the ban list. A "busy" never ends a request whose
+   approval is still being seated, and a later request for the same space
+   (whatever its answer) replaces the note. An answer to a made-up
+   applicant id waits in the GFS queue for its TTL like any undelivered
+   envelope (bounded by the budget below). The answers
    have their **own** per-space budget (120 / hour), so a flood of fresh
    keypairs at a full space gets at most that many replies; the rest stay
    silent. **No `proto_version` gate:** an applicant from before this
