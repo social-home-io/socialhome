@@ -803,6 +803,29 @@ async def test_a_new_page_is_compared_and_a_match_reads_up_to_date():
     assert t.env.changes[-1] == SPACE  # the status rechecks after the compare
 
 
+async def test_a_restarted_member_compares_its_held_page_once():
+    """Root cause of a demo failure: compare results live in memory, so
+    after a restart the page held in the database had no verdict and,
+    with no newer page coming, never got one (``match: null`` forever).
+    The next sentinel compares a held page that has no verdict — once."""
+    rows = [_row("p1")]
+    t = _Listed(rows, rows)
+    await t.take_page()
+    repo, state = t.env.repo, t.env.state
+    restarted = _Listed(rows, rows)  # a fresh service, same stored page
+    restarted.env.repo.rows = repo.rows
+    restarted.env.svc._repo = repo  # the same database
+    assert (await restarted.position()).match is None
+    for _ in range(2):
+        assert not await restarted.env.svc.receive(
+            space_id=SPACE, sync_id="s-9", provider=HOST, sealed=None
+        )
+        await restarted.env.svc.wait_idle()
+    assert restarted.env.state.calls == 1  # once, not per sentinel
+    assert (await restarted.position()).match is True
+    assert state.calls == 1
+
+
 async def test_a_repeated_page_is_not_compared_again():
     """A sentinel without a page (we hold it) or the same page again: no
     compare — the next comparison comes only with the next page."""

@@ -602,7 +602,9 @@ That single command runs the full sequence:
    — then fails unless **a** holds a page signed by **b** that verifies
    against the space key **a** pins, whose stored vector hashes to its
    root, and that **a**'s ``GET /api/spaces/{id}`` ``sync.page`` shows.
-   **a** compares its own rows with the page as soon as it stores it;
+   **a** compares its own rows with the page as soon as it stores it (or,
+   holding it from before a restart, on the next sentinel — so ``verify``
+   always sends one "Sync now");
    ``verify`` waits on **a**'s status for that verdict and fails unless it
    is ``match: true`` ("Up to date · checked against page N"). It pins
    ``MIN_FOR_SYNC_PAGES`` = 95.

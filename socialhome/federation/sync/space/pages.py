@@ -509,9 +509,13 @@ class SyncPageService:
         is logged (WARNING when it fails verification) and the page held
         stays."""
         if sealed is None:
+            await self._compare_if_unjudged(space_id)
             return False
         try:
-            return await self._receive(space_id, sync_id, provider, sealed)
+            stored = await self._receive(space_id, sync_id, provider, sealed)
+            if not stored:
+                await self._compare_if_unjudged(space_id)
+            return stored
         except (PageRefused, UnsupportedPageSuite) as exc:
             log.warning(
                 "sync page: refused the page of space %s from %s: %s",
@@ -663,6 +667,25 @@ class SyncPageService:
         self._hosts = hosts
         self._request_sync = request
         self._request_listing = listing
+
+    async def _compare_if_unjudged(self, space_id: str) -> None:
+        """A sentinel brought no newer page: compare the held page only if
+        it has no verdict yet — compare results live in memory, so after a
+        restart the stored page would otherwise wait for the next page.
+        Never a second compare of a judged page. Fail-soft."""
+        try:
+            if space_id in self._comparing:
+                return
+            space = await self._spaces.get(space_id)
+            held = await self._held(space) if space is not None else None
+            if held is None or held.page.signer == self._own_instance_id:
+                return
+            check = self._checks.get(space_id)
+            if check is not None and check.root == held.page.root:
+                return  # judged already
+            self.compare_soon(space_id)
+        except Exception:
+            log.exception("sync page: checking the verdict of %s failed", space_id)
 
     def compare_soon(self, space_id: str) -> None:
         """A newer page was stored: compare our copy with it — at once, or,

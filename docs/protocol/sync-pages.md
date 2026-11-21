@@ -597,7 +597,9 @@ What shipped, where it is more exact than the design above:
   bucket vector with the page's when a **newer** page is stored — never on
   a repeat — at most once per 15 min per space (a page arriving sooner
   waits out the rest once; the compare then takes the newest page). Never
-  for a page we signed. Hashing runs in `asyncio.to_thread`.
+  for a page we signed. Hashing runs in `asyncio.to_thread`. Verdicts are
+  memory only, so a held page with none (after a restart) is compared on
+  the next sentinel — once; a judged page never again.
   1. **Explain locally, no wire cost.** A differing bucket in which we hold
      a row whose change time (the newest of `created_at`, `edited_at`,
      `updated_at`, `last_edited_at`, `archived_at`, `sold_at`, `deleted_at`

@@ -19911,7 +19911,9 @@ def _verify_sync_page(state: dict) -> list[str]:
     deadline = time.monotonic() + 150.0
     asked = 0
     next_ask = 0.0
-    while _held() is None and time.monotonic() < deadline:
+    # At least one round even when a page is held already: a restarted
+    # household compares its stored page on the next sentinel.
+    while (_held() is None or asked == 0) and time.monotonic() < deadline:
         if asked < 3 and time.monotonic() >= next_ask:
             _request(
                 f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/sync",
