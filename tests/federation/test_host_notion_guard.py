@@ -64,6 +64,10 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("federation/sync/space/scheduler.py", "_on_invite_answered"): (
         "are WE the owner: nothing to catch up; targets come from acting_hosts()"
     ),
+    ("federation/sync/space/scheduler.py", "sync_now"): (
+        "are WE the owner: no host to ask, so its paired members are asked; "
+        "otherwise the targets come from acting_hosts()"
+    ),
     ("federation/sync/space/scheduler.py", "_tick_mesh_announce"): (
         "are WE the owner: then every member household is announced to"
     ),
