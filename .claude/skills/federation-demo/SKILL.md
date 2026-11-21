@@ -601,8 +601,11 @@ That single command runs the full sequence:
    makes **b** seal a page in the background, the next sentinel carries it
    — then fails unless **a** holds a page signed by **b** that verifies
    against the space key **a** pins, whose stored vector hashes to its
-   root, and that **a**'s ``GET /api/spaces/{id}`` ``sync.page`` shows. It
-   pins ``MIN_FOR_SYNC_PAGES`` = 95.
+   root, and that **a**'s ``GET /api/spaces/{id}`` ``sync.page`` shows.
+   **a** compares its own rows with the page as soon as it stores it;
+   ``verify`` waits on **a**'s status for that verdict and fails unless it
+   is ``match: true`` ("Up to date · checked against page N"). It pins
+   ``MIN_FOR_SYNC_PAGES`` = 95.
 
 9f. ``space-chat`` (v_55, every space's members' chat) — in **b**'s
    space from ``traffic`` / ``calendar`` (owner **b**, members **a** and

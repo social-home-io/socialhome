@@ -413,10 +413,11 @@ commitment to the space's state (a **page**: 256 bucket hashes under one
 root). Every sentinel carries the newest page the provider holds — sealed
 under the content key, only to a v_95 requester whose BEGIN `page` is
 older — and any member relays it. A member keeps the newest page and its
-vector, checks its own rows against it at most once an hour, and its
-status adds `sync.page`: **up to date as of page N** even while the host is
-offline, **behind** when a newer page exists than what it applied. See
-[sync-pages.md](./sync-pages.md).
+vector, compares its own rows with each newer page (at most every 15
+minutes), and its status adds `sync.page`: a match is **up to date ·
+checked against page N** even while the host is offline; a mismatch reads
+**needs sync · N parts differ** (state `behind`) and asks one acting host
+for an incremental sync. See [sync-pages.md](./sync-pages.md).
 
 ## What a sync streams
 

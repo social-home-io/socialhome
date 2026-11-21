@@ -588,27 +588,41 @@ What shipped, where it is more exact than the design above:
   younger than 15 min does not seal on top of it. The seal reads the
   `sync_seq` snapshot before the export, exports with the window cutoff of
   now (stored in the page) and hashes page by page in a worker thread.
-- **Root check.** At most once an hour per space, never again for a page
-  that matched, never for a page we signed; a checked mismatch is
-  re-checked hourly while sentinels arrive (≤ 24 / day).
+- **Compare (owner decision 2026-11-21, replaces the hourly root
+  check).** A member compares its own bucket vector with the page's when a
+  **newer** page is stored — never on a repeat (a sentinel without a page,
+  or the same page again) — and at most once per 15 min per space (the
+  seal cadence): a page arriving sooner waits out the rest once and the
+  compare then takes the newest page. The recompute is the seal's
+  (`PageStateHasher`, hashing in `asyncio.to_thread`); never for a page we
+  signed. The result goes to the status through its one coalesced recheck
+  (`SpaceSyncStatusService._request_recheck`). A **mismatch** asks ONE
+  household acting as the space's host (the signer when it is one) for an
+  incremental BEGIN (`SpaceSyncScheduler.sync_with`), within the
+  provider's 5 BEGINs / h budget; the next compare comes only with the
+  next page, so a mismatch never loops. A member that is *ahead* of the
+  page (rows newer than it, normal in a busy space) also reads a mismatch
+  until the next page.
 - **Status** (`GET /api/spaces/{id}` `sync.page`, also in the
   `space.sync_state` frame): `{seq, at, signer_role, applied, match,
   differing_buckets, conflict}`. `applied` — we applied a clean stream from
   the page's signer at or past its `seq` (`space_instances.applied_seq`;
   `null` when that signer is not one of our acting hosts). Rules
   (`domain/space_sync_page.state_with_page`): a running stream stays
-  **catching up**; `applied` or `match` → **up to date** "as of page N",
-  also while the host is offline; a newer page than we applied →
-  **catching up** while the host answers, **behind** while it is silent;
-  for a signer we do not sync from, a checked mismatch makes a silent
-  host's space **behind**. A plain mismatch with `applied` true does not
-  downgrade: rows newer than the page are normal in a busy space.
+  **catching up**; once compared, `match: true` → **up to date** (the SPA:
+  "Up to date · checked against page N"), also while the host is offline,
+  and `match: false` → **behind** (the SPA: "Needs sync · N parts
+  differ"), whatever the host last answered. Not compared yet: `applied` →
+  **up to date**; a newer page than we applied → **catching up** while the
+  host answers, **behind** while it is silent. No page (an older host):
+  the answer-based status, unchanged.
   `signer_role` is `owner` when `signer` names the owner; it is a label any
   seed holder could set.
 - **Measured** (x86 dev machine, real SQLite with every migration, the
   real exporters, 50 001 committed rows: 40 000 posts with ~400-char text,
-  6 000 comments, 4 000 tasks): a full seal takes **5.8 s**, of which the
-  hashing is **0.37 s** (7.4 µs per row). The rest is the existing `posts`
+  6 000 comments, 4 000 tasks): a full seal takes **5.8 s**, and a member's
+  compare is the same recompute (**5.8 s**); of that the hashing is
+  **0.37 s** (7.4 µs per row). The rest is the existing `posts`
   exporter: its keyset query (`ORDER BY rowid DESC` with the
   `(space_id, created_at)` index) sorts the whole space for every page of
   200 rows, ~25 ms per page — O(n²), and the same cost every full §25.6

@@ -19905,18 +19905,22 @@ def _verify_sync_page(state: dict) -> list[str]:
         )
         return rows[0] if rows else None
 
+    # Round 1 makes b seal (in the background of its sentinel); round 2
+    # carries the page. "Sync now" is the trigger; between rounds we wait on
+    # a's own rows (polled), re-asking only while no page has arrived.
     deadline = time.monotonic() + 150.0
     asked = 0
+    next_ask = 0.0
     while _held() is None and time.monotonic() < deadline:
-        if asked < 3:
-            # Round 1 makes b seal (background); round 2 carries the page.
+        if asked < 3 and time.monotonic() >= next_ask:
             _request(
                 f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/sync",
                 token=a["token"],
                 method="POST",
             )
             asked += 1
-        time.sleep(15.0)
+            next_ask = time.monotonic() + 20.0
+        time.sleep(1.0)
     held = _held()
     if held is None:
         return [f"v_95: a holds no sync page of the salon after {asked} sync rounds"]
@@ -19941,12 +19945,29 @@ def _verify_sync_page(state: dict) -> list[str]:
         out.append(f"v_95: a's page was signed by {page.signer}, not the host b")
     if root_of(bytes(vector)) != page.root:
         out.append("v_95: a's stored vector does not hash to its page's root")
-    s, detail = _request(
-        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}", token=a["token"]
-    )
-    sync_page = ((detail or {}).get("sync") or {}).get("page") if s == 200 else None
-    if not sync_page or sync_page.get("seq") != page.seq:
+    # a compares its own rows with the page as soon as it stores it: wait
+    # on a's status for the verdict, then it must match (after traffic a
+    # holds everything b committed).
+    def _status_page() -> dict | None:
+        s, detail = _request(
+            f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}", token=a["token"]
+        )
+        return ((detail or {}).get("sync") or {}).get("page") if s == 200 else None
+
+    deadline = time.monotonic() + 90.0
+    sync_page = _status_page()
+    while (
+        not sync_page or sync_page.get("match") is None
+    ) and time.monotonic() < deadline:
+        time.sleep(1.0)
+        sync_page = _status_page()
+    if not sync_page or sync_page.get("seq") < page.seq:
         out.append(f"v_95: a's sync status carries no page (got {sync_page!r})")
+    elif sync_page.get("match") is not True:
+        out.append(
+            "v_95: a's copy of the salon does not match b's signed page "
+            f"(status page={sync_page!r}) — it would read 'needs sync'"
+        )
     if not out:
         print(
             f"  v_95 a holds b's signed sync page {page.seq} ({page.rows} rows), "
