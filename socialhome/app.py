@@ -291,6 +291,7 @@ from .repositories.space_remote_location_repo import (
     SqliteSpaceRemoteLocationRepo,
 )
 from .repositories.space_remote_member_repo import SqliteSpaceRemoteMemberRepo
+from .repositories.space_sync_page_repo import SqliteSpaceSyncPageRepo
 from .repositories.space_sync_watermark_repo import SqliteSpaceSyncWatermarkRepo
 from .repositories.space_zone_repo import SqliteSpaceZoneRepo
 from .repositories.theme_repo import SqliteThemeRepo
@@ -1517,6 +1518,7 @@ def _build_repos(db: AsyncDatabase):
         space_zone=SqliteSpaceZoneRepo(db),
         household_zone=SqliteHouseholdZoneRepo(db),
         space_sync_watermark=SqliteSpaceSyncWatermarkRepo(db),
+        space_sync_page=SqliteSpaceSyncPageRepo(db),
         space_media_ref=SqliteSpaceMediaRefRepo(db),
         password_reset=SqlitePasswordResetRepo(db),
         local_area_attempt=SqliteLocalAreaAttemptRepo(db),
