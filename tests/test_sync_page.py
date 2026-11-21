@@ -507,6 +507,12 @@ def test_honest_chain_is_no_conflict():
 def test_page_ref():
     page = _page()
     ref = parse_page_ref(page.ref())
-    assert ref == {"signer": "host-1", "epoch": 2, "seq": 40, "root": page.root}
+    assert ref == {
+        "signer": "host-1",
+        "epoch": 2,
+        "seq": 40,
+        "issued_at": NOW,
+        "root": page.root,
+    }
     assert parse_page_ref({"signer": "x"}) is None
     assert parse_page_ref("nope") is None

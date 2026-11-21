@@ -56,3 +56,14 @@ CREATE TABLE IF NOT EXISTS space_sync_pages (
     vector     BLOB NOT NULL CHECK (length(vector) = 8192),
     delta      BLOB CHECK (delta IS NULL OR length(delta) % 33 = 0)
 ) WITHOUT ROWID;
+
+-- A space-authority rotation retires the key every held page was signed
+-- with: the page goes in the same statement that moves the epoch, on every
+-- path that moves it (the owner's ``rotate_authority_key``, a member's
+-- ``adopt_authority_key``). The next BEGIN seals or carries a new one.
+CREATE TRIGGER IF NOT EXISTS spaces_rotation_drops_sync_page
+AFTER UPDATE OF authority_key_epoch ON spaces
+WHEN NEW.authority_key_epoch IS NOT OLD.authority_key_epoch
+BEGIN
+    DELETE FROM space_sync_pages WHERE space_id = NEW.id;
+END;

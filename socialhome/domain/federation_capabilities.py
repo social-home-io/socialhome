@@ -1586,7 +1586,22 @@ from __future__ import annotations
 #:   re-encoded from the released v_80 line; the host repairs a member's
 #:   roster only on a ``roster_digest`` mismatch (``MIN_FOR_ROSTER_DIGEST``,
 #:   v_81). Wire otherwise unchanged.
-OURS: int = 94
+#: * **v_95** (2026-11-21) — **signed sync pages** (``docs/protocol/
+#:   sync-pages.md``, Phase 2): the space authority signs a commitment to
+#:   the space's state (256 bucket hashes under one root, suite
+#:   ``sha256-b256-c1``, authority event ``space_sync_page``). A
+#:   ``SPACE_SYNC_BEGIN`` carries ``page`` (the page the requester holds) and
+#:   the ``__complete__`` sentinel carries ``page_sealed`` (the provider's
+#:   newest page with the vector delta or the full vector, sealed under the
+#:   space content key) — only toward a requester at v_95 whose page is
+#:   older. Members store the newest page and tell whether they are behind,
+#:   also while the host is offline. No new event type, no record change,
+#:   no ``SYNC_RECORD_LINES`` entry.
+#:   **Fallback**: a requester below v_95 gets today's sentinel; a provider
+#:   below v_95 sends no page and the requester's status keeps the v_94
+#:   rules. Not space-scoped. Labelled "Space sync status, even without the
+#:   host".
+OURS: int = 95
 
 
 class FederationCapability:
@@ -2309,6 +2324,11 @@ class FederationCapability:
     #: ``roster_digest`` on every BEGIN to its host; a BEGIN without one
     #: from it asks for no roster repair (only an older one's echo does).
     MIN_FOR_ROSTER_DIGEST = 81
+    #: v_95 — a §25.6 requester at or above it is sent the provider's newest
+    #: signed sync page on the sentinel (``page_sealed``) when its BEGIN's
+    #: ``page`` is older, and sends that ``page`` itself only to a provider
+    #: at or above it. Below it: today's sentinel, Phase-1 status rules.
+    MIN_FOR_SYNC_PAGES = 95
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2667,6 +2687,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
         "Poll votes count the same in every household",
     ),
+    (
+        FederationCapability.MIN_FOR_SYNC_PAGES,
+        "Space sync status, even without the host",
+    ),
 ]
 
 
@@ -2771,6 +2795,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
     FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
     FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
+    FederationCapability.MIN_FOR_SYNC_PAGES: "sync_pages",
 }
 
 
