@@ -744,11 +744,13 @@ class SyncPage:
         return hashlib.sha256(canonical_bytes(self.to_wire())).hexdigest()[:16]
 
     def ref(self) -> dict[str, Any]:
-        """``page`` in a ``SPACE_SYNC_BEGIN``: what the requester holds."""
+        """``page`` in a ``SPACE_SYNC_BEGIN``: what the requester holds —
+        its order key (epoch, issued_at, seq), signer and root."""
         return {
             "signer": self.signer,
             "epoch": self.epoch,
             "seq": self.seq,
+            "issued_at": self.issued_at,
             "root": b64url_encode(self.root),
         }
 
@@ -913,6 +915,7 @@ def parse_page_ref(raw: object) -> dict[str, Any] | None:
             "signer": _str(raw.get("signer"), "signer"),
             "epoch": _int(raw.get("epoch"), "epoch"),
             "seq": _int(raw.get("seq"), "seq"),
+            "issued_at": _int(raw.get("issued_at"), "issued_at"),
             "root": _hash_field(raw.get("root"), "root"),
         }
     except PageRefused:

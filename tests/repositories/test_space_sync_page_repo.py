@@ -58,6 +58,19 @@ async def test_the_page_goes_with_the_space(env):
     assert await repo.get("sp") is None
 
 
+async def test_an_authority_rotation_drops_the_page(env):
+    """§3: an old-epoch page is stale — it goes with the epoch move, on the
+    owner's and on a member's path alike (trigger)."""
+    db, repo = env
+    await repo.put(StoredSyncPage("sp", "{}", VECTOR))
+    await db.enqueue("UPDATE spaces SET name='renamed' WHERE id='sp'")
+    assert await repo.get("sp") is not None
+    await db.enqueue(
+        "UPDATE spaces SET authority_key_epoch=authority_key_epoch+1 WHERE id='sp'"
+    )
+    assert await repo.get("sp") is None
+
+
 async def test_storage_stays_within_the_documented_bound(env):
     """``docs/protocol/sync-pages.md``: ≤ 17 KB per space on a signer
     (a full-size page + vector + a full 256-bucket delta), ≈ 9 KB on a
