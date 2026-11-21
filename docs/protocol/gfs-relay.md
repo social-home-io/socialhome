@@ -379,7 +379,9 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
   invite envelopes share, and charged only for a frame that went through.
   Frames that fail to open or fail their checks are charged to a junk bucket
   (`RELAY_MEDIA_JUNK_LIMIT`, 120 / min); while it is full, media frames are
-  dropped before any AES-GCM open. Refusals are logged as one WARNING a
+  dropped before any AES-GCM open. A frame over the media budget, or whose
+  sender is over its per-household media budget, is held, not dropped (see
+  [Inbound budgets on the household](#inbound-budgets-on-the-household)). Refusals are logged as one WARNING a
   minute with a count, never a traceback.
   It checks the recipient id and the kem-suite byte
   (unknown → refused, no default), opens the seal and runs
@@ -1799,11 +1801,19 @@ The frame is composed only when pushed to a claim socket.
 - **Per-recipient caps** charge every reference the full body size, so a
   multi frame cannot get past a mailbox's 2 000 / 32 MiB.
 - **Limits.** 1–500 recipients. 60 uploads per minute per address **per
-  node**, plus a per-address, per-node budget of 600 recipients per minute
-  (the same queue work as 600 single frames; `429` with `Retry-After: 60`).
-  Both are this node's, like `/gfs/envelope`'s limiter: a 4-node cluster
-  allows one address 4× (240 uploads, 2 400 recipients a minute).
-  Uniform `202`.
+  node**, plus a per-address, per-node budget of 2 400 recipients per
+  minute (`429` with `Retry-After: 60`) — a 200-member community with a
+  dozen items in a minute is 12 × 200; the earlier 600 (the single route's
+  request limit) 429'd its fourth. Both are this node's, like
+  `/gfs/envelope`'s limiter: a 4-node cluster allows one address 4× (240
+  uploads, 9 600 recipients a minute). Uniform `202`.
+- **Cost of the budget.** A recipient is one reference row (its wrap,
+  ~250 B) beside a body stored once per upload, charged to that mailbox's
+  own caps (2 000 rows / 64 MiB, tail-drop) and the mailbox pool — those
+  caps, not this budget, bound the disk. One address at the full budget
+  writes ≤ 60 bodies (≤ 320 KiB each, ≈ 19 MiB) and 2 400 wraps (≈ 0.6 MiB)
+  a minute on a node, against ≈ 187 MiB for `/gfs/envelope`'s 600 single
+  frames; a recipient with a live claim socket costs a push, not a row.
 - **Cluster.** The upload is queued on the receiving node; a node holding
   a claim socket drains it, the others get `NODE_DRAIN_HINT`.
 
@@ -1958,6 +1968,53 @@ targets, `_listed_connection`), `multi_caps_key`,
 `inbound_validator.make_check_multi_recipient`,
 `socialhome/global_server/envelope_relay.py`, GFS migration 0031,
 household migration 0145.
+
+## Inbound budgets on the household
+
+Every household that reaches us through a GFS — members seated from an
+invite link or a directory, paired peers on the relay fallback — shares
+the household-wide buckets of `GfsRelayInbound`, so they are sized for a
+community, and each sender is held to its own budget once the pipeline has
+verified it:
+
+| Step | Budget per minute | Key |
+|---|---|---|
+| Before the unseal (every relayed frame) | 3 000 | household |
+| Relayed §24.11 envelopes | 3 000 | household |
+| Invite / relayed pairing bodies | 60 each | household |
+| One mailbox (v_89) | 600 — past it a flood: dropped, counted toward a rotation | mailbox |
+| Binary media frames (v_87) | 1 200 | household |
+| §24.11 step 4a, after the signature | 600 envelopes, 600 media chunks | verified sender |
+
+Step 4a is the pipeline's per-household budget
+(`make_check_instance_rate`), the same bucket the sender's HTTPS inbox
+traffic spends — each envelope passes the pipeline once, so it is counted
+once. It runs after the signature (a forged envelope never spends a real
+household's budget) and before the replay id is recorded.
+
+**Held, not dropped.** The GFS deletes a queued row as soon as its frame
+went out on our socket (`drain`) and pushes a live frame without a row at
+all; there is no acknowledgement a household could withhold to have it
+redelivered, and adding one would change the wire. So a frame refused for
+a *budget* — the two household ceilings, the media budget, the sender's
+step 4a — is **held** in memory and run again from the step that refused
+it once that budget frees (`RELAY_DEFER_POLL_S`, 1 s), never charged to an
+earlier bucket twice; frames held on the same budget wait together, other
+senders' frames are not held up behind them. The hold is bounded
+(`RELAY_DEFER_MAX_FRAMES` 2 000 — the GFS's own per-recipient queue cap —
+and `RELAY_DEFER_MAX_BYTES` 16 MiB); past it, and on shutdown, a frame is
+dropped as before (one WARNING a minute with a count) and sync heals it.
+A relayed envelope may be up to a day old anyway, so the wait fits the
+relay's timestamp window. A held frame can be applied after a later frame
+of another household; the relay never promised an order across senders.
+A per-mailbox flood is not held: it is the signal that rotates the
+mailbox.
+
+**Cost.** Nothing new on the wire or on the GFS. A held frame costs its
+bytes in memory until it runs (≤ 16 MiB in all) and one dictionary check
+per second while it waits; a retry refused again costs the steps before
+the refusing one (for step 4a: parse, lookup, one Ed25519 verify), at most
+once per freed slot per budget.
 
 ## Privacy — who learns what
 

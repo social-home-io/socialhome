@@ -225,7 +225,8 @@ there is no frame to send.
   a refused chunk has used up its `msg_id` without being held); a body over
   `HTTPS_MEDIA_MAX_BODY_BYTES` (512 KiB + 16 KiB) → 413, from
   `Content-Length` once the 4 magic bytes are read, else while streaming;
-  its own per-IP bucket (600 / min) → 429. A sender that gets anything
+  its own per-IP backstop (3 600 / min) and the sender's per-household
+  media budget (600 / min) → 429. A sender that gets anything
   but 2xx sends the JSON chunk instead, which the outbox redelivers.
 - **Per-peer backoff** (`federation/media_https_backoff.py`, in memory,
   ≤ 1024 peers) — so an inbox that keeps refusing binary bodies (a proxy

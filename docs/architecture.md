@@ -616,7 +616,13 @@ tier; only the latency differs.
 
 All tiers run their inbound traffic through the same §24.11
 validation pipeline (parse → timestamp → instance lookup → ban check
-→ Ed25519 verify → replay cache → decrypt → authorize → dispatch).
+→ Ed25519 verify → per-household budget → replay cache → decrypt →
+authorize → dispatch). The budget (`make_check_instance_rate`, 600
+envelopes and 600 media chunks a minute per verified household) is charged
+on the HTTPS inbox (`429` + `Retry-After`) and the GFS relay legs (the frame
+is held and run again once it frees — `GfsRelayInbound`, the GFS cannot
+redeliver), never on a DataChannel frame (no redelivery; read one frame at
+a time); see [api → Rate limits](./api.md#rate-limits).
 Whether an envelope arrives over RTC, HTTPS or the connection-server
 relay is invisible to the per-event handlers; every path lands in
 `federation/inbound_validator.InboundPipeline`. Relayed frames enter
@@ -673,7 +679,8 @@ flowchart LR
     ts --> instance["instance lookup"]
     instance --> ban["ban check"]
     ban --> sig["Ed25519 verify"]
-    sig --> replay["replay cache"]
+    sig --> budget["per-household budget"]
+    budget --> replay["replay cache"]
     replay --> decrypt["decrypt payload"]
     decrypt --> authz["authorize author<br/>(hidden user / Follower seat)"]
     authz --> dispatch["event dispatch"]
