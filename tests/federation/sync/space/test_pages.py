@@ -535,7 +535,64 @@ async def test_a_delta_applies_to_the_previous_page():
     assert env.repo.rows[SPACE].vector == bytes(new_vec)
 
 
-async def test_a_delta_without_its_previous_page_drops_ours_for_a_full_vector():
+async def test_a_bogus_delta_cannot_roll_a_member_back():
+    """Review finding: a relay sending a newer page with an unusable delta
+    must not make us drop ours (and then take an older page)."""
+    env = _Env(own=ME, seed=None)
+    p2 = _signed(vector=_vec(2), seq=20, issued_at=T0 + 20)
+    await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(p2),
+    )
+    p4 = _signed(vector=_vec(4), seq=40, issued_at=T0 + 40, prev_root=b"\x03" * 32)
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider="evil",
+        sealed=await _sealed_for_member(p4, delta=[]),
+    )
+    p1 = _signed(vector=_vec(1), seq=10, issued_at=T0 + 10)
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider="evil",
+        sealed=await _sealed_for_member(p1),
+    )
+    await env.svc.wait_idle()
+    assert env.held() == p2
+
+
+async def test_a_signer_keeps_its_own_page_over_another_signers():
+    env = _Env()
+    own = await env.svc.seal_if_due(SPACE)
+    assert own is not None
+    other = _signed(signer=ADMIN, issued_at=T0 + 5_000, seq=999, vector=_vec(7))
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=ADMIN,
+        sealed=await _sealed_for_member(other, vector=_vec(7)),
+    )
+    await env.svc.wait_idle()
+    assert env.held() == own
+
+
+async def test_a_page_that_does_not_open_is_a_one_line_refusal(caplog):
+    env = _Env(own=ME, seed=None)
+    with caplog.at_level(logging.WARNING):
+        assert not await env.svc.receive(
+            space_id=SPACE,
+            sync_id="s-1",
+            provider=HOST,
+            sealed={"epoch": 99, "payload": "garbage"},
+        )
+    await env.svc.wait_idle()
+    assert "does not open" in caplog.text and "Traceback" not in caplog.text
+
+
+async def test_a_delta_without_its_previous_page_is_refused_and_ours_kept():
     env = _Env(own=ME, seed=None)
     held = _signed(vector=_vec(2))
     await env.svc.receive(
@@ -552,7 +609,7 @@ async def test_a_delta_without_its_previous_page_drops_ours_for_a_full_vector():
         sealed=await _sealed_for_member(second, delta=[]),
     )
     await env.svc.wait_idle()
-    assert not ok and env.held() is None  # next BEGIN asks for the vector
+    assert not ok and env.held() == held  # next BEGIN names it: full vector
 
 
 async def test_equivocation_is_detected_logged_and_flagged(caplog):
