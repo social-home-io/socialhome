@@ -15,6 +15,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.sync_manager import (
     ALLOWED_RESOURCES,
+    LISTING_RATE_LIMIT_PER_HOUR,
     MAX_ACTIVE_SESSIONS_PER_INSTANCE,
     MAX_INSTANCE_SYNC_STATUS_SPACES,
     MAX_PENDING_REQUESTS,
@@ -1060,6 +1061,22 @@ async def test_begin_session_records_the_requesters_sync_page():
     )
     assert d.accepted is True
     assert mgr.get_session("s-page").page_ref == ref
+
+
+def test_bucket_listings_have_their_own_hourly_budget():
+    """v_95: a ``buckets`` session (bucket listings, at most one compare per
+    15 min) never spends the 5/h stream budget a household needs to catch
+    up, and has its own: 4/h per (household, space)."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    for i in range(5):
+        assert mgr.check_sync_begin_rate("alice", "sp-1", now=100 + i) is True
+    assert mgr.check_sync_begin_rate("alice", "sp-1", now=110) is False
+    for i in range(LISTING_RATE_LIMIT_PER_HOUR):
+        assert mgr.check_sync_begin_rate(
+            "alice", "sp-1", now=120 + i, sync_mode="buckets"
+        )
+    assert not mgr.check_sync_begin_rate("alice", "sp-1", now=130, sync_mode="buckets")
+    assert mgr.check_sync_begin_rate("alice", "sp-1", now=3800, sync_mode="buckets")
 
 
 async def test_begin_session_records_the_asked_buckets():

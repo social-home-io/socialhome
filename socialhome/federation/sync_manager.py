@@ -44,6 +44,12 @@ log = logging.getLogger(__name__)
 #: (S-6 part 1).
 SYNC_BEGIN_RATE_LIMIT_PER_HOUR: int = 5
 
+#: v_95 sync pages: ``sync_mode: "buckets"`` sessions (bucket listings) per
+#: (from_instance, space_id) per hour — a budget of their own, so a compare
+#: (at most one per 15 min) never spends the stream budget above and a
+#: busy catch-up never starves the listings.
+LISTING_RATE_LIMIT_PER_HOUR: int = 4
+
 #: Maximum concurrent active sync sessions per remote instance
 #: (S-6 part 2).
 MAX_ACTIVE_SESSIONS_PER_INSTANCE: int = 3
@@ -385,20 +391,27 @@ class SyncSessionManager:
         space_id: str,
         *,
         now: float | None = None,
+        sync_mode: str = "",
     ) -> bool:
         """Return True if this peer may start another sync for *space_id*.
 
         Implements the 5-per-hour bucket from S-6 part 1.  Increments
         the bucket on ``True``; ``False`` means the caller must reply
-        with ``SPACE_SYNC_DIRECT_FAILED {reason: "rate_limited"}``.
+        with ``SPACE_SYNC_DIRECT_FAILED {reason: "rate_limited"}``. A
+        ``buckets`` session (v_95 bucket listings) counts against its own
+        bucket (:data:`LISTING_RATE_LIMIT_PER_HOUR`).
         """
         now = now if now is not None else time.monotonic()
-        key = (from_instance, space_id)
+        listing = sync_mode == "buckets"
+        key = (from_instance, space_id + ("\0buckets" if listing else ""))
+        limit = (
+            LISTING_RATE_LIMIT_PER_HOUR if listing else SYNC_BEGIN_RATE_LIMIT_PER_HOUR
+        )
         bucket = self._rate_buckets[key]
         cutoff = now - 3600
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
-        if len(bucket) >= SYNC_BEGIN_RATE_LIMIT_PER_HOUR:
+        if len(bucket) >= limit:
             return False
         bucket.append(now)
         return True
@@ -511,7 +524,9 @@ class SyncSessionManager:
                 next_payload={"sync_id": sync_id, "reason": "node_capacity"},
             )
 
-        if not self.check_sync_begin_rate(requester_instance_id, space_id):
+        if not self.check_sync_begin_rate(
+            requester_instance_id, space_id, sync_mode=sync_mode
+        ):
             return SyncDecision(
                 accepted=False,
                 reason="rate_limited",

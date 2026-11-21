@@ -627,7 +627,10 @@ What shipped, where it is more exact than the design above:
   `__listing__` chunks under the space content key (the chunk AAD) and the
   sentinel — no rows, no watermark, no media
   (`SpaceSyncService._stream_listings`); only to a member household (a
-  writer seat). Each record is `{i, held: true, rows: [[resource, row_id,
+  writer seat). A `buckets` session has its own budget at the provider —
+  4 per hour per (household, space), `LISTING_RATE_LIMIT_PER_HOUR` — so it
+  never spends the 5/h stream budget a catch-up needs (and a busy catch-up
+  never starves it). Each record is `{i, held: true, rows: [[resource, row_id,
   leaf, change_time], …]}` or `{i, held: false}`: a provider lists a bucket
   only when its own rows of it still hash to the requester's page (the
   same page it holds) — a bucket changed since the page cannot be proven
