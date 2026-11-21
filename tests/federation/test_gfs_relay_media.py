@@ -45,7 +45,9 @@ def test_the_gfs_sees_only_the_recipient(keys):
     to, sealed = parse_relay_media_body(out)
     assert to == ME
     assert b"secret-sender" not in out
-    assert b"SHM" not in bytes(sealed)
+    # The whole 5-byte frame magic, not just "SHM": three bytes turn up in
+    # random ciphertext by chance (a flaky failure), five practically never.
+    assert b"\x00SHM\x01" not in bytes(sealed)
 
 
 def test_full_chunk_fits_the_516_kib_rung_and_the_cap(keys):
