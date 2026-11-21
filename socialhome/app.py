@@ -75,6 +75,7 @@ from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import MULTI_MAX_TRANSIENT, FederationService
 from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
+from .federation.host_equivalence import acting_hosts
 from .federation.host_hop import HostHop
 from .federation.inbox_reply import inbox_holds_envelope
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
@@ -484,6 +485,7 @@ from .services.space_service import own_inviter_proof
 from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
 from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
 from .services.space_summary_service import SpaceSummaryService
+from .services.space_sync_status import SpaceSyncStatusService
 from .services.space_writer_cert_service import SpaceWriterCertService
 from .services.space_writer_households import SpaceWriterHouseholds
 from .services.space_zone_outbound import SpaceZoneOutbound
@@ -2478,6 +2480,19 @@ def _wire_federation_stack(
         # before this process started (the boot marks, set at startup).
         newest_from=space_post_repo.newest_from_household,
     )
+    # Migration 0150 — each sync outcome of a space's acting hosts, and the
+    # "does this space need sync?" status a member reads.
+    app[K.space_sync_status_key] = _build_space_sync_status(
+        bus=bus,
+        space_repo=space_repo,
+        seat_repo=space_remote_member_repo,
+        outcomes=space_sync_watermark_repo,
+        outbox=outbox_repo,
+        sync_manager=sync_manager,
+        receiver=space_sync_receiver,
+        scheduler=space_sync_scheduler,
+        own_instance_id=identity.instance_id,
+    )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
     app[K.space_media_wanted_key] = _build_space_media_wanted(
@@ -2562,6 +2577,47 @@ def _wire_federation_stack(
         gallery_federation_outbound=gallery_federation_outbound,
         page_federation_outbound=page_federation_outbound,
     )
+
+
+def _build_space_sync_status(
+    *,
+    bus: EventBus,
+    space_repo,
+    seat_repo,
+    outcomes,
+    outbox,
+    sync_manager: SyncSessionManager,
+    receiver,
+    scheduler,
+    own_instance_id: str,
+) -> SpaceSyncStatusService:
+    """The §25.6 sync status (migration 0150): outcomes from the receiver
+    (via the bus), the scheduler's silent-host verdict and the receiver's
+    stream starts; "catching up" from the session manager."""
+
+    async def _hosts(space) -> list[str]:
+        return await acting_hosts(
+            space_repo, seat_repo, space, own_instance_id=own_instance_id
+        )
+
+    def _receiving(space_id: str, ignore_sync_id: str = "") -> bool:
+        return sync_manager.receiving(
+            space_id, own_instance_id, ignore_sync_id=ignore_sync_id
+        )
+
+    status = SpaceSyncStatusService(
+        bus=bus,
+        space_repo=space_repo,
+        outcomes=outcomes,
+        outbox=outbox,
+        hosts=_hosts,
+        own_instance_id=own_instance_id,
+        receiving=_receiving,
+    )
+    status.wire()
+    scheduler.attach_status(status)
+    receiver.attach_stream_watch(status)
+    return status
 
 
 def _build_space_media_wanted(

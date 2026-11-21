@@ -1105,6 +1105,41 @@ async def test_a_plain_members_chunk_does_not_mark_the_host_heard(receiver, peer
     assert contact.spaces == []
 
 
+class _Streams:
+    def __init__(self) -> None:
+        self.started: list[tuple[str, str]] = []
+
+    async def stream_started(self, space_id: str, provider: str) -> None:
+        self.started.append((space_id, provider))
+
+
+async def test_the_first_chunk_of_a_stream_tells_the_sync_status(receiver, peer_setup):
+    """Once per stream (its first chunk), never per chunk, and never for a
+    sentinel-only (quiet) session."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+    streams = _Streams()
+    r.attach_stream_watch(streams)
+    await r.on_chunk(await _sentinel_frame(kp, "s-q", 0), from_instance="peer-a")
+    assert streams.started == []
+    await r.on_chunk(await _members_chunk(kp, "s-c"), from_instance="peer-a")
+    await r.on_chunk(await _members_chunk(kp, "s-c"), from_instance="peer-a")
+    assert streams.started == [("sp-1", "peer-a")]
+
+
+async def test_a_failing_stream_watch_never_costs_the_chunk(receiver, peer_setup):
+    r, _, _ = receiver
+    _, kp = peer_setup
+
+    class _Boom:
+        async def stream_started(self, space_id: str, provider: str) -> None:
+            raise RuntimeError("boom")
+
+    r.attach_stream_watch(_Boom())
+    await r.on_chunk(await _members_chunk(kp, "s-b"), from_instance="peer-a")
+    assert not r._health._streams["s-b"].failed
+
+
 async def test_a_forged_chunk_does_not_mark_the_host_heard(receiver):
     r, _, _ = receiver
     contact = _Heard()

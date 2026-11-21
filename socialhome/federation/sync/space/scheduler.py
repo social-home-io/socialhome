@@ -223,6 +223,10 @@ class _HostContact(Protocol):
     def went_silent(self, space_id: str, hosts: Iterable[str]) -> None: ...
 
 
+class _SyncStatus(Protocol):
+    async def host_unreachable(self, space_id: str, hosts: Iterable[str]) -> None: ...
+
+
 class _NewestFrom(Protocol):
     async def __call__(
         self, space_id: str, instance_id: str, *, upto: tuple[int, int] | None = None
@@ -313,6 +317,7 @@ class SpaceSyncScheduler:
         "_seat_repo",
         "_space_repo",
         "_startup_task",
+        "_status",
         "_stop",
         "_sync_manager",
         "_task",
@@ -411,6 +416,15 @@ class SpaceSyncScheduler:
         self._helper_round: dict[str, int] = {}
         #: space → its pending wait for the host's answer (one at a time).
         self._helper_checks: dict[str, asyncio.Task] = {}
+        #: Where a round's silent hosts are recorded (migration 0150,
+        #: :meth:`attach_status`); ``None``: not recorded.
+        self._status: _SyncStatus | None = None
+
+    def attach_status(self, status: _SyncStatus) -> None:
+        """Wire the sync status (``SpaceSyncStatusService``): a round whose
+        BEGIN the households acting as the host left unanswered records
+        them ``unreachable`` — what makes a member read "host offline"."""
+        self._status = status
 
     def attach_helpers(
         self,
@@ -499,6 +513,47 @@ class SpaceSyncScheduler:
             )
         else:
             await self._mesh_incremental(space, host, periodic=True, done=True)
+
+    async def sync_now(self, space_id: str) -> list[str]:
+        """ "Sync now" for one space: what one periodic tick does for it,
+        right away — the small incremental BEGIN (never a full stream) to
+        each household acting as its host here, a mesh-only one over the
+        mesh (:meth:`_mesh_incremental`), and to every paired co-member
+        household. Returns the households asked. Only for a space one of
+        our people holds a member seat in (a follower never contacts the
+        host); a space hosted here asks its paired members. The providers'
+        own BEGIN budget (5 / h per household and space) still applies."""
+        space = await self._space_repo.get(space_id)
+        if space is None or space.dissolved:
+            return []
+        hosted_here = space.owner_instance_id == self._own_instance_id
+        if not hosted_here and not await self._holds_member_seat(space):
+            return []
+        asked: list[str] = []
+        if not hosted_here:
+            for host in await self._mesh_targets(space):
+                if await self._federation.is_confirmed_peer(host):
+                    await self.enqueue_sync_for_space(
+                        space_id=space.id,
+                        peer_instance_id=host,
+                        sync_mode="incremental",
+                    )
+                else:
+                    await self._mesh_incremental(space, host, periodic=True, done=True)
+                asked.append(host)
+        peers = {p.id for p in await self._sweep_peers()}
+        for member in await self._space_repo.list_member_instances(space.id):
+            if (
+                member in asked
+                or member == self._own_instance_id
+                or member not in peers
+            ):
+                continue
+            await self.enqueue_sync_for_space(
+                space_id=space.id, peer_instance_id=member, sync_mode="incremental"
+            )
+            asked.append(member)
+        return asked
 
     def attach_roster_echo(
         self, echo: Callable[[str, str], Awaitable[dict | None]]
@@ -1083,17 +1138,7 @@ class SpaceSyncScheduler:
             log.exception("space-sync-scheduler: mesh catch-up failed")
         await self._tick_mesh_announce()
 
-        confirmed = [
-            inst
-            for inst in await self._federation_repo.list_instances()
-            if inst.status is PairingStatus.CONFIRMED
-            # v_89 — a member seated from the host's directory (a
-            # ``space_session`` row with no relay of its own) is reached for
-            # live fan-out only: catch-up comes from the host, or every
-            # member would sync with every GFS-reached member (N² streams
-            # through the GFS every 30 min).
-            and not (inst.source is InstanceSource.SPACE_SESSION and not inst.relay_via)
-        ]
+        confirmed = await self._sweep_peers()
         local_spaces = await self._list_local_space_ids()
         for peer in confirmed:
             peer_id = peer.id
@@ -1107,6 +1152,21 @@ class SpaceSyncScheduler:
                     priority=P6_PRODUCTIVITY,
                     sync_mode="incremental",
                 )
+
+    async def _sweep_peers(self) -> list:
+        """The confirmed peers the periodic sweep asks for each shared
+        space."""
+        return [
+            inst
+            for inst in await self._federation_repo.list_instances()
+            if inst.status is PairingStatus.CONFIRMED
+            # v_89 — a member seated from the host's directory (a
+            # ``space_session`` row with no relay of its own) is reached for
+            # live fan-out only: catch-up comes from the host, or every
+            # member would sync with every GFS-reached member (N² streams
+            # through the GFS every 30 min).
+            and not (inst.source is InstanceSource.SPACE_SESSION and not inst.relay_via)
+        ]
 
     # ─── Host offline: trusted helpers (trigger 10, v_92) ─────────────
 
@@ -1169,6 +1229,11 @@ class SpaceSyncScheduler:
         if contact.heard_since(space_id, asked):
             return
         contact.went_silent(space_id, hosts)
+        if self._status is not None:
+            try:
+                await self._status.host_unreachable(space_id, hosts)
+            except Exception:
+                log.exception("space %s: recording the silent host failed", space_id)
         if self._row_marks is None:
             # No boot cut (the startup read failed): a resume could start
             # past rows still missing — ask no helper rather than guess.

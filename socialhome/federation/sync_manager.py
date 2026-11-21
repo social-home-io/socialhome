@@ -56,6 +56,10 @@ MAX_ICE_CANDIDATE_BYTES: int = 2048
 #: provider never answers does not sit there for the process's lifetime.
 PENDING_REQUEST_TTL_SECONDS: float = 3600.0
 
+#: A stream counts as arriving (the sync status's "catching up") while a
+#: chunk of it moved within this long.
+RECEIVING_IDLE_S: float = 120.0
+
 #: Cap on outstanding requests, so a retry storm cannot grow the table
 #: without end. Oldest-first eviction.
 MAX_PENDING_REQUESTS: int = 256
@@ -312,6 +316,31 @@ class SyncSessionManager:
         record = self._sessions.get(sync_id)
         if record is not None:
             record.touch(now)
+
+    def receiving(
+        self,
+        space_id: str,
+        requester_instance_id: str,
+        *,
+        ignore_sync_id: str = "",
+        now: float | None = None,
+    ) -> bool:
+        """Whether a stream of ``space_id`` is arriving here now: a session
+        we requested whose sentinel has not landed, with a chunk moved in
+        the last :data:`RECEIVING_IDLE_S`. A session registered before its
+        BEGIN (a mesh host) that never got a chunk does not count — an
+        offline host must not read as "catching up". ``ignore_sync_id``:
+        a stream that is ending right now."""
+        current = now if now is not None else time.time()
+        return any(
+            s.space_id == space_id
+            and s.requester_instance_id == requester_instance_id
+            and s.sync_id != ignore_sync_id
+            and not s.sentinel_landed
+            and s.last_activity > s.created_at
+            and current - s.last_activity <= RECEIVING_IDLE_S
+            for s in self._sessions.values()
+        )
 
     def reap_stale(self, ttl_seconds: float, *, now: float | None = None) -> int:
         """Close sessions idle for more than ``ttl_seconds``.

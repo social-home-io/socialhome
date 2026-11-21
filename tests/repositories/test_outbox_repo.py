@@ -1585,3 +1585,23 @@ async def test_a_multi_enqueue_supersedes_and_makes_room_per_seat(env, monkeypat
     assert await _pending_ids(env, "peer-x") == {written["peer-x"]}
     assert await _pending_ids(env, "peer-a") == {"a1", written["peer-a"]}
     assert await _pending_ids(env, "peer-b") == {"b0", "b1", written["peer-b"]}
+
+
+# ── Sync status: what of a space still waits to go out (migration 0145) ────
+
+
+async def test_count_pending_for_space_counts_each_item_once(env):
+    repo = env.outbox_repo
+    assert await repo.count_pending_for_space("sp-1") == 0
+    # One post failed to reach three households: one item waiting.
+    for peer in ("peer-a", "peer-b", "peer-x"):
+        await _enqueue_ref(env, peer, f"m-{peer}")
+    await _enqueue_ref(env, "peer-a", "m-2", pid="p-2")
+    assert await repo.count_pending_for_space("sp-1") == 2
+    assert await repo.count_pending_for_space("other-space") == 0
+    # Delivered everywhere → no longer waiting.
+    await repo.mark_delivered("m-2")
+    assert await repo.count_pending_for_space("sp-1") == 1
+    for peer in ("peer-a", "peer-b", "peer-x"):
+        await repo.mark_failed(f"m-{peer}")
+    assert await repo.count_pending_for_space("sp-1") == 0
