@@ -140,6 +140,10 @@ class _HostHeard(Protocol):
     def heard(self, space_id: str) -> None: ...
 
 
+class _StreamWatch(Protocol):
+    async def stream_started(self, space_id: str, provider: str) -> None: ...
+
+
 class SpaceSyncReceiver(
     MembersMixin,
     PostsMixin,
@@ -185,6 +189,7 @@ class SpaceSyncReceiver(
         "_space_task_repo",
         "_sticky_repo",
         "_streaks",
+        "_stream_watch",
         "_timetable_repo",
         "_zone_repo",
     )
@@ -236,6 +241,9 @@ class SpaceSyncReceiver(
         #: v_92 — told when the household acting as a space's host answers
         #: (:meth:`attach_host_contact`). ``None``: nobody is told.
         self._host_contact: _HostHeard | None = None
+        #: Told when a stream of a space begins arriving (the sync status:
+        #: "catching up"), see :meth:`attach_stream_watch`.
+        self._stream_watch: _StreamWatch | None = None
         self._health = StreamHealth()
         self._streaks = HeldBackStreaks()
         #: Ids of other households' system albums seen in a stream — never
@@ -306,6 +314,20 @@ class SpaceSyncReceiver(
         the only answer a quiet space sends. The scheduler falls back to a
         trusted helper while the host stays silent."""
         self._host_contact = contact
+
+    def attach_stream_watch(self, watch: _StreamWatch) -> None:
+        """Wire the sync status (``SpaceSyncStatusService``): told once per
+        stream, on its first verified chunk — never per chunk, never for a
+        sentinel-only (quiet) session."""
+        self._stream_watch = watch
+
+    async def _note_stream_started(self, space_id: str, provider: str) -> None:
+        if self._stream_watch is None:
+            return
+        try:
+            await self._stream_watch.stream_started(space_id, provider)
+        except Exception:
+            log.exception("sync: noting the stream of space %s failed", space_id)
 
     async def _note_host_answer(self, space_id: str, provider: str) -> None:
         if self._host_contact is not None and await self._is_host(space_id, provider):
@@ -545,6 +567,7 @@ class SpaceSyncReceiver(
                 sync_id,
                 archived=bool(space_then is not None and space_then.archived),
             )
+            await self._note_stream_started(space_id, from_instance)
 
         # Decrypt — an unknown resource too: its ``chunk_index`` (v_56) is
         # inside the payload, and in a numbered stream only indices count.

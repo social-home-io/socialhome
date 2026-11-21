@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import orjson
 import pytest
 
 from socialhome.domain.events import (
@@ -13,6 +14,7 @@ from socialhome.domain.events import (
     SpaceMemberLeft,
     SpaceMemberProfileUpdated,
     SpaceProposalUpdated,
+    SpaceSyncStateChanged,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
 )
@@ -95,6 +97,11 @@ _EVENTS = [
         updated_at="2026-10-18T00:00:00+00:00",
     ),
     SpaceZoneDeleted(space_id="sp-1", zone_id="z1", deleted_by="own"),
+    # A follower gets no sync status (the GFS feeds it, not the host).
+    SpaceSyncStateChanged(
+        space_id="sp-1",
+        sync={"state": "behind", "last_ok_at": None, "waiting_to_send": 0},
+    ),
 ]
 
 
@@ -196,3 +203,15 @@ async def test_a_remote_seats_profile_frame_follows_its_role(
     )
     assert len(socks["mem"].sent) == 1
     assert (len(socks["fol"].sent) == 1) is followers_hear
+
+
+async def test_the_sync_state_frame_carries_the_status(env):
+    bus, socks = env
+    sync = {
+        "state": "host_offline",
+        "last_ok_at": "2026-11-21T10:00:00+00:00",
+        "waiting_to_send": 2,
+    }
+    await bus.publish(SpaceSyncStateChanged(space_id="sp-1", sync=sync))
+    frame = orjson.loads(socks["mem"].sent[0])
+    assert frame == {"type": "space.sync_state", "space_id": "sp-1", "sync": sync}

@@ -165,6 +165,7 @@ class AbstractOutboxRepo(Protocol):
         self, cutoff_iso: str, *, limit: int = PURGE_BATCH
     ) -> int: ...
     async def count_pending_for(self, instance_id: str) -> int: ...
+    async def count_pending_for_space(self, space_id: str) -> int: ...
     async def count_failed_for(self, instance_id: str) -> int: ...
     async def count_pending_with_key_prefix(
         self, instance_id: str, prefix: str
@@ -580,6 +581,20 @@ class SqliteOutboxRepo:
                 "SELECT COUNT(*) FROM federation_outbox "
                 "WHERE instance_id=? AND status='pending'",
                 (instance_id,),
+                default=0,
+            )
+        )
+
+    async def count_pending_for_space(self, space_id: str) -> int:
+        """How many of the space's events still wait to reach a household
+        — each stored payload once, however many households it waits for
+        (migration 0145). The sync status's "N waiting to send"."""
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(DISTINCT p.id) FROM federation_outbox_payloads p"
+                " JOIN federation_outbox o ON o.payload_id = p.id"
+                f" WHERE p.space_id=? AND {_LIVE.format(t='o')}",
+                (space_id,),
                 default=0,
             )
         )

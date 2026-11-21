@@ -3,10 +3,13 @@ counter and the per-household watermark on ``space_instances``."""
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.space import SpaceSyncWatermark
+from socialhome.domain.space_sync_status import SpaceSyncOutcome, SpaceSyncResult
 from socialhome.repositories.space_sync_watermark_repo import (
     SqliteSpaceSyncWatermarkRepo,
 )
@@ -130,3 +133,61 @@ async def test_record_applied_refuses_a_value_sqlite_cannot_hold(env, seq):
         r["instance_id"]
         for r in await db.fetchall("SELECT instance_id FROM space_instances")
     }
+
+
+# ── The last sync outcome per acting host (migration 0150) ────────────────
+
+
+async def test_no_outcome_until_one_is_recorded(env):
+    _db, repo = env
+    assert await repo.outcomes("sp", ["peer", "stranger"]) == [
+        SpaceSyncOutcome(instance_id="peer", result=None, ok_at=None)
+    ]
+
+
+async def test_an_ok_records_the_time_and_a_later_refusal_keeps_it(env):
+    _db, repo = env
+    await repo.record_outcome("sp", "peer", SpaceSyncResult.OK, ok_at="t1")
+    await repo.record_outcome("sp", "peer", SpaceSyncResult.DEFERRED)
+    assert await repo.outcomes("sp", ["peer"]) == [
+        SpaceSyncOutcome(
+            instance_id="peer", result=SpaceSyncResult.DEFERRED, ok_at="t1"
+        )
+    ]
+
+
+async def test_an_outcome_for_a_household_without_a_seat_records_nothing(env):
+    _db, repo = env
+    await repo.record_outcome("sp", "stranger", SpaceSyncResult.OK, ok_at="t1")
+    assert await repo.outcomes("sp", ["stranger"]) == []
+
+
+async def test_the_outcome_survives_a_restart(tmp_dir):
+    path = tmp_dir / "restart.db"
+    db = AsyncDatabase(path, batch_timeout_ms=1)
+    await db.startup()
+    await db.enqueue(
+        "INSERT INTO space_instances(space_id, instance_id) VALUES('sp','host')"
+    )
+    await SqliteSpaceSyncWatermarkRepo(db).record_outcome(
+        "sp", "host", SpaceSyncResult.UNREACHABLE
+    )
+    await db.shutdown()
+    db = AsyncDatabase(path, batch_timeout_ms=1)
+    await db.startup()
+    try:
+        assert await SqliteSpaceSyncWatermarkRepo(db).outcomes("sp", ["host"]) == [
+            SpaceSyncOutcome(
+                instance_id="host", result=SpaceSyncResult.UNREACHABLE, ok_at=None
+            )
+        ]
+    finally:
+        await db.shutdown()
+
+
+async def test_the_database_refuses_an_unknown_result(env):
+    db, _repo = env
+    with pytest.raises(sqlite3.IntegrityError):
+        await db.enqueue(
+            "UPDATE space_instances SET sync_result='maybe' WHERE instance_id='peer'"
+        )

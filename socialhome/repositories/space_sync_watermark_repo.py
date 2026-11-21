@@ -11,6 +11,10 @@
   for a (space, provider household): that provider's snapshot of the last
   stream applied cleanly here. Sent as ``have_seq`` in a periodic BEGIN; it
   lives in this database, so it rolls back with the rows it describes.
+* ``space_instances.sync_result`` / ``sync_ok_at`` (migration 0150) — the
+  REQUESTER's last outcome of a sync from a household acting as the space's
+  host, and when it last answered ``ok``: what ``SpaceSyncStatusService``
+  tells a member at read time.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.space import SpaceSyncWatermark, parse_have_seq
+from ..domain.space_sync_status import SpaceSyncOutcome, SpaceSyncResult
 
 
 @runtime_checkable
@@ -54,6 +59,26 @@ class AbstractSpaceSyncWatermarkRepo(Protocol):
     async def record_applied(self, space_id: str, instance_id: str, seq: int) -> None:
         """Record that a stream from ``instance_id`` up to its snapshot
         ``seq`` applied cleanly here. No seat row for that household: no-op."""
+        ...
+
+    async def record_outcome(
+        self,
+        space_id: str,
+        instance_id: str,
+        result: SpaceSyncResult,
+        *,
+        ok_at: str | None = None,
+    ) -> None:
+        """Record the last answer of ``instance_id`` to our sync of the
+        space; ``ok_at`` (UTC ISO 8601) moves the last ``ok`` time, ``None``
+        keeps it. No seat row for that household: no-op."""
+        ...
+
+    async def outcomes(
+        self, space_id: str, instance_ids: list[str]
+    ) -> list[SpaceSyncOutcome]:
+        """The recorded outcome of each of ``instance_ids`` that holds a
+        seat row in the space (households without one are left out)."""
         ...
 
 
@@ -118,3 +143,40 @@ class SqliteSpaceSyncWatermarkRepo:
             " WHERE space_id=? AND instance_id=?",
             (int(seq), space_id, instance_id),
         )
+
+    async def record_outcome(
+        self,
+        space_id: str,
+        instance_id: str,
+        result: SpaceSyncResult,
+        *,
+        ok_at: str | None = None,
+    ) -> None:
+        await self._db.enqueue(
+            "UPDATE space_instances SET sync_result=?,"
+            " sync_ok_at=COALESCE(?, sync_ok_at)"
+            " WHERE space_id=? AND instance_id=?",
+            (SpaceSyncResult(result).value, ok_at, space_id, instance_id),
+        )
+
+    async def outcomes(
+        self, space_id: str, instance_ids: list[str]
+    ) -> list[SpaceSyncOutcome]:
+        wanted = [i for i in dict.fromkeys(instance_ids) if i]
+        if not wanted:
+            return []
+        marks = ",".join("?" * len(wanted))
+        rows = await self._db.fetchall(
+            "SELECT instance_id, sync_result, sync_ok_at FROM space_instances"
+            f" WHERE space_id=? AND instance_id IN ({marks})",
+            (space_id, *wanted),
+        )
+        by_id = {
+            str(r["instance_id"]): SpaceSyncOutcome(
+                instance_id=str(r["instance_id"]),
+                result=SpaceSyncResult.parse(r["sync_result"]),
+                ok_at=r["sync_ok_at"],
+            )
+            for r in rows
+        }
+        return [by_id[i] for i in wanted if i in by_id]

@@ -19,6 +19,7 @@ from socialhome.federation.sync_manager import (
     MAX_INSTANCE_SYNC_STATUS_SPACES,
     MAX_PENDING_REQUESTS,
     PENDING_REQUEST_TTL_SECONDS,
+    RECEIVING_IDLE_S,
     SYNC_BEGIN_RATE_LIMIT_PER_HOUR,
     SYNC_REJECT_NOT_SEATED,
     PendingSyncRequest,
@@ -1013,3 +1014,29 @@ async def test_the_relay_retry_carries_the_roster_digest_of_its_begin():
         )
     decision = await mgr.trigger_relay_sync("s1")
     assert decision.next_payload["roster_digest"] == digest
+
+
+# ─── Sync status: is a stream of a space arriving? ─────────────────────────
+
+
+def test_receiving_needs_a_chunk_that_moved_lately():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    mgr.register_requester_https_session(
+        sync_id="s1",
+        space_id="sp",
+        requester_instance_id="me",
+        provider_instance_id="h",
+    )
+    now = mgr.get_session("s1").created_at + 1
+    # Registered before the BEGIN (a mesh host): no chunk yet, not running.
+    assert not mgr.receiving("sp", "me", now=now)
+    mgr.touch_session("s1", now=now)
+    assert mgr.receiving("sp", "me", now=now + 10)
+    assert not mgr.receiving("other", "me", now=now + 10)
+    assert not mgr.receiving("sp", "someone-else", now=now + 10)
+    assert not mgr.receiving("sp", "me", ignore_sync_id="s1", now=now + 10)
+    # Idle past the window: no longer running.
+    assert not mgr.receiving("sp", "me", now=now + RECEIVING_IDLE_S + 1)
+    # The sentinel landed: the stream is over.
+    mgr.get_session("s1").sentinel_landed = True
+    assert not mgr.receiving("sp", "me", now=now + 10)

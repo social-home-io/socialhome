@@ -2809,3 +2809,157 @@ async def test_an_inviter_reproof_for_a_gone_space_or_ourselves_is_a_no_op(
         SpaceInviterReproofDue(space_id="sp-gone", inviter_instance_id="admin-b")
     )
     assert fed.mesh_catchups == [] and fed.sent == []
+
+
+# ── Sync status (migration 0150) ──────────────────────────────────────────
+
+
+class _Unreachable:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, frozenset[str]]] = []
+        self.fail = False
+
+    async def host_unreachable(self, space_id, hosts) -> None:
+        self.calls.append((space_id, frozenset(hosts)))
+        if self.fail:
+            raise RuntimeError("db down")
+
+
+async def test_an_unanswered_round_records_the_hosts_unreachable(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    status = _Unreachable()
+    sched.attach_status(status)
+    await _round(sched)
+    await _wait_checks(sched)
+    assert status.calls == [("sp-1", frozenset({"host"}))]
+
+
+async def test_an_answered_round_records_nothing_unreachable(
+    bus, queue, sync_manager, monkeypatch
+):
+    """The answer's own outcome is the receiver's to record."""
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 0.3)
+    sched, contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    status = _Unreachable()
+    sched.attach_status(status)
+    await _round(sched)
+    contact.heard("sp-1")
+    await _wait_checks(sched)
+    assert status.calls == []
+
+
+async def test_a_failing_status_write_never_costs_the_helper(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    status = _Unreachable()
+    status.fail = True
+    sched.attach_status(status)
+    await _round(sched)
+    await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_sync_now_asks_a_paired_host_for_an_incremental_stream(
+    bus, queue, sync_manager
+):
+    fed = _FakeFederation(confirmed={"host", "peer-b"})
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host"), _peer("peer-b")]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type={
+                SpaceType.PRIVATE: [_space("sp-1", owner_instance_id="host")]
+            },
+            members_by_space={"sp-1": ["host", "peer-b"]},
+        ),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    await queue.start()
+    try:
+        targets = await sched.sync_now("sp-1")
+        await asyncio.sleep(0.1)
+    finally:
+        await queue.stop()
+    assert targets == ["host", "peer-b"]
+    begins = [s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN]
+    assert {(b["to"], b["payload"]["sync_mode"]) for b in begins} == {
+        ("host", "incremental"),
+        ("peer-b", "incremental"),
+    }
+    assert fed.mesh_catchups == []
+
+
+async def test_sync_now_reaches_a_host_only_over_the_mesh(bus, queue, sync_manager):
+    fed = _FakeFederation(confirmed=set())
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type={
+                SpaceType.PRIVATE: [_space("sp-1", owner_instance_id="host")]
+            },
+            members_by_space={"sp-1": ["host"]},
+        ),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    assert await sched.sync_now("sp-1") == ["host"]
+    assert fed.mesh_catchups == [("sp-1", "host")]
+    assert fed.mesh_fields[0]["sync_mode"] == "incremental"
+    assert fed.sent == []
+
+
+async def test_sync_now_for_a_space_hosted_here_asks_its_paired_members(
+    bus, queue, sync_manager
+):
+    fed = _FakeFederation(confirmed={"peer-b"})
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("peer-b")]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type={SpaceType.PRIVATE: [_space("sp-1")]},
+            members_by_space={"sp-1": ["self", "peer-b", "mesh-only"]},
+        ),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    assert await sched.sync_now("sp-1") == ["peer-b"]
+    assert fed.mesh_catchups == []
+
+
+async def test_sync_now_for_an_unknown_or_followed_space_asks_nobody(
+    bus, queue, sync_manager
+):
+    fed = _FakeFederation(confirmed={"host"})
+    repo = _FakeSpaceRepo(
+        spaces_by_type={SpaceType.PUBLIC: [_space("sp-1", owner_instance_id="host")]},
+        members_by_space={"sp-1": ["host"]},
+        local_roles={"sp-1": [SpaceRole.SUBSCRIBER.value]},
+    )
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host")]),
+        space_repo=repo,
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    assert await sched.sync_now("nope") == []
+    assert await sched.sync_now("sp-1") == []

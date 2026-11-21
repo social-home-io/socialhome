@@ -364,6 +364,34 @@ requester per 30 min in all, `SPACE_MEDIA_WANTED` included) — 200 × 48 =
 9 600 small requests a day in all, ~4 800 per helper. Nothing fans out: one
 requester, one helper, one space per round.
 
+### Sync status
+
+A member household tells its people whether a space it does not host needs
+sync — local only, no new message on the wire. Each answer of a household
+acting as the space's host here (`host_equivalence.acting_hosts`: the owner,
+or the trusted inviting admin) to our `SPACE_SYNC_BEGIN` ends in one result,
+kept on that household's `space_instances` row (migration 0150):
+
+| `sync_result` | From |
+|---|---|
+| `ok` (+ `sync_ok_at`) | a clean `SpaceSyncComplete` — the quiet sentinel of an up-to-date space included |
+| `unclean` | `SpaceSyncComplete {clean: false}` (held back / lost chunk) |
+| `deferred` | `SpaceSyncDeferred` (a refusal, or a stream cut mid-way) |
+| `unreachable` | the scheduler's silent-host verdict (`HOST_ANSWER_WAIT_S`, trigger 10) |
+
+A result is written only when it changes, an `ok` refreshes its time at most
+every 15 minutes — never per chunk. `SpaceSyncStatusService` computes the
+state at read time: **up to date** (an `ok` within 2 h; a refusal right after
+an `ok` within 1 h keeps it), **catching up** (a chunk of a stream from a host
+moved within 2 minutes), **host offline** (a host found unreachable and none
+answering since), **never** (no `ok` yet), else **behind**. The space's owner
+household is always up to date. It rides `GET /api/spaces/{id}` (`sync`, with
+`waiting_to_send` — our pending outbox items of the space) and, on a change,
+the local `space.sync_state` frame, members only. **Sync now**
+(`POST /api/spaces/{id}/sync`) sends the incremental BEGIN of one round right
+away — to a mesh-only host over the mesh too — within 3 per hour per space,
+inside the host's 5 BEGINs / h budget next to the 2 periodic ones.
+
 ## What a sync streams
 
 The provider walks `RESOURCE_ORDER` (`federation/sync/space/exporter.py`)
