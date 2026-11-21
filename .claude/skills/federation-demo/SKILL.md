@@ -595,6 +595,15 @@ That single command runs the full sequence:
    re-reads **b** and fails when it no longer holds **c**'s vote under
    **c**'s stamp, and pins ``MIN_FOR_ITEM_MERGE_STAMPS`` = 94.
 
+9f-t. Signed sync pages (v_95, ``docs/protocol/sync-pages.md`` Phase 2) —
+   no step of its own: ``verify`` sends **a**'s "Sync now" for the
+   tri-household salon (host **b**) up to three times — the first BEGIN
+   makes **b** seal a page in the background, the next sentinel carries it
+   — then fails unless **a** holds a page signed by **b** that verifies
+   against the space key **a** pins, whose stored vector hashes to its
+   root, and that **a**'s ``GET /api/spaces/{id}`` ``sync.page`` shows. It
+   pins ``MIN_FOR_SYNC_PAGES`` = 95.
+
 9f. ``space-chat`` (v_55, every space's members' chat) — in **b**'s
    space from ``traffic`` / ``calendar`` (owner **b**, members **a** and
    **c**). Prereqs: ``up``, ``pair``, ``traffic``, ``calendar``; runs
