@@ -1350,7 +1350,9 @@ async def test_a_held_frame_refused_again_keeps_its_place(keys):
             _envelope_frame(keys, {**ENVELOPE, "msg_id": msg_id})
         )
     clock.t += 61
-    await inbound.handle_frame(_envelope_frame(keys, {**ENVELOPE, "msg_id": "live"}))
+    # Another frame took the slot that freed first (here: charged straight
+    # to the budget, as a frame on the HTTPS inbox would be).
+    fed._charge("a" * 32)
     assert await inbound.run_deferred() == 0
     assert inbound.deferred_count == 2
     clock.t += 61
@@ -1359,7 +1361,89 @@ async def test_a_held_frame_refused_again_keeps_its_place(keys):
     assert await inbound.run_deferred() == 1
     assert [json.loads(raw)["msg_id"] for _, raw, _ in fed.calls] == [
         "m-1",
-        "live",
         "held-1",
         "held-2",
     ]
+
+
+async def test_a_live_frame_waits_behind_its_senders_held_frames(keys):
+    """Per-sender order: once a sender has frames held, its next frame
+    queues behind them even when a slot is free — a delete never lands
+    before the create it refers to."""
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    fed = _BudgetedFederation(limiter, limit=1)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    await inbound.handle_frame(_envelope_frame(keys))  # m-1
+    held = _envelope_frame(keys, {**ENVELOPE, "msg_id": "m-2"})
+    assert await inbound.handle_frame(held) == gri.DEFERRED_RESPONSE
+    clock.t += 61  # a slot is free, but m-2 is still held
+    live = _envelope_frame(keys, {**ENVELOPE, "msg_id": "m-3"})
+    assert await inbound.handle_frame(live) == gri.DEFERRED_RESPONSE
+    # Another household is not held up behind it.
+    other = _envelope_frame(keys, {**ENVELOPE, "from_instance": "q" * 32})
+    assert await inbound.handle_frame(other) == {"status": "ok"}
+    assert await inbound.run_deferred() == 1  # m-2; m-3 refused again
+    clock.t += 61
+    assert await inbound.run_deferred() == 1
+    sent = [json.loads(raw)["msg_id"] for iid, raw, _ in fed.calls if iid == "a" * 32]
+    assert sent == ["m-1", "m-2", "m-3"]
+
+
+async def test_a_live_mailbox_frame_waits_behind_its_senders_held_frames(keys):
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    fed = _BudgetedFederation(limiter, limit=1)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    mkeys = _mailbox_keys()
+    await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mkeys), keys=mkeys)
+    held = await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mkeys), keys=mkeys)
+    assert held == gri.DEFERRED_RESPONSE
+    clock.t += 61
+    live = await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mkeys), keys=mkeys)
+    assert live == gri.DEFERRED_RESPONSE
+    assert inbound.deferred_count == 2
+
+
+async def test_one_budget_never_takes_more_than_its_share_of_the_hold(
+    keys, monkeypatch
+):
+    """A household kept over its budget (or a replay flood) can't fill the
+    hold and push every other household's held frames out."""
+    monkeypatch.setattr(gri, "RELAY_DEFER_MAX_PER_BUDGET", 2)
+    limiter = RateLimiter(monotonic=_Clock())
+    fed = _BudgetedFederation(limiter, limit=0)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    for i in range(2):
+        frame = _envelope_frame(keys, {**ENVELOPE, "msg_id": f"m-{i}"})
+        assert await inbound.handle_frame(frame) == gri.DEFERRED_RESPONSE
+    with pytest.raises(ValueError, match="held"):
+        await inbound.handle_frame(_envelope_frame(keys))
+    other = _envelope_frame(keys, {**ENVELOPE, "from_instance": "q" * 32})
+    assert await inbound.handle_frame(other) == gri.DEFERRED_RESPONSE
+    assert inbound.deferred_count == 3
+
+
+async def test_one_budget_never_takes_more_than_its_share_of_the_bytes(
+    keys, monkeypatch
+):
+    monkeypatch.setattr(gri, "RELAY_DEFER_MAX_BYTES_PER_BUDGET", 1)
+    limiter = RateLimiter(monotonic=_Clock())
+    fed = _BudgetedFederation(limiter, limit=0)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    with pytest.raises(ValueError, match="held"):
+        await inbound.handle_frame(_envelope_frame(keys))
+    assert inbound.deferred_count == 0
+
+
+async def test_a_frame_held_too_long_is_dropped(keys, caplog):
+    clock = _Clock()
+    limiter = RateLimiter(monotonic=clock)
+    fed = _BudgetedFederation(limiter, limit=0)
+    inbound = _inbound(keys, federation=fed, limiter=limiter)
+    assert await inbound.handle_frame(_envelope_frame(keys)) == gri.DEFERRED_RESPONSE
+    clock.t += gri.RELAY_DEFER_MAX_AGE_S + 1
+    with caplog.at_level(logging.INFO):
+        assert await inbound.run_deferred() == 0
+    assert inbound.deferred_count == 0
+    assert "held too long" in caplog.text

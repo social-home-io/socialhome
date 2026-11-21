@@ -707,3 +707,42 @@ async def test_a_dropped_write_is_indistinguishable_across_space_states(client, 
     assert json.loads(baseline[1]) == {"status": "ok"}
     for label, answer in answers.items():
         assert answer == baseline, label
+
+
+async def test_refusals_before_the_signature_spend_a_tight_per_address_budget(
+    client, env
+):
+    """The 6000 / min backstop is for many genuine households behind one
+    address. What never proved a household — malformed JSON, an unknown
+    inbox, a bad signature — spends a far smaller per-address budget, so a
+    stranger on a directly reachable household gets 429'd long before
+    6000 bodies of unauthenticated parsing a minute."""
+    from socialhome.app_keys import rate_limiter_key
+    from socialhome.routes.federation import (
+        INBOX_JUNK_RATE_LIMIT,
+        INBOX_RATE_WINDOW_S,
+    )
+
+    assert INBOX_JUNK_RATE_LIMIT == 600
+    limiter = client.server.app[rate_limiter_key]
+    bucket = "federation-inbox-junk:127.0.0.1"
+    good = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"user_id": "alice"},
+        msg_id="good-1",
+    )
+    assert (await client.post("/federation/inbox/wh-test", data=good)).status == 200
+    assert (await client.post("/federation/inbox/nope", data=good)).status == 404
+    assert (await client.post("/federation/inbox/wh-test", data=b"junk")).status == 400
+    # Only the two refusals were charged; the accepted envelope and its
+    # replay (a genuine household's retry) were not.
+    assert (await client.post("/federation/inbox/wh-test", data=good)).status == 410
+    assert len(limiter._windows[bucket]) == 2
+
+    for _ in range(INBOX_JUNK_RATE_LIMIT - 2):
+        limiter.is_allowed(bucket, limit=INBOX_JUNK_RATE_LIMIT, window_s=60)
+    r = await client.post("/federation/inbox/wh-test", data=good)
+    assert r.status == 429
+    assert 1 <= int(r.headers["Retry-After"]) <= INBOX_RATE_WINDOW_S

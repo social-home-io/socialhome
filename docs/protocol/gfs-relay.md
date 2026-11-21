@@ -2004,15 +2004,23 @@ a *budget* — the two household ceilings, the media budget, the sender's
 step 5a — is **held** in memory and run again from the step that refused
 it once that budget frees (`RELAY_DEFER_POLL_S`, 1 s), never charged to an
 earlier bucket twice; frames held on the same budget wait together, other
-senders' frames are not held up behind them. The hold is bounded
-(`RELAY_DEFER_MAX_FRAMES` 2 000 — the GFS's own per-recipient queue cap —
-and `RELAY_DEFER_MAX_BYTES` 16 MiB); past it, and on shutdown, a frame is
-dropped as before (one WARNING a minute with a count) and sync heals it.
-A relayed envelope may be up to a day old anyway, so the wait fits the
-relay's timestamp window. A held frame can be applied after a later frame
-of another household; the relay never promised an order across senders.
-A per-mailbox flood is not held: it is the signal that rotates the
-mailbox.
+senders' frames are not held up behind them. While a sender has frames
+held, its next relayed or mailbox envelope queues behind them even when a
+slot is free, so one household's frames keep their order (a delete never
+lands before its create); across households there is no order, as before.
+The hold is bounded (`RELAY_DEFER_MAX_FRAMES` 2 000 — the GFS's own
+per-recipient queue cap — and `RELAY_DEFER_MAX_BYTES` 16 MiB), one budget
+takes at most a quarter of either (`RELAY_DEFER_MAX_PER_BUDGET`, so a
+household kept over its budget, or junk held before the unseal, can't push
+everyone else out), and nothing stays held longer than
+`RELAY_DEFER_MAX_AGE_S` (5 min — a budget frees within its minute, so a
+frame still held then is on one kept saturated). Past those, and on
+shutdown, a frame is dropped as before (one WARNING a minute with a count)
+and sync heals it. A relayed envelope may be up to a day old anyway, so
+the wait fits the relay's timestamp window. A per-mailbox flood is not
+held: it is the signal that rotates the mailbox. The bytes counted are the
+frame's wire size; what a held continuation keeps (the opened envelope) is
+of the same order.
 
 **Cost.** Nothing new on the wire or on the GFS. A held frame costs its
 bytes in memory until it runs (≤ 16 MiB in all) and one dictionary check

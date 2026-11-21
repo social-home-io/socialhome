@@ -62,12 +62,14 @@ our socket — there is no acknowledgement to withhold, so a frame refused
 here for a BUDGET (the process-wide or envelope ceiling, the media budget,
 the sender's per-household budget) would be lost for good. Such a frame is
 instead **held** in memory — bounded by :data:`RELAY_DEFER_MAX_FRAMES` and
-:data:`RELAY_DEFER_MAX_BYTES` — and run again from the stage that refused
-it (never charged to a bucket twice) once that budget frees. Only past the
-bound, or while shutting down, is it dropped as before (sync heals it). A
+:data:`RELAY_DEFER_MAX_BYTES`, a quarter of each per budget, at most
+:data:`RELAY_DEFER_MAX_AGE_S` — and run again from the stage that refused
+it (never charged to a bucket twice) once that budget frees. Past those
+bounds, or while shutting down, it is dropped as before (sync heals it). A
 frame refused for anything else (signature, replay, a gate) is final, as
-always. A held frame may be applied after a later frame of another
-household — the relay never promised an order across senders.
+always. While a sender has frames held, its next envelope queues behind
+them, so one household's frames keep their order; across households the
+relay never promised one.
 
 ``RELAY_DELIVERED_VIA``
 -----------------------
@@ -101,6 +103,7 @@ from ..federation.inbound_validator import (
     TRANSPORT_GFS_MAILBOX,
     TRANSPORT_GFS_RELAY,
     InboundRateLimitedError,
+    instance_bucket,
 )
 from ..federation.invite_bootstrap import JOIN_REQUEST_KINDS, unseal_envelope_body
 from ..federation.invite_token_redeem import (
@@ -196,6 +199,15 @@ DEFERRED_RESPONSE: dict = {"status": "deferred"}
 #: memory (a typical envelope is a few KiB; ~30 full media frames).
 RELAY_DEFER_MAX_FRAMES: int = 2000
 RELAY_DEFER_MAX_BYTES: int = 16 * 1024 * 1024
+#: One budget's share of the hold (a quarter): a household kept over its
+#: budget — or the pre-unseal ceiling under a junk flood — can't fill the
+#: hold and push every other household's held frames out.
+RELAY_DEFER_MAX_PER_BUDGET: int = RELAY_DEFER_MAX_FRAMES // 4
+RELAY_DEFER_MAX_BYTES_PER_BUDGET: int = RELAY_DEFER_MAX_BYTES // 4
+#: How long a frame may stay held (limiter clock). A budget frees within its
+#: 60 s window, so a frame still held after this is on a budget kept
+#: saturated: dropped (sync heals it), never kept forever.
+RELAY_DEFER_MAX_AGE_S: float = 300.0
 #: How often the background drain looks at held frames. A frame is run
 #: again only once the budget that held it frees (its ``Retry-After``), so
 #: this bounds the extra latency, not the retry rate.
@@ -226,14 +238,20 @@ class _OverBudget(Exception):
         self.resume = resume
 
 
-@dataclass(slots=True)
+#: Set while :meth:`GfsRelayInbound.run_deferred` runs a held frame, so that
+#: frame is not queued behind its own sender's held frames (itself).
+_RUNNING_HELD: ContextVar[bool] = ContextVar("gfs_relay_running_held", default=False)
+
+
+@dataclass(slots=True, eq=False)
 class _Held:
     """One held frame (module-local, mutable: a retry refused again keeps
-    its place with the new stage)."""
+    its place with the new stage). Compared by identity."""
 
     resume: Callable[[], Awaitable[dict]]
     bucket: str
     size: int
+    held_at: float
 
 
 def _frame_bytes(frame: object) -> int:
@@ -265,6 +283,7 @@ class GfsRelayInbound:
         "_gfs_repo",
         "_held",
         "_held_bytes",
+        "_held_on",
         "_hold_full_drops",
         "_hold_warned_at",
         "_invite",
@@ -292,6 +311,8 @@ class GfsRelayInbound:
         #: Frames held over a budget, oldest first, and their total size.
         self._held: deque[_Held] = deque()
         self._held_bytes = 0
+        #: bucket → (frames, bytes) held on it (the per-budget share).
+        self._held_on: dict[str, tuple[int, int]] = {}
         #: bucket → when (limiter clock) the frames held on it may run again.
         self._due: dict[str, float] = {}
         self._drain_task: asyncio.Task[None] | None = None
@@ -445,6 +466,10 @@ class GfsRelayInbound:
         """One opened mailbox envelope through the pipeline. Its sender over
         its budget: held, to run again from here (the mailbox bucket and the
         open are already paid)."""
+        self._wait_behind(
+            from_instance,
+            resume=lambda: self._dispatch_mailbox(from_instance, raw, multi=multi),
+        )
         try:
             return await self._federation.handle_inbound_rtc(
                 from_instance,
@@ -615,6 +640,10 @@ class GfsRelayInbound:
             inner.get("event_type"),
             from_instance,
         )
+        self._wait_behind(
+            from_instance,
+            resume=lambda: self._dispatch_envelope(body, gfs_url=gfs_url),
+        )
         delivered_via = await self._connection_id_for(gfs_url)
         token = RELAY_DELIVERED_VIA.set(delivered_via)
         try:
@@ -692,22 +721,55 @@ class GfsRelayInbound:
             self._hold(over, size=size)
             return dict(DEFERRED_RESPONSE)
 
+    def _wait_behind(
+        self, sender: str, *, resume: Callable[[], Awaitable[dict]]
+    ) -> None:
+        """Per-sender order: while *sender* (the envelope's claimed id —
+        the pipeline verifies it) has frames held on its budget, a new frame
+        of its queues behind them instead of taking a slot that just freed
+        (a delete must not land before the create it refers to). A claimed
+        id only ever holds the claimant's own frame, inside that budget's
+        share."""
+        bucket = instance_bucket(sender, media=False)
+        if _RUNNING_HELD.get() or not self._held_on.get(bucket):
+            return
+        raise _OverBudget(bucket=bucket, retry_after_s=0, resume=resume)
+
+    def _track(self, bucket: str, size: int, sign: int) -> None:
+        frames, nbytes = self._held_on.get(bucket, (0, 0))
+        frames, nbytes = frames + sign, nbytes + sign * size
+        if frames > 0:
+            self._held_on[bucket] = (frames, nbytes)
+        else:
+            self._held_on.pop(bucket, None)
+        self._held_bytes += sign * size
+
     def _hold(self, over: _OverBudget, *, size: int) -> None:
         """Hold one over-budget frame, or drop it (``ValueError``) past the
-        hold's bounds or once stopped."""
+        hold's bounds — the whole hold's, or its budget's share — or once
+        stopped."""
         if self._stop.is_set():
             raise ValueError("relay frame over budget, not held (shutting down)")
+        frames_on, bytes_on = self._held_on.get(over.bucket, (0, 0))
         if (
             len(self._held) >= RELAY_DEFER_MAX_FRAMES
             or self._held_bytes + size > RELAY_DEFER_MAX_BYTES
+            or frames_on >= RELAY_DEFER_MAX_PER_BUDGET
+            or bytes_on + size > RELAY_DEFER_MAX_BYTES_PER_BUDGET
         ):
             self._note_hold_full()
             raise ValueError("relay frame over budget, not held (the hold is full)")
-        self._held.append(_Held(resume=over.resume, bucket=over.bucket, size=size))
-        self._held_bytes += size
+        self._held.append(
+            _Held(
+                resume=over.resume, bucket=over.bucket, size=size, held_at=self._now()
+            )
+        )
+        self._track(over.bucket, size, +1)
+        # ``retry_after_s`` is 0 for a frame queued behind its sender's held
+        # ones: it keeps their due time rather than pushing it back.
         self._due[over.bucket] = max(
             self._due.get(over.bucket, float("-inf")),
-            self._now() + max(over.retry_after_s, 1),
+            self._now() + over.retry_after_s,
         )
         log.debug("gfs_relay: holding a frame over the %s budget", over.bucket)
         if self._drain_task is None or self._drain_task.done():
@@ -739,12 +801,20 @@ class GfsRelayInbound:
         Exposed for tests; the background drain calls it."""
         ran = 0
         for item in list(self._held):
+            if self._now() - item.held_at > RELAY_DEFER_MAX_AGE_S:
+                # Its budget stayed saturated: never kept forever.
+                log.info("gfs_relay: dropped a frame held too long (%s)", item.bucket)
+                self._release(item)
+                continue
             if self._due.get(item.bucket, float("-inf")) > self._now():
                 continue
+            running = _RUNNING_HELD.set(True)
             try:
                 await item.resume()
             except _OverBudget as over:
+                self._track(item.bucket, item.size, -1)
                 item.resume, item.bucket = over.resume, over.bucket
+                self._track(item.bucket, item.size, +1)
                 self._due[over.bucket] = self._now() + max(over.retry_after_s, 1)
                 continue
             except ValueError as exc:
@@ -755,11 +825,16 @@ class GfsRelayInbound:
                 log.warning("gfs_relay: a held frame failed", exc_info=True)
             else:
                 ran += 1
-            self._held.remove(item)
-            self._held_bytes -= item.size
+            finally:
+                _RUNNING_HELD.reset(running)
+            self._release(item)
         if not self._held:
             self._due.clear()
         return ran
+
+    def _release(self, item: _Held) -> None:
+        self._held.remove(item)
+        self._track(item.bucket, item.size, -1)
 
     async def _drain_loop(self) -> None:
         """Run held frames as their budgets free, until none is left or
@@ -784,15 +859,18 @@ class GfsRelayInbound:
         task, self._drain_task = self._drain_task, None
         if task is not None:
             try:
+                # On timeout ``wait_for`` cancels the drain; a cancellation
+                # of this caller propagates.
                 await asyncio.wait_for(task, timeout=5.0)
-            except TimeoutError, asyncio.CancelledError:
-                task.cancel()
+            except TimeoutError:
+                log.warning("gfs_relay: held-frame drain did not stop in time")
         if self._held:
             log.info(
                 "gfs_relay: dropping %d held frame(s) on shutdown", len(self._held)
             )
         self._held.clear()
         self._held_bytes = 0
+        self._held_on.clear()
         self._due.clear()
 
     async def _connection_id_for(self, gfs_url: str) -> str | None:

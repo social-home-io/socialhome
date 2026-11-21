@@ -98,6 +98,18 @@ INBOX_MAX_BODY_BYTES = DEFAULT_JSON_MAX_BYTES
 MEDIA_INBOX_RATE_LIMIT = 3600
 MEDIA_INBOX_RATE_WINDOW_S = 60
 
+#: Refusals per address per window — a body that never proved a household
+#: (malformed, too large, an unknown inbox, a bad signature, outside the
+#: timestamp window, a refused pairing body). Its own bucket, charged only
+#: on such a refusal and checked before the body is read, for JSON and media
+#: bodies alike: the 6000 / min backstop is sized for many genuine
+#: households behind one address, this one for what a stranger may make us
+#: parse and look up. A genuine household's replay (``410 REPLAY``) and its
+#: 429s are never charged. Behind Home Assistant's inbox relay every peer
+#: shares it, so it is still far above the refusals real peers cause (a
+#: stale inbox after an unpair, a clock briefly off).
+INBOX_JUNK_RATE_LIMIT = 600
+
 #: Generic strings returned to the wire on rejection. Never echo the
 #: raw exception (#7) — that text leaks ban-list / replay-cache state to
 #: an attacker probing inbox IDs.
@@ -215,6 +227,35 @@ def _bad_body(status: int) -> web.Response:
     return web.json_response({"error": _GENERIC_ERROR_BY_STATUS[status]}, status=status)
 
 
+def _junk_key(request: web.Request) -> str:
+    return f"federation-inbox-junk:{client_bucket(request.remote)}"
+
+
+def _junk_throttled(request: web.Request) -> web.Response | None:
+    """``429`` while *request*'s address has spent its refusal budget
+    (:data:`INBOX_JUNK_RATE_LIMIT`); a pure read — refusals charge it."""
+    limiter = request.app.get(K.rate_limiter_key)
+    if limiter is None:
+        return None
+    key = _junk_key(request)
+    if limiter.has_room(key, limit=INBOX_JUNK_RATE_LIMIT, window_s=INBOX_RATE_WINDOW_S):
+        return None
+    return _rate_limited(limiter.retry_after_s(key, window_s=INBOX_RATE_WINDOW_S))
+
+
+def _refused(request: web.Request, response: web.Response) -> web.Response:
+    """Charge one refusal of an unproven body to its address, then answer
+    *response*."""
+    limiter = request.app.get(K.rate_limiter_key)
+    if limiter is not None:
+        limiter.is_allowed(
+            _junk_key(request),
+            limit=INBOX_JUNK_RATE_LIMIT,
+            window_s=INBOX_RATE_WINDOW_S,
+        )
+    return response
+
+
 class FederationInboxView(BaseView):
     """POST /federation/inbox/{inbox_id} — federation envelope arrives here.
 
@@ -241,13 +282,18 @@ class FederationInboxView(BaseView):
     async def post(self) -> web.Response:
         inbox_id = self.match("inbox_id")
 
+        # An address that keeps sending what proves no household is shed
+        # here, before its body is read.
+        junk = _junk_throttled(self.request)
+        if junk is not None:
+            return junk
         try:
             head = await _read_body_head(self.request)
         except PayloadTooLargeError:
-            return _bad_body(413)
+            return _refused(self.request, _bad_body(413))
         except Exception as exc:
             log.debug("federation inbox: body read error: %s", exc, exc_info=True)
-            return _bad_body(400)
+            return _refused(self.request, _bad_body(400))
         media = is_media_body(head)
 
         # §Audit #4: per-IP throttle, mirroring ``/api/auth/token``.
@@ -276,10 +322,10 @@ class FederationInboxView(BaseView):
                 prefix=head,
             )
         except PayloadTooLargeError:
-            return _bad_body(413)
+            return _refused(self.request, _bad_body(413))
         except Exception as exc:
             log.debug("federation inbox: body read error: %s", exc, exc_info=True)
-            return _bad_body(400)
+            return _refused(self.request, _bad_body(400))
 
         federation_service = self.request.app.get(K.federation_service_key)
         if federation_service is None:
@@ -318,7 +364,7 @@ class FederationInboxView(BaseView):
                     raw_body,
                 )
         except InboundRateLimitedError as exc:
-            # Step 4a: a verified household over its budget. Back-pressure,
+            # Step 5a: a verified household over its budget. Back-pressure,
             # not a refusal — nothing about the envelope was kept (not even
             # its msg_id), so the redelivery after Retry-After is taken.
             log.info(
@@ -375,9 +421,12 @@ class FederationInboxView(BaseView):
                     status,
                     exc,
                 )
-            return web.json_response(
-                {"error": _GENERIC_ERROR_BY_STATUS.get(status, "rejected")},
-                status=status,
+            return _refused(
+                self.request,
+                web.json_response(
+                    {"error": _GENERIC_ERROR_BY_STATUS.get(status, "rejected")},
+                    status=status,
+                ),
             )
         except Exception:
             log.exception(
@@ -434,9 +483,12 @@ class FederationInboxView(BaseView):
                 status,
                 exc,
             )
-            return web.json_response(
-                {"error": _GENERIC_ERROR_BY_STATUS.get(status, "rejected")},
-                status=status,
+            return _refused(
+                self.request,
+                web.json_response(
+                    {"error": _GENERIC_ERROR_BY_STATUS.get(status, "rejected")},
+                    status=status,
+                ),
             )
         except Exception:
             log.exception(
