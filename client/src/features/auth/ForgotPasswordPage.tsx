@@ -21,6 +21,7 @@ import { FormError } from '@/components/FormError'
 import { showToast } from '@/components/Toast'
 import { Wordmark } from '@/components/Wordmark'
 import { t } from '@/i18n/i18n'
+import { rateLimitWaitMessage } from './rateLimitWait'
 
 interface Props {
   /** ``?token=`` from the current URL. ``null`` → instructions mode. */
@@ -97,7 +98,9 @@ function ResetForm({ token }: { token: string }) {
       } else if (res.status === 422) {
         setError(t('forgot.too_short'))
       } else if (res.status === 429) {
-        setError(t('forgot.rate_limited'))
+        setError(rateLimitWaitMessage(
+          res.headers.get('retry-after'), t('forgot.rate_limited'),
+        ))
       } else {
         const body = await res.json().catch(() => null)
         setError(body?.error?.message ?? t('forgot.failed_status', { status: String(res.status) }))
