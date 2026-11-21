@@ -1016,6 +1016,52 @@ async def test_the_relay_retry_carries_the_roster_digest_of_its_begin():
     assert decision.next_payload["roster_digest"] == digest
 
 
+async def test_the_relay_retry_carries_the_sync_page_of_its_begin():
+    """v_95: the relay re-BEGIN names the same sync page the first BEGIN
+    did, so the provider sends its page only when newer."""
+    ref = {"signer": "host", "epoch": 1, "seq": 4, "issued_at": 9, "root": "r"}
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        sync_mode="incremental",
+        page_ref=ref,
+    )
+    pending = mgr.pending_sync_request("s1")
+    assert pending.page_ref == ref
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode=pending.sync_mode,
+            page_ref=pending.page_ref,
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    assert decision.next_payload["page"] == ref
+
+
+async def test_begin_session_records_the_requesters_sync_page():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    ref = {"signer": "h", "epoch": 1, "seq": 2, "issued_at": 3, "root": b"\x00" * 32}
+    d = await mgr.begin_session(
+        sync_id="s-page",
+        space_id="sp-1",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="incremental",
+        page_ref=ref,
+    )
+    assert d.accepted is True
+    assert mgr.get_session("s-page").page_ref == ref
+
+
 # ─── Sync status: is a stream of a space arriving? ─────────────────────────
 
 

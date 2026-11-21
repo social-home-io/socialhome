@@ -353,6 +353,17 @@ class _FileHasher(Protocol):
     async def hashes_for(self, urls: Any) -> dict: ...
 
 
+class _SyncPages(Protocol):
+    async def sentinel_page(
+        self,
+        *,
+        space_id: str,
+        sync_id: str,
+        requester_version: int,
+        requester_ref: Any,
+    ) -> dict | None: ...
+
+
 class _WithFileHashes:
     """v_85 — a resource the host (or a delegated admin) streams to a v_85
     requester: each record that shows files carries their ``files`` hash
@@ -556,9 +567,22 @@ class SpaceSyncService:
         "_roster_authority",
         "_roster_sent",
         "_sig_suite",
+        "_sync_pages",
         "_watermarks",
         "_windows",
     )
+
+    async def _sentinel_page(self, session: SyncSessionRecord) -> dict | None:
+        """v_95: the sentinel's sealed sync page for this requester, or
+        ``None`` (no page service, an older requester, nothing newer)."""
+        if self._sync_pages is None:
+            return None
+        return await self._sync_pages.sentinel_page(
+            space_id=session.space_id,
+            sync_id=session.sync_id,
+            requester_version=await self._session_version(session),
+            requester_ref=getattr(session, "page_ref", None),
+        )
 
     async def _sentinel_proof(self, space_id: str) -> dict | None:
         if self._inviter_proof_for is None:
@@ -650,6 +674,13 @@ class SpaceSyncService:
         #: v_86 — which files of a row this household ships on catch-up
         #: (``None``: every file of every row, as before).
         self._file_gates: CatchUpFileGates | None = None
+        #: v_95 — signed sync pages: each sentinel carries the newest page
+        #: held here (``None``: no pages).
+        self._sync_pages: _SyncPages | None = None
+
+    def attach_sync_pages(self, pages: _SyncPages) -> None:
+        """Wire the v_95 sync pages (``docs/protocol/sync-pages.md``)."""
+        self._sync_pages = pages
 
     def attach_file_gates(self, gates: CatchUpFileGates) -> None:
         """Wire the v_86 catch-up file gate: on a full stream a non-host
@@ -964,6 +995,7 @@ class SpaceSyncService:
                 snapshot_seq=session.snapshot_seq,
                 owner_statement=await self._sentinel_statement(space_id),
                 inviter_proof=await self._sentinel_proof(space_id),
+                page_sealed=await self._sentinel_page(session),
             )
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.

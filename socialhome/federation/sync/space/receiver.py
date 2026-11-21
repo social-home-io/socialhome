@@ -144,6 +144,12 @@ class _StreamWatch(Protocol):
     async def stream_started(self, space_id: str, provider: str) -> None: ...
 
 
+class _SyncPageSink(Protocol):
+    async def receive(
+        self, *, space_id: str, sync_id: str, provider: str, sealed: object
+    ) -> bool: ...
+
+
 class SpaceSyncReceiver(
     MembersMixin,
     PostsMixin,
@@ -190,6 +196,7 @@ class SpaceSyncReceiver(
         "_sticky_repo",
         "_streaks",
         "_stream_watch",
+        "_sync_pages",
         "_timetable_repo",
         "_zone_repo",
     )
@@ -238,6 +245,8 @@ class SpaceSyncReceiver(
         #: handlers, which run each through the live create rule. ``None``
         #: drops the resource (see :meth:`attach_chat_sink`).
         self._chat_sink: ChatSyncSink | None = None
+        #: v_95 — takes the signed sync page a sentinel carries.
+        self._sync_pages: _SyncPageSink | None = None
         #: v_92 — told when the household acting as a space's host answers
         #: (:meth:`attach_host_contact`). ``None``: nobody is told.
         self._host_contact: _HostHeard | None = None
@@ -301,6 +310,11 @@ class SpaceSyncReceiver(
     def attach_media_names(self, namer: SpaceMediaNamer) -> None:
         """Wire the shared namer (it knows this household's instance id)."""
         self._media_names = namer
+
+    def attach_sync_pages(self, pages: _SyncPageSink) -> None:
+        """Wire the v_95 sync pages: a verified sentinel's ``page_sealed``
+        is decrypted, verified and kept (``SyncPageService.receive``)."""
+        self._sync_pages = pages
 
     def attach_chat_sink(self, sink: ChatSyncSink) -> None:
         """Wire where streamed space-chat messages (v_55) are applied."""
@@ -550,6 +564,17 @@ class SpaceSyncReceiver(
             if clean and not archive_changed:
                 await self._record_applied(
                     space_id, from_instance, envelope.get("snapshot_seq")
+                )
+            # v_95: the provider's newest signed sync page — taken after the
+            # stream's snapshot is recorded, so the status compares the page
+            # with what we now hold. Authority-signed: any provider may relay
+            # it, none can forge it.
+            if self._sync_pages is not None:
+                await self._sync_pages.receive(
+                    space_id=space_id,
+                    sync_id=sync_id,
+                    provider=from_instance,
+                    sealed=envelope.get("page_sealed"),
                 )
             await self._bus.publish(
                 SpaceSyncComplete(

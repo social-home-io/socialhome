@@ -14,6 +14,7 @@ from socialhome.domain.events import (
     SpaceSyncStateChanged,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.space_sync_page import SyncPagePosition
 from socialhome.domain.space_sync_status import (
     SpaceSyncOutcome,
     SpaceSyncResult,
@@ -393,3 +394,75 @@ async def test_the_outcome_survives_the_publisher_being_cancelled(env):
     assert publisher.cancelled()
     await svc.settle()
     assert env.outcomes.rows[("sp", "owner")] == (SpaceSyncResult.OK, NOW.isoformat())
+
+# ── v_95 sync pages ─────────────────────────────────────────────────────
+
+
+def _position(**over) -> SyncPagePosition:
+    fields = {
+        "seq": 812,
+        "at": NOW.isoformat(),
+        "signer_role": "owner",
+        "applied": True,
+        "match": None,
+        "differing_buckets": None,
+    }
+    fields.update(over)
+    return SyncPagePosition(**fields)
+
+
+async def test_up_to_date_as_of_the_page_while_the_host_is_offline(env):
+    """The host went silent, but we applied its stream at or past its
+    newest page (relayed by any member): up to date as of page N."""
+    seen: list[tuple[str, list[str]]] = []
+
+    async def position(space, hosts):
+        seen.append((space.id, hosts))
+        return _position()
+
+    env.svc.attach_pages(position)
+    await env.svc.host_unreachable("sp", ["owner"])
+    status = await env.svc.status("sp")
+    assert status.state is SpaceSyncState.UP_TO_DATE
+    assert status.to_wire()["page"]["seq"] == 812
+    assert seen[-1] == ("sp", ["owner"])
+
+
+async def test_behind_when_a_newer_signed_page_exists(env):
+    async def position(space, hosts):
+        return _position(applied=False)
+
+    env.svc.attach_pages(position)
+    await env.svc.host_unreachable("sp", ["owner"])
+    status = await env.svc.status("sp")
+    assert status.state is SpaceSyncState.BEHIND
+    assert status.to_wire()["page"]["applied"] is False
+
+
+async def test_no_page_keeps_the_phase_1_status_and_wire(env):
+    async def position(space, hosts):
+        return None
+
+    env.svc.attach_pages(position)
+    status = await env.svc.status("sp")
+    assert status.state is SpaceSyncState.NEVER
+    assert "page" not in status.to_wire()
+
+
+async def test_a_new_page_sends_a_frame_when_the_state_moves(env):
+    current: list[SyncPagePosition | None] = [None]
+
+    async def position(space, hosts):
+        return current[0]
+
+    env.svc.attach_pages(position)
+    await env.svc.host_unreachable("sp", ["owner"])
+    env.frames.clear()
+    current[0] = _position()
+    await env.svc.recheck("sp")
+    assert [f.sync["state"] for f in env.frames] == ["up_to_date"]
+    await env.svc.recheck("sp")
+    assert len(env.frames) == 1
+    await env.svc.recheck("mine")  # hosted here: no frame
+    await env.svc.recheck("unknown")
+    assert len(env.frames) == 1

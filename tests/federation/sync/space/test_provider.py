@@ -110,6 +110,42 @@ async def test_stream_initial_sends_chunks_then_sentinel(provider):
     assert last["is_last"] is True
 
 
+class _FakePages:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def sentinel_page(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"epoch": 1, "payload": "sealed"}
+
+
+async def test_the_sentinel_carries_the_sync_page_for_the_requester(provider):
+    """v_95: the sentinel asks the page service for this requester's page —
+    its version and the ``page`` its BEGIN named go along."""
+    pages = _FakePages()
+    provider.attach_sync_pages(pages)
+    session = _FakeSession()
+    session.page_ref = {"signer": "h"}
+    session.peer_version = 95
+    await provider.stream_initial(session)
+    last = orjson.loads(session.rtc.sent[-1])
+    assert last["page_sealed"] == {"epoch": 1, "payload": "sealed"}
+    assert pages.calls == [
+        {
+            "space_id": "sp-1",
+            "sync_id": "sync-x",
+            "requester_version": 95,
+            "requester_ref": {"signer": "h"},
+        }
+    ]
+
+
+async def test_no_page_service_no_page_field(provider):
+    session = _FakeSession()
+    await provider.stream_initial(session)
+    assert "page_sealed" not in orjson.loads(session.rtc.sent[-1])
+
+
 async def test_stream_initial_skips_missing_exporters(provider):
     """Resources without a registered exporter are skipped (this
     fixture only provides 2 of the 11)."""

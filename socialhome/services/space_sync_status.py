@@ -40,6 +40,7 @@ from ..domain.events import (
     SpaceSyncDeferred,
     SpaceSyncStateChanged,
 )
+from ..domain.space_sync_page import SyncPagePosition, state_with_page
 from ..domain.space_sync_status import (
     SpaceSyncOutcome,
     SpaceSyncResult,
@@ -103,6 +104,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         "_outbox",
         "_outcomes",
         "_own_instance_id",
+        "_pages",
         "_receiving",
         "_space_repo",
         "_tasks",
@@ -131,10 +133,36 @@ class SpaceSyncStatusService(BusPublisherMixin):
         #: arriving here now (the session manager). ``None``: never.
         self._receiving = receiving
         self._clock = clock
+        #: v_95 — ``(space, acting hosts) ->`` what the newest signed sync
+        #: page says about our copy (``SyncPageService.position``). ``None``:
+        #: the Phase-1 rules alone.
+        self._pages: (
+            Callable[[Space, list[str]], Awaitable[SyncPagePosition | None]] | None
+        ) = None
         #: space → the state last computed after an outcome (frame on change).
         self._last_state: OrderedDict[str, SpaceSyncState] = OrderedDict()
         #: Outcomes being recorded (:meth:`_spawn`).
         self._tasks: set[asyncio.Task] = set()
+
+    def attach_pages(
+        self,
+        position: Callable[[Space, list[str]], Awaitable[SyncPagePosition | None]],
+    ) -> None:
+        """Wire the v_95 sync pages: the state also says "up to date as of
+        page N" (even while the host is offline) or "behind: a newer page
+        exists" (``domain/space_sync_page.state_with_page``)."""
+        self._pages = position
+
+    async def recheck(self, space_id: str) -> None:
+        """Recompute the space's state (the page held changed) and send the
+        frame when it moved. Fail-soft."""
+        try:
+            space = await self._space_repo.get(space_id)
+            if space is None or space.owner_instance_id == self._own_instance_id:
+                return
+            await self._recheck(space)
+        except Exception:
+            log.exception("sync status: recheck of space %s failed", space_id)
 
     def wire(self) -> None:
         """Subscribe to the outcomes on the bus."""
@@ -171,7 +199,13 @@ class SpaceSyncStatusService(BusPublisherMixin):
             else False
         )
         state, last_ok = sync_state(outcomes, receiving=receiving, now=self._clock())
-        return SpaceSyncStatus(state=state, last_ok_at=last_ok, waiting_to_send=waiting)
+        page = await self._pages(space, hosts) if self._pages is not None else None
+        return SpaceSyncStatus(
+            state=state_with_page(state, page),
+            last_ok_at=last_ok,
+            waiting_to_send=waiting,
+            page=page.to_wire() if page is not None else None,
+        )
 
     # ─── Outcomes ─────────────────────────────────────────────────────
 

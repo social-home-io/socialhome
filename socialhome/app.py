@@ -131,6 +131,8 @@ from .federation.sync.dm_history import (
 )
 from .federation.sync.space.file_gate import CatchUpFileGates, SpaceFileBudget
 from .federation.sync.space.host_contact import HostContact
+from .federation.sync.space.page_state import PageStateHasher
+from .federation.sync.space.pages import SyncPageService
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
@@ -1566,6 +1568,7 @@ def _wire_federation_stack(
     pairing_relay_repo,
     space_zone_repo,
     space_sync_watermark_repo,
+    space_sync_page_repo,
     presence_repo,
     ws_manager,
     peer_user_visibility_repo,
@@ -2495,6 +2498,22 @@ def _wire_federation_stack(
         scheduler=space_sync_scheduler,
         own_instance_id=identity.instance_id,
     )
+    # v_95 — signed sync pages: sealed lazily by a signing host, carried on
+    # the sentinel, verified and kept by members, read by the sync status.
+    app[K.sync_page_service_key] = _build_sync_pages(
+        repo=space_sync_page_repo,
+        space_repo=space_repo,
+        seqs=space_sync_watermark_repo,
+        crypto=space_crypto,
+        exporters=exporters,
+        windows=sync_windows,
+        file_hasher=space_media_sync_service.file_hasher,
+        provider=space_sync_service,
+        receiver=space_sync_receiver,
+        scheduler=space_sync_scheduler,
+        status=app[K.space_sync_status_key],
+        own_instance_id=identity.instance_id,
+    )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
     app[K.space_media_wanted_key] = _build_space_media_wanted(
@@ -2620,6 +2639,41 @@ def _build_space_sync_status(
     scheduler.attach_status(status)
     receiver.attach_stream_watch(status)
     return status
+
+
+def _build_sync_pages(
+    *,
+    repo,
+    space_repo,
+    seqs,
+    crypto,
+    exporters: dict,
+    windows: SyncWindows,
+    file_hasher,
+    provider: SpaceSyncService,
+    receiver: SpaceSyncReceiver,
+    scheduler: SpaceSyncScheduler,
+    status: SpaceSyncStatusService,
+    own_instance_id: str,
+) -> SyncPageService:
+    """v_95 sync pages (``docs/protocol/sync-pages.md``): the provider's
+    sentinel carries the newest page, the receiver verifies and keeps one,
+    every BEGIN names the page we hold, and the sync status reads it."""
+    pages = SyncPageService(
+        repo=repo,
+        spaces=space_repo,
+        seqs=seqs,
+        crypto=crypto,
+        state=PageStateHasher(exporters=exporters, windows=windows, files=file_hasher),
+        exporters=exporters,
+        own_instance_id=own_instance_id,
+        on_change=status.recheck,
+    )
+    provider.attach_sync_pages(pages)
+    receiver.attach_sync_pages(pages)
+    scheduler.attach_sync_pages(pages.ref_for)
+    status.attach_pages(pages.position)
+    return pages
 
 
 def _build_space_media_wanted(
@@ -5148,6 +5202,7 @@ def create_app(config: Config | None = None) -> web.Application:
             pairing_relay_repo=repos.pairing_relay,
             space_zone_repo=repos.space_zone,
             space_sync_watermark_repo=repos.space_sync_watermark,
+            space_sync_page_repo=repos.space_sync_page,
             presence_repo=repos.presence,
             ws_manager=ws_manager,
             peer_user_visibility_repo=repos.peer_user_visibility,
@@ -6558,6 +6613,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # deletes) are published off the author's lock; send them while
         # the federation client and the database are still up.
         await app[K.highlight_service_key].stop()
+        # Background sync-page seals and root checks (they read the DB).
+        await app[K.sync_page_service_key].close()
         # Upload batches still open become their "new photos" rows first.
         await gallery_upload_batcher.stop()
         # Deliver the notifications still queued while the database, the
