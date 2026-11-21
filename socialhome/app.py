@@ -6582,6 +6582,11 @@ def create_app(config: Config | None = None) -> web.Application:
         await platform_adapter.on_cleanup(app)
         if outbox_processor is not None:
             await outbox_processor.stop()
+        # The sync status: outcomes still being recorded finish (bounded),
+        # its rechecks end — after the outbox (which tells it of rows) and
+        # while the database is up.
+        if (sync_status := app.get(K.space_sync_status_key)) is not None:
+            await sync_status.stop()
         if stale_call_scheduler is not None:
             await stale_call_scheduler.stop()
         if gfs_capability_warmup is not None:

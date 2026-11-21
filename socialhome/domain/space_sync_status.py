@@ -70,7 +70,7 @@ class SpaceSyncOutcome:
     instance_id: str
     result: SpaceSyncResult | None
     ok_at: str | None
-    result_at: str | None = None
+    result_at: str | None
 
 
 @dataclass(slots=True, frozen=True)

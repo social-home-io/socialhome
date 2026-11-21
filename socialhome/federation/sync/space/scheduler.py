@@ -107,7 +107,12 @@ from ....domain.events import (
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
-from ....domain.federation import FederationEventType, InstanceSource, PairingStatus
+from ....domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
 from ....domain.federation_capabilities import FederationCapability
 from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
@@ -1157,7 +1162,7 @@ class SpaceSyncScheduler:
                     sync_mode="incremental",
                 )
 
-    async def _sweep_peers(self) -> list:
+    async def _sweep_peers(self) -> list[RemoteInstance]:
         """The confirmed peers the periodic sweep asks for each shared
         space."""
         return [
@@ -1217,7 +1222,13 @@ class SpaceSyncScheduler:
         """Wait :data:`HOST_ANSWER_WAIT_S` for the host's answer to this
         round's BEGIN; none (offline, or no path) → record it unreachable
         (the sync status) and, unless we hold the roster authority, ask one
-        helper."""
+        helper.
+
+        A household holding the roster authority records its silent owner
+        too, on purpose: holding the authority does not make it hold the
+        content — a delegated admin household can itself be behind — so its
+        members honestly read "host offline" while the owner is down. Only
+        the helper fallback is skipped for it (nothing to fall back from)."""
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=HOST_ANSWER_WAIT_S)
             return  # stopped while waiting

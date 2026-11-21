@@ -68,6 +68,17 @@ RESULT_REFRESH_S: float = 15 * 60
 #: Spaces whose last framed status is remembered (frame on change).
 MAX_TRACKED: int = 4096
 
+#: A space's recheck holds it this long after it ran; a trigger meanwhile
+#: runs once at the end of that wait. Frames go out at most once per this
+#: while per space, however busy its outbox or
+#: its streams (a broadcast settling 500 rows reads the count a few times,
+#: not 500). Fixed, never random.
+RECHECK_SPACING_S: float = 2.0
+
+#: How long :meth:`SpaceSyncStatusService.stop` waits for outcomes still
+#: being recorded before cancelling them.
+STOP_TIMEOUT_S: float = 5.0
+
 
 class _Spaces(Protocol):
     async def get(self, space_id: str) -> Space | None: ...
@@ -97,6 +108,17 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class _Recheck:
+    """A space's one recheck in flight: whether another came due while it
+    ran, and the ending stream that one must not count."""
+
+    __slots__ = ("due", "ignore_sync_id")
+
+    def __init__(self, ignore_sync_id: str) -> None:
+        self.due = False
+        self.ignore_sync_id = ignore_sync_id
+
+
 class SpaceSyncStatusService(BusPublisherMixin):
     """Records each acting host's sync outcome; answers the sync status."""
 
@@ -106,11 +128,13 @@ class SpaceSyncStatusService(BusPublisherMixin):
         "_hosts",
         "_last_sent",
         "_outbox",
-        "_outbox_due",
         "_outcomes",
         "_own_instance_id",
         "_receiving",
+        "_recheck_spacing_s",
+        "_rechecks",
         "_space_repo",
+        "_stop",
         "_tasks",
     )
 
@@ -125,6 +149,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         own_instance_id: str,
         receiving: Callable[[str, list[str], str], bool] | None = None,
         clock: Callable[[], datetime] = _utc_now,
+        recheck_spacing_s: float = RECHECK_SPACING_S,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
@@ -140,10 +165,12 @@ class SpaceSyncStatusService(BusPublisherMixin):
         self._clock = clock
         #: space → the (state, waiting count) last framed (frame on change).
         self._last_sent: OrderedDict[str, tuple[SpaceSyncState, int]] = OrderedDict()
-        #: space → whether its outbox changed again while its recheck runs
-        #: (:meth:`outbox_changed`: one recheck at a time per space).
-        self._outbox_due: dict[str, bool] = {}
-        #: Outcomes being recorded (:meth:`_spawn`).
+        #: space → its one recheck in flight (:meth:`_request_recheck`).
+        self._rechecks: dict[str, _Recheck] = {}
+        self._recheck_spacing_s = recheck_spacing_s
+        #: Set by :meth:`stop`: no new work, a spacing wait ends.
+        self._stop = asyncio.Event()
+        #: Outcomes being recorded and rechecks running (:meth:`_spawn`).
         self._tasks: set[asyncio.Task] = set()
 
     def wire(self) -> None:
@@ -212,60 +239,113 @@ class SpaceSyncStatusService(BusPublisherMixin):
         task, and the federation service's own handler of the same event
         closes that session — which cancels the drain task while the bus is
         still calling handlers. Inline, our write died with it, silently
-        (``CancelledError`` is no ``Exception``)."""
+        (``CancelledError`` is no ``Exception``). Nothing new once stopped:
+        the database is about to close."""
+        if self._stop.is_set():
+            work.close()
+            return
         task = asyncio.create_task(work, name="space-sync-status")
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def settle(self) -> None:
-        """Wait for the outcomes being recorded (tests; shutdown)."""
+        """Wait for the outcomes being recorded and the rechecks (tests)."""
         while pending := [t for t in self._tasks if not t.done()]:
             await asyncio.gather(*pending, return_exceptions=True)
+
+    async def stop(self, timeout: float = STOP_TIMEOUT_S) -> None:
+        """Shutdown, before the database closes: take no new work, let the
+        outcomes being recorded finish (a due recheck's spacing wait ends at
+        once and it is not run), cancel whatever is still running after
+        *timeout*."""
+        self._stop.set()
+        pending = [t for t in self._tasks if not t.done()]
+        if not pending:
+            return
+        _done, late = await asyncio.wait(pending, timeout=timeout)
+        for task in late:
+            task.cancel()
+        if late:
+            await asyncio.gather(*late, return_exceptions=True)
 
     async def host_unreachable(self, space_id: str, hosts: Iterable[str]) -> None:
         """The scheduler waited a round's full while for *hosts* (the
         households acting as the space's host) and none answered — for any
-        space one of our people holds a member seat in."""
+        space one of our people holds a member seat in, a household holding
+        the roster authority included: it is not the owner and can itself
+        be behind, so its members read "host offline" while the owner is
+        down."""
         for host in hosts:
             await self.record(space_id, host, SpaceSyncResult.UNREACHABLE)
 
     def outbox_changed(self, space_id: str) -> None:
         """Rows of *space_id*'s outbox were queued, delivered or dropped
         (the federation service, the outbox processor): frame the waiting
-        count if it moved. Never blocks the caller and never reads per row —
-        changes that land while the space's recheck runs fold into one more
-        recheck after it."""
-        if not space_id:
-            return
-        if space_id in self._outbox_due:
-            self._outbox_due[space_id] = True
-            return
-        self._outbox_due[space_id] = False
-        self._spawn(self._outbox_recheck(space_id))
+        count if it moved. Never blocks the caller, never reads per row
+        (:meth:`_request_recheck`)."""
+        self._request_recheck(space_id)
 
-    async def _outbox_recheck(self, space_id: str) -> None:
+    def stream_started(self, space_id: str, provider: str) -> None:
+        """A stream of the space from *provider* began arriving here: a
+        member that was behind (or never synced) is now catching up. Called
+        from the receiver's chunk path: returns at once, the reads happen in
+        a task of our own."""
+        self._spawn(self._on_stream_started(space_id, provider))
+
+    async def _on_stream_started(self, space_id: str, provider: str) -> None:
+        try:
+            space = await self._space_repo.get(space_id)
+            if space is None or space.owner_instance_id == self._own_instance_id:
+                return
+            if provider in await self._hosts(space):
+                self._request_recheck(space_id)
+        except Exception:
+            log.exception("sync status: noting the stream of %s failed", space_id)
+
+    def _request_recheck(self, space_id: str, *, ignore_sync_id: str = "") -> None:
+        """THE one path every trigger (an outcome, a stream start, an
+        outbox change) takes to the frame: at most one recheck runs per
+        space, so frames go out in order and never an older view after a
+        newer one. A trigger while one runs marks it due (keeping the
+        stream that is ending, *ignore_sync_id*); a recheck holds the space
+        for :data:`RECHECK_SPACING_S` after it ran, so the due re-run comes
+        that long after the last."""
+        if not space_id or self._stop.is_set():
+            return
+        running = self._rechecks.get(space_id)
+        if running is not None:
+            running.due = True
+            if ignore_sync_id:
+                running.ignore_sync_id = ignore_sync_id
+            return
+        slot = self._rechecks[space_id] = _Recheck(ignore_sync_id)
+        self._spawn(self._rechecks_of(space_id, slot))
+
+    async def _rechecks_of(self, space_id: str, slot: _Recheck) -> None:
         try:
             while True:
+                ignore, slot.ignore_sync_id = slot.ignore_sync_id, ""
                 space = await self._space_repo.get(space_id)
                 if space is not None:
-                    await self._recheck(space)
-                if not self._outbox_due.get(space_id):
+                    await self._recheck(space, ignore_sync_id=ignore)
+                # Held for the spacing after every run: a trigger meanwhile
+                # waits for its end, so frames are at least that far apart.
+                if self._recheck_spacing_s > 0:
+                    try:
+                        await asyncio.wait_for(
+                            self._stop.wait(), timeout=self._recheck_spacing_s
+                        )
+                        return  # shutting down
+                    except TimeoutError:
+                        pass
+                if not slot.due or self._stop.is_set():
                     return
-                self._outbox_due[space_id] = False
+                slot.due = False
         except Exception:
             log.exception("sync status: rechecking space %s failed", space_id)
         finally:
-            self._outbox_due.pop(space_id, None)
-
-    async def stream_started(self, space_id: str, provider: str) -> None:
-        """A stream of the space from *provider* began arriving here: a
-        member that was behind (or never synced) is now catching up."""
-        space = await self._space_repo.get(space_id)
-        if space is None or space.owner_instance_id == self._own_instance_id:
-            return
-        if provider not in await self._hosts(space):
-            return
-        await self._recheck(space)
+            if self._rechecks.get(space_id) is slot:
+                del self._rechecks[space_id]
 
     async def record(
         self,
@@ -288,7 +368,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
             ):
                 return
             await self._write(space_id, provider, result)
-            await self._recheck(space, ignore_sync_id=ignore_sync_id)
+            self._request_recheck(space_id, ignore_sync_id=ignore_sync_id)
         except Exception:
             log.exception(
                 "sync status: recording %s from %s for space %s failed",

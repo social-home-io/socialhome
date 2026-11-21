@@ -2283,11 +2283,11 @@ SYNC_NOW_RATE_WINDOW_S: int = 3600
 class SpaceSyncTriggerView(BaseView):
     """POST /api/spaces/{id}/sync — "Sync now", any member (not a follower).
 
-    What one periodic round does for this space, right away
-    (``SpaceSyncScheduler.sync_now``): the small incremental
-    ``SPACE_SYNC_BEGIN`` to each household acting as its host — one reached
-    only over the mesh too — and to every paired co-member household. Never
-    a full stream. Returns ``202 Accepted`` with the households asked; the
+    The small incremental ``SPACE_SYNC_BEGIN`` of one round, right away
+    (``SpaceSyncScheduler.sync_now``), to each household acting as the
+    space's host — one reached only over the mesh too — never to a paired
+    co-member (its BEGIN budget for us is not ours to spend); a space hosted
+    here asks its paired member households. Never a full stream. Returns ``202 Accepted`` with the households asked; the
     streams arrive on their own (the ``space.sync_state`` frame tells).
     ``429`` past :data:`SYNC_NOW_RATE_LIMIT` an hour for the space.
     """

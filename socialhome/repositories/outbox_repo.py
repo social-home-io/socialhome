@@ -32,6 +32,7 @@ from ..db import AsyncDatabase
 from ..domain import federation_retention
 from ..domain.federation import (
     MULTI_EVENT_TYPES,
+    SPACE_WRITE_EVENT_TYPES,
     FederationEventType,
     PairingStatus,
 )
@@ -66,6 +67,12 @@ PURGE_BATCH = 5000
 _LIVE = (
     "{t}.status='pending'"
     " AND ({t}.expires_at IS NULL OR datetime({t}.expires_at) > datetime('now'))"
+)
+
+#: The event types :meth:`SqliteOutboxRepo.count_pending_for_space` counts:
+#: space content, never control traffic (sorted: a stable statement).
+_SPACE_CONTENT_TYPES: tuple[str, ...] = tuple(
+    sorted(t.value for t in SPACE_WRITE_EVENT_TYPES)
 )
 
 #: A pending row the v_91 seat ordering counts: inside its retention window
@@ -586,15 +593,23 @@ class SqliteOutboxRepo:
         )
 
     async def count_pending_for_space(self, space_id: str) -> int:
-        """How many of the space's events still wait to reach a household
-        — each stored payload once, however many households it waits for
-        (migration 0145). The sync status's "N waiting to send"."""
+        """How many content items of the space still wait to reach a
+        household — the sync status's "N waiting to send". Each stored
+        payload (migration 0145) counts once, however many households it
+        waits for, and only a content event (:data:`SPACE_WRITE_EVENT_TYPES`:
+        posts, comments, chat, pages, gallery, calendar, bazaar, …) — never
+        control traffic (a ``SPACE_SYNC_BEGIN``, config, roster, keys),
+        which would grow every round a host is offline. The payload is
+        sealed, so who wrote it is not read: on the host this includes the
+        members' content it forwards."""
+        marks = ",".join("?" * len(_SPACE_CONTENT_TYPES))
         return int(
             await self._db.fetchval(
                 "SELECT COUNT(DISTINCT p.id) FROM federation_outbox_payloads p"
                 " JOIN federation_outbox o ON o.payload_id = p.id"
-                f" WHERE p.space_id=? AND {_LIVE.format(t='o')}",
-                (space_id,),
+                f" WHERE p.space_id=? AND p.event_type IN ({marks})"
+                f" AND {_LIVE.format(t='o')}",
+                (space_id, *_SPACE_CONTENT_TYPES),
                 default=0,
             )
         )

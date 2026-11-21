@@ -121,13 +121,17 @@ def test_answered_but_never_ok_is_never():
 
 
 def test_an_unparseable_ok_time_counts_as_none():
-    outcome = SpaceSyncOutcome(instance_id="h", result=SpaceSyncResult.OK, ok_at="junk")
+    outcome = SpaceSyncOutcome(
+        instance_id="h", result=SpaceSyncResult.OK, ok_at="junk", result_at=None
+    )
     assert sync_state([outcome], now=NOW)[0] is SpaceSyncState.NEVER
 
 
 def test_a_naive_sqlite_time_is_read_as_utc():
     naive = (NOW - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-    outcome = SpaceSyncOutcome(instance_id="h", result=SpaceSyncResult.OK, ok_at=naive)
+    outcome = SpaceSyncOutcome(
+        instance_id="h", result=SpaceSyncResult.OK, ok_at=naive, result_at=None
+    )
     assert sync_state([outcome], now=NOW)[0] is SpaceSyncState.UP_TO_DATE
 
 

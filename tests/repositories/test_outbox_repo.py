@@ -1605,3 +1605,31 @@ async def test_count_pending_for_space_counts_each_item_once(env):
     for peer in ("peer-a", "peer-b", "peer-x"):
         await repo.mark_failed(f"m-{peer}")
     assert await repo.count_pending_for_space("sp-1") == 0
+
+
+async def test_count_pending_for_space_counts_content_only(env):
+    """A queued SPACE_SYNC_BEGIN (and any other control traffic of the
+    space — config, roster, keys) is no item of ours "waiting to send":
+    while the host is offline one more would pile up every round."""
+    repo = env.outbox_repo
+    for i, event_type in enumerate(
+        (
+            FederationEventType.SPACE_SYNC_BEGIN,
+            FederationEventType.SPACE_CONFIG_CHANGED,
+        )
+    ):
+        await repo.enqueue(
+            instance_id="peer-a",
+            event_type=event_type,
+            payload_json="",
+            msg_id=f"ctl-{i}",
+            payload_ref=OutboxPayload(
+                id=f"ctl-{i}",
+                event_type=event_type,
+                space_id="sp-1",
+                payload_enc="nonce:ciphertext",
+            ),
+        )
+    assert await repo.count_pending_for_space("sp-1") == 0
+    await _enqueue_ref(env, "peer-a", "m-post")
+    assert await repo.count_pending_for_space("sp-1") == 1

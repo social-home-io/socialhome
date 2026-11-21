@@ -141,7 +141,7 @@ class _HostHeard(Protocol):
 
 
 class _StreamWatch(Protocol):
-    async def stream_started(self, space_id: str, provider: str) -> None: ...
+    def stream_started(self, space_id: str, provider: str) -> None: ...
 
 
 class SpaceSyncReceiver(
@@ -318,14 +318,15 @@ class SpaceSyncReceiver(
     def attach_stream_watch(self, watch: _StreamWatch) -> None:
         """Wire the sync status (``SpaceSyncStatusService``): told once per
         stream, on its first verified chunk — never per chunk, never for a
-        sentinel-only (quiet) session."""
+        sentinel-only (quiet) session. It must not block: it does its reads
+        in a task of its own, off this chunk path."""
         self._stream_watch = watch
 
-    async def _note_stream_started(self, space_id: str, provider: str) -> None:
+    def _note_stream_started(self, space_id: str, provider: str) -> None:
         if self._stream_watch is None:
             return
         try:
-            await self._stream_watch.stream_started(space_id, provider)
+            self._stream_watch.stream_started(space_id, provider)
         except Exception:
             log.exception("sync: noting the stream of space %s failed", space_id)
 
@@ -567,7 +568,7 @@ class SpaceSyncReceiver(
                 sync_id,
                 archived=bool(space_then is not None and space_then.archived),
             )
-            await self._note_stream_started(space_id, from_instance)
+            self._note_stream_started(space_id, from_instance)
 
         # Decrypt — an unknown resource too: its ``chunk_index`` (v_56) is
         # inside the payload, and in a numbered stream only indices count.

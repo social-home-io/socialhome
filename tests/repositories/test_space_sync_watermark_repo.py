@@ -141,7 +141,7 @@ async def test_record_applied_refuses_a_value_sqlite_cannot_hold(env, seq):
 async def test_no_outcome_until_one_is_recorded(env):
     _db, repo = env
     assert await repo.outcomes("sp", ["peer", "stranger"]) == [
-        SpaceSyncOutcome(instance_id="peer", result=None, ok_at=None)
+        SpaceSyncOutcome(instance_id="peer", result=None, ok_at=None, result_at=None)
     ]
 
 

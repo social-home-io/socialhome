@@ -1109,7 +1109,7 @@ class _Streams:
     def __init__(self) -> None:
         self.started: list[tuple[str, str]] = []
 
-    async def stream_started(self, space_id: str, provider: str) -> None:
+    def stream_started(self, space_id: str, provider: str) -> None:
         self.started.append((space_id, provider))
 
 
@@ -1132,7 +1132,7 @@ async def test_a_failing_stream_watch_never_costs_the_chunk(receiver, peer_setup
     _, kp = peer_setup
 
     class _Boom:
-        async def stream_started(self, space_id: str, provider: str) -> None:
+        def stream_started(self, space_id: str, provider: str) -> None:
             raise RuntimeError("boom")
 
     r.attach_stream_watch(_Boom())

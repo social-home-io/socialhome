@@ -201,6 +201,38 @@ async def test_cleanup_stops_the_routed_handler(tmp_dir):
     assert handler._deferred_retransmits == {}
 
 
+async def test_cleanup_stops_the_sync_status_while_the_database_is_up(
+    tmp_dir, monkeypatch
+):
+    """``_on_cleanup`` stops the sync status (its outcomes still being
+    recorded finish, its rechecks end) before the database shuts down."""
+    from socialhome.app_keys import db_key
+    from socialhome.services.space_sync_status import SpaceSyncStatusService
+
+    stopped: list[int] = []
+    app_ref: list[web.Application] = []
+
+    async def _stop(self, timeout: float = 5.0) -> None:
+        # The database still answers: the outcomes can still be written.
+        row = await app_ref[0][db_key].fetchone("SELECT 1 AS one")
+        stopped.append(row["one"])
+
+    monkeypatch.setattr(SpaceSyncStatusService, "stop", _stop)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    app_ref.append(app)
+    async with TestClient(TestServer(app)) as tc:
+        await tc.get("/healthz")
+        assert stopped == []
+    assert stopped == [1]
+
+
 async def test_cleanup_publishes_queued_highlight_events(tmp_dir, monkeypatch):
     """``_on_cleanup`` lets the highlight service publish what it already
     queued (published off the author's lock) before the federation client

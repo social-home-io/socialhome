@@ -2397,8 +2397,6 @@ class FederationService:
             supersede_key=state_key,
             payload_ref=self._outbox_payload(event_type, space_id, payload),
         )
-        if queued is not None:
-            self._queued_for_space(space_id)
         if queued is None:
             # The pairing ended while this send was in flight (an unpair
             # purged the peer between our lookup and here) — nothing was
@@ -2409,6 +2407,7 @@ class FederationService:
                 status_code=status_code if isinstance(status_code, int) else None,
                 error="unknown_instance",
             )
+        self._queued_for_space(space_id)
         if transport_error == DELIVERY_ERROR_RELAY_THROTTLED:
             # Queued like any other failure — a throttle must never cost
             # an event — but reported as the waitable window it is, so a

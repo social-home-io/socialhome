@@ -124,6 +124,7 @@ def env():
         own_instance_id="self",
         receiving=receiving,
         clock=clock,
+        recheck_spacing_s=0.0,
     )
     svc.wire()
     frames: list[SpaceSyncStateChanged] = []
@@ -217,6 +218,7 @@ async def test_a_silent_host_is_unreachable_and_reads_host_offline(env):
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     env.clock.now = NOW + timedelta(hours=3)
     await env.svc.host_unreachable("sp", ["owner"])
+    await env.svc.settle()
     status = await env.svc.status("sp")
     assert status.state is SpaceSyncState.HOST_OFFLINE
     assert status.last_ok_at == NOW.isoformat()
@@ -227,6 +229,7 @@ async def test_an_answer_from_a_household_not_acting_as_host_is_not_recorded(env
         env, SpaceSyncComplete(space_id="sp", from_instance="member-x", clean=True)
     )
     await env.svc.host_unreachable("sp", ["member-x"])
+    await env.svc.settle()
     assert env.outcomes.writes == []
 
 
@@ -320,6 +323,7 @@ async def test_a_silent_host_reads_host_offline_despite_a_stale_answer(env):
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="admin", clean=True))
     env.clock.now = NOW + timedelta(minutes=90)
     await env.svc.host_unreachable("sp", ["owner"])
+    await env.svc.settle()
     status = await env.svc.status("sp")
     assert status.state is SpaceSyncState.HOST_OFFLINE
     assert status.last_ok_at == NOW.isoformat()
@@ -328,6 +332,7 @@ async def test_a_silent_host_reads_host_offline_despite_a_stale_answer(env):
 async def test_a_delegated_admin_acting_as_host_keeps_the_space_up_to_date(env):
     env.hosts["sp"] = ["owner", "admin"]
     await env.svc.host_unreachable("sp", ["owner"])
+    await env.svc.settle()
     assert await _state(env) is SpaceSyncState.HOST_OFFLINE
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="admin", clean=True))
     assert await _state(env) is SpaceSyncState.UP_TO_DATE
@@ -337,6 +342,7 @@ async def test_a_mesh_only_host_counts_like_a_paired_one(env):
     """Where the answer came from (paired, mesh, GFS) does not matter: the
     receiver publishes the same event for each."""
     await env.svc.host_unreachable("sp", ["owner"])
+    await env.svc.settle()
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert await _state(env) is SpaceSyncState.UP_TO_DATE
 
@@ -412,8 +418,10 @@ async def test_a_frame_goes_out_only_when_the_state_changes(env):
     await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
     assert len(env.frames) == 1  # still up to date: no frame
     await env.svc.host_unreachable("sp", ["owner"])
+    await env.svc.settle()
     env.clock.now = NOW + timedelta(hours=3)
     await env.svc.host_unreachable("sp", ["owner"])
+    await env.svc.settle()
     assert [f.sync["state"] for f in env.frames] == ["up_to_date", "host_offline"]
     assert env.frames[-1].space_id == "sp"
     assert (
@@ -424,20 +432,24 @@ async def test_a_frame_goes_out_only_when_the_state_changes(env):
 
 async def test_a_stream_starting_on_a_behind_space_sends_catching_up(env):
     env.running.add(("sp", "owner"))
-    await env.svc.stream_started("sp", "owner")
+    env.svc.stream_started("sp", "owner")
+    await env.svc.settle()
     assert [f.sync["state"] for f in env.frames] == ["catching_up"]
-    await env.svc.stream_started("sp", "owner")
+    env.svc.stream_started("sp", "owner")
+    await env.svc.settle()
     assert len(env.frames) == 1
 
 
 async def test_a_stream_from_a_non_host_sends_nothing(env):
     env.running.add(("sp", "member-x"))
-    await env.svc.stream_started("sp", "member-x")
+    env.svc.stream_started("sp", "member-x")
+    await env.svc.settle()
     assert env.frames == []
 
 
 async def test_no_frame_for_a_space_hosted_here(env):
-    await env.svc.stream_started("mine", "self")
+    env.svc.stream_started("mine", "self")
+    await env.svc.settle()
     await _pub(
         env, SpaceSyncComplete(space_id="mine", from_instance="peer", clean=True)
     )
@@ -488,3 +500,116 @@ async def test_the_outcome_survives_the_publisher_being_cancelled(env):
     assert publisher.cancelled()
     await svc.settle()
     assert env.outcomes.rows[("sp", "owner")] == (SpaceSyncResult.OK, NOW.isoformat())
+
+
+# ── One recheck path per space: no storm, no stale frame ──────────────────
+
+
+async def test_concurrent_triggers_never_end_on_a_stale_frame(env):
+    """An outcome and an outbox change race: the slower recheck must never
+    send its older view after the newer one. The last frame is the state
+    and count the space has now."""
+    gate = asyncio.Event()
+    original = env.outbox.count_pending_for_space
+    calls = 0
+
+    async def _slow_first(space_id: str) -> int:
+        nonlocal calls
+        calls += 1
+        value = await original(space_id)
+        if calls == 1:
+            await gate.wait()  # the first recheck read its count, then stalls
+        return value
+
+    env.outbox.count_pending_for_space = _slow_first
+    env.svc.outbox_changed("sp")  # reads waiting=0, then stalls
+    await asyncio.sleep(0.01)
+    env.outbox.pending["sp"] = 3
+    await env.bus.publish(
+        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
+    )
+    await asyncio.sleep(0.01)
+    gate.set()
+    await env.svc.settle()
+    assert env.frames[-1].sync["state"] == "up_to_date"
+    assert env.frames[-1].sync["waiting_to_send"] == 3
+
+
+def _spaced(env, spacing: float) -> SpaceSyncStatusService:
+    return SpaceSyncStatusService(
+        bus=env.bus,
+        space_repo=_Spaces(_space("sp")),
+        outcomes=env.outcomes,
+        outbox=env.outbox,
+        hosts=_owner_only,
+        own_instance_id="self",
+        clock=env.clock,
+        recheck_spacing_s=spacing,
+    )
+
+
+async def test_a_burst_of_a_thousand_changes_sends_a_few_frames(env):
+    svc = _spaced(env, 0.05)
+    for i in range(1000):
+        env.outbox.pending["sp"] = i
+        svc.outbox_changed("sp")
+        if i % 50 == 0:
+            await asyncio.sleep(0)
+    await svc.settle()
+    assert 1 <= len(env.frames) <= 3
+    assert env.frames[-1].sync["waiting_to_send"] == 999
+
+
+async def test_reruns_are_spaced_a_fixed_while_apart(env):
+    """A re-run that came due waits the fixed spacing: at most one frame
+    per spacing per space."""
+    spaced = _spaced(env, 0.2)
+    loop = asyncio.get_running_loop()
+    times: list[float] = []
+
+    async def _stamp(event: SpaceSyncStateChanged) -> None:
+        times.append(loop.time())
+
+    env.bus.subscribe(SpaceSyncStateChanged, _stamp)
+    for i in range(3):
+        env.outbox.pending["sp"] = i + 1
+        spaced.outbox_changed("sp")
+        await asyncio.sleep(0.05)
+    await spaced.settle()
+    assert len(times) == 2  # the first at once, the rest folded into one
+    assert times[1] - times[0] >= 0.2
+
+
+async def test_stream_started_never_blocks_the_chunk_path(env):
+    """The receiver calls it on a stream's first chunk: it returns at once,
+    the reads happen in the status's own task."""
+    env.running.add(("sp", "owner"))
+    assert env.svc.stream_started("sp", "owner") is None
+    assert env.frames == []
+    await env.svc.settle()
+    assert [f.sync["state"] for f in env.frames] == ["catching_up"]
+
+
+async def test_stop_records_what_is_due_then_takes_no_more(env):
+    await env.bus.publish(
+        SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True)
+    )
+    await env.svc.stop()
+    assert env.outcomes.rows[("sp", "owner")][0] is SpaceSyncResult.OK
+    env.svc.outbox_changed("sp")
+    env.svc.stream_started("sp", "owner")
+    assert env.svc._tasks == set()
+
+
+async def test_stop_cancels_what_does_not_finish_in_time(env):
+    hang = asyncio.Event()
+
+    async def _hang(space_id: str) -> int:
+        await hang.wait()
+        return 0
+
+    env.outbox.count_pending_for_space = _hang
+    env.svc.outbox_changed("sp")
+    await asyncio.sleep(0)
+    await env.svc.stop(timeout=0.05)
+    assert all(t.done() for t in env.svc._tasks)
