@@ -124,4 +124,44 @@ describe('useThrottledLiveRefresh', () => {
     setHidden(false)
     expect(refresh).not.toHaveBeenCalled()
   })
+
+  it('takes a shorter gap and a frame filter', () => {
+    const refresh = vi.fn()
+    function Filtered() {
+      useThrottledLiveRefresh(refresh, ['poll.voted'], {
+        minGapMs: 2_000,
+        accept: (_type, data) => data.post_id === 'p1',
+      })
+      return null
+    }
+    render(<Filtered />)
+    vi.advanceTimersByTime(2_000)
+    emit('poll.voted', { post_id: 'other' })
+    expect(refresh).not.toHaveBeenCalled()
+    emit('poll.voted', { post_id: 'p1' })
+    expect(refresh).toHaveBeenCalledTimes(1)
+    emit('poll.voted', { post_id: 'p1' })
+    emit('poll.voted', { post_id: 'p1' })
+    vi.advanceTimersByTime(1_999)
+    expect(refresh).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(1)
+    expect(refresh).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads the latest filter, so a changed target needs no resubscribe', () => {
+    const refresh = vi.fn()
+    function Target({ id }: { id: string }) {
+      useThrottledLiveRefresh(refresh, ['poll.voted'], {
+        minGapMs: 0,
+        accept: (_type, data) => data.post_id === id,
+      })
+      return null
+    }
+    const { rerender } = render(<Target id="a" />)
+    rerender(<Target id="b" />)
+    emit('poll.voted', { post_id: 'a' })
+    expect(refresh).not.toHaveBeenCalled()
+    emit('poll.voted', { post_id: 'b' })
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
 })

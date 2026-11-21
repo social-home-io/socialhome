@@ -29,8 +29,59 @@ vi.mock('preact-iso', async (orig) => ({
   useLocation: () => ({ route: vi.fn(), url: '/', path: '/' }),
 }))
 
-import { AppLayout, TopBar } from './App'
+const loadDmUnread = vi.hoisted(() => vi.fn(async () => undefined))
+const loadUserPreferences = vi.hoisted(() => vi.fn(async () => undefined))
+vi.mock('@/store/dms', async (orig) => ({
+  ...(await orig<typeof import('@/store/dms')>()),
+  loadDmUnread,
+}))
+vi.mock('@/store/userPreferences', async (orig) => ({
+  ...(await orig<typeof import('@/store/userPreferences')>()),
+  loadUserPreferences,
+}))
+
+import { AppLayout, TopBar, useSignedInLoads } from './App'
 import { currentUser } from '@/store/auth'
+import { token } from '@/store/token'
+
+describe('useSignedInLoads', () => {
+  function Probe({ authed }: { authed: boolean }) {
+    useSignedInLoads(authed)
+    return null
+  }
+
+  it('loads the cold-start inputs once, when signed in — not before (token alone)', () => {
+    cleanup()
+    loadDmUnread.mockClear()
+    loadUserPreferences.mockClear()
+    const prev = token.value
+    token.value = 'tok'  // stashed before /api/me answers
+    try {
+      const { rerender } = render(<Probe authed={false} />)
+      expect(loadDmUnread).not.toHaveBeenCalled()
+      expect(loadUserPreferences).not.toHaveBeenCalled()
+      rerender(<Probe authed={true} />)
+      rerender(<Probe authed={true} />)
+      expect(loadDmUnread).toHaveBeenCalledTimes(1)
+      expect(loadUserPreferences).toHaveBeenCalledTimes(1)
+    } finally {
+      token.value = prev
+    }
+  })
+
+  it('loads under haos ingress too, where the SPA carries no token', () => {
+    cleanup()
+    loadDmUnread.mockClear()
+    const prev = token.value
+    token.value = null
+    try {
+      render(<Probe authed={true} />)
+      expect(loadDmUnread).toHaveBeenCalledTimes(1)
+    } finally {
+      token.value = prev
+    }
+  })
+})
 
 describe('TopBar', () => {
   beforeEach(() => {

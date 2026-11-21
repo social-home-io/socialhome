@@ -132,9 +132,34 @@ describe('PresencePage', () => {
     emit('user.status_changed', {
       user_id: 'u1', status: { emoji: '🍽️', text: 'Lunch', expires_at: null },
     })
-    await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(calls))
+    // Inside the 3 s gap: the refetch trails.
+    await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(calls), { timeout: 4_000 })
     // The page no longer writes our own status onto ``currentUser``.
     expect(currentUser.value?.status?.text).toBeNull()
+  })
+
+  it('a burst of presence frames refetches at most once per 3 s', async () => {
+    const get = vi.fn(async () => [row(null)])
+    vi.doMock('@/api', () => ({ api: { get } }))
+    const { default: PresencePage } = await import('./PresencePage')
+    const view = render(<PresencePage />)
+    await view.findByText('Bob', { selector: 'strong' })
+    vi.useFakeTimers()
+    try {
+      const before = get.mock.calls.length
+      for (let i = 0; i < 30; i++) {
+        emit(['presence.updated', 'user.online', 'user.idle', 'user.offline'][i % 4], { user_id: 'u2' })
+      }
+      expect(get.mock.calls.length).toBe(before + 1)
+      await vi.advanceTimersByTimeAsync(2_900)
+      expect(get.mock.calls.length).toBe(before + 1)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(get.mock.calls.length).toBe(before + 2)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(get.mock.calls.length).toBe(before + 2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   describe('household zones and the map overview', () => {

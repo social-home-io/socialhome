@@ -76,6 +76,12 @@ import { resolveAvatar } from '@/utils/avatar'
 import { emptyFeedBodyKey } from './spaceFeedEmpty'
 import { personLabel } from '@/utils/names'
 import { titleEmoji } from './spaceGlyph'
+import { applySpacePostCreated } from './spaceFeedLive'
+import { createLiveThrottle, type LiveThrottle } from '@/utils/liveThrottle'
+
+/** At most one whole-feed refetch (and one feed-read mark) per this gap
+ *  for live frames. */
+const SPACE_FEED_REFRESH_GAP_MS = 5_000
 
 interface SpaceDetail {
   id: string
@@ -322,9 +328,18 @@ export default function SpaceFeedPage() {
       .finally(() => { loading.value = false })
     void loadSpaceHeader(spaceId)
 
+    // A new post lands from its frame (``spaceFeedLive.ts``); only one
+    // the frame can't render refetches, at most once per 5 s.
+    const feedRefresh = createLiveThrottle(
+      () => { loadSpaceFeed(spaceId).catch(() => {}) },
+      { minGapMs: SPACE_FEED_REFRESH_GAP_MS, startAt: Date.now(), pauseWhileHidden: true },
+    )
     const off4 = ws.on('space.post.created', (e) => {
-      const d = e.data as { space_id?: string | null }
-      if (d.space_id === spaceId) void loadSpaceFeed(spaceId)
+      const d = e.data as { space_id?: string | null; post?: unknown }
+      if (d.space_id !== spaceId) return
+      const next = applySpacePostCreated(posts.value, d.post)
+      if (next === 'refetch') feedRefresh.trigger()
+      else if (next) posts.value = next
     })
     // Live comment counts — the space analogue of store/feed.ts. The
     // frame fans out to space members as
@@ -358,6 +373,7 @@ export default function SpaceFeedPage() {
     })
     return () => {
       off4()
+      feedRefresh.cancel()
       offComment()
       offModerated()
       offEventDeleted()
@@ -432,15 +448,26 @@ export default function SpaceFeedPage() {
   // Viewing the Feed reads it: the Spaces list's "N new" starts again from
   // now — on opening the section, and again when posts arrive while it's
   // on screen. Any seat (a follower reads too); a hint, so a failure is
-  // silent.
+  // silent. Once the feed has loaded (not once per loading step), then at
+  // most once per 5 s while posts arrive — a busy space is one write per
+  // gap, not one per post; leaving sends a pending one at once.
   const seated = roleKnown.value && viewerRole.value !== undefined
   const postCount = posts.value.length
+  const feedLoaded = !loading.value
+  const feedRead = useRef<LiveThrottle | null>(null)
   useEffect(() => {
-    if (section !== 'feed' || !seated) return
-    void (async () => {
-      try { await api.post(`/api/spaces/${spaceId}/feed/read`, {}) } catch { /* a hint */ }
-    })()
-  }, [spaceId, section, seated, postCount])
+    const throttle = createLiveThrottle(() => {
+      void (async () => {
+        try { await api.post(`/api/spaces/${spaceId}/feed/read`, {}) } catch { /* a hint */ }
+      })()
+    }, { minGapMs: SPACE_FEED_REFRESH_GAP_MS, pauseWhileHidden: true })
+    feedRead.current = throttle
+    return () => { throttle.flush(); throttle.cancel() }
+  }, [spaceId])
+  useEffect(() => {
+    if (section !== 'feed' || !seated || !feedLoaded) return
+    feedRead.current?.trigger()
+  }, [spaceId, section, seated, feedLoaded, postCount])
 
   // The feed itself is on screen (not one post picked out of it): the
   // notifications that open the space — "joined", "you're in", a review

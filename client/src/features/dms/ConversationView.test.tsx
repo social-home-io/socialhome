@@ -712,17 +712,121 @@ describe('markThreadRead — read receipts', () => {
     expect(apiPost).toHaveBeenLastCalledWith('/api/conversations/conv-a/read')
     readReceiptsEnabled.value = false
     try {
-      markThreadRead('conv-a')
+      markThreadRead('conv-r')
       expect(apiPost).toHaveBeenLastCalledWith(
-        '/api/conversations/conv-a/read', { receipt: false },
+        '/api/conversations/conv-r/read', { receipt: false },
       )
       // A failed post stays silent.
       apiPost.mockRejectedValueOnce(new Error('offline'))
-      markThreadRead('conv-a')
+      markThreadRead('conv-s')
       await new Promise(res => setTimeout(res, 0))
     } finally {
       readReceiptsEnabled.value = true
     }
+  })
+
+  it('posts at most once per 2 s per thread, with one trailing post for a burst', async () => {
+    vi.useFakeTimers()
+    try {
+      const { markThreadRead, READ_MIN_GAP_MS } = await import('./ConversationView')
+      expect(READ_MIN_GAP_MS).toBe(2_000)
+      const reads = () => apiPost.mock.calls.filter(c => c[0] === '/api/conversations/conv-t/read').length
+      // A busy chat: a message every 200 ms for 3 s, each marking read.
+      for (let i = 0; i < 15; i++) {
+        markThreadRead('conv-t')
+        vi.advanceTimersByTime(200)
+      }
+      // The first right away, one at 2 s; the burst's last one trails.
+      expect(reads()).toBe(2)
+      vi.advanceTimersByTime(2_000)
+      expect(reads()).toBe(3)
+      vi.advanceTimersByTime(10_000)
+      expect(reads()).toBe(3)
+      // Another thread has its own budget.
+      markThreadRead('conv-u')
+      expect(apiPost).toHaveBeenLastCalledWith('/api/conversations/conv-u/read')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('flushThreadRead sends a pending trailing read now (leaving the thread)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { markThreadRead, flushThreadRead } = await import('./ConversationView')
+      const reads = () => apiPost.mock.calls.filter(c => c[0] === '/api/conversations/conv-f/read').length
+      markThreadRead('conv-f')
+      markThreadRead('conv-f')
+      expect(reads()).toBe(1)
+      flushThreadRead('conv-f')
+      expect(reads()).toBe(2)
+      vi.advanceTimersByTime(10_000)
+      expect(reads()).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('zeroes the thread\'s unread count in the Chats badge right away', async () => {
+    const { markThreadRead } = await import('./ConversationView')
+    const dms = await import('@/store/dms')
+    dms.applyConversationRows([
+      { id: 'conv-z', unread: 4, muted_until: null },
+      { id: 'conv-y', unread: 1, muted_until: null },
+    ])
+    expect(dms.dmUnreadTotal.value).toBe(5)
+    markThreadRead('conv-z')
+    expect(dms.dmUnreadTotal.value).toBe(1)
+  })
+})
+
+describe('ConversationView — delivery acks', () => {
+  type Frame = { data: Record<string, unknown> }
+  async function dmMessageHandler(): Promise<(e: Frame) => void> {
+    const { ws } = await import('@/ws')
+    const calls = (ws.on as unknown as { mock: { calls: [string, (e: Frame) => void][] } }).mock.calls
+    const hit = [...calls].reverse().find(c => c[0] === 'dm.message')
+    if (!hit) throw new Error('no dm.message handler')
+    return hit[1]
+  }
+  const delivered = () => apiPost.mock.calls.filter(c => String(c[0]).endsWith('/delivered'))
+
+  it('a 1:1 DM acks delivery of an incoming message', async () => {
+    const { render, waitFor, ConversationView } = await setup()
+    const { container } = render(<ConversationView conversationId="conv-a" />)
+    await waitFor(() => expect(container.textContent ?? '').toContain('BOB-conv-a'),
+      { timeout: RENDER_WAIT })
+    const on = await dmMessageHandler()
+    on({ data: { conversation_id: 'conv-a', message: msgRow('new-1', 'HI') } })
+    expect(delivered().map(c => c[0])).toEqual([
+      '/api/conversations/conv-a/messages/new-1/delivered',
+    ])
+  })
+
+  it('a space or household chat never acks delivery per message', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/conversations/sys-h/messages')) return [msgRow('sys-bob', 'HELLO')]
+      if (url === '/api/conversations/sys-h/members') return roster
+      return {}
+    })
+    const { render, waitFor, ConversationView } = await setup()
+    const { container } = render(
+      <ConversationView conversationId="sys-h" embedded meta={{
+        type: 'group_dm', name: null, managed_here: false,
+        muted_until: null, notif_level: 'all',
+      }} />,
+    )
+    await waitFor(() => expect(container.textContent ?? '').toContain('HELLO'),
+      { timeout: RENDER_WAIT })
+    const on = await dmMessageHandler()
+    for (let i = 0; i < 5; i++) {
+      on({ data: {
+        conversation_id: 'sys-h', system_scope: 'space', space_id: 's1',
+        message: msgRow(`m-${i}`, `MSG-${i}`),
+      } })
+    }
+    await waitFor(() => expect(container.textContent ?? '').toContain('MSG-4'))
+    expect(delivered()).toEqual([])
   })
 })
 

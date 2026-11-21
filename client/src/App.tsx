@@ -149,6 +149,28 @@ export function AppLayout({ children, overlays }: {
   )
 }
 
+/** The sidebar's cold-start inputs, once the viewer is signed in. Gated
+ *  on ``authed`` (``currentUser``), not the bearer token: the token is
+ *  there before ``/api/me`` answers, so gating on it loaded all of these
+ *  twice at boot — and never under haos ingress, where the SPA carries no
+ *  token. */
+export function useSignedInLoads(authed: boolean): void {
+  useEffect(() => {
+    if (!authed) return
+    if (toggles.value === null) void loadToggles()
+    if (isGuardian.value === null) void loadGuardian()
+    // Seed the sidebar Chats badge so the count is correct on cold
+    // load — without this it stays at 0 until the user opens /dms or
+    // the first ``dm.message`` WS frame triggers a refetch.
+    void loadDmUnread()
+    // Load per-user section visibility preferences (hide_highlights,
+    // hide_momentum, hide_bazaar). Fires once per auth success and is
+    // kept live via ``user.preferences_changed`` WS frames wired in
+    // main.tsx.
+    void loadUserPreferences()
+  }, [authed])
+}
+
 export function App() {
   const authed = useComputed(() => isAuthed.value)
   const cfg = useComputed(() => instanceConfig.value)
@@ -206,20 +228,7 @@ export function App() {
   // gates the Parent Control link. Both run only when authed; the
   // sidebar treats null/loading as "all visible" / "not a guardian"
   // so the first paint doesn't flicker items in.
-  useEffect(() => {
-    if (token.value === null) return
-    if (toggles.value === null) void loadToggles()
-    if (isGuardian.value === null) void loadGuardian()
-    // Seed the sidebar Chats badge so the count is correct on cold
-    // load — without this it stays at 0 until the user opens /dms or
-    // the first ``dm.message`` WS frame triggers a refetch.
-    void loadDmUnread()
-    // Load per-user section visibility preferences (hide_highlights,
-    // hide_momentum, hide_bazaar). Fires once per auth success and is
-    // kept live via ``user.preferences_changed`` WS frames wired in
-    // main.tsx.
-    void loadUserPreferences()
-  }, [authed.value])
+  useSignedInLoads(authed.value)
 
   // Household font (``--hh-font``) — painted app-wide once signed in.
   // Gated on ``authed`` (``currentUser``), not the bearer token, so it

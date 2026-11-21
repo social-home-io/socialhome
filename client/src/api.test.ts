@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { api, ApiError, _resetApiLoggedOut, dispositionName, setUnauthorizedHandler } from './api'
+import { token } from '@/store/token'
 
 describe('api — surface', () => {
   it('exports an ApiClient instance', () => {
@@ -477,5 +478,100 @@ describe('ApiClient — 429 on a GET (one polite retry)', () => {
     const err = await api.post('/api/bazaar/p1/bids', { amount: 1 }).catch((e) => e)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(err.status).toBe(429)
+  })
+})
+
+describe('ApiClient — identical concurrent GETs share one request', () => {
+  function res(status: number, body: unknown, retryAfter: string | null = null) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (k: string) => (k.toLowerCase() === 'retry-after' ? retryAfter : null) },
+      json: vi.fn().mockResolvedValue(body),
+    } as unknown as Response
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('two callers asking for the same URL at once get one fetch', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(res(200, { members: [1, 2] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const [a, b] = await Promise.all([
+      api.get('/api/spaces/s1/members'),
+      api.get('/api/spaces/s1/members'),
+    ])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(a).toEqual({ members: [1, 2] })
+    expect(b).toEqual({ members: [1, 2] })
+    // Each caller owns its copy: one mutating it never changes the other.
+    a.members.push(3)
+    expect(b.members).toEqual([1, 2])
+  })
+
+  it('params are part of the key: different queries are separate requests', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => res(200, []))
+    vi.stubGlobal('fetch', fetchMock)
+    await Promise.all([
+      api.get('/api/feed', { before: 'a' }),
+      api.get('/api/feed', { before: 'b' }),
+      api.get('/api/feed'),
+    ])
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('nothing is cached once the request settles', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(200, { n: 1 }))
+      .mockResolvedValueOnce(res(200, { n: 2 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(api.get('/api/me')).resolves.toEqual({ n: 1 })
+    await expect(api.get('/api/me')).resolves.toEqual({ n: 2 })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('a failure reaches every caller, and the next call fetches again', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(500, {}))
+      .mockResolvedValueOnce(res(200, { ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    const results = await Promise.allSettled([api.get('/api/x'), api.get('/api/x')])
+    expect(results.map(r => r.status)).toEqual(['rejected', 'rejected'])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await expect(api.get('/api/x')).resolves.toEqual({ ok: true })
+  })
+
+  it('a caller joining during the 429 wait shares the one retry', async () => {
+    vi.useFakeTimers()
+    const limited = { error: { code: 'RATE_LIMITED', detail: 'slow down' } }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(429, limited, '2'))
+      .mockResolvedValueOnce(res(200, { ok: 1 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const first = api.get('/api/me/corner')
+    await vi.advanceTimersByTimeAsync(1_000)
+    const second = api.get('/api/me/corner')
+    await vi.advanceTimersByTimeAsync(1_100)
+    await expect(first).resolves.toEqual({ ok: 1 })
+    await expect(second).resolves.toEqual({ ok: 1 })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('a different signed-in token is a different request', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => res(200, {}))
+    vi.stubGlobal('fetch', fetchMock)
+    const prev = token.value
+    try {
+      token.value = 'tok-a'
+      const a = api.get('/api/me')
+      token.value = 'tok-b'
+      const b = api.get('/api/me')
+      await Promise.all([a, b])
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      token.value = prev
+    }
   })
 })

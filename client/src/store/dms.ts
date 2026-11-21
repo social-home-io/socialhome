@@ -11,6 +11,9 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { isMuteActive, type MuteDuration } from '@/utils/mute'
+import { createLiveThrottle } from '@/utils/liveThrottle'
+import { currentUser } from '@/store/auth'
+import type { Conversation } from '@/types'
 
 export interface DmReaction {
   user_id: string
@@ -55,14 +58,16 @@ export const typingByConversation = signal<Record<string, TypingIndicator[]>>({}
  *  stale count. */
 export const dmUnreadTotal = signal<number>(0)
 
-function append(convo: string, msg: DmMessageLite): void {
+/** ``false`` when the message was already there (a reconnect replay). */
+function append(convo: string, msg: DmMessageLite): boolean {
   const existing = messagesByConversation.value[convo] ?? []
-  if (existing.some((m) => m.message_id === msg.message_id)) return
+  if (existing.some((m) => m.message_id === msg.message_id)) return false
   messagesByConversation.value = {
     ...messagesByConversation.value,
     [convo]: [...existing, msg],
   }
   inbox.value = { ...inbox.value, [convo]: msg }
+  return true
 }
 
 
@@ -158,15 +163,88 @@ export async function setConversationNotifLevel(
   return body.level === 'mentions' ? 'mentions' : 'all'
 }
 
+/** The fields of a ``GET /api/conversations`` row this store keeps live. */
+export interface ConversationRowLite {
+  id?: string
+  unread?: number
+  muted_until?: string | null
+  last_message_at?: string | null
+}
+
+/** The viewer's conversations as ``GET /api/conversations`` last answered,
+ *  kept live from ``dm.message`` frames: a message from someone else
+ *  counts one unread on its row and moves it to the top; reading a
+ *  thread zeroes it. The Chats inbox renders it; the badge sums it. */
+export const conversationRows = signal<Conversation[]>([])
+
+/** Whether ``conversationRows`` came from the server yet. */
+let rowsLoaded = false
+
+/** Take a fresh ``GET /api/conversations`` answer: the rows and the badge. */
+export function applyConversationRows(rows: ConversationRowLite[]): void {
+  conversationRows.value = rows as Conversation[]
+  rowsLoaded = true
+  dmUnreadTotal.value = alertingUnread(rows)
+}
+
+function patchRows(next: Conversation[]): void {
+  conversationRows.value = next
+  dmUnreadTotal.value = alertingUnread(next)
+}
+
+/** The viewer read ``convId`` (the thread marks read): its count is zero
+ *  now, before the server's answer. */
+export function noteConversationRead(convId: string): void {
+  const rows = conversationRows.value
+  const i = rows.findIndex(r => r.id === convId)
+  if (i < 0 || !rows[i].unread) return
+  const next = rows.slice()
+  next[i] = { ...rows[i], unread: 0 }
+  patchRows(next)
+}
+
+/** A new message in ``convId``: one more unread on its row (not for the
+ *  viewer's own), the row to the top. ``false`` when the row isn't known
+ *  — a new conversation, or the list isn't loaded yet. */
+function noteIncoming(convId: string, mine: boolean, at: string | undefined): boolean {
+  const rows = conversationRows.value
+  const i = rows.findIndex(r => r.id === convId)
+  if (!rowsLoaded || i < 0) return false
+  const row: Conversation = {
+    ...rows[i],
+    unread: mine ? rows[i].unread : (rows[i].unread ?? 0) + 1,
+    last_message_at: at ?? rows[i].last_message_at,
+  }
+  patchRows([row, ...rows.slice(0, i), ...rows.slice(i + 1)])
+  return true
+}
+
 export async function loadDmUnread(): Promise<void> {
   try {
-    const rows = (await api.get('/api/conversations')) as Array<{
-      unread?: number; muted_until?: string | null
-    }>
-    dmUnreadTotal.value = alertingUnread(rows)
+    const rows = (await api.get('/api/conversations')) as ConversationRowLite[]
+    applyConversationRows(rows)
   } catch {
     /* auth not ready or transient — leave the prior count visible */
   }
+}
+
+/** A full refetch the frames can't replace (a conversation we don't have
+ *  a row for), at most once per {@link DM_LIST_REFRESH_GAP_MS} with one
+ *  trailing call — a burst of new conversations costs two GETs, not one
+ *  per message. Paused while the tab is hidden. */
+export const DM_LIST_REFRESH_GAP_MS = 5_000
+let listRefresh = createLiveThrottle(() => { void loadDmUnread() }, {
+  minGapMs: DM_LIST_REFRESH_GAP_MS, pauseWhileHidden: true,
+})
+
+/** Test seam: forget the rows and the refresh budget. */
+export function resetDmStoreForTests(): void {
+  listRefresh.cancel()
+  listRefresh = createLiveThrottle(() => { void loadDmUnread() }, {
+    minGapMs: DM_LIST_REFRESH_GAP_MS, pauseWhileHidden: true,
+  })
+  conversationRows.value = []
+  rowsLoaded = false
 }
 
 /** A ``dm.*`` frame for a system chat (``system_scope`` set). */
@@ -202,7 +280,7 @@ export function wireDmWs(): void {
     // Chats badge (the server leaves it out of ``GET /api/conversations``
     // too, so a refetch here would only cost a request).
     if (isSystemChatFrame(d)) return
-    append(d.conversation_id, {
+    const added = append(d.conversation_id, {
       message_id:      msg.id,
       conversation_id: d.conversation_id,
       sender_user_id:  msg.sender_user_id ?? '',
@@ -211,7 +289,19 @@ export function wireDmWs(): void {
       occurred_at:     msg.created_at,
       edited_at:       msg.edited_at ?? null,
     })
-    void loadDmUnread()
+    if (!added) return
+    // Counted from the frame — no list refetch per message. Only a
+    // conversation without a row yet needs the server's list.
+    const mine = !!msg.sender_user_id && msg.sender_user_id === currentUser.value?.user_id
+    if (!noteIncoming(d.conversation_id, mine, msg.created_at)) listRefresh.trigger()
+  })
+  // A conversation someone started with the viewer: its row comes from
+  // the server (members, name), on the same refetch budget.
+  ws.on('dm.conversation.created', () => { listRefresh.trigger() })
+  // Reads on another device send no frame: catch up once when the tab
+  // comes back (the counts may have dropped while it was away).
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && rowsLoaded) listRefresh.trigger()
   })
   ws.on('dm.message_reaction', (e) => {
     // The frame is a patch: ``{conversation_id, message_id, user_id,

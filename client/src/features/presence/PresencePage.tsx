@@ -24,6 +24,10 @@ import { presenceLabel } from '@/utils/presenceLabel'
 import { statusLine } from '@/utils/statusLine'
 import { personZone } from '@/utils/mapMarkers'
 import type { HouseholdZone, UserStatus } from '@/types'
+import { createLiveThrottle } from '@/utils/liveThrottle'
+
+/** Live frames refetch the roster at most once per this. */
+const PRESENCE_REFRESH_GAP_MS = 3_000
 
 interface PresenceEntry {
   username: string
@@ -119,9 +123,13 @@ export default function PresencePage() {
     const offZones = ws.on('household_zones_changed', () => { void loadHouseholdZones() })
     // Live refresh: presence frames (physical state + GPS) and the
     // session-presence frames (online / idle / offline) both move the
-    // roster, so refetch on any of them. Refetch-on-frame keeps this
-    // page dead simple — the list is small and the endpoint cached.
-    const refresh = () => { void loadPresenceList() }
+    // roster, so refetch on any of them — at most once per 3 s (a burst
+    // of frames is one read now and one at the end of the gap), nothing
+    // while the tab is hidden. The list is small and the endpoint cached.
+    const roster = createLiveThrottle(() => { void loadPresenceList() }, {
+      minGapMs: PRESENCE_REFRESH_GAP_MS, pauseWhileHidden: true,
+    })
+    const refresh = () => { roster.trigger() }
     const offUpdated = ws.on('presence.updated', refresh)
     const offOnline = ws.on('user.online', refresh)
     const offIdle = ws.on('user.idle', refresh)
@@ -130,7 +138,10 @@ export default function PresencePage() {
     // moves their roster row. Our own ``currentUser`` is kept live
     // app-wide by ``MeButton``.
     const offStatus = ws.on('user.status_changed', refresh)
-    return () => { offUpdated(); offOnline(); offIdle(); offOffline(); offStatus(); offZones() }
+    return () => {
+      offUpdated(); offOnline(); offIdle(); offOffline(); offStatus(); offZones()
+      roster.cancel()
+    }
   }, [])
 
   if (loading.value) return <Spinner />

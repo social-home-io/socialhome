@@ -23,6 +23,10 @@ import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { confirmDialog } from '@/components/confirm'
 import { isOne, t } from '@/i18n/i18n'
+import { createLiveThrottle } from '@/utils/liveThrottle'
+
+/** Live poll frames reload the poll at most once per this. */
+const POLL_REFRESH_GAP_MS = 2_000
 
 interface PollOption {
   id: string
@@ -94,16 +98,18 @@ export function PollUI({
       }
     }
     void load()
-    const off1 = ws.on('poll.voted',   (e) => {
-      if ((e.data as { post_id: string }).post_id === postId) void load()
+    // A popular poll gets votes in bursts: reload at most once per 2 s
+    // (one read now, one at the end of the gap), nothing while hidden.
+    const live = createLiveThrottle(() => { void load() }, {
+      minGapMs: POLL_REFRESH_GAP_MS, pauseWhileHidden: true,
     })
-    const off2 = ws.on('poll.closed',  (e) => {
-      if ((e.data as { post_id: string }).post_id === postId) void load()
-    })
-    const off3 = ws.on('poll.created', (e) => {
-      if ((e.data as { post_id: string }).post_id === postId) void load()
-    })
-    return () => { stopped = true; off1(); off2(); off3() }
+    const mine = (e: { data: unknown }) => {
+      if ((e.data as { post_id: string }).post_id === postId) live.trigger()
+    }
+    const off1 = ws.on('poll.voted', mine)
+    const off2 = ws.on('poll.closed', mine)
+    const off3 = ws.on('poll.created', mine)
+    return () => { stopped = true; off1(); off2(); off3(); live.cancel() }
   }, [postId, spaceId])
 
   if (loadState === 'loading') return (

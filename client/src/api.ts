@@ -218,8 +218,37 @@ class ApiClient {
    *  page on a lively chat) gets its data a moment late instead of an
    *  error. Only a GET, and only once: a write is never repeated behind
    *  the user's back, and a second 429 says so plainly. */
-  async get<T = any>(path: string, params?: Record<string, string>): Promise<T> {
+  /**
+   *  Identical GETs in flight at the same time share one request: a page
+   *  whose parts each ask for the same list (a space's members, the
+   *  viewer's preferences at boot) costs one read. Keyed by URL + the
+   *  bearer token; the entry goes when the request settles — nothing is
+   *  cached. When a request was shared, every caller gets its own deep
+   *  copy, so one caller mutating its result never reaches another. A
+   *  caller joining during the 429 wait shares the one retry. */
+  get<T = any>(path: string, params?: Record<string, string>): Promise<T> {
     const url = params ? `${path}?${new URLSearchParams(params)}` : path
+    const key = `${token.value ?? ''}\n${url}`
+    const pending = ApiClient._inflight.get(key)
+    if (pending) {
+      pending.shared = true
+      return pending.req.then(body => structuredClone(body) as T)
+    }
+    const entry = { req: this._get<T>(path, url) as Promise<unknown>, shared: false }
+    ApiClient._inflight.set(key, entry)
+    // Registered first, so it runs before any caller's continuation: once
+    // a caller sees the result nobody can join any more, and ``shared``
+    // is final.
+    const clear = () => {
+      if (ApiClient._inflight.get(key) === entry) ApiClient._inflight.delete(key)
+    }
+    entry.req.then(clear, clear)
+    return entry.req.then(body => (entry.shared ? structuredClone(body) : body) as T)
+  }
+
+  private static _inflight = new Map<string, { req: Promise<unknown>; shared: boolean }>()
+
+  private async _get<T>(path: string, url: string): Promise<T> {
     let raw = await fetch(_rel(url), { headers: this.headers() })
     if (raw.status === 429) {
       await new Promise(resolve => setTimeout(resolve, retryAfterMs(raw)))

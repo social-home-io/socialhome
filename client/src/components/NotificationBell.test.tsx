@@ -262,6 +262,45 @@ describe('notification polling lifecycle', () => {
     stopNotificationPolling()
     expect(clearsAfterStop).toBe(clearSpy.mock.calls.length)
   })
+
+  it('never polls while the tab is hidden; once on coming back', async () => {
+    let hidden = false
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
+    const setHidden = (v: boolean) => {
+      hidden = v
+      document.dispatchEvent(new Event('visibilitychange'))
+    }
+    apiGet.mockReset()
+    apiGet.mockResolvedValue({ unread: 0 })
+    const polls = () => apiGet.mock.calls.filter(c => c[0] === '/api/notifications/unread-count').length
+    const { startNotificationPolling, stopNotificationPolling } =
+      await import('./NotificationBell')
+    try {
+      startNotificationPolling()
+      expect(polls()).toBe(1)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(polls()).toBe(2)
+      setHidden(true)
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      expect(polls()).toBe(2)
+      setHidden(false)
+      expect(polls()).toBe(3)
+      // The next one is a full period later, not right away.
+      await vi.advanceTimersByTimeAsync(29_000)
+      expect(polls()).toBe(3)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(polls()).toBe(4)
+      stopNotificationPolling()
+      // Stopped: neither the timer nor a visibility change polls.
+      setHidden(true)
+      setHidden(false)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(polls()).toBe(4)
+    } finally {
+      stopNotificationPolling()
+      hidden = false
+    }
+  })
 })
 
 describe('NotificationBell under the HA ingress prefix', () => {

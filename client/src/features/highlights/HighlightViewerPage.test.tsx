@@ -169,6 +169,43 @@ describe('HighlightViewerPage people', () => {
     expect(detailCalls).toBe(2)
     expect(document.body.textContent).not.toContain('ru-chidi')
   })
+
+  it('a burst of view and reaction frames refetches at most once per 5 s', async () => {
+    detailBody = {
+      highlight: highlight('uid-me', { author: { display_name: 'Me', picture_url: null } }),
+      frames,
+    }
+    let detailCalls = 0
+    route(path => {
+      if (path !== '/api/highlights/h1') return undefined
+      detailCalls += 1
+      return detailBody
+    })
+    const { container } = render(<HighlightViewerPage />)
+    await waitFor(() => expect(container.querySelector('.sh-hlv__name')).not.toBeNull())
+    expect(detailCalls).toBe(1)
+    vi.useFakeTimers()
+    try {
+      // A room of people opens it at once.
+      for (let i = 0; i < 20; i++) {
+        wsHandlers.get(i % 2 ? 'highlight.frame_viewed' : 'highlight.frame_reaction_changed')!({
+          data: { highlight_id: 'h1', frame_id: 'f1', viewer_user_id: `ru-${i}` },
+        })
+      }
+      // Another highlight's frames don't count.
+      wsHandlers.get('highlight.frame_viewed')!({ data: { highlight_id: 'h9' } })
+      await settle()
+      expect(detailCalls).toBe(2)
+      await vi.advanceTimersByTimeAsync(4_900)
+      expect(detailCalls).toBe(2)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(detailCalls).toBe(3)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(detailCalls).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('HighlightViewerPage opened from a share card', () => {

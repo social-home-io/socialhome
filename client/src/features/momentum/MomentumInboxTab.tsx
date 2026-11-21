@@ -32,6 +32,10 @@ import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { t } from '@/i18n/i18n'
 import { MomentCard } from './MomentCard'
+import { createLiveThrottle } from '@/utils/liveThrottle'
+
+/** Live frames refetch the list at most once per this. */
+const MOMENTUM_REFRESH_GAP_MS = 3_000
 
 /** Moments per page. */
 export const INBOX_PAGE = 30
@@ -107,13 +111,19 @@ export default function MomentumInboxTab({ tag }: { tag: string | null }) {
     void loadBlocks()
     void loadHouseholdUsers()  // names + pictures for this household's people
     void fetchFirst(tag, false)
-    const refresh = () => { void fetchFirst(tag, true) }
+    // Live frames refetch at most once per 3 s — a lively household's
+    // burst of moments and reactions is one read now and one at the end
+    // of the gap; nothing while the tab is hidden.
+    const live = createLiveThrottle(() => { void fetchFirst(tag, true) }, {
+      minGapMs: MOMENTUM_REFRESH_GAP_MS, pauseWhileHidden: true,
+    })
+    const refresh = () => { live.trigger() }
     const dispose = [
       ws.on('moment.created', refresh),
       ws.on('moment.deleted', refresh),
       ws.on('moment.reaction_changed', refresh),
     ]
-    return () => { dispose.forEach(d => d()) }
+    return () => { dispose.forEach(d => d()); live.cancel() }
   }, [tag])
 
   const blocked = blockedUserIds.value

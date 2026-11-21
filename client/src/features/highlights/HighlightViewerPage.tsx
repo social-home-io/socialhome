@@ -40,6 +40,7 @@ import { currentUser } from '@/store/auth'
 import { loadHouseholdUsers, namedPersonLabel, namedPersonPicture } from '@/store/householdUsers'
 import { markSeen } from '@/store/notifications'
 import { localSinceTime } from '@/utils/relativeTime'
+import { createLiveThrottle } from '@/utils/liveThrottle'
 import type { Highlight, HighlightFrame, HighlightInboxItem } from '@/types'
 import { ws } from '@/ws'
 import { t, isOne } from '@/i18n/i18n'
@@ -63,6 +64,8 @@ interface HighlightDetail {
 const QUICK_REACTIONS = ['❤️', '😂', '😮', '😢', '🔥', '👏'] as const
 
 const FRAME_DURATION_MS = 6000  // image default; video uses its own length
+/** "Seen by" / reaction frames refetch the detail at most once per this. */
+const HIGHLIGHT_ACTIVITY_GAP_MS = 5_000
 
 type Sheet = 'more' | 'seen' | 'share' | null
 
@@ -160,16 +163,21 @@ export default function HighlightViewerPage() {
     // Live counters for authors viewing their own highlight —
     // ``highlight.frame_viewed`` / ``highlight.frame_reaction_changed``
     // carry only the person's id, and a friend on another household is not
-    // in the local cache: refetch so "Seen by" comes back named.
+    // in the local cache: refetch so "Seen by" comes back named. At most
+    // once per 5 s (a room opening it at once is one read now and one at
+    // the end of the gap), nothing while the tab is hidden.
+    const activity = createLiveThrottle(() => { if (detail.value) void refetch(false) }, {
+      minGapMs: HIGHLIGHT_ACTIVITY_GAP_MS, pauseWhileHidden: true,
+    })
     const matches = (data: { highlight_id?: string }) => data.highlight_id === highlightId
     const onActivity = (e: { data: unknown }) => {
-      if (matches(e.data as { highlight_id?: string }) && detail.value) void refetch(false)
+      if (matches(e.data as { highlight_id?: string }) && detail.value) activity.trigger()
     }
     const dispose = [
       ws.on('highlight.frame_viewed', onActivity),
       ws.on('highlight.frame_reaction_changed', onActivity),
     ]
-    return () => { dispose.forEach(d => d()) }
+    return () => { dispose.forEach(d => d()); activity.cancel() }
   }, [highlightId, via])
 
   // The frame stands still while held, paused, while they type a reply

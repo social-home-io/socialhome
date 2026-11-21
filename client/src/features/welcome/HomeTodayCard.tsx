@@ -27,6 +27,10 @@ import { namedPersonLabel, namedPersonPicture } from '@/store/householdUsers'
 import { normaliseTimestamp } from '@/utils/relativeTime'
 import { TODAY_WINDOW_MS, todayView, type TodayPerson } from '@/features/highlights/today'
 import type { HighlightInboxItem, Moment } from '@/types'
+import { createLiveThrottle } from '@/utils/liveThrottle'
+
+/** Live frames reload the card at most once per this. */
+const TODAY_REFRESH_GAP_MS = 5_000
 
 const NAMES_SHOWN = 2
 
@@ -117,15 +121,21 @@ export function HomeTodayCard() {
         .catch(() => undefined)
     }
     load()
+    // Live frames reload at most once per 5 s (two reads each time),
+    // nothing while the tab is hidden.
+    const throttle = createLiveThrottle(load, {
+      minGapMs: TODAY_REFRESH_GAP_MS, pauseWhileHidden: true,
+    })
+    const refresh = () => { throttle.trigger() }
     const offs = [
-      ws.on('highlight.frame_added', load),
-      ws.on('highlight.frame_removed', load),
-      ws.on('highlight.removed', load),
-      ws.on('highlight.audience_changed', load),
-      ws.on('moment.created', load),
-      ws.on('moment.deleted', load),
+      ws.on('highlight.frame_added', refresh),
+      ws.on('highlight.frame_removed', refresh),
+      ws.on('highlight.removed', refresh),
+      ws.on('highlight.audience_changed', refresh),
+      ws.on('moment.created', refresh),
+      ws.on('moment.deleted', refresh),
     ]
-    return () => { live = false; offs.forEach(off => off()) }
+    return () => { live = false; offs.forEach(off => off()); throttle.cancel() }
   }, [noHighlights, noMomentum])
 
   if (!data) return null

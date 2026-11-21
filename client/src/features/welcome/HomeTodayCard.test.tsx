@@ -4,7 +4,10 @@ import { render, waitFor, fireEvent, within } from '@testing-library/preact'
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
-vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
+const wsHandlers = vi.hoisted(() => new Map<string, () => void>())
+vi.mock('@/ws', () => ({
+  ws: { on: (type: string, fn: () => void) => { wsHandlers.set(type, fn); return () => undefined } },
+}))
 
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
@@ -61,6 +64,27 @@ beforeEach(() => {
 afterEach(() => { currentUser.value = null })
 
 describe('HomeTodayCard', () => {
+  it('a burst of highlight and moment frames reloads at most once per 5 s', async () => {
+    render(<HomeTodayCard />)
+    await waitFor(() => expect(api.get).toHaveBeenCalledTimes(2))
+    vi.useFakeTimers()
+    try {
+      for (let i = 0; i < 20; i++) {
+        wsHandlers.get(['highlight.frame_added', 'moment.created', 'moment.deleted'][i % 3])!()
+      }
+      // One reload now (two reads), one trailing at the end of the gap.
+      expect(api.get).toHaveBeenCalledTimes(4)
+      await vi.advanceTimersByTimeAsync(4_900)
+      expect(api.get).toHaveBeenCalledTimes(4)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(api.get).toHaveBeenCalledTimes(6)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(api.get).toHaveBeenCalledTimes(6)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('stays hidden when nothing is new', async () => {
     highlights = [hl('seen', 'ru-a', 'Anna', 1 * H, 0), hl('mine', 'me', 'Me', 1 * H, 0)]
     moments = [moment('m0', 'me', 'Me', 1 * H)]
