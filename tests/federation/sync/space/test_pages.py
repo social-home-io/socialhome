@@ -754,6 +754,49 @@ async def test_a_mismatch_reads_needs_sync_and_asks_one_host_once():
     assert env.requests == [(SPACE, HOST)]
 
 
+async def test_a_member_ahead_of_the_page_matches():
+    """UX review: a member that applied the signer's stream past the page
+    holds everything the page commits to — its differing buckets are newer
+    content (normal in a busy space), not missing content. It reads
+    ``match: true`` and asks nobody."""
+    env = _Env(own=ME, seed=None)
+    env.seqs.applied[HOST] = 60  # applied a stream past page 50
+    env.state.vec = _differing(3)  # rows newer than the page
+    await _take(env, _signed(vector=_vec(2), seq=50), _vec(2))
+    pos = await env.svc.position(env.spaces.space, [HOST])
+    assert pos is not None and pos.match is True and pos.differing_buckets == 0
+    assert state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is (
+        SpaceSyncState.UP_TO_DATE
+    )
+    assert env.requests == []
+
+
+async def test_a_member_missing_a_row_reads_a_mismatch_until_its_sync_lands():
+    """A member that did not apply the signer's stream up to the page and
+    differs may lack content: mismatch, one BEGIN. Once that sync lands
+    (applied ≥ the page's seq) the same compare reads as a match."""
+    env = _Env(own=ME, seed=None)
+    env.seqs.applied[HOST] = 40
+    env.state.vec = _differing(2)
+    await _take(env, _signed(vector=_vec(2), seq=50), _vec(2))
+    pos = await env.svc.position(env.spaces.space, [HOST])
+    assert pos is not None and pos.match is False and pos.differing_buckets == 2
+    assert env.requests == [(SPACE, HOST)]
+    env.seqs.applied[HOST] = 55  # the triggered sync applied cleanly
+    pos = await env.svc.position(env.spaces.space, [HOST])
+    assert pos is not None and pos.match is True and pos.differing_buckets == 0
+    assert env.state.calls == 1  # no second compare
+
+
+async def test_applied_past_the_page_matches_before_any_compare():
+    env = _Env(own=ME, seed=None)
+    env.seqs.applied[HOST] = 50
+    page = _signed(vector=_vec(2), seq=50)
+    env.repo.rows[SPACE] = StoredSyncPage(SPACE, canonical_str(page.to_wire()), _vec(2))
+    pos = await env.svc.position(env.spaces.space, [HOST])
+    assert pos is not None and pos.match is True
+
+
 async def test_a_page_of_a_signer_that_is_not_our_host_asks_our_host():
     env = _Env(own=ME, seed=None)
     env.hosts = ["owner-x"]

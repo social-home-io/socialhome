@@ -600,19 +600,31 @@ What shipped, where it is more exact than the design above:
   household acting as the space's host (the signer when it is one) for an
   incremental BEGIN (`SpaceSyncScheduler.sync_with`), within the
   provider's 5 BEGINs / h budget; the next compare comes only with the
-  next page, so a mismatch never loops. A member that is *ahead* of the
-  page (rows newer than it, normal in a busy space) also reads a mismatch
-  until the next page.
+  next page, so a mismatch never loops.
+- **A mismatch means "may lack content the page commits to"**, never "holds
+  newer content". The member knows, for the page's signer, the snapshot of
+  the last stream from it that it applied cleanly
+  (`space_instances.applied_seq`, the same counter as the page's `seq`).
+  When that is at or past the page's `seq`, it holds everything the page
+  commits to, so differing buckets are only content newer than the page
+  (normal in a busy space): `match: true`, no BEGIN. Only a member that did
+  not apply the signer's stream up to the page (a relayed page while the
+  host is away, an unclean stream) reads `match: false` — and the BEGIN the
+  compare sends settles it: once that stream lands, `applied` passes the
+  page's `seq` and the same compare reads `match: true` (no second
+  recompute). A page of a signer we do not sync from has no `applied`, so
+  its compare alone decides.
 - **Status** (`GET /api/spaces/{id}` `sync.page`, also in the
   `space.sync_state` frame): `{seq, at, signer_role, applied, match,
   differing_buckets, conflict}`. `applied` — we applied a clean stream from
   the page's signer at or past its `seq` (`space_instances.applied_seq`;
   `null` when that signer is not one of our acting hosts). Rules
   (`domain/space_sync_page.state_with_page`): a running stream stays
-  **catching up**; once compared, `match: true` → **up to date** (the SPA:
-  "Up to date · checked against page N"), also while the host is offline,
-  and `match: false` → **behind** (the SPA: "Needs sync · N parts
-  differ"), whatever the host last answered. Not compared yet: `applied` →
+  **catching up**; `match: true` (compared equal, or applied past the
+  page) → **up to date**, also while the host is offline, and `match:
+  false` (differs and not applied that far) → **behind**, whatever the host
+  last answered; `differing_buckets` is the compare's count when `match` is
+  false, else `0`. (SPA copy for these is a separate UX step.) Not compared yet: `applied` →
   **up to date**; a newer page than we applied → **catching up** while the
   host answers, **behind** while it is silent. No page (an older host):
   the answer-based status, unchanged.

@@ -183,3 +183,25 @@ async def test_a_newer_page_shows_the_member_behind(pair):
     # the host last answered.
     assert (pos.match, pos.differing_buckets) == (False, 1)
     assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND
+
+
+async def test_a_member_ahead_of_the_page_reads_up_to_date(pair):
+    """UX review: the member holds MORE than the page (a post that came in
+    after the seal) and applied the host's stream past it — newer content,
+    not missing content: ``match: true``, up to date."""
+    host, member, host_pages, member_pages, _clock = pair
+    await _post(host)
+    await _stream(host, member)
+    page = await host_pages.seal_if_due(SPACE)
+    assert page is not None
+    await _post(host, "post-2")  # after the seal
+    await _stream(host, member)
+    await member.repos.space.add_space_instance(SPACE, HOST)
+    await member.repos.space_sync_watermark.record_applied(SPACE, HOST, page.seq + 1)
+    assert await _round(host_pages, member_pages, "s-1")
+    space = await member.repos.space.get(SPACE)
+    pos = await member_pages.position(space, [HOST])
+    assert pos is not None and (pos.match, pos.differing_buckets) == (True, 0)
+    assert state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is (
+        SpaceSyncState.UP_TO_DATE
+    )

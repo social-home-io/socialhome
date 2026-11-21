@@ -595,8 +595,10 @@ class SyncPageService:
     async def compare(self, space_id: str) -> int | None:
         """Compare our own bucket vector with the held page's (never for a
         page we signed): the differing bucket count, or ``None`` when
-        skipped. A mismatch asks ONE household acting as the space's host
-        for an incremental sync — the signer when it is one. The status
+        skipped. A difference that may be missing content (we did not apply
+        the signer's stream up to the page) asks ONE household acting as the
+        space's host for an incremental sync — the signer when it is one;
+        once that sync lands, :meth:`position` reads a match. The status
         rechecks either way. Fail-soft."""
         try:
             space = await self._spaces.get(space_id)
@@ -624,20 +626,34 @@ class SyncPageService:
                 self._compared_at.pop(next(iter(self._compared_at)))
             await self._changed(space_id)
             if differing:
-                await self._ask_host(space, held.page.signer)
+                await self._ask_host(space, held.page)
             return differing
         except Exception:
             log.exception("sync page: comparing space %s failed", space_id)
             return None
 
-    async def _ask_host(self, space: Space, signer: str) -> None:
+    async def _applied(
+        self, space_id: str, page: SyncPage, hosts: list[str]
+    ) -> bool | None:
+        """Whether a clean stream from the page's signer at or past its seq
+        was applied here (``None``: we do not sync from that signer)."""
+        if page.signer not in hosts:
+            return None
+        seq = await self._seqs.applied_seq(space_id, page.signer)
+        return seq is not None and seq >= page.seq
+
+    async def _ask_host(self, space: Space, page: SyncPage) -> None:
+        """A mismatch that may be missing content: one incremental BEGIN to
+        a household acting as host (the signer when it is one) — never when
+        we applied the signer's stream past the page (then the differences
+        are newer content, nothing is missing)."""
         if self._hosts is None or self._request_sync is None:
             return
         try:
             hosts = await self._hosts(space)
-            if not hosts:
+            if not hosts or await self._applied(space.id, page, hosts):
                 return
-            host = signer if signer in hosts else hosts[0]
+            host = page.signer if page.signer in hosts else hosts[0]
             await self._request_sync(space.id, host)
         except Exception:
             log.exception("sync page: asking the host of %s failed", space.id)
@@ -652,14 +668,18 @@ class SyncPageService:
         if held is None:
             return None
         page = held.page
-        applied: bool | None = None
-        if page.signer in hosts:
-            seq = await self._seqs.applied_seq(space.id, page.signer)
-            applied = seq is not None and seq >= page.seq
+        applied = await self._applied(space.id, page, hosts)
+        # ``match`` means "nothing the page commits to is missing here". A
+        # clean stream from the signer at or past the page's seq brought all
+        # of it, so differing buckets are only content NEWER than the page
+        # (normal in a busy space) — a match. Otherwise the last compare
+        # with this page decides; ``None``: not compared yet.
         check = self._checks.get(space.id)
         match: bool | None = None
         differing: int | None = None
-        if check is not None and check[0] == page.root:
+        if applied:
+            match, differing = True, 0
+        elif check is not None and check[0] == page.root:
             differing = check[1]
             match = differing == 0
         conflict = self._conflicts.get(space.id) == (page.epoch, page.signer)
