@@ -1307,6 +1307,33 @@ async def test_a_deferred_sync_keeps_its_mode(bus, queue, sync_manager, monkeypa
     assert begin["payload"]["sync_mode"] == "incremental"
 
 
+async def test_a_refused_bucket_listing_is_never_asked_again_as_a_sync(
+    bus, queue, sync_manager, monkeypatch
+):
+    """v_95: a ``buckets`` session is the page service's to ask (with its
+    buckets) — a refusal is not a sync owed; the next compare asks again."""
+    monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 0.01)
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _plain_sched(bus, queue, sync_manager, fed)
+    sched.wire()
+    await queue.start()
+    try:
+        await bus.publish(
+            SpaceSyncDeferred(
+                space_id="sp",
+                provider_instance_id="host",
+                sync_mode="buckets",
+                sync_id="L1",
+                reason="too_many_sessions",
+            )
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        await sched.stop()
+        await queue.stop()
+    assert fed.sent == []
+
+
 def _many_spaces_sched(bus, queue, sync_manager, fed, n: int):
     spaces = {SpaceType.HOUSEHOLD: [_space(f"sp-{i}") for i in range(n)]}
     members = {f"sp-{i}": ["host"] for i in range(n)}

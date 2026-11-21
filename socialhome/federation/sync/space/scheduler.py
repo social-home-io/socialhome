@@ -831,6 +831,10 @@ class SpaceSyncScheduler:
                 log.exception("noting the host's deferral failed")
         if event.reason == "rate_limited":
             return
+        if event.sync_mode == "buckets":
+            # v_95 bucket listings are the page service's to ask (with its
+            # buckets); the next compare asks again — never a sync owed.
+            return
         key = (event.space_id, event.provider_instance_id)
         attempts = self._deferred_attempts.get(key, 0)
         if attempts >= MAX_DEFERRED_SYNC_RETRIES:

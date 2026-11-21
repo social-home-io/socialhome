@@ -819,7 +819,17 @@ class SyncPageService:
             log.exception("sync page: asking for listings of %s failed", space.id)
             return
         if not sync_id:
+            log.info(
+                "sync page: could not ask %s for listings of space %s", host, space.id
+            )
             return
+        log.info(
+            "sync page: asked %s for %d bucket listing(s) of space %s (session %s)",
+            host,
+            len(buckets),
+            space.id,
+            sync_id,
+        )
         self._listings[sync_id] = _PendingListing(
             space_id=space.id,
             host=host,
@@ -866,6 +876,14 @@ class SyncPageService:
                 exc,
             )
             missing, unresolved = 0, len(pending.buckets)
+        log.info(
+            "sync page: listings of space %s from %s: %d row(s) missing, %d "
+            "bucket(s) unresolved",
+            space_id,
+            provider,
+            missing,
+            unresolved,
+        )
         check = self._checks.get(space_id)
         if check is None or check.root != pending.root:
             return  # a newer page came meanwhile; its compare decides
@@ -918,6 +936,12 @@ class SyncPageService:
                 except PageRefused:
                     proven = False  # changed here since the page
             out.append(listing_to_wire(index, rows if proven else None))
+        log.info(
+            "sync page: listed %d of %d bucket(s) of space %s",
+            sum(1 for r in out if r.get("held")),
+            len(out),
+            space_id,
+        )
         return out
 
     # ─── Status ───────────────────────────────────────────────────────
