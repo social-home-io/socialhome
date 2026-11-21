@@ -169,7 +169,7 @@ def _file_hash(url: Any, file_hash: FileHashOf) -> str | None:
 
 def _files(value: Any, file_hash: FileHashOf) -> Any:
     """A file field (one URL, or a list of them) as content hashes."""
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return sorted(h for v in value if (h := _file_hash(v, file_hash)) is not None)
     return _file_hash(value, file_hash)
 
@@ -483,7 +483,7 @@ def file_refs(resource: str, record: Mapping[str, Any]) -> list[str]:
     out: list[str] = []
     for name in spec.files:
         value = record.get(name)
-        values = value if isinstance(value, list) else [value]
+        values = value if isinstance(value, (list, tuple)) else [value]
         out.extend(v for v in values if isinstance(v, str) and v)
     for name, sub in spec.nested_files.items():
         parent = record.get(name)
@@ -522,7 +522,7 @@ def commit_form(
                     value = None
             elif name in spec.stamps:
                 value = _stamp(value)
-            if isinstance(value, list):
+            if isinstance(value, (list, tuple)):
                 value = _sorted_list(_no_floats(value))
             projection[name] = _no_floats(value)
     except _HostOnly:
