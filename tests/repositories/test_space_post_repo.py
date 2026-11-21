@@ -1299,8 +1299,9 @@ _OLD_TOMBSTONES_PAGE = (
 )
 
 
-async def _seed_interleaved(env, n: int, *, spaces: int = 2) -> None:
-    """``n`` posts spread round-robin over sp-1 and ``spaces - 1`` others,
+async def _seed_interleaved(env, n: int, *, spaces: int = 2, big: bool = False) -> None:
+    """``n`` posts spread round-robin over sp-1 and ``spaces - 1`` others
+    (``big``: sp-1 takes two of every three, the others share the rest),
     every 4th one deleted, every 3rd one outside a 2025 retention window."""
     others = [f"sp-x{k}" for k in range(spaces - 1)]
     for sid in others:
@@ -1318,7 +1319,13 @@ async def _seed_interleaved(env, n: int, *, spaces: int = 2) -> None:
             [
                 (
                     f"kp-{i}",
-                    ring[i % len(ring)],
+                    (
+                        ring[i % len(ring)]
+                        if not big
+                        else "sp-1"
+                        if i % 3 != 2
+                        else others[(i // 3) % len(others)]
+                    ),
                     "uid-alice",
                     "text",
                     "x",
@@ -1436,33 +1443,48 @@ _SYNC_PAGE_READS = {
     "tombstones": lambda env: env.repo.list_post_tombstones_page(
         env.space_id, limit=50
     ),
+    # An incremental run: the keyset index beats ``idx_space_posts_sync_seq``
+    # here — that one would sort every changed row on every page.
+    "posts-since": lambda env: env.repo.list_sync_page(env.space_id, since=0, limit=50),
 }
 
 
+_KEYSET_SEEK = "idx_space_posts_sync_keyset (space_id=? AND deleted=? AND rowid<?)"
+
+
+@pytest.mark.parametrize("stats", [False, True], ids=["no-stats", "optimized"])
 @pytest.mark.parametrize("read", sorted(_SYNC_PAGE_READS))
-async def test_a_sync_page_with_statistics_seeks_on_rowid_without_a_sort(env, read):
-    """With planner statistics, a page of a big space walks the table down
-    from the cursor and stops after ``limit`` rows — no temp B-tree over the
-    whole space per page (that made a 40k-post export O(n²), ~1.9 s)."""
-    await _seed_interleaved(env, 3000)
-    await env.db.optimize()
+async def test_a_big_space_among_many_seeks_the_keyset_index(env, read, stats):
+    """A page of a big space walks ``idx_space_posts_sync_keyset`` down from
+    the cursor and stops after ``limit`` rows — no temp B-tree over the
+    whole space per page (that made a 40k-post export O(n²), ~1.1 s). With
+    many spaces the planner's averages make the space look small, so
+    statistics alone did not get here (migration 0152)."""
+    await _seed_interleaved(env, 3000, spaces=50, big=True)
+    if stats:
+        await env.db.optimize()
+    else:
+        await env.db.transact(
+            lambda conn: conn.execute("DROP TABLE IF EXISTS sqlite_stat1")
+        )
     plans = await _page_plans(env, lambda: _SYNC_PAGE_READS[read](env))
     assert plans, "the read issued no query"
     for plan in plans:
         assert "TEMP B-TREE" not in plan, plan
-        assert "INTEGER PRIMARY KEY (rowid<?)" in plan, plan
+        assert _KEYSET_SEEK in plan, plan
 
 
-async def test_a_sync_page_without_statistics_still_reads_the_right_rows(env):
-    """Recorded, not a goal: with no statistics (a database never
-    optimized) SQLite plans the page through ``idx_space_posts_created`` and
-    sorts the space — correct rows, just the slow plan. The owner chose
-    ``PRAGMA optimize`` over a new index; ``AsyncDatabase.startup`` runs it."""
-    await _seed_interleaved(env, 400)
-    await env.db.transact(
-        lambda conn: conn.execute("DROP TABLE IF EXISTS sqlite_stat1")
+async def test_a_small_space_among_many_pages_every_row_once(env):
+    await _seed_interleaved(env, 3000, spaces=50, big=True)
+    seen, cursor = [], None
+    while True:
+        page, cursor = await env.repo.list_sync_page("sp-x3", cursor=cursor, limit=3)
+        seen.extend(p.id for p in page)
+        if cursor is None:
+            break
+    held = await env.db.fetchall(
+        "SELECT id FROM space_posts WHERE space_id='sp-x3' AND deleted=0"
+        " ORDER BY rowid DESC"
     )
-    plans = await _page_plans(env, lambda: _SYNC_PAGE_READS["posts"](env))
-    assert plans and all("space_posts" in p for p in plans)
-    page, _ = await env.repo.list_sync_page(env.space_id, limit=500)
-    assert len(page) == 100  # kp-2, kp-6, … — every live sp-1 post
+    assert len(held) > 6
+    assert seen == [r["id"] for r in held]
