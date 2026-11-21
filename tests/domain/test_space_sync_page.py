@@ -59,11 +59,17 @@ def test_a_newer_page_than_we_applied_is_behind_or_catching_up():
     assert state_with_page(S.UP_TO_DATE, newer) is S.CATCHING_UP
 
 
-def test_a_page_of_a_signer_we_do_not_sync_from_counts_by_its_root_check():
-    differs = _page(applied=None, match=False, differing_buckets=3)
-    assert state_with_page(S.HOST_OFFLINE, differs) is S.BEHIND
-    assert state_with_page(S.NEVER, differs) is S.BEHIND
-    assert state_with_page(S.UP_TO_DATE, differs) is S.UP_TO_DATE
+def test_a_compare_decides_needs_sync_or_up_to_date():
+    """Owner decision 2026-11-21: once our rows were compared with the
+    newest page, that is the answer — whatever the host's last answer or
+    what we applied said."""
+    differs = _page(applied=True, match=False, differing_buckets=3)
+    for state in (S.HOST_OFFLINE, S.NEVER, S.UP_TO_DATE, S.BEHIND):
+        assert state_with_page(state, differs) is S.BEHIND
+    matches = _page(applied=False, match=True, differing_buckets=0)
+    for state in (S.HOST_OFFLINE, S.NEVER, S.UP_TO_DATE, S.BEHIND):
+        assert state_with_page(state, matches) is S.UP_TO_DATE
+    assert state_with_page(S.CATCHING_UP, differs) is S.CATCHING_UP
     assert state_with_page(S.HOST_OFFLINE, _page()) is S.HOST_OFFLINE
 
 

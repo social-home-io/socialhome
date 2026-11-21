@@ -79,9 +79,6 @@ VECTOR_BYTES: int = BUCKETS * HASH_BYTES
 #: A signer seals at most this often (lazily, on a BEGIN that finds the
 #: space changed — owner decision 2026-11-21).
 PAGE_MIN_INTERVAL_S: int = 15 * 60
-#: A member recomputes its own vector against the stored page at most this
-#: often (owner decision 2026-11-21).
-ROOT_CHECK_INTERVAL_S: int = 60 * 60
 #: ``issued_at`` may be at most this far ahead of the receiver's clock.
 MAX_PAGE_FUTURE_SKEW_MS: int = 300 * 1000
 #: A page header as canonical JSON is never larger than this.
@@ -955,7 +952,6 @@ __all__ = [
     "MAX_PAGE_FUTURE_SKEW_MS",
     "PAGE_MIN_INTERVAL_S",
     "PAGE_SUITE_SHA256_B256",
-    "ROOT_CHECK_INTERVAL_S",
     "SUPPORTED_PAGE_SUITES",
     "VECTOR_BYTES",
     "CommitSpec",

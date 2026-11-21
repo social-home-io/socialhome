@@ -2515,6 +2515,7 @@ def _wire_federation_stack(
     app[K.sync_page_service_key] = _build_sync_pages(
         repo=space_sync_page_repo,
         space_repo=space_repo,
+        seat_repo=space_remote_member_repo,
         seqs=space_sync_watermark_repo,
         crypto=space_crypto,
         exporters=exporters,
@@ -2659,6 +2660,7 @@ def _build_sync_pages(
     *,
     repo,
     space_repo,
+    seat_repo,
     seqs,
     crypto,
     exporters: dict,
@@ -2687,6 +2689,14 @@ def _build_sync_pages(
     receiver.attach_sync_pages(pages)
     scheduler.attach_sync_pages(pages.ref_for)
     status.attach_pages(pages.position)
+
+    async def _hosts(space) -> list[str]:
+        return await acting_hosts(
+            space_repo, seat_repo, space, own_instance_id=own_instance_id
+        )
+
+    # A member whose rows differ from the newest page asks one acting host.
+    pages.attach_sync_requests(hosts=_hosts, request=scheduler.sync_with)
     return pages
 
 

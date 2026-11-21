@@ -51,7 +51,6 @@ from ....sync_page import (
     COMMITTED_RESOURCES,
     PAGE_MIN_INTERVAL_S,
     PAGE_SUITE_SHA256_B256,
-    ROOT_CHECK_INTERVAL_S,
     PageRefused,
     SyncPage,
     UnsupportedPageSuite,
@@ -135,15 +134,20 @@ class SyncPageService:
     __slots__ = (
         "_checks",
         "_clock_ms",
+        "_compared_at",
+        "_comparing",
         "_conflicts",
         "_crypto",
         "_exporters",
+        "_hosts",
         "_locks",
         "_monotonic",
         "_on_change",
         "_own_instance_id",
         "_repo",
+        "_request_sync",
         "_seqs",
+        "_sleep",
         "_spaces",
         "_state",
         "_tasks",
@@ -162,6 +166,7 @@ class SyncPageService:
         on_change: Callable[[str], Awaitable[None]] | None = None,
         clock_ms: Callable[[], int] = _now_ms,
         monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._repo = repo
         self._spaces = spaces
@@ -175,10 +180,17 @@ class SyncPageService:
         self._on_change = on_change
         self._clock_ms = clock_ms
         self._monotonic = monotonic
+        self._sleep = sleep
+        #: v_95 compare on a mismatch (:meth:`attach_sync_requests`).
+        self._hosts: Callable[[Space], Awaitable[list[str]]] | None = None
+        self._request_sync: Callable[[str, str], Awaitable[None]] | None = None
+        #: Spaces with a compare pending; space → when it last compared.
+        self._comparing: set[str] = set()
+        self._compared_at: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task] = set()
-        #: space → (root checked, when, differing bucket count).
-        self._checks: OrderedDict[str, tuple[bytes, float, int]] = OrderedDict()
+        #: space → (root compared, differing bucket count).
+        self._checks: OrderedDict[str, tuple[bytes, int]] = OrderedDict()
         #: space → the (epoch, signer) whose equivocation we saw.
         self._conflicts: OrderedDict[str, tuple[int, str]] = OrderedDict()
 
@@ -403,7 +415,6 @@ class SyncPageService:
         is logged (WARNING when it fails verification) and the page held
         stays."""
         if sealed is None:
-            self.check_soon(space_id)
             return False
         try:
             return await self._receive(space_id, sync_id, provider, sealed)
@@ -508,7 +519,7 @@ class SyncPageService:
             page.signer,
         )
         await self._changed(space_id)
-        self.check_soon(space_id)
+        self.compare_soon(space_id)
         return True
 
     def _note_conflict(
@@ -540,21 +551,53 @@ class SyncPageService:
         except Exception:
             log.exception("sync page: status update for %s failed", space_id)
 
-    # ─── Root check (member) ──────────────────────────────────────────
+    # ─── Compare (member) ─────────────────────────────────────────────
 
-    def check_soon(self, space_id: str) -> None:
-        """Start a background root check when one is due."""
+    def attach_sync_requests(
+        self,
+        *,
+        hosts: Callable[[Space], Awaitable[list[str]]],
+        request: Callable[[str, str], Awaitable[None]],
+    ) -> None:
+        """Wire what a mismatch does: ``hosts(space)`` — the households
+        acting as its host here; ``request(space_id, host)`` — one
+        incremental BEGIN to that host (the scheduler's ``sync_with``)."""
+        self._hosts = hosts
+        self._request_sync = request
+
+    def compare_soon(self, space_id: str) -> None:
+        """A newer page was stored: compare our copy with it — at once, or,
+        when the last compare of the space is younger than the seal cadence
+        (:data:`PAGE_MIN_INTERVAL_S`), once that much has passed, against
+        whatever page is newest then. One pending compare per space."""
+        if space_id in self._comparing:
+            return
+        self._comparing.add(space_id)
         task = asyncio.create_task(
-            self.check_root(space_id), name=f"sync-page-check-{space_id}"
+            self._compare_when_due(space_id), name=f"sync-page-compare-{space_id}"
         )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def check_root(self, space_id: str) -> int | None:
-        """Recompute our own vector against the held page — at most once
-        per :data:`ROOT_CHECK_INTERVAL_S` per space, never again for a page
-        we matched, never for a page we signed. Returns the differing bucket
-        count, or ``None`` when skipped."""
+    async def _compare_when_due(self, space_id: str) -> None:
+        try:
+            last = self._compared_at.get(space_id)
+            if last is not None:
+                wait = PAGE_MIN_INTERVAL_S - (self._monotonic() - last)
+                if wait > 0:
+                    await self._sleep(wait)
+            # From here a newer page schedules its own (spaced) compare.
+            self._comparing.discard(space_id)
+            await self.compare(space_id)
+        finally:
+            self._comparing.discard(space_id)
+
+    async def compare(self, space_id: str) -> int | None:
+        """Compare our own bucket vector with the held page's (never for a
+        page we signed): the differing bucket count, or ``None`` when
+        skipped. A mismatch asks ONE household acting as the space's host
+        for an incremental sync — the signer when it is one. The status
+        rechecks either way. Fail-soft."""
         try:
             space = await self._spaces.get(space_id)
             if space is None:
@@ -562,30 +605,42 @@ class SyncPageService:
             held = await self._held(space)
             if held is None or held.page.signer == self._own_instance_id:
                 return None
-            last = self._checks.get(space_id)
-            if last is not None and (
-                (last[0] == held.page.root and last[2] == 0)
-                or self._monotonic() - last[1] < ROOT_CHECK_INTERVAL_S
-            ):
-                # Matched this page already, or checked within the hour.
-                return None
-            # Claimed before the recompute, so two sentinels in a row start
-            # one check, not two.
-            self._remember_check(space_id, held.page.root, -1)
+            self._compared_at[space_id] = self._monotonic()
+            started = time.perf_counter()
             vector, _rows = await self._state.vector(space_id, cutoff=held.page.cutoff)
             differing = len(differing_buckets(vector, held.row.vector))
-            self._remember_check(space_id, held.page.root, differing)
+            log.info(
+                "sync page: space %s against page %d: %d bucket(s) differ (%.2f s)",
+                space_id,
+                held.page.seq,
+                differing,
+                time.perf_counter() - started,
+            )
+            self._checks[space_id] = (held.page.root, differing)
+            self._checks.move_to_end(space_id)
+            while len(self._checks) > MAX_TRACKED:
+                self._checks.popitem(last=False)
+            while len(self._compared_at) > MAX_TRACKED:
+                self._compared_at.pop(next(iter(self._compared_at)))
             await self._changed(space_id)
+            if differing:
+                await self._ask_host(space, held.page.signer)
             return differing
         except Exception:
-            log.exception("sync page: root check of %s failed", space_id)
+            log.exception("sync page: comparing space %s failed", space_id)
             return None
 
-    def _remember_check(self, space_id: str, root: bytes, differing: int) -> None:
-        self._checks[space_id] = (root, self._monotonic(), differing)
-        self._checks.move_to_end(space_id)
-        while len(self._checks) > MAX_TRACKED:
-            self._checks.popitem(last=False)
+    async def _ask_host(self, space: Space, signer: str) -> None:
+        if self._hosts is None or self._request_sync is None:
+            return
+        try:
+            hosts = await self._hosts(space)
+            if not hosts:
+                return
+            host = signer if signer in hosts else hosts[0]
+            await self._request_sync(space.id, host)
+        except Exception:
+            log.exception("sync page: asking the host of %s failed", space.id)
 
     # ─── Status ───────────────────────────────────────────────────────
 
@@ -604,8 +659,8 @@ class SyncPageService:
         check = self._checks.get(space.id)
         match: bool | None = None
         differing: int | None = None
-        if check is not None and check[0] == page.root and check[2] >= 0:
-            differing = check[2]
+        if check is not None and check[0] == page.root:
+            differing = check[1]
             match = differing == 0
         conflict = self._conflicts.get(space.id) == (page.epoch, page.signer)
         return SyncPagePosition(

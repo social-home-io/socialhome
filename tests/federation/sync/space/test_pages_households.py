@@ -72,6 +72,10 @@ class _Clock:
         return self.ms
 
 
+async def _no_wait(_seconds: float) -> None:
+    """The 15-min compare spacing, without waiting in a test."""
+
+
 def _service(
     home: Home, own: str, seed: bytes | None, clock: _Clock
 ) -> SyncPageService:
@@ -88,6 +92,7 @@ def _service(
         exporters=home.exporters,
         own_instance_id=own,
         clock_ms=clock,
+        sleep=_no_wait,
     )
 
 
@@ -174,4 +179,7 @@ async def test_a_newer_page_shows_the_member_behind(pair):
     assert pos is not None and pos.seq == newer.seq
     assert pos.applied is False  # we applied no stream that far
     assert state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is SpaceSyncState.BEHIND
-    assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.CATCHING_UP
+    # Compared: one post the member lacks differs → needs sync, whatever
+    # the host last answered.
+    assert (pos.match, pos.differing_buckets) == (False, 1)
+    assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND

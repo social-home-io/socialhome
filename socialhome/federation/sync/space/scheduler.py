@@ -515,7 +515,20 @@ class SpaceSyncScheduler:
         space = await self._space_repo.get(space_id)
         if space is None or space.dissolved:
             return
-        host = space.owner_instance_id
+        await self._sync_with(space, space.owner_instance_id)
+
+    async def sync_with(self, space_id: str, host: str) -> None:
+        """One incremental §25.6 BEGIN to *host* — a household acting as the
+        space's host here (the caller chose it) — now, with every echo a
+        BEGIN carries. v_95: our rows differ from the newest signed sync
+        page. The provider's own BEGIN budget still applies."""
+        space = await self._space_repo.get(space_id)
+        if space is None or space.dissolved:
+            return
+        await self._sync_with(space, host)
+
+    async def _sync_with(self, space: Space, host: str) -> None:
+        space_id = space.id
         if not host or host == self._own_instance_id:
             return
         if await self._federation.is_confirmed_peer(host):

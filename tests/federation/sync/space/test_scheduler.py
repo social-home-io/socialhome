@@ -2751,6 +2751,20 @@ async def test_a_mesh_only_host_gets_the_moderation_echo_too(bus, queue, sync_ma
     assert fed.mesh_fields[0]["sync_mode"] == "incremental"
 
 
+async def test_sync_with_sends_one_incremental_begin_to_the_named_host(
+    bus, queue, sync_manager
+):
+    """v_95: a sync page our rows do not match asks ONE acting host — a
+    delegated admin too, not only the owner — for an incremental stream."""
+    sched, fed, repo, _asked = _mod_sched(bus, queue, sync_manager, confirmed=False)
+    repo.get = AsyncMock(return_value=_space("sp-1", owner_instance_id="host"))
+    await sched.sync_with("sp-1", "admin-a")
+    assert fed.mesh_catchups == [("sp-1", "admin-a")]
+    assert fed.mesh_fields[0]["sync_mode"] == "incremental"
+    await sched.sync_with("sp-1", "self")  # never ourselves
+    assert len(fed.mesh_catchups) == 1
+
+
 async def test_sync_with_host_is_a_no_op_without_a_remote_host(
     bus, queue, sync_manager
 ):

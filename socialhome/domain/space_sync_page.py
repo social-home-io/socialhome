@@ -68,23 +68,27 @@ def state_with_page(
     """The Phase-1 *state* refined by the newest signed *page*.
 
     * A stream running stays **catching up**.
-    * We applied the signer's stream at or past the page, or our rows match
-      it: **up to date** "as of page N" — also while the host is offline
-      (the page may have been relayed by any member).
-    * A newer page exists than what we applied from its signer: **catching
-      up** while the host answers, **behind** while it is silent.
-    * We do not sync from the signer: a checked mismatch makes a silent
-      host's space **behind** (never "never" — we know what we lack).
+    * Our rows were compared with the newest page: a match is **up to
+      date** "checked against page N" — also while the host is offline (any
+      member may have relayed the page); a mismatch is **behind**, read
+      "needs sync · N parts differ" (the compare also asked a host).
+    * Not compared yet: we applied the signer's stream at or past the page
+      → **up to date**; a newer page than we applied → **catching up**
+      while the host answers, **behind** while it is silent.
     """
     if page is None or state is SpaceSyncState.CATCHING_UP:
         return state
-    if page.applied or page.match:
+    # Compared with the newest page: the answer (owner decision 2026-11-21).
+    if page.match is True:
+        return SpaceSyncState.UP_TO_DATE
+    if page.match is False:
+        return SpaceSyncState.BEHIND
+    # Not compared yet: what we applied from its signer.
+    if page.applied:
         return SpaceSyncState.UP_TO_DATE
     if page.applied is False:
         if state is SpaceSyncState.UP_TO_DATE:
             return SpaceSyncState.CATCHING_UP
-        return SpaceSyncState.BEHIND
-    if page.match is False and state is not SpaceSyncState.UP_TO_DATE:
         return SpaceSyncState.BEHIND
     return state
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from dataclasses import replace
@@ -20,7 +21,8 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
-from socialhome.domain.space_sync_page import StoredSyncPage
+from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
+from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.federation.sync.space.pages import SyncPageService
 from socialhome.sync_page import (
     PAGE_MIN_INTERVAL_S,
@@ -169,9 +171,27 @@ class _Env:
         self.state = _State()
         self.exporter = _Exporter()
         self.changes: list[str] = []
+        self.requests: list[tuple[str, str]] = []
+        self.slept: list[float] = []
+        self.hosts: list[str] = [HOST]
 
         async def on_change(space_id):
             self.changes.append(space_id)
+
+        #: When set, a spacing wait blocks until it is released.
+        self.gate: asyncio.Event | None = None
+
+        async def sleep(seconds: float) -> None:
+            self.slept.append(seconds)
+            if self.gate is not None:
+                await self.gate.wait()
+            self.mono += seconds
+
+        async def hosts(space):
+            return list(self.hosts)
+
+        async def request_sync(space_id: str, host: str) -> None:
+            self.requests.append((space_id, host))
 
         self.svc = SyncPageService(
             repo=self.repo,
@@ -184,7 +204,9 @@ class _Env:
             on_change=on_change,
             clock_ms=lambda: self.now,
             monotonic=lambda: self.mono,
+            sleep=sleep,
         )
+        self.svc.attach_sync_requests(hosts=hosts, request=request_sync)
 
     def held(self):
         row = self.repo.rows.get(SPACE)
@@ -671,47 +693,109 @@ async def test_position_applied_when_we_applied_the_signers_stream():
     assert pos is not None and pos.applied is None
 
 
-async def test_root_check_counts_differing_buckets_once_an_hour():
+async def _take(env: _Env, page, vector) -> bool:
+    stored = await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(page, vector=vector),
+    )
+    await env.svc.wait_idle()
+    return stored
+
+
+def _differing(n: int) -> bytes:
+    """Our local vector differing from ``_vec(2)`` in *n* buckets."""
+    out = bytearray(_vec(2))
+    out[0 : 32 * n] = b"\x08" * (32 * n)
+    return bytes(out)
+
+
+async def test_a_new_page_is_compared_and_a_match_reads_up_to_date():
+    env = _Env(own=ME, seed=None)
+    env.state.vec = _vec(2)
+    assert await _take(env, _signed(vector=_vec(2)), _vec(2))
+    assert env.state.calls == 1
+    assert env.state.cutoffs == [None]  # the page's cutoff, not our clock
+    pos = await env.svc.position(env.spaces.space, [HOST])
+    assert pos is not None and pos.match is True and pos.differing_buckets == 0
+    assert state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is (
+        SpaceSyncState.UP_TO_DATE
+    )
+    assert env.requests == []  # nothing to ask for
+    assert env.changes[-1] == SPACE  # the status rechecks after the compare
+
+
+async def test_a_repeated_page_is_not_compared_again():
+    """A sentinel without a page (we hold it) or the same page again: no
+    compare — the next comparison comes only with the next page."""
     env = _Env(own=ME, seed=None)
     env.state.vec = _vec(2)
     page = _signed(vector=_vec(2))
-    await env.svc.receive(
-        space_id=SPACE,
-        sync_id="s-1",
-        provider=HOST,
-        sealed=await _sealed_for_member(page),
-    )
-    await env.svc.wait_idle()  # the background check ran
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.match is True and pos.differing_buckets == 0
-    assert env.state.cutoffs == [None]  # the page's cutoff
-    calls = env.state.calls
-    assert await env.svc.check_root(SPACE) is None  # matched: never again
-    # A new page whose vector differs from ours in 2 buckets.
-    other = bytearray(_vec(2))
-    other[0:64] = b"\x08" * 64
-    newer = _signed(vector=bytes(other), seq=80, issued_at=T0 + 50)
-    await env.svc.receive(
-        space_id=SPACE,
-        sync_id="s-1",
-        provider=HOST,
-        sealed=await _sealed_for_member(newer, vector=bytes(other)),
+    await _take(env, page, _vec(2))
+    assert not await _take(env, page, _vec(2))
+    assert not await env.svc.receive(
+        space_id=SPACE, sync_id="s-1", provider=HOST, sealed=None
     )
     await env.svc.wait_idle()
-    assert env.state.calls == calls  # within the hour: no recompute
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.match is None
-    env.mono += 3600
-    assert await env.svc.check_root(SPACE) == 2
-    pos = await env.svc.position(env.spaces.space, [HOST])
-    assert pos is not None and pos.match is False and pos.differing_buckets == 2
+    assert env.state.calls == 1
 
 
-async def test_the_signer_never_checks_its_own_page():
+async def test_a_mismatch_reads_needs_sync_and_asks_one_host_once():
+    env = _Env(own=ME, seed=None)
+    env.state.vec = _differing(3)
+    assert await _take(env, _signed(vector=_vec(2)), _vec(2))
+    pos = await env.svc.position(env.spaces.space, [HOST])
+    assert pos is not None and pos.match is False and pos.differing_buckets == 3
+    assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND
+    assert env.requests == [(SPACE, HOST)]  # exactly one BEGIN, to the signer
+    # The same page again (or none): no new compare, no new BEGIN.
+    await _take(env, _signed(vector=_vec(2)), _vec(2))
+    assert env.requests == [(SPACE, HOST)]
+
+
+async def test_a_page_of_a_signer_that_is_not_our_host_asks_our_host():
+    env = _Env(own=ME, seed=None)
+    env.hosts = ["owner-x"]
+    env.state.vec = _differing(1)
+    await _take(env, _signed(vector=_vec(2), signer=ADMIN), _vec(2))
+    assert env.requests == [(SPACE, "owner-x")]
+
+
+async def test_compares_are_coalesced_to_one_per_15_minutes():
+    """Pages arriving faster than the seal cadence: the compare after the
+    first waits out the 15 min once and then compares the newest page."""
+    env = _Env(own=ME, seed=None)
+    env.state.vec = _vec(2)
+    await _take(env, _signed(vector=_vec(2), seq=10, issued_at=T0), _vec(2))
+    assert env.state.calls == 1
+    env.mono += 60  # one minute later, two newer pages
+    env.state.vec = _vec(5)
+    env.gate = asyncio.Event()
+    for seq, fill in ((20, 4), (30, 5)):
+        assert await env.svc.receive(
+            space_id=SPACE,
+            sync_id="s-1",
+            provider=HOST,
+            sealed=await _sealed_for_member(
+                _signed(vector=_vec(fill), seq=seq, issued_at=T0 + seq),
+                vector=_vec(fill),
+            ),
+        )
+    assert env.state.calls == 1  # waiting out the 15 min
+    env.gate.set()
+    await env.svc.wait_idle()
+    assert env.state.calls == 2  # one deferred compare, not two
+    assert env.slept == [PAGE_MIN_INTERVAL_S - 60]
+    pos = await env.svc.position(env.spaces.space, [HOST])
+    assert pos is not None and pos.seq == 30 and pos.match is True
+
+
+async def test_the_signer_never_compares_its_own_page():
     env = _Env()
     await env.svc.seal_if_due(SPACE)
     calls = env.state.calls
-    assert await env.svc.check_root(SPACE) is None
+    assert await env.svc.compare(SPACE) is None
     assert env.state.calls == calls
 
 
