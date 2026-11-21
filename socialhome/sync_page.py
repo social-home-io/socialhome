@@ -185,7 +185,8 @@ class CommitSpec:
     ``fields`` — the allow-list; an absent field is committed as ``None``.
     ``files`` — top-level fields holding file references (hashed).
     ``nested_files`` — ``{field: sub_field}``: a dict field whose sub field
-    is a file reference (``file_meta.url``, the link card thumbnail).
+    is a file reference (``file_meta.url``, the link card thumbnail);
+    ``nested_fields`` — the allow-list of that dict's keys.
     ``stamps`` — timestamp fields normalised by :func:`_stamp`.
     ``shape`` — per-field projections (poll options, schedule slots).
     ``skip`` — rows never committed (a gallery system album: local ids).
@@ -196,6 +197,7 @@ class CommitSpec:
     files: tuple[str, ...] = ()
     nested_files: Mapping[str, str] = field(default_factory=dict)
     stamps: tuple[str, ...] = ("created_at",)
+    nested_fields: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     shape: Mapping[str, Callable[[Any], Any]] = field(default_factory=dict)
     skip: Callable[[Mapping[str, Any]], bool] | None = None
 
@@ -247,10 +249,12 @@ _TASK_SPEC = CommitSpec(
 )
 
 
-def _tombstone(*fields: str, stamps: tuple[str, ...] = ("created_at",)) -> CommitSpec:
-    """A ``*_deleted`` record: its identity fields (+ ``created_at``),
-    never ``actor_user_id`` (often empty on the live path)."""
-    return CommitSpec(fields=("id", *fields), stamps=stamps)
+def _tombstone(*fields: str, created_at: bool = True) -> CommitSpec:
+    """A ``*_deleted`` record: its identity fields (+ ``created_at`` unless
+    the record has none or it is receipt-local), never ``actor_user_id``
+    (often empty on the live path)."""
+    tail = ("created_at",) if created_at else ()
+    return CommitSpec(fields=("id", *fields, *tail))
 
 
 #: The committed resources and their commit forms (``docs/protocol/
@@ -279,6 +283,16 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
             ),
             files=("media_url", "image_urls"),
             nested_files={"file_meta": "url", "link_preview": "thumbnail_url"},
+            nested_fields={
+                "file_meta": ("url", "mime_type", "original_name", "size_bytes"),
+                "link_preview": (
+                    "url",
+                    "title",
+                    "description",
+                    "site_name",
+                    "thumbnail_url",
+                ),
+            },
             stamps=("created_at", "edited_at"),
         ),
         "comments_deleted": _tombstone("comment_id", "post_id", "author"),
@@ -300,8 +314,11 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
             files=("media_url",),
         ),
         "task_lists": CommitSpec(fields=("id", "space_id", "name", "created_by")),
-        "task_lists_deleted": _tombstone("space_id", "created_by", stamps=()),
-        "tasks_deleted": _tombstone("space_id", "list_id", "created_by", stamps=()),
+        # Their records carry no ``created_at``.
+        "task_lists_deleted": _tombstone("space_id", "created_by", created_at=False),
+        "tasks_deleted": _tombstone(
+            "space_id", "list_id", "created_by", created_at=False
+        ),
         "tasks": _TASK_SPEC,
         "tasks_archived": _TASK_SPEC,
         "pages_deleted": _tombstone("space_id", "created_by"),
@@ -333,7 +350,8 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
                 "space_id",
             )
         ),
-        "calendar_deleted": _tombstone("created_by", stamps=()),
+        # ``created_at`` is the receiver's clock here (calendar_repo).
+        "calendar_deleted": _tombstone("created_by", created_at=False),
         "calendar": CommitSpec(
             # The series row; RSVPs are item state (rule 1).
             fields=(
@@ -521,7 +539,9 @@ def commit_form(
             elif name in spec.nested_files:
                 if isinstance(value, dict):
                     sub = spec.nested_files[name]
-                    value = {**value, sub: _file_hash(value.get(sub), file_hash)}
+                    keep = spec.nested_fields.get(name, (sub,))
+                    value = {k: value.get(k) for k in keep}
+                    value[sub] = _file_hash(value.get(sub), file_hash)
                 else:
                     value = None
             elif name in spec.stamps:

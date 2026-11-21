@@ -233,6 +233,27 @@ def test_tombstones_drop_the_actor():
     )
 
 
+def test_tombstones_commit_their_created_at():
+    t = {"id": "s", "author": "u", "created_at": "2026-01-01T00:00:00+00:00"}
+    assert record_leaf("stickies_deleted", t, _no_files) != record_leaf(
+        "stickies_deleted", {**t, "created_at": "2026-02-01T00:00:00+00:00"}, _no_files
+    )
+
+
+def test_nested_file_meta_and_link_card_are_allow_listed():
+    post = {
+        "id": "p",
+        "file_meta": {"url": "api/media/f.pdf", "mime_type": "x", "size_bytes": 3},
+        "link_preview": {"url": "https://x", "thumbnail_url": "api/media/t.webp"},
+    }
+    later = {
+        **post,
+        "file_meta": {**post["file_meta"], "new_field": 1},
+        "link_preview": {**post["link_preview"], "new_field": 2},
+    }
+    assert record_leaf("posts", post, _hashes) == record_leaf("posts", later, _hashes)
+
+
 def test_calendar_tombstone_drops_its_local_created_at():
     t = {"id": "e", "created_by": "u", "created_at": "2026-01-01 00:00:00"}
     assert record_leaf("calendar_deleted", t, _no_files) == record_leaf(

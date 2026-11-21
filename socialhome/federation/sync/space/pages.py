@@ -274,6 +274,14 @@ class SyncPageService:
             young = self._clock_ms() - own.page.issued_at < PAGE_MIN_INTERVAL_S * 1000
             if young and _cutoff_day(own.page.cutoff) == _cutoff_day(cutoff):
                 return None
+        elif (
+            held is not None
+            and self._clock_ms() - held.page.issued_at < PAGE_MIN_INTERVAL_S * 1000
+        ):
+            # Another signer's page (the owner's, held by a delegated admin
+            # that also syncs as a member) is fresh: the space has a recent
+            # page, so we do not add one of our own on top of every one of it.
+            return None
         # Read before the export (as a stream's snapshot): a row changed while
         # we hash is stamped above it, so the next seal sees it as changed.
         seq = await self._seqs.current_seq()
