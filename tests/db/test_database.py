@@ -784,3 +784,43 @@ async def test_a_periodic_optimize_due_during_shutdown_never_fails_it(tmp_dir):
     await db.shutdown()
     await write
     assert seen.count("PRAGMA optimize") >= 2, seen  # after the batch, and on close
+
+
+async def test_a_periodic_optimize_that_raises_never_kills_the_writer(
+    tmp_dir, monkeypatch, caplog
+):
+    """Not only ``sqlite3.Error``: an executor already shut down raises a
+    ``RuntimeError``. The writer logs it and keeps writing."""
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=0, optimize_interval_s=0)
+    await db.startup()
+
+    async def boom() -> None:
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(db, "_optimize_now", boom)
+    try:
+        for name in ("a", "b"):
+            # A dead writer would leave the second write waiting forever.
+            await asyncio.wait_for(
+                db.enqueue(
+                    "INSERT INTO users(username, user_id, display_name)"
+                    " VALUES(?, ?, ?)",
+                    (name, f"u-{name}", name),
+                ),
+                timeout=5,
+            )
+        assert await db.fetchval("SELECT count(*) FROM users") == 2
+        assert "periodic PRAGMA optimize failed" in caplog.text
+    finally:
+        await db.shutdown()
+
+
+async def test_open_caps_every_analysis(tmp_dir):
+    """``PRAGMA analysis_limit=400`` on open: before SQLite 3.46 a periodic
+    ``PRAGMA optimize`` would otherwise run a full ``ANALYZE``."""
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        assert await db.fetchval("PRAGMA analysis_limit") == 400
+    finally:
+        await db.shutdown()

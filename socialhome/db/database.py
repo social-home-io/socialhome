@@ -55,6 +55,11 @@ DEFAULT_OPTIMIZE_INTERVAL_S = 3600.0
 #: that need it. SQLite 3.46+; ``optimize`` caps each analysis itself.
 _OPTIMIZE_ON_OPEN = "PRAGMA optimize=0x10002"
 
+#: Rows ``ANALYZE`` samples per index (``PRAGMA analysis_limit``) — SQLite's
+#: suggested value. Set on open so a periodic ``PRAGMA optimize`` never runs a
+#: full-table ``ANALYZE`` on a SQLite older than 3.46.
+_ANALYSIS_LIMIT = 400
+
 
 @dataclass
 class _PendingWrite:
@@ -83,6 +88,8 @@ class AsyncDatabase:
     * ``PRAGMA cache_size=-16384`` — 16 MiB of page cache.
     * ``PRAGMA mmap_size=134217728`` — 128 MiB memory-mapped read window.
     * ``PRAGMA foreign_keys=ON`` — enforce referential integrity.
+    * ``PRAGMA analysis_limit=400`` — every ``ANALYZE`` samples, never reads
+      whole tables (SQLite 3.46+ does this itself inside ``optimize``).
     * ``PRAGMA optimize=0x10002`` — planner statistics (``sqlite_stat1``),
       refreshed by ``PRAGMA optimize`` at most every
       ``optimize_interval_s`` after a write batch and once more on
@@ -187,6 +194,9 @@ class AsyncDatabase:
                     "migrations (most likely a transaction is still open). "
                     "Every ON DELETE CASCADE would be inert for this process."
                 )
+            # Cap every ANALYZE ``optimize`` runs: SQLite 3.46+ does this
+            # itself, an older library would analyze whole tables.
+            conn.execute(f"PRAGMA analysis_limit={_ANALYSIS_LIMIT}")
             self._optimize_quietly(conn, _OPTIMIZE_ON_OPEN)
             return conn
 
@@ -490,7 +500,14 @@ class AsyncDatabase:
             await self._apply_batch(conn, batch)
             if loop.time() >= self._next_optimize_at:
                 self._next_optimize_at = loop.time() + self._optimize_interval_s
-                await self._optimize_now()
+                try:
+                    await self._optimize_now()
+                except Exception:
+                    # ``_optimize_quietly`` absorbs SQLite errors; this is
+                    # anything else (an executor already shut down raises
+                    # ``RuntimeError``). Statistics are an optimisation —
+                    # never let them end the writer every write waits on.
+                    log.warning("periodic PRAGMA optimize failed", exc_info=True)
 
     async def _apply_batch(
         self,

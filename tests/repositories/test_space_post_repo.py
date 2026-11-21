@@ -1416,26 +1416,6 @@ async def test_list_sync_page_first_page_starts_at_the_newest_row(env):
     assert (page, cursor) == ([], None)
 
 
-async def _page_plans(env, fetch) -> list[str]:
-    """The ``EXPLAIN QUERY PLAN`` of every query ``fetch`` reads with."""
-    seen: list[tuple[str, tuple]] = []
-    real = env.db.fetchall
-
-    async def spy(sql, params=()):
-        seen.append((sql, tuple(params)))
-        return await real(sql, params)
-
-    env.db.fetchall = spy
-    try:
-        await fetch()
-    finally:
-        env.db.fetchall = real
-    return [
-        " | ".join(r[3] for r in await real("EXPLAIN QUERY PLAN " + sql, params))
-        for sql, params in seen
-    ]
-
-
 _SYNC_PAGE_READS = {
     "posts": lambda env: env.repo.list_sync_page(env.space_id, limit=50),
     "posts-windowed": lambda env: env.repo.list_sync_page(
@@ -1468,12 +1448,7 @@ _FIRST_CHANGED_PAGE_READS = {
 
 async def _big_space_among_many(env, *, stats: bool) -> None:
     await _seed_interleaved(env, 3000, spaces=50, big=True)
-    if stats:
-        await env.db.optimize()
-    else:
-        await env.db.transact(
-            lambda conn: conn.execute("DROP TABLE IF EXISTS sqlite_stat1")
-        )
+    await set_statistics(env.db, on=stats)
 
 
 _KEYSET_SEEK = "idx_space_posts_sync_keyset (space_id=? AND deleted=? AND rowid<?)"
@@ -1488,8 +1463,7 @@ async def test_a_big_space_among_many_seeks_the_keyset_index(env, read, stats):
     many spaces the planner's averages make the space look small, so
     statistics alone did not get here (migration 0152)."""
     await _big_space_among_many(env, stats=stats)
-    plans = await _page_plans(env, lambda: _SYNC_PAGE_READS[read](env))
-    assert plans, "the read issued no query"
+    plans = await query_plans(env.db, lambda: _SYNC_PAGE_READS[read](env))
     for plan in plans:
         assert "TEMP B-TREE" not in plan, plan
         assert _KEYSET_SEEK in plan, plan
@@ -1504,8 +1478,9 @@ async def test_the_first_changed_page_reads_the_change_stamp_index(env, read, st
     round."""
     await _big_space_among_many(env, stats=stats)
     mark = await env.db.fetchval("SELECT max(sync_seq) FROM space_posts")
-    plans = await _page_plans(env, lambda: _FIRST_CHANGED_PAGE_READS[read](env, mark))
-    assert plans, "the read issued no query"
+    plans = await query_plans(
+        env.db, lambda: _FIRST_CHANGED_PAGE_READS[read](env, mark)
+    )
     for plan in plans:
         assert "idx_space_posts_sync_seq (space_id=? AND sync_seq>?)" in plan, plan
 

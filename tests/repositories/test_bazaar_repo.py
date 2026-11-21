@@ -21,6 +21,7 @@ from socialhome.repositories.bazaar_repo import (
     new_bid,
     new_offer,
 )
+from tests.repositories.sync_page_plans import query_plans, set_statistics
 
 
 @pytest.fixture
@@ -1301,43 +1302,17 @@ async def test_list_sync_page_seeks_on_rowid_without_a_sort(env, stats):
     plain keyset bound seeks inside the space — with or without planner
     statistics. The old ``(? IS NULL OR rowid < ?)`` could not."""
     await _seed_interleaved_listings(env, 2000)
-    if stats:
-        await env.db.optimize()
-    seen: list[tuple[str, tuple]] = []
-    real = env.db.fetchall
-
-    async def spy(sql, params=()):
-        seen.append((sql, tuple(params)))
-        return await real(sql, params)
-
-    env.db.fetchall = spy
-    try:
-        await env.bazaar_repo.list_sync_page(_DEFAULT_SPACE_ID, limit=50)
-    finally:
-        env.db.fetchall = real
-    (sql, params) = seen[-1]
-    plan = " | ".join(r[3] for r in await real("EXPLAIN QUERY PLAN " + sql, params))
-    assert "TEMP B-TREE" not in plan, plan
-    assert "rowid<?)" in plan, plan
+    await set_statistics(env.db, on=stats)
+    for plan in await _bazaar_plans(env):
+        assert "TEMP B-TREE" not in plan, plan
+        assert "rowid<?)" in plan, plan
 
 
 async def _bazaar_plans(env, **kw) -> list[str]:
-    seen: list[tuple[str, tuple]] = []
-    real = env.db.fetchall
-
-    async def spy(sql, params=()):
-        seen.append((sql, tuple(params)))
-        return await real(sql, params)
-
-    env.db.fetchall = spy
-    try:
-        await env.bazaar_repo.list_sync_page(_DEFAULT_SPACE_ID, limit=50, **kw)
-    finally:
-        env.db.fetchall = real
-    return [
-        " | ".join(r[3] for r in await real("EXPLAIN QUERY PLAN " + sql, params))
-        for sql, params in seen
-    ]
+    return await query_plans(
+        env.db,
+        lambda: env.bazaar_repo.list_sync_page(_DEFAULT_SPACE_ID, limit=50, **kw),
+    )
 
 
 @pytest.mark.parametrize("stats", [True, False], ids=["optimized", "no-stats"])
@@ -1346,8 +1321,7 @@ async def test_an_incremental_run_past_its_first_page_walks_the_listings(env, st
     by rowid — the stamp index would re-sort every changed listing for
     every page (~240 ms for 4k, O(n²))."""
     await _seed_interleaved_listings(env, 2000)
-    if stats:
-        await env.db.optimize()
+    await set_statistics(env.db, on=stats)
     for plan in await _bazaar_plans(env, since=0, cursor=2**40):
         assert "TEMP B-TREE" not in plan, plan
         assert "rowid<?)" in plan, plan
@@ -1358,8 +1332,7 @@ async def test_a_quiet_check_reads_the_change_stamps(env, stats):
     """The first page of an incremental run — all a quiet check reads —
     touches only the changed wrapper posts, whatever the statistics say."""
     await _seed_interleaved_listings(env, 2000)
-    if stats:
-        await env.db.optimize()
+    await set_statistics(env.db, on=stats)
     mark = await env.db.fetchval("SELECT max(sync_seq) FROM space_posts")
     for plan in await _bazaar_plans(env, since=mark):
         assert "idx_space_posts_sync_seq (space_id=? AND sync_seq>?)" in plan, plan
