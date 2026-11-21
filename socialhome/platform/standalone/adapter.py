@@ -314,7 +314,7 @@ class StandaloneAdapter(PlatformAdapter):
         password-reset redeem path (``POST /api/auth/redeem-password-
         reset``). Idempotent — re-running with the same password is a
         no-op from the user's perspective."""
-        await self._credentials.set_password(username, new_password)
+        await self._credentials.change_password(username, new_password)
 
     @staticmethod
     def hash_password(password: str, *, salt: bytes | None = None) -> str:

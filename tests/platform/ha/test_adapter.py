@@ -360,6 +360,45 @@ async def test_local_password_wrong_returns_none(tmp_path):
     await db.shutdown()
 
 
+async def test_change_password_keeps_admin_and_display_name(tmp_path):
+    """A password reset in ha mode rotates only the hash: the person stays
+    an admin and keeps their name (it used to reset both)."""
+    db = AsyncDatabase(tmp_path / "t.db", batch_timeout_ms=10)
+    await db.startup()
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES(?,?,?,?)",
+        (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
+    )
+    app = web.Application()
+    app[db_key] = db
+    app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
+    app[event_bus_key] = EventBus()
+    async with aiohttp.ClientSession() as session:
+        app[http_session_key] = session
+        adapter = HomeAssistantAdapter(
+            ha_url="http://ha.local",
+            ha_token="",
+            data_dir=str(tmp_path),
+            ha_client=_FakeHaClient(),
+        )
+        await adapter.on_startup(app)
+        await adapter.set_local_password(
+            "pascal", "old", display_name="Pascal", is_admin=True
+        )
+        await adapter.change_password("pascal", "n3w-secret")
+        row = await db.fetchone(
+            "SELECT display_name, is_admin FROM platform_users WHERE username='pascal'"
+        )
+        assert row["is_admin"] == 1
+        assert row["display_name"] == "Pascal"
+        assert await adapter.issue_bearer_token("pascal", "n3w-secret") is not None
+        assert await adapter.issue_bearer_token("pascal", "old") is None
+    await db.shutdown()
+
+
 # ─── User listing ────────────────────────────────────────────────────────
 
 

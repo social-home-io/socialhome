@@ -191,6 +191,20 @@ class LocalCredentialStore:
             )
         return raw
 
+    async def change_password(self, username: str, password: str) -> None:
+        """Rotate ``username``'s password hash and nothing else.
+
+        The admin-issued reset path: unlike :meth:`set_password` (the setup
+        upsert), it never touches ``display_name`` or ``is_admin`` — a
+        reset must not demote an admin or rename them. A username with no
+        row is a no-op, as before (the reset token names an existing user).
+        """
+        pw_hash = hash_password(password)
+        await self._db.enqueue(
+            "UPDATE platform_users SET password_hash=? WHERE username=?",
+            (pw_hash, username),
+        )
+
     async def set_password(
         self,
         username: str,
