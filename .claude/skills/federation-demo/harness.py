@@ -12623,6 +12623,19 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_94 item merge stamps gate in place ✓")
+    # v_95 — signed sync pages: a's BEGIN to the salon's host b names its
+    # page; b seals lazily (in the background of a sentinel) and the next
+    # sentinel carries the page, sealed under the content key. Two "Sync
+    # now" rounds from a must leave a verified page on a whose vector hashes
+    # to its root, and a's sync status must carry it.
+    if int(_Cap.MIN_FOR_SYNC_PAGES) != 95 or _OURS < 95:
+        failures.append(
+            "MIN_FOR_SYNC_PAGES moved off v_95 (or OURS fell below it) — "
+            "members would never learn whether they are behind from a page"
+        )
+    else:
+        print("  v_95 sync pages gate in place ✓")
+    failures.extend(_verify_sync_page(state))
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
@@ -19870,6 +19883,76 @@ def _accept_remote_invite(state: dict, joiner: str, space_id: str) -> None:
         method="POST",
     )
     _must(f"{joiner}: accept invite", s, body, ok=(204,))
+
+
+def _verify_sync_page(state: dict) -> list[str]:
+    """v_95: the salon's host b signs a page and a member (a) holds it,
+    verified against the space key a pins (``docs/protocol/sync-pages.md``).
+    """
+    from socialhome.sync_page import root_of, verify_page
+
+    space_id = state.get("space_id")
+    if not space_id:
+        return ["v_95: no salon space in the state to check pages on"]
+    a = state["instances"]["a"]
+    b_id = state["instances"]["b"]["instance_id"]
+
+    def _held() -> tuple | None:
+        rows = _rows(
+            "a",
+            "SELECT page_json, vector FROM space_sync_pages WHERE space_id=?",
+            (space_id,),
+        )
+        return rows[0] if rows else None
+
+    deadline = time.monotonic() + 150.0
+    asked = 0
+    while _held() is None and time.monotonic() < deadline:
+        if asked < 3:
+            # Round 1 makes b seal (background); round 2 carries the page.
+            _request(
+                f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/sync",
+                token=a["token"],
+                method="POST",
+            )
+            asked += 1
+        time.sleep(15.0)
+    held = _held()
+    if held is None:
+        return [f"v_95: a holds no sync page of the salon after {asked} sync rounds"]
+    page_json, vector = held
+    key = _rows(
+        "a",
+        "SELECT identity_public_key, authority_key_epoch FROM spaces WHERE id=?",
+        (space_id,),
+    )
+    try:
+        page = verify_page(
+            json.loads(page_json),
+            space_id=space_id,
+            space_public_key=bytes.fromhex(key[0][0]),
+            pinned_epoch=int(key[0][1] or 0),
+            now_ms=int(time.time() * 1000),
+        )
+    except ValueError as exc:
+        return [f"v_95: a's stored sync page does not verify: {exc}"]
+    out: list[str] = []
+    if page.signer != b_id:
+        out.append(f"v_95: a's page was signed by {page.signer}, not the host b")
+    if root_of(bytes(vector)) != page.root:
+        out.append("v_95: a's stored vector does not hash to its page's root")
+    s, detail = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}", token=a["token"]
+    )
+    sync_page = ((detail or {}).get("sync") or {}).get("page") if s == 200 else None
+    if not sync_page or sync_page.get("seq") != page.seq:
+        out.append(f"v_95: a's sync status carries no page (got {sync_page!r})")
+    if not out:
+        print(
+            f"  v_95 a holds b's signed sync page {page.seq} ({page.rows} rows), "
+            f"verified; status page={sync_page} ✓"
+        )
+    return out
 
 
 def _verify_routed_moment_reaction(state: dict, moment_id: str) -> list[str]:
