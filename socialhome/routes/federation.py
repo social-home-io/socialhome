@@ -28,10 +28,18 @@ envelope is itself authenticated (Ed25519 over the canonical bytes).
 The auth middleware bypass is the contract — no ``Authorization``
 header is expected.
 
-Rate limiting: the global rate-limit middleware buckets by user_id
-which is empty for unauthenticated calls — that means a flood from one
-remote IP would otherwise sail through. The view applies an explicit
-per-IP bucket on top, mirroring ``/api/auth/token``.
+Rate limiting, in two layers:
+
+* a per-address **backstop** before anything past the body's first bytes
+  is read (the global rate-limit middleware buckets by user_id, empty
+  here, so a flood would otherwise sail through). Behind Home Assistant's
+  inbox relay — and behind any reverse proxy — every peer household
+  arrives from the same address, so it is sized for many households at
+  once, not for one;
+* the **per-household budget** — the pipeline's step 4a
+  (:func:`~socialhome.federation.inbound_validator.make_check_instance_rate`),
+  counted once the signature proved who sent the envelope. Its refusal is
+  a ``429`` with ``Retry-After`` like the backstop's.
 """
 
 from __future__ import annotations
@@ -46,6 +54,7 @@ from .. import app_keys as K
 from ..domain.errors import PayloadTooLargeError
 from ..domain.federation import FederationEventType
 from ..federation.inbound_validator import (
+    InboundRateLimitedError,
     ReplayDetectedError,
     UnpairedPeerRefusedError,
 )
@@ -61,21 +70,32 @@ from .base import BaseView
 
 log = logging.getLogger(__name__)
 
-#: §Audit #4 — IP-bucket throttle for unauthenticated federation inbox.
-#: Tuned generous-but-finite: a real peer with a backlog of 1000 events
-#: still drains in under 17 minutes; a flood from one IP gets 429'd.
-INBOX_RATE_LIMIT = 1000
+#: §Audit #4 — the per-address backstop of the unauthenticated inbox,
+#: checked before the body is read. Per address rather than one bucket for
+#: the whole household: where every peer shares an address (Home
+#: Assistant's inbox relay, a reverse proxy) it IS one bucket anyway, and on
+#: a directly reachable household one stranger's flood then can't 429 every
+#: other peer. Ten households at their full per-household budget
+#: (:data:`~socialhome.federation.inbound_validator.INSTANCE_INBOUND_LIMIT`,
+#: 600 / min — the limit that decides who waits) fit through one address at
+#: once; a host with ~200 paired households after a restart (capability
+#: updates, sync requests, outbox backlogs) hit the old 1000 / min in waves.
+#: A flood from one address is still 429'd here, before any JSON parse or
+#: signature check.
+INBOX_RATE_LIMIT = 6000
 INBOX_RATE_WINDOW_S = 60
 
 #: Largest JSON envelope the inbox takes (§25.7).
 INBOX_MAX_BODY_BYTES = DEFAULT_JSON_MAX_BYTES
 
-#: Own per-IP bucket for binary media bodies on the inbox (proto v_81):
-#: each request is up to a 512 KiB chunk, so 600 / min is ~300 MiB a minute
-#: from one address — a 200 MiB video (400 chunks) in well under a minute —
-#: and it never eats into the JSON inbox's budget. A 429 sends the sender's
+#: Own per-IP backstop for binary media bodies on the inbox (proto v_81),
+#: so media never eats into the JSON inbox's. The same shared-address
+#: problem as above, so six households at their full per-household media
+#: budget (:data:`~socialhome.federation.inbound_validator
+#: .INSTANCE_MEDIA_INBOUND_LIMIT`, 600 chunks / min) fit through one
+#: address: 3600 bodies of ≤ 528 KiB a minute. A 429 sends the sender's
 #: chunk down the JSON path, which the outbox redelivers.
-MEDIA_INBOX_RATE_LIMIT = 600
+MEDIA_INBOX_RATE_LIMIT = 3600
 MEDIA_INBOX_RATE_WINDOW_S = 60
 
 #: Generic strings returned to the wire on rejection. Never echo the
@@ -164,15 +184,17 @@ def _throttled(
     bucket = f"{prefix}:{client_bucket(request.remote)}"
     if limiter.is_allowed(bucket, limit=limit, window_s=window_s):
         return None
-    # ``Retry-After`` (delta-seconds) tells the sender's outbox when the
-    # window frees up, so it waits instead of hammering — a 429 is
-    # back-pressure the sender retries, never a drop.
+    return _rate_limited(limiter.retry_after_s(bucket, window_s=window_s))
+
+
+def _rate_limited(retry_after_s: int) -> web.Response:
+    """A ``429`` whose ``Retry-After`` (delta-seconds) tells the sender's
+    outbox when the window frees up, so it waits instead of hammering — a
+    429 is back-pressure the sender retries, never a drop."""
     return web.json_response(
         {"error": _GENERIC_ERROR_BY_STATUS[429]},
         status=429,
-        headers={
-            "Retry-After": str(limiter.retry_after_s(bucket, window_s=window_s) or 1)
-        },
+        headers={"Retry-After": str(retry_after_s or 1)},
     )
 
 
@@ -295,6 +317,17 @@ class FederationInboxView(BaseView):
                     inbox_id,
                     raw_body,
                 )
+        except InboundRateLimitedError as exc:
+            # Step 4a: a verified household over its budget. Back-pressure,
+            # not a refusal — nothing about the envelope was kept (not even
+            # its msg_id), so the redelivery after Retry-After is taken.
+            log.info(
+                "federation inbox: household over its budget inbox_id=%s "
+                "retry_after=%ds",
+                inbox_id,
+                exc.retry_after_s,
+            )
+            return _rate_limited(exc.retry_after_s)
         except ValueError as exc:
             status = _classify(str(exc))
             # §Audit #7: never echo ``str(exc)`` to the wire — that

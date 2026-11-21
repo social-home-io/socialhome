@@ -24,6 +24,9 @@ from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
+    INSTANCE_INBOUND_LIMIT,
+    INSTANCE_INBOUND_WINDOW_S,
+    INSTANCE_MEDIA_INBOUND_LIMIT,
     RELAY_QUEUE_TTL_SECONDS,
     RELAY_TIMESTAMP_SKEW_SECONDS,
     RELAY_TRANSPORTS,
@@ -31,11 +34,13 @@ from socialhome.federation.inbound_validator import (
     TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
+    InboundRateLimitedError,
     ReplayDetectedError,
     UnpairedPeerRefusedError,
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
+    make_check_instance_rate,
     make_check_mailbox_sender,
     make_check_multi_recipient,
     make_check_peer_class,
@@ -60,6 +65,7 @@ from socialhome.federation.multi_recipient import (
     MULTI_TO_INSTANCE,
     multi_to_instance,
 )
+from socialhome.rate_limiter import RateLimiter
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -1014,6 +1020,103 @@ async def test_unpairing_gate_sits_between_signature_and_replay():
     assert names.index("check_unpairing") < names.index("check_replay")
 
 
+async def test_instance_rate_gate_sits_between_signature_and_replay():
+    """Mutation guard: counted only once the signature proved the sender (a
+    forged envelope never spends a real household's budget), and before the
+    replay id is recorded (a 429'd envelope comes back with the same
+    ``msg_id`` and must be taken then, not refused as a replay)."""
+    steps = FederationService._common_pipeline_steps(
+        _StubPipelineOwner(),  # type: ignore[arg-type]
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert names.count("check_instance_rate") == 1
+    assert names.index("verify_signature") < names.index("check_instance_rate")
+    assert names.index("check_instance_rate") < names.index("check_replay")
+
+
+# ─── Per-household inbound budget (after the signature) ─────────────────
+
+
+def _rate_ctx(*, transport: str = "", inbox_id: str = "", **env) -> InboundContext:
+    return InboundContext(
+        envelope=_minimal_envelope(**env),
+        inbox_id=inbox_id,
+        instance_id="" if inbox_id else "remote-iid",
+        transport=transport,
+    )
+
+
+def _media_types() -> frozenset[FederationEventType]:
+    return frozenset({FederationEventType.SPACE_MEDIA_BLOB})
+
+
+async def test_instance_rate_takes_up_to_the_limit_then_refuses_with_retry_after():
+    limiter = RateLimiter()
+    step = make_check_instance_rate(limiter=limiter, media_event_types=_media_types())
+    for _ in range(INSTANCE_INBOUND_LIMIT):
+        await step(_rate_ctx(inbox_id="inbox-1"))
+    with pytest.raises(InboundRateLimitedError) as caught:
+        await step(_rate_ctx(inbox_id="inbox-1"))
+    exc = caught.value
+    # A ValueError, so every caller that drops a refusal still does — but
+    # one the inbox answers 429 + Retry-After, never a drop.
+    assert isinstance(exc, ValueError)
+    assert 1 <= exc.retry_after_s <= INSTANCE_INBOUND_WINDOW_S
+    assert exc.bucket.endswith("remote-iid")
+    # Another household has its own budget.
+    await step(_rate_ctx(inbox_id="inbox-2", from_instance="other-iid"))
+
+
+async def test_instance_rate_keys_on_the_signed_sender_not_the_inbox():
+    """One budget per household, whichever transport or inbox it used."""
+    limiter = RateLimiter()
+    step = make_check_instance_rate(limiter=limiter, media_event_types=_media_types())
+    for i in range(INSTANCE_INBOUND_LIMIT):
+        transport = TRANSPORT_GFS_RELAY if i % 2 else TRANSPORT_GFS_MAILBOX
+        await step(_rate_ctx(transport=transport))
+    with pytest.raises(InboundRateLimitedError):
+        await step(_rate_ctx(inbox_id="inbox-1"))
+
+
+async def test_instance_rate_never_charges_a_datachannel_frame():
+    """A DataChannel frame has no redelivery: a refusal would lose it, and
+    the channel is read one frame at a time (its own backpressure). It is
+    neither refused nor charged, so it cannot push the household's HTTPS
+    or relay traffic into 429s either."""
+    limiter = RateLimiter()
+    step = make_check_instance_rate(limiter=limiter, media_event_types=_media_types())
+    for _ in range(INSTANCE_INBOUND_LIMIT + 5):
+        await step(_rate_ctx())  # no inbox id, no relay transport
+    assert limiter.key_count == 0
+
+
+async def test_instance_rate_gives_media_chunks_their_own_budget():
+    limiter = RateLimiter()
+    step = make_check_instance_rate(limiter=limiter, media_event_types=_media_types())
+    for _ in range(INSTANCE_MEDIA_INBOUND_LIMIT):
+        await step(
+            _rate_ctx(
+                inbox_id="inbox-1",
+                event_type=FederationEventType.SPACE_MEDIA_BLOB.value,
+            )
+        )
+    with pytest.raises(InboundRateLimitedError):
+        await step(
+            _rate_ctx(
+                inbox_id="inbox-1",
+                event_type=FederationEventType.SPACE_MEDIA_BLOB.value,
+            )
+        )
+    # …and the envelope budget is untouched.
+    await step(_rate_ctx(inbox_id="inbox-1"))
+
+
+async def test_instance_rate_is_a_no_op_without_a_limiter():
+    step = make_check_instance_rate(limiter=None, media_event_types=_media_types())
+    await step(_rate_ctx(inbox_id="inbox-1"))
+
+
 # ─── Unpair tombstone gate ───────────────────────────────────────────────
 
 
@@ -1164,6 +1267,7 @@ class _StubPipelineOwner:
     _on_relay_approval_contact = None
     _on_staged_approval_cancelled = None
     _own_instance_id = "own-1"
+    _inbound_limiter = None
 
     class _pending_pairings:
         @staticmethod
