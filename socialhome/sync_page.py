@@ -116,7 +116,7 @@ PAGE_FIELDS: frozenset[str] = frozenset(
 def _no_floats(value: Any) -> Any:
     """*value* with every float as its decimal string (``repr``: the
     shortest round-trip form, the same on every CPython)."""
-    if isinstance(value, bool) or value is None:
+    if value is None or type(value) in (str, int, bool):
         return value
     if isinstance(value, float):
         return repr(value)
@@ -128,8 +128,12 @@ def _no_floats(value: Any) -> Any:
 
 
 def _sorted_list(values: Iterable[Any]) -> list[Any]:
-    """A list in one order whatever order the household stored it in."""
-    return sorted(values, key=canonical_str)
+    """A list in one order whatever order the household stored it in
+    (strings by value, anything else by its canonical JSON)."""
+    items = list(values)
+    if all(type(v) is str for v in items):
+        return sorted(items)
+    return sorted(items, key=canonical_str)
 
 
 def _stamp(value: Any) -> Any:
@@ -522,9 +526,10 @@ def commit_form(
                     value = None
             elif name in spec.stamps:
                 value = _stamp(value)
-            if isinstance(value, (list, tuple)):
-                value = _sorted_list(_no_floats(value))
-            projection[name] = _no_floats(value)
+            value = _no_floats(value)
+            if isinstance(value, list):
+                value = _sorted_list(value)
+            projection[name] = value
     except _HostOnly:
         return None
     return {"r": resource, "v": projection}
