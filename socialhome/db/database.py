@@ -405,6 +405,12 @@ class AsyncDatabase:
         raised — statistics only make queries faster.
         """
         self._assert_running()
+        await self._optimize_now()
+
+    async def _optimize_now(self) -> None:
+        # No ``_assert_running``: the writer also calls this for the batches
+        # it drains after ``shutdown`` began (the connection is still open
+        # until the writer has exited).
         assert self._conn is not None
         assert self._writer_lock is not None
         conn = self._conn
@@ -484,7 +490,7 @@ class AsyncDatabase:
             await self._apply_batch(conn, batch)
             if loop.time() >= self._next_optimize_at:
                 self._next_optimize_at = loop.time() + self._optimize_interval_s
-                await self.optimize()
+                await self._optimize_now()
 
     async def _apply_batch(
         self,

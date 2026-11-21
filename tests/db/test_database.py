@@ -765,3 +765,22 @@ async def test_optimize_refreshes_statistics_on_demand(tmp_dir):
         assert await _stat_rows(db, "space_posts") > 0
     finally:
         await db.shutdown()
+
+
+async def test_a_periodic_optimize_due_during_shutdown_never_fails_it(tmp_dir):
+    """The writer drains its last batch after ``shutdown`` began; an
+    optimize falling due right then must not kill the writer."""
+    db = AsyncDatabase(
+        tmp_dir / "t.db", batch_max=1, batch_timeout_ms=0, optimize_interval_s=0
+    )
+    await db.startup()
+    seen = _trace(db)
+    write = asyncio.create_task(
+        db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES('a', 'u-a', 'A')"
+        )
+    )
+    await asyncio.sleep(0)  # queued ahead of the shutdown sentinel
+    await db.shutdown()
+    await write
+    assert seen.count("PRAGMA optimize") >= 2, seen  # after the batch, and on close
