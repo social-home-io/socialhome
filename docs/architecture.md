@@ -1399,6 +1399,11 @@ take ~2 s and every GFS write half a second. A burst still coalesces at 5 ms
 each statement alone (slower under a burst). Multi-statement atomic steps
 use `transact()` / `UnitOfWork`, which bypass the window.
 
+The writer also keeps the planner's statistics fresh: `PRAGMA
+optimize=0x10002` on open, `PRAGMA optimize` at most hourly after a batch
+(`DEFAULT_OPTIMIZE_INTERVAL_S`) and once at shutdown — no extra scheduler.
+See [`database.md`](./database.md#planner-statistics-pragma-optimize).
+
 ### Async media transcoding
 
 Video uploads transcode in the background instead of blocking the

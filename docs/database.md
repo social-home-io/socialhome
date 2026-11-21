@@ -340,6 +340,33 @@ later) into `socialhome/migrations/` and update both the matching
 section above and the `Sqlite*Repo` that owns it. See `CLAUDE.md` →
 **"Keep docs in sync"** for the reviewer rule.
 
+## Planner statistics (`PRAGMA optimize`)
+
+`AsyncDatabase` keeps SQLite's query-planner statistics (`sqlite_stat1`) the
+way SQLite recommends for a long-lived connection: `PRAGMA optimize=0x10002`
+when the connection opens (every table, SQLite 3.46+), `PRAGMA optimize` at
+most once an hour after a write batch (`optimize_interval_s`; an idle
+database is left alone) and once more just before it closes. It runs on the
+writer's turn in the executor, never on the event loop; a failure is logged
+at WARNING and never fails a write. No migration: `sqlite_stat1` is SQLite's
+own table, created by `ANALYZE`.
+
+Why it matters: the §25.6 sync exporters page a space newest-first by
+`rowid` (`… AND rowid <= ? ORDER BY rowid DESC LIMIT ?`, bound from
+`sync_page_below` in `repositories/base.py`). No index orders a space's posts
+by `rowid`, so without statistics SQLite reads the space through
+`idx_space_posts_created` and sorts all of it for every page — O(n²) for a
+big space (~1.1 s for 40k posts). With statistics it walks the table down
+from the cursor and stops after `limit` rows (~50 ms for the same export).
+The planner only has per-table averages (this SQLite has no `STAT4`), so
+when `space_posts` is spread over many spaces the average space looks small
+and it picks the index and sorts again — even for the one big space (seen at
+≈50 spaces / 60k posts in the benchmark; up to 20 spaces it seeks). An index
+on `space_posts(space_id, deleted)` would close that case; deliberately not
+added (owner decision, 2026-11-21). Bazaar listings seek inside
+`idx_bazaar_listings_space` (it carries the rowid) with or without
+statistics.
+
 ## Migrations after v1
 
 | File | Purpose |
