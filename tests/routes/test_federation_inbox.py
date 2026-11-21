@@ -533,6 +533,31 @@ async def test_a_household_over_its_budget_gets_429_with_retry_after(client, env
     assert (await r.json())["status"] == "ok"
 
 
+async def test_a_replayed_envelope_never_spends_a_households_budget(client, env):
+    """A captured genuine envelope pushed again verifies — but the replay
+    step refuses it before the budget is charged."""
+    from socialhome.federation.inbound_validator import (
+        INSTANCE_INBOUND_WINDOW_S,
+        instance_bucket,
+    )
+
+    body = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"user_id": "alice", "state": "home"},
+        msg_id="captured",
+    )
+    assert (await client.post("/federation/inbox/wh-test", data=body)).status == 200
+    for _ in range(5):
+        r = await client.post("/federation/inbox/wh-test", data=body)
+        assert r.status == 410
+    limiter = env["fed_svc"].inbound_limiter
+    bucket = instance_bucket(env["peer"].id, media=False)
+    assert len(limiter._windows[bucket]) == 1
+    assert limiter.retry_after_s(bucket, window_s=INSTANCE_INBOUND_WINDOW_S) > 0
+
+
 async def test_a_forged_envelope_never_spends_a_households_budget(client, env):
     """The budget is counted after the signature step: an envelope naming a
     real household but signed by someone else is refused (403) and leaves

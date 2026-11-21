@@ -388,7 +388,7 @@ async def test_a_media_sender_over_its_budget_is_held_not_counted_as_junk(
     monkeypatch,
 ):
     """Through the real pipeline: the sender's per-household media budget
-    (§24.11 step 4a) refuses after the signature, before the replay id —
+    (§24.11 step 5a) refuses after the signature and the replay check —
     the frame is held, spends nothing from the junk bucket, and is taken
     once that budget frees."""
     clock = _Clock()

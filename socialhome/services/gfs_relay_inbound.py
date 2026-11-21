@@ -50,7 +50,7 @@ AES-GCM open) and a per-family bucket after it, so space traffic,
 redeems and pairing bodies never starve each other (pairing bodies get the
 bootstrap-body budget, :data:`BOOTSTRAP_BODY_INBOUND_LIMIT`, under their
 own key). Once the pipeline verified the sender, it holds that household
-to its own budget (§24.11 step 4a,
+to its own budget (§24.11 step 5a,
 :func:`~socialhome.federation.inbound_validator.make_check_instance_rate`
 — one per household, shared with its HTTPS inbox traffic).
 
@@ -365,7 +365,7 @@ class GfsRelayInbound:
         budget here: the only id available before the pipeline runs is the
         envelope's UNVERIFIED ``from_instance``, and keying a budget on it
         would let anyone starve a household's traffic by claiming its id.
-        The pipeline holds the verified sender to its own (step 4a)."""
+        The pipeline holds the verified sender to its own (step 5a)."""
         self._charge(
             _ENVELOPES_KEY,
             limit=RELAY_ENVELOPE_INBOUND_LIMIT,

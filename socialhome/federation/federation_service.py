@@ -917,20 +917,22 @@ class FederationService:
             make_check_relay_opt_in(),
             make_check_timestamp(),
             make_verify_signature(encoder=self._encoder),
-            # Per-household budget, once the signature proved who the sender
-            # is (a forged envelope never spends a real household's budget)
-            # and before the replay id is recorded (a 429'd envelope comes
-            # back with the same msg_id and must be taken then).
-            make_check_instance_rate(
-                limiter=self._inbound_limiter,
-                media_event_types=MEDIA_HTTPS_EVENT_TYPES,
-            ),
             # Unpair tombstone gate: a peer we unpaired while it was offline
             # still has a row (so the outbox can deliver our UNPAIR), but no
             # trust. After the signature check so only the genuine peer can
             # pull our queued UNPAIR forward.
             make_check_unpairing(on_refused=self._on_tombstone_contact),
             make_check_replay(replay_cache=self._replay_cache),
+            # Per-household budget (step 5a): after the signature (a forged
+            # envelope never spends a real household's budget) and after the
+            # replay check (a captured genuine envelope pushed again is refused
+            # as a replay, never charged to its sender). A refusal takes the id
+            # back out of the replay cache, so the 429'd / held envelope is
+            # taken when it comes back with the same msg_id.
+            make_check_instance_rate(
+                limiter=self._inbound_limiter,
+                media_event_types=MEDIA_HTTPS_EVENT_TYPES,
+            ),
             make_decrypt_and_parse(
                 key_manager=self._key_manager,
                 encoder=self._encoder,
@@ -961,7 +963,7 @@ class FederationService:
 
     @property
     def inbound_limiter(self) -> RateLimiter:
-        """The per-household inbound budgets (§24.11 step 4a)."""
+        """The per-household inbound budgets (§24.11 step 5a)."""
         return self._inbound_limiter
 
     @property

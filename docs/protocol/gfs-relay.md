@@ -1984,20 +1984,24 @@ verified it:
 | Invite / relayed pairing bodies | 60 each | household |
 | One mailbox (v_89) | 600 — past it a flood: dropped, counted toward a rotation | mailbox |
 | Binary media frames (v_87) | 1 200 | household |
-| §24.11 step 4a, after the signature | 600 envelopes, 600 media chunks | verified sender |
+| §24.11 step 5a, after the signature | 600 envelopes, 600 media chunks | verified sender |
 
 Step 4a is the pipeline's per-household budget
 (`make_check_instance_rate`), the same bucket the sender's HTTPS inbox
 traffic spends — each envelope passes the pipeline once, so it is counted
 once. It runs after the signature (a forged envelope never spends a real
-household's budget) and before the replay id is recorded.
+household's budget) and after the replay check (a captured genuine
+envelope pushed again — a member re-wrapping a multi frame, a GFS
+re-pushing a stored one — is refused as a replay, never charged); a refusal
+takes the id back out of the replay cache, so the held frame is taken when
+it runs again.
 
 **Held, not dropped.** The GFS deletes a queued row as soon as its frame
 went out on our socket (`drain`) and pushes a live frame without a row at
 all; there is no acknowledgement a household could withhold to have it
 redelivered, and adding one would change the wire. So a frame refused for
 a *budget* — the two household ceilings, the media budget, the sender's
-step 4a — is **held** in memory and run again from the step that refused
+step 5a — is **held** in memory and run again from the step that refused
 it once that budget frees (`RELAY_DEFER_POLL_S`, 1 s), never charged to an
 earlier bucket twice; frames held on the same budget wait together, other
 senders' frames are not held up behind them. The hold is bounded
@@ -2013,7 +2017,7 @@ mailbox.
 **Cost.** Nothing new on the wire or on the GFS. A held frame costs its
 bytes in memory until it runs (≤ 16 MiB in all) and one dictionary check
 per second while it waits; a retry refused again costs the steps before
-the refusing one (for step 4a: parse, lookup, one Ed25519 verify), at most
+the refusing one (for step 5a: parse, lookup, one Ed25519 verify), at most
 once per freed slot per budget.
 
 ## Privacy — who learns what

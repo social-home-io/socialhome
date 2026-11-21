@@ -61,9 +61,9 @@ flowchart LR
     ts --> instance["instance lookup"]
     instance --> ban["ban check"]
     ban --> sig["Ed25519 verify"]
-    sig --> budget["per-household budget<br/>(429 / held)"]
-    budget --> replay["replay cache<br/>(dedup)"]
-    replay --> decrypt["decrypt payload"]
+    sig --> replay["replay cache<br/>(dedup)"]
+    replay --> budget["per-household budget<br/>(429 / held)"]
+    budget --> decrypt["decrypt payload"]
     decrypt --> dispatch["event dispatch"]
     dispatch --> handler["per-event handler"]
 ```

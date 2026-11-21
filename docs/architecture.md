@@ -616,7 +616,7 @@ tier; only the latency differs.
 
 All tiers run their inbound traffic through the same §24.11
 validation pipeline (parse → timestamp → instance lookup → ban check
-→ Ed25519 verify → per-household budget → replay cache → decrypt →
+→ Ed25519 verify → replay cache → per-household budget → decrypt →
 authorize → dispatch). The budget (`make_check_instance_rate`, 600
 envelopes and 600 media chunks a minute per verified household) is charged
 on the HTTPS inbox (`429` + `Retry-After`) and the GFS relay legs (the frame
@@ -679,9 +679,9 @@ flowchart LR
     ts --> instance["instance lookup"]
     instance --> ban["ban check"]
     ban --> sig["Ed25519 verify"]
-    sig --> budget["per-household budget"]
-    budget --> replay["replay cache"]
-    replay --> decrypt["decrypt payload"]
+    sig --> replay["replay cache"]
+    replay --> budget["per-household budget"]
+    budget --> decrypt["decrypt payload"]
     decrypt --> authz["authorize author<br/>(hidden user / Follower seat)"]
     authz --> dispatch["event dispatch"]
     dispatch --> handler["per-event handler"]

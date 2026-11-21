@@ -1022,7 +1022,7 @@ class _Clock:
 
 
 class _BudgetedFederation(_MailboxFederation):
-    """The §24.11 pipeline's step 4a at the boundary: refuses a sender over
+    """The §24.11 pipeline's step 5a at the boundary: refuses a sender over
     its per-household budget, exactly as the real step does."""
 
     def __init__(self, limiter: RateLimiter, *, limit: int = 2) -> None:
@@ -1229,7 +1229,7 @@ async def test_the_background_drain_runs_held_frames_and_stops_on_close(
 
 async def test_a_real_pipeline_holds_a_sender_over_budget_without_burning_its_msg_id():
     """End to end through the real §24.11 pipeline: the per-sender refusal
-    happens after the signature and before the replay id is recorded, so the
+    happens after the signature and the replay check, and forgets the id, so the
     held frame is dispatched once the budget frees — not refused as a
     replay."""
     clock = _Clock()

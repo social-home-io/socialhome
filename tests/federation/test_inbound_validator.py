@@ -1020,11 +1020,14 @@ async def test_unpairing_gate_sits_between_signature_and_replay():
     assert names.index("check_unpairing") < names.index("check_replay")
 
 
-async def test_instance_rate_gate_sits_between_signature_and_replay():
+async def test_instance_rate_gate_sits_between_replay_and_decrypt():
     """Mutation guard: counted only once the signature proved the sender (a
-    forged envelope never spends a real household's budget), and before the
-    replay id is recorded (a 429'd envelope comes back with the same
-    ``msg_id`` and must be taken then, not refused as a replay)."""
+    forged envelope never spends a real household's budget) AND the replay
+    step let it through (a captured genuine envelope pushed again — by a
+    space member re-wrapping a multi frame, or a GFS re-pushing a stored one
+    — is refused as a replay and never spends the real sender's budget).
+    A refusal takes the id back out of the replay cache, so the 429'd
+    envelope is taken when it comes back."""
     steps = FederationService._common_pipeline_steps(
         _StubPipelineOwner(),  # type: ignore[arg-type]
         lookup_step=_noop_step,
@@ -1032,7 +1035,8 @@ async def test_instance_rate_gate_sits_between_signature_and_replay():
     names = [getattr(s, "__name__", "") for s in steps]
     assert names.count("check_instance_rate") == 1
     assert names.index("verify_signature") < names.index("check_instance_rate")
-    assert names.index("check_instance_rate") < names.index("check_replay")
+    assert names.index("check_replay") < names.index("check_instance_rate")
+    assert names.index("check_instance_rate") < names.index("decrypt_and_parse")
 
 
 # ─── Per-household inbound budget (after the signature) ─────────────────
@@ -2777,3 +2781,25 @@ async def test_an_unknown_event_type_confirms_nothing():
     ctx.envelope["event_type"] = "something_new"
     await make_confirm_relay_approval(on_contact=_confirm)(ctx)
     assert confirmed == []
+
+
+async def test_instance_rate_refusal_takes_the_id_back_out_of_the_replay_cache():
+    """The step runs after the replay check; a refusal must not leave the
+    envelope's id there, or its redelivery would be refused as a replay."""
+    cache = ReplayCache()
+    limiter = RateLimiter()
+    for _ in range(INSTANCE_INBOUND_LIMIT):
+        limiter.is_allowed(
+            "fed-instance:remote-iid",
+            limit=INSTANCE_INBOUND_LIMIT,
+            window_s=INSTANCE_INBOUND_WINDOW_S,
+        )
+    replay = make_check_replay(replay_cache=cache)
+    rate = make_check_instance_rate(limiter=limiter, media_event_types=_media_types())
+    ctx = _rate_ctx(inbox_id="inbox-1")
+    await replay(ctx)
+    with pytest.raises(InboundRateLimitedError):
+        await rate(ctx)
+    assert ctx.replay_undo is None
+    again = _rate_ctx(inbox_id="inbox-1")
+    await replay(again)  # not a replay: the id was forgotten

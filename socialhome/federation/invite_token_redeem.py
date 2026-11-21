@@ -292,7 +292,7 @@ BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE: str = (
 #: * a **per-sender** bucket checked once the body's identity has been
 #:   verified, so one household can't burn the global budget alone (for a
 #:   relayed §24.11 envelope that is the pipeline's per-household budget,
-#:   §24.11 step 4a, 600 / min).
+#:   §24.11 step 5a, 600 / min).
 #:
 #: The process-wide ceiling is shared by EVERY household that reaches us
 #: over a GFS — every member seated from an invite link or a directory, and

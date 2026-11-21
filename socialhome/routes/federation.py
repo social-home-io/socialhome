@@ -36,7 +36,7 @@ Rate limiting, in two layers:
   inbox relay — and behind any reverse proxy — every peer household
   arrives from the same address, so it is sized for many households at
   once, not for one;
-* the **per-household budget** — the pipeline's step 4a
+* the **per-household budget** — the pipeline's step 5a
   (:func:`~socialhome.federation.inbound_validator.make_check_instance_rate`),
   counted once the signature proved who sent the envelope. Its refusal is
   a ``429`` with ``Retry-After`` like the backstop's.
