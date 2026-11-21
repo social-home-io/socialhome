@@ -150,6 +150,8 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Spaces](./spaces.md) — create/dissolve, membership events, per-space key exchange.
   - [Invites](./invites.md) — cross-household invites and join requests.
   - [Sync](./sync.md) — initial bulk content sync (Tier 2/3).
+  - [Sync pages](./sync-pages.md) — design: authority-signed state pages,
+    "am I behind?" and verified catch-up from any member (Phase 2 / 3).
   - [Discovery](./discovery.md) — GFS-brokered public-space directory.
   - [Local communities](./local-communities.md) — a public space bound to an area; every join carries the joiner's home rounded to ~1 km (with consent, sealed to the host) and the host decides — near the edge always an admin; the directory shows only the radius, never the centre (capability v_59).
 - **Content**
