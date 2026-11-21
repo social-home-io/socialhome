@@ -3463,6 +3463,8 @@ async def test_invite_link_code_is_rate_limited_per_ip(client):
     a uuid4 token is not guessable — just ordinary shedding."""
     from socialhome.routes.spaces import INVITE_CODE_RATE_LIMIT
 
+    # A room of phones behind one address opening one projected link.
+    assert INVITE_CODE_RATE_LIMIT == 120
     sid = await _invite_space(client)
     minted = await client.post(
         f"/api/spaces/{sid}/invite-tokens",

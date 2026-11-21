@@ -89,6 +89,7 @@ from .public import (
     build_publish_rate_limit,
     build_register_rate_limit,
     build_signup_rate_limit,
+    build_viewer_pages_rate_limit,
 )
 from .public_viewer import build_public_viewer_links
 from .relay_bridge import RelayBridge
@@ -645,6 +646,7 @@ class GfsApp:
             # The anonymous public limits are cluster-wide: each node allows
             # its share of the budget over the live nodes (``node_share``).
             build_listing_rate_limit(self.client_ip, nodes=live_nodes),
+            build_viewer_pages_rate_limit(self.client_ip, nodes=live_nodes),
             build_public_rtc_rate_limit(self.client_ip, nodes=live_nodes),
             build_ice_servers_rate_limit(self.client_ip, nodes=live_nodes),
             build_publish_rate_limit(self.client_ip),

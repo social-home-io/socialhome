@@ -29,6 +29,7 @@ import html as _html
 import io
 import ipaddress
 import logging
+import math
 import secrets
 import time
 from collections.abc import Callable, Iterable
@@ -79,8 +80,13 @@ PAIR_TOKEN_GUARANTEED_PER_CLIENT: int = 3
 #: later rarely helps: above the household's 60 s in-request retry, so the
 #: one-click connect says "busy" at once instead of spinning for a minute.
 PAIR_TOKEN_CAP_RETRY_S: int = 120
-#: Public-listing rate limit per IP (spec §24.7.3).
-LISTING_MAX_PER_MINUTE: int = 30
+#: Per-IP/minute cap on the public pages (``/``, ``/spaces/{id}``,
+#: ``/join/{token}``) — and, in a window of its own, on their viewer JSON
+#: (``/gfs/pages/…``). Sized for a room, not a person: 40 phones on one
+#: event Wi-Fi (or a carrier's CGNAT) opening a projected invite link share
+#: one address, and each may reload or open the space page too. Cluster-wide
+#: (:func:`node_share`).
+LISTING_MAX_PER_MINUTE: int = 120
 
 #: Per-IP/minute cap on the anonymous public-content RTC entry points
 #: (offer + relay). Each request fans a WS push to the author, so this
@@ -379,6 +385,20 @@ class SlidingWindowCounter:
         live = sum(1 for t in hits if stamp - t < self._window_s)
         return live >= self._limit
 
+    def retry_after(
+        self, key: str, *, now: float | None = None, limit: int | None = None
+    ) -> int:
+        """Whole seconds until :meth:`allow` would admit *key* again under
+        *limit* (the constructor's when ``None``) — when the hit that keeps
+        the window full leaves it. At least 1; a read-only peek."""
+        stamp = time.monotonic() if now is None else now
+        hits = [t for t in self._hits.get(key, ()) if stamp - t < self._window_s]
+        cap = max(1, self._limit if limit is None else limit)
+        if len(hits) < cap:
+            return 1
+        blocking = hits[len(hits) - cap]
+        return max(1, math.ceil(self._window_s - (stamp - blocking)))
+
     def _evict(self) -> None:
         overflow = len(self._hits) - self._max_keys
         if overflow <= 0:
@@ -463,6 +483,7 @@ def build_window_limiter(
     applies: Callable[[str], bool],
     *,
     nodes: Callable[[], int] | None = None,
+    refuse: Callable[[int], web.Response] | None = None,
 ):
     """Build a middleware that sheds >*limit* hits/minute per client IP.
 
@@ -473,6 +494,11 @@ def build_window_limiter(
     ``X-Forwarded-For`` (see :class:`ClientIpResolver`). With *nodes* (the
     cluster's live node count) the limit is cluster-wide: each node allows
     its :func:`node_share`.
+
+    A refused request gets ``429 {"error": "rate_limited"}`` with
+    ``Retry-After: 60`` — or, with *refuse*, whatever it builds from the
+    seconds until this address's window frees a slot (it sets the status
+    and ``Retry-After`` itself).
     """
     counter = SlidingWindowCounter(limit)
 
@@ -481,7 +507,10 @@ def build_window_limiter(
         if not applies(request.rel_url.path):
             return await handler(request)
         share = limit if nodes is None else node_share(limit, nodes())
-        if not counter.allow(resolver.bucket(request), limit=share):
+        key = resolver.bucket(request)
+        if not counter.allow(key, limit=share):
+            if refuse is not None:
+                return refuse(counter.retry_after(key, limit=share))
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
             return resp
@@ -490,17 +519,20 @@ def build_window_limiter(
     return _rate_limit
 
 
-def _is_public_listing(path: str) -> bool:
-    """The public HTML pages — landing, per-space, and invite-link pages —
-    and their JSON for the pinned viewer (``/gfs/pages/…``): one budget, so
-    redirect + data costs a visitor two of the same 30.
+def _is_public_page(path: str) -> bool:
+    """The public HTML pages — landing, per-space, and invite-link pages.
 
     ``/join/`` belongs here: it is the same kind of anonymous, unauthenticated
     SSR page, and it is the one an attacker would hammer to walk the token
     space. It writes nothing, so there is no per-household identity to key a
     limiter on — the client address is all there is.
     """
-    return path == "/" or path.startswith(("/spaces/", "/join/", "/gfs/pages/"))
+    return path == "/" or path.startswith(("/spaces/", "/join/"))
+
+
+def _is_viewer_page_json(path: str) -> bool:
+    """The pages' JSON for the pinned viewer (``/gfs/pages/…``)."""
+    return path.startswith("/gfs/pages/")
 
 
 def _is_public_rtc_entry(path: str) -> bool:
@@ -515,14 +547,69 @@ def _is_public_rtc_entry(path: str) -> bool:
 def build_listing_rate_limit(
     resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
 ):
-    """Simple in-memory per-IP rate limiter for the public listing.
-
-    Spec §24.7.3: 30 GETs per minute on ``/`` and ``/spaces/{id}`` —
-    cluster-wide with *nodes* (:func:`node_share`).
+    """Per-IP limiter for the public pages: :data:`LISTING_MAX_PER_MINUTE`
+    views a minute on ``/``, ``/spaces/{id}`` and ``/join/{token}``,
+    cluster-wide with *nodes* (:func:`node_share`). Past it a visitor gets
+    the readable busy page (:func:`busy_page_response`), not raw JSON.
     """
     return build_window_limiter(
-        resolver, LISTING_MAX_PER_MINUTE, _is_public_listing, nodes=nodes
+        resolver,
+        LISTING_MAX_PER_MINUTE,
+        _is_public_page,
+        nodes=nodes,
+        refuse=busy_page_response,
     )
+
+
+def build_viewer_pages_rate_limit(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+):
+    """Per-IP limiter for the viewer's page JSON (``/gfs/pages/…``): the
+    same :data:`LISTING_MAX_PER_MINUTE`, in a window of its own.
+
+    Its own window, not the pages' one: a page opened through the viewer is
+    the hand-off page here plus this JSON, and sharing one budget made each
+    visitor cost two — a room of 40 phones behind one address ran out after
+    about 15. Counting only the page instead would leave this JSON
+    unlimited for anyone who calls it directly (a viewer link opens the
+    viewer without touching ``/join/``). Two equal windows keep both bounded
+    and a visitor costs one hit of each. Its 429 stays JSON, with the real
+    ``Retry-After``, so the viewer shows its own busy state.
+    """
+    return build_window_limiter(
+        resolver,
+        LISTING_MAX_PER_MINUTE,
+        _is_viewer_page_json,
+        nodes=nodes,
+        refuse=_rate_limited_json,
+    )
+
+
+def _rate_limited_json(retry_after: int) -> web.Response:
+    return web.json_response(
+        {"error": "rate_limited"},
+        status=429,
+        headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"},
+    )
+
+
+def busy_page_response(retry_after: int) -> web.Response:
+    """The public pages' ``429``: a readable "busy right now" page with a
+    reload link, in the invite page's shell, and ``Retry-After``. No script
+    — a plain link reloads the page on any phone."""
+    html, css = _invite_page_html(
+        title="Busy right now",
+        accent="#D2542A",
+        body=f"""    <div class="accent-bar"></div>
+    <h1>Busy right now</h1>
+    <p>Lots of people are opening this page from the same network \u2014
+    try again in {retry_after} seconds.</p>
+    <p><a href="">Reload the page</a></p>""",
+    )
+    resp = html_response(html, inline_styles=[css], status=429)
+    resp.headers["Retry-After"] = str(retry_after)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def build_public_rtc_rate_limit(

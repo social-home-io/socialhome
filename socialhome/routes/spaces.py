@@ -2021,7 +2021,7 @@ def _gfs_publish_failure_message(status: int | None) -> str:
 #: is guessable here. It is ordinary anonymous-endpoint shedding: the
 #: handler does two DB reads plus a signature-free payload build, and one
 #: visitor legitimately hits it exactly once per link they open.
-INVITE_CODE_RATE_LIMIT: int = 30
+INVITE_CODE_RATE_LIMIT: int = 120
 INVITE_CODE_RATE_WINDOW_S: int = 60
 
 
