@@ -325,6 +325,20 @@ async def test_a_new_cutoff_day_reseals_a_young_page():
     assert page is not None and page.cutoff == "2026-10-02 00:01:00"
 
 
+async def test_a_fresh_page_of_another_signer_holds_our_seal_back():
+    """A delegated admin that holds the owner's page (synced as a member)
+    does not seal on top of every owner page: only once it is 15 min old."""
+    env = _Env()
+    other = _signed(signer=ADMIN, issued_at=T0, vector=_vec(4))
+    env.repo.rows[SPACE] = StoredSyncPage(
+        SPACE, canonical_str(other.to_wire()), _vec(4)
+    )
+    assert await env.svc.seal_if_due(SPACE) is None
+    env.now += PAGE_MIN_INTERVAL_S * 1000
+    page = await env.svc.seal_if_due(SPACE)
+    assert page is not None and page.signer == HOST and page.prev_root is None
+
+
 async def test_an_old_epoch_page_is_not_held_and_a_new_one_is_sealed():
     env = _Env()
     await env.svc.seal_if_due(SPACE)
