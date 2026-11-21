@@ -9,8 +9,9 @@
  *     button while pending, and the seller's reason once declined.
  *
  * Kept separate from :mod:`BazaarPostBody` so the feed card can host
- * it without ballooning — the panel fetches its own data and cleans
- * up its own listeners.
+ * it without ballooning. The card hands down the offers it already read
+ * (and patches them from live frames); used alone, the panel fetches its
+ * own and cleans up its own listeners.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
@@ -28,19 +29,24 @@ interface Props {
   /** Called after an offer flip that affects listing state (accept)
    *  so the parent can refetch the listing row. */
   onListingChanged?: () => void
+  /** The offers the card already read (``GET /api/bazaar/{id}``) and
+   *  keeps live — the panel then makes no read of its own. */
+  offers?: BazaarOffer[]
 }
 
 export function BazaarOffersPanel({
-  listing, currentUserId, onListingChanged,
+  listing, currentUserId, onListingChanged, offers: given,
 }: Props) {
-  const [offers, setOffers] = useState<BazaarOffer[]>([])
+  const [fetched, setOffers] = useState<BazaarOffer[]>([])
+  const offers = given ?? fetched
+  const handedDown = given !== undefined
   const [busy, setBusy] = useState(false)
 
   const isSeller = currentUserId === listing.seller_user_id
   const canShow = listing.mode === 'offer' || listing.mode === 'negotiable'
 
   useEffect(() => {
-    if (!canShow) return
+    if (!canShow || handedDown) return
     let stopped = false
     const refresh = async () => {
       try {
@@ -64,7 +70,7 @@ export function BazaarOffersPanel({
       if (matches(e)) void refresh()
     })
     return () => { stopped = true; off1(); off2(); off3() }
-  }, [listing.post_id, canShow])
+  }, [listing.post_id, canShow, handedDown])
 
   if (!canShow) return null
 

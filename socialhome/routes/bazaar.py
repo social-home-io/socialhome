@@ -242,6 +242,22 @@ class BazaarDetailView(BaseView):
                 listing.post_id, self.user.user_id
             )
         ]
+        # What a card shows, in this one read — the bids, the viewer's own
+        # offers (all of them for the seller) and the viewer's saved flag —
+        # so a feed of listings isn't four reads per card. Same per-viewer
+        # scoping as ``/bids``, ``/offers`` and ``/save``.
+        viewer = self.user.user_id
+        payload["bids"] = [
+            _bid_dict(b)
+            for b in await svc.list_bids(listing.post_id, viewer_user_id=viewer)
+        ]
+        payload["offers"] = [
+            _offer_dict(o)
+            for o in await svc.list_offers(listing.post_id, actor_user_id=viewer)
+        ]
+        payload["viewer_saved"] = bool(
+            await svc.is_listing_saved(user_id=viewer, post_id=listing.post_id)
+        )
         return web.json_response(payload)
 
     async def patch(self) -> web.Response:

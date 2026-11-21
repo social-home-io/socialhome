@@ -12,8 +12,10 @@ from aiohttp.test_utils import make_mocked_request
 from socialhome.auth import SIGNED_URL_PRINCIPAL, USER_KEY
 from socialhome.rate_limiter import (
     RateLimiter,
+    address_client_key,
     build_rate_limit_middleware,
     client_bucket,
+    ingress_client_key,
 )
 
 
@@ -385,6 +387,59 @@ async def test_signed_media_rule_leaves_the_default_bucket_alone():
     assert await _hit(mw, "/api/users/x", method="GET") == 429
     # Other methods on a matched path keep the default bucket too.
     assert await _hit(mw, "/api/users/x/picture", method="HEAD") == 429
+
+
+def _keyed_request(headers: dict[str, str], ip: str = "172.30.32.2"):
+    return make_mocked_request(
+        "GET", "/api/users/u1/picture", headers=headers, transport=_FakeTransport(ip)
+    )
+
+
+def test_address_client_key_is_the_address_bucket():
+    assert address_client_key(_keyed_request({})) == "172.30.32.2"
+
+
+def test_ingress_client_key_uses_the_supervisor_stamped_user():
+    req = _keyed_request({"X-Hass-Source": "core.ingress", "X-Remote-User-Id": "abc"})
+    assert ingress_client_key(req) == "ha-user:abc"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"X-Remote-User-Id": "abc"},  # not through HA Core's ingress
+        {"X-Hass-Source": "core.ingress"},  # no session user stamped
+    ],
+)
+def test_ingress_client_key_falls_back_to_the_address(headers):
+    assert ingress_client_key(_keyed_request(headers)) == "172.30.32.2"
+
+
+async def test_signed_client_key_picks_the_per_client_bucket():
+    """Behind ingress every browser has the Supervisor's address; the key
+    function lets the HA user name the bucket instead."""
+    rule = "GET /api/users/*/picture"
+    mw = build_rate_limit_middleware(
+        RateLimiter(),
+        limits={rule: (2, 60)},
+        per_client_signed_rules=frozenset({rule}),
+        signed_client_key=ingress_client_key,
+    )
+
+    async def hit(user: str) -> int:
+        req = _keyed_request(
+            {"X-Hass-Source": "core.ingress", "X-Remote-User-Id": user}
+        )
+        req[USER_KEY] = SimpleNamespace(user_id=SIGNED_URL_PRINCIPAL)
+
+        async def handler(_r):
+            return web.Response(status=200)
+
+        return (await mw(req, handler)).status
+
+    assert [await hit("a") for _ in range(3)] == [200, 200, 429]
+    assert await hit("b") == 200
 
 
 async def _response(mw, path: str, *, method: str = "POST"):

@@ -65,6 +65,25 @@ async function reloadSaved() {
   )
 }
 
+/** Apply ``fn`` to listing ``postId`` wherever the page holds it. */
+function patchListing(postId: string, fn: (l: BazaarListing) => BazaarListing) {
+  for (const list of [listings, myListings, savedListings]) {
+    if (list.value.some(l => l.post_id === postId)) {
+      list.value = list.value.map(l => (l.post_id === postId ? fn(l) : l))
+    }
+  }
+}
+
+/** Re-read one listing (an edit, a closing) instead of every list. */
+async function rereadListing(postId: string) {
+  try {
+    const fresh = await api.get(`/api/bazaar/${encodeURIComponent(postId)}`) as BazaarListing
+    patchListing(postId, () => fresh)
+  } catch {
+    /* gone or no longer visible: the next full load drops it */
+  }
+}
+
 /** ``?listing={post_id}`` (a notification's link): open that listing.
  *  One that is gone, or not visible to the viewer, says so. */
 async function openLinkedListing(postId: string) {
@@ -93,20 +112,44 @@ export default function BazaarPage() {
       me ? reloadSaved() : Promise.resolve(),
     ]).finally(() => { loading.value = false })
 
-    const refresh = () => {
-      void reloadActive()
-      if (currentUser.value) {
-        void reloadMine()
-        void reloadSaved()
-      }
+    // Live frames patch the grid from their payload. Every bid in the
+    // household used to reload all three lists — and the saved list is
+    // one read per saved listing — so a lively auction 429'd the page.
+    type Frame = {
+      listing_post_id?: string
+      seller_user_id?: string
+      new_end_time?: string | null
+      buyer_user_id?: string
+      price?: number
     }
+    const on = (type: string, apply: (f: Frame, id: string) => void) =>
+      ws.on(type, (e) => {
+        const f = e.data as Frame
+        if (f.listing_post_id) apply(f, f.listing_post_id)
+      })
     const offs = [
-      ws.on('bazaar.listing_created',   refresh),
-      ws.on('bazaar.listing_updated',   refresh),
-      ws.on('bazaar.listing_cancelled', refresh),
-      ws.on('bazaar.listing_closed',    refresh),
-      ws.on('bazaar.offer_accepted',    refresh),
-      ws.on('bazaar.bid_placed',        refresh),
+      on('bazaar.listing_created', (f) => {
+        void reloadActive()
+        const viewer = currentUser.value?.user_id
+        if (viewer && f.seller_user_id === viewer) void reloadMine()
+      }),
+      // Title, FAQ, winner — what the frame can't carry: that one listing.
+      on('bazaar.listing_updated', (_f, id) => { void rereadListing(id) }),
+      on('bazaar.listing_closed',  (_f, id) => { void rereadListing(id) }),
+      on('bazaar.listing_cancelled', (_f, id) => {
+        patchListing(id, l => ({ ...l, status: 'cancelled' }))
+      }),
+      on('bazaar.offer_accepted', (f, id) => {
+        patchListing(id, l => ({
+          ...l, status: 'sold',
+          winner_user_id: f.buyer_user_id ?? l.winner_user_id,
+          winning_price: f.price ?? l.winning_price,
+        }))
+      }),
+      on('bazaar.bid_placed', (f, id) => {
+        const end = f.new_end_time
+        if (end) patchListing(id, l => ({ ...l, end_time: end }))
+      }),
     ]
     return () => offs.forEach(o => o())
   }, [])

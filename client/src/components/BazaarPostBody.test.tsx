@@ -1,16 +1,34 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, act } from '@testing-library/preact'
 
 const { apiGet } = vi.hoisted(() => ({ apiGet: vi.fn() }))
 vi.mock('@/api', () => ({
   api: { get: apiGet, post: vi.fn(), delete: vi.fn() },
 }))
-vi.mock('@/ws', () => ({ ws: { on: () => () => {} } }))
+type WsHandler = (e: { type: string; data: Record<string, unknown> }) => void
+const { wsHandlers, panelProps, saveProps } = vi.hoisted(() => ({
+  wsHandlers: new Map<string, Set<(e: { type: string; data: Record<string, unknown> }) => void>>(),
+  panelProps: [] as Array<Record<string, unknown>>,
+  saveProps: [] as Array<Record<string, unknown>>,
+}))
+vi.mock('@/ws', () => ({
+  ws: {
+    on: (type: string, h: WsHandler) => {
+      if (!wsHandlers.has(type)) wsHandlers.set(type, new Set())
+      wsHandlers.get(type)!.add(h)
+      return () => { wsHandlers.get(type)?.delete(h) }
+    },
+  },
+}))
 vi.mock('@/store/auth', () => ({ currentUser: { value: { user_id: 'seller1' } } }))
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 vi.mock('@/components/confirm', () => ({ confirmDialog: vi.fn() }))
-vi.mock('./BazaarOffersPanel', () => ({ BazaarOffersPanel: () => null }))
-vi.mock('./SaveListingButton', () => ({ SaveListingButton: () => null }))
+vi.mock('./BazaarOffersPanel', () => ({
+  BazaarOffersPanel: (p: Record<string, unknown>) => { panelProps.push(p); return null },
+}))
+vi.mock('./SaveListingButton', () => ({
+  SaveListingButton: (p: Record<string, unknown>) => { saveProps.push(p); return null },
+}))
 vi.mock('./FileRenderer', () => ({ ImageRenderer: () => null }))
 
 import { BazaarPostBody } from './BazaarPostBody'
@@ -26,12 +44,20 @@ function listing(over: Record<string, unknown> = {}) {
   }
 }
 
-function mockApi(l: object, bids: object[], offers: object[]) {
+/** ``GET /api/bazaar/{id}`` carries the card's bids, the viewer's offers
+ *  and the saved flag — the card reads nothing else. */
+function mockApi(l: object, bids: object[], offers: object[], viewerSaved = false) {
   apiGet.mockImplementation((url: string) => {
     const u = String(url ?? '')
     if (u.endsWith('/bids')) return Promise.resolve(bids)
     if (u.endsWith('/offers')) return Promise.resolve(offers)
-    return Promise.resolve(l)
+    return Promise.resolve({ ...l, bids, offers, viewer_saved: viewerSaved })
+  })
+}
+
+function emit(type: string, data: Record<string, unknown>) {
+  act(() => {
+    wsHandlers.get(type)?.forEach(h => h({ type, data: { type, ...data } }))
   })
 }
 
@@ -260,5 +286,102 @@ describe('BazaarPostBody — questions and answers (v_75)', () => {
     const { container } = render(<BazaarPostBody postId="p1" detail />)
     await waitFor(() => expect(container.textContent).toContain('Vinyl'))
     expect(container.querySelector('.sh-bazaar-faq')).toBeNull()
+  })
+})
+
+describe('BazaarPostBody — one read per card', () => {
+  beforeEach(() => {
+    apiGet.mockReset()
+    panelProps.length = 0
+    saveProps.length = 0
+    currentUser.value = { user_id: 'buyer1' } as never
+  })
+
+  it('renders from GET /api/bazaar/{id} alone — no per-card bids / offers / save reads', async () => {
+    // A feed of 20 listings made 80 reads in 6 s (60/min bucket → 429s).
+    const offers = [{ id: 'o1', listing_post_id: 'p1', offerer_user_id: 'buyer1',
+      amount: 900, status: 'pending', created_at: 'x' }]
+    mockApi(listing({ mode: 'offer' }), [], offers, true)
+    const { container } = render(<BazaarPostBody postId="p1" />)
+    await waitFor(() => expect(container.textContent).toContain('1 offer'))
+    expect(apiGet.mock.calls.map(c => c[0])).toEqual(['/api/bazaar/p1'])
+    // The panel and the heart get their data handed down, not fetched.
+    expect(panelProps.at(-1)?.offers).toEqual(offers)
+    expect(saveProps.at(-1)?.initialSaved).toBe(true)
+  })
+})
+
+describe('BazaarPostBody — live frames patch the card', () => {
+  const bid = (over: Record<string, unknown> = {}) => ({
+    id: 'b1', listing_post_id: 'p1', bidder_user_id: 'other1', amount: 1200,
+    message: null, accepted: false, rejected: false, rejection_reason: null,
+    withdrawn: false, created_at: 'x', ...over,
+  })
+
+  async function show(user: string, l: object, bids: object[], offers: object[] = []) {
+    currentUser.value = { user_id: user } as never
+    mockApi(l, bids, offers)
+    const r = render(<BazaarPostBody postId="p1" />)
+    await waitFor(() => expect(r.container.textContent).toContain('Vinyl'))
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    return r.container
+  }
+
+  beforeEach(() => {
+    apiGet.mockReset()
+    wsHandlers.clear()
+  })
+
+  it('a new bid updates the price, the count and the end time without a read', async () => {
+    const end = new Date(Date.now() + 3 * 86_400_000).toISOString()
+    const c = await show('buyer1', listing({ mode: 'auction', start_price: 1000 }), [bid()])
+    expect(c.textContent).toContain('1 bid')
+    emit('bazaar.bid_placed', { listing_post_id: 'p1', amount: 1500, new_end_time: end })
+    expect(c.textContent).toContain('2 bids')
+    expect(c.querySelector('.sh-bazaar-price')?.textContent).toContain('15.00')
+    expect(c.querySelector('.sh-bazaar-countdown')?.textContent).toContain('2d')
+    // Another listing's frame changes nothing.
+    emit('bazaar.bid_placed', { listing_post_id: 'p2', amount: 9900 })
+    expect(c.textContent).toContain('2 bids')
+    expect(apiGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('a withdrawn or declined bid drops out of the count without a read', async () => {
+    const c = await show('buyer1', listing({ mode: 'auction', start_price: 1000 }),
+      [bid(), bid({ id: 'b2', amount: 1300 })])
+    expect(c.textContent).toContain('2 bids')
+    emit('bazaar.bid_withdrawn', { listing_post_id: 'p1', bid_id: 'b2', bidder_user_id: 'other1' })
+    expect(c.textContent).toContain('1 bid')
+    emit('bazaar.offer_rejected', { listing_post_id: 'p1', bid_id: 'b1', bidder_user_id: 'other1' })
+    expect(c.textContent).toContain('0 bids')
+    expect(apiGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancelled and sold land from the frame', async () => {
+    const c = await show('buyer1', listing({ mode: 'fixed', price: 1000 }), [])
+    emit('bazaar.offer_accepted', { listing_post_id: 'p1', buyer_user_id: 'other1', price: 1000 })
+    expect(c.querySelector('.sh-bazaar-sold-pill')?.textContent).toContain('10.00')
+    expect(c.textContent).not.toContain('Buy for')
+    expect(apiGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('a cancelled listing says so without a read', async () => {
+    const c = await show('buyer1', listing({ mode: 'fixed', price: 1000 }), [])
+    emit('bazaar.listing_cancelled', { listing_post_id: 'p1' })
+    expect(c.textContent).toContain('Cancelled')
+    expect(apiGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('the seller re-reads on a new bid — accept / decline need its id', async () => {
+    await show('seller1', listing({ mode: 'auction', start_price: 1000 }), [])
+    emit('bazaar.bid_placed', { listing_post_id: 'p1', amount: 1500 })
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2))
+  })
+
+  it('the bidder re-reads when their bid is declined — to read the reason', async () => {
+    await show('bidder1', listing({ mode: 'auction', start_price: 1000 }),
+      [bid({ bidder_user_id: 'bidder1' })])
+    emit('bazaar.offer_rejected', { listing_post_id: 'p1', bid_id: 'b1', bidder_user_id: 'bidder1' })
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2))
   })
 })

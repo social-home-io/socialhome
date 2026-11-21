@@ -210,7 +210,12 @@ from .peer_http import post_to_peer
 from .pinned_viewer import load_pinned_viewer
 from .platform import build_platform_adapter
 from .platform.adapter import Capability, PlatformAdapter
-from .rate_limiter import RateLimiter, build_rate_limit_middleware
+from .rate_limiter import (
+    RateLimiter,
+    address_client_key,
+    build_rate_limit_middleware,
+    ingress_client_key,
+)
 from .repositories import (
     SqliteBazaarRepo,
     SqliteCalendarRepo,
@@ -3121,17 +3126,27 @@ def _build_space_moderation(
 #: client address (``per_client_signed_rules``) so one busy browser — or a
 #: leaked URL — can't drain everyone's budget. 600/min still caps what a
 #: single client can pull; the bytes are local, nothing goes upstream.
+#: Behind HA ingress (``Capability.INGRESS``) every browser has the
+#: Supervisor's address, so the client is the Supervisor-stamped HA user
+#: instead (:func:`~socialhome.rate_limiter.ingress_client_key`).
 SIGNED_MEDIA_GET_LIMIT: tuple[int, int] = (600, 60)
 SIGNED_MEDIA_GET_RULES: tuple[str, ...] = (
     "GET /api/media/*",
     "GET /api/users/*/picture",
     "GET /api/spaces/*/members/*/picture",
+    # A space post's author picture (a remote author's, by space-scoped id).
+    "GET /api/spaces/*/authors/*/picture",
     "GET /api/spaces/*/cover",
     "GET /api/spaces/*/icon",
 )
 
 
-def _build_middleware(config: Config, limiter: RateLimiter):
+def _build_middleware(
+    config: Config,
+    limiter: RateLimiter,
+    *,
+    capabilities: frozenset[Capability] = frozenset(),
+):
     """Compose the HTTP middleware stack.
 
     Order matters: hardening runs first (cheap rejects), then auth,
@@ -3153,6 +3168,11 @@ def _build_middleware(config: Config, limiter: RateLimiter):
         # Order matters: the most-specific patterns must come first so
         # they short-circuit the broader prefix matches that follow.
         per_client_signed_rules=frozenset(SIGNED_MEDIA_GET_RULES),
+        signed_client_key=(
+            ingress_client_key
+            if Capability.INGRESS in capabilities
+            else address_client_key
+        ),
         limits={
             **dict.fromkeys(SIGNED_MEDIA_GET_RULES, SIGNED_MEDIA_GET_LIMIT),
             # Discover-tab avatars proxied from a GFS: every hit is an
@@ -3215,7 +3235,23 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             "/api/spaces": (600, 60),
             # Sensitive surfaces — tighter than the 60/min default.
             "/api/me/tokens": (10, 60),  # API token create
-            "/api/feed/posts": (30, 60),  # household posting
+            # Household posting. A method rule: as a path prefix it also
+            # capped reading a post's comments, reactions and permalink at
+            # 30/min. Those, and commenting / reacting, use the 60/min
+            # default ``api/feed`` bucket.
+            "POST /api/feed/posts": (30, 60),
+            # The home page's corner bundle: refreshed (throttled, ≤ 1 per
+            # 10 s per open page) on live frames, so it gets its own bucket
+            # instead of sharing the 60/min ``api/me`` one with profile
+            # writes. 120/min covers a few open tabs and devices.
+            "GET /api/me/corner": (120, 60),
+            # Bazaar reads: each listing card reads its listing (bids,
+            # offers and saved flag ride along), so a feed of 20 listings
+            # plus the Bazaar page 429'd under the 60/min default. Reads are
+            # local and cheap: 300/min per person. Bids, offers, questions
+            # and saves stay in the 60/min default ``api/bazaar`` bucket.
+            # One rule (one bucket) for the list and every read under it.
+            "GET /api/bazaar*": (300, 60),
             # Changing who sees today's highlight: each change can send the
             # day's frames (≤ 30) to every household it adds, so at most 6
             # changes an hour per author — ≤ 6 × 30 envelopes per added
@@ -4282,7 +4318,7 @@ def create_app(config: Config | None = None) -> web.Application:
         cors_middleware,
         rate_middleware,
         space_seat_gate_middleware,
-    ) = _build_middleware(config, limiter)
+    ) = _build_middleware(config, limiter, capabilities=platform_adapter.capabilities)
 
     # ── Application ───────────────────────────────────────────────────────
     # Order matters: hardening runs first (cheap rejects), then auth,

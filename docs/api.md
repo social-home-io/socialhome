@@ -1051,7 +1051,13 @@ is for members:** `POST …/bids` and `POST …/offers` from a follower answer
 `403 SUBSCRIBER_READ_ONLY` (`params.action: "trade"`); a follower may look
 and save. `GET /api/bazaar/{id}` carries **`viewer_can_trade`** (boolean,
 per caller: a writer seat and not the seller) so the SPA hides Buy / bid /
-offer for a follower. `GET /api/me/bazaar/saved` leaves out bookmarks of
+offer for a follower. It also carries what a feed card shows, so a card
+is one read (it was four: listing, `/bids`, `/offers`, `/save`): **`bids`**
+(the `GET …/bids` rows, same per-viewer reasons), **`offers`** (the
+`GET …/offers` rows — every offer for the seller, the caller's own for
+anyone else) and **`viewer_saved`** (the `GET …/save` answer). The SPA then
+patches a card from the `bazaar.*` frames (amount, `new_end_time`, status)
+instead of re-reading it. `GET /api/me/bazaar/saved` leaves out bookmarks of
 listings the caller can no longer see.
 
 **Declining a bid.** `POST /api/bazaar/{id}/bids/{bid_id}/reject` (seller
@@ -1987,6 +1993,9 @@ These pages are server-rendered HTML and require no auth.
 | `PATCH /api/highlights/{id}/audience` | 6 / hour / user — each change can send the day's frames (≤ 30) to every household it adds, so one author can cause at most 6 × 30 envelopes per added household an hour |
 | `POST /api/apps/{app_id}/messages` | 300 / min / user — its own bucket (a quick game's moves no longer share the 60 / min `/api/apps` default with the store writes around them); each send is one envelope to one household. |
 | `GET /api/apps/{app_id}/store`, `GET / PUT / DELETE …/store/{key}` | 300 / min / user — its own bucket, sized like the moves its writes go with (a fast game saves around each shot); each call touches one key of the caller's own data, ≤ 64 KiB, local only. |
+| `GET /api/bazaar`, `GET /api/bazaar/*` (every Bazaar read) | 300 / min / user, one bucket — a feed card reads its listing once (bids, offers and the saved flag ride along), so a feed of 20 listings plus the Bazaar page no longer 429s. Bids, offers, questions, asks and saves stay in the 60 / min default `api/bazaar` bucket. |
+| `GET /api/me/corner` | 120 / min / user, its own bucket — the home page refreshes it on live frames (at most once per 10 s per open page, never for space or household chat messages, not while the tab is hidden); it no longer shares the 60 / min `api/me` bucket with profile writes. |
+| `POST /api/feed/posts` (create a household post) | 30 / min / user — a method rule: reading a post, its comments and reactions, commenting and reacting use the 60 / min default `api/feed` bucket (the old path rule capped them at 30 too). |
 | `POST /api/link-preview` | 30 / min / user — on top, the service caps **fresh page fetches** (cache misses, including the ones a post create causes) at 20 / 5 min per member and 60 / 5 min per household; over budget the answer is simply "no card". |
 | `POST /unlock` (household dashboard port) | 5 wrong PINs / 15 min per lock — the bucket is the locked session's id (minted by `/lock`, kept by cookie renewal), never the client address: tablets behind one reverse proxy don't share it, and rotating addresses or renewing the cookie doesn't reset it. Separate from the password bucket; never feeds the global brake. The wrong PIN that reaches the limit (or any try past it) signs the tablet out (303 `/login?signed_out=1`) and revokes the session; a hold-back for any other reason only asks it to wait (303 `/?pin=wait`). |
 | `POST /ack` (household dashboard port) | 30 / 5 min per session (the session id, like the PIN bucket) — far above any household; caps writes from a stuck or scripted tablet. 429 + `Retry-After`. |
@@ -1998,7 +2007,7 @@ These pages are server-rendered HTML and require no auth.
 | `POST /api/display/v1/pair/claim` (household dashboard port) | 10 / 10 min per client address (socket peer), a bucket of its own — code-pairing tries can't use up what a panel needs to spend its claim in time. Claims are 256-bit, so this only caps the work of a flood. 429 + `Retry-After`. |
 | `POST /api/admin/dashboard/displays` (wrong pairing codes) | 5 wrong codes / 15 min — one bucket for every admin (the code is what's guessed, not the account); counted before the check, cleared by a right code. Never feeds the dashboard's global login brake. 429 `DASHBOARD_PAIRING_THROTTLED`. |
 | `POST /login`, `POST /enter` (household dashboard port) | 5 failed attempts / 15 min per client address (socket peer, never `X-Forwarded-For`); `/login` also 30 failures / 15 min across all clients — the global brake (a valid setup token neither feeds nor obeys it). Counted in memory by `DashboardAuth` (survives a port change, not a restart); one password check at a time. Behind a reverse proxy every tablet shares one client bucket. |
-| `GET /api/media/{filename}`, `GET /api/users/{id}/picture`, `GET /api/spaces/{id}/members/{user_id}/picture`, `GET /api/spaces/{id}/cover`, `GET /api/spaces/{id}/icon` | 600 / min each — per **user** for a bearer caller, per **client address** (IPv6 by /64) for a signed-URL `<img>` fetch. A signed URL authenticates as one constant principal, so these used to share a single household-wide 60 / min bucket per path family and one Friends page of ~22 avatars 429'd on its third load. Behind the HA ingress proxy every browser has the proxy's address, so the bucket is household-wide there. |
+| `GET /api/media/{filename}`, `GET /api/users/{id}/picture`, `GET /api/spaces/{id}/members/{user_id}/picture`, `GET /api/spaces/{id}/authors/{author_id}/picture`, `GET /api/spaces/{id}/cover`, `GET /api/spaces/{id}/icon` | 600 / min each — per **user** for a bearer caller, per **client** for a signed-URL `<img>` fetch. A signed URL authenticates as one constant principal, so these used to share a single household-wide 60 / min bucket per path family and one Friends page of ~22 avatars 429'd on its third load. The client is its address (IPv6 by /64) — except behind HA ingress (`haos`, `Capability.INGRESS`), where every browser has the Supervisor's address: there it is the HA user the Supervisor stamps on every proxied request (`X-Remote-User-Id`, client copies stripped), falling back to the address when none is stamped. The SPA loads avatars lazily, so an off-screen one costs nothing. |
 | `GET /api/gfs/{gfs_id}/moments/users/{user_id}/picture` | 300 / min — one shared bucket for signed-URL fetches (like map tiles): every hit is an upstream fetch from the GFS, so a leaked URL must not multiply it per client. |
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
 | `POST /cluster/sync` | 60 / min per **verified** peer node — counted only after the frame verified under the key this GFS holds for that node (its pin, or the GFS's own key for a shared-seed node), never on the `from` a request claims, so forged traffic naming a real peer cannot lock it out. Every request that proves no member — malformed body, unknown suite, stale timestamp, unknown or unapproved sender, key mismatch, bad signature, or a replay — spends a separate 30 / min per **source address** budget instead (wrong recipient included). Once that is spent the address is shed: its frames are still parsed and matched against the roster (no crypto), anything not naming an approved node gets 429, and a frame naming one is verified — accepted if it verifies, else it spends that node's 30 / min **failed-verify** budget, after which further such frames get 429 without a verify. Verify CPU on forgeries is therefore bounded per address, then per approved node, and the node's own budget is never spent by a forgery. Genuine peers never touch the address budget. Behind a shared reverse proxy configure `trusted_proxies` (below) so the budget keys on the real client. |
@@ -2050,7 +2059,10 @@ household's per-user limiter (`rate_limiter.py`) it is computed from the
 sliding window — the whole seconds until the oldest request leaves it, so a
 client that waits exactly that long gets through — and the
 `{"error": {"code": "RATE_LIMITED", …}}` body carries the same number as
-`retry_after` (the SPA retries a pairing `confirm` once after it).
+`retry_after` (the SPA retries a pairing `confirm` once after it). The SPA's
+api client also retries any **GET** that got a 429 once, after `Retry-After`
+(≤ 30 s; ~2 s when the header is missing); a write is never retried. A read
+still refused says "You're going a bit fast — try again in a moment."
 
 **Signed media URLs.** Browser-loaded media (`<img>`, `<video>`) carries no
 bearer header, so every `picture_url` / `media_url` / `cover_url` /

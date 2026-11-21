@@ -6,7 +6,7 @@
  * to keep bid counts + countdowns live, and exposes context-aware
  * action affordances (Buy / Place bid / Make offer / Cancel / Accept).
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
@@ -83,22 +83,24 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
   // Bumped when this viewer changed the FAQ: refetch the listing now
   // (other viewers refresh on the ``bazaar.listing_updated`` frame).
   const [reload, setReload] = useState(0)
+  const [errorText, setErrorText] = useState<string | null>(null)
+
+  // The latest listing, for frame handlers that patch by mode / seller.
+  const listingRef = useRef<BazaarListing | null>(null)
+  listingRef.current = listing
 
   useEffect(() => {
     let stopped = false
+    // ONE read per card: the listing carries its bids, the viewer's offers
+    // and the saved flag. A feed of 20 listings used to make 80 reads
+    // (listing, bids, offers, save) and trip the 60/min Bazaar bucket.
     const refresh = async () => {
       try {
-        const [l, bs, os] = await Promise.all([
-          api.get(`/api/bazaar/${postId}`) as Promise<BazaarListing>,
-          api.get(`/api/bazaar/${postId}/bids`) as Promise<BazaarBid[]>,
-          // Returns [] for non-offer listings; scoped per viewer by the API.
-          (api.get(`/api/bazaar/${postId}/offers`) as Promise<BazaarOffer[]>)
-            .catch(() => [] as BazaarOffer[]),
-        ])
+        const l = await api.get(`/api/bazaar/${postId}`) as BazaarListing
         if (stopped) return
         setListing(l)
-        setBids(bs)
-        setOffers(os)
+        setBids(l.bids ?? [])
+        setOffers(l.offers ?? [])
         setLoadState('ok')
       } catch (err: unknown) {
         if (stopped) return
@@ -107,27 +109,84 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
         if (status === 404 || msg.includes('404')) {
           setLoadState('missing')
         } else {
-          setLoadState('error')
+          // A card that already shows keeps showing; a busy moment (429,
+          // still after the api client's one retry) says so plainly.
+          setErrorText(status === 429 ? msg : null)
+          setLoadState(cur => (cur === 'ok' ? cur : 'error'))
         }
       }
     }
     void refresh()
 
-    const matches = (e: { data: unknown }) =>
-      (e.data as { listing_post_id?: string }).listing_post_id === postId
-    const off1 = ws.on('bazaar.bid_placed',        (e) => { if (matches(e)) void refresh() })
-    const off2 = ws.on('bazaar.listing_closed',    (e) => { if (matches(e)) void refresh() })
-    const off3 = ws.on('bazaar.listing_updated',   (e) => { if (matches(e)) void refresh() })
-    const off4 = ws.on('bazaar.listing_cancelled', (e) => { if (matches(e)) void refresh() })
-    const off5 = ws.on('bazaar.offer_accepted',    (e) => { if (matches(e)) void refresh() })
-    const off6 = ws.on('bazaar.offer_rejected',    (e) => { if (matches(e)) void refresh() })
-    const off7 = ws.on('bazaar.bid_withdrawn',     (e) => { if (matches(e)) void refresh() })
+    // Live frames patch the card from their payload. Every viewer in the
+    // household gets every frame, so a re-read here was one read per open
+    // card per bid. Only what the frame can't carry is re-read: a closing
+    // (winner, final price), an edit (title, FAQ), the seller's new bid or
+    // offer (accept / decline need its id) and the bidder's own declined
+    // bid (the reason reaches only them).
+    type Frame = {
+      listing_post_id?: string
+      amount?: number
+      new_end_time?: string | null
+      bid_id?: string
+      bidder_user_id?: string
+      buyer_user_id?: string
+      price?: number
+    }
+    const on = (type: string, apply: (f: Frame) => void) =>
+      ws.on(type, (e) => {
+        const f = e.data as Frame
+        if (f.listing_post_id === postId && listingRef.current) apply(f)
+      })
+    const mine = () => currentUser.value?.user_id
+    const offs = [
+      on('bazaar.bid_placed', (f) => {
+        const l = listingRef.current!
+        if (l.seller_user_id === mine()) { void refresh(); return }
+        if (f.new_end_time) {
+          const end = f.new_end_time
+          setListing(cur => cur && { ...cur, end_time: end })
+        }
+        // Offers are per viewer: someone else's never shows here.
+        if ((l.mode === 'auction' || l.mode === 'bid_from') && typeof f.amount === 'number') {
+          const amount = f.amount
+          setBids(cur => cur.some(b => b.amount === amount && !b.withdrawn && !b.rejected)
+            ? cur  // our own bid, already read back
+            : [...cur, {
+                id: `live-${amount}`, listing_post_id: postId, bidder_user_id: '',
+                amount, message: null, accepted: false, rejected: false,
+                rejection_reason: null, withdrawn: false, created_at: new Date().toISOString(),
+              } as BazaarBid])
+        }
+      }),
+      on('bazaar.listing_closed',  () => { void refresh() }),
+      on('bazaar.listing_updated', () => { void refresh() }),
+      on('bazaar.listing_cancelled', () => {
+        setListing(cur => cur && { ...cur, status: 'cancelled' })
+      }),
+      on('bazaar.offer_accepted', (f) => {
+        setListing(cur => cur && {
+          ...cur, status: 'sold',
+          winner_user_id: f.buyer_user_id ?? cur.winner_user_id,
+          winning_price: f.price ?? cur.winning_price,
+        })
+      }),
+      on('bazaar.offer_rejected', (f) => {
+        if (f.bidder_user_id && f.bidder_user_id === mine()) { void refresh(); return }
+        setBids(cur => cur.map(b => b.id === f.bid_id ? { ...b, rejected: true } : b))
+        setOffers(cur => cur.map(o => o.id === f.bid_id ? { ...o, status: 'rejected' } : o))
+      }),
+      on('bazaar.bid_withdrawn', (f) => {
+        setBids(cur => cur.map(b => b.id === f.bid_id ? { ...b, withdrawn: true } : b))
+        setOffers(cur => cur.map(o => o.id === f.bid_id ? { ...o, status: 'withdrawn' } : o))
+      }),
+    ]
 
     const timer = setInterval(() => setTick(t => t + 1), 30_000)
 
     return () => {
       stopped = true
-      off1(); off2(); off3(); off4(); off5(); off6(); off7()
+      offs.forEach(off => off())
       clearInterval(timer)
     }
   }, [postId, reload])
@@ -166,7 +225,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
   if (loadState === 'error' || !listing) {
     return (
       <div class="sh-bazaar-card sh-bazaar-card--error">
-        <span class="sh-muted">{t('bazaar.card.load_error')}</span>
+        <span class="sh-muted">{errorText ?? t('bazaar.card.load_error')}</span>
       </div>
     )
   }
@@ -192,6 +251,12 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
   const closed = listing.status !== 'active'
   // Past end_time the high bid has won, even before the sweep marks it.
   const pastEnd = Date.parse(listing.end_time) <= Date.now()
+  // After the viewer's own action: read the card back once (the frames
+  // don't say whose bid / offer is whose), then tell the parent.
+  const changed = () => {
+    setReload(n => n + 1)
+    onUpdated?.()
+  }
   const countdown = formatCountdown(listing.end_time)
 
   const placeBid = async (amountCents: number, message?: string) => {
@@ -205,7 +270,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
       setBidAmount('')
       setOfferMessage('')
       showToast(t('bazaar.card.bid_placed'), 'success')
-      onUpdated?.()
+      changed()
     } catch (err: unknown) {
       showToast(
         t('bazaar.error.bid', { error: String((err as Error).message ?? err) }), 'error',
@@ -221,7 +286,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
     try {
       await api.delete(`/api/bazaar/${postId}/bids/${bidId}`)
       showToast(t('bazaar.card.bid_withdrawn'), 'info')
-      onUpdated?.()
+      changed()
     } catch (err: unknown) {
       showToast(
         t('bazaar.error.withdraw', { error: String((err as Error).message ?? err) }), 'error',
@@ -237,7 +302,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
     try {
       await api.post(`/api/bazaar/${postId}/bids/${bidId}/accept`)
       showToast(t('bazaar.card.offer_accepted'), 'success')
-      onUpdated?.()
+      changed()
     } catch (err: unknown) {
       showToast(
         t('bazaar.error.accept', { error: String((err as Error).message ?? err) }), 'error',
@@ -258,7 +323,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
         reason ? { reason } : {},
       )
       showToast(t('bazaar.card.offer_declined'), 'info')
-      onUpdated?.()
+      changed()
     } catch (err: unknown) {
       showToast(
         t('bazaar.error.decline', { error: String((err as Error).message ?? err) }), 'error',
@@ -274,7 +339,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
     try {
       await api.delete(`/api/bazaar/${postId}`)
       showToast(t('bazaar.card.cancelled_toast'), 'info')
-      onUpdated?.()
+      changed()
     } catch (err: unknown) {
       showToast(
         t('bazaar.error.cancel', { error: String((err as Error).message ?? err) }), 'error',
@@ -303,7 +368,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
       setBidAmount('')
       setOfferMessage('')
       showToast(t('bazaar.card.offer_sent'), 'success')
-      onUpdated?.()
+      changed()
     } catch (err: unknown) {
       showToast(
         t('bazaar.error.offer', { error: String((err as Error).message ?? err) }), 'error',
@@ -340,7 +405,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
             {modeLabel(listing.mode)}
           </span>
           {me && !isSeller && (
-            <SaveListingButton postId={postId} />
+            <SaveListingButton postId={postId} initialSaved={listing.viewer_saved} />
           )}
         </div>
       </div>
@@ -501,7 +566,8 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
         <BazaarOffersPanel
           listing={listing}
           currentUserId={me ?? null}
-          onListingChanged={onUpdated} />
+          offers={offers}
+          onListingChanged={changed} />
       )}
 
       {isSeller && <ListingQuestions postId={postId} />}

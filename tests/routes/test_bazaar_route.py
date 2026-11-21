@@ -663,3 +663,34 @@ async def test_an_over_long_reason_is_refused(client):
             headers=_auth(client._tok),
         )
         assert r.status == 422, path
+
+
+# ─── Card data in one read ────────────────────────────────────────────────
+
+
+async def test_listing_detail_carries_the_cards_bids_offers_and_saved_flag(client):
+    """A feed card renders from ``GET /api/bazaar/{id}`` alone: the bids,
+    the viewer's offers and whether the viewer saved it ride along, so a
+    feed of 20 listings is 20 reads, not 80 (the 60/min bucket 429'd)."""
+    await _seed_listing(client, listing_id="lst-card", seller="other-user")
+    h = _auth(client._tok)
+    db = client._db
+    await db.enqueue(
+        "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+        " amount, status) VALUES(?,?,?,?,?)",
+        ("foreign-card-offer", "lst-card", "someone-else", 100, "pending"),
+    )
+    r = await client.get("/api/bazaar/lst-card", headers=h)
+    body = await r.json()
+    assert body["bids"] == []
+    assert body["offers"] == []
+    assert body["viewer_saved"] is False
+
+    await client.post("/api/bazaar/lst-card/bids", json={"amount": 300}, headers=h)
+    await client.post("/api/bazaar/lst-card/offers", json={"amount": 200}, headers=h)
+    await client.post("/api/bazaar/lst-card/save", json={}, headers=h)
+    body = await (await client.get("/api/bazaar/lst-card", headers=h)).json()
+    assert [b["amount"] for b in body["bids"]] == [300]
+    # Offers stay per viewer: only the caller's own, never someone else's.
+    assert [o["offerer_user_id"] for o in body["offers"]] == [client._uid]
+    assert body["viewer_saved"] is True

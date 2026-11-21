@@ -54,6 +54,32 @@ def client_bucket(raw: str | None) -> str:
     return str(addr)
 
 
+def address_client_key(request: web.Request) -> str:
+    """The per-client key of a signed-URL request: its address bucket."""
+    return client_bucket(request.remote)
+
+
+def ingress_client_key(request: web.Request) -> str:
+    """The per-client key of a signed-URL request behind HA ingress.
+
+    Every browser reaches the app through the Supervisor, so every request
+    has the Supervisor's address and an address bucket is one bucket for the
+    whole household. The Supervisor stamps the session user on every proxied
+    request (``X-Remote-User-Id``, set after it drops any client-supplied
+    ``X-Remote-User-*`` header — ``supervisor/api/ingress.py``
+    ``_init_header``), and HA Core sets ``X-Hass-Source: core.ingress``
+    (``homeassistant/components/hassio/ingress.py``), so behind ingress the
+    user id is the honest per-client key. A request without them falls back
+    to the address. Only wire this where the adapter has
+    ``Capability.INGRESS``: anywhere else the headers are the client's own.
+    """
+    if request.headers.get("X-Hass-Source") == "core.ingress":
+        ha_user = request.headers.get("X-Remote-User-Id")
+        if ha_user:
+            return f"ha-user:{ha_user}"
+    return address_client_key(request)
+
+
 class RateLimiter:
     """A trivially simple sliding-window rate limiter.
 
@@ -179,6 +205,7 @@ def build_rate_limit_middleware(
     default_window_s: int = 60,
     limits: dict[str, tuple[int, int]] | None = None,
     per_client_signed_rules: frozenset[str] = frozenset(),
+    signed_client_key: Callable[[web.Request], str] = address_client_key,
 ):
     """Return an aiohttp middleware that enforces per-endpoint limits.
 
@@ -198,7 +225,9 @@ def build_rate_limit_middleware(
     one bucket: one busy page starves everyone's avatars, and a leaked
     URL can drain the bucket for the whole household. Rules that cap
     traffic the household makes *upstream* (map tiles, GFS proxies) stay
-    out of this set so the cap stays household-wide.
+    out of this set so the cap stays household-wide. ``signed_client_key``
+    names the client (default: its address; :func:`ingress_client_key`
+    behind HA ingress, where every browser shares the Supervisor's address).
     """
     limits = limits or {}
     unknown = per_client_signed_rules - limits.keys()
@@ -283,7 +312,7 @@ def build_rate_limit_middleware(
         if rule is not None:
             owner = user_id
             if user_id == SIGNED_URL_PRINCIPAL and rule in per_client_signed_rules:
-                owner = f"{per_client_prefix}{client_bucket(request.remote)}"
+                owner = f"{per_client_prefix}{signed_client_key(request)}"
                 now = limiter.now
                 if now - last_sweep[0] >= per_client_window_s:
                     last_sweep[0] = now
