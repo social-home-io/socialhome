@@ -4387,9 +4387,8 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # Store services / repos in app using typed AppKeys (no warnings)
     app[K.config_key] = config
-    # Expose the same limiter so public endpoints (e.g. /api/auth/token)
-    # can implement IP-bucket brute-force protection without rebuilding
-    # a second instance.
+    # Expose the same limiter so public endpoints (e.g. the federation
+    # inbox) can implement IP-bucket limits without a second instance.
     app[K.rate_limiter_key] = limiter
     # Wrong passwords / reset links only (§25.7): /api/auth/token, reset.
     app[K.login_throttle_key] = LoginThrottle()

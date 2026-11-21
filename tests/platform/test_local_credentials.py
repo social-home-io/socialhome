@@ -71,3 +71,24 @@ async def test_password_check_runs_off_the_event_loop(monkeypatch):
     store = LocalCredentialStore(_Db({"anna": hash_password("right")}))
     assert await store.issue_bearer_token("anna", "right") is not None
     assert threads, "verify_password was not run via asyncio.to_thread"
+
+
+@pytest.mark.security
+async def test_password_checks_are_bounded(monkeypatch):
+    """A flood of logins runs at most VERIFY_CONCURRENCY scrypt checks at
+    once, so it can't take over the shared thread pool."""
+    running = 0
+    peak = 0
+
+    async def slow_to_thread(fn, *args, **kwargs):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return False
+
+    monkeypatch.setattr(local_credentials.asyncio, "to_thread", slow_to_thread)
+    store = LocalCredentialStore(_Db({}))
+    await asyncio.gather(*(store.issue_bearer_token(f"u{i}", "x") for i in range(20)))
+    assert peak == local_credentials.VERIFY_CONCURRENCY

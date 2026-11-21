@@ -9,6 +9,7 @@ from socialhome.login_throttle import (
     FAILURE_WINDOW_S,
     LOGIN_IP_MAX_FAILURES,
     LOGIN_USER_MAX_FAILURES,
+    LOGIN_USER_MAX_SUCCESSES,
     RESET_IP_MAX_FAILURES,
     LoginThrottle,
     normalize_username,
@@ -187,3 +188,52 @@ def test_username_keys_do_not_hold_the_raw_name(throttle: LoginThrottle):
     long_name = "x" * 100_000
     assert throttle.begin_login("10.0.0.1", long_name) == 0
     assert all(len(k) < 200 for k in throttle.bucket_keys())
+
+
+def test_successes_per_username_are_capped(throttle: LoginThrottle):
+    """One known password can't loop the endpoint for unlimited scrypt work
+    and token rows: successes have a cap of their own, never handed back."""
+    for i in range(LOGIN_USER_MAX_SUCCESSES):
+        assert throttle.begin_login(f"10.0.0.{i}", "anna") == 0
+        throttle.login_succeeded(f"10.0.0.{i}", "anna")
+    assert throttle.begin_login("10.0.9.9", "anna") > 0
+    # Other people at the same address are unaffected.
+    assert throttle.begin_login("10.0.0.1", "ben") == 0
+
+
+def test_reset_does_not_lift_the_success_cap(throttle: LoginThrottle):
+    for _ in range(LOGIN_USER_MAX_SUCCESSES):
+        assert throttle.begin_login("10.0.0.1", "anna") == 0
+        throttle.login_succeeded("10.0.0.1", "anna")
+    assert throttle.begin_reset("10.0.0.1") == 0
+    throttle.reset_succeeded("10.0.0.1", "anna")
+    assert throttle.begin_login("10.0.0.1", "anna") > 0
+
+
+@pytest.mark.security
+def test_a_full_table_never_drops_a_locked_bucket(clock: _Clock):
+    """Flooding the table with junk keys must not unlock a username."""
+    throttle = LoginThrottle(clock=clock, max_keys=40)
+    for i in range(LOGIN_USER_MAX_FAILURES):
+        assert throttle.begin_login(f"10.0.0.{i}", "admin") == 0
+    assert throttle.begin_login("10.0.9.9", "admin") > 0
+    for i in range(500):
+        throttle.begin_login(f"2001:db8:{i:x}::/64", f"junk{i}")
+        clock.now += 0.1
+    assert throttle.key_count <= 40
+    assert throttle.begin_login("10.0.9.9", "admin") > 0
+
+
+@pytest.mark.security
+def test_a_table_full_of_locked_buckets_fails_closed(clock: _Clock):
+    throttle = LoginThrottle(clock=clock, max_keys=3)
+    for ip in ("10.0.0.1", "10.0.0.2"):
+        for i in range(LOGIN_IP_MAX_FAILURES):
+            assert throttle.begin_login(ip, f"{ip}-u{i}") == 0
+    # Two locked address keys plus one evictable name key: a newcomer needs
+    # two keys, so there is no room — it waits rather than unlock anyone.
+    assert throttle.begin_login("10.0.0.3", "new") > 0
+    assert throttle.key_count <= 3
+    assert throttle.begin_login("10.0.0.1", "other") > 0
+    clock.now += FAILURE_WINDOW_S
+    assert throttle.begin_login("10.0.0.3", "new") == 0

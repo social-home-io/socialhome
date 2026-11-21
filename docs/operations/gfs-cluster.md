@@ -428,6 +428,13 @@ server {
 }
 ```
 
+Behind a **Cloudflare Tunnel** (`cloudflared`) the TCP peer is the local
+tunnel process, not a Cloudflare edge address, so the range check above
+never matches. Trust `CF-Connecting-IP` from the tunnel's own address
+instead (in HAProxy, `acl from_cloudflare src 127.0.0.1` when `cloudflared`
+runs on the same host; in nginx, `set_real_ip_from 127.0.0.1;`), and make
+sure nothing but the tunnel can reach that listener.
+
 and in `global_server.toml`, only the proxy itself:
 
 ```toml
