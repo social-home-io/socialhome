@@ -826,6 +826,23 @@ async def test_a_restarted_member_compares_its_held_page_once():
     assert state.calls == 1
 
 
+async def test_reading_the_status_of_an_unjudged_page_compares_it_once():
+    """Demo root cause, second half: after a restart the host may refuse our
+    BEGINs for a while (its hourly budget), so no sentinel comes. Asking for
+    the status is the event: a held page without a verdict is compared."""
+    rows = [_row("p1")]
+    t = _Listed(rows, rows)
+    await t.take_page()
+    restarted = _Listed(rows, rows)
+    restarted.env.repo.rows = t.env.repo.rows
+    restarted.env.svc._repo = t.env.repo
+    assert (await restarted.position()).match is None  # starts the compare
+    await restarted.env.svc.wait_idle()
+    assert (await restarted.position()).match is True
+    await restarted.env.svc.wait_idle()
+    assert restarted.env.state.calls == 1
+
+
 async def test_a_repeated_page_is_not_compared_again():
     """A sentinel without a page (we hold it) or the same page again: no
     compare — the next comparison comes only with the next page."""

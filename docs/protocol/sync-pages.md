@@ -599,7 +599,8 @@ What shipped, where it is more exact than the design above:
   waits out the rest once; the compare then takes the newest page). Never
   for a page we signed. Hashing runs in `asyncio.to_thread`. Verdicts are
   memory only, so a held page with none (after a restart) is compared on
-  the next sentinel — once; a judged page never again.
+  the next sentinel or the next read of the sync status, whichever comes
+  first — once; a judged page never again.
   1. **Explain locally, no wire cost.** A differing bucket in which we hold
      a row whose change time (the newest of `created_at`, `edited_at`,
      `updated_at`, `last_edited_at`, `archived_at`, `sold_at`, `deleted_at`

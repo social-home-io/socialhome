@@ -935,6 +935,15 @@ class SyncPageService:
             return None
         page = held.page
         check = self._checks.get(space.id)
+        if (
+            (check is None or check.root != page.root)
+            and page.signer != self._own_instance_id
+            and space.id not in self._comparing
+        ):
+            # A held page without a verdict (verdicts are memory only — a
+            # restart loses them): asking for the status starts its compare,
+            # once. The status rechecks when it is done.
+            self.compare_soon(space.id)
         match: bool | None = None
         missing: int | None = None
         differing: int | None = None
