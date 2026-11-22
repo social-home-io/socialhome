@@ -786,13 +786,17 @@ class SpaceSyncReceiver(
             outcome = await self._apply(resource, space_id, [record], provider=provider)
         finally:
             VERIFIED_ROW.reset(token)
-        if not outcome.count and await self._parent_missing(resource, record):
+        if not outcome.count and await self._parent_missing(space_id, resource, record):
             outcome.count += 1
         return outcome
 
-    async def _parent_missing(self, resource: str, record: dict[str, Any]) -> bool:
-        """Whether *record*'s parent row is held nowhere here (in no space —
-        one held in another space is a refusal by rule)."""
+    async def _parent_missing(
+        self, space_id: str, resource: str, record: dict[str, Any]
+    ) -> bool:
+        """Whether *record*'s parent row is held nowhere here yet (in no
+        space, and not deleted here) — the only case it may still arrive.
+        One held in another space, or deleted here, is a refusal by rule.
+        (A deleted post stays held, soft-deleted.)"""
         match resource:
             case "comments" | "polls" | "schedules" | "bazaar":
                 post_id = str(record.get("post_id") or "")
@@ -804,6 +808,9 @@ class SpaceSyncReceiver(
                 return (
                     bool(list_id)
                     and await self._space_task_repo.get_list(list_id) is None
+                    and not await self._space_task_repo.is_list_deleted(
+                        list_id, space_id=space_id
+                    )
                 )
             case "gallery":
                 album_id = str(record.get("album_id") or "")
@@ -812,6 +819,9 @@ class SpaceSyncReceiver(
                     and bool(album_id)
                     and self._gallery_repo is not None
                     and await self._gallery_repo.get_album(album_id) is None
+                    and not await self._gallery_repo.is_album_deleted(
+                        album_id, space_id=space_id
+                    )
                 )
         return False
 

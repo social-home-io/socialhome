@@ -117,7 +117,7 @@ from ....sync_page import (
 from ...host_equivalence import serves_as_host
 from .exporter import RESOURCE_ORDER, record_batches
 from .page_state import BucketRows
-from .stream_health import HeldBack
+from .stream_health import HELD_BACK_LIMIT, HeldBack
 from .trusted_helpers import helper_offset, member_deliverers
 
 if TYPE_CHECKING:
@@ -445,7 +445,8 @@ def _still_missing(
     local: BucketRows,
     horizon: str,
     applied: list[_Applied],
-) -> tuple[dict[int, int], dict[int, tuple[bytes, int]]]:
+    held: set[bytes],
+) -> tuple[dict[int, int], dict[int, tuple[bytes, int]], dict[int, tuple[bytes, int]]]:
     """Per listed bucket, how many of its signed leaves are still not
     accounted for — judged on OUR rows as they are after the apply (review
     N1: what the receiver silently refused is still missing). A leaf is
@@ -455,8 +456,10 @@ def _still_missing(
     only.
 
     Also the buckets whose every missing leaf was a row handed to the
-    receiver that did not land (R3: refused by its own rules — asking again
-    brings the same row): ``index -> (our bucket hash now, rows missing)``."""
+    receiver that did not land, ``index -> (our bucket hash now, rows
+    missing)``: refused by its own rules (R3 — asking again brings the same
+    row), and those with a row only *held* back (its parent not here yet;
+    S1)."""
     settled = {
         leaf
         for index, resource, row_id, leaf, _record in verified
@@ -464,7 +467,8 @@ def _still_missing(
     }
     handed = {leaf for _index, _resource, leaf, _record in applied}
     still: dict[int, int] = {}
-    stuck: dict[int, tuple[bytes, int]] = {}
+    refused: dict[int, tuple[bytes, int]] = {}
+    holding: dict[int, tuple[bytes, int]] = {}
     for index, listed_rows in listed.items():
         if listed_rows is None:
             continue
@@ -472,8 +476,9 @@ def _still_missing(
         missing = {r.leaf for r in listed_rows} - set(mine) - settled
         still[index] = len(missing)
         if missing and missing <= handed:
-            stuck[index] = (bucket_hash(index, mine), len(missing))
-    return still, stuck
+            entry = (bucket_hash(index, mine), len(missing))
+            (holding if missing & held else refused)[index] = entry
+    return still, refused, holding
 
 
 def _wanted_ids(rows: list[object]) -> frozenset[tuple[str, str]]:
@@ -599,10 +604,16 @@ class _Stuck:
     its own rules (an id held in another space, newer words kept, …).
     Asking again would bring the same rows; such a bucket is not asked of
     members again while OUR bucket is unchanged — ``index -> (our bucket
-    hash then, rows missing)``. The status keeps them missing."""
+    hash then, rows missing)``. The status keeps them missing.
+
+    A bucket whose rows were only HELD BACK (a parent not here yet) is
+    counted in ``holds``, answer after answer; at :data:`HELD_BACK_LIMIT`
+    in a row it is stuck too — its parent is outside the page and will
+    not come from a member. A row landing starts every count over."""
 
     root: bytes
     buckets: dict[int, tuple[bytes, int]] = field(default_factory=dict)
+    holds: dict[int, int] = field(default_factory=dict)
 
 
 class _DeliverySeats(Protocol):
@@ -1342,16 +1353,31 @@ class SyncPageService:
         return out
 
     def _note_stuck(
-        self, space_id: str, root: bytes, found: Mapping[int, tuple[bytes, int]]
-    ) -> None:
+        self,
+        space_id: str,
+        root: bytes,
+        found: Mapping[int, tuple[bytes, int]],
+        holding: Mapping[int, tuple[bytes, int]] | None = None,
+    ) -> dict[int, tuple[bytes, int]]:
+        """Remember *found* (refused by rule) as stuck, count one more hold
+        for each bucket of *holding* and remember those at
+        :data:`HELD_BACK_LIMIT` as stuck too. The buckets stuck now."""
         held = self._stuck.get(space_id)
         if held is None or held.root != root:
             held = _Stuck(root=root)
-        held.buckets.update(found)
+        out = dict(found)
+        for index, entry in (holding or {}).items():
+            held.holds[index] = held.holds.get(index, 0) + 1
+            if held.holds[index] >= HELD_BACK_LIMIT:
+                out[index] = entry
+        for index in out:
+            held.holds.pop(index, None)
+        held.buckets.update(out)
         self._stuck[space_id] = held
         self._stuck.move_to_end(space_id)
         while len(self._stuck) > MAX_STUCK_SPACES:
             self._stuck.popitem(last=False)
+        return out
 
     def _remember(self, space_id: str, result: _Compare) -> None:
         self._checks[space_id] = result
@@ -1769,17 +1795,18 @@ class SyncPageService:
                     cutoff=wanted.cutoff,
                     known=_known_files(space_id, applied),
                 )
-            # Only a refusal by rule can mark a bucket stuck (S1): a row
-            # held back for its parent lands once the parent does.
-            refused_by_rule = [a for a in applied if a[2] not in held]
-            still, stuck = await asyncio.to_thread(
+            # A refusal by rule marks a bucket stuck at once (R3); a row
+            # held back for its parent only after HELD_BACK_LIMIT answers
+            # in a row (S1) — its parent may still come.
+            still, refused, holding = await asyncio.to_thread(
                 _still_missing,
                 listed,
                 verified,
                 wanted,
                 local,
                 horizon,
-                refused_by_rule,
+                applied,
+                held,
             )
             landed = sum(
                 1
@@ -1793,8 +1820,11 @@ class SyncPageService:
                 gone = self._stuck.pop(space_id, None)
                 if gone is not None and gone.root == wanted.root:
                     revived = frozenset(gone.buckets)
-            if stuck:
-                self._note_stuck(space_id, wanted.root, stuck)
+            stuck = (
+                self._note_stuck(space_id, wanted.root, refused, holding)
+                if refused or holding
+                else {}
+            )
             complete = frozenset(i for i, n in still.items() if not n)
             todo = (check.todo | revived) - complete - stuck.keys()
             short = sum(1 for i, n in still.items() if n and i not in stuck)

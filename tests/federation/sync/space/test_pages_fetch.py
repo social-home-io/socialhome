@@ -34,6 +34,7 @@ from socialhome.federation.sync.space.pages import (
     MAX_FETCH_ASKS,
     SyncPageService,
 )
+from socialhome.federation.sync.space.stream_health import HELD_BACK_LIMIT
 from socialhome.sync_page import (
     MAX_FETCH_ROWS,
     PAGE_MIN_INTERVAL_S,
@@ -50,6 +51,7 @@ from tests.federation.sync.space.test_pages_households import (
     _service,
 )
 from tests.federation.sync.space.test_sync_coverage import (
+    ALBUM,
     ANNA,
     BOB,
     CARL,
@@ -57,7 +59,9 @@ from tests.federation.sync.space.test_sync_coverage import (
     PAGE,
     SPACE,
     TASK,
+    TASK_LIST,
     Home,
+    _album,
     _event,
     _home,
     _page,
@@ -66,6 +70,7 @@ from tests.federation.sync.space.test_sync_coverage import (
     _stream,
     _task,
     _task_done,
+    _task_list,
     homes,  # noqa: F401 — the fixture
 )
 
@@ -1363,3 +1368,66 @@ async def test_a_verified_row_before_its_parent_is_held_back(
     await _post(requester)
     outcome = await requester.receiver.apply_verified(SPACE, MEMBER, resource, record)
     assert outcome.count == held
+
+
+async def test_a_row_whose_parent_was_deleted_here_is_refused_by_rule(trio):
+    """Residual (a): a parent deleted here never arrives — its child is a
+    refusal by rule (stuck at once), not held back for ever. A deleted
+    post stays held (soft-deleted), a deleted list or album is filtered
+    out of the live lookups, so their tombstones are checked."""
+    _host, _member, requester, *_rest = trio
+    await _task_list(requester)
+    assert await requester.repos.space_task.delete_list(TASK_LIST, space_id=SPACE)
+    outcome = await requester.receiver.apply_verified(
+        SPACE,
+        MEMBER,
+        "tasks",
+        {"id": "t-x", "list_id": TASK_LIST, "title": "x"},
+    )
+    assert outcome.count == 0
+    await _album(requester)
+    await requester.repos.gallery.delete_album_in_space(ALBUM, space_id=SPACE)
+    outcome = await requester.receiver.apply_verified(
+        SPACE,
+        MEMBER,
+        "gallery",
+        {"kind": "item", "id": "g-x", "album_id": ALBUM},
+    )
+    assert outcome.count == 0
+
+
+async def test_a_child_held_back_answer_after_answer_is_stuck_at_the_limit(trio):
+    """Residual (b): a child whose parent no member delivers (outside the
+    page; here withheld every time) is held back on every answer. After
+    HELD_BACK_LIMIT answers in a row its bucket counts as stuck — missing,
+    never matched, and not asked again."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _post(host)
+    await _stream(host, requester)
+    await _task(host)
+    await _stream(host, member)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    task_bucket = row_key("tasks", TASK)[0]
+
+    def withhold_list(listings, rows):
+        return listings, [r for r in rows if r["r"] != "task_lists"]
+
+    wire.forge = withhold_list
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    for _ in range(HELD_BACK_LIMIT - 1):
+        stuck = r_pages._stuck.get(SPACE)
+        assert stuck is None or task_bucket not in stuck.buckets
+        r_pages.host_silent(SPACE)
+        await wire.settle()
+    stuck = r_pages._stuck.get(SPACE)
+    assert stuck is not None and task_bucket in stuck.buckets
+    asks = len(wire.asks)
+    r_pages.host_silent(SPACE)
+    await wire.settle()
+    asked_task = [a for a in wire.asks[asks:] if task_bucket in a[1]]
+    assert asked_task == []
+    assert await requester.repos.space_task.get(TASK) is None
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is not True

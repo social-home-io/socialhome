@@ -941,9 +941,14 @@ between asks, and a stale memo would prove nothing.
    (re-review R3). A row only **held back** — its parent not held here at
    all yet: a comment, poll, schedule or listing before its post, a task
    before its list, a gallery item before its album (`apply_verified`
-   reports it in `HeldBack.count`) — never marks a bucket, and whenever a
-   verified row lands the space's remembered buckets are asked again (the
-   parent may have come). A remembered bucket stays **missing** in every
+   reports it in `HeldBack.count`) — does not mark a bucket at once, and
+   whenever a verified row lands the space's remembered buckets are asked
+   again (the parent may have come). A parent deleted here never comes: a
+   child of a tombstoned list or album is a refusal by rule (a deleted
+   post stays held, so its children already are). A bucket held back
+   answer after answer — its parent outside the page — counts as stuck
+   after `HELD_BACK_LIMIT` (3) answers in a row, the stream's own limit;
+   a row landing starts the count over. A remembered bucket stays **missing** in every
    later verdict of that page, so it never reads up to date (re-review
    S1). The host's stream, or the next page, settles it.
 
