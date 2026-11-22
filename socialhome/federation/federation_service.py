@@ -1524,7 +1524,8 @@ class FederationService:
         self._outbox_space_changed = space_changed
 
     def _queued_for_space(self, space_id: str | None) -> None:
-        """A payload of *space_id* was queued: tell the sync status. Never
+        """A payload of *space_id* was queued (the outbox, or a deferred
+        mesh send queued or released): tell the sync status. Never
         raises."""
         if self._outbox_space_changed is None or not space_id:
             return
@@ -4577,6 +4578,7 @@ class FederationService:
             )
         )
         self._deferred_mesh_bytes += size
+        self._queued_for_space(space_id)
         return DeliveryResult(
             instance_id=target, ok=False, error=DELIVERY_ERROR_MESH_DEFERRED
         )
@@ -4613,6 +4615,8 @@ class FederationService:
     def _release_deferred(self, items: Iterable[_DeferredMeshSend]) -> None:
         for item in items:
             self._deferred_mesh_bytes = max(0, self._deferred_mesh_bytes - item.size)
+            # Sent or dropped: the sync status's "Not sent yet" may move.
+            self._queued_for_space(item.space_id)
 
     def _log_deferred_cap(self, target: str, why: str) -> None:
         if target in self._deferred_mesh_cap_logged:

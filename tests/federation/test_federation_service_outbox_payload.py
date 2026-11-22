@@ -334,3 +334,18 @@ async def test_a_deferred_mesh_send_counts_as_still_waiting():
     # Once the paired household took it, it is sent.
     s.outbox.enqueued = [e for e in s.outbox.enqueued if e["instance_id"] != paired]
     assert await s.svc.undelivered_space_items(_SPACE, POST) == []
+
+
+async def test_a_deferred_mesh_send_queued_or_released_tells_the_sync_status():
+    """ "Not sent yet" moves when a deferred mesh send is queued, delivered
+    or dropped — like an outbox row."""
+    s = _Sender()
+    seen: list[str] = []
+    s.svc.attach_outbox_wake(lambda: None, space_changed=seen.append)
+    s.svc._deferred_mesh_queues["mesh-x"] = deque()
+    s.svc._enqueue_deferred_mesh_send(
+        "mesh-x", space_id=_SPACE, event_type=POST, payload={"id": "post-6"}
+    )
+    assert seen == [_SPACE]
+    s.svc._release_deferred(list(s.svc._deferred_mesh_queues["mesh-x"]))
+    assert seen == [_SPACE, _SPACE]

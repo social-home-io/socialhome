@@ -430,8 +430,9 @@ payload (`federation_outbox_payloads`, unwrapped under the local KEK to
 read the post id) or a deferred mesh send, and no GFS took it (the member
 publish's `on_published`; memory only — after a restart such a post reads
 "Not sent yet" until a household takes it). A household that took it at
-once has no row, so the post is sent. Bounded (newest 100 stored payloads
-read, 50 ids sent) and read only while the space has content waiting.
+once has no row, so the post is sent; a deferred mesh send queued or
+released moves it like an outbox row. Bounded (newest 100 stored payloads
+read, 50 ids sent).
 
 **Signed sync pages (v_95).** The household acting as host that holds the
 space's authority seed seals, lazily and at most every 15 minutes, a signed

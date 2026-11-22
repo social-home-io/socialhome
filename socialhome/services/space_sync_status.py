@@ -294,8 +294,10 @@ class SpaceSyncStatusService(BusPublisherMixin):
         self, space: Space, *, ignore_sync_id: str = ""
     ) -> SpaceSyncStatus:
         waiting = await self._outbox.count_pending_for_space(space.id)
-        # Nothing waits in the outbox: nothing can be unsent (no read).
-        unsent = await self._unsent(space.id) if waiting else ()
+        # Read even with nothing in the outbox: a post whose every member
+        # household is reached only over the mesh waits in a deferred mesh
+        # send, not in the outbox.
+        unsent = await self._unsent(space.id)
         state, last_ok, page, missing = await self._state_of(
             space, ignore_sync_id=ignore_sync_id
         )

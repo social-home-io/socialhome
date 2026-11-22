@@ -778,15 +778,11 @@ async def test_unsent_posts_come_from_the_delivery_check(env):
         return ["p2", "p1"]
 
     env.svc.attach_delivery(undelivered)
-    # Nothing in the outbox: nothing can be unsent, nothing is read.
-    assert (await env.svc.status("sp")).unsent_posts == ()
-    assert asked == []
-    env.outbox.pending["sp"] = 2
     status = await env.svc.status("sp")
     assert status.unsent_posts == ("p2", "p1")
     assert status.to_wire()["unsent_posts"] == ["p2", "p1"]
+    assert asked == ["sp"]
     # The space's own host household too.
-    env.outbox.pending["mine"] = 1
     assert (await env.svc.status("mine")).unsent_posts == ("p2", "p1")
 
 

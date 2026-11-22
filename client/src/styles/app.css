@@ -30772,10 +30772,10 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   font-size: var(--sh-font-size-sm);
 }
 .sh-sync-card__details summary {
+  /* Keeps its disclosure triangle (a list item); padded to a 36 px
+     tap target. */
   cursor: pointer;
-  min-height: 36px;
-  display: flex;
-  align-items: center;
+  padding-block: 8px;
   width: fit-content;
 }
 .sh-sync-card__details summary:focus-visible {
@@ -30792,7 +30792,7 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
    target without moving the line. */
 .sh-post-not-sent {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   align-self: flex-start;
   gap: 4px;
   max-width: 100%;
