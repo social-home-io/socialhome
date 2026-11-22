@@ -186,7 +186,11 @@ class PublicSpaceDiscoveryService:
                 pin = merge_pin(held, listing.join_contact, space_id=listing.space_id)
                 if pin is not None and pin != held:
                     await self._repo.set_pin(listing.space_id, pin)
-                await self._repo.upsert(replace(listing, join_contact=None))
+                # Stamped with the tick's start: exactly the snapshot cutoff
+                # below (kept), whatever the wall clock does meanwhile.
+                await self._repo.upsert(
+                    replace(listing, join_contact=None, cached_at=tick_started)
+                )
             total += len(listings)
 
         # Every directory answered (or there is no GFS left): this tick is the

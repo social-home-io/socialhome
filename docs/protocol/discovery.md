@@ -4093,8 +4093,10 @@ connection at start, hourly, on an admin's `POST /api/public_spaces/refresh`
 poll, so connecting or disconnecting never waits on a download). A tick in
 which every directory answered is a full snapshot: a space no GFS lists any
 more, or one listed only by a GFS the household left, drops out right away
-(with no GFS left the cache empties). If a directory didn't answer, its
-spaces stay until the 24 h TTL. A pending connection (awaiting the GFS
+(with no GFS left the cache empties). If any directory didn't answer,
+nothing is dropped early: unlisted spaces go after the 24 h TTL. (A GFS
+that answers 200 with a partial list is taken at its word until the next
+tick.) A pending connection (awaiting the GFS
 operator) lists nothing. There is no realtime frame for a directory change:
 Discover reads `GET /api/public_spaces` each time it opens.
 

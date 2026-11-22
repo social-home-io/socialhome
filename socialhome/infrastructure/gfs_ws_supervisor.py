@@ -320,6 +320,10 @@ class GfsWebSocketSupervisor:
             ),
         )
         async with self._lock:
+            if self._stop.is_set():
+                # Stopped meanwhile (an ``add`` racing shutdown): a client
+                # added now would never be stopped.
+                return
             existing = self._clients.get(conn.id)
             self._clients[conn.id] = client
             self._client_urls[conn.id] = conn.inbox_url
