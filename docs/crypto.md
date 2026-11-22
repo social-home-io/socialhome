@@ -1260,7 +1260,7 @@ relabelled, replayed, lifted from another household's answer nor obtained
 for a question someone on the path altered (its signature, its suite or its
 time). Before it signs anything the GFS refuses, with an UNSIGNED `400`, a
 question whose suite it does not support, whose `sig` is not exactly 64
-bytes, or whose `ts` is older than 10 min or more than 2 min ahead — so a
+bytes, or whose `ts` is older than 10 min or more than 5 min ahead — so a
 signed `unknown` means only "no such registration" or "the signature did not
 verify", and a captured question is no lasting status oracle. The household
 reads any non-200 as "ask again later": a skewed clock never reads as a

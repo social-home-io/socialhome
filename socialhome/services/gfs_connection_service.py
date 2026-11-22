@@ -1624,10 +1624,13 @@ class GfsConnectionService:
                 if resp.status != 200:
                     log.warning(
                         "GFS %s %s answered HTTP %d — retryable, not a verdict "
-                        "about its key",
+                        "about its key%s",
                         gfs_url,
                         PROOF_ROUTE,
                         resp.status,
+                        " (an approval question refused: check this household's clock)"
+                        if resp.status == 400 and "client" in payload
+                        else "",
                     )
                     return "unreachable", None
                 try:

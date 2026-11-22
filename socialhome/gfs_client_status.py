@@ -84,8 +84,10 @@ CLIENT_STATUSES: frozenset[str] = frozenset({"active", "pending", "banned", "unk
 #: How old a question's ``ts`` may be when the GFS reads it (seconds). The
 #: household floors its clock to the minute, so this is ~9–10 min of real age.
 CLIENT_STATUS_REQUEST_MAX_AGE_S: int = 600
-#: How far ahead of the GFS's clock a question's ``ts`` may be (skew).
-CLIENT_STATUS_REQUEST_MAX_FUTURE_S: int = 120
+#: How far ahead of the GFS's clock a question's ``ts`` may be (skew) —
+#: the federation pipeline's ±300 s, so a household that federates fine
+#: also learns its approval.
+CLIENT_STATUS_REQUEST_MAX_FUTURE_S: int = 300
 
 _MAX_INSTANCE_ID_CHARS = 256
 #: An Ed25519 signature is 64 bytes → 86 b64url chars.

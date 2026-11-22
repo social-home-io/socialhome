@@ -57,7 +57,7 @@ def test_constants():
     assert CLIENT_STATUSES == frozenset({"active", "pending", "banned", "unknown"})
     assert issubclass(UnsupportedClientStatusSigSuite, ValueError)
     assert CLIENT_STATUS_REQUEST_MAX_AGE_S == 600
-    assert CLIENT_STATUS_REQUEST_MAX_FUTURE_S == 120
+    assert CLIENT_STATUS_REQUEST_MAX_FUTURE_S == 300
 
 
 def test_ts_is_coarse_minutes():
@@ -178,6 +178,12 @@ def test_parse_request_accepts_the_window_edges():
     assert parse_status_request(
         _block(ts=int(NOW) + CLIENT_STATUS_REQUEST_MAX_FUTURE_S), now=NOW
     )
+
+
+def test_a_clock_four_minutes_fast_still_learns_its_approval():
+    """Re-review residual 1: a household inside the federation pipeline's
+    ±300 s skew must be able to ask too, or it stays pending for ever."""
+    assert parse_status_request(_block(ts=int(NOW) + 240), now=NOW)
 
 
 def test_a_captured_question_expires():

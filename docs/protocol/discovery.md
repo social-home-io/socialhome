@@ -833,7 +833,7 @@ sequenceDiagram
   to the GFS it registered with: the one place this request identifies it.
 - **What the GFS refuses unsigned.** A question whose suite it does not
   support, whose `sig` is not exactly 64 bytes, or whose `ts` is more than
-  10 min old or more than 2 min ahead of its clock gets a plain `400` — no
+  10 min old or more than 5 min ahead of its clock gets a plain `400` — no
   status, nothing signed. So a signed `unknown` only ever means "no such
   registration" or "the signature did not verify", and a question captured
   on the path stops working after 10 min instead of telling its holder the
