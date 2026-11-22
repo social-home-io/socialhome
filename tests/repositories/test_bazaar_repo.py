@@ -21,6 +21,7 @@ from socialhome.repositories.bazaar_repo import (
     new_bid,
     new_offer,
 )
+from tests.repositories.sync_page_plans import query_plans, set_statistics
 
 
 @pytest.fixture
@@ -1233,3 +1234,132 @@ async def test_an_accept_and_another_bids_withdrawal_end_the_same(env, accept_fi
     )
     await repo.accept_offer("c-1", space_id=_DEFAULT_SPACE_ID)
     assert await _bid_state(env, "c-2") == want
+
+
+# ── §25.6 sync pages: a seekable keyset cursor ───────────────────────────
+
+# The query shape from before the keyset rewrite, verbatim.
+_OLD_SYNC_PAGE = (
+    "SELECT l.rowid AS sync_rowid, l.post_id FROM bazaar_listings l"
+    " JOIN space_posts p ON p.id = l.post_id AND p.space_id = l.space_id"
+    " WHERE l.space_id=? AND p.deleted=0"
+    " AND (? IS NULL OR l.rowid < ?) ORDER BY l.rowid DESC LIMIT ?"
+)
+
+
+async def _seed_interleaved_listings(env, n: int) -> None:
+    """``n`` listings alternating between two spaces; every 4th wrapper
+    post deleted."""
+    for sid in (_DEFAULT_SPACE_ID, _OTHER_SPACE_ID):
+        await _seed_space(env.db, sid)
+
+    def _fill(conn):
+        for i in range(n):
+            sid = _DEFAULT_SPACE_ID if i % 2 else _OTHER_SPACE_ID
+            conn.execute(
+                "INSERT INTO space_posts(id, space_id, author, type, deleted)"
+                " VALUES(?,?,?,?,?)",
+                (f"bk-{i}", sid, "u1", "bazaar", int(i % 4 == 1)),
+            )
+            conn.execute(
+                "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id,"
+                " mode, title, end_time, currency) VALUES(?,?,?,?,?,?,?)",
+                (f"bk-{i}", sid, "u1", "fixed", "t", "2099-01-01T00:00:00", "EUR"),
+            )
+
+    await env.db.transact(_fill)
+
+
+async def test_list_sync_page_pages_exactly_like_the_old_or_cursor(env):
+    await _seed_interleaved_listings(env, 41)
+    old, cursor = [], None
+    while True:
+        rows = await env.db.fetchall(
+            _OLD_SYNC_PAGE, (_DEFAULT_SPACE_ID, cursor, cursor, 3)
+        )
+        old.append([r["post_id"] for r in rows])
+        if len(rows) < 3:
+            break
+        cursor = rows[-1]["sync_rowid"]
+    new, cursor = [], None
+    while True:
+        page, cursor = await env.bazaar_repo.list_sync_page(
+            _DEFAULT_SPACE_ID, cursor=cursor, limit=3
+        )
+        new.append([lst.post_id for lst in page])
+        if cursor is None:
+            break
+    assert len(new) > 3
+    assert new == old
+    flat = [i for page in new for i in page]
+    # Every listing of the space on a live post, newest stored first, once.
+    assert flat == [f"bk-{i}" for i in range(39, -1, -2) if i % 4 != 1]
+
+
+@pytest.mark.parametrize("stats", [True, False], ids=["optimized", "no-stats"])
+async def test_list_sync_page_seeks_on_rowid_without_a_sort(env, stats):
+    """``idx_bazaar_listings_space(space_id)`` carries the rowid, so the
+    plain keyset bound seeks inside the space — with or without planner
+    statistics. The old ``(? IS NULL OR rowid < ?)`` could not."""
+    await _seed_interleaved_listings(env, 2000)
+    await set_statistics(env.db, on=stats)
+    for plan in await _bazaar_plans(env):
+        assert "TEMP B-TREE" not in plan, plan
+        assert "rowid<?)" in plan, plan
+
+
+async def _bazaar_plans(env, **kw) -> list[str]:
+    return await query_plans(
+        env.db,
+        lambda: env.bazaar_repo.list_sync_page(_DEFAULT_SPACE_ID, limit=50, **kw),
+    )
+
+
+@pytest.mark.parametrize("stats", [True, False], ids=["optimized", "no-stats"])
+async def test_an_incremental_run_past_its_first_page_walks_the_listings(env, stats):
+    """Many changed listings: the pages after the first walk the listings
+    by rowid — the stamp index would re-sort every changed listing for
+    every page (~240 ms for 4k, O(n²))."""
+    await _seed_interleaved_listings(env, 2000)
+    await set_statistics(env.db, on=stats)
+    for plan in await _bazaar_plans(env, since=0, cursor=2**40):
+        assert "TEMP B-TREE" not in plan, plan
+        assert "rowid<?)" in plan, plan
+
+
+@pytest.mark.parametrize("stats", [True, False], ids=["optimized", "no-stats"])
+async def test_a_quiet_check_reads_the_change_stamps(env, stats):
+    """The first page of an incremental run — all a quiet check reads —
+    touches only the changed wrapper posts, whatever the statistics say."""
+    await _seed_interleaved_listings(env, 2000)
+    await set_statistics(env.db, on=stats)
+    mark = await env.db.fetchval("SELECT max(sync_seq) FROM space_posts")
+    for plan in await _bazaar_plans(env, since=mark):
+        assert "idx_space_posts_sync_seq (space_id=? AND sync_seq>?)" in plan, plan
+
+
+async def test_an_incremental_run_pages_exactly_like_the_old_or_cursor(env):
+    await _seed_interleaved_listings(env, 81)
+    mark = await env.db.fetchval("SELECT sync_seq FROM space_posts WHERE id='bk-20'")
+    old_sql = _OLD_SYNC_PAGE.replace(
+        " AND (? IS NULL", " AND p.sync_seq > ? AND (? IS NULL"
+    )
+    old, cursor = [], None
+    while True:
+        rows = await env.db.fetchall(
+            old_sql, (_DEFAULT_SPACE_ID, mark, cursor, cursor, 3)
+        )
+        old.append([r["post_id"] for r in rows])
+        if len(rows) < 3:
+            break
+        cursor = rows[-1]["sync_rowid"]
+    new, cursor = [], None
+    while True:
+        page, cursor = await env.bazaar_repo.list_sync_page(
+            _DEFAULT_SPACE_ID, cursor=cursor, limit=3, since=mark
+        )
+        new.append([lst.post_id for lst in page])
+        if cursor is None:
+            break
+    assert len(new) >= 3
+    assert new == old

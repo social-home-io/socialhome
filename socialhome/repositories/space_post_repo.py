@@ -47,9 +47,12 @@ from ..utils.datetime import parse_iso8601_optional
 from .base import (
     bool_col,
     changed_since_sql,
+    first_changed_page,
+    page_stamp_col,
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
+    sync_page_below,
     sync_page_cursor,
 )
 from .post_repo import (  # reuse the household post helpers verbatim
@@ -455,21 +458,22 @@ class SqliteSpacePostRepo:
         window, window_params = retention_window_sql(
             "created_at", cutoff, type_col="type", exempt_types=exempt_types
         )
-        changed, changed_params = changed_since_sql("sync_seq", since)
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("sync_seq", since, cursor), since
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
-                "SELECT rowid AS sync_rowid, * FROM space_posts"
-                " WHERE space_id=? AND deleted=0"
+                "SELECT rowid AS sync_rowid, * FROM "
+                + _sync_page_source(since, cursor)
+                + " WHERE space_id=? AND deleted=0"
                 + window
                 + changed
-                + " AND (? IS NULL OR rowid < ?)"
-                " ORDER BY rowid DESC LIMIT ?",
+                + " AND rowid <= ? ORDER BY rowid DESC LIMIT ?",
                 (
                     space_id,
                     *window_params,
                     *changed_params,
-                    cursor,
-                    cursor,
+                    sync_page_below(cursor),
                     int(limit),
                 ),
             )
@@ -484,15 +488,18 @@ class SqliteSpacePostRepo:
         limit: int = 200,
         since: int | None = None,
     ) -> tuple[list[PostTombstone], int | None]:
-        changed, changed_params = changed_since_sql("sync_seq", since)
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("sync_seq", since, cursor), since
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, id, author, type, created_at,"
-                " moderated, moderated_by FROM space_posts"
-                " WHERE space_id=? AND deleted=1"
+                " moderated, moderated_by FROM "
+                + _sync_page_source(since, cursor)
+                + " WHERE space_id=? AND deleted=1"
                 + changed
-                + " AND (? IS NULL OR rowid < ?) ORDER BY rowid DESC LIMIT ?",
-                (space_id, *changed_params, cursor, cursor, int(limit)),
+                + " AND rowid <= ? ORDER BY rowid DESC LIMIT ?",
+                (space_id, *changed_params, sync_page_below(cursor), int(limit)),
             )
         )
         tombstones = [
@@ -1083,11 +1090,22 @@ class SqliteSpacePostRepo:
         window, window_params = retention_window_sql(
             "p.created_at", cutoff, type_col="p.type", exempt_types=exempt_types
         )
-        changed, changed_params = changed_since_sql("c.sync_seq", since)
+        # See ``first_changed_page``: the first incremental page starts from
+        # the changed comments (CROSS JOIN fixes that order).
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("c.sync_seq", since, cursor), since
+        )
+        source = (
+            "space_post_comments c INDEXED BY idx_space_post_comments_sync_seq"
+            " CROSS JOIN space_posts p"
+            if first_changed_page(since, cursor)
+            else "space_post_comments c JOIN space_posts p"
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
-                "SELECT c.rowid AS sync_rowid, c.* FROM space_post_comments c"
-                " JOIN space_posts p ON p.id = c.post_id"
+                "SELECT c.rowid AS sync_rowid, c.* FROM "
+                + source
+                + " ON p.id = c.post_id"
                 " WHERE p.space_id=? AND c.deleted=?"
                 + ("" if deleted else " AND p.deleted=0")
                 + window
@@ -1158,6 +1176,27 @@ class SqliteSpacePostRepo:
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
+
+
+def _sync_page_source(since: int | None, cursor: int | None) -> str:
+    """The table a §25.6 posts / tombstones page reads, with the index it
+    must use where the planner's choice would be wrong.
+
+    The first page of an incremental run (``since`` set, no cursor) reads
+    the change stamps, ``idx_space_posts_sync_seq``: the quiet check
+    (``provider.is_quiet``) reads only this page every 30 min per
+    (household, space) and usually finds nothing — ~0.1 ms, where the
+    planner's pick, the keyset index (migration 0152), walks the whole
+    space (~7 ms for 40k posts). Every other page — a full export, or an
+    incremental run past its first full page, i.e. many changes — walks
+    ``idx_space_posts_sync_keyset`` from the cursor: the stamp index would
+    re-sort every changed row for every page (3.3 s for 38k changed).
+    ``since`` set means the query has ``sync_seq > ?``, which the partial
+    index requires. Same rows either way; only the plan differs.
+    """
+    if first_changed_page(since, cursor):
+        return "space_posts INDEXED BY idx_space_posts_sync_seq"
+    return "space_posts"
 
 
 def _row_to_space_post(row: dict) -> Post:

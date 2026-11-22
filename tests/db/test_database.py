@@ -10,7 +10,11 @@ from contextlib import closing
 import pytest
 
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS, AsyncDatabase
-from socialhome.db.migrations import MigrationError, discover_migrations
+from socialhome.db.migrations import (
+    MigrationError,
+    discover_migrations,
+    run_migrations,
+)
 
 
 async def test_startup_creates_tables(tmp_dir):
@@ -628,3 +632,195 @@ async def test_writer_does_not_hold_the_write_lock_while_it_waits(tmp_dir):
             check.close()
 
     assert count_rows() == 2
+
+
+# ── Planner statistics: ``PRAGMA optimize`` (SQLite's recommended use) ────
+
+
+def _seed_unanalyzed(path, rows: int = 500) -> None:
+    """A migrated database holding ``rows`` posts and no statistics."""
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    try:
+        run_migrations(conn)
+        conn.execute(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES('s', 's', 'i', 'u', 'k')"
+        )
+        conn.executemany(
+            "INSERT INTO space_posts(id, space_id, author, type) VALUES(?,?,?,?)",
+            [(f"p{i}", "s", "u", "text") for i in range(rows)],
+        )
+        conn.execute("DROP TABLE IF EXISTS sqlite_stat1")
+    finally:
+        conn.close()
+
+
+async def _stat_rows(db, table: str) -> int:
+    if not await db.fetchval(
+        "SELECT count(*) FROM sqlite_master WHERE name='sqlite_stat1'", default=0
+    ):
+        return 0
+    return int(
+        await db.fetchval(
+            "SELECT count(*) FROM sqlite_stat1 WHERE tbl=?", (table,), default=0
+        )
+    )
+
+
+def test_bundled_sqlite_supports_optimize_on_open():
+    """``PRAGMA optimize=0x10002`` (check every table, not just the ones
+    this connection used) needs SQLite 3.46+."""
+    assert sqlite3.sqlite_version_info >= (3, 46, 0)
+
+
+async def test_startup_gathers_planner_statistics(tmp_dir):
+    """Statistics for a database that never had any: SQLite's
+    ``PRAGMA optimize=0x10002`` on open."""
+    path = tmp_dir / "stats.db"
+    _seed_unanalyzed(path)
+    db = AsyncDatabase(path, batch_timeout_ms=10)
+    await db.startup()
+    try:
+        assert await _stat_rows(db, "space_posts") > 0
+    finally:
+        await db.shutdown()
+
+
+def _trace(db) -> list[str]:
+    seen: list[str] = []
+    db._conn.set_trace_callback(seen.append)
+    return seen
+
+
+async def test_optimize_runs_periodically_after_writes(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=0, optimize_interval_s=0)
+    await db.startup()
+    try:
+        seen = _trace(db)
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES('a', 'u-a', 'A')"
+        )
+        for _ in range(200):  # the writer optimizes right after the batch
+            if "PRAGMA optimize" in seen:
+                break
+            await asyncio.sleep(0.01)
+        assert "PRAGMA optimize" in seen
+    finally:
+        await db.shutdown()
+
+
+async def test_optimize_waits_out_its_interval(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=0)
+    await db.startup()
+    try:
+        seen = _trace(db)
+        for i in range(3):
+            await db.enqueue(
+                "INSERT INTO users(username, user_id, display_name) VALUES(?, ?, ?)",
+                (f"a{i}", f"u{i}", "A"),
+            )
+        assert "PRAGMA optimize" not in seen
+    finally:
+        await db.shutdown()
+
+
+async def test_shutdown_runs_optimize_before_closing(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=10)
+    await db.startup()
+    seen = _trace(db)
+    await db.shutdown()
+    assert seen[-1:] == ["PRAGMA optimize"]
+
+
+async def test_a_failing_optimize_never_breaks_writes_or_shutdown(tmp_dir, caplog):
+    """Statistics are an optimisation: a failure is logged, never raised."""
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=0, optimize_interval_s=0)
+    await db.startup()
+    db._optimize_sql = "PRAGMA no_such_thing(("
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('a', 'u-a', 'A')"
+    )
+    assert await db.fetchval("SELECT count(*) FROM users WHERE username='a'") == 1
+    await db.shutdown()
+    assert "PRAGMA optimize failed" in caplog.text
+
+
+async def test_optimize_refreshes_statistics_on_demand(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES('s', 's', 'i', 'u', 'k')"
+        )
+
+        def _fill(conn):
+            conn.executemany(
+                "INSERT INTO space_posts(id, space_id, author, type) VALUES(?,?,?,?)",
+                [(f"p{i}", "s", "u", "text") for i in range(300)],
+            )
+
+        await db.transact(_fill)
+        await db.optimize()
+        assert await _stat_rows(db, "space_posts") > 0
+    finally:
+        await db.shutdown()
+
+
+async def test_a_periodic_optimize_due_during_shutdown_never_fails_it(tmp_dir):
+    """The writer drains its last batch after ``shutdown`` began; an
+    optimize falling due right then must not kill the writer."""
+    db = AsyncDatabase(
+        tmp_dir / "t.db", batch_max=1, batch_timeout_ms=0, optimize_interval_s=0
+    )
+    await db.startup()
+    seen = _trace(db)
+    write = asyncio.create_task(
+        db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES('a', 'u-a', 'A')"
+        )
+    )
+    await asyncio.sleep(0)  # queued ahead of the shutdown sentinel
+    await db.shutdown()
+    await write
+    assert seen.count("PRAGMA optimize") >= 2, seen  # after the batch, and on close
+
+
+async def test_a_periodic_optimize_that_raises_never_kills_the_writer(
+    tmp_dir, monkeypatch, caplog
+):
+    """Not only ``sqlite3.Error``: an executor already shut down raises a
+    ``RuntimeError``. The writer logs it and keeps writing."""
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=0, optimize_interval_s=0)
+    await db.startup()
+
+    async def boom() -> None:
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(db, "_optimize_now", boom)
+    try:
+        for name in ("a", "b"):
+            # A dead writer would leave the second write waiting forever.
+            await asyncio.wait_for(
+                db.enqueue(
+                    "INSERT INTO users(username, user_id, display_name)"
+                    " VALUES(?, ?, ?)",
+                    (name, f"u-{name}", name),
+                ),
+                timeout=5,
+            )
+        assert await db.fetchval("SELECT count(*) FROM users") == 2
+        assert "periodic PRAGMA optimize failed" in caplog.text
+    finally:
+        await db.shutdown()
+
+
+async def test_open_caps_every_analysis(tmp_dir):
+    """``PRAGMA analysis_limit=400`` on open: before SQLite 3.46 a periodic
+    ``PRAGMA optimize`` would otherwise run a full ``ANALYZE``."""
+    db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        assert await db.fetchval("PRAGMA analysis_limit") == 400
+    finally:
+        await db.shutdown()

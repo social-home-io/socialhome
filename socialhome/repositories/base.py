@@ -125,6 +125,45 @@ def changed_since_sql(stamp_col: str, since: int | None) -> tuple[str, tuple[Any
     return f" AND {stamp_col} > ?", (int(since),)
 
 
+def first_changed_page(since: int | None, cursor: int | None) -> bool:
+    """Whether a §25.6 sync read is the first page of an incremental run.
+
+    That page is all the quiet check (``provider.is_quiet``) reads, every
+    30 min per (household, space), and it usually finds nothing — so it
+    reads the table's change-stamp index (``INDEXED BY idx_…_sync_seq``)
+    and sorts only the changed rows, instead of the planner's guess (a
+    walk of the whole space or table). Every other page uses
+    :func:`page_stamp_col` to keep the stamp index out: past one full page
+    many rows changed, and that index would re-sort all of them for every
+    page (O(n²)). Same rows either way; only the plan differs.
+    """
+    return since is not None and cursor is None
+
+
+def page_stamp_col(stamp_col: str, since: int | None, cursor: int | None) -> str:
+    """``stamp_col`` for :func:`changed_since_sql` on this page: unary ``+``
+    (keeps an index on it out of the plan) on every page but the first
+    page of an incremental run — see :func:`first_changed_page`."""
+    return stamp_col if first_changed_page(since, cursor) else f"+{stamp_col}"
+
+
+#: The largest rowid SQLite can store — the first page's upper bound.
+MAX_ROWID = 2**63 - 1
+
+
+def sync_page_below(cursor: int | None) -> int:
+    """The inclusive rowid bound for the §25.6 sync page after ``cursor``.
+
+    For the newest-first exporters (``ORDER BY rowid DESC``): the query
+    keeps ``rowid <= sync_page_below(cursor)`` — every row on the first
+    page (``cursor=None``), the rows strictly below the cursor after it.
+    That is the same row set as ``(? IS NULL OR rowid < ?)``, but as one
+    plain range SQLite can seek on; the ``OR`` form cannot be used as a
+    seek, so every page re-read and re-sorted the whole space.
+    """
+    return MAX_ROWID if cursor is None else int(cursor) - 1
+
+
 def sync_page_cursor(rows: list[dict[str, Any]], limit: int) -> int | None:
     """The keyset cursor after one §25.6 sync page.
 

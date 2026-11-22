@@ -24,7 +24,13 @@ from ..domain.gallery import (
 from ..domain.gallery_search import GallerySearchSpec
 from ..domain.household_dashboard import DashboardPhoto, FrameAlbumChoice
 from ..domain.tombstone import SpaceRowTombstone
-from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
+from .base import (
+    changed_since_sql,
+    first_changed_page,
+    page_stamp_col,
+    rows_to_dicts,
+    sync_page_cursor,
+)
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 
 #: Items whose uploader the viewer may see: not on the viewer's personal
@@ -1096,11 +1102,14 @@ class SqliteGalleryRepo:
         limit: int = 200,
         since: int | None = None,
     ) -> tuple[list[GalleryItem], int | None]:
-        changed, changed_params = changed_since_sql("i.sync_seq", since)
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("i.sync_seq", since, cursor), since
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
-                "SELECT i.rowid AS sync_rowid, i.* FROM gallery_items i"
-                " JOIN gallery_albums a ON a.id = i.album_id"
+                "SELECT i.rowid AS sync_rowid, i.* FROM "
+                + _items_sync_source(since, cursor)
+                + " ON a.id = i.album_id"
                 " WHERE a.space_id=? AND i.source_post_id IS NULL"
                 " AND a.is_system = 0"
                 " AND i.deleted_at IS NULL AND a.deleted_at IS NULL"
@@ -2293,12 +2302,15 @@ class SqliteGalleryRepo:
         id. Items of a tombstoned album are left out — the album's own
         tombstone tells a household that missed it, and its trigger
         tombstones the items there too."""
-        changed, changed_params = changed_since_sql("i.sync_seq", since)
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("i.sync_seq", since, cursor), since
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT i.rowid AS sync_rowid, i.id, i.album_id, i.uploaded_by,"
-                " i.created_at, i.deleted_at, i.deleted_by FROM gallery_items i"
-                " JOIN gallery_albums a ON a.id = i.album_id"
+                " i.created_at, i.deleted_at, i.deleted_by FROM "
+                + _items_sync_source(since, cursor)
+                + " ON a.id = i.album_id"
                 " WHERE a.space_id=? AND a.deleted_at IS NULL"
                 " AND a.is_system = 0"
                 " AND i.deleted_at IS NOT NULL"
@@ -2402,3 +2414,16 @@ class SqliteGalleryRepo:
 def _basename(url: str) -> str:
     """The stored file name of an ``api/media/<name>`` URL — no path, no query."""
     return url.rsplit("/", 1)[-1].split("?", 1)[0]
+
+
+def _items_sync_source(since: int | None, cursor: int | None) -> str:
+    """The join a §25.6 gallery items / item tombstones page reads: the
+    first incremental page starts from the changed items
+    (``idx_gallery_items_sync_seq``; CROSS JOIN fixes that order) — see
+    :func:`~.base.first_changed_page`."""
+    if first_changed_page(since, cursor):
+        return (
+            "gallery_items i INDEXED BY idx_gallery_items_sync_seq"
+            " CROSS JOIN gallery_albums a"
+        )
+    return "gallery_items i JOIN gallery_albums a"
