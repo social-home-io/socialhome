@@ -491,6 +491,12 @@ class SyncSessionManager:
         if sync_id in self._sessions:
             return SyncDecision(accepted=False, reason="duplicate_sync_id")
 
+        # A household runs one sync of a space with us at a time: its new
+        # BEGIN for the space replaces the session it left (it restarted, or
+        # gave up on it) — otherwise that orphan holds a slot until the
+        # 30-min reaper and its BEGINs are refused ``too_many_sessions``.
+        self._replace_sessions_of(requester_instance_id, space_id, provider_instance_id)
+
         # Capacity before the hourly budget: a BEGIN refused for lack of a
         # slot was never served, so it must not spend one of the
         # requester's 5 / h for that space — a household that restarts and
@@ -607,6 +613,27 @@ class SyncSessionManager:
         )
         self._sessions[sync_id] = record
         return SyncDecision(accepted=True)
+
+    def _replace_sessions_of(
+        self, requester_instance_id: str, space_id: str, provider_instance_id: str
+    ) -> None:
+        """Close the sessions *requester_instance_id* holds with us for
+        *space_id* (provider side), before its new BEGIN is admitted."""
+        stale = [
+            sid
+            for sid, rec in self._sessions.items()
+            if rec.requester_instance_id == requester_instance_id
+            and rec.space_id == space_id
+            and rec.provider_instance_id == provider_instance_id
+        ]
+        for sid in stale:
+            log.info(
+                "sync %s: replaced by a new BEGIN from %s for space %s",
+                sid,
+                requester_instance_id,
+                space_id,
+            )
+            self.close_session(sid)
 
     def register_requester_https_session(
         self,

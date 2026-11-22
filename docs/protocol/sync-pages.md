@@ -544,6 +544,8 @@ What shipped, where it is more exact than the design above:
   microseconds (the stored forms differ between households). Lists are
   sorted: lists of strings by code point, anything else by its canonical
   JSON. Floats are `repr` strings. Per resource, beyond the §2 table:
+  - A calendar event's **feed card** (a post with `linked_event_id`) is
+    never committed: every household mints its own (own id, own words).
   - `posts` also commits `media_url` (as a hash); `file_meta` keeps
     `url` (as a hash), `mime_type`, `original_name`, `size_bytes`; the
     link card keeps `url`, `title`, `description`, `site_name`,

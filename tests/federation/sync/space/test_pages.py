@@ -1110,6 +1110,16 @@ async def test_the_signer_never_compares_its_own_page():
     assert env.state.calls == calls
 
 
+async def test_wait_idle_never_spins_on_finished_tasks():
+    """A finished task leaves the set only when its done-callback runs:
+    wait_idle must wait for the unfinished ones, not loop over done ones."""
+    env = _Env()
+    done = asyncio.get_running_loop().create_future()
+    done.set_result(None)
+    env.svc._tasks.add(done)  # finished, its callback not run yet
+    await asyncio.wait_for(env.svc.wait_idle(), timeout=1.0)
+
+
 async def test_no_page_no_position():
     env = _Env(own=ME, seed=None)
     assert await env.svc.position(env.spaces.space, [HOST]) is None

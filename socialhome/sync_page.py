@@ -279,6 +279,9 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
                 "link_preview",
             ),
             files=("media_url", "image_urls"),
+            # A calendar event's feed card: every household mints its own
+            # (own id, own words) — never committed, on any side.
+            skip=lambda r: bool(r.get("linked_event_id")),
             nested_files={"file_meta": "url", "link_preview": "thumbnail_url"},
             nested_fields={
                 "file_meta": ("url", "mime_type", "original_name", "size_bytes"),

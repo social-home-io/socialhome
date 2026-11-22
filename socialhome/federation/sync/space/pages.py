@@ -974,8 +974,10 @@ class SyncPageService:
 
     async def wait_idle(self) -> None:
         """Wait until the background seals and checks started so far end."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        # Only the unfinished: a finished task leaves the set when its
+        # done-callback runs, and gathering it again never yields.
+        while pending := [t for t in self._tasks if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def close(self) -> None:
         """Cancel the background seals and checks (shutdown)."""

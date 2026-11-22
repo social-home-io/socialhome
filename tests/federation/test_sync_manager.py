@@ -226,6 +226,50 @@ async def test_begin_session_blocks_when_rate_limited_s6():
     assert decision.next_payload["reason"] == "rate_limited"
 
 
+async def test_a_new_begin_replaces_the_requesters_session_of_that_space():
+    """Phase 3 finding: a requester that restarted mid-session left its
+    sessions here until the 30-min reaper, and its next BEGINs were refused
+    ``too_many_sessions``. A household runs one sync of a space with us at a
+    time, so its new BEGIN for that space replaces the old session — for
+    every kind of sync, before the cap is counted."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    for i in range(MAX_ACTIVE_SESSIONS_PER_INSTANCE):
+        d = await mgr.begin_session(
+            sync_id=f"old-{i}",
+            space_id=f"sp-{i}",
+            requester_instance_id="alice",
+            provider_instance_id="me",
+            sync_mode="incremental",
+        )
+        assert d.accepted
+    again = await mgr.begin_session(
+        sync_id="new-0",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="incremental",
+    )
+    assert again.accepted is True
+    assert mgr.get_session("old-0") is None
+    assert mgr.get_session("old-1") is not None  # other spaces untouched
+    # Another household's session of the same space is never touched.
+    await mgr.begin_session(
+        sync_id="bob-0",
+        space_id="sp-0",
+        requester_instance_id="bob",
+        provider_instance_id="me",
+    )
+    assert mgr.get_session("new-0") is not None
+    # A fourth space is still refused: the cap stands.
+    blocked = await mgr.begin_session(
+        sync_id="new-9",
+        space_id="sp-9",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    assert blocked.reason == "too_many_sessions"
+
+
 async def test_begin_session_blocks_at_concurrent_cap_s6():
     """3 active sessions per instance."""
     mgr = SyncSessionManager(_FakeFedRepo())

@@ -142,6 +142,14 @@ def test_shape_golden_vectors():
     assert root_of(vec) == hashlib.sha256(b"sh-sync-root:v1:" + vec).digest()
 
 
+def test_a_calendar_feed_card_is_never_committed():
+    """Every household mints its own feed card for an announced event (own
+    id, own text), so a page never commits to one — on any side."""
+    card = {"id": "c1", "author": "u", "type": "text", "linked_event_id": "ev-1"}
+    assert commit_form("posts", card, _no_files) is None
+    assert commit_form("posts", {**card, "linked_event_id": None}, _no_files)
+
+
 def test_post_commit_form_golden():
     record = {
         "id": "post-1",
@@ -158,7 +166,7 @@ def test_post_commit_form_golden():
         "moderated": False,
         "location": {"lat": 52.1, "lon": 4.1},
         "bot_id": "bot-1",
-        "linked_event_id": "ev-1",
+        "linked_event_id": None,  # a feed card is never committed
         "linked_highlight_id": "h-1",
         "no_link_preview": True,
         "deleted": False,
