@@ -861,7 +861,12 @@ class SyncPageService:
             or pending.host != provider
             or not isinstance(records, list)
         ):
-            log.debug("sync page: an unasked listing from %s dropped", provider)
+            log.info(
+                "sync page: listing chunk of session %s from %s dropped (%s)",
+                sync_id,
+                provider,
+                "not asked" if pending is None else "not from the household asked",
+            )
             return
         pending.received.extend(records[: MAX_LISTING_BUCKETS - len(pending.received)])
 
@@ -871,6 +876,13 @@ class SyncPageService:
         the space ``behind`` and asks the host for ONE incremental sync."""
         pending = self._listings.get(sync_id)
         if pending is None or pending.space_id != space_id or pending.host != provider:
+            if pending is not None:
+                log.info(
+                    "sync page: the end of listing session %s from %s ignored "
+                    "(not the household asked)",
+                    sync_id,
+                    provider,
+                )
             return
         self._listings.pop(sync_id, None)
         try:

@@ -1101,6 +1101,15 @@ class SpaceSyncService:
                 sig_suite=self._sig_suite,
                 chunk_count=int(getattr(session, "next_chunk_index", 0)),
             )
+            log.info(
+                "sync %s: %d bucket listing(s) of space %s to %s (%s, %s)",
+                session.sync_id,
+                len(records),
+                session.space_id,
+                session.requester_instance_id,
+                getattr(session, "transport_mode", "?"),
+                "sent" if clean else "a chunk failed",
+            )
             session.stream_clean = clean
             if not (await self._send(session, sentinel)).ok:
                 session.stream_clean = False
