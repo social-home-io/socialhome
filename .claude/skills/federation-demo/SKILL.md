@@ -764,7 +764,7 @@ last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
 audit over the whole chain, so ``all`` alone is green-or-red end to end.
 Apart from ``gfs-up`` / ``gfs-pair``, the ``gfs-*`` chain (``gfs-open-signup`` /
-``gfs-traffic``
+``gfs-approval`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-authority-rotate`` /
 ``gfs-space-no-subscribers`` / ``gfs-reach-pair`` /
@@ -786,6 +786,15 @@ Phases added after the initial publish are documented inline in
   Global lists every space the GFS directory lists without a restart, then
   c disconnects again and the list empties. Needs a fresh ``up`` (the config
   key) and ``gfs-up``.
+* ``gfs-approval`` — household c connects to the demo GFS while its operator
+  reviews new households (``auto_accept_clients`` off via the admin portal):
+  the connection lands ``pending`` and lists nothing; the operator approves
+  c in the admin portal and, with no restart or click, c's connection turns
+  ``active`` on its own (it asks over ``POST /gfs/proof`` with a signed
+  question and verifies the GFS-signed answer against the pinned key — the
+  first question goes out 1 min after connecting) and Discover › Global
+  lists the GFS's spaces. Restores ``auto_accept_clients`` and disconnects c.
+  About a minute. Needs ``up`` and ``gfs-up``.
 * ``space-post-routed`` — mesh-routed SPACE_POST_CREATED via
   SPACE_ROUTED through a relay that never decrypts the inner
   payload.

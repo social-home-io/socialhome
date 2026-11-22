@@ -68,6 +68,11 @@ from ..domain.subscriber_accepts import (
     seat_bits,
 )
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
+from ..gfs_client_status import (
+    CLIENT_STATUSES,
+    StatusRequest,
+    verify_status_request,
+)
 from ..space_join_contact import parse_join_contact, verify_join_contact
 from .domain import (
     MIN_EPOCH_STEP_INTERVAL_S,
@@ -538,6 +543,35 @@ class GfsFederationService:
         """The active subscribers a forwarded space item reaches (the cluster
         audience resolver, :mod:`.cluster_relay`)."""
         return [s.instance_id for s in await self._repo.list_subscribers(space_id)]
+
+    async def client_status(
+        self, nonce: str, request: StatusRequest, *, gfs_key: str
+    ) -> str:
+        """The approval state a household asked for over ``POST /gfs/proof``
+        (:mod:`socialhome.gfs_client_status`): ``active`` / ``pending`` /
+        ``banned`` when *request* verifies against the key its instance
+        registered, as a question for THIS server (*gfs_key*, its identity
+        key — a question meant for another GFS is no question here), else
+        ``unknown``.
+
+        *request* already passed :func:`parse_status_request` (supported
+        suite, 64-byte signature, current ``ts``): ``unknown`` means only "no
+        such registration" or "the signature did not verify". An unknown
+        instance verifies against :data:`TIMING_UNIFORM_DUMMY_KEY_HEX`, so it
+        answers no sooner than a bad signature for a registered one: only the
+        key holder learns whether — and how — it is registered here (the same
+        rule as the WebSocket hello). A rejected household's row is deleted,
+        so it reads ``unknown`` too."""
+        instance = await self._repo.get_instance(request.instance_id)
+        key_hex = (
+            instance.public_key
+            if instance is not None
+            else TIMING_UNIFORM_DUMMY_KEY_HEX
+        )
+        verified = verify_status_request(key_hex, gfs_key, nonce, request)
+        if instance is None or not verified or instance.status not in CLIENT_STATUSES:
+            return "unknown"
+        return instance.status
 
     async def check_client_identity(self, instance_id: str, public_key: str) -> None:
         """Before a ``/gfs/register`` spends its pairing token: the id must
