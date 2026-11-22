@@ -2990,6 +2990,15 @@ def _gfs_admin_space_media(base_url: str) -> dict:
     (``GET /admin/api/overview`` after ``POST /admin/login`` with the demo's
     admin password). Its on-demand counts (v_83: ``holder_requests``,
     ``streams_served``, ``reuploads``, …) are THIS node's since start."""
+    overview = _gfs_admin_json(base_url, "/admin/api/overview")
+    return overview.get("space_media") or {}
+
+
+def _gfs_admin_json(
+    base_url: str, path: str, *, method: str = "GET", body: dict | None = None
+) -> dict:
+    """One GFS admin-portal call as the operator (``POST /admin/login`` with
+    the demo's admin password once per node, the session cookie reused)."""
     cookie = _GFS_ADMIN_COOKIES.get(base_url)
     for _attempt in range(2):
         if cookie is None:
@@ -3002,19 +3011,24 @@ def _gfs_admin_space_media(base_url: str) -> dict:
             with urllib.request.urlopen(req, timeout=10) as r:
                 cookie = r.headers.get("Set-Cookie", "").split(";", 1)[0]
             _GFS_ADMIN_COOKIES[base_url] = cookie
+        headers = {"Cookie": cookie}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(
-            f"{base_url}/admin/api/overview", headers={"Cookie": cookie}
+            f"{base_url}{path}", data=data, method=method, headers=headers
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
-                overview = json.loads(r.read())
+                answer = json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as exc:
             if exc.code != 401:
                 raise
             cookie = None
             _GFS_ADMIN_COOKIES.pop(base_url, None)
             continue
-        return overview.get("space_media") or {}
+        return answer if isinstance(answer, dict) else {"items": answer}
     raise SystemExit(f"GFS admin login at {base_url} failed")
 
 
@@ -4172,6 +4186,99 @@ def cmd_gfs_open_signup() -> None:
     _must("gfs-open-signup(disconnect)", s, body, ok=(204,))
     _wait_global_listing(base, c["token"], lambda got: not got, "disconnect")
     print("gfs-open-signup: ok (c paired via open sign-up, then disconnected)")
+
+
+def cmd_gfs_approval() -> None:
+    """Household c waits for the GFS operator's approval, then connects on
+    its own — no restart, no click.
+
+    1. The operator turns ``auto_accept_clients`` off (admin portal policy)
+       and removes any earlier registration of c, so c registers fresh.
+    2. c connects from its onboarding step → ``201`` ``pending``; Discover ›
+       Global lists nothing through it.
+    3. The operator approves c in the admin portal.
+    4. c asks the GFS for its approval status over ``POST /gfs/proof`` (a
+       question signed with its key, the answer signed with the GFS key it
+       pinned) — first 1 min after connecting — and turns ``active``; Discover
+       then lists every space the GFS directory lists.
+    5. The operator turns ``auto_accept_clients`` back on and c disconnects,
+       leaving the topology as ``gfs-open-signup`` leaves it.
+
+    About a minute, mostly waiting for c's first question; c's connection
+    list is polled every 5 s (below its per-minute API bucket).
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' first")
+    c = state["instances"]["c"]
+    base = f"http://127.0.0.1:{c['port']}"
+    gfs_url = f"http://127.0.0.1:{GFS_PORT}"
+
+    s, offer = _request(f"{base}/api/gfs/connections/default", token=c["token"])
+    _must("gfs-approval(offer)", s, offer, ok=(200,))
+    if offer.get("reason") == "already_connected":
+        conn_id = (offer.get("connection") or {}).get("id")
+        _request(
+            f"{base}/api/gfs/connections/{conn_id}", token=c["token"], method="DELETE"
+        )
+    _gfs_admin_json(
+        gfs_url, "/admin/api/policy", method="PATCH", body={"auto_accept_clients": False}
+    )
+    _gfs_admin_json(gfs_url, f"/admin/api/clients/{c['instance_id']}/reject", method="POST")
+    try:
+        s, conn = _request(
+            f"{base}/api/gfs/connections/default", token=c["token"], method="POST"
+        )
+        _must("gfs-approval(connect)", s, conn, ok=(201,))
+        if conn.get("status") != "pending":
+            raise SystemExit(f"gfs-approval: expected a pending connection: {conn!r}")
+        print(f"  c: connected, pending approval — id={conn['id'][:8]}")
+        s, rows = _request(f"{base}/api/public_spaces?limit=200", token=c["token"])
+        rows = _must("gfs-approval(listing while pending)", s, rows, ok=(200,))
+        if rows:
+            raise SystemExit(f"gfs-approval: pending connection lists {rows!r}")
+
+        _gfs_admin_json(
+            gfs_url, f"/admin/api/clients/{c['instance_id']}/accept", method="POST"
+        )
+        print("  GFS operator approved c")
+        status = ""
+        for _ in range(30):
+            s, conns = _request(f"{base}/api/gfs/connections", token=c["token"])
+            conns = _must("gfs-approval(connections)", s, conns, ok=(200,))
+            status = next(
+                (x["status"] for x in conns if x["id"] == conn["id"]), "missing"
+            )
+            if status == "active":
+                break
+            time.sleep(5.0)
+        if status != "active":
+            raise SystemExit(
+                f"gfs-approval: c's connection is still {status!r} 150 s after the"
+                " operator approved it"
+            )
+        print("  c: connection active on its own (no restart)")
+
+        s, directory = _request(f"{gfs_url}/gfs/spaces")
+        _must("gfs-approval(directory)", s, directory, ok=(200,))
+        listed = {sp["space_id"] for sp in directory.get("spaces") or []}
+        _wait_global_listing(base, c["token"], lambda got: listed <= got, "approval")
+        print(f"  c: Discover lists the GFS's {len(listed)} space(s)")
+
+        s, body = _request(
+            f"{base}/api/gfs/connections/{conn['id']}",
+            token=c["token"],
+            method="DELETE",
+        )
+        _must("gfs-approval(disconnect)", s, body, ok=(204,))
+    finally:
+        _gfs_admin_json(
+            gfs_url,
+            "/admin/api/policy",
+            method="PATCH",
+            body={"auto_accept_clients": True},
+        )
+    print("gfs-approval: ok (pending → operator approved → active, then disconnected)")
 
 
 def _wait_global_listing(base: str, token: str, ok, when: str) -> None:

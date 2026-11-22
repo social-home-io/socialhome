@@ -783,13 +783,90 @@ What the household checks and sends:
   sends is ignored — never validated, stored or echoed).
 - **Approval still applies.** With `auto_accept_clients = false` the
   registration lands `pending` and onboarding says "waiting for the GFS to
-  approve"; the connection turns active once the operator approves.
+  approve"; the connection turns active on its own once the operator
+  approves — see "Waiting for the operator's approval" below.
 - **Plain errors.** Unreachable, sign-up closed, busy (rate-limited) and
   refused map to fixed household-side sentences; the GFS's own error text
   never reaches the screen.
 
 The household↔GFS leg has no `proto_version`: `open_signup` and
 `proof_of_possession` are signed capabilities, not an `OURS` bump.
+
+#### Waiting for the operator's approval
+
+A `pending` connection is inert: the push socket, the Discover poll and the
+metadata refresh all skip it, and the GFS refuses its WebSocket hello
+(`auth-failed`). The GFS holds no household address, so it cannot announce
+an approval. The household therefore **asks**, on the challenge it already
+sends (`POST /gfs/proof`, no new endpoint), with an optional `client`
+question signed by its identity key — the key it registered:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as Household (connection pending)
+    participant G as GFS
+    participant O as Operator
+    Note over H: app start, or a pairing that answered pending
+    loop 1 min, 2, 4, 8, 16, 32, 60 min — then each hourly /gfs/info pass
+        H->>G: POST /gfs/proof {nonce, client: {instance_id, sig, sig_suite}}
+        Note over G: verify sig (for THIS gfs_key) against the registered key<br/>(dummy key when unknown — same work)
+        G-->>H: {proof…, client_status, client_status_sig, client_status_sig_suite}
+        Note over H: verify against the PINNED GFS key,<br/>this nonce, own instance id and own question sig
+    end
+    O->>G: admin portal: accept (or reject / ban)
+    H->>G: POST /gfs/proof {nonce, client}
+    G-->>H: client_status = active (signed)
+    Note over H: status → active, on-connected hooks:<br/>push socket, Discover refresh, GFS-needed bell
+```
+
+- **The question** is `client: {instance_id, sig, sig_suite}`; `sig` is
+  Ed25519 over `b"gfs-client-status-request:v1:"` + canonical JSON of
+  `{gfs_key, instance_id, nonce, suite}` (`socialhome/gfs_client_status.py`),
+  where `gfs_key` is the key the household pinned for that GFS. A GFS answers
+  a question naming another key with `unknown`, so a GFS that saw the question
+  can't replay it at another GFS to learn whether — or how — the household is
+  registered there. Only a pending (or suspended) household sends it, and only
+  to the GFS it registered with: the one place this request identifies it.
+- **The answer** adds `client_status` — `active`, `pending` or `banned` for a
+  question that verifies against the key the instance registered, and
+  `unknown` for an unknown instance and a bad signature alike (the GFS
+  verifies an unknown instance against the fixed dummy key, as for the
+  WebSocket hello, so the endpoint is no oracle for who is registered) — with
+  `client_status_sig`, Ed25519 over `b"gfs-client-status:v1:"` + canonical
+  JSON of `{gfs_key, instance_id, nonce, request_sig, status, suite}` under the
+  GFS identity key (`request_sig` is the question's signature as the GFS
+  received it), and `client_status_sig_suite` (`ed25519`; an unknown suite is
+  refused, never defaulted).
+- **What the household trusts.** Only an answer whose signature verifies
+  against the key it pinned for that connection, over this question's fresh
+  nonce, its own instance id and its own question signature — a forged,
+  unsigned, relabelled or replayed status is ignored with a WARNING and
+  nothing changes. Someone on the path who breaks the question's signature
+  gets a signed `unknown` for the broken question, which does not verify for
+  the household's — so it can't get a household suspended. No URL is bound: a
+  relay that forwards the question unchanged gets back that GFS's genuine
+  answer. No timestamp: the nonce makes every answer fresh, and
+  a skewed clock must never read as a rejection.
+- **Outcomes.** `active` → the row turns `active` and the normal
+  on-connected hooks run (the push socket opens, Discover refreshes — its
+  spaces appear without a restart — and the GFS's `/gfs/info` refresh
+  follows on the socket's connect). `unknown` (the operator rejected it, which
+  deletes the row, or removed it) or `banned` → the row turns `suspended` and
+  the connections list shows "Suspended"; remove it and connect again with a
+  new code. A suspended row is still asked (same backoff, then hourly), so an
+  unban (the GFS row goes back to `pending`, then the operator accepts) or a
+  GFS whose database was restored brings it back without a new code.
+  `pending`, no answer, a 4xx / 5xx or an older GFS that answers only the
+  plain proof → ask again later.
+- **Cost.** Only a `pending` or `suspended` connection asks — none, no
+  request.
+  One ~250-byte request per question: seven in the first ~2 h, then one per
+  hour (the jittered hourly `/gfs/info` pass) until the operator decides.
+  `/gfs/proof` stays rate-limited 20 / min / IP.
+- **When it flips.** The SPA's connections list reads the new status on its
+  next load (no live frame); onboarding's "waiting for approval" note says to
+  check Settings → Connections.
 
 ### Subscriber-side on-ramp (local space mirror)
 

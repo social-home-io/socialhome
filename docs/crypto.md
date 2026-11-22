@@ -1239,6 +1239,30 @@ traffic are not gated). Not enforced: an impostor replaying a block
 signed before the GFS learnt the proof, for a key the household never saw
 proven, looks like an older GFS and pairs unproven.
 
+**GFS approval status** (`gfs_client_status.py`) — a household whose
+connection is still `pending` asks, on the same `POST /gfs/proof`, whether
+the operator approved it. Two signatures, both suite-tagged
+(`CLIENT_STATUS_SIG_SUITE_ED25519 = "ed25519"`, validated against
+`SUPPORTED_CLIENT_STATUS_SIG_SUITES`; unknown → `UnsupportedClientStatusSigSuite`,
+never a default): the household's question `client: {instance_id, sig,
+sig_suite}`, Ed25519 with its identity key over
+`b"gfs-client-status-request:v1:"` + canonical JSON of `{gfs_key, instance_id,
+nonce, suite}` (`gfs_key` = the key it pinned for that GFS, so another GFS
+can't replay the question elsewhere), and the GFS's answer
+`client_status_sig` (+ `client_status_sig_suite`), Ed25519 with the GFS
+identity key over `b"gfs-client-status:v1:"` + canonical JSON of `{gfs_key,
+instance_id, nonce, request_sig, status, suite}`. The household verifies the
+answer against the key it PINNED for the connection, with its own fresh
+nonce, instance id and question signature, so a status can be neither forged,
+relabelled, replayed, lifted from another household's answer nor obtained for
+a question someone on the path swapped in. The GFS answers the real status only to a question that
+verifies against the registered key; an unknown instance is verified against
+a fixed dummy key and, like a bad signature, reads `unknown` — no oracle for
+who is registered. No URL is bound (a relay forwarding the question unchanged
+to the real GFS gets the real answer) and no timestamp (the nonce gives freshness; a skewed clock
+must never read as a rejection). The prefixes are distinct from each other,
+from `gfs-proof:v1:` and from the capability block's.
+
 The suite-tag retrofit promised in earlier revisions of this doc is
 shipped — every cryptographic wire format in the federation surface
 carries a ``*_suite`` identifier (signatures, mesh KEM, key-wrap KEM,

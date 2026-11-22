@@ -12,7 +12,8 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.capabilities_sig import verify_capabilities
-from socialhome.crypto import b64url_encode
+from socialhome.crypto import b64url_encode, generate_identity_keypair
+from socialhome.gfs_client_status import sign_status_request, verify_client_status
 from socialhome.gfs_proof import (
     PROOF_CAPABILITY,
     PROOF_ROUTE,
@@ -21,8 +22,9 @@ from socialhome.gfs_proof import (
     verify_possession_proof,
 )
 from socialhome.global_server import public
-from socialhome.global_server.app_keys import gfs_cluster_key
+from socialhome.global_server.app_keys import gfs_cluster_key, gfs_fed_repo_key
 from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
 
 BASE_URL = "https://gfs.proof.test"
@@ -245,3 +247,133 @@ async def test_nodes_with_a_shared_seed_and_different_ids_prove_the_same_key(
     finally:
         for tc in clients:
             await tc.close()
+
+
+# ── A pending household asks for its approval status ──────────────────────
+
+
+async def _register(client, kp, instance_id: str, status: str) -> None:
+    await client.server.app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id=instance_id,
+            display_name="Home",
+            public_key=kp.public_key.hex(),
+            status=status,
+        )
+    )
+
+
+async def _ask(client, kp, instance_id: str, n: int = 50, *, gfs_key: str = ""):
+    """POST a signed question → ``(nonce, question sig, response)``. Asks
+    the GFS at *client* unless *gfs_key* names another one."""
+    if not gfs_key:
+        gfs_key = (await (await client.get("/gfs/info")).json())["public_key"]
+    nonce = new_proof_nonce()
+    question = sign_status_request(kp.private_key, gfs_key, instance_id, nonce)
+    body = {"nonce": nonce, "client": question}
+    resp = await client.post(PROOF_ROUTE, json=body, headers=_ip(n))
+    return nonce, question["sig"], resp
+
+
+@pytest.mark.parametrize("status", ["pending", "active", "banned"])
+async def test_a_registered_household_learns_its_status_signed(client, status):
+    home = generate_identity_keypair()
+    await _register(client, home, "home-a", status)
+    info = await (await client.get("/gfs/info")).json()
+    nonce, q_sig, resp = await _ask(client, home, "home-a")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["client_status"] == status
+    assert verify_client_status(
+        info["public_key"],
+        "home-a",
+        nonce,
+        q_sig,
+        status,
+        body["client_status_sig"],
+        body["client_status_sig_suite"],
+    )
+    # The possession proof rides along unchanged.
+    assert verify_possession_proof(
+        info["public_key"], nonce, BASE_URL, body["proof_sig"], body["proof_sig_suite"]
+    )
+
+
+async def test_an_unknown_instance_and_a_bad_signature_answer_the_same(client):
+    """No registration oracle: only the key holder learns a real status."""
+    home = generate_identity_keypair()
+    impostor = generate_identity_keypair()
+    await _register(client, home, "home-a", "active")
+    info = await (await client.get("/gfs/info")).json()
+    for n, (kp, iid) in enumerate(((impostor, "home-a"), (home, "home-gone"))):
+        nonce, q_sig, resp = await _ask(client, kp, iid, n=60 + n)
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["client_status"] == "unknown"
+        assert verify_client_status(
+            info["public_key"],
+            iid,
+            nonce,
+            q_sig,
+            "unknown",
+            body["client_status_sig"],
+            body["client_status_sig_suite"],
+        )
+
+
+async def test_a_rejected_household_reads_unknown(client):
+    """The operator's reject deletes the row: the household reads unknown."""
+    home = generate_identity_keypair()
+    await _register(client, home, "home-a", "pending")
+    await client.server.app[gfs_fed_repo_key].delete_instance("home-a")
+    _, _, resp = await _ask(client, home, "home-a")
+    assert (await resp.json())["client_status"] == "unknown"
+
+
+async def test_a_question_meant_for_another_gfs_reads_unknown(client):
+    """Another GFS that saw the household's question can't replay it here
+    to learn whether — or how — the household is registered."""
+    home = generate_identity_keypair()
+    await _register(client, home, "home-a", "banned")
+    other_gfs = generate_identity_keypair().public_key.hex()
+    _, _, resp = await _ask(client, home, "home-a", n=73, gfs_key=other_gfs)
+    assert (await resp.json())["client_status"] == "unknown"
+
+
+async def test_an_unknown_question_suite_reads_unknown(client):
+    home = generate_identity_keypair()
+    await _register(client, home, "home-a", "active")
+    nonce = new_proof_nonce()
+    info = await (await client.get("/gfs/info")).json()
+    block = sign_status_request(home.private_key, info["public_key"], "home-a", nonce)
+    block["sig_suite"] = "ed448"
+    resp = await client.post(
+        PROOF_ROUTE, json={"nonce": nonce, "client": block}, headers=_ip(70)
+    )
+    assert resp.status == 200
+    assert (await resp.json())["client_status"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "x",
+        [],
+        {"instance_id": "home-a"},
+        {"instance_id": 1, "sig": "s", "sig_suite": "ed25519"},
+    ],
+)
+async def test_a_malformed_client_block_is_400(client, block):
+    resp = await client.post(
+        PROOF_ROUTE,
+        json={"nonce": new_proof_nonce(), "client": block},
+        headers=_ip(71),
+    )
+    assert resp.status == 400
+
+
+async def test_without_a_client_block_the_answer_carries_no_status(client):
+    resp = await client.post(
+        PROOF_ROUTE, json={"nonce": new_proof_nonce()}, headers=_ip(72)
+    )
+    assert "client_status" not in await resp.json()

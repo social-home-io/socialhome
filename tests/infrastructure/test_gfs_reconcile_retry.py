@@ -70,6 +70,18 @@ async def test_after_the_bounded_attempts_it_stays_pending_for_the_hourly_pass()
     await retry.stop()
 
 
+async def test_own_delays_bound_the_attempts():
+    """A caller with its own schedule (the pending-approval check) gets
+    exactly one attempt per delay, then waits for the hourly pass."""
+    run = _Run([])  # always "retry"
+    retry = GfsReconcileRetry(run, delays=(0.01, 0.01, 0.01, 0.01, 0.01))
+    retry.schedule("g1")
+    await retry.wait_idle()
+    assert run.calls == ["g1"] * 5
+    assert retry.pending() == {"g1"}
+    await retry.stop()
+
+
 async def test_schedule_twice_runs_one_loop():
     run = _Run(["done"])
     retry = GfsReconcileRetry(run)
@@ -102,7 +114,7 @@ async def test_a_raising_run_counts_as_retry(caplog):
     await retry.wait_idle()
     assert len(calls) == 3
     assert retry.pending() == {"g1"}
-    assert "reconcile retry failed" in caplog.text
+    assert "gfs-reconcile-retry failed" in caplog.text
     await retry.stop()
 
 
