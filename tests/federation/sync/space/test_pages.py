@@ -965,6 +965,35 @@ async def test_a_forged_or_truncated_listing_is_refused(caplog):
     assert "refused the listings" in caplog.text
 
 
+async def test_a_hosts_current_listing_settles_a_changed_bucket():
+    """The host changed the bucket since the page (it cannot prove it), so
+    it lists the bucket as it is now — trusted like its stream: a row of it
+    we lack, or hold in an older version, is missing; ours newer is not."""
+    t = _Listed([_row("lost")], [])
+    await t.take_page()
+    t.forge = lambda recs: [
+        listing_to_wire(r["i"], [_row("lost", version=2)], current=True) for r in recs
+    ]
+    await t.deliver()
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing) == (False, 1)
+
+    mid = "2026-06-01T00:00:00.000000+00:00"
+    for ours, expect in (
+        (_row("lost", version=1, marker=OLD), (False, 1)),  # older than the host's
+        (_row("lost", version=3, marker="2026-07-01T00:00:00.000000+00:00"), (True, 0)),
+    ):
+        t = _Listed([_row("lost", version=0)], [ours])
+        await t.take_page()
+        t.forge = lambda recs: [
+            listing_to_wire(r["i"], [_row("lost", version=2, marker=mid)], current=True)
+            for r in recs
+        ]
+        await t.deliver()
+        pos = await t.position()
+        assert pos is not None and (pos.match, pos.missing) == expect
+
+
 async def test_an_unasked_listing_is_dropped():
     host = [_row("lost")]
     t = _Listed(host, [])
@@ -1001,6 +1030,9 @@ async def test_the_host_lists_only_buckets_unchanged_since_the_page():
     )
     by_bucket = {r["i"]: r for r in recs}
     assert by_bucket[b0]["held"] is True and by_bucket[b1]["held"] is False
+    # As the space's host it lists the changed bucket as it is now.
+    assert by_bucket[b1]["current"] is True
+    assert by_bucket[b1]["rows"][0][1] == "p1"
     # Another page than ours: nothing held.
     other = _signed(vector=_vec(9))
     recs = await env.svc.listing_records(

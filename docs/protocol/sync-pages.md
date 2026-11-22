@@ -632,9 +632,16 @@ What shipped, where it is more exact than the design above:
   never spends the 5/h stream budget a catch-up needs (and a busy catch-up
   never starves it). Each record is `{i, held: true, rows: [[resource, row_id,
   leaf, change_time], …]}` or `{i, held: false}`: a provider lists a bucket
-  only when its own rows of it still hash to the requester's page (the
-  same page it holds) — a bucket changed since the page cannot be proven
-  (no leaf cache) and stays unresolved. The requester takes listings only
+  as of the page only when its own rows of it still hash to the
+  requester's page (the same page it holds). A bucket changed since the
+  page cannot be proven (no leaf cache); a provider that acts as the
+  space's host then lists it **as it is now** — `{i, held: false, current:
+  true, rows}` — which the requester classifies without the page check:
+  it asked an acting host, whose stream it takes unchecked anyway. Any
+  other provider (Phase 3) answers `{i, held: false}` and the bucket stays
+  unresolved. A delete on the host shows in its tombstone's bucket, not in
+  a current listing, so a delete we missed is not counted missing there
+  (the 30-min sync heals it). The requester takes listings only
   for a session it asked for, from the household it asked; a listing must
   hash to the page's signed bucket, name only rows of that bucket and
   committed resources, and stay within 4 096 rows — otherwise the whole

@@ -177,14 +177,20 @@ def _classify(pending: _PendingListing) -> tuple[int, int]:
     not asked, repeated, or that does not hash to the signed bucket."""
     seen: set[int] = set()
     missing = 0
+    unresolved = 0
     for raw in pending.received:
-        index, rows = parse_listing(raw)
+        index, rows, current = parse_listing(raw)
         if index not in pending.buckets or index in seen:
             raise PageRefused(f"a listing of bucket {index} not asked for")
         seen.add(index)
         if rows is None:
+            unresolved += 1
             continue
-        verify_listing(index, rows, pending.vector)
+        if not current:
+            verify_listing(index, rows, pending.vector)
+        # ``current``: the host's rows as they are now (it changed the
+        # bucket since the page) — trusted as its stream is: we only ever
+        # ask a household acting as the space's host.
         mine = {(r.resource, r.row_id): r for r in pending.local.get(index, [])}
         for row in rows:
             have = mine.get((row.resource, row.row_id))
@@ -197,16 +203,7 @@ def _classify(pending: _PendingListing) -> tuple[int, int]:
             ):
                 missing += 1
         # A row of ours not listed was created after the page: ahead.
-    unresolved = (
-        len(pending.buckets)
-        - len(seen)
-        + sum(
-            1
-            for raw in pending.received
-            if isinstance(raw, dict) and raw.get("held") is not True
-        )
-    )
-    return missing, unresolved
+    return missing, unresolved + len(pending.buckets) - len(seen)
 
 
 def _now_ms() -> int:
@@ -927,18 +924,31 @@ class SyncPageService:
             return [listing_to_wire(i, None) for i in asked]
         scan = await self._state.rows_in(space_id, asked, cutoff=held.page.cutoff)
         out: list[dict] = []
+        hosting = await serves_as_host(
+            self._spaces,  # type: ignore[arg-type]
+            space,
+            own_instance_id=self._own_instance_id,
+        )
         for index in asked:
             rows = scan.rows.get(index, [])
-            proven = len(rows) <= MAX_LISTING_ROWS
-            if proven:
-                try:
-                    verify_listing(index, rows, held.row.vector)
-                except PageRefused:
-                    proven = False  # changed here since the page
-            out.append(listing_to_wire(index, rows if proven else None))
+            if len(rows) > MAX_LISTING_ROWS:
+                out.append(listing_to_wire(index, None))
+                continue
+            try:
+                verify_listing(index, rows, held.row.vector)
+                out.append(listing_to_wire(index, rows))
+            except PageRefused:
+                # Changed here since the page: as the space's host we list
+                # the bucket as it is now (trusted like our stream); anyone
+                # else cannot prove it.
+                out.append(
+                    listing_to_wire(index, rows, current=True)
+                    if hosting
+                    else listing_to_wire(index, None)
+                )
         log.info(
             "sync page: listed %d of %d bucket(s) of space %s",
-            sum(1 for r in out if r.get("held")),
+            sum(1 for r in out if r.get("held") or r.get("current")),
             len(out),
             space_id,
         )

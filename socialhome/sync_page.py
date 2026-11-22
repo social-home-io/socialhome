@@ -1034,20 +1034,26 @@ class ListingRow:
     marker: str | None
 
 
-def listing_to_wire(index: int, rows: Sequence[ListingRow] | None) -> dict:
-    """A ``__listing__`` record: the bucket and its rows, or
-    ``held: false`` when the provider cannot prove that bucket."""
+def listing_to_wire(
+    index: int, rows: Sequence[ListingRow] | None, *, current: bool = False
+) -> dict:
+    """A ``__listing__`` record: the bucket and its rows as of the page
+    (``held: true``, they hash to the signed bucket); or ``held: false``
+    when the provider cannot prove that bucket — with ``current: true`` and
+    its rows as they are NOW when it acts as the space's host (trusted like
+    its stream, unproven by the page)."""
     if rows is None:
         return {"i": index, "held": False}
-    return {
-        "i": index,
-        "held": True,
-        "rows": [[r.resource, r.row_id, b64url_encode(r.leaf), r.marker] for r in rows],
-    }
+    wire_rows = [[r.resource, r.row_id, b64url_encode(r.leaf), r.marker] for r in rows]
+    if current:
+        return {"i": index, "held": False, "current": True, "rows": wire_rows}
+    return {"i": index, "held": True, "rows": wire_rows}
 
 
-def parse_listing(raw: object) -> tuple[int, list[ListingRow] | None]:
-    """A received ``__listing__`` record, strictly parsed and bounded.
+def parse_listing(raw: object) -> tuple[int, list[ListingRow] | None, bool]:
+    """A received ``__listing__`` record, strictly parsed and bounded:
+    ``(bucket, rows, current)`` — rows ``None`` for a bucket not listed,
+    ``current`` for a host's rows as they are now (not as of the page).
     Raises :class:`PageRefused`."""
     if not isinstance(raw, dict):
         raise PageRefused("listing is not an object")
@@ -1058,8 +1064,9 @@ def parse_listing(raw: object) -> tuple[int, list[ListingRow] | None]:
         or not 0 <= index < BUCKETS
     ):
         raise PageRefused("malformed listing bucket")
-    if raw.get("held") is not True:
-        return index, None
+    current = raw.get("held") is not True and raw.get("current") is True
+    if raw.get("held") is not True and not current:
+        return index, None, False
     rows_raw = raw.get("rows")
     if not isinstance(rows_raw, list) or len(rows_raw) > MAX_LISTING_ROWS:
         raise PageRefused("malformed listing rows")
@@ -1081,7 +1088,7 @@ def parse_listing(raw: object) -> tuple[int, list[ListingRow] | None]:
         if row_key(resource, row_id)[0] != index:
             raise PageRefused("a listing row of another bucket")
         rows.append(ListingRow(resource, row_id, value, marker))
-    return index, rows
+    return index, rows, current
 
 
 def verify_listing(index: int, rows: Sequence[ListingRow], vector: bytes) -> None:

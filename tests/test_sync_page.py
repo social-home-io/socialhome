@@ -604,12 +604,17 @@ def test_a_listing_round_trips_and_verifies():
     vector = bytearray(VECTOR_BYTES)
     vector[index * 32 : (index + 1) * 32] = bucket_hash(index, (r.leaf for r in rows))
     wire = listing_to_wire(index, rows)
-    got_index, got_rows = parse_listing(wire)
-    assert got_index == index and got_rows == rows
+    got_index, got_rows, current = parse_listing(wire)
+    assert got_index == index and got_rows == rows and current is False
     verify_listing(index, got_rows, bytes(vector))
     with pytest.raises(PageRefused):
         verify_listing(index, got_rows[:-1], bytes(vector))  # truncated
-    assert parse_listing(listing_to_wire(index, None)) == (index, None)
+    assert parse_listing(listing_to_wire(index, None)) == (index, None, False)
+    assert parse_listing(listing_to_wire(index, rows, current=True)) == (
+        index,
+        rows,
+        True,
+    )
 
 
 @pytest.mark.parametrize(
