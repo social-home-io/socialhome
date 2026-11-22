@@ -1,8 +1,10 @@
 # Sync pages (signed state pages)
 
 **Status: Phase 2 (signed pages, the "behind?" check) and Phase 3
-(verified fetch from any member) are implemented at v_95 — see [Phase 2
-as built](#phase-2-as-built-v_95) and [Phase 3 as
+(verified fetch from any member) are implemented at v_95, with the final
+whole-branch review's fixes (2026-11-22: no vector delta, changes after a
+page settle, the owner's catch-up completes) — see [Phase 2 as
+built](#phase-2-as-built-v_95) and [Phase 3 as
 built](#phase-3-as-built-v_95). The anti-entropy part of Phase 3
 (`page_match`) is not built yet.** It builds on [sync.md](./sync.md), the
 §25.6 space sync.
@@ -22,9 +24,9 @@ checked against the signed page, not against who delivered it.
    is the hash of 256 bucket hashes. A bucket hash covers the sorted leaf
    hashes of the rows in that bucket. A leaf is the SHA-256 of a row's
    canonical **commit form** (§2).
-2. **Store almost nothing.** The host keeps its newest page, the bucket
-   vector and the delta from the previous page: ≤ 17 KB per space. A
-   member keeps the newest page and its vector: ≈ 9 KB per space. There
+2. **Store almost nothing.** Every household — the host and a member
+   alike — keeps its newest page and its bucket vector: ≈ 9 KB per space
+   (no delta since the final review, I4). There
    is no per-row data and no history. Leaves are recomputed on demand.
    Hashing costs ≈ 3.3 µs per record (measured), so a 50 000-row space
    takes 0.17 s of hashing, or an estimated 2–4 s on a Pi with the
@@ -32,9 +34,9 @@ checked against the signed page, not against who delivered it.
 3. **No new message in Phase 2.** The page rides the sentinel of the
    periodic BEGIN that already runs every 30 min, sealed under the space
    content key, and only when it is newer than the one the requester
-   holds. Next to it travels the **delta** of the bucket vector (the
-   changed buckets only), or the full vector when the requester is more
-   than one page behind. The host seals lazily: when a BEGIN finds the
+   holds — always with the full bucket vector (a delta against the
+   requester's page was built and removed: it almost never applied, see
+   §5). The host seals lazily: when a BEGIN finds the
    space changed since the stored page, at most once every 15 min. There
    is no timer, no push and no fan-out.
 4. **Phase 3 reuses the §25.6 session.** A member sends `SPACE_SYNC_BEGIN`
@@ -90,8 +92,8 @@ records, and with a real SQLite file (`WITHOUT ROWID`, after `VACUUM`).
 
 | | A. change log + Merkle pages | **B. state commitment, 256 buckets** | C. B + per-row leaf cache |
 |---|---|---|---|
-| Host storage, big | 114 B × 2 000 × 30 days ≈ **6.8 MB** (grows with activity, cliff at 30 days) | page + vector + delta ≤ **17 KB** | + 56 B × 50 000 ≈ **2.8 MB** |
-| Host storage, small | ≈ 170 KB | ≤ 17 KB | ≈ 130 KB |
+| Host storage, big | 114 B × 2 000 × 30 days ≈ **6.8 MB** (grows with activity, cliff at 30 days) | page + vector ≈ **9 KB** | + 56 B × 50 000 ≈ **2.8 MB** |
+| Host storage, small | ≈ 170 KB | ≈ 9 KB | ≈ 130 KB |
 | Member storage | header, plus the entry lists of recent pages if it is to prove rows while the host is offline | header + vector ≈ **9 KB** | ≈ 9 KB |
 | Host CPU per seal | O(changes) | O(rows): 0.17 s of hashing at 50 k rows, an estimated 2–4 s with DB reads on a Pi | O(changes) |
 | Seals per day, worst case | 1 per 256 changes or 5 min | ≤ 96 (lazy, ≥ 15 min apart, only when a BEGIN asks) | as B |
@@ -274,9 +276,8 @@ offline, which is the content a catch-up needs most.
 4. `issued_at` must not be more than 300 s in the future. The order key
    is `(epoch, issued_at, seq)`, and only a newer page replaces the
    stored one.
-5. The vector must hash to `root`. For a delta, the receiver applies it
-   to its stored vector, which must match `prev_root` and the stored
-   page's `signer`. Otherwise it asks for the full vector.
+5. The full vector must come with the page and hash to `root`; a page
+   without it is refused and the held one kept.
 
 **Epoch rotation.** When a member applies `SPACE_AUTHORITY_ROTATED`, it
 drops its stored page together with the baseline reset it already does.
@@ -328,23 +329,22 @@ sequenceDiagram
     H->>M: chunks (if anything changed)
     H->>M: __listing__ chunks (only for asked buckets)
     H->>M: sentinel __complete__ + page_sealed<br/>(only when newer than M's page)
-    Note over M: verify page → apply delta to the stored vector<br/>→ check root → store → compare (≤ 1 / 15 min)<br/>listings → verify vs signed buckets → classify vs rows now → status
+    Note over M: verify page → check the vector hashes to root → store → compare (≤ 1 / 15 min)<br/>listings → verify vs signed buckets → classify vs rows now → status
     M->>H: SPACE_SYNC_COMPLETE (clean)
 ```
 
-- **`page` in BEGIN**: `{signer, epoch, seq, root}`, about 120 B, inside
-  the encrypted payload. With it the provider can skip a page the
-  requester already has, and can choose between a delta and the full
-  vector.
+- **`page` in BEGIN**: `{signer, epoch, seq, issued_at, root}`, about
+  170 B, inside the encrypted payload. With it the provider skips a page
+  the requester already has.
 - **`page_sealed` on the sentinel**: AES-256-GCM under the space content
   key, through the same helper and AAD as chunks
   (`encrypt_chunk`, `space_id:epoch:sync_id`). The sentinel itself stays
   plaintext-signed, so the page, its counts and its hashes must not ride
-  in the clear (encryption-first rule). The plaintext is
-  `{page, delta | vector}`:
-  - `delta`: `[[i, bucket_hash_b64], …]`, the buckets that changed since
-    `prev_root`, sent when the requester's page is that previous page;
-  - `vector`: all 256 bucket hashes (8 KiB raw), sent otherwise.
+  in the clear (encryption-first rule). The plaintext is `{page,
+  vector}`: the signed header and all 256 bucket hashes — ≈ 11.4 KB of
+  JSON, ≈ 15.3 KB sealed (measured). It goes only when the requester's
+  `page` is absent or older; a requester that holds the current page gets
+  nothing beyond its own 170-byte ref.
 - **Any provider relays**: a non-signing provider (a member household
   that streams its writers' rows) attaches the newest page it holds in
   the same way. This is the member-to-member relay. It needs no new
@@ -421,7 +421,7 @@ sequenceDiagram
   3. Otherwise R sends a `buckets` session to the host for S.
 
   A false `page_match` only harms the household that sends it.
-- **Bounds**: page ≤ 1 KiB; delta ≤ 256 entries; vector exactly 256 × 32
+- **Bounds**: page ≤ 1 KiB; vector exactly 256 × 32
   B; ≤ 256 buckets per request; listing ≤ 4 096 leaves (128 KiB, spread
   over chunks). That caps the b256 suite at about 1 M rows per space;
   bigger spaces would need a sibling suite with more buckets.
@@ -432,27 +432,41 @@ sequenceDiagram
 
 ## 5. Cost
 
-| Trigger | Recipients × items × bytes | Big space, worst case per day | Small space |
+Rewritten in the final review (I4, the delta removed). The busy space: 200
+member households, 50 000 committed rows, 2 000 changes a day, every member
+sending its periodic BEGIN 48 times a day.
+
+| Trigger | Recipients × items × bytes | Busy space, per day | Small space (2 000 rows, 50 changes, 5 households) |
 |---|---|---|---|
-| Phase 2, page on the sentinel | only members whose BEGIN shows an older page; ≤ 1 page per member per 30-min round | 200 × 48 × (0.7 KiB page + ~2 KiB delta, ~40 changed buckets) ≈ **26 MB**; a member > 1 page behind gets the 11 KiB vector once | ≈ 0, a few KB |
-| Phase 2, seal | 1 export + hash, ≤ 1 / 15 min, only when asked and changed | ≤ 96 × 2–4 s CPU on a Pi (est.) | ≤ 96 × 0.1 s |
-| Phase 2, member root check | 1 recompute per new page, debounced ≤ 1 / h, `to_thread` | ≤ 24 × 2–4 s per member (est.) | trivial |
-| Phase 3, catch-up while the host is silent | 1 requester → 1 member per round, cooldown as for helpers | listings 6.2 KiB raw per differing bucket + the rows R lacks (rows it would have had from the host anyway) | |
-| Phase 3, anti-entropy | replaces a full stream per member per day | today ≈ 200 × 50 k × ~0.6 KB ≈ **6 GB/day** of host upload → **≈ 0** when roots match, otherwise only the differing buckets | |
+| `page` ref in every BEGIN | 200 members × 48 BEGINs × ≈ 0.2 KB (170 B JSON, encrypted) | ≈ **2 MB** | ≈ 0.05 MB |
+| Phase 2, page on the sentinel | only to a requester whose ref shows an older page. Changes arrive every ~45 s, so the host seals at most every 15 min (≤ 96 / day) and nearly every 30-min BEGIN finds a newer page: 200 × 48 × 15.3 KB (page + full vector, sealed) | ≈ **147 MB** (worst: a member also hears a co-member's older page first in the same tick, ≤ 2 pages per tick → ≈ 294 MB) | ≤ 5 × 48 × 15.3 KB ≈ 3.7 MB, far less in practice (a quiet space is not resealed) |
+| Phase 2, seal | 1 export + hash, ≤ 1 / 15 min, only when a BEGIN finds the space changed (the "changed?" probe is memoised on the change counter) | ≤ 96 × 6 s on x86 (2–4× on a Pi) | ≤ 96 × 0.1 s |
+| Phase 2, member compare | 1 recompute per newer page, ≤ 1 / 15 min, `to_thread` | ≤ 48 × 6 s per member (one per received page) | trivial |
+| Phase 3, catch-up while the host is silent | 1 requester → 1 member per ask, ≤ 3 asks per round | see *Phase 3 as built*, Cost | |
+| Phase 3, anti-entropy (`page_match`, not built) | would replace a full stream per member per day | today ≈ 200 × 50 k × ~0.6 KB ≈ **6 GB/day** of host upload | |
 
 - **Live traffic, for scale**: 2 000 changes × 200 households × ~1.5 KB
-  ≈ 600 MB/day.
-- **Net effect**: Phase 2 adds about 4 % on top of the live traffic in
-  the busiest case and nothing to a quiet space. Phase 3 removes the
-  biggest recurring cost a space has.
+  ≈ 600 MB/day. The pages add ≈ 25 % on top in the busiest case (≈ 50 %
+  at the worst), nothing to a quiet space.
+- **Why the delta went (I4).** It was sent only to a requester holding
+  exactly the signer's previous page (`prev_root`). A busy host seals every
+  15 min and members ask every 30, so a member is nearly always two pages
+  behind: in practice the full vector went every time, and the delta cost
+  a column, a wire field and a chain rule for ≈ nothing. The honest cost
+  is the table above.
+- **Cheaper shapes, if this proves too much** (not built — measure first):
+  send a newer page only when the requester's is older than an hour (the
+  requester compares at most once per 15 min anyway): ≈ 74 MB/day; or carry
+  the vector as raw bytes rather than base64 inside the sealed JSON (8 KiB
+  instead of 10.9 KiB before the outer base64): ≈ −25 %.
 - **Amplification**: nothing fans out. One requester talks to one
   provider per session, and one member's action never triggers N × M
   work.
 - **The 30-min quiet BEGIN stays.** It is the host-liveness probe
   (`HostContact`) and the watermark exchange, and the page cannot skip it.
   The page only makes it more useful: a quiet round now also says "your
-  copy matches the host as of 14:05". Phase 3's `page_match` is what
-  makes the daily full pass skippable.
+  copy matches the space as of 14:05". Phase 3's `page_match` is what
+  would make the daily full pass skippable.
 
 ## 6. Security
 
@@ -479,11 +493,11 @@ protocol v_95, with adversarial review).
      property test over each receiver (stream a row, re-export it,
      compare the leaf).
    - Tests: unknown suite refused, epoch checks, future skew, ordering,
-     delta apply, a broken chain flagged as a conflict.
+     a broken chain flagged as a conflict.
 2. Additive migration with the audit:
    - `space_instances` gains nothing;
    - one table `space_sync_pages(space_id PK, page_json, vector BLOB,
-     delta BLOB)` holds the newest page per space, the same row on host
+     …)` holds the newest page per space, the same row on host
      and member;
    - the PR shows why no existing column fits.
 3. Lazy seal in `provider.py`, plus `page` in BEGIN (`scheduler.py`) and
@@ -603,16 +617,21 @@ What shipped, where it is more exact than the design above:
   `{epoch, payload}` from `encrypt_chunk` (content key, AAD
   `space_id:epoch:sync_id`), ≤ 24 KiB. Sent only to a requester at
   `MIN_FOR_SYNC_PAGES` whose `page` is absent or older by
-  `(epoch, issued_at, seq)`; a delta only when its `page` is the stored
-  page's `prev_root` from the same signer and epoch. BEGIN `page` goes only
+  `(epoch, issued_at, seq)`, always with the full vector (no delta: final
+  review I4, see §5). BEGIN `page` goes only
   to a provider at v_95 (`space_member_supports`), on every BEGIN path
   (paired, mesh catch-up / incremental, relay re-BEGIN).
-- **Receiver.** A delta that does not fit the held page is refused and the
-  held page kept (never dropped: that would let a relay roll a member back
-  by then offering an older page). The next BEGIN names the held page, so
-  the provider sends the full vector. A household that signs the space
-  itself never stores another signer's page over its own. A page that does
-  not open (wrong key, tag) is a one-line WARNING.
+- **Receiver.** A page without its vector, or whose vector does not hash
+  to its root, is refused and the held page kept (never dropped: that
+  would let a relay roll a member back by then offering an older page).
+  The store itself is conditional (`space_sync_page_repo.put`, final review
+  minor 6): in one statement, only while the space still pins the key and
+  epoch the page was verified against, and only over an older page by
+  `(epoch, issued_at, seq)` — a slower writer, or a re-pin between the
+  verify and the write, never replaces a newer page. A household that
+  signs the space itself never stores another signer's page over its own
+  (the owner excepted, Phase 3). A page that does not open (wrong key,
+  tag) is a one-line WARNING.
 - **Equivocation** is flagged for two pages of one signer and epoch with
   the same `seq` and different roots, or two different pages with the same
   non-null `prev_root`. The flag is kept in memory (WARNING log with both
@@ -621,7 +640,16 @@ What shipped, where it is more exact than the design above:
   that moves `authority_key_epoch` or `identity_public_key` (every path:
   rotate, adopt, re-pin). A held page of another epoch is ignored anyway.
 - **Lazy seal.** As in §4, plus: a signer that holds another signer's page
-  younger than 15 min does not seal on top of it. Accepted exception: when
+  younger than 15 min does not seal on top of it — nor while that page is
+  still being compared or its catch-up from members (Phase 3) still has
+  buckets to fetch, for at most `CATCH_UP_HOLD_S` (2 h) after its compare
+  (final review I3: the owner's own seal would replace the page it is
+  catching up to, end the catch-up and commit the incomplete state; the
+  bound keeps a catch-up nobody can serve from stopping the seals for
+  good). The "changed since the page?" probe is memoised on the change
+  counter (`current_seq`): a "changed" holds for that page, a "quiet" while
+  the counter has not moved — every BEGIN to the signer asks (minor 9).
+  Accepted exception: when
   the retention cutoff rolls over to a new day, a changed space re-seals
   even if its page is younger than 15 min — at most once a day. The seal reads the
   `sync_seq` snapshot before the export, exports with the window cutoff of
@@ -642,6 +670,20 @@ What shipped, where it is more exact than the design above:
      A change time later than now + 300 s (the page skew) explains
      nothing, here or in step 3: one writer stamping rows far in the
      future must not make every member read "up to date".
+     **A move we hold** (final review I1) — a delete (its tombstone keeps
+     the row's `created_at`, no delete time), an archive or un-archive (the
+     row under its other identity), none with a change time of its own:
+     a moved row of ours whose other identity's bucket differs too is not
+     in the page when our bucket **without it** hashes to the page's signed
+     bucket. That bucket is then explained **exactly** (ours is the page's
+     plus the move; an old tombstone, in the page, never explains
+     anything). The bucket of the row's other identity — where the page may
+     still hold the old version — is a *partner*: we cannot recompute the
+     page's leaf there, and the page may never have held that row (one we
+     created and deleted unseen by the signer, which a deliverer could
+     otherwise use to hide a missing row), so it is still asked like any
+     other; it counts as explained only once nobody can prove it (Phase 3:
+     a whole round answers `held: false` — each member made the same move).
   2. **Listings only for unexplained buckets**, at most
      `MAX_LISTING_BUCKETS` = 8 per compare; the rest stay unresolved until
      the next page. They are asked of ONE household acting as host (the
@@ -697,6 +739,10 @@ What shipped, where it is more exact than the design above:
   (unless `current`), name only rows of that bucket and committed
   resources, each row once, and stay within 4 096 rows — otherwise the
   whole answer is refused (WARNING) and those buckets stay unresolved.
+  A bucket a listing settled (every listed row held, or ahead here) leaves
+  the buckets still to fetch (`todo`), so a host that goes silent later
+  is never followed by a member ask for it, and a match stays a match
+  (final review I2).
   The change times in a listing are the provider's word: Phase 2 asks
   only an acting host, whose stream it trusts anyway; a provider that is
   not (Phase 3, any member) must not be trusted on them — its listing
@@ -732,15 +778,21 @@ What shipped, where it is more exact than the design above:
   `space.sync_state` frame). Rules
   (`domain/space_sync_page.state_with_page`): a running stream stays
   **catching up**; `match: true` (nothing missing: no unexplained
-  bucket, or every listing showed none) → **up to date**, also while the
-  host is offline; `match: false` (a listing proved a row missing) →
+  bucket, or every listing showed none) → **up to date** while the page is
+  at most `PAGE_MATCH_FRESH_S` (75 min: two 30-min rounds plus the 15-min
+  seal interval) old, and at any age while the host is offline (no newer
+  page comes from it then) — an older match no longer masks a host that
+  answers `deferred` / unclean for hours (final review minor 3);
+  `match: false` (a listing proved a row missing) →
   **behind**; `match: null` (not compared yet, a listing pending or a
   bucket unresolved) → the Phase-1 state. The field is `{seq, at,
   signer_role, match, missing, differing_buckets, conflict}`: `missing` —
   rows proven missing (`0` with a match); `differing_buckets` — buckets
-  that differ at all, being ahead included. (SPA copy for these is a
-  separate UX step.) No page (an older host): the answer-based status,
-  unchanged.
+  that differ at all, being ahead included. After a match the Space
+  settings say "Checked {time}: nothing is missing." with the page's time
+  and no host named (the page may have been relayed by any member). No
+  page (an older host): the answer-based status, unchanged. A space hosted
+  here always reads up to date, with no warning.
   `signer_role` is `owner` when `signer` names the owner; it is a label any
   seed holder could set.
 - **Measured** (x86 dev machine, real SQLite with every migration, the
@@ -754,8 +806,8 @@ What shipped, where it is more exact than the design above:
   stream pays today. Fixing that query (an index or a rowid-ordered plan)
   is a separate change; with it a seal would be well under a second here.
   A Pi will be several times slower. No leaf cache (decision 4).
-- **Storage** (tested): a signer row ≤ 17 KB (page ≈ 0.5 KB + vector
-  8 KiB + a full delta 8.25 KiB), a member row ≤ 9 KB.
+- **Storage** (tested): ≤ 9 KB per space (page ≈ 0.5 KB + vector
+  8 KiB), the same on a signer and a member.
 - **Not in Phase 2:** verified fetch from any member, `sync_mode:
   "buckets"`, listings, `page_match` (all Phase 3); SPA text for the page
   ("as of page N"), the API field is there.
@@ -951,6 +1003,18 @@ between asks, and a stale memo would prove nothing.
    a row landing starts the count over. A remembered bucket stays **missing** in every
    later verdict of that page, so it never reads up to date (re-review
    S1). The host's stream, or the next page, settles it.
+7. **A bucket nobody can prove is not asked again** (final review I1). A
+   change made after the page that carries no change time — a poll
+   closed, an edit whose stamp a receiver does not keep, a delete or move
+   whose partner bucket is not ours alone — changes the bucket on every
+   member too, so every member answers `held: false`. Once every member
+   household of a round (`MAX_FETCH_ASKS`, or fewer when fewer exist) has
+   answered `held: false` for a bucket, it is **dry**: not asked again
+   while our own bucket is unchanged (memory only, kept with the stuck
+   buckets, per page). A dry bucket is unresolved — `match` stays `null`
+   and the Phase-1 state shows — unless it is the partner of a move we
+   hold (step 1 of the compare), which then counts as explained. Without
+   this the round asked every tick, for nothing, until the host returned.
 
 **The owner back from a long absence is a requester too.** While the owner
 household was offline a seed-holding delegated admin may have sealed newer
@@ -971,9 +1035,15 @@ archived (re-review N2). **Delete wins**, as everywhere in sync: a
 `*_deleted` tombstone is an identity the owner lacks, so a delete the
 admin's page commits removes the owner's live row even if the owner edited
 it offline — the same outcome the live delete event and the host's stream
-would have had. Its sync
-status, otherwise always up to date, follows that compare (`behind` while
-rows are proven missing). Its next own page starts a new chain (`prev_root`
+would have had. Its sync status stays **up to date** with no warning
+(final review minor 1: a space hosted here never reads behind or shows
+"may be missing" — the Space settings say "Everything's here" and the feed
+shows no chip); the page and its compare are kept for the admin Details
+and the catch-up. **Every tick** the scheduler starts the owner's next
+round for each space it owns (`_tick_owner_catch_up`): no host above the
+owner ever goes silent, so without it the catch-up would get one round
+only, and while it has buckets to fetch the owner does not seal over the
+admin's page (*Lazy seal*, I3). Its next own page starts a new chain (`prev_root`
 null, the full vector), which is no conflict. Limits: the owner is the wiki
 pages' sequencer (v_48), so it never takes a page *version* from a stream —
 a verified wiki page row is ignored there and the admin's page edits reach
@@ -992,6 +1062,21 @@ host's stream (or the author's live event) brings the un-archive. Kept:
 un-archiving is rare, the outcome is a stale archive flag, never a row
 nobody signed, and judging an archive against an un-archive by change
 times would need the archive time committed.
+
+**For review: the trust `VERIFIED_ROW` widens (final review minor 4,
+needs the owner's sign-off).** A verified row passes the receiver exactly
+where a row from the space's acting host passes (`_acts_as_host`): for
+that space, that deliverer and that row only. That is a real widening of
+who may cause a row to be written here — from "the host (or a trusted
+helper, own people's rows only)" to "any member household, for any row
+the signed page commits". The page's signature is what makes it safe: the
+row must hash to a leaf of a listing that hashes to the bucket the space
+authority signed, so a deliverer can withhold or delay, never invent or
+alter a row. What it can still do: replay the page's version of a row
+we changed offline before the page's `issued_at` (the same outcome as the
+host's stream), and learn our `have` prefixes. This is the design's core
+decision (owner decision 2, 2026-11-21) and it is listed here plainly so
+the review can confirm it, not because it changed.
 
 **Partial answers are fine.** A deliverer that changed a bucket since the
 page, holds the page under another root, or is behind itself answers
@@ -1045,7 +1130,9 @@ requester asks one member at a time):
 - **Per round**: ≤ 3 asks per behind member per silent space, one round per
   30-min tick (plus one when a newer page arrives while the host is silent),
   and none once nothing is left to fetch (`todo` empty) — a caught-up
-  member costs nothing while the host stays offline.
+  member costs nothing while the host stays offline. A bucket a whole round
+  answered `held: false` for (dry, step 7) leaves `todo`: a change nobody
+  can prove costs one round, not one per tick (final review I1).
 - **Worst realistic case**: a global space with 200 member households and
   50 000 rows, the host offline for a day, every member missing the host's
   last ~2 h (≈ 170 changes at 2 000 a day). 170 rows fall into ≈ 125
@@ -1114,7 +1201,7 @@ requester asks one member at a time):
   `receiver_base.py` (`VERIFIED_ROW` in `_acts_as_host`),
   `receive_pages.py` (a verified page is the host's version),
   `scheduler.py` (`sync_with`, `rows` / `have` in `_page_fields_for`,
-  `attach_host_silent`), `federation_service.py` / `sync_manager.py` /
+  `attach_host_silent`, the owner's per-tick round `_tick_owner_catch_up`), `federation_service.py` / `sync_manager.py` /
   `sync_rtc.py` (`rows` / `have` on BEGIN, the mesh BEGIN and the relay
   retry), `space_sync_status.py` (the owner's status); demo step
   `members-page-catchup`.

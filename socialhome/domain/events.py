@@ -1547,7 +1547,8 @@ class SpaceSyncStateChanged(DomainEvent):
     date, catching up, behind, host offline, never — read-time
     ``SpaceSyncStatusService``). Local only: the realtime layer sends the
     space's members a ``space.sync_state`` frame. ``sync`` is the wire
-    shape ``{state, last_ok_at, waiting_to_send}``."""
+    shape of ``GET /api/spaces/{id}`` ``sync``: ``{state, last_ok_at,
+    waiting_to_send, may_be_missing, unsent_posts, page?}``."""
 
     space_id: str
     sync: dict = field(default_factory=dict)

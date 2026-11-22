@@ -382,7 +382,14 @@ committed part against a listed leaf, refuses anything else (one
 WARNING), and applies what passes through the normal receiver as the host's
 row — that row only. A partial answer goes on to the next member; a host
 heard again stops it. Once nothing is left, the space reads **up to date**
-while the host is still offline.
+while the host is still offline. A bucket every member of a round answers
+`held: false` for (each changed it after the page too: a delete, a poll
+closed) is not asked again while ours is unchanged, so a silent host never
+costs one ask per tick for nothing; a delete or archive we hold explains
+its own bucket locally. The owner, back from a long absence with a newer
+page its delegated admin sealed, has no host to go silent: it gets a round
+every tick and does not seal over that page while its catch-up has
+buckets to fetch (at most 2 h).
 
 The helper resume is unchanged and runs next to it: it covers the rows
 newer than the page (its own people's), while the verified fetch covers

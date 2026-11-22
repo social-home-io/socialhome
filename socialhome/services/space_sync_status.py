@@ -225,9 +225,11 @@ class SpaceSyncStatusService(BusPublisherMixin):
         self,
         position: Callable[[Space], Awaitable[SyncPagePosition | None]],
     ) -> None:
-        """Wire the v_95 sync pages: the state also says "up to date as of
-        page N" (even while the host is offline) or "behind: a newer page
-        exists" (``domain/space_sync_page.state_with_page``)."""
+        """Wire the v_95 sync pages (``SyncPageService.position``): the
+        state also says "up to date as of page N" (a fresh match, or any
+        match while the host is offline) or "behind" (a bucket listing
+        proved a row missing) — ``domain/space_sync_page.state_with_page``.
+        A space hosted here stays up to date."""
         self._pages = position
 
     async def page_changed(self, space_id: str) -> None:

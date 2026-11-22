@@ -339,7 +339,8 @@ member — `space_member_guard.require_member_seat`): a follower gets the
 outsider's `403 "Not a space member."`, and an unknown id the same. The
 live `space.proposal.updated`, `space_zone_changed`,
 `space.sync_state` (`{space_id, sync: {state, last_ok_at, waiting_to_send,
-page?}}`, sent only when the space's sync state changes; `page` (v_95) —
+may_be_missing, unsent_posts, page?}}`, the `sync` field of
+`GET /api/spaces/{id}`, sent only when it changes; `page` (v_95) —
 `{seq, at, signer_role, match, missing, differing_buckets, conflict}` from
 the newest signed sync page held, absent without one, see
 [protocol/sync-pages.md](protocol/sync-pages.md#phase-2-as-built-v_95)) and

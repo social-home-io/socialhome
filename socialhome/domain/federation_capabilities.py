@@ -1587,16 +1587,21 @@ from __future__ import annotations
 #:   roster only on a ``roster_digest`` mismatch (``MIN_FOR_ROSTER_DIGEST``,
 #:   v_81). Wire otherwise unchanged.
 #: * **v_95** (2026-11-21) — **signed sync pages** (``docs/protocol/
-#:   sync-pages.md``, Phase 2): the space authority signs a commitment to
+#:   sync-pages.md``, Phases 2 and 3): the space authority signs a commitment to
 #:   the space's state (256 bucket hashes under one root, suite
 #:   ``sha256-b256-c1``, authority event ``space_sync_page``). A
 #:   ``SPACE_SYNC_BEGIN`` carries ``page`` (the page the requester holds) and
 #:   the ``__complete__`` sentinel carries ``page_sealed`` (the provider's
-#:   newest page with the vector delta or the full vector, sealed under the
-#:   space content key) — only toward a requester at v_95 whose page is
-#:   older. Members store the newest page and tell whether they are behind,
-#:   also while the host is offline. No new event type, no record change,
-#:   no ``SYNC_RECORD_LINES`` entry.
+#:   newest page with its full vector, sealed under the space content key)
+#:   — only toward a requester at v_95 whose page is older. Members store
+#:   the newest page and tell whether they are behind, also while the host
+#:   is offline; the BEGIN's ``buckets`` asks the acting host for bucket
+#:   listings (``__listing__`` chunks before the sentinel). Phase 3: while
+#:   no host answers, the same BEGIN to any member household at v_95 adds
+#:   ``rows: true`` and ``have`` (leaf prefixes), and the member ends its
+#:   stream with the listings and ``__rows__`` of the buckets it holds
+#:   unchanged — every row verified against the signed page. No new event
+#:   type, no record change, no ``SYNC_RECORD_LINES`` entry.
 #:   **Fallback**: a requester below v_95 gets today's sentinel; a provider
 #:   below v_95 sends no page and the requester's status keeps the v_94
 #:   rules. Not space-scoped. Labelled "Space sync status, even without the

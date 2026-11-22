@@ -150,7 +150,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Spaces](./spaces.md) — create/dissolve, membership events, per-space key exchange.
   - [Invites](./invites.md) — cross-household invites and join requests.
   - [Sync](./sync.md) — initial bulk content sync (Tier 2/3).
-  - [Sync pages](./sync-pages.md) — authority-signed state pages: "am I behind?" (Phase 2, v_95, built)
+  - [Sync pages](./sync-pages.md) — authority-signed state pages: "am I behind?" (Phase 2) and verified catch-up from any member household while the host is offline (Phase 3); v_95, built (`page_match` anti-entropy not yet)
     and verified catch-up from any member (Phase 3, design).
   - [Discovery](./discovery.md) — GFS-brokered public-space directory.
   - [Local communities](./local-communities.md) — a public space bound to an area; every join carries the joiner's home rounded to ~1 km (with consent, sealed to the host) and the host decides — near the edge always an admin; the directory shows only the radius, never the centre (capability v_59).
