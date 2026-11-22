@@ -47,6 +47,7 @@ const confirm = vi.hoisted(() => vi.fn())
 vi.mock('@/components/confirm', () => ({ confirmDialog: confirm }))
 
 import { confirmLeave, shouldConfirmLeave } from '@/router/navigationGuard'
+import type { InstanceConfig } from '@/store/instance'
 
 let detail: Record<string, unknown>
 let role: string
@@ -477,5 +478,49 @@ describe('SpaceSettingsPage — under the HA ingress prefix', () => {
       .toBe('/api/hassio_ingress/tok/spaces/sp-1')
     expect(view.getByRole('link', { name: 'Manage zones' }).getAttribute('href'))
       .toBe('/api/hassio_ingress/tok/spaces/sp-1/zones')
+  })
+})
+
+
+describe('SpaceSettingsPage — "Is everything here?" on a space hosted elsewhere', () => {
+  const SYNC = {
+    state: 'up_to_date', last_ok_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    waiting_to_send: 1, may_be_missing: false, unsent_posts: [],
+    page: { seq: 41, at: new Date().toISOString(), signer_role: 'owner', match: true,
+      missing: 0, differing_buckets: 0, conflict: false },
+  }
+  // Earlier blocks reset the module registry: take the stores the page
+  // will import now.
+  let stores: { instance: typeof import('@/store/instance'); conns: typeof import('@/store/connections') }
+  beforeEach(async () => {
+    stores = { instance: await import('@/store/instance'), conns: await import('@/store/connections') }
+    stores.instance.instanceConfig.value = { instance_id: 'me' } as InstanceConfig
+    stores.conns.connections.value = []
+    detail = { ...detail, owner_instance_id: 'host-x', sync: SYNC }
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (url === '/api/connections'
+      ? [{ instance_id: 'host-x', display_name: 'The Müllers' }]
+      : base(url)))
+  })
+  afterEach(() => {
+    stores.instance.instanceConfig.value = null
+    stores.conns.connections.value = []
+  })
+
+  it('names the host household and shows the Details to a space admin', async () => {
+    role = 'admin'
+    const view = await mount()
+    const section = await view.findByTestId('space-sync-section')
+    await waitFor(() => expect(section.textContent).toContain('Checked with The Müllers'))
+    expect(view.getByTestId('space-sync-now')).toBeTruthy()
+    expect(view.getByTestId('space-sync-details').textContent).toContain('Matches page 41')
+  })
+
+  it('a member gets the plain words without the Details', async () => {
+    role = 'member'
+    const view = await mount()
+    const section = await view.findByTestId('space-sync-section')
+    expect(section.textContent).toContain("Everything's here")
+    expect(view.queryByTestId('space-sync-details')).toBeNull()
   })
 })
