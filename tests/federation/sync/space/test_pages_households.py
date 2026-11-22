@@ -167,10 +167,13 @@ async def pair(homes):  # noqa: F811
     yield host, member, host_pages, member_pages, clock, wire
 
 
-async def _round(host_pages, member_pages, sync_id: str) -> bool:
+async def _round(host_pages, member_pages, sync_id: str, *, newest=False) -> bool:
     """One sentinel: the member's BEGIN ``page``, the host's ``page_sealed``,
-    the member taking it."""
+    the member taking it. *newest*: a "Sync now" BEGIN (a newer page goes
+    even while the member's is under an hour old)."""
     ref = await member_pages.ref_for(SPACE)
+    if ref is not None and newest:
+        ref = {**ref, "newest": True}
     sealed = await host_pages.sentinel_page(
         space_id=SPACE,
         sync_id=sync_id,

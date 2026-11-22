@@ -343,8 +343,11 @@ sequenceDiagram
   in the clear (encryption-first rule). The plaintext is `{page,
   vector}`: the signed header and all 256 bucket hashes — ≈ 11.4 KB of
   JSON, ≈ 15.3 KB sealed (measured). It goes only when the requester's
-  `page` is absent or older; a requester that holds the current page gets
-  nothing beyond its own 170-byte ref.
+  `page` is absent or older, **and** that page is at least
+  `PAGE_RESEND_AFTER_S` (1 h) old or of another epoch — or the BEGIN is a
+  "Sync now" (`newest: true` in its `page`, from the scheduler's
+  `sync_now`, on the paired and the mesh path and the relay retry). Any
+  other requester gets nothing beyond its own 170-byte ref.
 - **Any provider relays**: a non-signing provider (a member household
   that streams its writers' rows) attaches the newest page it holds in
   the same way. This is the member-to-member relay. It needs no new
@@ -439,26 +442,29 @@ sending its periodic BEGIN 48 times a day.
 | Trigger | Recipients × items × bytes | Busy space, per day | Small space (2 000 rows, 50 changes, 5 households) |
 |---|---|---|---|
 | `page` ref in every BEGIN | 200 members × 48 BEGINs × ≈ 0.2 KB (170 B JSON, encrypted) | ≈ **2 MB** | ≈ 0.05 MB |
-| Phase 2, page on the sentinel | only to a requester whose ref shows an older page. Changes arrive every ~45 s, so the host seals at most every 15 min (≤ 96 / day) and nearly every 30-min BEGIN finds a newer page: 200 × 48 × 15.3 KB (page + full vector, sealed) | ≈ **147 MB** (worst: a member also hears a co-member's older page first in the same tick, ≤ 2 pages per tick → ≈ 294 MB) | ≤ 5 × 48 × 15.3 KB ≈ 3.7 MB, far less in practice (a quiet space is not resealed) |
+| Phase 2, page on the sentinel | only to a requester whose ref shows an older page that is ≥ 1 h old (`PAGE_RESEND_AFTER_S`), or on "Sync now". Changes arrive every ~45 s, so the host seals at most every 15 min (≤ 96 / day), and a member takes a newer page about every other 30-min round: 200 × 24 × 15.3 KB (page + full vector, sealed) | ≈ **74 MB** (worst: a co-member's older page and the host's both reach a member in the hour's round → ≈ 147 MB; "Sync now" adds ≤ 3 / h per space, rare) | ≤ 5 × 24 × 15.3 KB ≈ 1.8 MB, far less in practice (a quiet space is not resealed) |
 | Phase 2, seal | 1 export + hash, ≤ 1 / 15 min, only when a BEGIN finds the space changed (the "changed?" probe is memoised on the change counter) | ≤ 96 × 6 s on x86 (2–4× on a Pi) | ≤ 96 × 0.1 s |
 | Phase 2, member compare | 1 recompute per newer page, ≤ 1 / 15 min, `to_thread` | ≤ 48 × 6 s per member (one per received page) | trivial |
 | Phase 3, catch-up while the host is silent | 1 requester → 1 member per ask, ≤ 3 asks per round | see *Phase 3 as built*, Cost | |
 | Phase 3, anti-entropy (`page_match`, not built) | would replace a full stream per member per day | today ≈ 200 × 50 k × ~0.6 KB ≈ **6 GB/day** of host upload | |
 
 - **Live traffic, for scale**: 2 000 changes × 200 households × ~1.5 KB
-  ≈ 600 MB/day. The pages add ≈ 25 % on top in the busiest case (≈ 50 %
+  ≈ 600 MB/day. The pages add ≈ 12 % on top in the busiest case (≈ 25 %
   at the worst), nothing to a quiet space.
 - **Why the delta went (I4).** It was sent only to a requester holding
   exactly the signer's previous page (`prev_root`). A busy host seals every
   15 min and members ask every 30, so a member is nearly always two pages
   behind: in practice the full vector went every time, and the delta cost
-  a column, a wire field and a chain rule for ≈ nothing. The honest cost
-  is the table above.
-- **Cheaper shapes, if this proves too much** (not built — measure first):
-  send a newer page only when the requester's is older than an hour (the
-  requester compares at most once per 15 min anyway): ≈ 74 MB/day; or carry
-  the vector as raw bytes rather than base64 inside the sealed JSON (8 KiB
-  instead of 10.9 KiB before the outer base64): ≈ −25 %.
+  a column, a wire field and a chain rule for ≈ nothing. Without the
+  1-h rule below the full vector went on nearly every round: ≈ 147 MB/day.
+- **The 1-h resend rule (owner-approved follow-up to I4).** A requester
+  whose page is under an hour old gets no newer one: this halves the page
+  traffic to ≈ 74 MB/day. The status stays honest: a held page that does
+  not match never reads "up to date" (only a match does, and only while
+  its page is at most 75 min old — `PAGE_MATCH_FRESH_S`, longer than the
+  1-h rule, so a matched page is replaced before its match stops
+  counting); "Sync now" gets the newest page at once. Not built: carrying
+  the vector as raw bytes inside the sealed JSON (≈ −25 %).
 - **Amplification**: nothing fans out. One requester talks to one
   provider per session, and one member's action never triggers N × M
   work.
@@ -634,7 +640,8 @@ What shipped, where it is more exact than the design above:
   `{epoch, payload}` from `encrypt_chunk` (content key, AAD
   `space_id:epoch:sync_id`), ≤ 24 KiB. Sent only to a requester at
   `MIN_FOR_SYNC_PAGES` whose `page` is absent or older by
-  `(epoch, issued_at, seq)`, always with the full vector (no delta: final
+  `(epoch, issued_at, seq)` and at least an hour old (or "Sync now":
+  `newest: true` in the ref), always with the full vector (no delta: final
   review I4, see §5). BEGIN `page` goes only
   to a provider at v_95 (`space_member_supports`), on every BEGIN path
   (paired, mesh catch-up / incremental, relay re-BEGIN).

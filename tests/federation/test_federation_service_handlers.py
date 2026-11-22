@@ -543,7 +543,8 @@ async def test_handle_space_sync_begin_parses_the_sync_page(svc):
         "root": base64.urlsafe_b64encode(root).decode().rstrip("="),
     }
     for wire, parsed in (
-        (good, {**good, "root": root}),
+        (good, {**good, "root": root, "newest": False}),
+        ({**good, "newest": True}, {**good, "root": root, "newest": True}),
         ({"signer": "h"}, None),
         ("x", None),
     ):

@@ -80,6 +80,13 @@ VECTOR_BYTES: int = BUCKETS * HASH_BYTES
 #: A signer seals at most this often (lazily, on a BEGIN that finds the
 #: space changed — owner decision 2026-11-21).
 PAGE_MIN_INTERVAL_S: int = 15 * 60
+#: A requester whose held page is younger than this gets no newer page on
+#: a sentinel — only its own BEGIN ref travels (final review I4 follow-up:
+#: about halves the page traffic of a busy space). "Sync now" asks for the
+#: newest page at once (``newest`` in its ``page`` ref). Below the 75-min
+#: freshness of a match (``domain.space_sync_page.PAGE_MATCH_FRESH_S``), so
+#: a matched page is replaced before its match stops counting.
+PAGE_RESEND_AFTER_S: int = 60 * 60
 #: ``issued_at`` may be at most this far ahead of the receiver's clock.
 MAX_PAGE_FUTURE_SKEW_MS: int = 300 * 1000
 #: A page header as canonical JSON is never larger than this.
@@ -894,7 +901,10 @@ def is_conflict(held: SyncPage, incoming: SyncPage) -> bool:
 
 def parse_page_ref(raw: object) -> dict[str, Any] | None:
     """The ``page`` of a ``SPACE_SYNC_BEGIN`` (what the requester holds), or
-    ``None`` when absent or malformed (it then gets the full vector)."""
+    ``None`` when absent or malformed (it then gets the full vector).
+    ``newest`` (``True`` only when sent as ``true``): "Sync now" — a newer
+    page goes even while the held one is younger than
+    :data:`PAGE_RESEND_AFTER_S`."""
     if not isinstance(raw, dict):
         return None
     try:
@@ -904,6 +914,7 @@ def parse_page_ref(raw: object) -> dict[str, Any] | None:
             "seq": _int(raw.get("seq"), "seq"),
             "issued_at": _int(raw.get("issued_at"), "issued_at"),
             "root": _hash_field(raw.get("root"), "root"),
+            "newest": raw.get("newest") is True,
         }
     except PageRefused:
         return None
@@ -1228,6 +1239,7 @@ __all__ = [
     "MAX_LISTING_ROWS",
     "MAX_PAGE_FUTURE_SKEW_MS",
     "PAGE_MIN_INTERVAL_S",
+    "PAGE_RESEND_AFTER_S",
     "PAGE_SUITE_SHA256_B256",
     "SUPPORTED_PAGE_SUITES",
     "VECTOR_BYTES",

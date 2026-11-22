@@ -3250,3 +3250,49 @@ async def test_every_tick_gives_the_owner_its_catch_up_round(bus, queue, sync_ma
     sched.attach_host_silent(rounds.append)
     await sched._tick_once()
     assert rounds == ["sp-mine"]
+
+
+async def test_sync_now_asks_for_the_newest_page(bus, queue, sync_manager):
+    """Final review I4 follow-up: a provider sends a newer page only to a
+    requester whose page is an hour old — but "Sync now" asks for it at
+    once (``newest`` in its ``page`` ref), paired or over the mesh; the
+    periodic round never does."""
+    fed = _FakeFederation(confirmed={"host"})
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host")]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type={
+                SpaceType.PRIVATE: [
+                    _space("sp-1", owner_instance_id="host"),
+                    _space("sp-mesh", owner_instance_id="host-x"),
+                ]
+            },
+            members_by_space={"sp-1": ["host"], "sp-mesh": ["host-x"]},
+        ),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    ref = {"signer": "host", "epoch": 1, "seq": 9, "issued_at": 5, "root": "r"}
+
+    async def _ref_for(space_id):
+        return ref
+
+    sched.attach_sync_pages(_ref_for, lambda space_id, to, page_ref: None)
+    await queue.start()
+    try:
+        await sched.sync_now("sp-1")
+        for _ in range(50):
+            if fed.sent:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.stop()
+    assert fed.sent[0]["payload"]["page"] == {**ref, "newest": True}
+    # The periodic round's BEGIN names our page as it is.
+    assert (await sched._page_fields_for("sp-1", "host"))["page"] == ref
+    assert {**ref, "newest": True} in fed.request_pages  # the relay retry too
+    assert await sched.sync_now("sp-mesh") == ["host-x"]
+    assert fed.mesh_fields[-1]["page_ref"] == {**ref, "newest": True}

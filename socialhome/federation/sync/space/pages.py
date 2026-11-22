@@ -79,6 +79,7 @@ from ....sync_page import (
     MAX_LISTING_ROWS,
     MAX_PAGE_FUTURE_SKEW_MS,
     PAGE_MIN_INTERVAL_S,
+    PAGE_RESEND_AFTER_S,
     PAGE_SUITE_SHA256_B256,
     SUPERSEDED_BY,
     ListingRow,
@@ -1090,6 +1091,15 @@ class SyncPageService:
                     int(ref.get("seq", 0)),
                 )
                 if ref_key >= page.order_key():
+                    return None
+                if (
+                    ref_key[0] == page.epoch
+                    and not ref.get("newest")
+                    and self._clock_ms() - ref_key[1] < PAGE_RESEND_AFTER_S * 1000
+                ):
+                    # Its page is under an hour old: no newer one this round
+                    # (cost, final review I4 follow-up) — "Sync now" asks
+                    # for it at once (``newest``).
                     return None
             # Always the whole vector (final review I4: a delta against the
             # requester's page fit too rarely to earn its column and rules).

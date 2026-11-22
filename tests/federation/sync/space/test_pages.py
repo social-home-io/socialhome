@@ -31,6 +31,7 @@ from socialhome.sync_page import (
     MAX_FETCH_BYTES,
     MAX_FETCH_ROWS,
     PAGE_MIN_INTERVAL_S,
+    PAGE_RESEND_AFTER_S,
     VECTOR_BYTES,
     ListingRow,
     bucket_hash,
@@ -440,8 +441,28 @@ async def test_only_when_newer_than_the_requesters_page():
     assert await _sentinel(env, ref=page.ref()) is None
     newer = _signed(issued_at=T0 + 10, seq=999, vector=_vec(9))
     assert await _sentinel(env, ref=newer.ref()) is None
-    older = _signed(issued_at=T0 - 10, seq=1, vector=_vec(8))
+    old_ms = T0 - PAGE_RESEND_AFTER_S * 1000
+    older = _signed(issued_at=old_ms, seq=1, vector=_vec(8))
     assert await _sentinel(env, ref=older.ref()) is not None
+
+
+async def test_a_requester_with_a_page_under_an_hour_old_gets_no_newer_one():
+    """Follow-up to final review I4 (cost): a requester whose held page is
+    under PAGE_RESEND_AFTER_S old gets no newer page and no vector — only
+    its own BEGIN ref travels. Its status stays honest: it holds what it
+    holds (a match on it counts only while fresh). From an hour on, and at
+    once for "Sync now" (``newest`` in its ref), the newer page goes."""
+    env = _Env()
+    page = await env.svc.seal_if_due(SPACE)
+    assert page is not None
+    recent = _signed(issued_at=T0 - 30 * 60_000, seq=1, vector=_vec(8))
+    assert await _sentinel(env, ref=recent.ref()) is None
+    assert await _sentinel(env, ref={**recent.ref(), "newest": True}) is not None
+    edge = _signed(issued_at=T0 - PAGE_RESEND_AFTER_S * 1000, seq=1, vector=_vec(8))
+    assert await _sentinel(env, ref=edge.ref()) is not None
+    # Never for a page of another epoch: the held one is stale anyway.
+    other = _signed(issued_at=T0 - 60_000, seq=1, epoch=2, vector=_vec(8))
+    assert await _sentinel(env, ref=other.ref()) is not None
 
 
 async def test_the_previous_page_gets_the_full_vector():
@@ -457,6 +478,7 @@ async def test_the_previous_page_gets_the_full_vector():
     env.state.vec = bytes(new_vec)
     second = await env.svc.seal_if_due(SPACE)
     assert first is not None and second is not None
+    env.now = first.issued_at + PAGE_RESEND_AFTER_S * 1000  # first is 1 h old
     body = _open(env, await _sentinel(env, ref=first.ref()))
     assert set(body) == {"page", "vector"}
     assert vector_from_wire(body["vector"]) == env.state.vec

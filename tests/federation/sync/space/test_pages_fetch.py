@@ -431,7 +431,7 @@ async def test_a_newer_page_during_an_ask_starts_its_own_round(trio):
     await _post(host, "post-3", content="later")
     await _stream(host, member)
     assert await host_pages.seal_if_due(SPACE) is not None
-    assert await _round(host_pages, r_pages, "s-r2")
+    assert await _round(host_pages, r_pages, "s-r2", newest=True)
     await wire.settle()
     assert len(wire.asks) == 2
 
@@ -713,7 +713,10 @@ async def test_the_owner_back_from_a_long_absence_catches_up_from_members(trio):
         space_id=SPACE,
         sync_id="s-o",
         requester_version=95,
-        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
+        # The owner's "Sync now" (its own page is young in this harness).
+        requester_ref=parse_page_ref(
+            {**(await host_pages.ref_for(SPACE) or {}), "newest": True}
+        ),
     )
     assert await host_pages.receive(
         space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
@@ -819,7 +822,10 @@ async def _admin_page_reaches_owner(
         space_id=SPACE,
         sync_id="s-o",
         requester_version=95,
-        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
+        # The owner's "Sync now" (its own page is young in this harness).
+        requester_ref=parse_page_ref(
+            {**(await host_pages.ref_for(SPACE) or {}), "newest": True}
+        ),
     )
     assert await host_pages.receive(
         space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
@@ -1674,7 +1680,10 @@ async def test_the_owners_catch_up_is_not_cut_short_by_its_own_seal(trio):
         space_id=SPACE,
         sync_id="s-o",
         requester_version=95,
-        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
+        # The owner's "Sync now" (its own page is young in this harness).
+        requester_ref=parse_page_ref(
+            {**(await host_pages.ref_for(SPACE) or {}), "newest": True}
+        ),
     )
     assert await host_pages.receive(
         space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed

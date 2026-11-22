@@ -594,14 +594,19 @@ class SpaceSyncScheduler:
         asked: list[str] = []
         if not hosted_here:
             for host in await self._mesh_targets(space):
+                # ``newest``: the host's newest sync page comes at once, not
+                # only once ours is an hour old (v_95 cost rule).
                 if await self._federation.is_confirmed_peer(host):
                     await self.enqueue_sync_for_space(
                         space_id=space.id,
                         peer_instance_id=host,
                         sync_mode="incremental",
+                        newest_page=True,
                     )
                 else:
-                    await self._mesh_incremental(space, host, periodic=True, done=True)
+                    await self._mesh_incremental(
+                        space, host, periodic=True, done=True, newest_page=True
+                    )
                 asked.append(host)
             return asked
         peers = {p.id for p in await self._sweep_peers()}
@@ -665,10 +670,14 @@ class SpaceSyncScheduler:
         self._sync_page_buckets = buckets_for
         self._sync_page_have = have_for
 
-    async def _page_fields_for(self, space_id: str, to_instance_id: str) -> dict:
+    async def _page_fields_for(
+        self, space_id: str, to_instance_id: str, *, newest: bool = False
+    ) -> dict:
         """v_95 fields of a BEGIN to *to_instance_id*: ``page`` (the page we
-        hold) and ``buckets`` (listings asked of that household). Only to a
-        household at ``MIN_FOR_SYNC_PAGES``."""
+        hold; with ``newest: true`` for "Sync now" — the provider's newer
+        page then comes even while ours is under an hour old) and
+        ``buckets`` (listings asked of that household). Only to a household
+        at ``MIN_FOR_SYNC_PAGES``."""
         if self._sync_page_ref is None:
             return {}
         try:
@@ -679,7 +688,7 @@ class SpaceSyncScheduler:
             out: dict = {}
             ref = await self._sync_page_ref(space_id)
             if ref is not None:
-                out["page"] = ref
+                out["page"] = {**ref, "newest": True} if newest else ref
                 buckets = (
                     self._sync_page_buckets(space_id, to_instance_id, ref)
                     if self._sync_page_buckets is not None
@@ -702,9 +711,11 @@ class SpaceSyncScheduler:
             log.exception("sync page fields for %s failed", space_id)
             return {}
 
-    async def _mesh_page_fields(self, space_id: str, host: str) -> dict:
+    async def _mesh_page_fields(
+        self, space_id: str, host: str, *, newest: bool = False
+    ) -> dict:
         """:meth:`_page_fields_for` as ``begin_mesh_catchup_sync`` keywords."""
-        fields = await self._page_fields_for(space_id, host)
+        fields = await self._page_fields_for(space_id, host, newest=newest)
         return {
             "page_ref": fields.get("page"),
             "buckets": fields.get("buckets"),
@@ -1078,8 +1089,11 @@ class SpaceSyncScheduler:
         peer_instance_id: str,
         priority: int = P4_DM,
         sync_mode: str = "initial",
+        newest_page: bool = False,
     ) -> None:
         """Queue a sync from us to ``peer_instance_id`` for ``space_id``.
+        ``newest_page`` ("Sync now"): ask for the provider's newest sync page
+        at once (:meth:`_page_fields_for`).
 
         ``sync_mode`` ``"incremental"`` is the periodic re-sync of a space
         we already hold: the provider re-ships no media and streams only the
@@ -1158,7 +1172,9 @@ class SpaceSyncScheduler:
                 sync_mode=sync_mode,
             )
             roster_digest = await self._roster_digest_for(space_id, peer_instance_id)
-            page_fields = await self._page_fields_for(space_id, peer_instance_id)
+            page_fields = await self._page_fields_for(
+                space_id, peer_instance_id, newest=newest_page
+            )
             page_ref = page_fields.get("page")
             # Record what we are asking for, so the provider's
             # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An
@@ -1596,7 +1612,13 @@ class SpaceSyncScheduler:
         return pending
 
     async def _mesh_incremental(
-        self, space: Space, host: str, *, periodic: bool, done: bool
+        self,
+        space: Space,
+        host: str,
+        *,
+        periodic: bool,
+        done: bool,
+        newest_page: bool = False,
     ) -> None:
         """The incremental BEGIN to a mesh-only *host* outside the full
         catch-up: every periodic tick, else (startup) only to echo a
@@ -1630,7 +1652,7 @@ class SpaceSyncScheduler:
                     else None
                 ),
                 roster_digest=await self._roster_digest_for(space.id, host),
-                **await self._mesh_page_fields(space.id, host),
+                **await self._mesh_page_fields(space.id, host, newest=newest_page),
             )
         except Exception:  # pragma: no cover — fail-soft
             log.debug("mesh incremental BEGIN failed", exc_info=True)

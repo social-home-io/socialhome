@@ -559,7 +559,10 @@ def test_page_ref():
         "seq": 40,
         "issued_at": NOW,
         "root": page.root,
+        "newest": False,
     }
+    assert parse_page_ref({**page.ref(), "newest": True})["newest"] is True
+    assert parse_page_ref({**page.ref(), "newest": "yes"})["newest"] is False
     assert parse_page_ref({"signer": "x"}) is None
     assert parse_page_ref("nope") is None
 
