@@ -4,6 +4,12 @@ Subscribes to :class:`UserProfileUpdated` and fans the event out as a
 ``USER_UPDATED`` payload to every paired instance that has a live
 mirror of this user (a row in ``remote_users`` on the peer).
 
+A member created after a pairing (:class:`UserProvisioned`, e.g. a child
+account a parent adds) goes out the same way, once, to every paired
+household they are visible to — the pair-confirm ``USERS_SYNC`` came
+before them, and a member who never edits their profile would otherwise
+never reach a paired household at all.
+
 The payload always carries display name + bio + picture hash. When the
 picture bytes changed in this publication, they travel as a base64
 ``picture_webp_base64`` field so the peer can re-validate + store
@@ -37,7 +43,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from ..domain.events import UserProfileUpdated
+from ..domain.events import UserProfileUpdated, UserProvisioned
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
@@ -131,6 +137,18 @@ class ProfileFederationOutbound(
 
     def wire(self) -> None:
         self._bus.subscribe(UserProfileUpdated, self._on_updated)
+        self._bus.subscribe(UserProvisioned, self._on_provisioned)
+
+    async def _on_provisioned(self, event: UserProvisioned) -> None:
+        """A new member: every paired household they are visible to gets
+        their profile now — the pair-confirm roster came before them."""
+        user = await self._local_user(event.user_id)
+        if user is None:
+            return
+        for instance_id in await self.list_confirmed_peer_ids():
+            if user.user_id in await self.hidden_for_peer(instance_id):
+                continue
+            await self.send_profile(instance_id, user, with_picture=True)
 
     async def _on_updated(self, event: UserProfileUpdated) -> None:
         # The public @handle rides USER_UPDATED as unsigned display metadata,

@@ -371,7 +371,9 @@ display names, bios, avatars, handles and each user's current status
 (`{emoji, text, expires_at}`, or `null` when unset or expired). It lets
 a freshly paired peer populate its directory, statuses included,
 without waiting for each user to tick over organically. It is sent
-once, when a pairing is confirmed; see
+once, when a pairing is confirmed (and once more to every paired
+household per roster generation, at startup); a member created later
+goes out as a `USER_UPDATED`. See
 [pairing.md](./pairing.md#roster-catch-up-on-pair-confirm--users_sync)
 for the payload and receiver rules (an entry without `status` leaves
 the cached one as is; `null` clears it).

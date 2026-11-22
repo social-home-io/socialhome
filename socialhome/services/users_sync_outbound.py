@@ -29,6 +29,15 @@ Guardian blocks (§CP.F2): a protected account goes to a household where
 someone its guardian blocked is homed with its name only — ``bio``,
 ``picture_hash`` and ``status`` ``null``, no picture bytes — like
 ``USER_UPDATED`` and ``USER_STATUS_UPDATED`` do.
+
+Roster re-send (:meth:`UsersSyncOutbound.resend_roster_if_due`): before
+new members went out on creation, a member added after a pairing (a child
+account, typically, who never edits a profile) never reached the paired
+household. On the first start of a build whose
+:data:`ROSTER_RESEND_GENERATION` is above the one stored in
+``instance_config``, every paired household gets one fresh snapshot — the
+same one, same filters — so existing pairs heal without anyone acting.
+Bump the generation to heal a future roster bug the same way.
 """
 
 from __future__ import annotations
@@ -41,12 +50,15 @@ from typing import TYPE_CHECKING
 from ..domain.events import PairingConfirmed
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
+from .peer_outbound import ConfirmedPeerBroadcaster
 from .protection_gate import ProtectionGateMixin
 from .user_identity_binding import user_identity_binding_fields
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from ..repositories.federation_repo import AbstractFederationRepo
+    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
     from ..repositories.peer_user_visibility_repo import (
         AbstractPeerUserVisibilityRepo,
     )
@@ -55,8 +67,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: ``instance_config`` key holding the last roster re-send generation run.
+ROSTER_RESEND_KEY = "federation.roster_resend_generation"
 
-class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
+#: Raise to send every paired household the roster once more on the next
+#: start. 1 — members created after a pairing were never sent.
+ROSTER_RESEND_GENERATION = 1
+
+
+class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroadcaster):
     """Send ``USERS_SYNC`` to a freshly-confirmed peer."""
 
     # Narrow the mixin's ``FederationService | None`` slot — always wired.
@@ -66,6 +85,8 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
         "_bus",
         "_child_protection",
         "_federation",
+        "_federation_repo",
+        "_instance_config",
         "_picture_repo",
         "_user_repo",
     )
@@ -78,10 +99,16 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
         user_repo: AbstractUserRepo,
         profile_picture_repo: AbstractProfilePictureRepo | None = None,
         visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
+        federation_repo: AbstractFederationRepo | None = None,
+        instance_config: AbstractInstanceConfigRepo | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
         self._user_repo = user_repo
+        # Both only for :meth:`resend_roster_if_due` (the paired households,
+        # and where the generation run last is kept).
+        self._federation_repo = federation_repo
+        self._instance_config = instance_config
         # Optional so test wiring without picture bytes still works —
         # ``picture_webp_base64`` is just omitted in that case and
         # receivers fall back to the ``picture_hash`` URL.
@@ -96,6 +123,37 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
 
     async def _on_pair_confirmed(self, event: PairingConfirmed) -> None:
         await self.send_snapshot(event.instance_id)
+
+    async def resend_roster_if_due(self) -> int:
+        """Send every paired household one snapshot when this build's
+        :data:`ROSTER_RESEND_GENERATION` has not run here yet; returns the
+        number of households sent to (0 when not due).
+
+        Paired (social) households only — the list profile updates go to;
+        never a household met through an invite link, never a GFS. A peer
+        that is unreachable gets it from the outbox like any send.
+        """
+        if self._instance_config is None:
+            return 0
+        raw = await self._instance_config.get(ROSTER_RESEND_KEY)
+        try:
+            done = int(raw) if raw else 0
+        except ValueError:
+            done = 0
+        if done >= ROSTER_RESEND_GENERATION:
+            return 0
+        peers = await self.list_confirmed_peer_ids()
+        for peer_id in peers:
+            await self.send_snapshot(peer_id)
+        await self._instance_config.set(
+            ROSTER_RESEND_KEY, str(ROSTER_RESEND_GENERATION)
+        )
+        log.info(
+            "users-sync: roster generation %d sent to %d paired household(s)",
+            ROSTER_RESEND_GENERATION,
+            len(peers),
+        )
+        return len(peers)
 
     async def send_snapshot(self, peer_id: str) -> None:
         """Send ``peer_id`` one ``USERS_SYNC`` of every (visible) local user."""

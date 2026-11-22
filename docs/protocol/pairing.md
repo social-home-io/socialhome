@@ -723,6 +723,30 @@ When every local user is hidden from the peer (or there are no
 local users at all), the envelope is suppressed entirely — no
 empty-roster sync.
 
+### Members added after the pairing
+
+The snapshot is taken once, at pair-confirm. A member created later
+(`UserProvisioned` — typically a child account a parent adds, who then
+never edits a profile) goes to every paired household they are visible
+to as one `USER_UPDATED` right away (`ProfileFederationOutbound`, the
+same builder as a profile edit, so the per-pair hide list and the §CP.F2
+guardian-block rule apply). Protected accounts are no exception: like any
+member they reach the households they are visible to, under the §CP.F2
+rules in [presence.md](./presence.md).
+
+Before this, such a member never reached a pair that already existed —
+however "Who can … see?" was ticked. To heal those pairs without anyone
+acting, `UsersSyncOutbound.resend_roster_if_due` sends every paired
+(social) household one fresh `USERS_SYNC` on the first start of a build
+whose `ROSTER_RESEND_GENERATION` is above the one stored in
+`instance_config` (`federation.roster_resend_generation`), then records
+it, so later starts send nothing. Never a household met through an invite
+link (`space_session`), never a GFS. No wire change and no capability
+bump: every receiver already takes `USERS_SYNC` from a paired household.
+Cost, once per generation: one envelope per paired household with every
+member visible to it — e.g. 5 people with pictures (≤ 24 KB each) to 10
+households ≈ 1.6 MB in all, once.
+
 ## Per-pair user visibility
 
 The admin Connection-Detail modal toggles which **local** users

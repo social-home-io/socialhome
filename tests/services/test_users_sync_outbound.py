@@ -27,7 +27,11 @@ from socialhome.domain.events import PairingConfirmed
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import UserIdentityAssertion, UserStatus
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.services.users_sync_outbound import UsersSyncOutbound
+from socialhome.services.users_sync_outbound import (
+    ROSTER_RESEND_GENERATION,
+    ROSTER_RESEND_KEY,
+    UsersSyncOutbound,
+)
 
 
 class _FakeFederationService:
@@ -556,3 +560,93 @@ async def test_protected_profile_is_name_only_to_a_blocked_household(peer):
     assert mom["bio"] == "Mom"
     assert mom["picture_hash"] == "h-mom"
     assert mom["picture_webp_base64"] == base64.b64encode(b"MOM").decode()
+
+
+# ─── Roster re-send once per generation (existing pairs heal) ─────────────
+
+
+class _Peer:
+    def __init__(self, instance_id: str) -> None:
+        self.id = instance_id
+
+
+class _FakeFedRepo:
+    """The paired (social) households — what profile updates go to."""
+
+    def __init__(self, peers: list[str]) -> None:
+        self._peers = peers
+
+    async def list_social_instances(self):
+        return [_Peer(p) for p in self._peers]
+
+
+class _FakeInstanceConfig:
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self.values = dict(values or {})
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+
+def _resender(config: _FakeInstanceConfig | None, peers=("peer-1", "peer-2")):
+    fed = _FakeFederationService()
+    vis = _FakeVisibilityRepo()
+    vis.hide("peer-2", "u-maria")
+    out = UsersSyncOutbound(
+        bus=EventBus(),
+        federation_service=fed,
+        user_repo=_FakeUserRepo(
+            [
+                _FakeUser("u-alice", "alice", "Alice"),
+                _FakeUser("u-maria", "maria", "Maria"),
+            ]
+        ),
+        visibility_repo=vis,
+        federation_repo=_FakeFedRepo([*peers, "own-inst"]),
+        instance_config=config,
+    )
+    return out, fed
+
+
+async def test_roster_resend_sends_every_paired_household_one_snapshot_once():
+    config = _FakeInstanceConfig()
+    out, fed = _resender(config)
+
+    assert await out.resend_roster_if_due() == 2
+    by_peer = {to: payload for to, ev, payload in fed.sent}
+    assert all(ev is FederationEventType.USERS_SYNC for _to, ev, _p in fed.sent)
+    assert set(by_peer) == {"peer-1", "peer-2"}  # never our own instance
+    # Same snapshot, same per-pair hide list.
+    assert [u["user_id"] for u in by_peer["peer-1"]["users"]] == [
+        "u-alice",
+        "u-maria",
+    ]
+    assert [u["user_id"] for u in by_peer["peer-2"]["users"]] == ["u-alice"]
+    assert config.values[ROSTER_RESEND_KEY] == str(ROSTER_RESEND_GENERATION)
+
+    fed.sent.clear()
+    assert await out.resend_roster_if_due() == 0
+    assert fed.sent == []
+
+
+async def test_roster_resend_with_no_pairs_still_records_the_generation():
+    config = _FakeInstanceConfig()
+    out, fed = _resender(config, peers=())
+    assert await out.resend_roster_if_due() == 0
+    assert fed.sent == []
+    assert config.values[ROSTER_RESEND_KEY] == str(ROSTER_RESEND_GENERATION)
+
+
+@pytest.mark.parametrize("stored", ["0", "", "garbage"])
+async def test_roster_resend_runs_for_an_older_or_unreadable_generation(stored):
+    out, _fed = _resender(_FakeInstanceConfig({ROSTER_RESEND_KEY: stored}))
+    assert await out.resend_roster_if_due() == 2
+
+
+async def test_roster_resend_without_instance_config_does_nothing():
+    out, fed = _resender(None)
+    assert await out.resend_roster_if_due() == 0
+    assert fed.sent == []
