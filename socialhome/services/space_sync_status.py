@@ -138,11 +138,13 @@ class SpaceSyncStatusService(BusPublisherMixin):
         "_outbox",
         "_outcomes",
         "_own_instance_id",
+        "_page_memo",
         "_pages",
         "_receiving",
         "_recheck_spacing_s",
         "_rechecks",
         "_space_repo",
+        "_started_at",
         "_stop",
         "_tasks",
         "_undelivered",
@@ -173,6 +175,9 @@ class SpaceSyncStatusService(BusPublisherMixin):
         #: here now (the session manager). ``None``: never.
         self._receiving = receiving
         self._clock = clock
+        #: When this household started: rounds it missed while down are no
+        #: failed rounds ("may be missing" counts from here at the earliest).
+        self._started_at = clock()
         #: space → what of its status was last framed (frame on change).
         self._last_sent: OrderedDict[str, tuple] = OrderedDict()
         #: space → its one recheck in flight (:meth:`_request_recheck`).
@@ -193,8 +198,13 @@ class SpaceSyncStatusService(BusPublisherMixin):
         #: (``FederationService.undelivered_space_items``). ``None``: none.
         self._undelivered: Callable[[str], Awaitable[list[str]]] | None = None
         #: ``(space, post)`` a GFS took from us (member publish): sent,
-        #: whatever the outbox says. Memory only, bounded.
+        #: whatever the outbox says. Memory only, bounded — lost on a
+        #: restart (the post then reads "Not sent yet" until a household
+        #: takes it).
         self._gfs_took: OrderedDict[tuple[str, str], None] = OrderedDict()
+        #: space → the page position the last full read saw: the Spaces
+        #: list reads the verdict from here and never starts a compare.
+        self._page_memo: OrderedDict[str, SyncPagePosition | None] = OrderedDict()
 
     def attach_delivery(
         self, undelivered: Callable[[str], Awaitable[list[str]]]
@@ -252,14 +262,20 @@ class SpaceSyncStatusService(BusPublisherMixin):
         space = await self._space_repo.get(space_id)
         if space is None:
             return False
-        _state, _last_ok, _page, missing = await self._state_of(space)
+        _state, _last_ok, _page, missing = await self._state_of(space, read_page=False)
         return missing
 
     async def _state_of(
-        self, space: Space, *, ignore_sync_id: str = ""
+        self, space: Space, *, ignore_sync_id: str = "", read_page: bool = True
     ) -> tuple[SpaceSyncState, str | None, SyncPagePosition | None, bool]:
         """The state, the newest ``ok``, the page position and whether
-        posts may be missing. A space hosted here is up to date."""
+        posts may be missing. A space hosted here is up to date.
+
+        *read_page* ``False`` (the Spaces list): the page verdict the last
+        full read saw, never a read of the page itself — asking the page
+        service for a position starts a compare when it holds no verdict,
+        and the list would start one per space at once (after a restart
+        none has one)."""
         if space.owner_instance_id == self._own_instance_id:
             return SpaceSyncState.UP_TO_DATE, None, None, False
         hosts = await self._hosts(space)
@@ -270,14 +286,25 @@ class SpaceSyncStatusService(BusPublisherMixin):
             else False
         )
         state, last_ok = sync_state(outcomes, receiving=receiving, now=self._clock())
-        page = await self._pages(space, hosts) if self._pages is not None else None
+        if not read_page:
+            page = self._page_memo.get(space.id)
+        elif self._pages is not None:
+            page = await self._pages(space, hosts)
+            self._page_memo[space.id] = page
+            self._page_memo.move_to_end(space.id)
+            while len(self._page_memo) > MAX_TRACKED:
+                self._page_memo.popitem(last=False)
+        else:
+            page = None
         state = state_with_page(state, page)
         proven = page is not None and page.match is False and (page.missing or 0) > 0
         return (
             state,
             last_ok,
             page,
-            may_be_missing(state, outcomes, proven_missing=proven),
+            may_be_missing(
+                state, outcomes, proven_missing=proven, since=self._started_at
+            ),
         )
 
     async def _unsent(self, space_id: str) -> tuple[str, ...]:

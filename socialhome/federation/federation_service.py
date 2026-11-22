@@ -2927,7 +2927,14 @@ class FederationService:
         together) or a deferred mesh send. A household that took it at
         once has no row, so the item is sent. With no other member
         household there is nobody to send to: nothing is undelivered. The
-        stored payload is unwrapped (local KEK) for the item's ``id``."""
+        stored payload is unwrapped (local KEK) for the item's ``id``.
+
+        Known gaps (``docs/protocol/sync.md``): a terminal mesh failure (no
+        outbox, no deferral) leaves nothing waiting, so the item reads
+        sent; a household that joined after the broadcast holds no row yet
+        is in the audience, so the item reads sent; on a
+        host, members' content it forwards shares the newest-payloads
+        window (``pending_targets_for_space``)."""
         audience = {
             iid
             for iid in await self._federation_repo.list_member_instance_ids(space_id)

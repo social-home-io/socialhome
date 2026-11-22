@@ -60,22 +60,27 @@ STALE_OK_S: float = 2 * 60 * 60
 #: no longer counts as the host answering: with another host found
 #: unreachable, the space reads "host offline".
 ANSWER_STALE_S: float = 60 * 60
-#: "Some posts may be missing" waits for the SECOND failed round after the
-#: newest ``ok``: rounds come every 30 minutes, so that round's answer is at
-#: least this long after the ``ok`` (one failed round is a hiccup the next
-#: round usually fixes — nobody is warned about it).
+#: "Some posts may be missing" waits for the SECOND failed round: rounds
+#: come every 30 minutes, so that round's answer is at least this long after
+#: the moment failures start to count — the newest ``ok``, or with none the
+#: host's seat here (when we joined), and never before this household's
+#: own start (a household that was down missed rounds; one failed answer
+#: after it resumes is still a hiccup the next round usually fixes).
 MISSING_AFTER_S: float = 45 * 60
 
 
 @dataclass(slots=True, frozen=True)
 class SpaceSyncOutcome:
     """One acting host's row: its last result, its last ``ok`` and when
-    that last result came (UTC ISO 8601, ``None`` if never / not known)."""
+    that last result came (UTC ISO 8601, ``None`` if never / not known);
+    ``joined_at`` — when its seat row was written here (we joined the
+    space; SQLite's naive UTC), ``None`` when not known."""
 
     instance_id: str
     result: SpaceSyncResult | None
     ok_at: str | None
     result_at: str | None
+    joined_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -189,6 +194,7 @@ def may_be_missing(
     outcomes: Iterable[SpaceSyncOutcome],
     *,
     proven_missing: bool = False,
+    since: datetime | None = None,
 ) -> bool:
     """Whether to tell the member "Some posts may be missing".
 
@@ -196,9 +202,12 @@ def may_be_missing(
     signed sync page PROVED a row missing (*proven_missing*: ``match`` false
     with ``missing`` > 0 — known only after the round that carried the
     listing, so it is still true after that automatic sync). Otherwise only
-    **behind** counts, and only from the second failed round after the
-    newest ``ok`` (:data:`MISSING_AFTER_S`) — or with no ``ok`` ever while a
-    stream arrived unclean. An away host (**host offline**) and a space not
+    **behind** counts, and only from the second failed round: the newest
+    answer at least :data:`MISSING_AFTER_S` after the newest ``ok`` — with
+    none, after the host's seat here (when we joined) — and after *since*
+    (this household's start: rounds it missed while down are no failures).
+    Nothing to count from (no ``ok``, no join time): no warning, the space
+    is still getting ready. An away host (**host offline**) and a space not
     synced yet (**never**) are no warning."""
     if state is SpaceSyncState.CATCHING_UP:
         return False
@@ -208,9 +217,13 @@ def may_be_missing(
         return False
     rows = list(outcomes)
     oks = [at for at in (parse_utc(o.ok_at) for o in rows) if at is not None]
-    if not oks:
-        return True
+    joins = [at for at in (parse_utc(o.joined_at) for o in rows) if at is not None]
+    start = max(oks) if oks else (min(joins) if joins else None)
+    if start is None:
+        return False
+    if since is not None:
+        start = max(start, since)
     answers = [at for at in map(answered_at, rows) if at is not None]
     if not answers:
         return False
-    return max(answers) - max(oks) >= timedelta(seconds=MISSING_AFTER_S)
+    return max(answers) - start >= timedelta(seconds=MISSING_AFTER_S)

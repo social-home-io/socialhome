@@ -432,7 +432,22 @@ publish's `on_published`; memory only — after a restart such a post reads
 "Not sent yet" until a household takes it). A household that took it at
 once has no row, so the post is sent; a deferred mesh send queued or
 released moves it like an outbox row. Bounded (newest 100 stored payloads
-read, 50 ids sent).
+read, 50 ids sent). Known gaps, accepted: a **terminal mesh failure** (no
+outbox row, no deferral left) leaves nothing waiting, so that post reads
+sent; a household that **joined after the post** holds no row for it and
+is still in the audience, so a post every older member still waits for
+reads sent (the newcomer gets it by sync from the host anyway);
+the **GFS "took it" note** is memory only and lost on a restart; on a
+**host**, members' content it forwards shares the 100-payload window with
+its own (the payloads are sealed, so the query cannot pick ours first —
+that would need a column). The time rule counts from this household's own
+start too: rounds missed while it was down are no failed rounds, so after
+a restart the warning needs two failed rounds again; with no `ok` ever it
+counts from the host's seat here (`space_instances.joined_at`, when we
+joined) — a first unclean stream reads "Getting the space ready". The
+Spaces list reads the page verdict the last full read saw and never starts
+a page compare itself. `next_check_at` (UTC, only while "Sync now" is
+refused) comes from the per-space limit, which the whole household shares.
 
 **Signed sync pages (v_95).** The household acting as host that holds the
 space's authority seed seals, lazily and at most every 15 minutes, a signed

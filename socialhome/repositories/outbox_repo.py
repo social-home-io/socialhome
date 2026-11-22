@@ -646,7 +646,13 @@ class SqliteOutboxRepo:
         households whose live row still holds it — the sync status's "Not
         sent yet" (``FederationService.undelivered_space_items``). A
         delivered row is gone (``mark_delivered``), a failed one is no wait.
-        One query, over the payload rows of one space."""
+        One query. No index on ``(space_id, event_type)`` — accepted: the
+        payload table holds only what still waits for someone (a payload
+        goes with its last ref row), bounded by the per-peer cap, and the
+        join uses ``idx_federation_outbox_payload`` (docs/database.md).
+        On a host, payloads of members' content it forwards share the
+        *limit* window with our own (they are sealed; nothing here says
+        whose they are)."""
         rows = await self._db.fetchall(
             "SELECT p.id, p.event_type, p.space_id, p.payload_enc, p.msg_id,"
             " json_group_array(o.instance_id) AS households"

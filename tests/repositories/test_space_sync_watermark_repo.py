@@ -3,13 +3,18 @@ counter and the per-household watermark on ``space_instances``."""
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 
 import pytest
 
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.space import SpaceSyncWatermark
-from socialhome.domain.space_sync_status import SpaceSyncOutcome, SpaceSyncResult
+from socialhome.domain.space_sync_status import (
+    SpaceSyncOutcome,
+    SpaceSyncResult,
+    parse_utc,
+)
 from socialhome.repositories.space_sync_watermark_repo import (
     SqliteSpaceSyncWatermarkRepo,
 )
@@ -138,9 +143,22 @@ async def test_record_applied_refuses_a_value_sqlite_cannot_hold(env, seq):
 # ── The last sync outcome per acting host (migration 0150) ────────────────
 
 
+def _no_join(outcomes):
+    """The outcomes without their seat's join time (asserted on its own)."""
+    return [dataclasses.replace(o, joined_at=None) for o in outcomes]
+
+
+async def test_an_outcome_carries_when_the_seat_was_written(env):
+    """No ``ok`` yet: "may be missing" counts failed rounds from the join."""
+    _db, repo = env
+    (outcome,) = await repo.outcomes("sp", ["peer"])
+    assert outcome.joined_at  # SQLite's datetime('now') default
+    assert parse_utc(outcome.joined_at) is not None
+
+
 async def test_no_outcome_until_one_is_recorded(env):
     _db, repo = env
-    assert await repo.outcomes("sp", ["peer", "stranger"]) == [
+    assert _no_join(await repo.outcomes("sp", ["peer", "stranger"])) == [
         SpaceSyncOutcome(instance_id="peer", result=None, ok_at=None, result_at=None)
     ]
 
@@ -149,7 +167,7 @@ async def test_an_ok_records_the_time_and_a_later_refusal_keeps_it(env):
     _db, repo = env
     await repo.record_outcome("sp", "peer", SpaceSyncResult.OK, at="t1", ok_at="t1")
     await repo.record_outcome("sp", "peer", SpaceSyncResult.DEFERRED, at="t2")
-    assert await repo.outcomes("sp", ["peer"]) == [
+    assert _no_join(await repo.outcomes("sp", ["peer"])) == [
         SpaceSyncOutcome(
             instance_id="peer",
             result=SpaceSyncResult.DEFERRED,
@@ -179,7 +197,9 @@ async def test_the_outcome_survives_a_restart(tmp_dir):
     db = AsyncDatabase(path, batch_timeout_ms=1)
     await db.startup()
     try:
-        assert await SqliteSpaceSyncWatermarkRepo(db).outcomes("sp", ["host"]) == [
+        assert _no_join(
+            await SqliteSpaceSyncWatermarkRepo(db).outcomes("sp", ["host"])
+        ) == [
             SpaceSyncOutcome(
                 instance_id="host",
                 result=SpaceSyncResult.UNREACHABLE,

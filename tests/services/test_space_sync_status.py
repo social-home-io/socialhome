@@ -813,3 +813,43 @@ async def test_unsent_posts_are_bounded(env):
 async def test_without_the_delivery_check_nothing_is_unsent(env):
     env.outbox.pending["sp"] = 3
     assert (await env.svc.status("sp")).unsent_posts == ()
+
+
+async def test_the_spaces_list_read_never_starts_a_page_compare(env):
+    """``GET /api/spaces`` after a restart must not ask the page service
+    (which starts a compare when it holds no verdict) once per space: it
+    reads the verdict the last full read saw."""
+    asked: list[str] = []
+
+    async def position(space, hosts):
+        asked.append(space.id)
+        return _position(match=False, missing=2, differing_buckets=3)
+
+    env.svc.attach_pages(position)
+    assert await env.svc.may_be_missing("sp") is False  # no verdict seen yet
+    assert asked == []
+    await env.svc.status("sp")  # the detail read (and a recheck) ask
+    assert asked == ["sp"]
+    assert await env.svc.may_be_missing("sp") is True
+    assert asked == ["sp"]
+
+
+async def test_one_failed_answer_after_our_restart_is_no_warning(env):
+    """ok 3 h ago, we were down, one unclean answer now: no warning until a
+    second failed round after we resumed."""
+    env.outcomes.rows[("sp", "owner")] = (
+        SpaceSyncResult.OK,
+        (NOW - timedelta(hours=3)).isoformat(),
+    )
+    env.outcomes.at[("sp", "owner")] = (NOW - timedelta(hours=3)).isoformat()
+    env.clock.now = NOW + timedelta(minutes=1)
+    await _pub(
+        env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=False)
+    )
+    assert await _state(env) is SpaceSyncState.BEHIND
+    assert (await env.svc.status("sp")).may_be_missing is False
+    env.clock.now = NOW + timedelta(minutes=46)
+    await _pub(
+        env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=False)
+    )
+    assert (await env.svc.status("sp")).may_be_missing is True

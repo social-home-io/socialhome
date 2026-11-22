@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from aiohttp import web
@@ -72,7 +73,7 @@ from ..domain.user import SYSTEM_AUTHOR
 from ..domain.zone_geo import match_zone
 from ..federation.invite_bootstrap import InviteBootstrapHint
 from ..media_signer import sign_media_urls_in, strip_signature_query
-from ..rate_limiter import client_bucket
+from ..rate_limiter import RateLimiter, client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_attention import needs_you_count, space_attention
@@ -459,7 +460,18 @@ class SpaceDetailView(BaseView):
         if status_svc is None or role == SpaceRole.SUBSCRIBER:
             return None
         status = await status_svc.status(space_id)
-        return status.to_wire() if status is not None else None
+        if status is None:
+            return None
+        wire = status.to_wire()
+        # When "Check now" works again (UTC ISO 8601), from the per-space
+        # limit "Sync now" keeps for the whole household — so a reload
+        # shows the countdown at once; absent while it is allowed.
+        wait = sync_now_wait_s(self.request.app.get(rate_limiter_key), space_id)
+        if wait:
+            wire["next_check_at"] = (
+                datetime.now(UTC) + timedelta(seconds=wait)
+            ).isoformat()
+        return wire
 
     async def _has_remote_households(self, space_id: str) -> bool:
         moderation = self.request.app.get(space_moderation_service_key)
@@ -2289,6 +2301,26 @@ SYNC_NOW_RATE_LIMIT: int = 3
 SYNC_NOW_RATE_WINDOW_S: int = 3600
 
 
+def _sync_now_key(space_id: str) -> str:
+    """The rate-limit bucket of "Sync now": per space, for the whole
+    household (every member shares it)."""
+    return f"space-sync-now:{space_id}"
+
+
+def sync_now_wait_s(limiter: RateLimiter | None, space_id: str) -> int:
+    """Seconds until "Sync now" is allowed again for *space_id*; ``0``
+    when it is now (or no limiter is wired). A pure read."""
+    if limiter is None or limiter.has_room(
+        _sync_now_key(space_id),
+        limit=SYNC_NOW_RATE_LIMIT,
+        window_s=SYNC_NOW_RATE_WINDOW_S,
+    ):
+        return 0
+    return limiter.retry_after_s(
+        _sync_now_key(space_id), window_s=SYNC_NOW_RATE_WINDOW_S
+    )
+
+
 class SpaceSyncTriggerView(BaseView):
     """POST /api/spaces/{id}/sync — "Sync now", any member (not a follower).
 
@@ -2309,7 +2341,7 @@ class SpaceSyncTriggerView(BaseView):
         member = await space_svc._require_member(space_id, ctx.user_id)
         space_svc._assert_writable_member(member, action="sync")
         limiter = self.request.app.get(rate_limiter_key)
-        key = f"space-sync-now:{space_id}"
+        key = _sync_now_key(space_id)
         if limiter is not None and not limiter.is_allowed(
             key,
             limit=SYNC_NOW_RATE_LIMIT,

@@ -3,6 +3,7 @@ status of GET /api/spaces/{id}."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -383,10 +384,24 @@ async def test_sync_now_is_rate_limited_per_space(client):
     assert 0 < error["retry_after_s"] <= 3600
     assert resp.headers["Retry-After"] == str(error["retry_after_s"])
     assert begin.await_count == SYNC_NOW_RATE_LIMIT
+    # A reload knows it at once: the detail says when the next is allowed.
+    r = await client.get(f"/api/spaces/{space_id}", headers=_auth(client._admin_token))
+    next_at = datetime.fromisoformat((await r.json())["sync"]["next_check_at"])
+    left = (next_at - datetime.now(UTC)).total_seconds()
+    assert 0 < left <= 3600
+
+
+async def test_no_next_check_at_while_check_now_is_allowed(client):
+    space_id = await _remote_space(client)
+    r = await client.get(f"/api/spaces/{space_id}", headers=_auth(client._admin_token))
+    assert "next_check_at" not in (await r.json())["sync"]
 
 
 async def _two_failed_rounds(client, space_id: str) -> None:
-    """The host answered ``ok`` an hour ago, then two unclean rounds."""
+    """The host answered ``ok`` an hour ago, then two unclean rounds — while
+    this household ran (it started 2 h ago)."""
+    status = client.server.app[space_sync_status_key]
+    status._started_at = datetime.now(UTC) - timedelta(hours=2)
     db = client.server.app[_db_key]
     await db.enqueue(
         "UPDATE space_instances SET sync_result='unclean',"

@@ -242,9 +242,21 @@ def test_an_ok_without_a_result_time_answered_at_its_ok_time():
 # ─── "Some posts may be missing" (may_be_missing) ────────────────────────
 
 
-def _missing(rows, *, proven=False):
+def _missing(rows, *, proven=False, since=None):
     state, _ = sync_state(rows, now=NOW)
-    return may_be_missing(state, rows, proven_missing=proven)
+    return may_be_missing(state, rows, proven_missing=proven, since=since)
+
+
+def _joined(outcome, minutes: float):
+    """*outcome* with its seat written *minutes* ago (SQLite's naive UTC)."""
+    at = (NOW - timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    return SpaceSyncOutcome(
+        instance_id=outcome.instance_id,
+        result=outcome.result,
+        ok_at=outcome.ok_at,
+        result_at=outcome.result_at,
+        joined_at=at,
+    )
 
 
 def test_one_failed_round_after_an_ok_is_not_yet_missing():
@@ -280,8 +292,33 @@ def test_never_synced_is_not_missing():
     assert _missing([_o("h", None, None)]) is False
 
 
-def test_an_unclean_stream_with_no_ok_ever_may_be_missing():
-    assert _missing([_o("h", SpaceSyncResult.UNCLEAN, None, at_min=5)]) is True
+def test_a_first_unclean_stream_after_joining_is_no_warning():
+    """No ``ok`` ever: a first unclean stream right after joining is the
+    space still getting ready, not "posts may be missing"."""
+    row = _joined(_o("h", SpaceSyncResult.UNCLEAN, None, at_min=5), 10)
+    assert _missing([row]) is False
+
+
+def test_no_ok_ever_and_two_failed_rounds_since_joining_may_be_missing():
+    row = _joined(_o("h", SpaceSyncResult.UNCLEAN, None, at_min=5), 65)
+    assert _missing([row]) is True
+
+
+def test_no_ok_ever_and_no_join_time_is_no_warning():
+    assert _missing([_o("h", SpaceSyncResult.UNCLEAN, None, at_min=5)]) is False
+
+
+def test_one_failed_answer_after_our_own_downtime_is_no_warning():
+    """ok 3 h ago, we were down (an HA restart), one unclean answer now:
+    one failed round after resuming, not two."""
+    rows = [_o("h", SpaceSyncResult.UNCLEAN, 180, at_min=1)]
+    assert _missing(rows) is True  # without our start time it would warn
+    assert _missing(rows, since=NOW - timedelta(minutes=5)) is False
+
+
+def test_two_failed_rounds_after_resuming_may_be_missing():
+    rows = [_o("h", SpaceSyncResult.UNCLEAN, 180, at_min=1)]
+    assert _missing(rows, since=NOW - timedelta(minutes=50)) is True
 
 
 def test_a_proven_missing_row_is_missing_whatever_the_rounds_say():

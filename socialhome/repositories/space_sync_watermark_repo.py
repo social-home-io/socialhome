@@ -171,8 +171,8 @@ class SqliteSpaceSyncWatermarkRepo:
             return []
         marks = ",".join("?" * len(wanted))
         rows = await self._db.fetchall(
-            "SELECT instance_id, sync_result, sync_ok_at, sync_result_at"
-            " FROM space_instances"
+            "SELECT instance_id, sync_result, sync_ok_at, sync_result_at,"
+            " joined_at FROM space_instances"
             f" WHERE space_id=? AND instance_id IN ({marks})",
             (space_id, *wanted),
         )
@@ -182,6 +182,7 @@ class SqliteSpaceSyncWatermarkRepo:
                 result=SpaceSyncResult.parse(r["sync_result"]),
                 ok_at=r["sync_ok_at"],
                 result_at=r["sync_result_at"],
+                joined_at=r["joined_at"],
             )
             for r in rows
         }
