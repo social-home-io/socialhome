@@ -43,6 +43,11 @@ ALLOWED: dict[tuple[str, str], str] = {
         "member households for a newer page's rows at once (sync pages "
         "Phase 3); a delegated admin waits for its owner like any member"
     ),
+    ("federation/sync/space/pages.py", "_fetch_next"): (
+        "are WE the owner: only the owner applies rows it lacks and never "
+        "another version of its own (a delegated admin's page may predate "
+        "the owner's edits; what it applies it spreads as the host)"
+    ),
     ("federation/sync/space/pages.py", "_receive"): (
         "are WE the owner: only the owner takes a newer page its delegated "
         "admin signed over its own; a delegated admin keeps its own chain"

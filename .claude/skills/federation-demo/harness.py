@@ -193,6 +193,10 @@ _OFFLINE_PEER_NATIVE_NOISE: tuple[str, ...] = (
     "juice: Lost connectivity",
     "juice: STUN local ufrag check failed",
     "juice: STUN message verification failed",
+    # A DTLS handshake under way when the peer's process died (or came
+    # back with fresh credentials) ends with a fatal I/O error on the
+    # survivor — the same outage, from the other side of the handshake.
+    "DTLS recv: Handshake failed: fatal I/O error",
     "SCTP connection failed",
 )
 
