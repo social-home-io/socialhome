@@ -20119,6 +20119,11 @@ def cmd_members_page_catchup() -> None:
         )
         return json.loads(rows[0][0]) if rows else None
 
+    # v_95 push: the host seals lazily at the end of a member's stream (the
+    # joins' first syncs) and PUSHES the page to every member household. The
+    # lagging member is never asked to sync here: it must get the page by
+    # the push alone. Only the deliverer may press "Sync now" (a BEGIN to
+    # the host, which also makes it seal when no stream did yet).
     for label, inst, url in ((_PC_LAG, a, a_url), (_PC_DLV, c, c_url)):
         deadline = time.monotonic() + 150.0
         asked = 0
@@ -20131,6 +20136,9 @@ def cmd_members_page_catchup() -> None:
                 and got.get("rows", 0) >= 3
             ):
                 break
+            if label == _PC_LAG:
+                time.sleep(1.0)
+                continue
             if asked < 3 and time.monotonic() >= next_ask:
                 _request(
                     f"{url}/api/spaces/{space_id}/sync",
@@ -20148,6 +20156,16 @@ def cmd_members_page_catchup() -> None:
     signed = _held_page(_PC_LAG)
     if _held_page(_PC_DLV) != signed:
         raise SystemExit(f"{step}: the members hold different pages of the host")
+    pushes = _log_lines_matching(_PC_HOST, f"pushed page {signed['seq']} of space {space_id}")
+    if not pushes:
+        raise SystemExit(
+            f"{step}: the host's log names no push of page {signed['seq']} — "
+            f"{_PC_LAG} got it some other way"
+        )
+    print(
+        f"  the host pushed page {signed['seq']} to its member households; "
+        f"{_PC_LAG} holds it without a sync round of its own ✓"
+    )
     _poll(
         "a's status to compare its copy with b's page and match",
         lambda: (
@@ -20401,9 +20419,11 @@ def _verify_sync_page(state: dict, *, want_match: bool = False) -> list[str]:
         )
         return rows[0] if rows else None
 
-    # Round 1 makes b seal (in the background of its sentinel); round 2
-    # carries the page. "Sync now" is the trigger; between rounds we wait on
-    # a's own rows (polled), re-asking only while no page has arrived.
+    # A round makes b seal (in the background, at the end of a's stream);
+    # b then pushes the page to its member households (v_95 push), or sends
+    # it to a's stale ref on a later round. "Sync now" is the trigger;
+    # between rounds we wait on a's own rows (polled), re-asking only while
+    # no page has arrived.
     deadline = time.monotonic() + 150.0
     asked = 0
     next_ask = 0.0

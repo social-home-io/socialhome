@@ -167,23 +167,23 @@ async def pair(homes):  # noqa: F811
     yield host, member, host_pages, member_pages, clock, wire
 
 
-async def _round(host_pages, member_pages, sync_id: str, *, newest=False) -> bool:
-    """One sentinel: the member's BEGIN ``page``, the host's ``page_sealed``,
-    the member taking it. *newest*: a "Sync now" BEGIN (a newer page goes
-    even while the member's is under an hour old)."""
+async def _round(host_pages, member_pages, sync_id: str) -> bool:
+    """One round: the member's BEGIN ``page``; the provider sends the
+    ``SPACE_SYNC_PAGE`` event to that household when its ref is older than
+    the page it offers (the one receive path), then the stream's sentinel
+    (no page on it). *sync_id* names the round only."""
+    del sync_id
     ref = await member_pages.ref_for(SPACE)
-    if ref is not None and newest:
-        ref = {**ref, "newest": True}
-    sealed = await host_pages.sentinel_page(
-        space_id=SPACE,
-        sync_id=sync_id,
-        requester_version=95,
-        requester_ref=parse_page_ref(ref),
+    event = await host_pages.page_for(
+        space_id=SPACE, requester_version=95, requester_ref=parse_page_ref(ref)
     )
     await host_pages.wait_idle()
-    stored = await member_pages.receive(
-        space_id=SPACE, sync_id=sync_id, provider=HOST, sealed=sealed
+    stored = (
+        await member_pages.take_pushed(space_id=SPACE, provider=HOST, payload=event)
+        if event is not None
+        else False
     )
+    member_pages.sentinel_seen(SPACE)
     await member_pages.wait_idle()
     return stored
 
@@ -211,9 +211,8 @@ async def test_a_page_round_trips_and_the_member_matches_it(pair):
     assert wire.asks == []
     # The page is not sent again while the member holds it.
     assert (
-        await host_pages.sentinel_page(
+        await host_pages.page_for(
             space_id=SPACE,
-            sync_id="s-2",
             requester_version=95,
             requester_ref=parse_page_ref(await member_pages.ref_for(SPACE)),
         )

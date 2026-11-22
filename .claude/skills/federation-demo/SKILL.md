@@ -599,8 +599,9 @@ That single command runs the full sequence:
    ``docs/protocol/sync-pages.md`` Phase 2), its own step right after
    ``calendar`` (``up → pair → traffic → calendar → sync-pages``). **a**
    sends "Sync now" for the tri-household salon (host **b**) up to three
-   times — the first BEGIN makes **b** seal a page in the background, the
-   next sentinel carries it — and fails unless **a** holds a page signed by
+   times — the first BEGIN makes **b** seal a page in the background and
+   push it to its member households (``SPACE_SYNC_PAGE``; a later BEGIN
+   naming an older page gets it too) — and fails unless **a** holds a page signed by
    **b** that verifies against the space key **a** pins, whose stored
    vector hashes to its root, and that **a**'s ``GET /api/spaces/{id}``
    ``sync.page`` shows. It then waits on **a**'s status for the verdict
@@ -1359,9 +1360,12 @@ asks for its page, stays for ``verify``). The chain runs the step before
 ``gfs-admin-seed``, whose restart of a right before ``verify`` it keeps.
 
 c creates a fresh private space, writes two posts and a wiki page and only
-then invites b and a, so c's first signed page (sealed on the first join's
-sentinel) commits all three; "Sync now" brings it to both, and b's status
-reads it as a match. b goes down and its copies of the posts and the page
+then invites b and a, so c's first signed page (sealed at the end of the
+first join's stream) commits all three. c **pushes** it to its member
+households (``SPACE_SYNC_PAGE``): b is never asked to sync for it — the
+step fails unless b holds the page and c's log names the push of that
+page; only a may press "Sync now" (a BEGIN, which also makes c seal).
+b's status reads the page as a match. b goes down and its copies of the posts and the page
 are removed from its database (what lost deliveries would leave — the one
 place the step writes app state); then the host c goes down (no delegated
 admin). b comes back: its BEGIN to c goes unanswered for

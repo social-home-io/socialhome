@@ -189,6 +189,7 @@ CONFIRMS_PAIRING_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_SYNC_ICE,
         FederationEventType.SPACE_SYNC_DIRECT_READY,
         FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+        FederationEventType.SPACE_SYNC_PAGE,
         FederationEventType.SPACE_SYNC_REQUEST_MORE,
         FederationEventType.SPACE_SYNC_REJECTED,
         FederationEventType.INSTANCE_SYNC_STATUS,

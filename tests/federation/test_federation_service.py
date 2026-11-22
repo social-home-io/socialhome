@@ -805,6 +805,23 @@ async def test_an_offline_peer_queues_one_online_status_per_person():
 
 
 @pytest.mark.asyncio
+async def test_an_offline_member_gets_only_the_newest_sync_page():
+    """Sync pages push: the pages pushed while a member household is offline
+    leave ONE queued row per space — the newest page; an older page is
+    never delivered after it."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    for n in range(3):
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.SPACE_SYNC_PAGE,
+            payload={"page_sealed": {"epoch": 1, "payload": f"page-{n}"}},
+            space_id="s1",
+        )
+    (row,) = outbox_repo.enqueued  # each newer page replaced the older row
+    assert row["supersede_key"] == "sync-page:s1"
+
+
+@pytest.mark.asyncio
 async def test_an_outbox_key_queues_one_routed_reaction_per_person():
     """v_67: a routed reaction's reactor is sealed, so its sender names the
     latest-only key itself — local only, never on the wire."""

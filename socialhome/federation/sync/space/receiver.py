@@ -147,9 +147,7 @@ class _StreamWatch(Protocol):
 
 
 class _SyncPageSink(Protocol):
-    async def receive(
-        self, *, space_id: str, sync_id: str, provider: str, sealed: object
-    ) -> bool: ...
+    def sentinel_seen(self, space_id: str) -> None: ...
 
     async def take_listing(
         self, *, space_id: str, sync_id: str, provider: str, records: object
@@ -326,7 +324,7 @@ class SpaceSyncReceiver(
         self._media_names = namer
 
     def attach_sync_pages(self, pages: _SyncPageSink) -> None:
-        """Wire the v_95 sync pages: a verified sentinel's ``page_sealed``
+        """Wire the v_95 sync pages: a verified sentinel's end of stream
         is decrypted, verified and kept (``SyncPageService.receive``)."""
         self._sync_pages = pages
 
@@ -580,17 +578,12 @@ class SpaceSyncReceiver(
                 await self._record_applied(
                     space_id, from_instance, envelope.get("snapshot_seq")
                 )
-            # v_95: the provider's newest signed sync page — taken after the
-            # stream's snapshot is recorded, so the status compares the page
-            # with what we now hold. Authority-signed: any provider may relay
-            # it, none can forge it.
+            # v_95: after the stream's snapshot is recorded — a held page
+            # with no verdict yet is compared with what we now hold (the page
+            # itself comes as its own ``SPACE_SYNC_PAGE`` event), and the
+            # listings this round asked for are classified.
             if self._sync_pages is not None:
-                await self._sync_pages.receive(
-                    space_id=space_id,
-                    sync_id=sync_id,
-                    provider=from_instance,
-                    sealed=envelope.get("page_sealed"),
-                )
+                self._sync_pages.sentinel_seen(space_id)
                 await self._sync_pages.listing_done(
                     space_id=space_id, sync_id=sync_id, provider=from_instance
                 )

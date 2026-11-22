@@ -14,6 +14,7 @@ import orjson
 
 from socialhome.canonical_json import canonical_str
 from socialhome.crypto import ed25519_public_key
+from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.space import (
     JoinMode,
@@ -26,12 +27,15 @@ from socialhome.domain.space import (
 from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.federation.sync.space.page_state import BucketRows
-from socialhome.federation.sync.space.pages import SyncPageService
+from socialhome.federation.sync.space.pages import (
+    PAGE_PUSH_AAD,
+    PAGE_PUSH_INTERVAL_S,
+    SyncPageService,
+)
 from socialhome.sync_page import (
     MAX_FETCH_BYTES,
     MAX_FETCH_ROWS,
     PAGE_MIN_INTERVAL_S,
-    PAGE_RESEND_AFTER_S,
     VECTOR_BYTES,
     ListingRow,
     bucket_hash,
@@ -227,18 +231,19 @@ class _Env:
 V = FederationCapability.MIN_FOR_SYNC_PAGES
 
 
-async def _sentinel(env: _Env, *, ref=None, version=V, sync_id="s-1"):
-    sealed = await env.svc.sentinel_page(
+async def _sentinel(env: _Env, *, ref=None, version=V):
+    """What a BEGIN naming *ref* gets: the ``SPACE_SYNC_PAGE`` event's
+    ``page_sealed`` (sent to that household alone), or ``None``."""
+    event = await env.svc.page_for(
         space_id=SPACE,
-        sync_id=sync_id,
         requester_version=version,
         requester_ref=parse_page_ref(ref) if ref is not None else None,
     )
     await env.svc.wait_idle()
-    return sealed
+    return None if event is None else event["page_sealed"]
 
 
-def _open(env: _Env, sealed, sync_id="s-1") -> dict:
+def _open(env: _Env, sealed, sync_id=PAGE_PUSH_AAD) -> dict:
     blob = base64.b64decode(sealed["payload"])
     return orjson.loads(blob[len(f"{SPACE}|{sync_id}|") :])
 
@@ -441,28 +446,8 @@ async def test_only_when_newer_than_the_requesters_page():
     assert await _sentinel(env, ref=page.ref()) is None
     newer = _signed(issued_at=T0 + 10, seq=999, vector=_vec(9))
     assert await _sentinel(env, ref=newer.ref()) is None
-    old_ms = T0 - PAGE_RESEND_AFTER_S * 1000
-    older = _signed(issued_at=old_ms, seq=1, vector=_vec(8))
+    older = _signed(issued_at=T0 - 10, seq=1, vector=_vec(8))
     assert await _sentinel(env, ref=older.ref()) is not None
-
-
-async def test_a_requester_with_a_page_under_an_hour_old_gets_no_newer_one():
-    """Follow-up to final review I4 (cost): a requester whose held page is
-    under PAGE_RESEND_AFTER_S old gets no newer page and no vector — only
-    its own BEGIN ref travels. Its status stays honest: it holds what it
-    holds (a match on it counts only while fresh). From an hour on, and at
-    once for "Sync now" (``newest`` in its ref), the newer page goes."""
-    env = _Env()
-    page = await env.svc.seal_if_due(SPACE)
-    assert page is not None
-    recent = _signed(issued_at=T0 - 30 * 60_000, seq=1, vector=_vec(8))
-    assert await _sentinel(env, ref=recent.ref()) is None
-    assert await _sentinel(env, ref={**recent.ref(), "newest": True}) is not None
-    edge = _signed(issued_at=T0 - PAGE_RESEND_AFTER_S * 1000, seq=1, vector=_vec(8))
-    assert await _sentinel(env, ref=edge.ref()) is not None
-    # Never for a page of another epoch: the held one is stale anyway.
-    other = _signed(issued_at=T0 - 60_000, seq=1, epoch=2, vector=_vec(8))
-    assert await _sentinel(env, ref=other.ref()) is not None
 
 
 async def test_the_previous_page_gets_the_full_vector():
@@ -478,7 +463,6 @@ async def test_the_previous_page_gets_the_full_vector():
     env.state.vec = bytes(new_vec)
     second = await env.svc.seal_if_due(SPACE)
     assert first is not None and second is not None
-    env.now = first.issued_at + PAGE_RESEND_AFTER_S * 1000  # first is 1 h old
     body = _open(env, await _sentinel(env, ref=first.ref()))
     assert set(body) == {"page", "vector"}
     assert vector_from_wire(body["vector"]) == env.state.vec
@@ -1371,3 +1355,200 @@ async def test_a_deliverers_answer_is_bounded_in_rows_bytes_and_record_size():
     _listings, fetched = await fetch(max_record_bytes=1000)
     assert fetched == []  # every record over the requester's frame cap
     assert await fetch(requester_version=V - 1) == ([], [])
+
+
+# ── Push (the signer sends each new page to every member household) ──────
+
+
+class _PushSender:
+    """The federation service's space fan-out and one-target send."""
+
+    def __init__(self) -> None:
+        self.broadcasts: list[tuple[str, object, dict, int | None, object]] = []
+        self.sends: list[tuple[str, str, object, dict]] = []
+
+    async def broadcast_to_space_members(
+        self,
+        space_id,
+        event_type,
+        payload,
+        *,
+        min_proto_version=None,
+        only_instances=None,
+    ):
+        self.broadcasts.append(
+            (space_id, event_type, payload, min_proto_version, only_instances)
+        )
+
+    async def send_with_mesh_fallback(
+        self, *, to_instance_id, event_type, payload, space_id
+    ):
+        self.sends.append((space_id, to_instance_id, event_type, payload))
+
+
+WRITERS = {"member-a", "member-b"}
+
+
+def _pushing(env: _Env) -> _PushSender:
+    sender = _PushSender()
+
+    async def writers(space_id):
+        return set(WRITERS)
+
+    env.svc.attach_push(sender=sender, writers=writers)
+    return sender
+
+
+def _pushed_page(env: _Env, payload: dict):
+    blob = base64.b64decode(payload["page_sealed"]["payload"])
+    head = f"{SPACE}|{PAGE_PUSH_AAD}|".encode()
+    assert blob.startswith(head)
+    body = orjson.loads(blob[len(head) :])
+    return parse_page(body["page"]), vector_from_wire(body["vector"])
+
+
+def _change(env: _Env, minutes: float, seq: int) -> None:
+    env.exporter.changed_above = 10**9
+    env.seqs.seq = seq
+    env.now += int(minutes * 60_000)
+    env.mono += minutes * 60
+    vec = bytearray(env.state.vec)
+    vec[0:32] = bytes([seq % 256]) * 32
+    env.state.vec = bytes(vec)
+
+
+async def test_a_seal_pushes_the_page_to_every_member_household():
+    """The signer pushes a new page at once to every member household —
+    never a follower (the writer seats), only at v_95 — as the one
+    ``SPACE_SYNC_PAGE`` event, the page and its vector sealed under the
+    space content key."""
+    env = _Env()
+    sender = _pushing(env)
+    page = await env.svc.seal_if_due(SPACE)
+    await env.svc.wait_idle()
+    [(space_id, event_type, payload, min_v, only)] = sender.broadcasts
+    assert space_id == SPACE
+    assert event_type is FederationEventType.SPACE_SYNC_PAGE
+    assert min_v == FederationCapability.MIN_FOR_SYNC_PAGES
+    assert set(only) == WRITERS
+    assert set(payload) == {"page_sealed"}
+    got, vector = _pushed_page(env, payload)
+    assert got == page and vector == env.state.vec
+
+
+async def test_pushes_coalesce_to_one_an_hour_with_the_latest_page():
+    """A seal within the hour after the last push schedules ONE push of the
+    newest page at the hour mark (the scheduler's tick), never a queue."""
+    env = _Env()
+    sender = _pushing(env)
+    await env.svc.seal_if_due(SPACE)
+    await env.svc.wait_idle()
+    assert len(sender.broadcasts) == 1
+    for k, minutes in enumerate((16, 16, 16)):  # three more seals in the hour
+        _change(env, minutes, 200 + k)
+        assert await env.svc.seal_if_due(SPACE) is not None
+        await env.svc.wait_idle()
+        await env.svc.push_due()
+    assert len(sender.broadcasts) == 1  # none before the hour mark
+    env.mono += PAGE_PUSH_INTERVAL_S
+    await env.svc.push_due()
+    await env.svc.push_due()
+    assert len(sender.broadcasts) == 2
+    latest, _vector = _pushed_page(env, sender.broadcasts[-1][2])
+    assert latest == env.held()
+
+
+async def test_a_begin_naming_a_page_older_than_the_pushed_one_gets_it():
+    """One receive path, two triggers: a member that missed a push is caught
+    by its BEGIN ``page`` ref — older than the page last pushed — with the
+    same event sent to it alone. A ref of the last pushed page gets nothing
+    (a newer page waits for its hourly push); a follower or an older
+    household gets nothing."""
+    env = _Env()
+    sender = _pushing(env)
+    first = await env.svc.seal_if_due(SPACE)
+    await env.svc.wait_idle()
+    older = _signed(issued_at=T0 - 60_000, seq=1, vector=_vec(8))
+    await env.svc.offer_page(
+        space_id=SPACE,
+        requester="member-a",
+        requester_version=V,
+        requester_ref=parse_page_ref(older.ref()),
+    )
+    await env.svc.offer_page(
+        space_id=SPACE, requester="member-b", requester_version=V, requester_ref=None
+    )
+    assert [(t, e) for _s, t, e, _p in sender.sends] == [
+        ("member-a", FederationEventType.SPACE_SYNC_PAGE),
+        ("member-b", FederationEventType.SPACE_SYNC_PAGE),
+    ]
+    got, _v = _pushed_page(env, sender.sends[0][3])
+    assert got == first
+    _change(env, 16, 300)
+    assert await env.svc.seal_if_due(SPACE) is not None  # pending, not pushed
+    await env.svc.offer_page(
+        space_id=SPACE,
+        requester="member-a",
+        requester_version=V,
+        requester_ref=parse_page_ref(first.ref()),
+    )
+    await env.svc.offer_page(
+        space_id=SPACE,
+        requester="follower-f",
+        requester_version=V,
+        requester_ref=None,
+    )
+    await env.svc.offer_page(
+        space_id=SPACE,
+        requester="member-b",
+        requester_version=V - 1,
+        requester_ref=None,
+    )
+    assert len(sender.sends) == 2
+
+
+async def test_a_member_relays_the_page_it_holds_to_a_stale_ref():
+    """A member household (no seal of its own) catches a co-member's stale
+    ref up too — with the page it holds, the same event."""
+    env = _Env(own=ME, seed=None)
+    sender = _pushing(env)
+    page = _signed()
+    assert await env.svc.receive(
+        space_id=SPACE,
+        sync_id=PAGE_PUSH_AAD,
+        provider=HOST,
+        sealed=await _sealed_for_member(page, sync_id=PAGE_PUSH_AAD),
+    )
+    await env.svc.wait_idle()
+    assert sender.broadcasts == []  # a member never pushes to everyone
+    older = _signed(issued_at=T0 - 60_000, seq=1, vector=_vec(8))
+    await env.svc.offer_page(
+        space_id=SPACE,
+        requester="member-a",
+        requester_version=V,
+        requester_ref=parse_page_ref(older.ref()),
+    )
+    [(_s, to, _e, payload)] = sender.sends
+    assert to == "member-a" and _pushed_page(env, payload)[0] == page
+
+
+async def test_the_page_event_handler_takes_a_pushed_page():
+    """The dispatch registry's ``SPACE_SYNC_PAGE`` handler: the one receive
+    path — verified against the pinned key, stored, compared."""
+    env = _Env(own=ME, seed=None)
+    page = _signed()
+    event = FederationEvent(
+        msg_id="m-1",
+        event_type=FederationEventType.SPACE_SYNC_PAGE,
+        from_instance=HOST,
+        to_instance=ME,
+        timestamp="2027-01-15T08:00:00+00:00",
+        payload={"page_sealed": await _sealed_for_member(page, sync_id=PAGE_PUSH_AAD)},
+        space_id=SPACE,
+    )
+    await env.svc.on_page_event(event)
+    await env.svc.wait_idle()
+    assert env.held() == page
+    # A payload without a page is ignored.
+    await env.svc.on_page_event(replace(event, payload={}))
+    assert env.held() == page

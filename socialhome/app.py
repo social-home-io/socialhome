@@ -2511,8 +2511,8 @@ def _wire_federation_stack(
         federation_service=federation_service,
         own_instance_id=identity.instance_id,
     )
-    # v_95 — signed sync pages: sealed lazily by a signing host, carried on
-    # the sentinel, verified and kept by members, read by the sync status.
+    # v_95 — signed sync pages: sealed lazily by a signing host, pushed to
+    # the member households, verified and kept, read by the sync status.
     app[K.sync_page_service_key] = _build_sync_pages(
         repo=space_sync_page_repo,
         space_repo=space_repo,
@@ -2688,9 +2688,11 @@ def _build_sync_pages(
     host_contact: HostContact,
     own_instance_id: str,
 ) -> SyncPageService:
-    """v_95 sync pages (``docs/protocol/sync-pages.md``): the provider's
-    sentinel carries the newest page, the receiver verifies and keeps one,
-    every BEGIN names the page we hold, and the sync status reads it."""
+    """v_95 sync pages (``docs/protocol/sync-pages.md``): the signer pushes
+    each new page (at most hourly) to every member household as
+    ``SPACE_SYNC_PAGE``, a provider sends it to one household whose BEGIN
+    names an older page, the receiver verifies and keeps one, every BEGIN
+    names the page we hold, and the sync status reads it."""
     pages = SyncPageService(
         repo=repo,
         spaces=space_repo,
@@ -2734,6 +2736,21 @@ def _build_sync_pages(
         apply=receiver.apply_verified,
     )
     scheduler.attach_host_silent(pages.host_silent)
+    # Delivery: the space fan-out to the writer households (paired and mesh
+    # members directly, GFS-reached ones in one multi upload per GFS), at
+    # most hourly per space (the scheduler's tick pushes a page that waited
+    # for the hour mark); one receive path for the push and the targeted
+    # send a stale BEGIN ref gets.
+    writers = SpaceWriterHouseholds(seat_repo, own_instance_id=own_instance_id)
+
+    async def _writers(space_id: str) -> set[str]:
+        return set(await writers.writer_households(space_id))
+
+    pages.attach_push(sender=federation_service, writers=_writers)
+    federation_service._event_registry.register(
+        FederationEventType.SPACE_SYNC_PAGE, pages.on_page_event
+    )
+    scheduler.attach_page_push(pages.push_due)
     return pages
 
 

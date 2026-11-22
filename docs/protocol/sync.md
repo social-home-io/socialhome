@@ -504,9 +504,11 @@ settings page learns of the limit on its own next press (or a reload).
 **Signed sync pages (v_95).** The household acting as host that holds the
 space's authority seed seals, lazily and at most every 15 minutes, a signed
 commitment to the space's state (a **page**: 256 bucket hashes under one
-root). Every sentinel carries the newest page the provider holds — sealed
-under the content key, only to a v_95 requester whose BEGIN `page` is
-older — and any member relays it. A member keeps the newest page and its
+root). It pushes each new page — `SPACE_SYNC_PAGE`, sealed under the
+content key — to every member household (never a follower), at most once
+an hour per space (one multi upload per GFS for the GFS-reached ones); a
+member whose BEGIN `page` is older than the page last pushed gets the
+same event from that provider alone, and any member relays it that way. A member keeps the newest page and its
 vector, compares its own rows with each newer page (at most every 15
 minutes): differences explained by its own newer rows cost nothing; the
 rest is settled by at most 8 bucket listings an acting host appends to

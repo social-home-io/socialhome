@@ -128,9 +128,8 @@ class _PageSink:
         self.done: list[dict] = []
         self.rows: list[dict] = []
 
-    async def receive(self, **kwargs):
-        self.calls.append(kwargs)
-        return True
+    def sentinel_seen(self, space_id):
+        self.calls.append(space_id)
 
     async def take_listing(self, **kwargs):
         self.listings.append(kwargs)
@@ -142,35 +141,27 @@ class _PageSink:
         self.rows.append(kwargs)
 
 
-async def test_a_verified_sentinel_hands_its_sync_page_on(bus, receiver, peer_setup):
-    """v_95: the sealed page of a sentinel whose provider signature
-    verified goes to the page service (which decrypts and verifies it)."""
+async def test_a_verified_sentinel_tells_the_page_service(bus, receiver, peer_setup):
+    """v_95: a sentinel whose provider signature verified tells the page
+    service the stream ended (a held page without a verdict is compared
+    now); no page rides it any more — a ``page_sealed`` on one is ignored.
+    A forged sentinel never reaches it."""
     r, _, _ = receiver
     _peer, kp = peer_setup
     sink = _PageSink()
     r.attach_sync_pages(sink)
-    sealed = {"epoch": 2, "payload": "ct"}
     sentinel = {
         "sync_id": "sync-1",
         "resource": SENTINEL_RESOURCE,
         "space_id": "sp-1",
         "is_last": True,
-        "page_sealed": sealed,
     }
     sentinel = await _sign_as_peer(kp, sentinel)
     await r.on_chunk(serialise_chunk(sentinel), from_instance="peer-a")
-    assert sink.calls == [
-        {
-            "space_id": "sp-1",
-            "sync_id": "sync-1",
-            "provider": "peer-a",
-            "sealed": sealed,
-        }
-    ]
-    # A tampered sentinel (signature broken) never reaches it.
+    assert sink.calls == ["sp-1"]
     forged = {**sentinel, "page_sealed": {"epoch": 2, "payload": "other"}}
     await r.on_chunk(serialise_chunk(forged), from_instance="peer-a")
-    assert len(sink.calls) == 1
+    assert sink.calls == ["sp-1"]
 
 
 async def test_listing_chunks_and_their_sentinel_reach_the_page_service(

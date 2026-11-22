@@ -8,14 +8,16 @@
   about to end a stream with its sentinel, it seals a new page in the
   background — but only when the space changed since its stored page and
   that page is ≥ :data:`~socialhome.sync_page.PAGE_MIN_INTERVAL_S` old (or
-  of another epoch, suite or cutoff day). One seal per space at a time; the
-  sentinel never waits for it (it carries the stored page).
-* **Carry (any provider).** The sentinel's ``page_sealed`` carries the
-  newest page this household holds — sealed here or verified from another
-  provider (the member-to-member relay) — sealed under the space content
-  key like a chunk, and only to a requester at
-  ``MIN_FOR_SYNC_PAGES`` whose BEGIN shows an older page (or none) — with
-  its full bucket vector (no delta: final review I4).
+  of another epoch, suite or cutoff day). One seal per space at a time; a
+  BEGIN never waits for it.
+* **Deliver (push; owner decision 2026-11-22).** A new page is pushed as
+  ``SPACE_SYNC_PAGE`` (the page and its full vector, sealed under the space
+  content key) to every member household holding a writer seat, at most
+  once an hour per space (a seal within the hour waits for the hour mark;
+  the scheduler's tick pushes the newest page then). A member whose BEGIN
+  names an older page than the one last pushed gets the same event from
+  that provider alone (any member relays its page that way). One receive
+  path for both.
 * **Verify and store (member).** A received page must pass
   :func:`~socialhome.sync_page.verify_page` against the key and epoch this
   household pins, be newer than the one held, and come with a vector that
@@ -55,6 +57,7 @@ import orjson
 
 from ....canonical_json import canonical_str
 from ....crypto import ed25519_public_key
+from ....domain.federation import FederationEventType
 from ....domain.federation_capabilities import FederationCapability
 from ....domain.file_hashes import (
     FILES_FIELD,
@@ -79,7 +82,6 @@ from ....sync_page import (
     MAX_LISTING_ROWS,
     MAX_PAGE_FUTURE_SKEW_MS,
     PAGE_MIN_INTERVAL_S,
-    PAGE_RESEND_AFTER_S,
     PAGE_SUITE_SHA256_B256,
     SUPERSEDED_BY,
     ListingRow,
@@ -117,6 +119,7 @@ from .stream_health import HELD_BACK_LIMIT, HeldBack
 from .trusted_helpers import helper_offset, member_deliverers
 
 if TYPE_CHECKING:
+    from ....domain.federation import FederationEvent
     from ....domain.space import Space
     from ....repositories.space_sync_page_repo import AbstractSpaceSyncPageRepo
     from .exporter import ResourceExporter
@@ -124,9 +127,18 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: The sealed ``page_sealed`` field of a sentinel is never larger than this
+#: The ``page_sealed`` of a ``SPACE_SYNC_PAGE`` is never larger than this
 #: (a ≤ 1 KiB page + an 8 KiB vector, base64 and AES-GCM overhead).
 MAX_SEALED_PAGE_CHARS: int = 24 * 1024
+
+#: The AAD label a pushed page is sealed under (the space content key, like
+#: a chunk: ``space_id:epoch:<this>``).
+PAGE_PUSH_AAD: str = "space-sync-page"
+
+#: The signer pushes a new page to every member household at most this
+#: often per space: a seal within the hour after the last push schedules
+#: ONE push of the newest page at the hour mark (the scheduler's tick).
+PAGE_PUSH_INTERVAL_S: float = 3600.0
 
 #: Spaces whose compare result / conflict flag is remembered.
 MAX_TRACKED: int = 4096
@@ -169,6 +181,29 @@ class _Crypto(Protocol):
     async def decrypt_chunk(
         self, *, space_id: str, epoch: int, sync_id: str, ciphertext: str
     ) -> bytes: ...
+
+
+class _PageSender(Protocol):
+    """The federation service's space fan-out and one-household send."""
+
+    async def broadcast_to_space_members(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        *,
+        min_proto_version: int | None = None,
+        only_instances: Any = None,
+    ) -> Any: ...
+
+    async def send_with_mesh_fallback(
+        self,
+        *,
+        to_instance_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        space_id: str | None = None,
+    ) -> Any: ...
 
 
 @dataclass(slots=True, frozen=True)
@@ -782,16 +817,20 @@ class SyncPageService:
         "_exporters",
         "_fetching",
         "_hosts",
+        "_judging",
         "_locks",
         "_monotonic",
         "_on_change",
         "_own_instance_id",
         "_probes",
+        "_push_pending",
+        "_pushed",
         "_repo",
         "_request_round",
         "_round_left",
         "_rounds",
         "_seats",
+        "_sender",
         "_seqs",
         "_silent",
         "_sleep",
@@ -801,6 +840,7 @@ class SyncPageService:
         "_tasks",
         "_versions",
         "_wanted",
+        "_writers",
     )
 
     def __init__(
@@ -841,6 +881,10 @@ class SyncPageService:
         #: Spaces with a compare pending; space → when it last compared.
         self._comparing: set[str] = set()
         self._compared_at: dict[str, float] = {}
+        #: space → the page root a compare is running for right now: the
+        #: push and the stream's sentinel both look for an unjudged page —
+        #: one compare of it is enough.
+        self._judging: dict[str, bytes] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         #: space → ``(page seq, change counter then, changed)``: the last
         #: answer of the seal's quiet probe (final review minor 9).
@@ -867,6 +911,16 @@ class SyncPageService:
         self._fetching: dict[str, float] = {}
         #: space → the buckets a member fetch cannot complete (R3).
         self._stuck: OrderedDict[str, _Stuck] = OrderedDict()
+        #: Push (:meth:`attach_push`): the fan-out, the writer households of
+        #: a space (never a follower-only one), and per space when the last
+        #: push went (monotonic) with that page's order key; the spaces
+        #: whose newer page waits for the hour mark.
+        self._sender: _PageSender | None = None
+        self._writers: Callable[[str], Awaitable[set[str]]] | None = None
+        self._pushed: OrderedDict[str, tuple[float, tuple[int, int, int]]] = (
+            OrderedDict()
+        )
+        self._push_pending: set[str] = set()
 
     # ─── The page held here ───────────────────────────────────────────
 
@@ -1015,6 +1069,7 @@ class SyncPageService:
             time.perf_counter() - started,
         )
         await self._changed(space_id)
+        await self._push_or_schedule(space_id)
         return page
 
     def _catching_up(self, space_id: str, root: bytes) -> bool:
@@ -1065,30 +1120,111 @@ class SyncPageService:
             self._probes.popitem(last=False)
         return changed
 
-    # ─── Carry (any provider) ─────────────────────────────────────────
+    # ─── Deliver: push on seal, catch a stale BEGIN ref ───────────────
 
-    async def sentinel_page(
+    def attach_push(
+        self,
+        *,
+        sender: _PageSender,
+        writers: Callable[[str], Awaitable[set[str]]],
+    ) -> None:
+        """Wire page delivery: ``sender`` — the federation service's space
+        fan-out (``broadcast_to_space_members``: paired and mesh members
+        directly, GFS-reached ones in ONE multi upload per GFS) and its
+        one-household send; ``writers(space_id)`` — the member households
+        holding a writer seat (a follower-only household never gets a
+        page: its vector covers member-only resources)."""
+        self._sender = sender
+        self._writers = writers
+
+    async def _page_event(self, space_id: str, held: _Held) -> dict:
+        """The ``SPACE_SYNC_PAGE`` payload: the page and its full vector,
+        sealed under the space content key (encryption-first; the envelope
+        keeps only routing fields in the clear)."""
+        body = {"page": held.page.to_wire(), "vector": vector_to_wire(held.row.vector)}
+        epoch, ciphertext = await self._crypto.encrypt_chunk(
+            space_id=space_id, sync_id=PAGE_PUSH_AAD, plaintext=orjson.dumps(body)
+        )
+        return {"page_sealed": {"epoch": epoch, "payload": ciphertext}}
+
+    async def _push_or_schedule(self, space_id: str) -> None:
+        """A page was sealed here: push it now, or — within the hour after
+        the last push — once at the hour mark (:meth:`push_due`)."""
+        if self._sender is None or self._writers is None:
+            return
+        last = self._pushed.get(space_id)
+        if last is not None and self._monotonic() - last[0] < PAGE_PUSH_INTERVAL_S:
+            self._push_pending.add(space_id)
+            return
+        await self._push(space_id)
+
+    async def push_due(self) -> None:
+        """The scheduler's tick: push each space whose newer page waited for
+        the hour mark — the newest page held then, once."""
+        now = self._monotonic()
+        for space_id in list(self._push_pending):
+            last = self._pushed.get(space_id)
+            if last is None or now - last[0] >= PAGE_PUSH_INTERVAL_S:
+                await self._push(space_id)
+
+    async def _push(self, space_id: str) -> None:
+        """Push the page sealed here to every writer household. Fail-soft."""
+        self._push_pending.discard(space_id)
+        if self._sender is None or self._writers is None:
+            return
+        try:
+            space = await self._spaces.get(space_id)
+            held = await self._held(space) if space is not None else None
+            if held is None or held.page.signer != self._own_instance_id:
+                return  # only the signer pushes, only its own page
+            payload = await self._page_event(space_id, held)
+            self._pushed[space_id] = (self._monotonic(), held.page.order_key())
+            self._pushed.move_to_end(space_id)
+            while len(self._pushed) > MAX_TRACKED:
+                self._pushed.popitem(last=False)
+            writers = await self._writers(space_id)
+            await self._sender.broadcast_to_space_members(
+                space_id,
+                FederationEventType.SPACE_SYNC_PAGE,
+                payload,
+                min_proto_version=FederationCapability.MIN_FOR_SYNC_PAGES,
+                only_instances=writers,
+            )
+            log.info(
+                "sync page: pushed page %d of space %s to %d member household(s)",
+                held.page.seq,
+                space_id,
+                len(writers),
+            )
+        except Exception:
+            log.exception("sync page: pushing the page of %s failed", space_id)
+
+    async def page_for(
         self,
         *,
         space_id: str,
-        sync_id: str,
         requester_version: int,
         requester_ref: Mapping[str, Any] | None,
     ) -> dict | None:
-        """The sentinel's ``page_sealed`` for one session, or ``None``: none
-        held, an older requester, or it already holds this page or a newer
-        one. Also starts a background seal when one is due here."""
+        """The ``SPACE_SYNC_PAGE`` payload for a requester whose BEGIN names
+        *requester_ref*, or ``None``: none held, an older requester, or it
+        holds the page last pushed (or this household's page), or a newer
+        one — a page sealed since the last push waits for its hourly push,
+        so a BEGIN never undoes the coalescing. Also starts a background
+        seal when one is due here (the lazy seal rides every BEGIN)."""
         if requester_version < FederationCapability.MIN_FOR_SYNC_PAGES:
             return None
         self.seal_soon(space_id)
         try:
             space = await self._spaces.get(space_id)
-            if space is None:
-                return None
-            held = await self._held(space)
+            held = await self._held(space) if space is not None else None
             if held is None:
                 return None
             page = held.page
+            threshold = page.order_key()
+            pushed = self._pushed.get(space_id)
+            if page.signer == self._own_instance_id and pushed is not None:
+                threshold = min(threshold, pushed[1])
             ref = requester_ref or None
             if ref is not None:
                 if ref.get("root") == page.root:
@@ -1098,37 +1234,84 @@ class SyncPageService:
                     int(ref.get("issued_at", 0)),
                     int(ref.get("seq", 0)),
                 )
-                if ref_key >= page.order_key():
+                if ref_key >= threshold:
                     return None
-                if (
-                    ref_key[0] == page.epoch
-                    and not ref.get("newest")
-                    and self._clock_ms() - ref_key[1] < PAGE_RESEND_AFTER_S * 1000
-                ):
-                    # Its page is under an hour old: no newer one this round
-                    # (cost, final review I4 follow-up) — "Sync now" asks
-                    # for it at once (``newest``).
-                    return None
-            # Always the whole vector (final review I4: a delta against the
-            # requester's page fit too rarely to earn its column and rules).
-            body = {"page": page.to_wire(), "vector": vector_to_wire(held.row.vector)}
-            epoch, ciphertext = await self._crypto.encrypt_chunk(
-                space_id=space_id, sync_id=sync_id, plaintext=orjson.dumps(body)
-            )
-            return {"epoch": epoch, "payload": ciphertext}
+            return await self._page_event(space_id, held)
         except Exception:
-            log.exception("sync page: attaching the page of %s failed", space_id)
+            log.exception("sync page: the page of %s for a BEGIN failed", space_id)
             return None
+
+    async def offer_page(
+        self,
+        *,
+        space_id: str,
+        requester: str,
+        requester_version: int,
+        requester_ref: Mapping[str, Any] | None,
+    ) -> None:
+        """A BEGIN from *requester* (a stream ends): when its ``page`` ref
+        shows it missed a push (:meth:`page_for`), the same
+        ``SPACE_SYNC_PAGE`` event goes to that one household — never a
+        follower-only one. The sentinel carries no page. Fail-soft."""
+        if self._sender is None or self._writers is None:
+            self.seal_soon(space_id)
+            return
+        try:
+            payload = await self.page_for(
+                space_id=space_id,
+                requester_version=requester_version,
+                requester_ref=requester_ref,
+            )
+            if payload is None or requester not in await self._writers(space_id):
+                return
+            await self._sender.send_with_mesh_fallback(
+                to_instance_id=requester,
+                event_type=FederationEventType.SPACE_SYNC_PAGE,
+                payload=payload,
+                space_id=space_id,
+            )
+        except Exception:
+            log.exception("sync page: sending the page of %s failed", space_id)
+
+    def sentinel_seen(self, space_id: str) -> None:
+        """A sentinel of a stream of *space_id* arrived (no page rides it any
+        more): compare the held page if it has no verdict yet (verdicts are
+        memory only — after a restart the stored page waits otherwise)."""
+        self._spawn(self._compare_if_unjudged(space_id), f"sync-page-seen-{space_id}")
+
+    async def on_page_event(self, event: FederationEvent) -> None:
+        """The ``SPACE_SYNC_PAGE`` handler (the dispatch registry): the
+        envelope passed the §24.11 pipeline; the page itself is checked
+        against the space authority key (any member may relay it)."""
+        if event.space_id:
+            await self.take_pushed(
+                space_id=event.space_id,
+                provider=event.from_instance,
+                payload=event.payload,
+            )
+
+    async def take_pushed(
+        self, *, space_id: str, provider: str, payload: object
+    ) -> bool:
+        """``SPACE_SYNC_PAGE`` from *provider* (the signer's push, or a
+        member catching our stale BEGIN ref up): decrypt, verify, store when
+        newer — the one receive path (:meth:`receive`)."""
+        sealed = payload.get("page_sealed") if isinstance(payload, dict) else None
+        if sealed is None:
+            return False
+        return await self.receive(
+            space_id=space_id, sync_id=PAGE_PUSH_AAD, provider=provider, sealed=sealed
+        )
 
     # ─── Verify and store (member) ────────────────────────────────────
 
     async def receive(
         self, *, space_id: str, sync_id: str, provider: str, sealed: object
     ) -> bool:
-        """Take the ``page_sealed`` of a verified sentinel: decrypt, verify,
-        store when newer. Returns whether a page was stored. A refused page
-        is logged (WARNING when it fails verification) and the page held
-        stays."""
+        """Take a ``page_sealed`` (``SPACE_SYNC_PAGE``, sealed under the space
+        content key with AAD *sync_id*): decrypt, verify, store when newer.
+        Returns whether a page was stored. A refused page is logged (WARNING
+        when it fails verification) and the page held stays."""
         if sealed is None:
             await self._compare_if_unjudged(space_id)
             return False
@@ -1302,6 +1485,8 @@ class SyncPageService:
         held = await self._held(space) if space is not None else None
         if held is None or held.page.signer == self._own_instance_id:
             return True
+        if self._judging.get(space_id) == held.page.root:
+            return True  # being compared right now
         check = self._checks.get(space_id)
         return check is not None and check.root == held.page.root
 
@@ -1347,6 +1532,7 @@ class SyncPageService:
            (:meth:`take_listing` / :meth:`listing_done` classify the rows);
            the rest wait for the next page.
         """
+        mine: bytes | None = None
         try:
             space = await self._spaces.get(space_id)
             if space is None:
@@ -1355,6 +1541,9 @@ class SyncPageService:
             if held is None or held.page.signer == self._own_instance_id:
                 return None
             page = held.page
+            if self._judging.get(space_id) == page.root:
+                return None  # a compare of this very page is running
+            self._judging[space_id] = mine = page.root
             self._compared_at[space_id] = self._monotonic()
             while len(self._compared_at) > MAX_TRACKED:
                 self._compared_at.pop(next(iter(self._compared_at)))
@@ -1441,6 +1630,9 @@ class SyncPageService:
         except Exception:
             log.exception("sync page: comparing space %s failed", space_id)
             return None
+        finally:
+            if mine is not None and self._judging.get(space_id) == mine:
+                del self._judging[space_id]
 
     def _stuck_now(
         self, space_id: str, root: bytes, vector: bytes, unexplained: list[int]
@@ -2253,5 +2445,7 @@ __all__ = [
     "CATCH_UP_HOLD_S",
     "DRY_RECHECK_S",
     "MAX_SEALED_PAGE_CHARS",
+    "PAGE_PUSH_AAD",
+    "PAGE_PUSH_INTERVAL_S",
     "SyncPageService",
 ]

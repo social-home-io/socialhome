@@ -432,7 +432,7 @@ async def test_a_newer_page_during_an_ask_starts_its_own_round(trio):
     await _post(host, "post-3", content="later")
     await _stream(host, member)
     assert await host_pages.seal_if_due(SPACE) is not None
-    assert await _round(host_pages, r_pages, "s-r2", newest=True)
+    assert await _round(host_pages, r_pages, "s-r2")
     await wire.settle()
     assert len(wire.asks) == 2
 
@@ -709,19 +709,13 @@ async def test_the_owner_back_from_a_long_absence_catches_up_from_members(trio):
         request=wire.request,
         apply=host.receiver.apply_verified,
     )
-    # The admin's sentinel relays its page to the owner (any provider does).
-    sealed = await member_pages.sentinel_page(
+    # The admin's household catches the owner's stale BEGIN ref up.
+    event = await member_pages.page_for(
         space_id=SPACE,
-        sync_id="s-o",
         requester_version=95,
-        # The owner's "Sync now" (its own page is young in this harness).
-        requester_ref=parse_page_ref(
-            {**(await host_pages.ref_for(SPACE) or {}), "newest": True}
-        ),
+        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
     )
-    assert await host_pages.receive(
-        space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
-    )
+    assert await host_pages.take_pushed(space_id=SPACE, provider=MEMBER, payload=event)
     await wire.settle()
     assert await wire.host_round_buckets() is None  # never asks itself as "the host"
     assert [a[0] for a in wire.asks] == [MEMBER]
@@ -819,18 +813,13 @@ async def _admin_page_reaches_owner(
         request=wire.request,
         apply=host.receiver.apply_verified,
     )
-    sealed = await member_pages.sentinel_page(
+    # The admin's household catches the owner's stale BEGIN ref up.
+    event = await member_pages.page_for(
         space_id=SPACE,
-        sync_id="s-o",
         requester_version=95,
-        # The owner's "Sync now" (its own page is young in this harness).
-        requester_ref=parse_page_ref(
-            {**(await host_pages.ref_for(SPACE) or {}), "newest": True}
-        ),
+        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
     )
-    assert await host_pages.receive(
-        space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
-    )
+    assert await host_pages.take_pushed(space_id=SPACE, provider=MEMBER, payload=event)
     await wire.settle()
     return wire
 
@@ -1679,31 +1668,24 @@ async def test_the_owners_catch_up_is_not_cut_short_by_its_own_seal(trio):
         request=wire.request,
         apply=host.receiver.apply_verified,
     )
-    sealed = await member_pages.sentinel_page(
+    # The admin's household catches the owner's stale BEGIN ref up.
+    event = await member_pages.page_for(
         space_id=SPACE,
-        sync_id="s-o",
         requester_version=95,
-        # The owner's "Sync now" (its own page is young in this harness).
-        requester_ref=parse_page_ref(
-            {**(await host_pages.ref_for(SPACE) or {}), "newest": True}
-        ),
+        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
     )
-    assert await host_pages.receive(
-        space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
-    )
+    assert await host_pages.take_pushed(space_id=SPACE, provider=MEMBER, payload=event)
     await host_pages.wait_idle()  # compared; the first ask is out
     assert wire.asks
-    # A member's BEGIN reaches the owner: its sentinel would seal now.
-    await host_pages.sentinel_page(
-        space_id=SPACE, sync_id="s-b", requester_version=95, requester_ref=None
-    )
+    # A member's BEGIN reaches the owner: it would seal now.
+    await host_pages.page_for(space_id=SPACE, requester_version=95, requester_ref=None)
     await host_pages.wait_idle()
     await wire.settle()
     for _ in range(8):  # the owner's per-tick rounds
         host_pages.host_silent(SPACE)
         await wire.settle()
-        await host_pages.sentinel_page(
-            space_id=SPACE, sync_id="s-t", requester_version=95, requester_ref=None
+        await host_pages.page_for(
+            space_id=SPACE, requester_version=95, requester_ref=None
         )
         await host_pages.wait_idle()
     for k in range(30):
@@ -1799,12 +1781,12 @@ async def test_poc_a_a_member_on_another_page_is_no_nay(trio):
     await _post(host, "post-3", content="later")
     await _stream(host, member)
     assert await host_pages.seal_if_due(SPACE) is not None  # P2
-    assert await _round(host_pages, r_pages, "s-r", newest=True)  # R holds P2
+    assert await _round(host_pages, r_pages, "s-r")  # R holds P2
     await wire.settle()
     assert await requester.repos.space_post.get("post-2") is None
     stuck = r_pages._stuck.get(SPACE)
     assert stuck is None or not stuck.dry
-    assert await _round(host_pages, member_pages, "s-m2", newest=True)  # M: P2
+    assert await _round(host_pages, member_pages, "s-m2")  # M: P2
     await _silent_ticks(r_pages, wire, 2)
     assert await requester.repos.space_post.get("post-2") is not None
     assert await requester.repos.space_post.get("post-3") is not None
@@ -1891,17 +1873,12 @@ async def test_poc_c_the_owner_never_seals_an_incomplete_page_on_a_nay(trio):
         ),
         key=PK_HEX,
     )
-    sealed = await member_pages.sentinel_page(
+    event = await member_pages.page_for(
         space_id=SPACE,
-        sync_id="s-o",
         requester_version=95,
-        requester_ref=parse_page_ref(
-            {**(await host_pages.ref_for(SPACE) or {}), "newest": True}
-        ),
+        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
     )
-    assert await host_pages.receive(
-        space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
-    )
+    assert await host_pages.take_pushed(space_id=SPACE, provider=MEMBER, payload=event)
     await wire.settle()
     await _silent_ticks(host_pages, wire, 4)
     host_pages._clock_ms.ms += 2 * PAGE_MIN_INTERVAL_S * 1000  # a seal is due

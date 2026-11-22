@@ -290,32 +290,12 @@ async def test_the_sentinel_carries_and_signs_the_owner_statement():
     assert "owner_statement" not in plain
 
 
-async def test_the_sentinel_carries_and_signs_the_sealed_sync_page():
-    """v_95: the sealed page rides the sentinel inside the provider's
-    signature (a swapped ciphertext fails it); absent when none is given."""
+async def test_no_sync_page_rides_the_sentinel():
+    """v_95 push: a page is its own ``SPACE_SYNC_PAGE`` event; the sentinel
+    has no field for it."""
     kp = generate_identity_keypair()
-    encoder = FederationEncoder(kp.private_key)
-    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
-    sealed = {"epoch": 3, "payload": "ciphertext"}
-    sentinel = await builder.build_sentinel(
-        space_id="sp-1", sync_id="sync-x", sig_suite="ed25519", page_sealed=sealed
-    )
-    assert sentinel["page_sealed"] == sealed
-    body = {k: v for k, v in sentinel.items() if k != "signatures"}
-    assert encoder.verify_signatures_all(
-        orjson.dumps(body),
-        suite="ed25519",
-        signatures=sentinel["signatures"],
-        ed_public_key=kp.public_key,
-        pq_public_key=None,
-    )
-    body["page_sealed"] = {"epoch": 3, "payload": "other"}
-    assert not encoder.verify_signatures_all(
-        orjson.dumps(body),
-        suite="ed25519",
-        signatures=sentinel["signatures"],
-        ed_public_key=kp.public_key,
-        pq_public_key=None,
+    builder = ChunkBuilder(
+        encoder=FederationEncoder(kp.private_key), crypto=_FakeCrypto()
     )
     plain = await builder.build_sentinel(
         space_id="sp-1", sync_id="sync-x", sig_suite="ed25519"

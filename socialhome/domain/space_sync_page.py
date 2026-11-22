@@ -18,12 +18,15 @@ from datetime import datetime, timedelta
 from .space_sync_status import SpaceSyncState, parse_utc
 
 #: A match counts as "up to date" for this long after its page was sealed:
-#: two 30-min rounds plus the 15-min seal interval (final review minor 3).
-#: Past it, while the host still answers, the answers decide — an old match
-#: must not mask a host answering ``deferred`` / unclean for hours. While
-#: the host is offline no newer page comes from it, so the newest page
-#: stands whatever its age.
-PAGE_MATCH_FRESH_S: float = 2 * 30 * 60 + 15 * 60
+#: the hourly push interval + one 30-min tick (a page that waited for its
+#: hour mark goes out on the next tick) + the 15-min seal lag, plus 15 min
+#: slack — 2 h, so an active space's members, pushed a newer page at most
+#: every hour and a half, keep their match between pushes (final review
+#: minor 3; widened from 75 min for the push). Past it, while the host still
+#: answers, the answers decide — an old match must not mask a host
+#: answering ``deferred`` / unclean for hours. While the host is offline no
+#: newer page comes from it, so the newest page stands whatever its age.
+PAGE_MATCH_FRESH_S: float = 60 * 60 + 30 * 60 + 15 * 60 + 15 * 60
 
 
 @dataclass(slots=True, frozen=True)

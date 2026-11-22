@@ -103,3 +103,14 @@ def test_an_old_match_stands_while_the_host_is_offline():
     later = NOW + timedelta(days=2)
     page = _page(match=True, missing=0)
     assert state_with_page(S.HOST_OFFLINE, page, now=later) is S.UP_TO_DATE
+
+
+def test_a_match_stays_fresh_between_two_hourly_pushes():
+    """Sync pages push: a member holds a page sealed up to the push interval
+    (1 h) + one 30-min tick (the hour-mark push rides it) + the 15-min seal
+    lag before the next push replaces it — 105 min. Its match still counts
+    then; only past PAGE_MATCH_FRESH_S do the answers decide."""
+    page = _page(match=True, missing=0)
+    assert state_with_page(S.BEHIND, page, now=NOW + timedelta(minutes=104)) is (
+        S.UP_TO_DATE
+    )

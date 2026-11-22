@@ -239,6 +239,10 @@ def supersede_key(
         # older one carries the seed of a retired key); a rotation drops
         # every queued one by this prefix so none lands after a revocation.
         return f"{admin_seed_key_prefix(space_id)}seed" if space_id else None
+    if event_type is FederationEventType.SPACE_SYNC_PAGE:
+        # Only the newest signed page of a space is worth delivering: an
+        # offline member household gets just that one (sync pages push).
+        return f"sync-page:{space_id}" if space_id else None
     if event_type is FederationEventType.SPACE_ROSTER_SNAPSHOT:
         # The host's whole roster for one space, to one household: a newer
         # one makes a queued older one worthless (the receiver merges by

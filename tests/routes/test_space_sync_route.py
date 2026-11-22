@@ -300,10 +300,7 @@ async def test_sync_now_asks_a_paired_host_incrementally(client):
     assert resp.status == 202
     assert (await resp.json())["targets"] == ["host-x"]
     enqueue.assert_awaited_once_with(
-        space_id=space_id,
-        peer_instance_id="host-x",
-        sync_mode="incremental",
-        newest_page=True,  # the host's newest sync page at once
+        space_id=space_id, peer_instance_id="host-x", sync_mode="incremental"
     )
 
 

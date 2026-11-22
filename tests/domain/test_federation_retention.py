@@ -360,3 +360,17 @@ def test_a_credentials_only_snapshot_has_its_own_key():
         )
         is None
     )
+
+
+def test_a_queued_sync_page_is_replaced_by_a_newer_one():
+    """Sync pages push: an offline member household gets only the newest
+    page of a space — every page for it supersedes the queued older one
+    (one outbox slot per space and peer)."""
+    key = supersede_key(
+        FederationEventType.SPACE_SYNC_PAGE, space_id="sp-1", payload={}
+    )
+    assert key == "sync-page:sp-1"
+    assert (
+        supersede_key(FederationEventType.SPACE_SYNC_PAGE, space_id=None, payload={})
+        is None
+    )

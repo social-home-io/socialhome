@@ -474,3 +474,15 @@ def test_admin_key_share_reaches_a_gfs_only_admin_one_household_at_a_time():
     assert t in SPACE_SESSION_ALLOWED_EVENT_TYPES
     assert t in MULTI_SEND_EXCLUDED_EVENT_TYPES
     assert t not in MULTI_EVENT_TYPES
+
+
+def test_the_sync_page_push_reaches_every_member_path_and_goes_multi():
+    """Sync pages push: ``SPACE_SYNC_PAGE`` reaches a household seated
+    through a GFS (space-session allowed), goes in one multi upload per GFS
+    (not excluded from multi) and is space vocabulary a reader household
+    may relay (authority-signed, never content)."""
+    t = FederationEventType.SPACE_SYNC_PAGE
+    assert t in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    assert t in MULTI_EVENT_TYPES
+    assert t not in MULTI_SEND_EXCLUDED_EVENT_TYPES
+    assert t in SPACE_READER_EVENT_TYPES

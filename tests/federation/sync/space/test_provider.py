@@ -114,14 +114,15 @@ class _FakePages:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def sentinel_page(self, **kwargs):
+    async def offer_page(self, **kwargs):
         self.calls.append(kwargs)
-        return {"epoch": 1, "payload": "sealed"}
 
 
-async def test_the_sentinel_carries_the_sync_page_for_the_requester(provider):
-    """v_95: the sentinel asks the page service for this requester's page —
-    its version and the ``page`` its BEGIN named go along."""
+async def test_the_stream_end_offers_the_page_never_on_the_sentinel(provider):
+    """v_95 push: at the end of a stream the page service is told who asked
+    and which ``page`` its BEGIN named — it sends a newer page to that
+    household as its own ``SPACE_SYNC_PAGE`` event; the sentinel carries no
+    page."""
     pages = _FakePages()
     provider.attach_sync_pages(pages)
 
@@ -134,11 +135,11 @@ async def test_the_sentinel_carries_the_sync_page_for_the_requester(provider):
     session.peer_version = 95
     await provider.stream_initial(session)
     last = orjson.loads(session.rtc.sent[-1])
-    assert last["page_sealed"] == {"epoch": 1, "payload": "sealed"}
+    assert "page_sealed" not in last
     assert pages.calls == [
         {
             "space_id": "sp-1",
-            "sync_id": "sync-x",
+            "requester": session.requester_instance_id,
             "requester_version": 95,
             "requester_ref": {"signer": "h"},
         }

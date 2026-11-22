@@ -376,14 +376,14 @@ class _SyncPages(Protocol):
         max_record_bytes: int | None,
     ) -> tuple[list[dict], list[dict]]: ...
 
-    async def sentinel_page(
+    async def offer_page(
         self,
         *,
         space_id: str,
-        sync_id: str,
+        requester: str,
         requester_version: int,
         requester_ref: Any,
-    ) -> dict | None: ...
+    ) -> None: ...
 
 
 class _WithFileHashes:
@@ -594,11 +594,13 @@ class SpaceSyncService:
         "_windows",
     )
 
-    async def _sentinel_page(self, session: SyncSessionRecord) -> dict | None:
-        """v_95: the sentinel's sealed sync page for this requester, or
-        ``None`` (no page service, an older requester, nothing newer).
-        Only to a member household (a writer seat): the page's vector covers
-        member-only resources (zones), which a follower never gets."""
+    async def _offer_page(self, session: SyncSessionRecord) -> None:
+        """v_95: the stream ends — when the requester's BEGIN ``page`` shows
+        it missed a push, the page service sends it the newest page as its
+        own ``SPACE_SYNC_PAGE`` event (never on the sentinel), and a seal due
+        here starts. Only to a member household (a writer seat): the page's
+        vector covers member-only resources (zones), which a follower never
+        gets."""
         if (
             self._sync_pages is None
             or self._member_gate is None
@@ -606,10 +608,10 @@ class SpaceSyncService:
                 session.space_id, session.requester_instance_id
             )
         ):
-            return None
-        return await self._sync_pages.sentinel_page(
+            return
+        await self._sync_pages.offer_page(
             space_id=session.space_id,
-            sync_id=session.sync_id,
+            requester=session.requester_instance_id,
             requester_version=await self._session_version(session),
             requester_ref=getattr(session, "page_ref", None),
         )
@@ -1038,8 +1040,8 @@ class SpaceSyncService:
                 snapshot_seq=session.snapshot_seq,
                 owner_statement=await self._sentinel_statement(space_id),
                 inviter_proof=await self._sentinel_proof(space_id),
-                page_sealed=await self._sentinel_page(session),
             )
+            await self._offer_page(session)
             if _stopped(session):
                 return
             # Marked before the sentinel ships: the requester's

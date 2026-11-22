@@ -31,14 +31,16 @@ checked against the signed page, not against who delivered it.
    Hashing costs ≈ 3.3 µs per record (measured), so a 50 000-row space
    takes 0.17 s of hashing, or an estimated 2–4 s on a Pi with the
    database reads.
-3. **No new message in Phase 2.** The page rides the sentinel of the
-   periodic BEGIN that already runs every 30 min, sealed under the space
-   content key, and only when it is newer than the one the requester
-   holds — always with the full bucket vector (a delta against the
-   requester's page was built and removed: it almost never applied, see
-   §5). The host seals lazily: when a BEGIN finds the
-   space changed since the stored page, at most once every 15 min. There
-   is no timer, no push and no fan-out.
+3. **One event, pushed (owner decision 2026-11-22).** When a signer seals
+   a page it pushes it — `SPACE_SYNC_PAGE`, the page and its full bucket
+   vector sealed under the space content key — to every member household
+   through the space fan-out, at most once an hour per space (a seal
+   within the hour waits for the hour mark, and only the newest page goes
+   then). A member that missed a push is caught by its BEGIN `page` ref:
+   the provider sends the same event to that one household. The host
+   seals lazily: when a BEGIN finds the space changed since the stored
+   page, at most once every 15 min. (The page first rode the sentinel of
+   every BEGIN, with a vector delta; both are gone — §5.)
 4. **Phase 3 reuses the §25.6 session.** A member sends `SPACE_SYNC_BEGIN`
    carrying `buckets` to **any** member household. That household
    streams, for each requested bucket it still holds unchanged, the bucket
@@ -67,10 +69,14 @@ checked against the signed page, not against who delivered it.
 
 ## Event types
 
-No new `FederationEventType`. The new fields are additive, so an older
-household ignores them.
-
-- `SPACE_SYNC_CHUNK` sentinel (`__complete__`): `page_sealed` (Phase 2).
+- **`SPACE_SYNC_PAGE`** (new in v_95, never released before): `{page_sealed:
+  {epoch, payload}}` — the signed page and its 256 bucket hashes, sealed
+  under the space content key (AAD `space_id:epoch:space-sync-page`)
+  inside the per-pair encrypted payload; only `space_id` routes it. From
+  the signer to every member household (pushed, ≤ 1 / h per space), or
+  from any member-seated provider to one household whose BEGIN named an
+  older page. Never to a follower-only household, never to a non-member;
+  a GFS relays it sealed, as content.
 - `SPACE_SYNC_BEGIN`: `page` (a reference to the requester's newest page)
   and `buckets` (≤ 8: the listings the stream should end with; Phase 2 on
   the incremental BEGIN to an acting host). Phase 3 as built adds `rows:
@@ -317,44 +323,66 @@ breaks the chain the receiver holds.
 
 ## 4. Wire
 
-### Phase 2: the page on the sentinel
+### Phase 2: the page, pushed
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant M as Member
+    participant M as Member (paired / mesh)
+    participant G as GFS (send to many)
+    participant R as Member (GFS-reached)
     participant H as Host (signer)
     M->>H: SPACE_SYNC_BEGIN (incremental, have_seq,<br/>page = {signer, epoch, seq, issued_at, root} held,<br/>buckets = the last compare's unexplained ones, ≤ 8)
     Note over H: space changed since the stored page<br/>and page ≥ 15 min old → seal in the background
-    H->>M: chunks (if anything changed)
-    H->>M: __listing__ chunks (only for asked buckets)
-    H->>M: sentinel __complete__ + page_sealed<br/>(only when newer than M's page)
-    Note over M: verify page → check the vector hashes to root → store → compare (≤ 1 / 15 min)<br/>listings → verify vs signed buckets → classify vs rows now → status
-    M->>H: SPACE_SYNC_COMPLETE (clean)
+    H->>M: chunks, __listing__ chunks (asked buckets), sentinel (no page)
+    Note over H: sealed → push now, or at the next hour mark<br/>(≤ 1 push / h per space, the newest page only)
+    H->>M: SPACE_SYNC_PAGE {page_sealed} (direct, or SPACE_ROUTED)
+    H->>G: ONE POST /gfs/envelope/multi (every GFS-reached member's mailbox)
+    G->>R: SPACE_SYNC_PAGE (sealed, from its mailbox)
+    Note over M,R: verify page → vector hashes to root → store (only if newer)<br/>→ compare (≤ 1 / 15 min) → status
+    M->>H: later BEGIN naming an older page than the last pushed one
+    H->>M: SPACE_SYNC_PAGE to M alone (the same event)
 ```
 
 - **`page` in BEGIN**: `{signer, epoch, seq, issued_at, root}`, about
-  170 B, inside the encrypted payload. With it the provider skips a page
-  the requester already has.
-- **`page_sealed` on the sentinel**: AES-256-GCM under the space content
-  key, through the same helper and AAD as chunks
-  (`encrypt_chunk`, `space_id:epoch:sync_id`). The sentinel itself stays
-  plaintext-signed, so the page, its counts and its hashes must not ride
-  in the clear (encryption-first rule). The plaintext is `{page,
-  vector}`: the signed header and all 256 bucket hashes — ≈ 11.4 KB of
-  JSON, ≈ 15.3 KB sealed (measured). It goes only when the requester's
-  `page` is absent or older, **and** that page is at least
-  `PAGE_RESEND_AFTER_S` (1 h) old or of another epoch — or the BEGIN is a
-  "Sync now" (`newest: true` in its `page`, from the scheduler's
-  `sync_now`, on the paired and the mesh path and the relay retry). Any
-  other requester gets nothing beyond its own 170-byte ref.
-- **Any provider relays**: a non-signing provider (a member household
-  that streams its writers' rows) attaches the newest page it holds in
-  the same way. This is the member-to-member relay. It needs no new
-  message, and the authority signature means a relay can only withhold a
-  page, never forge one.
-- **Lazy seal.** When the provider is a signer and is about to build a
-  sentinel, it seals a page if all of these hold:
+  170 B, inside the encrypted payload.
+- **`SPACE_SYNC_PAGE`**: `{page_sealed: {epoch, payload}}`, the page and
+  its vector sealed with `encrypt_chunk` under the space content key (AAD
+  `space_id:epoch:space-sync-page`), inside the envelope's own encrypted
+  payload (encryption-first: only `space_id` and the routing fields are
+  in the clear). The plaintext is `{page, vector}` — ≈ 11.4 KB of JSON,
+  ≈ 15.3 KB sealed (measured).
+- **Two triggers, one receive path** (`SyncPageService.take_pushed` →
+  `receive`):
+  - **Push on seal.** The signer pushes each new page to every member
+    household holding a writer seat (`broadcast_to_space_members` with
+    `only_instances` = the writer households, `min_proto_version` = 95):
+    paired and mesh members directly (mesh as `SPACE_ROUTED`, end-to-end
+    sealed), GFS-reached ones in ONE `POST /gfs/envelope/multi` per GFS
+    (v_91 send to many — `SPACE_SYNC_PAGE` is in `MULTI_EVENT_TYPES`, so
+    `_queue_multi_groups` takes it like space content; tested). **At most
+    hourly per space**: a seal within the hour after the last push marks
+    the space due; the scheduler's tick (every 30 min) pushes the newest
+    page held then, once — never a queue of pages.
+  - **A stale BEGIN ref.** At the end of a stream the provider compares
+    the requester's `page` with the page it offers — for the signer the
+    page it last pushed (a page sealed since waits for its hourly push, so
+    BEGINs never undo the coalescing), for a member the page it holds —
+    and when the ref is older (or absent), sends the same event to that
+    one household (`send_with_mesh_fallback`). "Sync now" is a BEGIN like
+    any other: a member that missed a push gets the page at once.
+- **Offline members get only the newest page**: the outbox keeps one row
+  per (space, peer) for this event (`supersede_key` `sync-page:<space>`;
+  a newer page replaces a queued older one, the multi path included). A
+  GFS mailbox keeps what it was handed; the receiver's conditional store
+  drops every page that is not newer (cost in §5).
+- **Followers and non-members get no page**: the fan-out names only the
+  writer households (a page's vector covers member-only resources, e.g.
+  zones), and a provider sends the targeted event only to a writer
+  household. A non-member on a mesh path sees `SPACE_ROUTED` ciphertext;
+  a GFS sees the sealed multi body.
+- **Lazy seal.** When the provider is a signer and a stream to a member
+  ends, it seals a page if all of these hold:
   - the space changed since `page.seq` (the `is_quiet` probe with
     `since = page.seq`);
   - the stored page is ≥ `PAGE_MIN_INTERVAL_S` (900 s) old, or belongs to
@@ -362,12 +390,12 @@ sequenceDiagram
 
   The seal runs as a background task, one per space under a lock. The
   export is read in keyset pages (async DB) and the hashing runs through
-  `asyncio.to_thread`. The sentinel carries the stored page (the next
-  round gets the new one), so a BEGIN never waits on a seal.
-- **Version gate.** Pages go only to requesters where
-  `peer_supports(…, MIN_FOR_SYNC_PAGES)` holds. An older requester gets
-  today's sentinel. An older provider sends no page, and the requester's
-  status falls back to Phase 1 rules. No `SYNC_RECORD_LINES` entry is
+  `asyncio.to_thread`. A BEGIN never waits on a seal; the new page is
+  pushed when the seal is done (or at the hour mark).
+- **Version gate.** Pages go only to member households at
+  `MIN_FOR_SYNC_PAGES` (`min_proto_version` of the fan-out, the
+  requester's version for a targeted send). An older household gets no
+  page, and its status falls back to Phase 1 rules. No `SYNC_RECORD_LINES` entry is
   needed: no record changes shape and no receiver takes a different
   field, so no household needs a full stream to cross v_95.
 
@@ -435,44 +463,44 @@ sequenceDiagram
 
 ## 5. Cost
 
-Rewritten in the final review (I4, the delta removed). The busy space: 200
-member households, 50 000 committed rows, 2 000 changes a day, every member
-sending its periodic BEGIN 48 times a day.
+Rewritten for the push (owner decision 2026-11-22). The busy space: 200
+member households — 100 paired or mesh-reached, 100 reached only through 2
+GFSs (50 each) — 50 000 committed rows, 2 000 changes a day, every member
+sending its periodic BEGIN 48 times a day. One pushed page: ≈ 15.3 KB
+sealed + ≈ 0.5 KB envelope ≈ 15.8 KB per direct send; one multi upload:
+one ≈ 15.8 KB body + one key wrap per mailbox (≈ 100 B × 50 ≈ 5 KB).
 
-| Trigger | Recipients × items × bytes | Busy space, per day | Small space (2 000 rows, 50 changes, 5 households) |
+| Trigger | Recipients × items × bytes | Busy space, per day | Small space (2 000 rows, 50 changes, 5 paired households) |
 |---|---|---|---|
+| Push on seal, ≤ 1 / h per space | per push: 100 direct × 15.8 KB ≈ 1.58 MB + 2 multi uploads × ≈ 21 KB ≈ 42 KB ≈ **1.62 MB host upload**; changes every ~45 s keep the space changed, so ≤ 24 pushes | ≈ **39 MB** host upload; the 2 GFSs hand each of their 50 mailboxes the 15.8 KB body (≈ 38 MB/day of GFS egress, not the host's) | ≤ 24 × 5 × 15.8 KB ≈ 1.9 MB, far less in practice (a quiet space is neither resealed nor pushed) |
+| A stale BEGIN ref (a member that missed a push) | 1 × 15.8 KB to that household | a returning member: once; ≈ 0 otherwise (a member holding the last pushed page gets nothing) | ≈ 0 |
 | `page` ref in every BEGIN | 200 members × 48 BEGINs × ≈ 0.2 KB (170 B JSON, encrypted) | ≈ **2 MB** | ≈ 0.05 MB |
-| Phase 2, page on the sentinel | only to a requester whose ref shows an older page that is ≥ 1 h old (`PAGE_RESEND_AFTER_S`), or on "Sync now". Changes arrive every ~45 s, so the host seals at most every 15 min (≤ 96 / day), and a member takes a newer page about every other 30-min round: 200 × 24 × 15.3 KB (page + full vector, sealed) | ≈ **74 MB** (worst: a co-member's older page and the host's both reach a member in the hour's round → ≈ 147 MB; "Sync now" adds ≤ 3 / h per space, rare) | ≤ 5 × 24 × 15.3 KB ≈ 1.8 MB, far less in practice (a quiet space is not resealed) |
-| Phase 2, seal | 1 export + hash, ≤ 1 / 15 min, only when a BEGIN finds the space changed (the "changed?" probe is memoised on the change counter) | ≤ 96 × 6 s on x86 (2–4× on a Pi) | ≤ 96 × 0.1 s |
-| Phase 2, member compare | 1 recompute per newer page, ≤ 1 / 15 min, `to_thread` | ≤ 48 × 6 s per member (one per received page) | trivial |
+| Seal | 1 export + hash, ≤ 1 / 15 min, only when a BEGIN finds the space changed (the "changed?" probe is memoised on the change counter) | ≤ 96 × 6 s on x86 (2–4× on a Pi) | ≤ 96 × 0.1 s |
+| Member compare | 1 recompute per newer page, ≤ 1 / 15 min, `to_thread` | ≤ 24 × 6 s per member (one per pushed page) | trivial |
 | Phase 3, catch-up while the host is silent | 1 requester → 1 member per ask, ≤ 3 asks per round | see *Phase 3 as built*, Cost | |
 | Phase 3, anti-entropy (`page_match`, not built) | would replace a full stream per member per day | today ≈ 200 × 50 k × ~0.6 KB ≈ **6 GB/day** of host upload | |
 
 - **Live traffic, for scale**: 2 000 changes × 200 households × ~1.5 KB
-  ≈ 600 MB/day. The pages add ≈ 12 % on top in the busiest case (≈ 25 %
-  at the worst), nothing to a quiet space.
-- **Why the delta went (I4).** It was sent only to a requester holding
-  exactly the signer's previous page (`prev_root`). A busy host seals every
-  15 min and members ask every 30, so a member is nearly always two pages
-  behind: in practice the full vector went every time, and the delta cost
-  a column, a wire field and a chain rule for ≈ nothing. Without the
-  1-h rule below the full vector went on nearly every round: ≈ 147 MB/day.
-- **The 1-h resend rule (owner-approved follow-up to I4).** A requester
-  whose page is under an hour old gets no newer one: this halves the page
-  traffic to ≈ 74 MB/day. The status stays honest: a held page that does
-  not match never reads "up to date" (only a match does, and only while
-  its page is at most 75 min old — `PAGE_MATCH_FRESH_S`, longer than the
-  1-h rule, so a matched page is replaced before its match stops
-  counting); "Sync now" gets the newest page at once. Not built: carrying
-  the vector as raw bytes inside the sealed JSON (≈ −25 %).
-- **Amplification**: nothing fans out. One requester talks to one
-  provider per session, and one member's action never triggers N × M
-  work.
+  ≈ 600 MB/day. The pushed pages add ≈ 7 % of host upload on top, nothing
+  to a quiet space.
+- **Backlog of an offline member**: a paired one keeps ONE queued page per
+  space in our outbox (`supersede_key`); a mesh-only one gets nothing
+  queued past the bounded mesh deferral and is caught by its next BEGIN;
+  a GFS-reached one finds up to 24 pages a day in its GFS mailbox
+  (≈ 380 KB/day, bounded by the mailbox's retention) and keeps only the
+  newest — its conditional store drops every older one.
+- **How it got here.** First the page rode the sentinel of every BEGIN
+  with a vector **delta** for a requester holding exactly the previous page
+  — it almost never applied (a busy host seals every 15 min, members ask
+  every 30), so the full vector went every round: ≈ 147 MB/day. A 1-h
+  resend rule halved that (≈ 74 MB/day); the push halves it again and
+  makes delivery independent of BEGINs: one event, one receive path.
+- **Amplification**: one seal makes at most one push an hour — 1 × N
+  members, never N × M; a member's BEGIN costs at most one targeted page.
 - **The 30-min quiet BEGIN stays.** It is the host-liveness probe
-  (`HostContact`) and the watermark exchange, and the page cannot skip it.
-  The page only makes it more useful: a quiet round now also says "your
-  copy matches the space as of 14:05". Phase 3's `page_match` is what
-  would make the daily full pass skippable.
+  (`HostContact`) and the watermark exchange, and it catches a member that
+  missed a push. Phase 3's `page_match` is what would make the daily full
+  pass skippable.
 
 ## 6. Security
 
@@ -480,7 +508,7 @@ sending its periodic BEGIN 48 times a day.
 |---|---|
 | Forged row from a deliverer | Its leaf is not in a listing that hashes to the signed vector, so the row is refused and logged. The test is a demo step. |
 | Stale row version | An old version's leaf is not in the current listing, so it is refused. A version that is valid but older than one held is resolved by the existing merge rules (last writer wins on `edited_at`, stamps), so a newer local copy stays. |
-| Withheld page | A relay can only drop the page. The host's own sentinel and any other member's sentinel carry it, and status shows the page's age ("as of 2 h ago"). |
+| Withheld page | A relay can only drop the page. The signer pushes it to every member household, any member-seated provider sends it to a stale BEGIN ref, and status shows the page's age ("as of 2 h ago"). |
 | Replayed old page | It is older by `(epoch, issued_at, seq)`, so it is ignored. Rows proven by it are refused once a newer page is stored. |
 | Removed admin (epoch rotation) | The old-epoch page is refused after the member applies the rotation; the residual window is unchanged (§3). |
 | Equivocation | Detected per `(epoch, signer, seq)` and through the `prev_root` chain, then reported (§3). |
@@ -507,7 +535,7 @@ protocol v_95, with adversarial review).
      and member;
    - the PR shows why no existing column fits.
 3. Lazy seal in `provider.py`, plus `page` in BEGIN (`scheduler.py`) and
-   `page_sealed` on the sentinel (`exporter.build_sentinel`).
+   the page's delivery (as built: the `SPACE_SYNC_PAGE` push).
 4. Member side: verify, store, debounced root check, status.
    - Phase 1's `SpaceSyncStatus` gains `page: {at, signer_role, match,
      differing_buckets, conflict}`.
@@ -636,13 +664,14 @@ What shipped, where it is more exact than the design above:
     *live* event (instead of a stream) is not covered yet.
 - **Wire.** BEGIN `page` = `{signer, epoch, seq, issued_at, root}`
   (`issued_at` is needed for the order key). Hashes are base64url without
-  padding; the vector is one base64url string. `page_sealed` =
-  `{epoch, payload}` from `encrypt_chunk` (content key, AAD
-  `space_id:epoch:sync_id`), ≤ 24 KiB. Sent only to a requester at
-  `MIN_FOR_SYNC_PAGES` whose `page` is absent or older by
-  `(epoch, issued_at, seq)` and at least an hour old (or "Sync now":
-  `newest: true` in the ref), always with the full vector (no delta: final
-  review I4, see §5). BEGIN `page` goes only
+  padding; the vector is one base64url string. `SPACE_SYNC_PAGE` carries
+  `page_sealed` = `{epoch, payload}` from `encrypt_chunk` (content key, AAD
+  `space_id:epoch:space-sync-page`), ≤ 24 KiB, always with the full vector
+  (no delta: final review I4, see §5) — pushed by the signer to every
+  writer household at most hourly, and sent to one household at
+  `MIN_FOR_SYNC_PAGES` whose BEGIN `page` is absent or older by
+  `(epoch, issued_at, seq)` than the page last pushed (see §4). BEGIN
+  `page` goes only
   to a provider at v_95 (`space_member_supports`), on every BEGIN path
   (paired, mesh catch-up / incremental, relay re-BEGIN).
 - **Receiver.** A page without its vector, or whose vector does not hash
@@ -684,8 +713,9 @@ What shipped, where it is more exact than the design above:
   waits out the rest once; the compare then takes the newest page). Never
   for a page we signed. Hashing runs in `asyncio.to_thread`. Verdicts are
   memory only, so a held page with none (after a restart) is compared on
-  the next sentinel or the next read of the sync status, whichever comes
-  first — once; a judged page never again.
+  the next stream's sentinel or the next read of the sync status,
+  whichever comes first — once (one compare of a page at a time, however
+  many paths ask); a judged page never again.
   1. **Explain locally, no wire cost.** A differing bucket in which we hold
      a row whose change time (the newest of `created_at`, `edited_at`,
      `updated_at`, `last_edited_at`, `archived_at`, `sold_at`, `deleted_at`
@@ -737,8 +767,8 @@ What shipped, where it is more exact than the design above:
   of listing records right before the sentinel, under the space content
   key (the chunk AAD), counted in the sentinel's `chunk_count`
   (`SpaceSyncService._listing_chunks`); only to a member household (a
-  writer seat) — as is the page itself on the sentinel: its vector covers
-  member-only resources (zones), so a follower gets neither. No session kind, budget or session-cap rule of its own:
+  writer seat) — as is the page itself: its vector covers member-only
+  resources (zones), so a follower gets neither. No session kind, budget or session-cap rule of its own:
   the round's admission rules apply. Each record is `{i, held: true,
   rows: [[resource, row_id, leaf, change_time], …]}` or `{i, held:
   false}`: a provider lists a bucket as of the page only when its own rows
@@ -803,8 +833,9 @@ What shipped, where it is more exact than the design above:
   (`domain/space_sync_page.state_with_page`): a running stream stays
   **catching up**; `match: true` (nothing missing: no unexplained
   bucket, or every listing showed none) → **up to date** while the page is
-  at most `PAGE_MATCH_FRESH_S` (75 min: two 30-min rounds plus the 15-min
-  seal interval) old, and at any age while the host is offline (no newer
+  at most `PAGE_MATCH_FRESH_S` (2 h: the hourly push + one 30-min tick +
+  the 15-min seal lag + 15 min slack, so a member keeps its match between
+  two pushes) old, and at any age while the host is offline (no newer
   page comes from it then) — an older match no longer masks a host that
   answers `deferred` / unclean for hours (final review minor 3);
   `match: false` (a listing proved a row missing) →
@@ -1140,8 +1171,8 @@ commits, from anyone.
 **Not built from the Phase 3 design:** `page_match` in BEGIN and the
 bucket-diff anti-entropy that would replace the daily full stream; the
 deliverer checking the full signed page sent in the BEGIN (it must hold the
-same page — members converge on the newest page through the sentinel
-relay, and a deliverer with another page answers `held: false`).
+same page — members converge on the newest page through the push and a
+stale BEGIN ref, and a deliverer with another page sends no listing).
 
 **Cost** (recipients × items × bytes per trigger; nothing fans out — one
 requester asks one member at a time):
@@ -1211,10 +1242,12 @@ requester asks one member at a time):
 - Phase 2 (built): `socialhome/sync_page.py` (commit form, hashing, page
   sign / verify, suites), `federation/sync/space/page_state.py` (the
   vector from the local exporters), `federation/sync/space/pages.py`
-  (`SyncPageService`: seal, sentinel, receive, root check, status),
-  `exporter.py` (`build_sentinel(page_sealed=…)`), `provider.py`
-  (`_sentinel_page`), `receiver.py` (sentinel path), `scheduler.py`
-  (`page` in BEGIN), `sync_manager.py` / `federation_service.py` (`page`
+  (`SyncPageService`: seal, push / `push_due` / `offer_page`, receive,
+  root check, status), `domain/federation.py` (`SPACE_SYNC_PAGE`),
+  `domain/federation_retention.py` (its `supersede_key`), `provider.py`
+  (`_offer_page`), `receiver.py` (sentinel path), `scheduler.py`
+  (`page` in BEGIN, `attach_page_push`), `app.py` (`attach_push`, the
+  handler), `sync_manager.py` / `federation_service.py` (`page`
   through every BEGIN path), `window.py` (`pinned_cutoff`),
   `authority_sig.py` (`space_sync_page`), migration `0151`
   (`space_sync_pages` + the rotation trigger), `domain/space_sync_page.py`
