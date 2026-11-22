@@ -60,6 +60,21 @@ export function applyPostCreated(data: unknown, me: string | undefined): void {
   if (hit) spaces.value = next
 }
 
+/** A ``space.sync_state`` frame: the row's "Some posts may be missing"
+ *  dot follows it live. Exported for tests. */
+export function applySyncState(data: unknown): void {
+  const d = data as { space_id?: string; sync?: { may_be_missing?: unknown } } | undefined
+  if (!d?.space_id || !d.sync) return
+  const missing = d.sync.may_be_missing === true
+  let hit = false
+  const next = spaces.value.map((s) => {
+    if (s.id !== d.space_id || !!s.sync_may_be_missing === missing) return s
+    hit = true
+    return { ...s, sync_may_be_missing: missing }
+  })
+  if (hit) spaces.value = next
+}
+
 async function loadAll(): Promise<void> {
   loading.value = spaces.value.length === 0
   failed.value = !(await loadSpaces())
@@ -81,9 +96,19 @@ function SpaceRowEnd({ needs, unread }: { needs: number; unread: number }) {
   return null
 }
 
+/** "Some posts may be missing" on a row: a small dot with its words for
+ *  assistive tech (never colour alone — the row's label says it too). */
+function SyncMissingDot() {
+  return (
+    <span class="sh-spaces-sync-dot" role="img" aria-label={t('space.sync.missing')}
+          title={t('space.sync.missing')} data-testid="space-sync-dot" />
+  )
+}
+
 /** Everything the row says, in reading order. */
-function rowLabel(s: Space, meta: string, needs: number, unread: number): string {
+function rowLabel(s: Space, meta: string, needs: number, unread: number, missing = false): string {
   const parts = [s.name, meta]
+  if (missing) parts.push(t('space.sync.missing'))
   if (needs > 0) parts.push(t(isOne(needs) ? 'spaces.list.needs_you_one' : 'spaces.list.needs_you', { n: String(needs) }))
   else if (unread > 0) parts.push(t(isOne(unread) ? 'spaces.list.posts_new_one' : 'spaces.list.posts_new', { n: String(unread) }))
   return parts.filter(Boolean).join(', ')
@@ -96,6 +121,8 @@ function MemberRow({ space: s, following }: { space: Space; following?: boolean 
     ? [t('spaces.list.following_meta'), activity].filter(Boolean).join(' · ')
     : activity
   const { needs, unread } = rowEnd(s)
+  // Members only: a follower sees none of the sync status.
+  const missing = !following && s.sync_may_be_missing === true
   return (
     <SpaceListRow
       to={`/spaces/${s.id}`}
@@ -103,8 +130,8 @@ function MemberRow({ space: s, following }: { space: Space; following?: boolean 
       emoji={s.emoji}
       name={s.name}
       meta={meta}
-      label={rowLabel(s, meta, needs, unread)}
-      end={<SpaceRowEnd needs={needs} unread={unread} />}
+      label={rowLabel(s, meta, needs, unread, missing)}
+      end={<>{missing && <SyncMissingDot />}<SpaceRowEnd needs={needs} unread={unread} /></>}
     />
   )
 }
@@ -140,12 +167,13 @@ export default function SpaceListPage() {
     const off = ws.on('space.post.created', (e) => {
       applyPostCreated(e.data, currentUser.value?.user_id)
     })
+    const offSync = ws.on('space.sync_state', (e) => { applySyncState(e.data) })
     let prev = connectionState.value
     const offConn = connectionState.subscribe((next) => {
       if (prev === 'reconnecting' && next === 'open') void loadSpaces()
       prev = next
     })
-    return () => { off(); offConn() }
+    return () => { off(); offSync(); offConn() }
   }, [])
 
   // Opened as ``/spaces?discover=…`` (the retired /spaces/browse, a shared

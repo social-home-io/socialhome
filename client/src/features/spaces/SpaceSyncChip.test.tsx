@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, act } from '@testing-library/preact'
 
 const { handlers } = vi.hoisted(() => ({
@@ -16,76 +16,106 @@ vi.mock('@/ws', () => ({
 import { SpaceSyncChip } from './SpaceSyncChip'
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
+const base = { last_ok_at: ago(5), waiting_to_send: 0, may_be_missing: false, unsent_posts: [] }
 
 function chip(sync: unknown) {
   return render(<SpaceSyncChip spaceId="s1" sync={sync} />)
 }
 
-const text = (c: Element) =>
-  (c.querySelector('[data-testid="space-sync-chip"]')?.textContent ?? '').trim()
+const theChip = (c: Element) => c.querySelector('[data-testid="space-sync-chip"]')
+const text = (c: Element) => (theChip(c)?.querySelector('.sh-sync-chip__text')?.textContent ?? '').trim()
+const live = (c: Element) => c.querySelector('[role="status"]')?.textContent ?? ''
+
+function frame(sync: Record<string, unknown>, spaceId = 's1') {
+  act(() => { handlers.get('space.sync_state')?.({ type: 'space.sync_state', data: { space_id: spaceId, sync } }) })
+}
 
 beforeEach(() => { handlers.clear() })
+afterEach(() => { vi.useRealTimers() })
 
 describe('SpaceSyncChip', () => {
-  it('shows nothing when the space is up to date and nothing waits', () => {
-    expect(chip({ state: 'up_to_date', last_ok_at: ago(5), waiting_to_send: 0 })
-      .container.innerHTML).toBe('')
+  it('up to date: no chip, nothing said', () => {
+    const { container } = chip({ ...base, state: 'up_to_date' })
+    expect(theChip(container)).toBeNull()
+    expect(live(container)).toBe('')
   })
 
-  it('shows nothing for a follower (no sync status) or a bad body', () => {
+  it('a follower (no sync status) or a bad body: nothing at all', () => {
     expect(chip(null).container.innerHTML).toBe('')
     expect(chip({ state: 'bogus' }).container.innerHTML).toBe('')
   })
 
-  it('catching up', () => {
-    const { container } = chip({ state: 'catching_up', last_ok_at: null, waiting_to_send: 0 })
-    expect(text(container)).toBe('Catching up…')
+  it('the warning: icon, words and an RTL-mirrored chevron, linking to settings', () => {
+    const { container } = chip({ ...base, state: 'behind', may_be_missing: true })
+    const a = theChip(container) as HTMLAnchorElement
+    expect(text(container)).toBe('Some posts may be missing')
+    expect(a.className).toContain('sh-sync-chip--missing')
+    expect(a.querySelector('.sh-sync-chip__icon')?.getAttribute('aria-hidden')).toBe('true')
+    expect(a.querySelector('.sh-sync-chip__chev')?.textContent).toBe('›')
+    expect(a.getAttribute('href')).toContain('/spaces/s1/settings/sync')
+    expect(a.getAttribute('aria-label')).toBe('Some posts may be missing — open details')
   })
 
-  it('behind, with when it was last up to date', () => {
-    const { container } = chip({ state: 'behind', last_ok_at: ago(5), waiting_to_send: 0 })
-    expect(text(container)).toBe('Behind — last up to date 5 min ago')
+  it('first join: "Getting the space ready…" without a chevron', () => {
+    const { container } = chip({ ...base, state: 'never', last_ok_at: null })
+    expect(text(container)).toBe('Getting the space ready…')
+    expect(theChip(container)?.querySelector('.sh-sync-chip__chev')).toBeNull()
   })
 
-  it('host offline since a clock time', () => {
-    const { container } = chip({ state: 'host_offline', last_ok_at: ago(3), waiting_to_send: 0 })
-    expect(text(container)).toMatch(/^Host offline since \d{1,2}:\d{2}/)
+  it.each([
+    ['host_offline'],
+    ['behind'],
+  ])('%s without the warning: no chip (the away host is for settings only)', (state) => {
+    expect(theChip(chip({ ...base, state }).container)).toBeNull()
   })
 
-  it('host offline, never up to date', () => {
-    const { container } = chip({ state: 'host_offline', last_ok_at: null, waiting_to_send: 0 })
-    expect(text(container)).toBe('Host offline')
+  it('no space-level "waiting to send" any more', () => {
+    const { container } = chip({ ...base, state: 'up_to_date', waiting_to_send: 3 })
+    expect(theChip(container)).toBeNull()
   })
 
-  it('not synced yet', () => {
-    const { container } = chip({ state: 'never', last_ok_at: null, waiting_to_send: 0 })
-    expect(text(container)).toBe('Not synced yet')
+  it('catching up shows a muted chip only after 10 s, and goes without a trace', () => {
+    vi.useFakeTimers()
+    const { container } = chip({ ...base, state: 'catching_up' })
+    expect(theChip(container)).toBeNull()
+    act(() => { vi.advanceTimersByTime(9_000) })
+    expect(theChip(container)).toBeNull()
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(text(container)).toBe('Getting the latest…')
+    expect(theChip(container)?.className).toContain('sh-sync-chip--latest')
+    frame({ ...base, state: 'up_to_date' })
+    expect(theChip(container)).toBeNull()
+    expect(live(container)).toBe('')
   })
 
-  it('items waiting to send show even when up to date', () => {
-    expect(text(chip({ state: 'up_to_date', last_ok_at: ago(1), waiting_to_send: 1 }).container))
-      .toBe('1 waiting to send')
-    expect(text(chip({ state: 'behind', last_ok_at: ago(5), waiting_to_send: 3 }).container))
-      .toBe('Behind — last up to date 5 min ago · 3 waiting to send')
+  it('a short catch-up never shows', () => {
+    vi.useFakeTimers()
+    const { container } = chip({ ...base, state: 'catching_up' })
+    act(() => { vi.advanceTimersByTime(3_000) })
+    frame({ ...base, state: 'up_to_date' })
+    act(() => { vi.advanceTimersByTime(30_000) })
+    expect(theChip(container)).toBeNull()
   })
 
-  it('links to the Sync section of the space settings', () => {
-    const { container } = chip({ state: 'never', last_ok_at: null, waiting_to_send: 0 })
-    const a = container.querySelector('a') as HTMLAnchorElement
-    expect(a.getAttribute('href')).toMatch(/\/spaces\/s1\/settings\/sync$/)
-    expect(a.getAttribute('aria-label')).toContain('Not synced yet')
+  it('announces only a change INTO the warning', () => {
+    const { container } = chip({ ...base, state: 'up_to_date' })
+    frame({ ...base, state: 'catching_up' })
+    expect(live(container)).toBe('')
+    frame({ ...base, state: 'behind', may_be_missing: true })
+    expect(live(container)).toBe('Some posts may be missing')
+    frame({ ...base, state: 'up_to_date' })
+    expect(live(container)).toBe('')
   })
 
-  it('follows the space.sync_state frame of its own space only', () => {
-    const { container } = chip({ state: 'behind', last_ok_at: ago(5), waiting_to_send: 0 })
-    const frame = handlers.get('space.sync_state')!
-    act(() => frame({ type: 'space.sync_state', data: {
-      space_id: 'other', sync: { state: 'up_to_date', last_ok_at: ago(0), waiting_to_send: 0 },
-    } }))
-    expect(text(container)).toContain('Behind')
-    act(() => frame({ type: 'space.sync_state', data: {
-      space_id: 's1', sync: { state: 'up_to_date', last_ok_at: ago(0), waiting_to_send: 0 },
-    } }))
-    expect(container.innerHTML).toBe('')
+  it('a warning already there on load is shown, not announced', () => {
+    const { container } = chip({ ...base, state: 'behind', may_be_missing: true })
+    expect(text(container)).toBe('Some posts may be missing')
+    expect(live(container)).toBe('')
+  })
+
+  it('a frame for another space changes nothing', () => {
+    const { container } = chip({ ...base, state: 'up_to_date' })
+    frame({ ...base, state: 'behind', may_be_missing: true }, 's2')
+    expect(theChip(container)).toBeNull()
   })
 })

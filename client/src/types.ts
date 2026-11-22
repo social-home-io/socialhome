@@ -403,20 +403,32 @@ export interface Comment {
   created_at: string
 }
 
-/** ``GET /api/spaces/{id}`` ``sync`` (see ``features/spaces/spaceSync``). */
 /** v_95: the newest signed sync page held, and how our copy compared
- *  with it (``match`` / ``differing_buckets`` ``null``: not compared yet). */
+ *  with it (``match`` / ``missing`` / ``differing_buckets`` ``null``: not
+ *  compared yet). Shown only in the admin Details. */
 export interface SpaceSyncPageWire {
   seq: number
   at: string
   match: boolean | null
+  /** Rows a listing PROVED missing (``match: false``). */
+  missing: number | null
   differing_buckets: number | null
+  /** ``owner`` or ``admin`` (a seed-holding delegated admin). */
+  signer_role: string | null
+  /** The signer equivocated (two pages that cannot both be honest). */
+  conflict: boolean
 }
 
+/** ``GET /api/spaces/{id}`` ``sync`` (see ``features/spaces/spaceSync``). */
 export interface SpaceSyncWire {
   state: 'up_to_date' | 'catching_up' | 'behind' | 'host_offline' | 'never'
   last_ok_at: string | null
   waiting_to_send: number
+  /** "Some posts may be missing" — the one warning. */
+  may_be_missing: boolean
+  /** Posts written here that no other household has yet ("Not sent
+   *  yet" on the post; the SPA marks only the viewer's own). */
+  unsent_posts: string[]
   page?: SpaceSyncPageWire
 }
 
@@ -495,6 +507,9 @@ export interface Space {
   /** ``GET /api/spaces`` rows: what waits for the caller (the More badge's
    *  total) — ``null`` unless they are owner / admin / moderator. */
   needs_you?: number | null
+  /** ``GET /api/spaces`` rows: "Some posts may be missing" — the list's
+   *  dot (``sync.may_be_missing``; never for a follower). */
+  sync_may_be_missing?: boolean
   /** The uploaded icon (signed), ``null`` without one. */
   icon_url?: string | null
 }

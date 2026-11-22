@@ -5,6 +5,8 @@ import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
+import { ensureConnections } from '@/store/connections'
+import { instanceConfig } from '@/store/instance'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers, setSpaceHereAllowed } from '@/store/spaceMembers'
 import { useTitle, useTitleGlyph } from '@/store/pageTitle'
@@ -64,6 +66,8 @@ import { SpaceSetupCard } from './SpaceSetupCard'
 import { SpaceInviteFirst } from './SpaceInviteFirst'
 import { SpaceGfsNotice } from '@/components/SpaceGfsNotice'
 import { SpaceSyncChip } from './SpaceSyncChip'
+import { NotSentMark } from './NotSentMark'
+import { syncHostName, useSpaceSync } from './spaceSync'
 import { isSetupPending } from './spaceSetup'
 import { useSpaceNotifLevel } from './SpaceNotifLevels'
 import {
@@ -583,6 +587,19 @@ export default function SpaceFeedPage() {
     }
   }
 
+  // "Not sent yet" on the viewer's own posts no other household has yet
+  // (``sync.unsent_posts``, live with the ``space.sync_state`` frame).
+  const ownerId = spaceDetail.value?.owner_instance_id ?? null
+  const syncLive = useSpaceSync(spaceId, spaceDetail.value?.sync)
+  const hostedHere = !!ownerId && ownerId === instanceConfig.value?.instance_id
+  useEffect(() => {
+    if (ownerId && !hostedHere && syncLive?.unsent_posts.length) void ensureConnections()
+  }, [ownerId, hostedHere, syncLive?.unsent_posts.length])
+  const notSent = (author: string, postId: string) =>
+    author === currentUser.value?.user_id && !!syncLive?.unsent_posts.includes(postId)
+      ? <NotSentMark hostName={syncHostName(ownerId)} hostedHere={hostedHere} />
+      : undefined
+
   if (loading.value) return <Spinner />
 
   // Neither the space nor its feed could be read: an error with Retry —
@@ -915,6 +932,7 @@ export default function SpaceFeedPage() {
                   : undefined}
                 spaceId={spaceId}
                 surface="space"
+                metaEnd={notSent(post.author, post.id)}
               />
             </div>
           ))}

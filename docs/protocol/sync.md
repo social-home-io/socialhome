@@ -405,7 +405,33 @@ at most one frame per 2 s per space (fixed), never one per row. **Sync now** (`P
 BEGIN of one round right away to the households acting as host only — a
 mesh-only one over the mesh too, never a paired co-member — within 3 per
 hour per space, inside the host's 5 BEGINs / h budget next to the 2
-periodic ones; a space hosted here asks its paired member households.
+periodic ones; a space hosted here asks its paired member households. Past
+the limit it answers `429` with `Retry-After` and `error.retry_after_s`
+(when the next one is allowed).
+
+**What a member sees** (owner decisions 2026-11-21/22) is plain language,
+not plumbing. The status carries one warning, `may_be_missing` ("Some
+posts may be missing", the DM gap's wording): true from the **second
+failed round** after the newest `ok` (the newest answer at least 45 min
+after it — rounds are 30 min apart; one failed round is no warning), with
+no `ok` ever after an unclean stream, or when the newest signed page
+**proved** a row missing (`page.match: false`, `page.missing > 0` — known
+only after the round that carried the listing, so still true after that
+automatic sync; a first mismatch says nothing). Never while catching up,
+never for an away host (`host_offline`, neutral, settings only) or a space
+not synced yet. Only this warning gets a header chip and a dot on the
+Spaces list (`GET /api/spaces` rows carry `sync_may_be_missing`); the
+settings section "Is everything here?" words every state, and the page,
+parts, signer, outbox count and last sync sit in an admin-only Details.
+`unsent_posts` names our posts **no member household has yet** ("Not
+sent yet" on the author's own post): every member household of the
+broadcast's audience still holds a live outbox row of the post's stored
+payload (`federation_outbox_payloads`, unwrapped under the local KEK to
+read the post id) or a deferred mesh send, and no GFS took it (the member
+publish's `on_published`; memory only — after a restart such a post reads
+"Not sent yet" until a household takes it). A household that took it at
+once has no row, so the post is sent. Bounded (newest 100 stored payloads
+read, 50 ids sent) and read only while the space has content waiting.
 
 **Signed sync pages (v_95).** The household acting as host that holds the
 space's authority seed seals, lazily and at most every 15 minutes, a signed

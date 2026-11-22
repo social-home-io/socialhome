@@ -94,7 +94,7 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     const links = indexLinks(view)
     expect(links.map(a => a.textContent)).toEqual([
       'Basics', 'Who can find it', 'Members & joining', 'Sections', 'Games allowed here',
-      'Your notifications', 'Location & zones', 'Moderation & age', 'Sync', 'Bots', 'Archive or delete',
+      'Your notifications', 'Location & zones', 'Moderation & age', 'Is everything here?', 'Bots', 'Archive or delete',
     ])
     expect(links[0].getAttribute('href')).toBe('/spaces/sp-1/settings/basics')
     expect(links[0].getAttribute('aria-current')).toBe('page')
@@ -112,7 +112,7 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     role = 'moderator'
     let view = await mount()
     expect(indexLinks(view).map(a => a.textContent)).toEqual([
-      'Your notifications', 'Games allowed here', 'You in this space', 'Sync', 'Bots', 'Leave',
+      'Your notifications', 'Games allowed here', 'You in this space', 'Is everything here?', 'Bots', 'Leave',
     ])
     view.unmount()
     role = 'member'
@@ -164,7 +164,7 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     role = 'member'
     const view = await mount()
     expect(indexLinks(view).map(a => a.textContent)).toEqual([
-      'Your notifications', 'You in this space', 'Sync', 'Bots', 'Leave',
+      'Your notifications', 'You in this space', 'Is everything here?', 'Bots', 'Leave',
     ])
     expect(view.container.querySelector('#settings-basics')).toBeNull()
     expect(view.getByTestId('settings-you-profile')).toBeTruthy()

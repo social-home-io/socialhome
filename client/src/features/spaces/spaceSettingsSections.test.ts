@@ -27,7 +27,7 @@ describe('space settings sections', () => {
     expect(settingsSections('follower')).not.toContain('sync')
     expect(resolveSettingsSection('sync', 'follower')).toBe('notifications')
     expect(parseSettingsSection('sync')).toBe('sync')
-    expect(settingsSectionLabel('sync')).toBe('Sync')
+    expect(settingsSectionLabel('sync')).toBe('Is everything here?')
   })
 
   it('Games — for an admin after Sections, for a moderator after Notifications (D9)', () => {

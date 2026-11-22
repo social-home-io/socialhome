@@ -30687,14 +30687,15 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
 /* Directly under its field, not a form gap away. */
 .sh-form > .sh-length-counter { margin-top: calc(2px - var(--sh-space-md)); }
 
-/* ── Space sync status (header chip + settings' Sync section) ────────── */
-/* The chip shows only when a space is not up to date here; it links to
-   the settings' Sync section. Text stays --sh-text on a light tint, so
-   it reads in both themes; the state is in the dot's colour AND the
-   words. */
+/* ── Space sync status: header chip, list dot, "Is everything here?",
+   "Not sent yet" ─────────────────────────────────────────────────────── */
+/* The chip shows only for "Some posts may be missing" (warning tint),
+   "Getting the space ready…" and a slow "Getting the latest…" (muted).
+   Every state has an icon AND words — never colour alone. Text stays
+   --sh-text on a light tint, so it reads in both themes. */
 .sh-sync-chip-row {
   display: flex;
-  padding: var(--sh-space-xs) 0 0;
+  padding-block-start: var(--sh-space-xs);
   min-width: 0;
 }
 .sh-sync-chip {
@@ -30703,7 +30704,7 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   gap: var(--sh-space-xs);
   min-height: 36px;
   max-width: 100%;
-  padding: 0 var(--sh-space-sm);
+  padding-inline: var(--sh-space-sm);
   border: 1px solid var(--sh-border-strong);
   border-radius: var(--sh-radius-full);
   background: var(--sh-bg-secondary);
@@ -30716,40 +30717,98 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   outline: 2px solid var(--sh-focus-ring);
   outline-offset: 2px;
 }
+.sh-sync-chip__icon { flex: none; font-size: 14px; line-height: 1; }
 .sh-sync-chip__text {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.sh-sync-chip__dot {
+.sh-sync-chip__chev { flex: none; opacity: 0.6; }
+.sh-sync-chip__chev:dir(rtl) { transform: scaleX(-1); }
+[dir='rtl'] .sh-sync-chip__chev { transform: scaleX(-1); }
+.sh-sync-chip--missing {
+  border-color: var(--sh-warning);
+  background: color-mix(in srgb, var(--sh-warning) 12%, var(--sh-bg-secondary));
+}
+.sh-sync-chip--latest {
+  border-color: var(--sh-border);
+  background: transparent;
+  color: var(--sh-text-muted);
+}
+
+/* Spaces list: a dot only for "Some posts may be missing" (role="img"
+   with its words; the row's label says it too). */
+.sh-spaces-sync-dot {
   flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--sh-text-muted);
+  background: var(--sh-warning);
 }
-.sh-sync-chip--behind,
-.sh-sync-chip--host_offline {
-  border-color: var(--sh-warning);
-  background: color-mix(in srgb, var(--sh-warning) 12%, var(--sh-bg-secondary));
-}
-.sh-sync-chip--behind .sh-sync-chip__dot,
-.sh-sync-chip--host_offline .sh-sync-chip__dot,
-.sh-sync-card__state--behind .sh-sync-chip__dot,
-.sh-sync-card__state--host_offline .sh-sync-chip__dot { background: var(--sh-warning); }
-.sh-sync-chip--catching_up .sh-sync-chip__dot,
-.sh-sync-card__state--catching_up .sh-sync-chip__dot { background: var(--sh-primary); }
-.sh-sync-card__state--up_to_date .sh-sync-chip__dot { background: var(--sh-success); }
+
+/* Settings → "Is everything here?" */
 .sh-sync-card__state {
   display: flex;
   align-items: center;
   gap: var(--sh-space-sm);
   margin: 0;
 }
+.sh-sync-card__icon { flex: none; width: 1.25em; text-align: center; }
+.sh-sync-card__state--missing .sh-sync-card__icon { color: var(--sh-warning); }
+.sh-sync-card__state--here .sh-sync-card__icon { color: var(--sh-success); }
 .sh-sync-card__body { margin: 0; }
-.sh-sync-card__facts {
+.sh-sync-card__body time { white-space: nowrap; }
+.sh-sync-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-sm);
+}
+.sh-sync-card__why {
   margin: 0;
-  padding-left: var(--sh-space-lg);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-sync-card__details {
   color: var(--sh-text-muted);
   font-size: var(--sh-font-size-sm);
 }
-.sh-sync-card__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
+.sh-sync-card__details summary {
+  cursor: pointer;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  width: fit-content;
+}
+.sh-sync-card__details summary:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-sync-card__facts {
+  margin: 0;
+  padding-inline-start: var(--sh-space-lg);
+}
+
+/* "○ Not sent yet" in the meta line of one's own post (the DM receipt's
+   "Sending" glyph); tapping it opens the reason. Padded to a 36 px tap
+   target without moving the line. */
+.sh-post-not-sent {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  max-width: 100%;
+  margin-block: -9px;
+  padding-block: 9px;
+  padding-inline: 0;
+  border: 0;
+  background: none;
+  color: var(--sh-text-muted);
+  font: inherit;
+  font-size: var(--sh-font-size-xs);
+  text-align: start;
+  cursor: pointer;
+}
+.sh-post-not-sent:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}
