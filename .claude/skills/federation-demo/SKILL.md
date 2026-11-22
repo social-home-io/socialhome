@@ -595,19 +595,22 @@ That single command runs the full sequence:
    re-reads **b** and fails when it no longer holds **c**'s vote under
    **c**'s stamp, and pins ``MIN_FOR_ITEM_MERGE_STAMPS`` = 94.
 
-9f-t. Signed sync pages (v_95, ``docs/protocol/sync-pages.md`` Phase 2) —
-   no step of its own: ``verify`` sends **a**'s "Sync now" for the
-   tri-household salon (host **b**) up to three times — the first BEGIN
-   makes **b** seal a page in the background, the next sentinel carries it
-   — then fails unless **a** holds a page signed by **b** that verifies
-   against the space key **a** pins, whose stored vector hashes to its
-   root, and that **a**'s ``GET /api/spaces/{id}`` ``sync.page`` shows.
-   **a** compares its own rows with the page as soon as it stores it (or,
-   holding it from before a restart, on the next sentinel — so ``verify``
-   always sends one "Sync now");
-   ``verify`` waits on **a**'s status for that verdict and fails unless it
-   is ``match: true`` ("Up to date · checked against page N"). It pins
-   ``MIN_FOR_SYNC_PAGES`` = 95.
+9f-t. ``sync-pages`` — signed sync pages (v_95,
+   ``docs/protocol/sync-pages.md`` Phase 2), its own step right after
+   ``calendar`` (``up → pair → traffic → calendar → sync-pages``). **a**
+   sends "Sync now" for the tri-household salon (host **b**) up to three
+   times — the first BEGIN makes **b** seal a page in the background, the
+   next sentinel carries it — and fails unless **a** holds a page signed by
+   **b** that verifies against the space key **a** pins, whose stored
+   vector hashes to its root, and that **a**'s ``GET /api/spaces/{id}``
+   ``sync.page`` shows. It then waits on **a**'s status for the verdict
+   (a difference **a** cannot explain locally is listed on its next round —
+   up to two more "Sync now") and fails unless it is ``match: true``. It
+   runs early on purpose: that next round is gated by **b**'s hourly sync
+   budget for **a** and the salon (5 / h), which the later steps spend; a
+   verdict then waits up to an hour. ``verify`` keeps this step's result
+   and re-checks only that **a** still holds the page, verified (no round
+   of its own). It pins ``MIN_FOR_SYNC_PAGES`` = 95.
 
 9f. ``space-chat`` (v_55, every space's members' chat) — in **b**'s
    space from ``traffic`` / ``calendar`` (owner **b**, members **a** and
@@ -1015,6 +1018,7 @@ python .claude/skills/federation-demo/harness.py up
 python .claude/skills/federation-demo/harness.py pair
 python .claude/skills/federation-demo/harness.py traffic
 python .claude/skills/federation-demo/harness.py calendar   # verify checks what it creates (roster, moderator, access levels)
+python .claude/skills/federation-demo/harness.py sync-pages # v_95 match: true, before later steps spend a's sync budget
 python .claude/skills/federation-demo/harness.py gfs-up
 python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-traffic

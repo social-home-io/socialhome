@@ -665,6 +665,15 @@ What shipped, where it is more exact than the design above:
   changed after the page stays hidden (the bucket is explained) until a
   later page or the 30-min sync heals it. Change times come from the
   authors' clocks, so a clock far ahead can hide a bucket the same way.
+- **A verdict waits for the next allowed round.** The listing rides a
+  normal round, so it is gated by the host's limit of 5 sync BEGINs per
+  hour per requester and space (`SYNC_BEGIN_RATE_LIMIT_PER_HOUR`, no
+  exemption). After heavy use — a restart or two, "Sync now" pressed 3
+  times — the round that would carry `buckets` is refused (`rate_limited`)
+  and the verdict waits for the next round the limit allows, up to about
+  an hour. Until then `match` stays `null` and the status shows the
+  Phase 1 state (answers, stream outcomes); nothing reads "needs sync"
+  because of it.
 - **Cost.** Normally ≈ 0 on the wire: every differing bucket of a busy
   member is explained locally. Otherwise the listing adds ≤ 8 × ~6 KB
   (50 000 rows: ≈ 195 rows per bucket × ~32 B, base64 and JSON; ≤ 50 KB)

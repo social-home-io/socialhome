@@ -19885,9 +19885,33 @@ def _accept_remote_invite(state: dict, joiner: str, space_id: str) -> None:
     _must(f"{joiner}: accept invite", s, body, ok=(204,))
 
 
-def _verify_sync_page(state: dict) -> list[str]:
+def cmd_sync_pages() -> None:
+    """v_95 signed sync pages, right after ``calendar``: a holds b's signed
+    page of the salon, verified, and its status says ``match: true``.
+
+    Its own step so the later steps cannot spend a's hourly sync budget for
+    the salon at b first: a difference a cannot explain locally is listed
+    on a's NEXT round, which that budget gates (a verdict then waits up to
+    an hour — ``docs/protocol/sync-pages.md``). ``verify`` keeps this
+    step's result and re-checks only that the page is held and verified.
+    """
+    state = _load()
+    failures = _verify_sync_page(state, want_match=True)
+    if failures:
+        for f in failures:
+            print(f"  ✗ {f}")
+        raise SystemExit("sync-pages: FAIL")
+    state = _load()
+    state["sync_pages_match"] = True
+    _save(state)
+    print("sync-pages: ok")
+
+
+def _verify_sync_page(state: dict, *, want_match: bool = False) -> list[str]:
     """v_95: the salon's host b signs a page and a member (a) holds it,
     verified against the space key a pins (``docs/protocol/sync-pages.md``).
+    *want_match* (the ``sync-pages`` step): also wait for a's verdict and
+    require ``match: true``; ``verify`` keeps that step's result instead.
     """
     from socialhome.sync_page import root_of, verify_page
 
@@ -19912,8 +19936,11 @@ def _verify_sync_page(state: dict) -> list[str]:
     asked = 0
     next_ask = 0.0
     # At least one round even when a page is held already: a restarted
-    # household compares its stored page on the next sentinel.
-    while (_held() is None or asked == 0) and time.monotonic() < deadline:
+    # household compares its stored page on the next sentinel. ``verify``
+    # only re-reads the page it holds (no round of its own).
+    while (_held() is None or (want_match and asked == 0)) and (
+        time.monotonic() < deadline
+    ):
         if asked < 3 and time.monotonic() >= next_ask:
             _request(
                 f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/sync",
@@ -19947,6 +19974,18 @@ def _verify_sync_page(state: dict) -> list[str]:
         out.append(f"v_95: a's page was signed by {page.signer}, not the host b")
     if root_of(bytes(vector)) != page.root:
         out.append("v_95: a's stored vector does not hash to its page's root")
+    if not want_match:
+        if not state.get("sync_pages_match"):
+            out.append(
+                "v_95: the sync-pages step has not proven match: true "
+                "(run 'sync-pages' right after 'calendar')"
+            )
+        if not out:
+            print(
+                f"  v_95 a holds b's signed sync page {page.seq} ({page.rows} "
+                "rows), verified; match: true proven by the sync-pages step ✓"
+            )
+        return out
     # a compares its own rows with the page as soon as it stores it: wait
     # on a's status for the verdict, then it must match (after traffic a
     # holds everything b committed).
@@ -27507,6 +27546,7 @@ def main() -> None:
         cmd_traffic()
         time.sleep(5)  # let federation settle before assertions
         cmd_calendar()
+        cmd_sync_pages()
         cmd_verify()
         cmd_relay_pair()
         # ``visibility`` toggles a local user hidden from a peer and
