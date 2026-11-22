@@ -56,7 +56,10 @@ checked against the signed page, not against who delivered it.
 - **GFS**: not involved. Pages travel only inside §25.6 sync sessions
   (paired, mesh `SPACE_ROUTED`, or the household path of a GFS mailbox
   seat). They are sealed end to end, so a relay sees no content.
-  Followers get no pages.
+  Every household the sync session seats gets the same page: members
+  and subscriber (follower) households with a seat alike; the member-only
+  kinds are not committed (§2). A household without a seat gets no
+  session, so no page. GFS followers do not run §25.6 at all.
 - **Not covered**: media bytes (already content-addressed,
   `SPACE_MEDIA_WANTED`), space config (`SPACE_CONFIG_CATCH_UP`), the
   moderation queue, and the *host-only* resources in §2.
@@ -206,9 +209,9 @@ page suite (§3).
 | `posts_deleted`, `comments_deleted` | `id, post_id / comment_id, author, created_at` | stable (no `deleted_at` on the wire) |
 | `comments` | all fields, with `media_url` replaced by its hash | stable after normalisation |
 | `task_lists`, `tasks`, `tasks_archived` | all fields except `updated_at` (`domain/task.py:491`) | stable after normalisation |
-| `*_deleted` for lists, tasks, pages, stickies, zones, timetables, gallery | identity fields + `created_at`, without `actor_user_id` (and without `created_at` for `calendar_deleted`) | stable after normalisation |
+| `*_deleted` for lists, tasks, pages, stickies, timetables, gallery | identity fields + `created_at`, without `actor_user_id` (and without `created_at` for `calendar_deleted`) | stable after normalisation |
 | `pages` | `id, title, content, cover_image_url, created_by, seq, version_hash, conflict` (`sp-` names are the same everywhere); locks and delete requests are local workflow | stable after normalisation |
-| `stickies`, `space_zones`, `timetables` | all fields except `updated_at`; floats (`position_*`, coordinates) as decimal strings | stable after normalisation |
+| `stickies`, `timetables` | all fields except `updated_at`; floats (`position_*`) as decimal strings | stable after normalisation |
 | `calendar` | the series row (never expanded) without `rsvps`, `rsvps_at`, `rsvps_partial`; `cover_url` as a hash | stable after normalisation |
 | `gallery` | non-system albums without `item_count`, `updated_at`; items with `url` / `thumbnail_url` as hashes | stable after normalisation (system albums have local ids and are left out, as in the stream) |
 | `polls`, `schedules` | definition only: `meta`, options `(id, text)`; schedule `title, deadline, slots, finalized_slot_id` | stable after normalisation |
@@ -216,6 +219,7 @@ page suite (§3).
 | `bans`, `members` | could be committed as `(user_id, role, …)` without `joined_at` / `banned_at` / `picture_hash` | **host-only for now.** The roster has its own `roster_digest` repair, and removals have no tombstone, so a member holding a removed seat would mismatch until that repair |
 | `member_pictures` | none | **host-only**: every receiver re-encodes the image (`receive_members.py:69`) |
 | `chat_messages`, `chat_messages_deleted` | none | **host-only**: each household prunes its own chat, and `created_at` is capped at the receiver's clock and `reply_to_id` nulled (`space_chat.py:346-366`) |
+| `space_zones`, `space_zones_deleted` | none | **not committed: member-only.** A subscriber seat never gets the members' places (`provider._MEMBER_ONLY_RESOURCES`, and the receiver drops them on a household without a member seat), and a seated subscriber household checks the same page as a member (owner decision, 2026-11-22) |
 
 **Files.** Since v_92 a receiver stores every hashed file under its
 content name (`sc-<sha256>`), so any household can derive the hash from
@@ -456,7 +460,7 @@ sequenceDiagram
 | Equivocation | Detected per `(epoch, signer, seq)` and through the `prev_root` chain, then reported (§3). |
 | Withholding rows | A listing names every leaf, so R knows what is still missing and asks the next member. |
 | Oversized proof | The bounds in §4 apply; anything larger is refused before it is parsed further. |
-| Privacy | Pages, vectors and listings are encrypted under the space content key and go only to member households (§4). Hashes of low-entropy records (tombstones) could be guessed only by someone who already holds the key, which means a member who can read the content anyway. Non-members on a mesh path see `SPACE_ROUTED` ciphertext. The GFS sees nothing, because no sync traffic goes through it. A page reveals no person's location; zones are content and are encrypted with the rest. |
+| Privacy | Pages, vectors and listings are encrypted under the space content key and go only to households the sync session seats — members and seated subscribers (§4); the member-only kinds (zones) are not committed, so the vector reveals nothing about them to a subscriber. Hashes of low-entropy records (tombstones) could be guessed only by someone who already holds the key, which means a member who can read the content anyway. Non-members on a mesh path see `SPACE_ROUTED` ciphertext. The GFS sees nothing, because no sync traffic goes through it. A page reveals no person's location. |
 
 ## 7. Phase plan
 
@@ -641,9 +645,10 @@ What shipped, where it is more exact than the design above:
   streams the round as usual and appends one `__listing__` chunk per ≤ 8 KB
   of listing records right before the sentinel, under the space content
   key (the chunk AAD), counted in the sentinel's `chunk_count`
-  (`SpaceSyncService._listing_chunks`); only to a member household (a
-  writer seat) — as is the page itself on the sentinel: its vector covers
-  member-only resources (zones), so a follower gets neither. No session kind, budget or session-cap rule of its own:
+  (`SpaceSyncService._listing_chunks`); to any household the session
+  seats, members and subscribers alike — as is the page itself on the
+  sentinel (the member-only kinds are not committed, §2). No session kind,
+  budget or session-cap rule of its own:
   the round's admission rules apply. Each record is `{i, held: true,
   rows: [[resource, row_id, leaf, change_time], …]}` or `{i, held:
   false}`: a provider lists a bucket as of the page only when its own rows

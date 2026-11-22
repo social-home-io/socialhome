@@ -34,6 +34,7 @@ from tests.federation.sync.space.test_sync_coverage import (
     SPACE,
     Home,
     _post,
+    _zone,
     homes,  # noqa: F401 — the fixture
 )
 
@@ -217,6 +218,28 @@ async def test_a_page_round_trips_and_the_member_matches_it(pair):
     assert (
         state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is SpaceSyncState.UP_TO_DATE
     )
+
+
+async def test_a_subscriber_household_reads_the_same_page_as_a_match(pair):
+    """Owner decision (B1 revised): a seated subscriber household gets the
+    page like a member. It never receives the members' places (zones), so
+    those stay out of the commitment — the host's zone is not a row the
+    subscriber lacks, and its copy matches without a listing."""
+    host, member, host_pages, member_pages, _clock, wire = pair
+    await _post(host)
+    await _stream(host, member)
+    await _zone(host)  # members only: the subscriber never gets it
+    page = await host_pages.seal_if_due(SPACE)
+    assert page is not None and page.rows == 1  # the post, not the zone
+    assert await _round(host_pages, member_pages, "s-1")
+    await wire.round()
+    pos = await _position(member, member_pages)
+    assert pos is not None and (pos.match, pos.missing, pos.differing_buckets) == (
+        True,
+        0,
+        0,
+    )
+    assert wire.asks == []
 
 
 async def test_a_missing_row_is_proven_by_the_hosts_listing(pair):

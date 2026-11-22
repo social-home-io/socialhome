@@ -122,6 +122,15 @@ def test_members_bans_pictures_and_chat_are_host_only():
         assert commit_form(resource, {"id": "x"}, _no_files) is None
 
 
+def test_member_only_kinds_are_never_committed():
+    """Owner decision (B1 revised): a seated subscriber household gets the
+    same page as a member, so what a subscriber seat never receives (the
+    members' places) stays out of the commitment on both sides."""
+    for resource in ("space_zones", "space_zones_deleted"):
+        assert resource not in COMMITTED_RESOURCES
+        assert commit_form(resource, {"id": "z", "name": "School"}, _no_files) is None
+
+
 # ── Golden vectors: the bytes are pinned ─────────────────────────────────
 
 
@@ -297,10 +306,10 @@ def test_calendar_tombstone_drops_its_local_created_at():
 
 
 def test_absent_and_null_fields_hash_the_same():
-    a = {"id": "z", "name": "School", "color": None}
-    b = {"id": "z", "name": "School"}
-    assert record_leaf("space_zones", a, _no_files) == record_leaf(
-        "space_zones", b, _no_files
+    a = {"id": "s", "content": "School run", "color": None}
+    b = {"id": "s", "content": "School run"}
+    assert record_leaf("stickies", a, _no_files) == record_leaf(
+        "stickies", b, _no_files
     )
 
 
