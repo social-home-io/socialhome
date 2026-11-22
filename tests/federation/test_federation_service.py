@@ -80,7 +80,6 @@ from socialhome.federation.media_https_backoff import (
     MediaPostResult,
 )
 from socialhome.federation.routed_envelope import SpaceRoutedHandler
-from socialhome.federation.sync_manager import SyncSessionManager
 from socialhome.federation.transport import (
     FederationTransport,
     _TransportSendResult,
@@ -2050,81 +2049,6 @@ async def test_send_with_mesh_fallback_returns_failure_when_mesh_not_attached():
 
     assert result.ok is False
     assert result.error == "not_confirmed"
-
-
-# ─── begin_bucket_listing (v_95) ──────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("supports", [True, False])
-async def test_begin_bucket_listing_asks_the_host_over_the_relay(supports):
-    """v_95 sync pages: a ``sync_mode: "buckets"`` BEGIN (page + buckets in
-    the encrypted payload) to a v_95 host, answered over the relay into a
-    requester session; nothing to an older household."""
-    svc, _ = _make_service()
-    sync_manager = MagicMock()
-    sync_manager.register_requester_https_session = MagicMock(return_value=True)
-    svc.attach_sync_manager(sync_manager)
-    send_mock = AsyncMock(return_value=DeliveryResult(instance_id="host-1", ok=True))
-    ref = {"signer": "host-1", "epoch": 1, "seq": 3, "issued_at": 4, "root": "r"}
-    with (
-        patch.object(
-            FederationService, "space_member_supports", AsyncMock(return_value=supports)
-        ),
-        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
-    ):
-        sent = await svc.begin_bucket_listing("sp-1", "host-1", ref, [7, 2], "L1")
-    sync_id = "L1"
-    if not supports:
-        assert sent is False
-        send_mock.assert_not_awaited()
-        return
-    assert sent is True
-    req = sync_manager.record_sync_request.call_args.kwargs
-    assert (req["sync_mode"], req["page_ref"]) == ("buckets", ref)
-    payload = send_mock.call_args.kwargs["payload"]
-    assert payload == {
-        "sync_id": sync_id,
-        "space_id": "sp-1",
-        "sync_mode": "buckets",
-        "prefer_direct": False,
-        "page": ref,
-        "buckets": [7, 2],
-    }
-
-
-@pytest.mark.asyncio
-async def test_a_listing_sessions_chunks_reach_the_receiver():
-    """v_95: the host's ``__listing__`` chunks for a listing session we
-    asked for find the requester session (registered before the BEGIN left)
-    and reach the receiver — also for its sentinel."""
-    svc, _ = _make_service()
-    svc.attach_sync_manager(SyncSessionManager(InMemoryFederationRepo()))
-    receiver = MagicMock()
-    receiver.on_chunk = AsyncMock()
-    svc._space_sync_receiver = receiver
-    send_mock = AsyncMock(return_value=DeliveryResult(instance_id="host-1", ok=True))
-    with (
-        patch.object(
-            FederationService, "space_member_supports", AsyncMock(return_value=True)
-        ),
-        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
-    ):
-        assert await svc.begin_bucket_listing(
-            "sp-1", "host-1", {"root": "r"}, [3], "L1"
-        )
-    for chunk in ("listing-bytes", "sentinel-bytes"):
-        await svc._handle_space_sync_chunk(
-            types.SimpleNamespace(
-                from_instance="host-1",
-                space_id="sp-1",
-                payload={"sync_id": "L1", "chunk": chunk},
-            )
-        )
-    assert [c.args[0] for c in receiver.on_chunk.await_args_list] == [
-        "listing-bytes",
-        "sentinel-bytes",
-    ]
 
 
 # ─── begin_mesh_catchup_sync ──────────────────────────────────────────────

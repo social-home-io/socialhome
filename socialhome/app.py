@@ -2525,7 +2525,6 @@ def _wire_federation_stack(
         receiver=space_sync_receiver,
         scheduler=space_sync_scheduler,
         status=app[K.space_sync_status_key],
-        federation_service=federation_service,
         own_instance_id=identity.instance_id,
     )
     # v_92 — a member household that views a space file it misses asks the
@@ -2671,7 +2670,6 @@ def _build_sync_pages(
     receiver: SpaceSyncReceiver,
     scheduler: SpaceSyncScheduler,
     status: SpaceSyncStatusService,
-    federation_service: FederationService,
     own_instance_id: str,
 ) -> SyncPageService:
     """v_95 sync pages (``docs/protocol/sync-pages.md``): the provider's
@@ -2689,7 +2687,7 @@ def _build_sync_pages(
     )
     provider.attach_sync_pages(pages)
     receiver.attach_sync_pages(pages)
-    scheduler.attach_sync_pages(pages.ref_for)
+    scheduler.attach_sync_pages(pages.ref_for, pages.buckets_for)
     status.attach_pages(pages.position)
 
     async def _hosts(space) -> list[str]:
@@ -2697,12 +2695,9 @@ def _build_sync_pages(
             space_repo, seat_repo, space, own_instance_id=own_instance_id
         )
 
-    # A member whose rows differ from the newest page asks one acting host.
-    pages.attach_sync_requests(
-        hosts=_hosts,
-        request=scheduler.sync_with,
-        listing=federation_service.begin_bucket_listing,
-    )
+    # Unexplained differences are listed by one acting host, on the next
+    # round's BEGIN to it.
+    pages.attach_hosts(_hosts)
     return pages
 
 

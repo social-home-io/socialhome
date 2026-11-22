@@ -67,12 +67,13 @@ No new `FederationEventType`. The new fields are additive, so an older
 household ignores them.
 
 - `SPACE_SYNC_CHUNK` sentinel (`__complete__`): `page_sealed` (Phase 2).
-- `SPACE_SYNC_BEGIN`: `page` (a reference to the requester's newest page,
-  Phase 2); `sync_mode: "buckets"` with `buckets` (≤ 8, Phase 2: listings
-  only, to an acting host; Phase 3 adds `vector_hint`, the rows and any
-  member household), and `page_match` (Phase 3).
-- New in-stream resource, carried in ordinary chunks: `__listing__` (one
-  bucket's rows — identity, leaf, change time; Phase 2).
+- `SPACE_SYNC_BEGIN`: `page` (a reference to the requester's newest page)
+  and `buckets` (≤ 8: the listings the stream should end with; Phase 2 on
+  the incremental BEGIN to an acting host). Phase 3 adds `vector_hint`,
+  the rows, a BEGIN to any member household, and `page_match`.
+- New in-stream resource, carried in ordinary chunks right before the
+  sentinel: `__listing__` (one bucket's rows — identity, leaf, change
+  time; Phase 2).
 
 ## 1. Log or state? (decision)
 
@@ -316,11 +317,12 @@ sequenceDiagram
     autonumber
     participant M as Member
     participant H as Host (signer)
-    M->>H: SPACE_SYNC_BEGIN (incremental, have_seq,<br/>page = {signer, epoch, seq, root} held)
+    M->>H: SPACE_SYNC_BEGIN (incremental, have_seq,<br/>page = {signer, epoch, seq, issued_at, root} held,<br/>buckets = the last compare's unexplained ones, ≤ 8)
     Note over H: space changed since the stored page<br/>and page ≥ 15 min old → seal in the background
     H->>M: chunks (if anything changed)
+    H->>M: __listing__ chunks (only for asked buckets)
     H->>M: sentinel __complete__ + page_sealed<br/>(only when newer than M's page)
-    Note over M: verify page → apply delta to the stored vector<br/>→ check root → store → status
+    Note over M: verify page → apply delta to the stored vector<br/>→ check root → store → compare (≤ 1 / 15 min)<br/>listings → verify vs signed buckets → classify vs rows now → status
     M->>H: SPACE_SYNC_COMPLETE (clean)
 ```
 
@@ -609,64 +611,67 @@ What shipped, where it is more exact than the design above:
   2. **Listings only for unexplained buckets**, at most
      `MAX_LISTING_BUCKETS` = 8 per compare; the rest stay unresolved until
      the next page. They are asked of ONE household acting as host (the
-     signer if it is one, else the first) — see *Bucket listings* below.
-  3. **Classify** each listed row against our rows of that bucket: listed
+     signer if it is one, else the first) on the **next round's** BEGIN to
+     it — see *Bucket listings* below. Never a BEGIN of its own.
+  3. **Classify**, on that round's sentinel and against our rows read
+     then (the round's own rows applied — a row the same stream delivered
+     is not missing), each listed row: listed
      and absent here → **missing**, unless we hold its tombstone or its
      archived copy, or its post is deleted (gone after the page → ahead);
      listed with another leaf → **missing** unless our change time is newer
      than the listed one (→ ahead); a row of ours not listed was created
      after the page → ahead.
-  4. Only a **proven missing** row makes `match: false` (state `behind`)
-     and sends the ONE incremental BEGIN (`SpaceSyncScheduler.sync_with`).
-     The next compare comes only with the next page — no loop.
-- **Bucket listings — the general shape (Phase 3 reuses it).** The member
-  sends `SPACE_SYNC_BEGIN` with `sync_mode: "buckets"`, `prefer_direct:
-  false`, `page` (the page it holds) and `buckets` (≤ 8 indices), all in
-  the encrypted payload (`FederationService.begin_bucket_listing`, only to
-  a household at v_95). The provider answers over the relay with
-  `__listing__` chunks under the space content key (the chunk AAD) and the
-  sentinel — no rows, no watermark, no media
-  (`SpaceSyncService._stream_listings`); only to a member household (a
-  writer seat). A `buckets` session has its own budget at the provider —
-  4 per hour per (household, space), `LISTING_RATE_LIMIT_PER_HOUR` — so it
-  never spends the 5/h stream budget a catch-up needs (and a busy catch-up
-  never starves it); nor does it count against the 3 concurrent streams
-  per household (streams left by a requester's restart would otherwise
-  block it for up to 30 minutes). The node-wide session cap still applies.
-  The requester remembers the session before its BEGIN leaves (a fast path
-  may answer first). Each record is `{i, held: true, rows: [[resource, row_id,
-  leaf, change_time], …]}` or `{i, held: false}`: a provider lists a bucket
-  as of the page only when its own rows of it still hash to the
-  requester's page (the same page it holds). A bucket changed since the
-  page cannot be proven (no leaf cache); a provider that acts as the
-  space's host then lists it **as it is now** — `{i, held: false, current:
-  true, rows}` — which the requester classifies without the page check:
-  it asked an acting host, whose stream it takes unchecked anyway. Any
-  other provider (Phase 3) answers `{i, held: false}` and the bucket stays
-  unresolved. A delete on the host shows in its tombstone's bucket, not in
-  a current listing, so a delete we missed is not counted missing there
-  (the 30-min sync heals it). The requester takes listings only
-  for a session it asked for, from the household it asked; a listing must
-  hash to the page's signed bucket, name only rows of that bucket and
-  committed resources, and stay within 4 096 rows — otherwise the whole
-  answer is refused (WARNING) and those buckets stay unresolved. Phase 3
-  adds: from any member household, and the rows themselves.
+  4. Only a **proven missing** row makes `match: false` (state
+     `behind`). No extra BEGIN: the rounds go on anyway, and a row lost
+     below the provider's watermark would not come back on an incremental
+     stream either — the daily full anti-entropy stream (or Phase 3's
+     verified fetch) heals it. The next compare comes only with the next
+     page — no loop.
+- **Bucket listings — the general shape (Phase 3 reuses it).** A listing
+  rides the normal §25.6 round: the member's incremental `SPACE_SYNC_BEGIN`
+  to the acting host (periodic, or Sync now) carries `buckets` (≤ 8
+  indices) next to `page`, both in the encrypted payload, only to a
+  household at v_95 (`SpaceSyncScheduler._page_fields_for`; also on the
+  mesh BEGIN and the relay re-BEGIN after an ICE timeout). The provider
+  streams the round as usual and appends one `__listing__` chunk per ≤ 8 KB
+  of listing records right before the sentinel, under the space content
+  key (the chunk AAD), counted in the sentinel's `chunk_count`
+  (`SpaceSyncService._listing_chunks`); only to a member household (a
+  writer seat). No session kind, budget or session-cap rule of its own:
+  the round's admission rules apply. Each record is `{i, held: true,
+  rows: [[resource, row_id, leaf, change_time], …]}` or `{i, held:
+  false}`: a provider lists a bucket as of the page only when its own rows
+  of it still hash to the requester's page (the same page it holds). A
+  bucket changed since the page cannot be proven (no leaf cache); a
+  provider that acts as the space's host then lists it **as it is now** —
+  `{i, held: false, current: true, rows}` — which the requester classifies
+  without the page check: it asked an acting host, whose stream it takes
+  unchecked anyway. Any other provider (Phase 3) answers `{i, held:
+  false}` and the bucket stays unresolved. A delete on the host shows in
+  its tombstone's bucket, not in a current listing, so a delete we missed
+  is not counted missing there (the 30-min sync heals it). The requester
+  takes listings only from the household its BEGIN asked, for a space it
+  asked about; a listing must hash to the page's signed bucket (unless
+  `current`), name only rows of that bucket and committed resources, and
+  stay within 4 096 rows — otherwise the whole answer is refused (WARNING)
+  and those buckets stay unresolved. A round that brings no listing (an
+  older host) keeps them asked for the next round. After a restart the
+  lost verdict is rebuilt: the held page is compared again and the next
+  round asks. Phase 3 adds: the same `buckets` on a BEGIN to any member
+  household, and the rows themselves.
 - **Accepted gap.** A missing row that shares a bucket with a row we
   changed after the page stays hidden (the bucket is explained) until a
   later page or the 30-min sync heals it. Change times come from the
   authors' clocks, so a clock far ahead can hide a bucket the same way.
 - **Cost.** Normally ≈ 0 on the wire: every differing bucket of a busy
-  member is explained locally. Per unexplained bucket ≈ 6 KB of listing
-  (50 000 rows: ≈ 195 rows per bucket × ~32 B, base64 and JSON);
-  ≤ 8 per compare ≈ 50 KB; at most one compare per 15 min per member and
-  space, and only on a mismatch. The provider pays one export of the
-  space per listing request (as a seal: ~6 s at 50 000 rows, see
-  *Measured*).
+  member is explained locally. Otherwise the listing adds ≤ 8 × ~6 KB
+  (50 000 rows: ≈ 195 rows per bucket × ~32 B, base64 and JSON; ≤ 50 KB)
+  to a round that runs anyway — no extra round trip, no extra BEGIN; at
+  most one compare per 15 min per member and space, and only on a
+  mismatch. The provider pays one export of the space for that round's
+  listing (as a seal: ~6 s at 50 000 rows, see *Measured*).
 - **Status** (`GET /api/spaces/{id}` `sync.page`, also in the
-  `space.sync_state` frame): `{seq, at, signer_role, applied, match,
-  differing_buckets, conflict}`. `applied` — we applied a clean stream from
-  the page's signer at or past its `seq` (`space_instances.applied_seq`;
-  `null` when that signer is not one of our acting hosts). Rules
+  `space.sync_state` frame). Rules
   (`domain/space_sync_page.state_with_page`): a running stream stays
   **catching up**; `match: true` (nothing missing: no unexplained
   bucket, or every listing showed none) → **up to date**, also while the
@@ -676,10 +681,8 @@ What shipped, where it is more exact than the design above:
   signer_role, match, missing, differing_buckets, conflict}`: `missing` —
   rows proven missing (`0` with a match); `differing_buckets` — buckets
   that differ at all, being ahead included. (SPA copy for these is a
-  separate UX step.) Not compared yet: `applied` →
-  **up to date**; a newer page than we applied → **catching up** while the
-  host answers, **behind** while it is silent. No page (an older host):
-  the answer-based status, unchanged.
+  separate UX step.) No page (an older host): the answer-based status,
+  unchanged.
   `signer_role` is `owner` when `signer` names the owner; it is a label any
   seed holder could set.
 - **Measured** (x86 dev machine, real SQLite with every migration, the

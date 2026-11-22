@@ -19956,13 +19956,32 @@ def _verify_sync_page(state: dict) -> list[str]:
         )
         return ((detail or {}).get("sync") or {}).get("page") if s == 200 else None
 
-    # A compare that needs bucket listings waits on a round trip to b, which
-    # may still be re-establishing its link to a restarted a: up to 4 min.
+    # Reading the status starts a's compare. A difference it cannot explain
+    # locally is listed by b on the NEXT round (``buckets`` on a's BEGIN, no
+    # BEGIN of its own): once the compare is in (``differing_buckets`` set)
+    # and the verdict still open, "Sync now" is that round. Waits on the
+    # status; up to 4 min (b may be re-establishing its link to a
+    # restarted a).
     deadline = time.monotonic() + 240.0
     sync_page = _status_page()
+    next_round = 0.0
+    rounds = 0
     while (
         not sync_page or sync_page.get("match") is None
     ) and time.monotonic() < deadline:
+        if (
+            sync_page
+            and sync_page.get("differing_buckets") is not None
+            and rounds < 2
+            and time.monotonic() >= next_round
+        ):
+            _request(
+                f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/sync",
+                token=a["token"],
+                method="POST",
+            )
+            rounds += 1
+            next_round = time.monotonic() + 45.0
         time.sleep(1.0)
         sync_page = _status_page()
     if not sync_page or sync_page.get("seq") < page.seq:

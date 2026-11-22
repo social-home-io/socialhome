@@ -932,9 +932,6 @@ class SpaceSyncService:
         logged, not re-raised. Callers rely on the session record's
         task slot to cancel this if the channel dies.
         """
-        if getattr(session, "sync_mode", "") == "buckets":
-            await self._stream_listings(session)
-            return
         sync_id = session.sync_id
         space_id = session.space_id
         consecutive_failures = 0
@@ -993,6 +990,15 @@ class SpaceSyncService:
                         # discovery window warms the cache right after this.
                         self._close_session(sync_id)
                         return
+            # v_95: the bucket listings the BEGIN asked for, right before
+            # the sentinel (the requester classifies on it, after this
+            # stream's rows are applied).
+            async for envelope in self._listing_chunks(session, indexed, record_limit):
+                chunk_count += 1
+                if await self._send_chunk(session, envelope, waits):
+                    session.touch()
+                else:
+                    any_failure = True
             sentinel = await self._builder.build_sentinel(
                 space_id=space_id,
                 sync_id=sync_id,
@@ -1054,72 +1060,55 @@ class SpaceSyncService:
             # stream died is garbage, and holding it blocks the retry.
             self._close_session(sync_id)
 
-    async def _stream_listings(self, session: SyncSessionRecord) -> None:
-        """A ``sync_mode: "buckets"`` session (v_95, sync pages): the bucket
-        listings the requester asked for, as ``__listing__`` chunks under
-        the content key, then the sentinel — no rows, no watermark, no
-        media. Only to a member household (a writer seat) at
-        ``MIN_FOR_SYNC_PAGES``; anyone else gets the bare sentinel."""
-        session.stream_clean = False
-        session.snapshot_seq = None
-        session.since_seq = None
-        records: list[dict] = []
+    async def _listing_chunks(
+        self,
+        session: SyncSessionRecord,
+        indexed: bool,
+        record_limit: int | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """``__listing__`` chunks for the ``buckets`` the BEGIN named (v_95,
+        sync pages): only to a member household (a writer seat); the page
+        service gates on its version. Nothing when none were asked."""
+        buckets = list(getattr(session, "buckets", None) or [])
+        if (
+            not buckets
+            or self._sync_pages is None
+            or self._member_gate is None
+            or not await self._member_gate(
+                session.space_id, session.requester_instance_id
+            )
+        ):
+            return
         try:
-            allowed = (
-                self._sync_pages is not None
-                and self._member_gate is not None
-                and await self._member_gate(
-                    session.space_id, session.requester_instance_id
-                )
-            )
-            if allowed and self._sync_pages is not None:
-                # The page service gates on the requester's version (a
-                # listing changes no stream record: no sync line).
-                records = await self._sync_pages.listing_records(
-                    space_id=session.space_id,
-                    page_ref=getattr(session, "page_ref", None),
-                    buckets=list(getattr(session, "buckets", None) or []),
-                    requester_version=await self._session_version(session),
-                )
-            waits: dict[str, int] = {}
-            clean = True
-            next_index = _allocator(session)
-            async for envelope in self._builder.build_chunks(
-                exporter=_Listings(records),
+            records = await self._sync_pages.listing_records(
                 space_id=session.space_id,
-                sync_id=session.sync_id,
-                sig_suite=self._sig_suite,
-                next_index=next_index,
-            ):
-                if await self._send_chunk(session, envelope, waits):
-                    session.touch()
-                else:
-                    clean = False
-            sentinel = await self._builder.build_sentinel(
-                space_id=session.space_id,
-                sync_id=session.sync_id,
-                sig_suite=self._sig_suite,
-                chunk_count=int(getattr(session, "next_chunk_index", 0)),
+                page_ref=getattr(session, "page_ref", None),
+                buckets=buckets,
+                requester_version=await self._session_version(session),
             )
-            log.info(
-                "sync %s: %d bucket listing(s) of space %s to %s (%s, %s)",
-                session.sync_id,
-                len(records),
-                session.space_id,
-                session.requester_instance_id,
-                getattr(session, "transport_mode", "?"),
-                "sent" if clean else "a chunk failed",
-            )
-            session.stream_clean = clean
-            if not (await self._send(session, sentinel)).ok:
-                session.stream_clean = False
-        except Exception:  # pragma: no cover — fail-soft
+        except Exception:
             log.exception(
                 "sync %s: listings of space %s failed",
                 session.sync_id,
                 session.space_id,
             )
-            self._close_session(session.sync_id)
+            return
+        log.info(
+            "sync %s: %d bucket listing(s) of space %s to %s",
+            session.sync_id,
+            len(records),
+            session.space_id,
+            session.requester_instance_id,
+        )
+        async for envelope in self._builder.build_chunks(
+            exporter=_Listings(records),
+            space_id=session.space_id,
+            sync_id=session.sync_id,
+            sig_suite=self._sig_suite,
+            next_index=_allocator(session) if indexed else None,
+            max_record_bytes=record_limit,
+        ):
+            yield envelope
 
     async def _plan(self, session: SyncSessionRecord) -> list[ResourceExporter]:
         """The exporters this session streams, in :data:`RESOURCE_ORDER`,

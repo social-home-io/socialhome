@@ -975,6 +975,7 @@ def _solicited(svc, *, provider="peer-1", space_id="sp"):
             have_seq=41,
             roster_digest=None,
             page_ref=None,
+            buckets=None,
         ),
     )
 

@@ -74,6 +74,7 @@ class _FakeFederation:
         self.request_digests: list[dict | None] = []
         #: The v_95 ``page`` recorded with each request (relay retry).
         self.request_pages: list[dict | None] = []
+        self.request_buckets: list[list[int] | None] = []
 
     async def space_member_supports(self, instance_id, *, min_version):
         self.version_asks.append((instance_id, min_version))
@@ -89,6 +90,7 @@ class _FakeFederation:
         have_seq=None,
         roster_digest=None,
         page_ref=None,
+        buckets=None,
     ):
         """A requester notes the sync_id it is about to ask for, so the
         provider's SPACE_SYNC_OFFER can be recognised as an answer."""
@@ -97,6 +99,7 @@ class _FakeFederation:
         )
         self.request_digests.append(roster_digest)
         self.request_pages.append(page_ref)
+        self.request_buckets.append(buckets)
 
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
@@ -709,6 +712,7 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
             "mod_held": None,
             "roster_digest": None,
             "page_ref": None,
+            "buckets": None,
         },
         {
             "dir_seq": None,
@@ -717,6 +721,7 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
             "mod_held": None,
             "roster_digest": None,
             "page_ref": None,
+            "buckets": None,
         },
     ]
     # The startup sweep sends it only for the directory echo.
@@ -1305,33 +1310,6 @@ async def test_a_deferred_sync_keeps_its_mode(bus, queue, sync_manager, monkeypa
         await queue.stop()
     (begin,) = fed.sent
     assert begin["payload"]["sync_mode"] == "incremental"
-
-
-async def test_a_refused_bucket_listing_is_never_asked_again_as_a_sync(
-    bus, queue, sync_manager, monkeypatch
-):
-    """v_95: a ``buckets`` session is the page service's to ask (with its
-    buckets) — a refusal is not a sync owed; the next compare asks again."""
-    monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 0.01)
-    fed = _FakeFederation(confirmed={"host"})
-    sched = _plain_sched(bus, queue, sync_manager, fed)
-    sched.wire()
-    await queue.start()
-    try:
-        await bus.publish(
-            SpaceSyncDeferred(
-                space_id="sp",
-                provider_instance_id="host",
-                sync_mode="buckets",
-                sync_id="L1",
-                reason="too_many_sessions",
-            )
-        )
-        await asyncio.sleep(0.2)
-    finally:
-        await sched.stop()
-        await queue.stop()
-    assert fed.sent == []
 
 
 def _many_spaces_sched(bus, queue, sync_manager, fed, n: int):
@@ -2463,6 +2441,7 @@ async def test_a_capped_mesh_only_host_still_gets_the_incremental_begin(
             "mod_held": None,
             "roster_digest": None,
             "page_ref": None,
+            "buckets": None,
         }
     ]
     assert sched._mesh_catchup_attempts[("sp-1", "host")] == MAX_MESH_CATCHUP_ATTEMPTS
@@ -2778,20 +2757,6 @@ async def test_a_mesh_only_host_gets_the_moderation_echo_too(bus, queue, sync_ma
     assert fed.mesh_fields[0]["sync_mode"] == "incremental"
 
 
-async def test_sync_with_sends_one_incremental_begin_to_the_named_host(
-    bus, queue, sync_manager
-):
-    """v_95: a sync page our rows do not match asks ONE acting host — a
-    delegated admin too, not only the owner — for an incremental stream."""
-    sched, fed, repo, _asked = _mod_sched(bus, queue, sync_manager, confirmed=False)
-    repo.get = AsyncMock(return_value=_space("sp-1", owner_instance_id="host"))
-    await sched.sync_with("sp-1", "admin-a")
-    assert fed.mesh_catchups == [("sp-1", "admin-a")]
-    assert fed.mesh_fields[0]["sync_mode"] == "incremental"
-    await sched.sync_with("sp-1", "self")  # never ourselves
-    assert len(fed.mesh_catchups) == 1
-
-
 async def test_sync_with_host_is_a_no_op_without_a_remote_host(
     bus, queue, sync_manager
 ):
@@ -3064,7 +3029,10 @@ async def test_begin_carries_our_sync_page_only_to_a_v95_provider(
             raise RuntimeError("boom")
         return ref
 
-    sched.attach_sync_pages(_ref_for)
+    def _buckets_for(space_id, to):
+        return [7] if (space_id, to) == ("sp-1", "owner-o") else None
+
+    sched.attach_sync_pages(_ref_for, _buckets_for)
     await queue.start()
     try:
         for space_id, to in (
@@ -3081,7 +3049,12 @@ async def test_begin_carries_our_sync_page_only_to_a_v95_provider(
         await queue.stop()
     by_key = {(m["payload"]["space_id"], m["to"]): m["payload"] for m in fed.sent}
     assert by_key[("sp-1", "owner-o")]["page"] == ref
+    # v_95: the round asks the listings the last compare left unexplained
+    # (no BEGIN of its own) — only of the household they are asked of.
+    assert by_key[("sp-1", "owner-o")]["buckets"] == [7]
+    assert [7] in fed.request_buckets
     assert "page" not in by_key[("sp-1", "peer-b")]
+    assert "buckets" not in by_key[("sp-1", "peer-b")]
     assert "page" not in by_key[("sp-boom", "owner-o")]
     assert ref in fed.request_pages
     assert (
@@ -3100,9 +3073,10 @@ async def test_a_mesh_begin_carries_our_sync_page(bus, queue, sync_manager):
     async def _ref_for(space_id):
         return ref
 
-    sched.attach_sync_pages(_ref_for)
+    sched.attach_sync_pages(_ref_for, lambda space_id, to: [3])
     await sched._tick_once()
     assert fed.mesh_fields[-1]["page_ref"] == ref
+    assert fed.mesh_fields[-1]["buckets"] == [3]
     sched._mesh_catchup_done.add(("sp-mesh", "host-x"))
     fed.mesh_fields.clear()
     await sched._tick_once()

@@ -27,12 +27,15 @@
   differing bucket in which it holds a row changed after the page is
   explained (it is ahead there). At most :data:`MAX_LISTING_BUCKETS` of the
   unexplained ones are asked of a household acting as host as **bucket
-  listings** (a ``sync_mode: "buckets"`` session — the shape Phase 3 asks
-  any member for): verified against the page's signed bucket hashes, each
-  listed row is classified missing or ahead. Only a proven missing row
-  makes the space ``behind`` and asks for ONE incremental sync.
-* **Listings (provider).** A household holding the page serves a bucket's
-  listing only while its own rows of that bucket still hash to the page.
+  listings** on the next round's BEGIN to it (``buckets``, :meth:`
+  buckets_for` — never a BEGIN of its own; Phase 3 sends the same field to
+  any member): the listings end that round's stream and are verified
+  against the page's signed bucket hashes on its sentinel, and each listed
+  row is classified missing or ahead against our rows read then. Only a
+  proven missing row makes the space ``behind``.
+* **Listings (provider).** A household holding the page lists a bucket as
+  of the page only while its own rows of it still hash to the page; acting
+  as host, it lists a changed bucket as it is now (``current``).
 
 Storage: one ``space_sync_pages`` row per space (migration 0151). Compare
 results, pending listings and conflict flags are memory only.
@@ -43,7 +46,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -62,7 +64,6 @@ from ....sync_page import (
     MAX_LISTING_ROWS,
     PAGE_MIN_INTERVAL_S,
     PAGE_SUITE_SHA256_B256,
-    ListingRow,
     PageRefused,
     SyncPage,
     UnsupportedPageSuite,
@@ -93,7 +94,7 @@ if TYPE_CHECKING:
     from ....domain.space import Space
     from ....repositories.space_sync_page_repo import AbstractSpaceSyncPageRepo
     from .exporter import ResourceExporter
-    from .page_state import PageStateHasher
+    from .page_state import BucketRows, PageStateHasher
 
 log = logging.getLogger(__name__)
 
@@ -104,8 +105,8 @@ MAX_SEALED_PAGE_CHARS: int = 24 * 1024
 #: Spaces whose compare result / conflict flag is remembered.
 MAX_TRACKED: int = 4096
 
-#: Listing sessions we asked for and wait on.
-MAX_PENDING_LISTINGS: int = 64
+#: Rounds per space whose listing records are kept until their sentinel.
+MAX_PENDING_LISTINGS: int = 8
 
 
 class _Spaces(Protocol):
@@ -122,11 +123,6 @@ class _Seqs(Protocol):
     async def current_seq(self) -> int: ...
 
     async def applied_seq(self, space_id: str, instance_id: str) -> int | None: ...
-
-
-#: ``(space_id, host, page_ref, buckets, sync_id) ->`` whether the
-#: ``buckets`` BEGIN went out under that session id.
-ListingRequest = Callable[[str, str, dict, list[int], str], Awaitable[bool]]
 
 
 class _Crypto(Protocol):
@@ -160,44 +156,50 @@ class _Compare:
 
 
 @dataclass(slots=True)
-class _PendingListing:
-    """A listing session we asked for (memory only, bounded)."""
+class _Wanted:
+    """The bucket listings our next BEGIN to *host* asks for (memory only):
+    the page they must hash to and what each round brought."""
 
-    space_id: str
     host: str
     root: bytes
     vector: bytes
-    buckets: frozenset[int]
-    local: dict[int, list[ListingRow]]
-    gone: frozenset[tuple[str, str]]
-    received: list[object] = field(default_factory=list)
+    cutoff: str | None
+    buckets: tuple[int, ...]
+    #: sync_id → the ``__listing__`` records that session brought.
+    received: dict[str, list[object]] = field(default_factory=dict)
 
 
-def _classify(pending: _PendingListing) -> tuple[int, int]:
-    """``(missing rows, unresolved buckets)`` of a finished listing session.
+def _classify(
+    records: list[object],
+    buckets: tuple[int, ...],
+    vector: bytes,
+    local: BucketRows,
+) -> tuple[int, int]:
+    """``(missing rows, unresolved buckets)`` of one round's listings
+    against our rows (*local*, read after that round's rows were applied).
     Raises :class:`PageRefused` for a listing that is malformed, of a bucket
     not asked, repeated, or that does not hash to the signed bucket."""
     seen: set[int] = set()
     missing = 0
     unresolved = 0
-    for raw in pending.received:
+    for raw in records:
         index, rows, current = parse_listing(raw)
-        if index not in pending.buckets or index in seen:
+        if index not in buckets or index in seen:
             raise PageRefused(f"a listing of bucket {index} not asked for")
         seen.add(index)
         if rows is None:
             unresolved += 1
             continue
         if not current:
-            verify_listing(index, rows, pending.vector)
+            verify_listing(index, rows, vector)
         # ``current``: the host's rows as they are now (it changed the
         # bucket since the page) — trusted as its stream is: we only ever
         # ask a household acting as the space's host.
-        mine = {(r.resource, r.row_id): r for r in pending.local.get(index, [])}
+        mine = {(r.resource, r.row_id): r for r in local.rows.get(index, [])}
         for row in rows:
             have = mine.get((row.resource, row.row_id))
             if have is None:
-                if not is_superseded(row.resource, row.row_id, pending.gone):
+                if not is_superseded(row.resource, row.row_id, local.gone):
                     missing += 1
             elif have.leaf != row.leaf and not (
                 have.marker is not None
@@ -205,7 +207,7 @@ def _classify(pending: _PendingListing) -> tuple[int, int]:
             ):
                 missing += 1
         # A row of ours not listed was created after the page: ahead.
-    return missing, unresolved + len(pending.buckets) - len(seen)
+    return missing, unresolved + len(buckets) - len(seen)
 
 
 def _now_ms() -> int:
@@ -228,19 +230,17 @@ class SyncPageService:
         "_crypto",
         "_exporters",
         "_hosts",
-        "_listings",
         "_locks",
         "_monotonic",
         "_on_change",
         "_own_instance_id",
         "_repo",
-        "_request_listing",
-        "_request_sync",
         "_seqs",
         "_sleep",
         "_spaces",
         "_state",
         "_tasks",
+        "_wanted",
     )
 
     def __init__(
@@ -271,12 +271,10 @@ class SyncPageService:
         self._clock_ms = clock_ms
         self._monotonic = monotonic
         self._sleep = sleep
-        #: v_95 compare on a mismatch (:meth:`attach_sync_requests`).
+        #: The households acting as a space's host (:meth:`attach_hosts`).
         self._hosts: Callable[[Space], Awaitable[list[str]]] | None = None
-        self._request_sync: Callable[[str, str], Awaitable[None]] | None = None
-        self._request_listing: ListingRequest | None = None
-        #: sync_id → a listing session we asked for (bounded, oldest out).
-        self._listings: OrderedDict[str, _PendingListing] = OrderedDict()
+        #: space → the listings our next BEGIN to its host asks for.
+        self._wanted: dict[str, _Wanted] = {}
         #: Spaces with a compare pending; space → when it last compared.
         self._comparing: set[str] = set()
         self._compared_at: dict[str, float] = {}
@@ -650,22 +648,11 @@ class SyncPageService:
 
     # ─── Compare (member) ─────────────────────────────────────────────
 
-    def attach_sync_requests(
-        self,
-        *,
-        hosts: Callable[[Space], Awaitable[list[str]]],
-        request: Callable[[str, str], Awaitable[None]],
-        listing: ListingRequest | None = None,
-    ) -> None:
-        """Wire what a mismatch does: ``hosts(space)`` — the households
-        acting as its host here; ``request(space_id, host)`` — one
-        incremental BEGIN to that host (the scheduler's ``sync_with``);
-        ``listing(space_id, host, page_ref, buckets, sync_id)`` — ask that
-        host for the listings of *buckets* (a ``sync_mode: "buckets"`` BEGIN
-        under *sync_id*; whether it went out)."""
+    def attach_hosts(self, hosts: Callable[[Space], Awaitable[list[str]]]) -> None:
+        """``hosts(space)`` — the households acting as the space's host here:
+        the one an unexplained difference is asked of (the signer when it
+        is one of them)."""
         self._hosts = hosts
-        self._request_sync = request
-        self._request_listing = listing
 
     async def _compare_if_unjudged(self, space_id: str) -> None:
         """A sentinel brought no newer page: compare the held page only if
@@ -741,14 +728,11 @@ class SyncPageService:
             vector, _rows = await self._state.vector(space_id, cutoff=page.cutoff)
             differing = differing_buckets(vector, held.row.vector)
             unexplained: list[int] = []
-            gone: set[tuple[str, str]] = set()
-            local: dict[int, list[ListingRow]] = {}
             if differing:
                 scan = await self._state.rows_in(
                     space_id, differing, cutoff=page.cutoff
                 )
                 newer_than = page_time(page)
-                gone = scan.gone
                 for index in differing:
                     rows = scan.rows.get(index, [])
                     if any(
@@ -756,8 +740,21 @@ class SyncPageService:
                     ):
                         continue  # ahead in this bucket
                     unexplained.append(index)
-                    local[index] = rows
             asked = unexplained[:MAX_LISTING_BUCKETS]
+            host = await self._host_for(space, page.signer) if asked else None
+            self._wanted.pop(space_id, None)
+            if host is not None:
+                # Rides the next incremental BEGIN to that host (periodic or
+                # Sync now) — never a BEGIN of its own.
+                self._wanted[space_id] = _Wanted(
+                    host=host,
+                    root=page.root,
+                    vector=held.row.vector,
+                    cutoff=page.cutoff,
+                    buckets=tuple(asked),
+                )
+                while len(self._wanted) > MAX_TRACKED:
+                    self._wanted.pop(next(iter(self._wanted)))
             result = _Compare(
                 root=page.root,
                 differing=len(differing),
@@ -768,16 +765,15 @@ class SyncPageService:
             self._remember(space_id, result)
             log.info(
                 "sync page: space %s against page %d: %d bucket(s) differ, %d "
-                "unexplained (%.2f s)",
+                "unexplained (%.2f s)%s",
                 space_id,
                 page.seq,
                 len(differing),
                 len(unexplained),
                 time.perf_counter() - started,
+                f"; the next round to {host} lists {len(asked)}" if host else "",
             )
             await self._changed(space_id)
-            if asked:
-                await self._ask_listing(space, held, asked, local, gone)
             return result
         except Exception:
             log.exception("sync page: comparing space %s failed", space_id)
@@ -797,96 +793,53 @@ class SyncPageService:
             return None
         return signer if signer in hosts else hosts[0]
 
-    async def _ask_listing(
-        self,
-        space: Space,
-        held: _Held,
-        buckets: list[int],
-        local: dict[int, list[ListingRow]],
-        gone: set[tuple[str, str]],
-    ) -> None:
-        if self._request_listing is None:
-            return
-        try:
-            host = await self._host_for(space, held.page.signer)
-        except Exception:
-            log.exception("sync page: no host to ask for %s", space.id)
-            return
-        if host is None:
-            return
-        # Remembered BEFORE the BEGIN goes out: over a fast path the answer
-        # can arrive before the request call returns.
-        sync_id = uuid.uuid4().hex
-        self._listings[sync_id] = _PendingListing(
-            space_id=space.id,
-            host=host,
-            root=held.page.root,
-            vector=held.row.vector,
-            buckets=frozenset(buckets),
-            local={i: local.get(i, []) for i in buckets},
-            gone=frozenset(gone),
-        )
-        while len(self._listings) > MAX_PENDING_LISTINGS:
-            self._listings.popitem(last=False)
-        try:
-            sent = await self._request_listing(
-                space.id, host, held.page.ref(), buckets, sync_id
-            )
-        except Exception:
-            log.exception("sync page: asking for listings of %s failed", space.id)
-            sent = False
-        if not sent:
-            self._listings.pop(sync_id, None)
-            log.info(
-                "sync page: could not ask %s for listings of space %s", host, space.id
-            )
-            return
-        log.info(
-            "sync page: asked %s for %d bucket listing(s) of space %s (session %s)",
-            host,
-            len(buckets),
-            space.id,
-            sync_id,
-        )
+    def buckets_for(self, space_id: str, to_instance_id: str) -> list[int] | None:
+        """``buckets`` for our next BEGIN of *space_id* to *to_instance_id*:
+        the unexplained buckets of the last compare, when it is the host
+        they are asked of; else ``None``."""
+        wanted = self._wanted.get(space_id)
+        if wanted is None or wanted.host != to_instance_id:
+            return None
+        return list(wanted.buckets)
 
     async def take_listing(
         self, *, space_id: str, sync_id: str, provider: str, records: object
     ) -> None:
-        """``__listing__`` chunk records of a session WE asked for, from the
-        household we asked. Anything else is dropped."""
-        pending = self._listings.get(sync_id)
-        if (
-            pending is None
-            or pending.space_id != space_id
-            or pending.host != provider
-            or not isinstance(records, list)
-        ):
+        """``__listing__`` chunk records from the household our BEGIN asked
+        (bounded). Anything else is dropped."""
+        wanted = self._wanted.get(space_id)
+        if wanted is None or wanted.host != provider or not isinstance(records, list):
             log.info(
-                "sync page: listing chunk of session %s from %s dropped (%s)",
+                "sync page: listing chunk of session %s from %s dropped (not asked)",
                 sync_id,
                 provider,
-                "not asked" if pending is None else "not from the household asked",
             )
             return
-        pending.received.extend(records[: MAX_LISTING_BUCKETS - len(pending.received)])
+        got = wanted.received.setdefault(sync_id, [])
+        got.extend(records[: MAX_LISTING_BUCKETS - len(got)])
+        while len(wanted.received) > MAX_PENDING_LISTINGS:
+            wanted.received.pop(next(iter(wanted.received)))
 
     async def listing_done(self, *, space_id: str, sync_id: str, provider: str) -> None:
-        """The listing session's sentinel: verify every listing against the
-        page's signed buckets and classify the rows. A missing row makes
-        the space ``behind`` and asks the host for ONE incremental sync."""
-        pending = self._listings.get(sync_id)
-        if pending is None or pending.space_id != space_id or pending.host != provider:
-            if pending is not None:
-                log.info(
-                    "sync page: the end of listing session %s from %s ignored "
-                    "(not the household asked)",
-                    sync_id,
-                    provider,
-                )
+        """The sentinel of a round that carried our listings: read our rows
+        of those buckets NOW (the round's rows are applied — a row it just
+        delivered is no longer missing), verify each listing against the
+        page's signed bucket and classify. A round without listings (an
+        older host, or our BEGIN did not ask) changes nothing."""
+        wanted = self._wanted.get(space_id)
+        if wanted is None or wanted.host != provider:
             return
-        self._listings.pop(sync_id, None)
+        records = wanted.received.pop(sync_id, None)
+        if not records:
+            return
+        self._wanted.pop(space_id, None)
         try:
-            missing, unresolved = _classify(pending)
+            local = await self._state.rows_in(
+                space_id, wanted.buckets, cutoff=wanted.cutoff
+            )
+            missing, unresolved = _classify(
+                records, wanted.buckets, wanted.vector, local
+            )
         except PageRefused as exc:
             log.warning(
                 "sync page: refused the listings of space %s from %s: %s",
@@ -894,7 +847,7 @@ class SyncPageService:
                 provider,
                 exc,
             )
-            missing, unresolved = 0, len(pending.buckets)
+            missing, unresolved = 0, len(wanted.buckets)
         log.info(
             "sync page: listings of space %s from %s: %d row(s) missing, %d "
             "bucket(s) unresolved",
@@ -904,22 +857,19 @@ class SyncPageService:
             unresolved,
         )
         check = self._checks.get(space_id)
-        if check is None or check.root != pending.root:
+        if check is None or check.root != wanted.root:
             return  # a newer page came meanwhile; its compare decides
-        result = _Compare(
-            root=check.root,
-            differing=check.differing,
-            unexplained=check.unexplained,
-            missing=missing,
-            unresolved=check.unresolved + unresolved,
+        self._remember(
+            space_id,
+            _Compare(
+                root=check.root,
+                differing=check.differing,
+                unexplained=check.unexplained,
+                missing=missing,
+                unresolved=check.unresolved + unresolved,
+            ),
         )
-        self._remember(space_id, result)
         await self._changed(space_id)
-        if missing and self._request_sync is not None:
-            try:
-                await self._request_sync(space_id, provider)
-            except Exception:
-                log.exception("sync page: asking the host of %s failed", space_id)
 
     # ─── Listings (provider) ──────────────────────────────────────────
 

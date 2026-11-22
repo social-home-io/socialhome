@@ -129,8 +129,7 @@ class SyncRtcSession:
         loop: asyncio.AbstractEventLoop | None = None,
         on_local_ice: Callable[[str, str, str], Awaitable[None]] | None = None,
     ) -> None:
-        # "buckets" (v_95, sync pages): bucket listings over the relay.
-        if sync_mode not in ("initial", "incremental", "full", "buckets"):
+        if sync_mode not in ("initial", "incremental", "full"):
             raise ValueError(f"Invalid sync_mode: {sync_mode!r}")
         if role not in ("provider", "requester"):
             raise ValueError(f"Invalid role: {role!r}")
@@ -568,8 +567,9 @@ class SyncSessionRecord:
     #: sends its own page only when newer. On the requester side, the
     #: ``page`` our BEGIN carried, re-sent by a relay re-BEGIN …
     page_ref: dict | None = None
-    #: … the buckets a ``sync_mode: "buckets"`` session lists (v_95,
-    #: :func:`socialhome.sync_page.parse_bucket_request`) …
+    #: … the buckets whose listings the BEGIN asked for (v_95, sync pages,
+    #: :func:`socialhome.sync_page.parse_bucket_request`); on the requester
+    #: side, those our BEGIN carried, re-sent by a relay re-BEGIN …
     buckets: list[int] | None = None
     #: … the requester's protocol version, read once when the session is
     #: planned (``None``: not yet) — the exporter choice, the shape and the

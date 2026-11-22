@@ -328,6 +328,7 @@ class SpaceSyncScheduler:
         "_status",
         "_stop",
         "_sync_manager",
+        "_sync_page_buckets",
         "_sync_page_ref",
         "_task",
     )
@@ -380,6 +381,7 @@ class SpaceSyncScheduler:
         self._roster_digest: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: v_95 — ``space_id ->`` the sync page we hold (BEGIN ``page``).
         self._sync_page_ref: Callable[[str], Awaitable[dict | None]] | None = None
+        self._sync_page_buckets: Callable[[str, str], list[int] | None] | None = None
         #: v_89 member directory version echo (see :meth:`attach_directory_echo`).
         self._directory_echo: Callable[[str, str], Awaitable[int | None]] | None = None
         #: Moderation queue echo (see :meth:`attach_moderation_echo`).
@@ -517,16 +519,6 @@ class SpaceSyncScheduler:
             return
         await self._sync_with(space, space.owner_instance_id)
 
-    async def sync_with(self, space_id: str, host: str) -> None:
-        """One incremental §25.6 BEGIN to *host* — a household acting as the
-        space's host here (the caller chose it) — now, with every echo a
-        BEGIN carries. v_95: our rows differ from the newest signed sync
-        page. The provider's own BEGIN budget still applies."""
-        space = await self._space_repo.get(space_id)
-        if space is None or space.dissolved:
-            return
-        await self._sync_with(space, host)
-
     async def _sync_with(self, space: Space, host: str) -> None:
         space_id = space.id
         if not host or host == self._own_instance_id:
@@ -611,26 +603,55 @@ class SpaceSyncScheduler:
             return None
 
     def attach_sync_pages(
-        self, ref_for: Callable[[str], Awaitable[dict | None]]
+        self,
+        ref_for: Callable[[str], Awaitable[dict | None]],
+        buckets_for: Callable[[str, str], list[int] | None] | None = None,
     ) -> None:
         """``ref_for(space_id)`` → the sync page we hold for the space, as a
         BEGIN's ``page`` (v_95, ``SyncPageService.ref_for``), or ``None``.
         Carried on every BEGIN path to a provider at ``MIN_FOR_SYNC_PAGES``
-        so it sends its page only when newer than ours."""
+        so it sends its page only when newer than ours. ``buckets_for(
+        space_id, to_instance_id)`` — the buckets whose listings that BEGIN
+        asks for (``SyncPageService.buckets_for``): a listing rides the
+        round, never a BEGIN of its own."""
         self._sync_page_ref = ref_for
+        self._sync_page_buckets = buckets_for
 
     async def _page_ref_for(self, space_id: str, to_instance_id: str) -> dict | None:
+        fields = await self._page_fields_for(space_id, to_instance_id)
+        return fields.get("page")
+
+    async def _page_fields_for(self, space_id: str, to_instance_id: str) -> dict:
+        """v_95 fields of a BEGIN to *to_instance_id*: ``page`` (the page we
+        hold) and ``buckets`` (listings asked of that household). Only to a
+        household at ``MIN_FOR_SYNC_PAGES``."""
         if self._sync_page_ref is None:
-            return None
+            return {}
         try:
             if not await self._federation.space_member_supports(
                 to_instance_id, min_version=FederationCapability.MIN_FOR_SYNC_PAGES
             ):
-                return None
-            return await self._sync_page_ref(space_id)
+                return {}
+            out: dict = {}
+            ref = await self._sync_page_ref(space_id)
+            if ref is not None:
+                out["page"] = ref
+                buckets = (
+                    self._sync_page_buckets(space_id, to_instance_id)
+                    if self._sync_page_buckets is not None
+                    else None
+                )
+                if buckets:
+                    out["buckets"] = buckets
+            return out
         except Exception:
-            log.exception("sync page reference for %s failed", space_id)
-            return None
+            log.exception("sync page fields for %s failed", space_id)
+            return {}
+
+    async def _mesh_page_fields(self, space_id: str, host: str) -> dict:
+        """:meth:`_page_fields_for` as ``begin_mesh_catchup_sync`` keywords."""
+        fields = await self._page_fields_for(space_id, host)
+        return {"page_ref": fields.get("page"), "buckets": fields.get("buckets")}
 
     def attach_mesh_announce(self, announce: Callable[[str], Awaitable[bool]]) -> None:
         """``announce(instance_id)`` → ``True`` once nothing more is needed
@@ -727,7 +748,7 @@ class SpaceSyncScheduler:
             # Every member BEGIN to the host carries the digest: one without
             # it from this version asks for no roster repair.
             roster_digest=await self._roster_digest_for(event.space_id, owner),
-            page_ref=await self._page_ref_for(event.space_id, owner),
+            **await self._mesh_page_fields(event.space_id, owner),
         )
 
     async def _on_inviter_reproof_due(self, event: SpaceInviterReproofDue) -> None:
@@ -830,10 +851,6 @@ class SpaceSyncScheduler:
             except Exception:  # pragma: no cover — defensive
                 log.exception("noting the host's deferral failed")
         if event.reason == "rate_limited":
-            return
-        if event.sync_mode == "buckets":
-            # v_95 bucket listings are the page service's to ask (with its
-            # buckets); the next compare asks again — never a sync owed.
             return
         key = (event.space_id, event.provider_instance_id)
         attempts = self._deferred_attempts.get(key, 0)
@@ -1065,7 +1082,8 @@ class SpaceSyncScheduler:
                 sync_mode=sync_mode,
             )
             roster_digest = await self._roster_digest_for(space_id, peer_instance_id)
-            page_ref = await self._page_ref_for(space_id, peer_instance_id)
+            page_fields = await self._page_fields_for(space_id, peer_instance_id)
+            page_ref = page_fields.get("page")
             # Record what we are asking for, so the provider's
             # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An
             # offer for a sync_id nobody here issued is refused. The mode
@@ -1079,6 +1097,7 @@ class SpaceSyncScheduler:
                 have_seq=fields.get("have_seq"),
                 roster_digest=roster_digest,
                 page_ref=page_ref,
+                buckets=page_fields.get("buckets"),
             )
             payload: dict = {
                 "sync_id": sync_id,
@@ -1097,8 +1116,7 @@ class SpaceSyncScheduler:
                 payload["roster_echo"] = roster_echo
             if roster_digest is not None:
                 payload["roster_digest"] = roster_digest
-            if page_ref is not None:
-                payload["page"] = page_ref
+            payload.update(page_fields)
             dir_seq = await self._directory_echo_for(space_id, peer_instance_id)
             if dir_seq is not None:
                 payload["dir_seq"] = dir_seq
@@ -1455,7 +1473,7 @@ class SpaceSyncScheduler:
                     ),
                     dir_seq=dir_seq,
                     roster_digest=await self._roster_digest_for(space.id, host),
-                    page_ref=await self._page_ref_for(space.id, host),
+                    **await self._mesh_page_fields(space.id, host),
                 )
             except Exception:  # pragma: no cover — begin_* is fail-soft
                 log.exception(
@@ -1506,7 +1524,7 @@ class SpaceSyncScheduler:
                     else None
                 ),
                 roster_digest=await self._roster_digest_for(space.id, host),
-                page_ref=await self._page_ref_for(space.id, host),
+                **await self._mesh_page_fields(space.id, host),
             )
         except Exception:  # pragma: no cover — fail-soft
             log.debug("mesh incremental BEGIN failed", exc_info=True)

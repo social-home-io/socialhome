@@ -15,7 +15,6 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.sync_manager import (
     ALLOWED_RESOURCES,
-    LISTING_RATE_LIMIT_PER_HOUR,
     MAX_ACTIVE_SESSIONS_PER_INSTANCE,
     MAX_INSTANCE_SYNC_STATUS_SPACES,
     MAX_PENDING_REQUESTS,
@@ -246,18 +245,6 @@ async def test_begin_session_blocks_at_concurrent_cap_s6():
     )
     assert blocked.accepted is False
     assert blocked.reason == "too_many_sessions"
-    # v_95: a bucket-listing session is short and has its own hourly budget:
-    # streams holding every slot (e.g. orphaned by a requester's restart)
-    # never block it. The node-wide cap still applies.
-    listing = await mgr.begin_session(
-        sync_id="L1",
-        space_id="sp-0",
-        requester_instance_id="alice",
-        provider_instance_id="me",
-        sync_mode="buckets",
-        buckets=[1],
-    )
-    assert listing.accepted is True
 
 
 @pytest.mark.parametrize("have_seq", [None, 0, 17])
@@ -1075,22 +1062,6 @@ async def test_begin_session_records_the_requesters_sync_page():
     assert mgr.get_session("s-page").page_ref == ref
 
 
-def test_bucket_listings_have_their_own_hourly_budget():
-    """v_95: a ``buckets`` session (bucket listings, at most one compare per
-    15 min) never spends the 5/h stream budget a household needs to catch
-    up, and has its own: 4/h per (household, space)."""
-    mgr = SyncSessionManager(_FakeFedRepo())
-    for i in range(5):
-        assert mgr.check_sync_begin_rate("alice", "sp-1", now=100 + i) is True
-    assert mgr.check_sync_begin_rate("alice", "sp-1", now=110) is False
-    for i in range(LISTING_RATE_LIMIT_PER_HOUR):
-        assert mgr.check_sync_begin_rate(
-            "alice", "sp-1", now=120 + i, sync_mode="buckets"
-        )
-    assert not mgr.check_sync_begin_rate("alice", "sp-1", now=130, sync_mode="buckets")
-    assert mgr.check_sync_begin_rate("alice", "sp-1", now=3800, sync_mode="buckets")
-
-
 async def test_begin_session_records_the_asked_buckets():
     mgr = SyncSessionManager(_FakeFedRepo())
     await mgr.begin_session(
@@ -1098,11 +1069,40 @@ async def test_begin_session_records_the_asked_buckets():
         space_id="sp-1",
         requester_instance_id="alice",
         provider_instance_id="me",
-        sync_mode="buckets",
+        sync_mode="incremental",
         buckets=[3, 9],
     )
-    session = mgr.get_session("s-b")
-    assert (session.sync_mode, session.buckets) == ("buckets", [3, 9])
+    assert mgr.get_session("s-b").buckets == [3, 9]
+
+
+async def test_the_relay_retry_carries_the_asked_buckets():
+    """v_95: the relay re-BEGIN after an ICE timeout asks for the same
+    bucket listings the first BEGIN did."""
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        sync_mode="incremental",
+        buckets=[5, 2],
+    )
+    pending = mgr.pending_sync_request("s1")
+    assert pending.buckets == [5, 2]
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode=pending.sync_mode,
+            buckets=pending.buckets,
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    assert decision.next_payload["buckets"] == [5, 2]
 
 
 # ─── Sync status: is a stream of a space arriving? ─────────────────────────

@@ -148,7 +148,7 @@ class _ListingPages(_FakePages):
         return [{"i": b, "held": False} for b in kwargs["buckets"]]
 
 
-async def _listing_session(provider, *, version=95, member=True):
+async def _listing_session(provider, *, version=95, member=True, buckets=(4, 9)):
     pages = _ListingPages()
     provider.attach_sync_pages(pages)
 
@@ -156,35 +156,42 @@ async def _listing_session(provider, *, version=95, member=True):
         return member
 
     provider.attach_member_gate(gate)
-    session = _FakeSession(sync_mode="buckets")
+    session = _FakeSession(sync_mode="incremental")
     session.peer_version = version
     session.page_ref = {"root": b"\x01" * 32}
-    session.buckets = [4, 9]
+    session.buckets = list(buckets)
     await provider.stream_initial(session)
     frames = [orjson.loads(f) for f in session.rtc.sent]
     return pages, session, frames
 
 
-async def test_a_buckets_session_streams_only_its_listings(provider):
-    """v_95: a ``sync_mode: "buckets"`` session answers with the asked
-    buckets' listings as ``__listing__`` chunks under the content key, then
-    the sentinel — no rows, no watermark."""
-    pages, session, frames = await _listing_session(provider)
-    assert [f["resource"] for f in frames] == ["__listing__", "__complete__"]
-    plain = orjson.loads(base64.urlsafe_b64decode(frames[0]["encrypted_payload"]))
+async def test_the_listings_ride_the_stream_before_its_sentinel(provider):
+    """v_95: the ``buckets`` a BEGIN names come back as ``__listing__``
+    chunks (under the content key) at the end of that same stream, right
+    before the sentinel, counted with its chunks."""
+    pages, _session, frames = await _listing_session(provider)
+    resources = [f["resource"] for f in frames]
+    assert resources[-2:] == ["__listing__", "__complete__"]
+    assert sorted(resources[:-2]) == ["members", "posts"]
+    plain = orjson.loads(base64.urlsafe_b64decode(frames[-2]["encrypted_payload"]))
     assert plain["records"] == [{"i": 4, "held": False}, {"i": 9, "held": False}]
-    assert pages.calls[-1]["buckets"] == [4, 9]
-    assert session.snapshot_seq is None and session.stream_clean is True
-    assert frames[1]["chunk_count"] == 1
+    listing_call = next(c for c in pages.calls if "buckets" in c)
+    assert listing_call["buckets"] == [4, 9]
+    assert frames[-1]["chunk_count"] == len(frames) - 1
 
 
-@pytest.mark.parametrize(("version", "member"), [(94, True), (95, False)])
-async def test_listings_only_for_a_v95_member(provider, version, member):
+@pytest.mark.parametrize(
+    ("version", "member", "buckets"),
+    [(94, True, (4,)), (95, False, (4,)), (95, True, ())],
+)
+async def test_no_listings_for_an_older_household_a_follower_or_none_asked(
+    provider, version, member, buckets
+):
     pages, _session, frames = await _listing_session(
-        provider, version=version, member=member
+        provider, version=version, member=member, buckets=buckets
     )
-    assert [f["resource"] for f in frames] == ["__complete__"]
-    if not member:
+    assert "__listing__" not in [f["resource"] for f in frames]
+    if not member or not buckets:
         assert not any("buckets" in c for c in pages.calls)
 
 

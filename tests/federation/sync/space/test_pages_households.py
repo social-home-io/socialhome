@@ -11,7 +11,6 @@ to the session like ``encrypt_chunk``'s AAD).
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from datetime import UTC, datetime
 
@@ -104,48 +103,43 @@ def _service(
 
 
 class _Wire:
-    """The member's listing requests answered by the real host service, as
-    the ``buckets`` session would (records, then the sentinel)."""
+    """One sync round: the member's BEGIN names the buckets it wants listed
+    (``buckets_for``), the real host service lists them at the end of its
+    stream, the member takes them and classifies on the sentinel."""
 
     def __init__(self, host_pages: SyncPageService) -> None:
         self.host_pages = host_pages
         self.member_pages: SyncPageService | None = None
         self.asks: list[list[int]] = []
-        self.syncs: list[tuple[str, str]] = []
-        self.tasks: list[asyncio.Task] = []
+        self.rounds = 0
 
     async def hosts(self, space) -> list[str]:
         return [HOST]
 
-    async def request_sync(self, space_id: str, host: str) -> None:
-        self.syncs.append((space_id, host))
-
-    async def listing(self, space_id, host, page_ref, buckets, sync_id) -> bool:
-        self.asks.append(list(buckets))
-        # Answered at once — before this call returns, as a fast path can.
-        await self._answer(sync_id, page_ref, buckets)
-        return True
-
-    async def _answer(self, sync_id, page_ref, buckets) -> None:
-        records = await self.host_pages.listing_records(
-            space_id=SPACE,
-            page_ref=parse_page_ref(page_ref),
-            buckets=buckets,
-            requester_version=95,
-        )
-        wire = orjson.loads(orjson.dumps(records))
+    async def round(self) -> None:
+        """The next round to the host (periodic or Sync now)."""
         assert self.member_pages is not None
-        await self.member_pages.take_listing(
-            space_id=SPACE, sync_id=sync_id, provider=HOST, records=wire
-        )
+        await self.member_pages.wait_idle()
+        buckets = self.member_pages.buckets_for(SPACE, HOST)
+        self.rounds += 1
+        sync_id = f"R{self.rounds}"
+        if buckets:
+            self.asks.append(list(buckets))
+            records = await self.host_pages.listing_records(
+                space_id=SPACE,
+                page_ref=parse_page_ref(await self.member_pages.ref_for(SPACE)),
+                buckets=buckets,
+                requester_version=95,
+            )
+            await self.member_pages.take_listing(
+                space_id=SPACE,
+                sync_id=sync_id,
+                provider=HOST,
+                records=orjson.loads(orjson.dumps(records)),
+            )
         await self.member_pages.listing_done(
             space_id=SPACE, sync_id=sync_id, provider=HOST
         )
-
-    async def settle(self) -> None:
-        while self.tasks:
-            await self.tasks.pop()
-        assert self.member_pages is not None
         await self.member_pages.wait_idle()
 
 
@@ -162,9 +156,7 @@ async def pair(homes):  # noqa: F811
     member_pages = _service(member, MEMBER, None, clock)
     wire = _Wire(host_pages)
     wire.member_pages = member_pages
-    member_pages.attach_sync_requests(
-        hosts=wire.hosts, request=wire.request_sync, listing=wire.listing
-    )
+    member_pages.attach_hosts(wire.hosts)
     yield host, member, host_pages, member_pages, clock, wire
 
 
@@ -224,9 +216,9 @@ async def test_a_page_round_trips_and_the_member_matches_it(pair):
 
 async def test_a_missing_row_is_proven_by_the_hosts_listing(pair):
     """The host holds a post the member never got (created before the page,
-    so no newer row of ours explains its bucket): the member asks the host
-    for that one bucket's listing, which proves the row missing — behind,
-    one incremental BEGIN. A stream watermark past the page changes nothing
+    so no newer row of ours explains its bucket): the next round asks the
+    host for that one bucket's listing, which proves the row missing —
+    behind. A stream watermark past the page changes nothing
     (the old shortcut is gone)."""
     host, member, host_pages, member_pages, _clock, wire = pair
     await _post(host)
@@ -237,12 +229,13 @@ async def test_a_missing_row_is_proven_by_the_hosts_listing(pair):
     await member.repos.space.add_space_instance(SPACE, HOST)
     await member.repos.space_sync_watermark.record_applied(SPACE, HOST, page.seq + 99)
     assert await _round(host_pages, member_pages, "s-1")
-    await wire.settle()
+    await wire.round()
     assert wire.asks == [[row_key("posts", "post-2")[0]]]
     pos = await _position(member, member_pages)
     assert pos is not None and (pos.match, pos.missing) == (False, 1)
     assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND
-    assert wire.syncs == [(SPACE, HOST)]
+    await wire.round()  # answered: the next round asks nothing
+    assert len(wire.asks) == 1
 
 
 async def test_a_member_ahead_by_a_live_event_matches_without_a_listing(pair):
@@ -281,8 +274,8 @@ async def test_a_member_ahead_by_a_live_event_matches_without_a_listing(pair):
     )
     assert await member.repos.space_post.get("live-1") is not None
     assert await _round(host_pages, member_pages, "s-1")
-    await wire.settle()
+    await wire.round()
     pos = await _position(member, member_pages)
     assert pos is not None and pos.differing_buckets == 1
     assert (pos.match, pos.missing) == (True, 0)
-    assert wire.asks == [] and wire.syncs == []
+    assert wire.asks == []

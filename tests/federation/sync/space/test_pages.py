@@ -215,7 +215,7 @@ class _Env:
             monotonic=lambda: self.mono,
             sleep=sleep,
         )
-        self.svc.attach_sync_requests(hosts=hosts, request=request_sync)
+        self.svc.attach_hosts(hosts)
 
     def held(self):
         row = self.repo.rows.get(SPACE)
@@ -736,10 +736,9 @@ class _Listed:
         self.env.state.vec = _vector_of(member_rows)
         self.member_rows = list(member_rows)
         self.gone = set(gone)
-        self.asks: list[tuple[str, list[int]]] = []
-        self.sync_ids: list[str] = []
         self.forge = None  # a function(records) -> records
         self.signer = signer
+        self.rounds = 0
 
         async def rows_in(space_id, buckets, *, cutoff=None):
             wanted = set(buckets)
@@ -748,36 +747,34 @@ class _Listed:
             }
             return BucketRows(rows=rows, gone=set(self.gone))
 
-        async def listing(space_id, host, page_ref, buckets, sync_id):
-            self.asks.append((host, list(buckets)))
-            self.sync_ids.append(sync_id)
-            return True
-
         self.env.state.rows_in = rows_in
-        self.env.svc.attach_sync_requests(
-            hosts=self.env_hosts, request=self.env_request, listing=listing
-        )
 
-    async def env_hosts(self, space):
-        return list(self.env.hosts)
-
-    async def env_request(self, space_id, host):
-        self.env.requests.append((space_id, host))
+    @property
+    def asks(self) -> list[tuple[str, list[int]]]:
+        """What the next round's BEGIN to each acting host would ask."""
+        out = []
+        for host in [*self.env.hosts, HOST, ADMIN]:
+            buckets = self.env.svc.buckets_for(SPACE, host)
+            if buckets and (host, buckets) not in out:
+                out.append((host, buckets))
+        return out
 
     async def take_page(self) -> None:
         page = _signed(vector=self.page_vector, signer=self.signer)
         assert await _take(self.env, page, self.page_vector)
 
-    async def deliver(self, n: int = 1) -> None:
-        """Answer ask *n* like an honest host (or ``forge``)."""
-        host, buckets = self.asks[n - 1]
+    async def deliver(self) -> None:
+        """One round: the BEGIN asks the buckets, the host answers at the end
+        of its stream like an honest host (or ``forge``), then the sentinel."""
+        ((host, buckets),) = self.asks
         records = [
             listing_to_wire(i, [r for r in self.host_rows if _bucket(r) == i])
             for i in buckets
         ]
         if self.forge is not None:
             records = self.forge(records)
-        sync_id = self.sync_ids[n - 1]
+        self.rounds += 1
+        sync_id = f"R{self.rounds}"
         await self.env.svc.take_listing(
             space_id=SPACE, sync_id=sync_id, provider=host, records=records
         )
@@ -886,10 +883,11 @@ async def test_a_signer_not_our_host_and_a_member_ahead_matches():
     assert t.asks == []
 
 
-async def test_a_missing_row_is_proven_by_one_listing_and_asks_one_sync():
-    """A bucket that differs with no newer row of ours: only it is listed;
-    the listing proves the row missing — behind, one BEGIN. Applied stream
-    watermarks play no part (the old shortcut is gone)."""
+async def test_a_missing_row_is_proven_by_one_listing_on_the_next_round():
+    """A bucket that differs with no newer row of ours: only it is asked, on
+    the next round's BEGIN — never a BEGIN of its own; the listing proves
+    the row missing — behind. No extra BEGIN after it either: the rounds go
+    on anyway. Applied stream watermarks play no part."""
     present = [_row(f"p{k}") for k in range(10)]
     lost = _row("lost")
     t = _Listed(present + [lost], present)
@@ -902,7 +900,27 @@ async def test_a_missing_row_is_proven_by_one_listing_and_asks_one_sync():
     pos = await t.position()
     assert pos is not None and (pos.match, pos.missing) == (False, 1)
     assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND
-    assert t.env.requests == [(SPACE, HOST)]
+    assert t.asks == []  # answered: the next round asks nothing
+
+
+async def test_a_row_the_same_round_delivers_is_not_missing():
+    """The listing ends the stream that may itself bring the row: our rows
+    are read at the sentinel, after the round's rows are applied."""
+    lost = _row("lost")
+    t = _Listed([lost], [])
+    await t.take_page()
+    t.member_rows.append(lost)  # the round's stream delivered it
+    await t.deliver()
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing) == (True, 0)
+
+
+async def test_a_round_without_listings_keeps_them_asked():
+    t = _Listed([_row("lost")], [])
+    await t.take_page()
+    asked = t.asks
+    await t.env.svc.listing_done(space_id=SPACE, sync_id="R0", provider=HOST)
+    assert t.asks == asked and (await t.position()).match is None
 
 
 async def test_an_older_local_version_is_missing_a_newer_one_is_ahead():
@@ -919,11 +937,9 @@ async def test_an_older_local_version_is_missing_a_newer_one_is_ahead():
     ]
     t = _Listed(host, mine)
     await t.take_page()
-    for n in range(1, len(t.asks) + 1):
-        await t.deliver(n)
+    await t.deliver()
     pos = await t.position()
     assert pos is not None and (pos.match, pos.missing) == (True, 0)
-    assert t.env.requests == []
 
 
 async def test_a_row_deleted_here_after_the_page_is_not_missing():
@@ -997,40 +1013,15 @@ async def test_a_hosts_current_listing_settles_a_changed_bucket():
         assert pos is not None and (pos.match, pos.missing) == expect
 
 
-async def test_an_answer_that_overtakes_the_request_is_taken():
-    """Demo root cause: over a fast path the host's listing chunks and
-    sentinel arrived before the request call returned — before the session
-    was remembered — and were dropped as unasked. The session is
-    remembered BEFORE the BEGIN goes out."""
-    lost = _row("lost")
-    t = _Listed([lost], [])
-    svc = t.env.svc
-
-    async def answering(space_id, host, page_ref, buckets, sync_id):
-        records = [listing_to_wire(i, [lost]) for i in buckets]
-        await svc.take_listing(
-            space_id=space_id, sync_id=sync_id, provider=host, records=records
-        )
-        await svc.listing_done(space_id=space_id, sync_id=sync_id, provider=host)
-        return True
-
-    svc.attach_sync_requests(
-        hosts=t.env_hosts, request=t.env_request, listing=answering
-    )
-    await t.take_page()
-    pos = await t.position()
-    assert pos is not None and (pos.match, pos.missing) == (False, 1)
-
-
 async def test_an_unasked_listing_is_dropped():
     host = [_row("lost")]
     t = _Listed(host, [])
     await t.take_page()
     await t.env.svc.take_listing(
-        space_id=SPACE, sync_id=t.sync_ids[0], provider="evil", records=[{"i": 0}]
+        space_id=SPACE, sync_id="R1", provider="evil", records=[{"i": 0}]
     )
     await t.env.svc.take_listing(
-        space_id=SPACE, sync_id="L9", provider=HOST, records=[{"i": 0}]
+        space_id="sp-other", sync_id="R1", provider=HOST, records=[{"i": 0}]
     )
     await t.deliver()
     assert (await t.position()).missing == 1

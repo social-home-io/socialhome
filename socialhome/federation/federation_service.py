@@ -1170,6 +1170,7 @@ class FederationService:
         have_seq: int | None = None,
         roster_digest: dict | None = None,
         page_ref: dict | None = None,
+        buckets: list[int] | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -1188,6 +1189,7 @@ class FederationService:
             have_seq=have_seq,
             roster_digest=roster_digest,
             page_ref=page_ref,
+            buckets=buckets,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -3279,74 +3281,6 @@ class FederationService:
                 )
         return DeliveryResult(instance_id=to_instance_id, ok=True)
 
-    async def begin_bucket_listing(
-        self,
-        space_id: str,
-        host_instance_id: str,
-        page_ref: dict,
-        buckets: list[int],
-        sync_id: str,
-    ) -> bool:
-        """v_95 sync pages: ask *host_instance_id* (a household acting as
-        the space's host) for the listings of *buckets* of the page we hold
-        (*page_ref*) — a ``SPACE_SYNC_BEGIN`` with ``sync_mode: "buckets"``,
-        answered over the relay as ``__listing__`` chunks under the content
-        key and a sentinel (``docs/protocol/sync-pages.md``; Phase 3 sends
-        the same request to any member). Everything but the routing fields
-        rides the encrypted payload. *sync_id* is the caller's (it
-        remembers the session before the BEGIN leaves). Whether the BEGIN
-        went out. Fail-soft."""
-        if self._sync_manager is None or not buckets or not sync_id:
-            return False
-        try:
-            if not await self.space_member_supports(
-                host_instance_id, min_version=FederationCapability.MIN_FOR_SYNC_PAGES
-            ):
-                return False
-            self._sync_manager.record_sync_request(
-                sync_id=sync_id,
-                space_id=space_id,
-                provider_instance_id=host_instance_id,
-                sync_mode="buckets",
-                page_ref=page_ref,
-            )
-            self._sync_manager.register_requester_https_session(
-                sync_id=sync_id,
-                space_id=space_id,
-                requester_instance_id=self._own_instance_id,
-                provider_instance_id=host_instance_id,
-            )
-            result = await self.send_with_mesh_fallback(
-                to_instance_id=host_instance_id,
-                event_type=FederationEventType.SPACE_SYNC_BEGIN,
-                payload={
-                    "sync_id": sync_id,
-                    "space_id": space_id,
-                    "sync_mode": "buckets",
-                    "prefer_direct": False,
-                    "page": page_ref,
-                    "buckets": list(buckets),
-                },
-                space_id=space_id,
-            )
-        except Exception:
-            log.warning(
-                "sync pages: asking %s for bucket listings of %s failed",
-                host_instance_id,
-                space_id,
-                exc_info=True,
-            )
-            return False
-        log.info(
-            "sync %s: bucket-listing BEGIN to %s: ok=%s via=%s error=%s",
-            sync_id,
-            host_instance_id,
-            getattr(result, "ok", None),
-            getattr(result, "via", None),
-            getattr(result, "error", None),
-        )
-        return bool(getattr(result, "ok", False))
-
     async def begin_mesh_catchup_sync(
         self,
         *,
@@ -3359,6 +3293,7 @@ class FederationService:
         mod_held: dict | None = None,
         roster_digest: dict | None = None,
         page_ref: dict | None = None,
+        buckets: list[int] | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
@@ -3403,6 +3338,7 @@ class FederationService:
                 have_seq=have_seq,
                 roster_digest=roster_digest,
                 page_ref=page_ref,
+                buckets=buckets,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -3427,8 +3363,11 @@ class FederationService:
             if roster_digest is not None:
                 payload["roster_digest"] = roster_digest
             if page_ref is not None:
-                # v_95: the sync page we hold (the caller gated it).
+                # v_95: the sync page we hold (the caller gated it) …
                 payload["page"] = page_ref
+            if buckets:
+                # … and the bucket listings the stream should end with.
+                payload["buckets"] = list(buckets)
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
@@ -5600,17 +5539,9 @@ class FederationService:
             # v_95: the sync page the requester holds (absent / malformed →
             # it gets our newest page, if we hold one).
             page_ref=parse_page_ref(payload.get("page")),
-            # v_95: the buckets a ``sync_mode: "buckets"`` session lists.
+            # v_95: the buckets whose listings the stream ends with.
             buckets=parse_bucket_request(payload.get("buckets")),
         )
-        if payload.get("sync_mode") == "buckets":
-            log.info(
-                "sync %s: bucket-listing BEGIN from %s for %s: %s",
-                sync_id,
-                event.from_instance,
-                space_id,
-                "accepted" if decision.accepted else getattr(decision, "reason", "?"),
-            )
         if not decision.accepted and decision.next_event is not None:
             if (
                 decision.next_event is FederationEventType.SPACE_SYNC_REJECTED
@@ -5865,6 +5796,7 @@ class FederationService:
                 have_seq=pending.have_seq,
                 roster_digest=pending.roster_digest,
                 page_ref=pending.page_ref,
+                buckets=pending.buckets,
             )
         except ConnectionError:
             # Closed while the offer was applied (reaped, superseded):

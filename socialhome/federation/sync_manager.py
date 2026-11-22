@@ -44,12 +44,6 @@ log = logging.getLogger(__name__)
 #: (S-6 part 1).
 SYNC_BEGIN_RATE_LIMIT_PER_HOUR: int = 5
 
-#: v_95 sync pages: ``sync_mode: "buckets"`` sessions (bucket listings) per
-#: (from_instance, space_id) per hour — a budget of their own, so a compare
-#: (at most one per 15 min) never spends the stream budget above and a
-#: busy catch-up never starves the listings.
-LISTING_RATE_LIMIT_PER_HOUR: int = 4
-
 #: Maximum concurrent active sync sessions per remote instance
 #: (S-6 part 2).
 MAX_ACTIVE_SESSIONS_PER_INSTANCE: int = 3
@@ -121,6 +115,8 @@ class PendingSyncRequest:
     #: The ``page`` the BEGIN carried (v_95, the sync page we hold, wire
     #: form) — a relay re-BEGIN carries it too.
     page_ref: dict | None = None
+    #: The ``buckets`` the BEGIN asked listings for (v_95).
+    buckets: list[int] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -238,6 +234,7 @@ class SyncSessionManager:
         have_seq: int | None = None,
         roster_digest: dict | None = None,
         page_ref: dict | None = None,
+        buckets: list[int] | None = None,
     ) -> None:
         """Remember a ``SPACE_SYNC_BEGIN`` we are about to send.
 
@@ -257,6 +254,7 @@ class SyncSessionManager:
             have_seq=have_seq,
             roster_digest=roster_digest,
             page_ref=page_ref,
+            buckets=buckets,
         )
 
     def pending_sync_request(self, sync_id: str) -> PendingSyncRequest | None:
@@ -391,27 +389,20 @@ class SyncSessionManager:
         space_id: str,
         *,
         now: float | None = None,
-        sync_mode: str = "",
     ) -> bool:
         """Return True if this peer may start another sync for *space_id*.
 
         Implements the 5-per-hour bucket from S-6 part 1.  Increments
         the bucket on ``True``; ``False`` means the caller must reply
-        with ``SPACE_SYNC_DIRECT_FAILED {reason: "rate_limited"}``. A
-        ``buckets`` session (v_95 bucket listings) counts against its own
-        bucket (:data:`LISTING_RATE_LIMIT_PER_HOUR`).
+        with ``SPACE_SYNC_DIRECT_FAILED {reason: "rate_limited"}``.
         """
         now = now if now is not None else time.monotonic()
-        listing = sync_mode == "buckets"
-        key = (from_instance, space_id + ("\0buckets" if listing else ""))
-        limit = (
-            LISTING_RATE_LIMIT_PER_HOUR if listing else SYNC_BEGIN_RATE_LIMIT_PER_HOUR
-        )
+        key = (from_instance, space_id)
         bucket = self._rate_buckets[key]
         cutoff = now - 3600
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
-        if len(bucket) >= limit:
+        if len(bucket) >= SYNC_BEGIN_RATE_LIMIT_PER_HOUR:
             return False
         bucket.append(now)
         return True
@@ -505,12 +496,8 @@ class SyncSessionManager:
         # requester's 5 / h for that space — a household that restarts and
         # asks for more spaces than the cap at once retries the rest
         # (``SpaceSyncDeferred``) and would otherwise lock itself out.
-        # A v_95 bucket-listing session is short and has a budget of its own
-        # (``LISTING_RATE_LIMIT_PER_HOUR``): streams holding every slot —
-        # e.g. left by a requester that restarted — never block it.
         if (
-            sync_mode != "buckets"
-            and self.active_sessions_for_instance(requester_instance_id)
+            self.active_sessions_for_instance(requester_instance_id)
             >= MAX_ACTIVE_SESSIONS_PER_INSTANCE
         ):
             return SyncDecision(
@@ -528,9 +515,7 @@ class SyncSessionManager:
                 next_payload={"sync_id": sync_id, "reason": "node_capacity"},
             )
 
-        if not self.check_sync_begin_rate(
-            requester_instance_id, space_id, sync_mode=sync_mode
-        ):
+        if not self.check_sync_begin_rate(requester_instance_id, space_id):
             return SyncDecision(
                 accepted=False,
                 reason="rate_limited",
@@ -674,6 +659,7 @@ class SyncSessionManager:
         have_seq: int | None = None,
         roster_digest: dict | None = None,
         page_ref: dict | None = None,
+        buckets: list[int] | None = None,
     ) -> str:
         """Requester-side handling of ``SPACE_SYNC_OFFER``.
 
@@ -717,6 +703,7 @@ class SyncSessionManager:
                 have_seq=have_seq,
                 roster_digest=roster_digest,
                 page_ref=page_ref,
+                buckets=buckets,
             )
             self._sessions[sync_id] = record
 
@@ -812,6 +799,8 @@ class SyncSessionManager:
         # only when newer.
         if record.page_ref is not None:
             payload["page"] = record.page_ref
+        if record.buckets:
+            payload["buckets"] = list(record.buckets)
         return SyncDecision(
             accepted=True,
             reason="relay_fallback",
