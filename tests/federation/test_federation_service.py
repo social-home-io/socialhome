@@ -2072,12 +2072,13 @@ async def test_begin_bucket_listing_asks_the_host_over_the_relay(supports):
         ),
         patch.object(FederationService, "send_with_mesh_fallback", send_mock),
     ):
-        sync_id = await svc.begin_bucket_listing("sp-1", "host-1", ref, [7, 2])
+        sent = await svc.begin_bucket_listing("sp-1", "host-1", ref, [7, 2], "L1")
+    sync_id = "L1"
     if not supports:
-        assert sync_id is None
+        assert sent is False
         send_mock.assert_not_awaited()
         return
-    assert sync_id
+    assert sent is True
     req = sync_manager.record_sync_request.call_args.kwargs
     assert (req["sync_mode"], req["page_ref"]) == ("buckets", ref)
     payload = send_mock.call_args.kwargs["payload"]

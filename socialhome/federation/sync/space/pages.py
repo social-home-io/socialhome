@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -123,8 +124,9 @@ class _Seqs(Protocol):
     async def applied_seq(self, space_id: str, instance_id: str) -> int | None: ...
 
 
-#: ``(space_id, host, page_ref, buckets) ->`` the listing session's id.
-ListingRequest = Callable[[str, str, dict, list[int]], Awaitable[str | None]]
+#: ``(space_id, host, page_ref, buckets, sync_id) ->`` whether the
+#: ``buckets`` BEGIN went out under that session id.
+ListingRequest = Callable[[str, str, dict, list[int], str], Awaitable[bool]]
 
 
 class _Crypto(Protocol):
@@ -658,9 +660,9 @@ class SyncPageService:
         """Wire what a mismatch does: ``hosts(space)`` — the households
         acting as its host here; ``request(space_id, host)`` — one
         incremental BEGIN to that host (the scheduler's ``sync_with``);
-        ``listing(space_id, host, page_ref, buckets)`` — ask that host for
-        the listings of *buckets* (a ``sync_mode: "buckets"`` BEGIN; the
-        session id, or ``None`` when it could not go out)."""
+        ``listing(space_id, host, page_ref, buckets, sync_id)`` — ask that
+        host for the listings of *buckets* (a ``sync_mode: "buckets"`` BEGIN
+        under *sync_id*; whether it went out)."""
         self._hosts = hosts
         self._request_sync = request
         self._request_listing = listing
@@ -807,26 +809,14 @@ class SyncPageService:
             return
         try:
             host = await self._host_for(space, held.page.signer)
-            if host is None:
-                return
-            sync_id = await self._request_listing(
-                space.id, host, held.page.ref(), buckets
-            )
         except Exception:
-            log.exception("sync page: asking for listings of %s failed", space.id)
+            log.exception("sync page: no host to ask for %s", space.id)
             return
-        if not sync_id:
-            log.info(
-                "sync page: could not ask %s for listings of space %s", host, space.id
-            )
+        if host is None:
             return
-        log.info(
-            "sync page: asked %s for %d bucket listing(s) of space %s (session %s)",
-            host,
-            len(buckets),
-            space.id,
-            sync_id,
-        )
+        # Remembered BEFORE the BEGIN goes out: over a fast path the answer
+        # can arrive before the request call returns.
+        sync_id = uuid.uuid4().hex
         self._listings[sync_id] = _PendingListing(
             space_id=space.id,
             host=host,
@@ -838,6 +828,26 @@ class SyncPageService:
         )
         while len(self._listings) > MAX_PENDING_LISTINGS:
             self._listings.popitem(last=False)
+        try:
+            sent = await self._request_listing(
+                space.id, host, held.page.ref(), buckets, sync_id
+            )
+        except Exception:
+            log.exception("sync page: asking for listings of %s failed", space.id)
+            sent = False
+        if not sent:
+            self._listings.pop(sync_id, None)
+            log.info(
+                "sync page: could not ask %s for listings of space %s", host, space.id
+            )
+            return
+        log.info(
+            "sync page: asked %s for %d bucket listing(s) of space %s (session %s)",
+            host,
+            len(buckets),
+            space.id,
+            sync_id,
+        )
 
     async def take_listing(
         self, *, space_id: str, sync_id: str, provider: str, records: object

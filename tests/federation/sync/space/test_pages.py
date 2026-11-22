@@ -737,6 +737,7 @@ class _Listed:
         self.member_rows = list(member_rows)
         self.gone = set(gone)
         self.asks: list[tuple[str, list[int]]] = []
+        self.sync_ids: list[str] = []
         self.forge = None  # a function(records) -> records
         self.signer = signer
 
@@ -747,9 +748,10 @@ class _Listed:
             }
             return BucketRows(rows=rows, gone=set(self.gone))
 
-        async def listing(space_id, host, page_ref, buckets):
+        async def listing(space_id, host, page_ref, buckets, sync_id):
             self.asks.append((host, list(buckets)))
-            return f"L{len(self.asks)}"
+            self.sync_ids.append(sync_id)
+            return True
 
         self.env.state.rows_in = rows_in
         self.env.svc.attach_sync_requests(
@@ -775,10 +777,11 @@ class _Listed:
         ]
         if self.forge is not None:
             records = self.forge(records)
+        sync_id = self.sync_ids[n - 1]
         await self.env.svc.take_listing(
-            space_id=SPACE, sync_id=f"L{n}", provider=host, records=records
+            space_id=SPACE, sync_id=sync_id, provider=host, records=records
         )
-        await self.env.svc.listing_done(space_id=SPACE, sync_id=f"L{n}", provider=host)
+        await self.env.svc.listing_done(space_id=SPACE, sync_id=sync_id, provider=host)
 
     async def position(self):
         return await self.env.svc.position(self.env.spaces.space, [HOST])
@@ -994,12 +997,37 @@ async def test_a_hosts_current_listing_settles_a_changed_bucket():
         assert pos is not None and (pos.match, pos.missing) == expect
 
 
+async def test_an_answer_that_overtakes_the_request_is_taken():
+    """Demo root cause: over a fast path the host's listing chunks and
+    sentinel arrived before the request call returned — before the session
+    was remembered — and were dropped as unasked. The session is
+    remembered BEFORE the BEGIN goes out."""
+    lost = _row("lost")
+    t = _Listed([lost], [])
+    svc = t.env.svc
+
+    async def answering(space_id, host, page_ref, buckets, sync_id):
+        records = [listing_to_wire(i, [lost]) for i in buckets]
+        await svc.take_listing(
+            space_id=space_id, sync_id=sync_id, provider=host, records=records
+        )
+        await svc.listing_done(space_id=space_id, sync_id=sync_id, provider=host)
+        return True
+
+    svc.attach_sync_requests(
+        hosts=t.env_hosts, request=t.env_request, listing=answering
+    )
+    await t.take_page()
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing) == (False, 1)
+
+
 async def test_an_unasked_listing_is_dropped():
     host = [_row("lost")]
     t = _Listed(host, [])
     await t.take_page()
     await t.env.svc.take_listing(
-        space_id=SPACE, sync_id="L1", provider="evil", records=[{"i": 0}]
+        space_id=SPACE, sync_id=t.sync_ids[0], provider="evil", records=[{"i": 0}]
     )
     await t.env.svc.take_listing(
         space_id=SPACE, sync_id="L9", provider=HOST, records=[{"i": 0}]

@@ -120,11 +120,11 @@ class _Wire:
     async def request_sync(self, space_id: str, host: str) -> None:
         self.syncs.append((space_id, host))
 
-    async def listing(self, space_id, host, page_ref, buckets) -> str:
+    async def listing(self, space_id, host, page_ref, buckets, sync_id) -> bool:
         self.asks.append(list(buckets))
-        sync_id = f"L{len(self.asks)}"
-        self.tasks.append(asyncio.create_task(self._answer(sync_id, page_ref, buckets)))
-        return sync_id
+        # Answered at once — before this call returns, as a fast path can.
+        await self._answer(sync_id, page_ref, buckets)
+        return True
 
     async def _answer(self, sync_id, page_ref, buckets) -> None:
         records = await self.host_pages.listing_records(

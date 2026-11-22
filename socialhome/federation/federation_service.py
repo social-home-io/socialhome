@@ -3280,24 +3280,29 @@ class FederationService:
         return DeliveryResult(instance_id=to_instance_id, ok=True)
 
     async def begin_bucket_listing(
-        self, space_id: str, host_instance_id: str, page_ref: dict, buckets: list[int]
-    ) -> str | None:
+        self,
+        space_id: str,
+        host_instance_id: str,
+        page_ref: dict,
+        buckets: list[int],
+        sync_id: str,
+    ) -> bool:
         """v_95 sync pages: ask *host_instance_id* (a household acting as
         the space's host) for the listings of *buckets* of the page we hold
         (*page_ref*) — a ``SPACE_SYNC_BEGIN`` with ``sync_mode: "buckets"``,
         answered over the relay as ``__listing__`` chunks under the content
         key and a sentinel (``docs/protocol/sync-pages.md``; Phase 3 sends
         the same request to any member). Everything but the routing fields
-        rides the encrypted payload. The session id, or ``None`` when the
-        BEGIN could not go out. Fail-soft."""
-        if self._sync_manager is None or not buckets:
-            return None
+        rides the encrypted payload. *sync_id* is the caller's (it
+        remembers the session before the BEGIN leaves). Whether the BEGIN
+        went out. Fail-soft."""
+        if self._sync_manager is None or not buckets or not sync_id:
+            return False
         try:
             if not await self.space_member_supports(
                 host_instance_id, min_version=FederationCapability.MIN_FOR_SYNC_PAGES
             ):
-                return None
-            sync_id = uuid.uuid4().hex
+                return False
             self._sync_manager.record_sync_request(
                 sync_id=sync_id,
                 space_id=space_id,
@@ -3331,8 +3336,8 @@ class FederationService:
                 space_id,
                 exc_info=True,
             )
-            return None
-        return sync_id if getattr(result, "ok", False) else None
+            return False
+        return bool(getattr(result, "ok", False))
 
     async def begin_mesh_catchup_sync(
         self,
