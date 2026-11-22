@@ -80,6 +80,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Outbox key of the snapshot — latest-only per household.
+_OUTBOX_KEY = "users_sync"
+
 #: Snapshot entry fields left out of the per-household digest: the instance
 #: assertion is re-signed with a fresh ``issued_at`` on every build, and the
 #: picture bytes are covered by ``picture_hash``.
@@ -168,7 +171,23 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroad
             log.debug("users-sync: list_active failed: %s", exc, exc_info=True)
             return
 
-        hidden = await self.hidden_for_peer(peer_id)
+        # Fail closed, unlike the per-event ``hidden_for_peer``: a snapshot
+        # that cannot read the hide list would carry members hidden from
+        # this household back to it.
+        try:
+            hidden = (
+                await self._visibility_repo.hidden_user_ids_for_peer(peer_id)
+                if self._visibility_repo is not None
+                else frozenset()
+            )
+        except Exception as exc:
+            log.warning(
+                "users-sync: hide list for %s unreadable, no snapshot: %s",
+                peer_id,
+                exc,
+                exc_info=True,
+            )
+            return
         now = datetime.now(UTC)
         payload_users: list[dict] = []
         for u in users:
@@ -245,15 +264,25 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroad
                 to_instance_id=peer_id,
                 event_type=FederationEventType.USERS_SYNC,
                 # ``complete``: every member this household may see — the
-                # receiver takes one it no longer names as removed.
-                payload={"users": payload_users, "complete": True},
+                # receiver takes one it no longer names as removed, unless
+                # it heard of them after ``as_of`` (a snapshot that waited
+                # in a queue must not undo a newer USER_UPDATED).
+                payload={
+                    "users": payload_users,
+                    "complete": True,
+                    "as_of": datetime.now(UTC).isoformat(),
+                },
+                # Latest-only: at most one snapshot waits for a household
+                # that is away, and it is the newest.
+                outbox_key=_OUTBOX_KEY,
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug("users-sync: send to %s failed: %s", peer_id, exc, exc_info=True)
             return
-        # Only a snapshot the household accepted counts; one left in the
-        # outbox goes again on its next connect.
-        if getattr(result, "ok", False):
+        # Only a snapshot the household took counts. One left in the outbox,
+        # or merely accepted by a GFS relay (queued there, may expire), goes
+        # again on its next connect.
+        if getattr(result, "ok", False) and getattr(result, "via", None) != "gfs_relay":
             self._sent[peer_id] = digest
         else:
             self._sent.pop(peer_id, None)

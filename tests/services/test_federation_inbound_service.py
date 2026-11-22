@@ -1722,10 +1722,10 @@ async def test_users_sync_one_bad_user_does_not_drop_the_rest(
     )
     real = type(inbound)._upsert_remote_user
 
-    async def flaky(self, instance_id, payload):
+    async def flaky(self, instance_id, payload, **kw):
         if payload.get("username") == "bob":
             raise RuntimeError("boom")
-        await real(self, instance_id, payload)
+        await real(self, instance_id, payload, **kw)
 
     monkeypatch.setattr(type(inbound), "_upsert_remote_user", flaky)
     inbound._federation_service = _BindingFakeFederation({"peer-a": _PK_AA})
@@ -1769,11 +1769,17 @@ async def _seed_sync_peer(db, peer_id: str) -> None:
     )
 
 
-async def _seed_remote(db, user_id: str, instance_id: str, username: str) -> None:
+async def _seed_remote(
+    db,
+    user_id: str,
+    instance_id: str,
+    username: str,
+    synced_at: str = "2026-01-01 00:00:00",
+) -> None:
     await db.enqueue(
         "INSERT INTO remote_users(user_id, instance_id, remote_username,"
-        " display_name) VALUES(?,?,?,?)",
-        (user_id, instance_id, username, username.title()),
+        " display_name, synced_at) VALUES(?,?,?,?,?)",
+        (user_id, instance_id, username, username.title(), synced_at),
     )
 
 
@@ -1807,7 +1813,7 @@ async def test_complete_users_sync_removes_a_member_it_no_longer_names(db, inbou
     await _seed_remote(db, gone, "peer-a", "sam")
     await _seed_remote(db, "u-other", "peer-b", "olga")
 
-    await _sync(inbound, ["alice"], complete=True)
+    await _sync(inbound, ["alice"], complete=True, as_of=_now())
 
     state = await _deprovisioned(db)
     assert state[gone] is True
@@ -1823,9 +1829,48 @@ async def test_users_sync_without_complete_removes_nobody(db, inbound):
     await _seed_remote(db, sam, "peer-a", "sam")
 
     await _sync(inbound, ["alice"])
-    await _sync(inbound, ["alice"], complete="yes")
+    await _sync(inbound, ["alice"], complete="yes", as_of=_now())
+    await _sync(inbound, ["alice"], complete=True)  # no as_of
+    await _sync(inbound, ["alice"], complete=True, as_of="not a time")
 
     assert (await _deprovisioned(db))[sam] is False
+
+
+def _now(delta_s: float = 0) -> str:
+    return (datetime.now(UTC) + timedelta(seconds=delta_s)).isoformat()
+
+
+async def test_a_queued_snapshot_never_undoes_a_newer_user_updated(db, inbound):
+    """A snapshot that waited in a queue while a member was created (or
+    reactivated, or shown again) must not remove them: a row written from
+    an envelope the sender sent after the snapshot's ``as_of`` is kept.
+    ``synced_at`` holds that envelope's timestamp (the sender's clock, the
+    same clock as ``as_of``)."""
+    await _seed_sync_peer(db, "peer-a")
+    inbound._federation_service = _BindingFakeFederation({"peer-a": _PK_AA})
+    newer = derive_user_id(_PK_AA, "kid")
+    await _seed_remote(db, newer, "peer-a", "kid", synced_at=_now(-30))
+    older = derive_user_id(_PK_AA, "tim")
+    await _seed_remote(db, older, "peer-a", "tim", synced_at=_now(-90))
+
+    await _sync(inbound, ["alice"], complete=True, as_of=_now(-60))
+
+    state = await _deprovisioned(db)
+    assert state[newer] is False
+    assert state[older] is True
+
+
+async def test_synced_at_is_the_senders_envelope_time(db, inbound):
+    await _seed_sync_peer(db, "peer-a")
+    inbound._federation_service = _BindingFakeFederation({"peer-a": _PK_AA})
+    event = _event(
+        FederationEventType.USER_UPDATED,
+        {"user_id": derive_user_id(_PK_AA, "kid"), "username": "kid"},
+        from_instance="peer-a",
+    )
+    await inbound._on_user_updated(event)
+    row = await db.fetchone("SELECT synced_at FROM remote_users")
+    assert row["synced_at"] == event.timestamp
 
 
 async def test_complete_users_sync_leaves_a_member_who_moved_out(db, inbound):
@@ -1841,7 +1886,7 @@ async def test_complete_users_sync_leaves_a_member_who_moved_out(db, inbound):
         (moved,),
     )
 
-    await _sync(inbound, ["alice"], complete=True)
+    await _sync(inbound, ["alice"], complete=True, as_of=_now())
 
     assert (await _deprovisioned(db))[moved] is False
 

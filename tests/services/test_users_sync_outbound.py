@@ -65,7 +65,7 @@ class _FakeFederationService:
             return False
         return self._supports_v25
 
-    async def send_event(self, *, to_instance_id, event_type, payload):
+    async def send_event(self, *, to_instance_id, event_type, payload, **kw):
         self.sent.append((to_instance_id, event_type, payload))
 
 
@@ -582,8 +582,9 @@ class _FakeFedRepo:
 
 
 class _Result:
-    def __init__(self, ok: bool) -> None:
+    def __init__(self, ok: bool, via: str | None = None) -> None:
         self.ok = ok
+        self.via = via
 
 
 class _ResultFederation(_FakeFederationService):
@@ -592,10 +593,13 @@ class _ResultFederation(_FakeFederationService):
     def __init__(self) -> None:
         super().__init__()
         self.ok = True
+        self.via: str | None = "rtc"
+        self.kwargs: list[dict] = []
 
-    async def send_event(self, *, to_instance_id, event_type, payload):
+    async def send_event(self, *, to_instance_id, event_type, payload, **kw):
         self.sent.append((to_instance_id, event_type, payload))
-        return _Result(self.ok)
+        self.kwargs.append(kw)
+        return _Result(self.ok, self.via)
 
 
 def _connecting(peers=("peer-1", "peer-2")):
@@ -622,10 +626,42 @@ def _back(peer: str) -> PeerCapabilitiesAdvertised:
     return PeerCapabilitiesAdvertised(instance_id=peer)
 
 
-async def test_snapshot_is_marked_complete():
+async def test_snapshot_is_complete_dated_and_queued_latest_only():
     bus, fed, _users = _connecting()
     await bus.publish(PairingConfirmed(instance_id="peer-1"))
-    assert fed.sent[0][2]["complete"] is True
+    payload = fed.sent[0][2]
+    assert payload["complete"] is True
+    assert datetime.fromisoformat(payload["as_of"]).tzinfo is not None
+    # At most one snapshot waits for a household that is away.
+    assert fed.kwargs[0] == {"outbox_key": "users_sync"}
+
+
+async def test_a_snapshot_only_accepted_by_a_gfs_relay_goes_again():
+    """A relay's ``ok`` means queued there (it may expire), not received."""
+    bus, fed, _users = _connecting()
+    fed.via = "gfs_relay"
+    await bus.publish(_back("peer-1"))
+    await bus.publish(_back("peer-1"))
+    assert len(fed.sent) == 2
+
+
+class _BrokenVisibilityRepo:
+    async def hidden_user_ids_for_peer(self, peer: str) -> frozenset[str]:
+        raise RuntimeError("db is busy")
+
+
+async def test_an_unreadable_hide_list_sends_no_snapshot():
+    """Fail closed: a snapshot without the hide list would carry hidden
+    members back to the household."""
+    fed = _ResultFederation()
+    out = UsersSyncOutbound(
+        bus=EventBus(),
+        federation_service=fed,
+        user_repo=_FakeUserRepo([_FakeUser("u-alice", "alice", "Alice")]),
+        visibility_repo=_BrokenVisibilityRepo(),
+    )
+    await out.send_snapshot("peer-1")
+    assert fed.sent == []
 
 
 async def test_a_paired_household_connecting_fresh_gets_the_snapshot():

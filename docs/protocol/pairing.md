@@ -754,19 +754,36 @@ raise it. A household that restarts over and over still gets the
 snapshot once: we keep, per household and in memory, a digest of the
 last snapshot it accepted from us (the entries without the per-send
 signature fields and picture bytes — `picture_hash` covers those) and
-skip a reconnect whose snapshot is the same. A snapshot not accepted
-(left in the outbox, or refused) goes again on the next connect; after
-our own restart the first reconnect sends once; an unpair forgets it.
+skip a reconnect whose snapshot is the same. A snapshot the household
+did not take (left in the outbox, refused, or only accepted by a GFS
+relay, whose queue may expire) goes again on the next connect; after our
+own restart the first reconnect sends once; an unpair forgets it. The
+snapshot is queued latest-only (`outbox_key` `users_sync`), so at most
+one, the newest, waits for a household that is away. A snapshot whose
+hide list cannot be read is not sent (fail closed — it would carry hidden
+members back).
 
-**The receiver reconciles.** The snapshot carries `complete: true`: it
-names every member the receiver may see. A receiver that holds a member
-of the sender that a complete snapshot leaves out takes it as
-`USER_REMOVED` (deprovisioned, content purged) — removed, or hidden from
-this household, both mean exactly that. Only rows homed on the sender
-are touched, a member who moved out (a move redirect on the row) is left
-alone, and a snapshot without the marker (an older sender) removes
-nobody. No capability bump: an older receiver ignores the field, and
-every receiver already takes `USERS_SYNC` from a paired household.
+**The receiver reconciles.** The snapshot carries `complete: true` and
+`as_of` (when it was taken, the sender's clock): it names every member
+the receiver may see. A receiver that holds a member of the sender that
+a complete snapshot leaves out takes it as `USER_REMOVED` (deprovisioned,
+content purged) — removed, or hidden from this household, both mean
+exactly that — unless that row was written from an envelope the sender
+sent after `as_of`: `remote_users.synced_at` keeps the envelope timestamp
+of the `USER_UPDATED` / `USERS_SYNC` that wrote it (the sender's clock,
+the same clock as `as_of`), so a snapshot that waited in a queue never
+undoes a newer `USER_UPDATED` (a member created, reactivated or shown
+again meanwhile). Only rows homed on the sender are touched, a member who
+moved out (a move redirect on the row) is left alone, and a snapshot
+without both fields (an older sender) removes nobody. No capability bump:
+an older receiver ignores the fields, and every receiver already takes
+`USERS_SYNC` from a paired household.
+
+A removed member's DMs, moments and highlights are purged at the paired
+household at once (the `USER_REMOVED` cascade, as for hiding), even
+though the removal is a soft delete here with a 30-day grace period:
+reactivating the person brings their profile back there, not that
+content.
 
 ```mermaid
 sequenceDiagram
@@ -780,8 +797,8 @@ sequenceDiagram
     Note over B: B starts again
     B->>A: INSTANCE_CAPABILITIES_UPDATED
     A->>A: PeerCapabilitiesAdvertised, paired? snapshot changed?
-    A->>B: USERS_SYNC {users, complete: true}
-    B->>B: upsert named members, remove the ones not named
+    A->>B: USERS_SYNC {users, complete: true, as_of}
+    B->>B: upsert named members, remove the ones not named<br/>(unless written after as_of)
     B->>A: INSTANCE_CAPABILITIES_UPDATED (B restarts again)
     A->>A: same snapshot already accepted — nothing sent
 ```

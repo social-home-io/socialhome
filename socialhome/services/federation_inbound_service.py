@@ -299,6 +299,18 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _parse_utc(value: object) -> datetime | None:
+    """An ISO-8601 time as aware UTC (a naive SQLite ``datetime('now')`` is
+    UTC); ``None`` when absent or unreadable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _status_from_wire(p: dict) -> UserStatus | None:
     """Parse a federated ``{emoji, text, expires_at}`` status.
 
@@ -4129,7 +4141,9 @@ class FederationInboundService(ProtectionGateMixin):
             return
         for u in users:
             try:
-                accepted = await self._upsert_remote_user(event.from_instance, u)
+                accepted = await self._upsert_remote_user(
+                    event.from_instance, u, sent_at=event.timestamp
+                )
                 # ``status`` rides the snapshot so a peer's current status
                 # shows right after pairing. Absent key (older sender) =
                 # leave the cached status as is; ``null`` = clear.
@@ -4144,9 +4158,13 @@ class FederationInboundService(ProtectionGateMixin):
                     exc_info=True,
                 )
         if event.payload.get("complete") is True:
-            await self._drop_unnamed_remote_users(event.from_instance, users)
+            as_of = _parse_utc(event.payload.get("as_of"))
+            if as_of is not None:
+                await self._drop_unnamed_remote_users(event.from_instance, users, as_of)
 
-    async def _drop_unnamed_remote_users(self, instance_id: str, users: list) -> None:
+    async def _drop_unnamed_remote_users(
+        self, instance_id: str, users: list, as_of: datetime
+    ) -> None:
         """A complete snapshot names every member of ``instance_id`` we may
         see: one we hold that it leaves out was removed, or hidden from us
         — both mean ``USER_REMOVED`` (which we may have missed while away).
@@ -4154,12 +4172,22 @@ class FederationInboundService(ProtectionGateMixin):
         Only rows homed on the sender (``list_remote_for_instance``), so a
         household can only ever drop its own people. A user who moved out
         to another household is left alone: their old row is a forwarding
-        pointer, not a member. Only a snapshot marked ``complete`` counts —
-        an older sender's carries no marker and drops nobody.
+        pointer, not a member. Only a snapshot marked ``complete`` with an
+        ``as_of`` counts — an older sender's carries neither and drops
+        nobody.
+
+        A snapshot can wait in a queue while a newer ``USER_UPDATED``
+        (a member created, reactivated or shown again) overtakes it: a row
+        written from an envelope the sender sent after the snapshot's
+        ``as_of`` is kept. Both times are the sender's clock (``synced_at``
+        holds the envelope timestamp), so no skew allowance is needed.
         """
         named = {str(u.get("user_id")) for u in users if isinstance(u, dict)}
         for remote in await self._user_repo.list_remote_for_instance(instance_id):
             if remote.user_id in named:
+                continue
+            synced = _parse_utc(remote.synced_at)
+            if synced is not None and synced > as_of:
                 continue
             if await self._user_repo.get_move_link(remote.user_id) is not None:
                 continue
@@ -4171,7 +4199,9 @@ class FederationInboundService(ProtectionGateMixin):
             await self._remove_remote_user(remote.user_id)
 
     async def _on_user_updated(self, event: FederationEvent) -> None:
-        await self._upsert_remote_user(event.from_instance, event.payload)
+        await self._upsert_remote_user(
+            event.from_instance, event.payload, sent_at=event.timestamp
+        )
 
     async def _on_user_removed(self, event: FederationEvent) -> None:
         """Mark a remote user as deprovisioned + cascade-purge their content.
@@ -5449,8 +5479,15 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Helpers ────────────────────────────────────────────────────────
 
-    async def _upsert_remote_user(self, instance_id: str, payload: dict) -> bool:
-        """Upsert one published user; ``True`` when it was accepted."""
+    async def _upsert_remote_user(
+        self, instance_id: str, payload: dict, *, sent_at: str | None = None
+    ) -> bool:
+        """Upsert one published user; ``True`` when it was accepted.
+
+        ``sent_at`` — the envelope's timestamp, on the sender's clock — is
+        kept as ``synced_at``, so a complete ``USERS_SYNC`` can tell a row
+        written after its ``as_of`` (same clock) from one it supersedes.
+        """
         user_id = str(payload.get("user_id") or "")
         username = str(payload.get("username") or payload.get("remote_username") or "")
         if not user_id or not username:
@@ -5524,7 +5561,7 @@ class FederationInboundService(ProtectionGateMixin):
             bio=payload.get("bio"),
             public_key=payload.get("public_key"),
             handle=handle,
-            synced_at=_now_iso(),
+            synced_at=sent_at or _now_iso(),
         )
         await self._user_repo.upsert_remote(remote)
         if home is None and self._child_protection is not None:
