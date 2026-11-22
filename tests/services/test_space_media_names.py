@@ -69,6 +69,34 @@ def test_no_origin_or_space_names_nothing():
     assert SpaceMediaNamer().localize(SP, "", ["api/media/f.webp"]).names == {}
 
 
+def test_a_verified_rows_hashed_file_always_takes_its_content_name():
+    """Phase 3 re-review R2: a row checked against a signed sync page
+    commits each file's hash, not its name — a held name (our old cover)
+    must not win over the hash a deliverer pairs with it."""
+    namer = SpaceMediaNamer(own_instance_id=lambda: "us")
+    h = FileHash("ab" * 32)
+    held = ["api/media/old.webp"]
+    hashes = {"old.webp": h}
+    kept = namer.localize(SP, "hh-w", ["api/media/old.webp"], held=held, hashes=hashes)
+    assert kept.url("api/media/old.webp") == "api/media/old.webp"
+    loc = namer.localize(
+        SP,
+        "hh-w",
+        ["api/media/old.webp", "api/media/unhashed.webp"],
+        held=held,
+        hashes=hashes,
+        verified=True,
+    )
+    assert loc.url("api/media/old.webp") == (
+        "api/media/" + space_content_media_name(SP, h.h, "old.webp")
+    )
+    # No hash: the usual rules (cannot happen for a verified row, whose
+    # leaf needs every file's hash).
+    assert loc.url("api/media/unhashed.webp") == (
+        f"api/media/{sd('hh-w', 'unhashed.webp')}"
+    )
+
+
 def test_a_held_row_keeps_the_file_it_has():
     """The same file under the name it has here: verbatim (a relay of a file
     from the same origin), the sender's own name mapped, or our own file as

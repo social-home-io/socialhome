@@ -22,12 +22,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ....domain.file_hashes import FileHash, file_hashes_to_wire
 from ....services.inbound_media_store import media_basename
 from ....sync_page import (
     COMMITTED_RESOURCES,
+    COUNTERPARTS,
+    HINT_PREFIX_BYTES,
+    MAX_FETCH_ROWS,
     ListingRow,
     VectorBuilder,
     change_time,
@@ -41,7 +45,6 @@ from .exporter import RESOURCE_ORDER, record_batches
 from .window import pinned_cutoff
 
 if TYPE_CHECKING:
-    from ....domain.file_hashes import FileHash
     from .exporter import ResourceExporter
     from .window import SyncWindows
 
@@ -104,16 +107,43 @@ class PageStateHasher:
         return vector, builder.rows
 
     async def rows_in(
-        self, space_id: str, buckets: Iterable[int], *, cutoff: str | None
+        self,
+        space_id: str,
+        buckets: Iterable[int],
+        *,
+        cutoff: str | None,
+        keep_records: bool = False,
+        skip: frozenset[bytes] = frozenset(),
+        keep_ids: frozenset[tuple[str, str]] = frozenset(),
+        known: Mapping[str, str] | None = None,
     ) -> BucketRows:
         """The committed rows of *buckets* (with the page's *cutoff*): per
         bucket its rows as :class:`~socialhome.sync_page.ListingRow`
         (resource, id, leaf, change time); and every live row this household
         holds as gone — deleted, archived — (:data:`SUPERSEDED_BY`). One
         export of the space, like :meth:`vector`; only the asked buckets'
-        rows are kept."""
+        rows are kept.
+
+        *keep_records* (a v_95 deliverer, Phase 3): also each row's record —
+        with the content hashes of its files (``files``) — unless its leaf's
+        8-byte prefix is in *skip* (the requester holds it), at most
+        :data:`~socialhome.sync_page.MAX_FETCH_ROWS` per bucket.
+
+        A requester (Phase 3): *keep_ids* — our own records of those
+        identities, in any bucket (``own``: their uncommitted columns carry
+        over when a verified version is applied); *known* — content names
+        whose hash we know though we may not hold the bytes yet (``name ->
+        SHA-256``: a file of a row we just applied). Every row of a
+        resource with a live / archived counterpart is noted with its
+        change time in ``held_any`` (:data:`COUNTERPARTS`)."""
         wanted = frozenset(buckets)
-        out = BucketRows(rows={i: [] for i in wanted}, gone=set())
+        out = BucketRows(
+            rows={i: [] for i in wanted},
+            gone=set(),
+            records={i: [] for i in wanted} if keep_records else None,
+            skip=skip,
+            keep_ids=keep_ids,
+        )
         with pinned_cutoff(space_id, cutoff):
             for resource in RESOURCE_ORDER:
                 if resource not in COMMITTED_RESOURCES:
@@ -122,23 +152,29 @@ class PageStateHasher:
                 if exporter is None:
                     continue
                 async for batch in record_batches(exporter, space_id):
-                    hashes = await self._hash_files(resource, batch)
+                    hashes = await self._hash_files(resource, batch, known)
                     await asyncio.to_thread(
                         _collect, out, wanted, resource, batch, hashes
                     )
         return out
 
     async def _hash_files(
-        self, resource: str, batch: list[dict[str, Any]]
+        self,
+        resource: str,
+        batch: list[dict[str, Any]],
+        known: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
         out: dict[str, str] = {}
-        if self._files is None:
-            return out
         for record in batch:
             for url in file_refs(resource, record):
                 if url in out:
                     continue
                 name = media_basename(url)
+                if known is not None and name and name in known:
+                    out[url] = known[name]
+                    continue
+                if self._files is None:
+                    continue
                 found = await self._files.hash_name(name) if name else None
                 if found is not None:
                     out[url] = found.h
@@ -151,6 +187,31 @@ class BucketRows:
 
     rows: dict[int, list[ListingRow]]
     gone: set[tuple[str, str]]
+    #: Per bucket ``(resource, record)`` a deliverer may send (Phase 3);
+    #: ``None`` unless asked for.
+    records: dict[int, list[tuple[str, dict[str, Any]]]] | None = None
+    #: Leaf prefixes whose records are not kept (the requester holds them).
+    skip: frozenset[bytes] = frozenset()
+    #: Phase 3 requester: the identities whose own records are kept …
+    keep_ids: frozenset[tuple[str, str]] = frozenset()
+    #: … those records, by identity (whatever bucket) …
+    own: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    #: … and every held row of a resource with a live / archived counterpart,
+    #: by identity, with its change time.
+    held_any: dict[tuple[str, str], str | None] = field(default_factory=dict)
+
+
+def _with_files(
+    resource: str, record: dict[str, Any], hashes: dict[str, str]
+) -> dict[str, Any]:
+    """*record* with the ``files`` hash map of the files its commit form
+    hashes — keyed by file name, as every v_85 sender keys it."""
+    found = {
+        name: FileHash(h)
+        for url in file_refs(resource, record)
+        if (h := hashes.get(url)) and (name := media_basename(url))
+    }
+    return {**record, **file_hashes_to_wire(found)} if found else record
 
 
 def _collect(
@@ -167,6 +228,10 @@ def _collect(
         key = superseded_key(resource, row_id)
         if key is not None:
             out.gone.add(key)
+        if resource in COUNTERPARTS:
+            out.held_any[(resource, row_id)] = change_time(record)
+        if (resource, row_id) in out.keep_ids:
+            out.own[(resource, row_id)] = record
         index = row_key(resource, row_id)[0]
         if index not in wanted:
             continue
@@ -175,6 +240,13 @@ def _collect(
             out.rows[index].append(
                 ListingRow(resource, row_id, found[1], change_time(record))
             )
+            kept = out.records.get(index) if out.records is not None else None
+            if (
+                kept is not None
+                and len(kept) < MAX_FETCH_ROWS
+                and found[1][:HINT_PREFIX_BYTES] not in out.skip
+            ):
+                kept.append((resource, _with_files(resource, record, hashes)))
 
 
 def _add_all(

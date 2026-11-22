@@ -75,6 +75,7 @@ class _FakeFederation:
         #: The v_95 ``page`` recorded with each request (relay retry).
         self.request_pages: list[dict | None] = []
         self.request_buckets: list[list[int] | None] = []
+        self.request_haves: list[str | None] = []
 
     async def space_member_supports(self, instance_id, *, min_version):
         self.version_asks.append((instance_id, min_version))
@@ -91,6 +92,7 @@ class _FakeFederation:
         roster_digest=None,
         page_ref=None,
         buckets=None,
+        fetch_have=None,
     ):
         """A requester notes the sync_id it is about to ask for, so the
         provider's SPACE_SYNC_OFFER can be recognised as an answer."""
@@ -100,6 +102,7 @@ class _FakeFederation:
         self.request_digests.append(roster_digest)
         self.request_pages.append(page_ref)
         self.request_buckets.append(buckets)
+        self.request_haves.append(fetch_have)
 
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
@@ -719,6 +722,7 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
             "roster_digest": None,
             "page_ref": None,
             "buckets": None,
+            "have": None,
         },
         {
             "dir_seq": None,
@@ -728,6 +732,7 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
             "roster_digest": None,
             "page_ref": None,
             "buckets": None,
+            "have": None,
         },
     ]
     # The startup sweep sends it only for the directory echo.
@@ -2497,6 +2502,7 @@ async def test_a_capped_mesh_only_host_still_gets_the_incremental_begin(
             "roster_digest": None,
             "page_ref": None,
             "buckets": None,
+            "have": None,
         }
     ]
     assert sched._mesh_catchup_attempts[("sp-1", "host")] == MAX_MESH_CATCHUP_ATTEMPTS
@@ -2734,6 +2740,34 @@ async def test_a_skipped_begin_causes_no_fallback(
     await _wait_checks(sched)
     assert sched._federation.sent == []
     assert resume.requests == []
+
+
+async def test_a_silent_host_starts_the_verified_member_fetch(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """Sync pages Phase 3: the round that finds the hosts silent also tells
+    the page service — even without boot marks (the fetch is verified, it
+    needs no resume start); a host that answers starts nothing."""
+    silent: list[str] = []
+    sched, contact, _resume = _helper_sched(bus, queue, sync_manager, helpers=[])
+    sched._row_marks = None
+    sched.attach_host_silent(silent.append)
+    await _round(sched)
+    await _wait_checks(sched)
+    assert silent == ["sp-1"] and contact.is_silent("sp-1")
+
+
+async def test_a_host_that_answers_starts_no_member_fetch(
+    bus, queue, sync_manager, monkeypatch
+):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 0.3)
+    silent: list[str] = []
+    sched, contact, _resume = _helper_sched(bus, queue, sync_manager, helpers=[])
+    sched.attach_host_silent(silent.append)
+    await _round(sched)
+    contact.heard("sp-1")  # the host's sentinel lands within the wait
+    await _wait_checks(sched)
+    assert silent == []
 
 
 async def test_no_helper_is_asked_when_the_boot_marks_could_not_be_read(
@@ -3139,3 +3173,60 @@ async def test_a_mesh_begin_carries_our_sync_page(bus, queue, sync_manager):
     await sched._tick_once()
     assert fed.mesh_fields[-1]["sync_mode"] == "incremental"
     assert fed.mesh_fields[-1]["page_ref"] == ref
+
+
+async def test_a_verified_fetch_rides_an_ordinary_begin_to_that_member(
+    bus, queue, sync_manager
+):
+    """Sync pages Phase 3: ``sync_with`` sends the member the same
+    incremental BEGIN a tick would; when the page service's buckets are a
+    fetch from that member, the BEGIN also asks for the rows (``rows: true``
+    + ``have``), recorded for a relay retry. Over the mesh too."""
+    fed = _FakeFederation(confirmed={"member-m"})
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("member-m")]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type={
+                SpaceType.PRIVATE: [_space("sp-1", owner_instance_id="owner-o")]
+            },
+            members_by_space={},
+        ),
+        queue=queue,
+        sync_manager=sync_manager,
+        own_instance_id="self",
+    )
+    ref = {"signer": "owner-o", "epoch": 1, "seq": 9, "issued_at": 5, "root": "r"}
+
+    async def _ref_for(space_id):
+        return ref
+
+    def _have_for(space_id, to, page_ref):
+        return "AAAAAAAAAAA" if to in ("member-m", "member-x") else None
+
+    sched.attach_sync_pages(_ref_for, lambda s, to, p: [7], _have_for)
+    await queue.start()
+    try:
+        await sched.sync_with("sp-1", "member-m")
+        for _ in range(50):
+            if fed.sent:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.stop()
+    (sent,) = fed.sent
+    assert sent["to"] == "member-m"
+    payload = sent["payload"]
+    assert payload["sync_mode"] == "incremental"
+    assert (payload["buckets"], payload["rows"], payload["have"]) == (
+        [7],
+        True,
+        "AAAAAAAAAAA",
+    )
+    assert "AAAAAAAAAAA" in fed.request_haves
+    await sched.sync_with("sp-1", "member-x")  # reached only over the mesh
+    assert fed.mesh_catchups[-1] == ("sp-1", "member-x")
+    assert fed.mesh_fields[-1]["have"] == "AAAAAAAAAAA"
+    await sched.sync_with("sp-1", sched._own_instance_id)  # never ourselves
+    assert len(fed.mesh_catchups) == 1

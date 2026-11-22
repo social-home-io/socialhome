@@ -78,6 +78,10 @@ Triggers:
     own people's rows and their files. The round also marks the host silent
     (``HostContact.went_silent``, with the households it waited on) until
     one of them answers a BEGIN or sends any verified event of the space.
+    v_95 (sync pages Phase 3): the same round tells the page service
+    (:meth:`SpaceSyncScheduler.attach_host_silent`), which fetches what the
+    newest signed page proves we lack from ANY member household — every
+    row verified against the page, so not only the helper's own people's.
     The host is still
     asked first every tick — a mesh-only host too, with the small
     incremental BEGIN once its full catch-up completed or hit its cap
@@ -305,6 +309,7 @@ class SpaceSyncScheduler:
         "_helper_round",
         "_host_ask_due",
         "_host_contact",
+        "_host_silent",
         "_inflight",
         "_interval",
         "_mesh_announce",
@@ -329,6 +334,7 @@ class SpaceSyncScheduler:
         "_stop",
         "_sync_manager",
         "_sync_page_buckets",
+        "_sync_page_have",
         "_sync_page_ref",
         "_task",
     )
@@ -384,6 +390,7 @@ class SpaceSyncScheduler:
         self._sync_page_buckets: Callable[[str, str, dict], list[int] | None] | None = (
             None
         )
+        self._sync_page_have: Callable[[str, str, dict], str | None] | None = None
         #: v_89 member directory version echo (see :meth:`attach_directory_echo`).
         self._directory_echo: Callable[[str, str], Awaitable[int | None]] | None = None
         #: Moderation queue echo (see :meth:`attach_moderation_echo`).
@@ -434,6 +441,9 @@ class SpaceSyncScheduler:
         #: Where a round's silent hosts are recorded (migration 0150,
         #: :meth:`attach_status`); ``None``: not recorded.
         self._status: _SyncStatus | None = None
+        #: v_95 sync pages Phase 3 (:meth:`attach_host_silent`): told when a
+        #: space's hosts went silent, to catch up from a member household.
+        self._host_silent: Callable[[str], None] | None = None
 
     def attach_status(self, status: _SyncStatus) -> None:
         """Wire the sync status (``SpaceSyncStatusService``): a round whose
@@ -460,6 +470,14 @@ class SpaceSyncScheduler:
         self._resume = resume
         self._roster_authority = roster_authority
         self._newest_from = newest_from
+
+    def attach_host_silent(self, on_silent: Callable[[str], None]) -> None:
+        """``on_silent(space_id)`` — called when trigger 10 finds a space's
+        acting hosts silent (sync pages Phase 3,
+        ``SyncPageService.host_silent``): what the newest signed page proves
+        we lack is fetched, verified, from a member household. Next to the
+        helper resume, which covers rows newer than the page."""
+        self._host_silent = on_silent
 
     def set_row_marks(self, marks: tuple[int, int]) -> None:
         """Which rows were stored before this process started — read by the
@@ -528,6 +546,31 @@ class SpaceSyncScheduler:
             )
         else:
             await self._mesh_incremental(space, host, periodic=True, done=True)
+
+    async def sync_with(self, space_id: str, instance_id: str) -> None:
+        """One incremental §25.6 BEGIN of *space_id* to *instance_id* now,
+        with every field a BEGIN carries — sync pages Phase 3: the member
+        household a verified fetch asks, whose ``buckets`` / ``rows`` /
+        ``have`` ride this BEGIN (:meth:`_page_fields_for`). The same
+        BEGIN a periodic tick sends a paired co-member (a mesh-only one over
+        the mesh); skipped while a sync of the space from it runs, like
+        every BEGIN — the fetch then rides the next one."""
+        space = await self._space_repo.get(space_id)
+        if (
+            space is None
+            or space.dissolved
+            or not instance_id
+            or instance_id == self._own_instance_id
+        ):
+            return
+        if await self._federation.is_confirmed_peer(instance_id):
+            await self.enqueue_sync_for_space(
+                space_id=space_id,
+                peer_instance_id=instance_id,
+                sync_mode="incremental",
+            )
+        else:
+            await self._mesh_incremental(space, instance_id, periodic=True, done=True)
 
     async def sync_now(self, space_id: str) -> list[str]:
         """The "Sync now" of one space: the small incremental BEGIN (never a
@@ -605,6 +648,7 @@ class SpaceSyncScheduler:
         self,
         ref_for: Callable[[str], Awaitable[dict | None]],
         buckets_for: Callable[[str, str, dict], list[int] | None] | None = None,
+        have_for: Callable[[str, str, dict], str | None] | None = None,
     ) -> None:
         """``ref_for(space_id)`` → the sync page we hold for the space, as a
         BEGIN's ``page`` (v_95, ``SyncPageService.ref_for``), or ``None``.
@@ -612,9 +656,13 @@ class SpaceSyncScheduler:
         so it sends its page only when newer than ours. ``buckets_for(
         space_id, to_instance_id)`` — the buckets whose listings that BEGIN
         asks for (``SyncPageService.buckets_for``): a listing rides the
-        round, never a BEGIN of its own."""
+        round, never a BEGIN of its own. ``have_for(space_id,
+        to_instance_id, page)`` — Phase 3: when those buckets are a verified
+        fetch from that member household, the ``have`` hint (the BEGIN then
+        asks for the rows too; ``SyncPageService.have_for``)."""
         self._sync_page_ref = ref_for
         self._sync_page_buckets = buckets_for
+        self._sync_page_have = have_for
 
     async def _page_fields_for(self, space_id: str, to_instance_id: str) -> dict:
         """v_95 fields of a BEGIN to *to_instance_id*: ``page`` (the page we
@@ -638,6 +686,16 @@ class SpaceSyncScheduler:
                 )
                 if buckets:
                     out["buckets"] = buckets
+                    have = (
+                        self._sync_page_have(space_id, to_instance_id, ref)
+                        if self._sync_page_have is not None
+                        else None
+                    )
+                    if have is not None:
+                        # Phase 3: a verified fetch from that member household
+                        # — its rows too, minus those we hold.
+                        out["rows"] = True
+                        out["have"] = have
             return out
         except Exception:
             log.exception("sync page fields for %s failed", space_id)
@@ -646,7 +704,11 @@ class SpaceSyncScheduler:
     async def _mesh_page_fields(self, space_id: str, host: str) -> dict:
         """:meth:`_page_fields_for` as ``begin_mesh_catchup_sync`` keywords."""
         fields = await self._page_fields_for(space_id, host)
-        return {"page_ref": fields.get("page"), "buckets": fields.get("buckets")}
+        return {
+            "page_ref": fields.get("page"),
+            "buckets": fields.get("buckets"),
+            "have": fields.get("have"),
+        }
 
     def attach_mesh_announce(self, announce: Callable[[str], Awaitable[bool]]) -> None:
         """``announce(instance_id)`` → ``True`` once nothing more is needed
@@ -1111,6 +1173,7 @@ class SpaceSyncScheduler:
                 roster_digest=roster_digest,
                 page_ref=page_ref,
                 buckets=page_fields.get("buckets"),
+                fetch_have=page_fields.get("have"),
             )
             payload: dict = {
                 "sync_id": sync_id,
@@ -1334,6 +1397,13 @@ class SpaceSyncScheduler:
             log.exception("space %s: reading the roster authority failed", space_id)
             return
         contact.went_silent(space_id, hosts)
+        if self._host_silent is not None:
+            # v_95: the signed page's rows from any member household,
+            # verified — independent of the helper resume below.
+            try:
+                self._host_silent(space_id)
+            except Exception:
+                log.exception("space %s: the verified member fetch failed", space_id)
         if self._row_marks is None:
             # No boot cut (the startup read failed): a resume could start
             # past rows still missing — ask no helper rather than guess.

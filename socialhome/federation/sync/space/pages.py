@@ -57,31 +57,56 @@ import orjson
 from ....canonical_json import canonical_str
 from ....crypto import ed25519_public_key
 from ....domain.federation_capabilities import FederationCapability
+from ....domain.file_hashes import (
+    FILES_FIELD,
+    FILES_SUITE_FIELD,
+    file_hashes_to_wire,
+    parse_file_hashes,
+    space_content_media_name,
+)
+from ....domain.media_constraints import space_media_ref
+from ....domain.space_media_ref import MEDIA_REFS_FIELD
 from ....domain.space_sync_page import StoredSyncPage, SyncPagePosition
+from ....services.inbound_media_store import media_basename
 from ....sync_page import (
+    COMMIT_SPECS,
     COMMITTED_RESOURCES,
+    COUNTERPARTS,
+    HASH_BYTES,
+    MAX_FETCH_BYTES,
+    MAX_FETCH_ROWS,
+    MAX_HINT_LEAVES,
     MAX_LISTING_BUCKETS,
     MAX_LISTING_ROWS,
     MAX_PAGE_FUTURE_SKEW_MS,
     PAGE_MIN_INTERVAL_S,
     PAGE_SUITE_SHA256_B256,
+    ListingRow,
     PageRefused,
     SyncPage,
     UnsupportedPageSuite,
     apply_delta,
+    bucket_hash,
     delta_from_bytes,
     delta_from_wire,
     delta_to_bytes,
     delta_to_wire,
     differing_buckets,
+    fetched_record,
+    fetched_row_to_wire,
+    file_refs,
+    hint_to_wire,
     is_conflict,
     is_superseded,
     listing_to_wire,
     page_time,
+    parse_fetched_row,
     parse_listing,
     parse_page,
     parse_page_ref,
+    record_leaf,
     root_of,
+    row_id_of,
     sign_page,
     vector_delta,
     vector_from_wire,
@@ -90,13 +115,16 @@ from ....sync_page import (
     verify_page,
 )
 from ...host_equivalence import serves_as_host
-from .exporter import record_batches
+from .exporter import RESOURCE_ORDER, record_batches
+from .page_state import BucketRows
+from .stream_health import HELD_BACK_LIMIT, HeldBack
+from .trusted_helpers import helper_offset, member_deliverers
 
 if TYPE_CHECKING:
     from ....domain.space import Space
     from ....repositories.space_sync_page_repo import AbstractSpaceSyncPageRepo
     from .exporter import ResourceExporter
-    from .page_state import BucketRows, PageStateHasher
+    from .page_state import PageStateHasher
 
 log = logging.getLogger(__name__)
 
@@ -155,6 +183,9 @@ class _Compare:
     missing: int | None
     #: Unexplained buckets no listing settled (over the cap, not held, refused).
     unresolved: int
+    #: Phase 3: the unexplained buckets not yet proven complete here — what a
+    #: verified fetch from a member still asks for while no host answers.
+    todo: frozenset[int] = frozenset()
 
 
 @dataclass(slots=True)
@@ -169,6 +200,432 @@ class _Wanted:
     buckets: tuple[int, ...]
     #: sync_id → the ``__listing__`` records that session brought.
     received: dict[str, list[object]] = field(default_factory=dict)
+    #: Phase 3: a verified fetch from a member household (``host`` is the
+    #: deliverer): the BEGIN also asks for the rows (``rows: true``) minus
+    #: those the ``have`` hint names; ``page_at`` — the page's signed
+    #: ``issued_at`` (a row of ours changed later is ahead).
+    fetch: bool = False
+    have: str | None = None
+    page_at: str | None = None
+    #: Whether WE are the space's owner (back after a long absence): it
+    #: only ever takes rows it lacks, never another version of its own.
+    owner: bool = False
+    #: sync_id → the ``__rows__`` records that session brought (bounded).
+    rows: dict[str, list[object]] = field(default_factory=dict)
+    row_bytes: dict[str, int] = field(default_factory=dict)
+
+
+def _lacks(
+    local: BucketRows,
+    wanted: _Wanted,
+    horizon: str,
+    index: int,
+    resource: str,
+    row_id: str,
+    leaf: bytes,
+) -> bool:
+    """Phase 3: whether we lack the verified row ``(resource, row_id)`` with
+    *leaf* — the identity from the delivered record itself (its leaf commits
+    to it), judged against OUR rows only (a member's listing labels and
+    change times are not signed):
+
+    * we hold no row of that identity, and it is not gone here for a later
+      reason (deleted, archived) → we lack it;
+    * we hold that very version → we do not;
+    * we are the space's OWNER (``wanted.owner``): we never replace a
+      version we hold — the page an admin sealed while we were away may
+      predate our own edits, and what we apply we then spread as the host;
+    * else we lack it unless we changed our copy after the page's signed
+      ``issued_at`` — a change time past *horizon* (:func:`_horizon`, a
+      clock far ahead) never counts as newer.
+
+    One stored row can sit under two identities (:data:`COUNTERPARTS`: a
+    task is ``tasks:T`` live, ``tasks_archived:T`` archived): holding its
+    counterpart is holding the row, judged by the same two rules (review
+    N2). A tombstone is no counterpart — delete wins."""
+    mine = next(
+        (
+            r
+            for r in local.rows.get(index, [])
+            if r.resource == resource and r.row_id == row_id
+        ),
+        None,
+    )
+    if mine is None:
+        if is_superseded(resource, row_id, local.gone):
+            return False
+        for other in COUNTERPARTS.get(resource, ()):
+            if (other, row_id) in local.held_any:
+                marker = local.held_any[(other, row_id)]
+                return not (wanted.owner or _newer(marker, wanted, horizon))
+        return True
+    if mine.leaf == leaf or wanted.owner:
+        return False
+    return not _newer(mine.marker, wanted, horizon)
+
+
+def _newer(marker: str | None, wanted: _Wanted, horizon: str) -> bool:
+    """Whether a row of ours changed at *marker* is newer than the page
+    (after its signed ``issued_at``, not past *horizon*)."""
+    return (
+        marker is not None
+        and wanted.page_at is not None
+        and wanted.page_at < marker <= horizon
+    )
+
+
+def _fetched_listings(
+    records: list[object], buckets: tuple[int, ...], vector: bytes
+) -> dict[int, list[ListingRow] | None]:
+    """Phase 3: a member's listings, per bucket — ``None`` when not held. A
+    ``current`` listing (a host's rows as they are now) proves nothing from a
+    member and counts as not held. Raises :class:`PageRefused` for one that
+    is malformed, of a bucket not asked, repeated, or that does not hash to
+    the signed bucket (the whole answer is refused)."""
+    out: dict[int, list[ListingRow] | None] = {}
+    for raw in records:
+        index, rows, current = parse_listing(raw)
+        if index not in buckets or index in out:
+            raise PageRefused(f"a listing of bucket {index} not asked for")
+        if rows is not None and current:
+            rows = None
+        elif rows is not None:
+            verify_listing(index, rows, vector)
+        out[index] = rows
+    return out
+
+
+def _fit_hint(
+    window: list[int], rows: Mapping[int, list[ListingRow]]
+) -> tuple[list[int], list[bytes]]:
+    """The buckets of *window* whose leaves fit one ``have`` hint
+    (:data:`MAX_HINT_LEAVES`), in order, and those leaves. The first bucket
+    always goes; if it alone is too big its hint is cut (the deliverer then
+    sends a few rows we hold, which we skip)."""
+    buckets: list[int] = []
+    leaves: list[bytes] = []
+    for index in window:
+        mine = [r.leaf for r in rows.get(index, [])]
+        if buckets and len(leaves) + len(mine) > MAX_HINT_LEAVES:
+            break
+        buckets.append(index)
+        leaves.extend(mine)
+    return buckets, leaves[:MAX_HINT_LEAVES]
+
+
+def _verified_row(
+    resource: str, record: Mapping[str, Any], leaves: frozenset[bytes]
+) -> tuple[str, str, bytes, dict[str, Any]] | None:
+    """``(resource, row_id, leaf, record to apply)`` when the committed part
+    of a delivered *record* hashes to one of *leaves* (its bucket's verified
+    listing) — else ``None``. The identity comes from the record itself (the
+    leaf commits to it), never from the listing's labels. The record applied
+    is that committed part (:func:`~socialhome.sync_page.fetched_record`)
+    plus the content hashes of its files, which the leaf covers.
+
+    The leaf commits to a file's CONTENT, not to how the row names it: a
+    reference not in the canonical local shape (``api/media/<name>``, not a
+    name another receiving path owns — :func:`space_media_ref`) is refused,
+    or a deliverer could keep the leaf and have the receiver drop the file
+    (review N1)."""
+    kept = fetched_record(resource, record)
+    if any(space_media_ref(url) != url for url in file_refs(resource, kept)):
+        return None
+    files = parse_file_hashes(record)
+
+    def file_hash(url: str) -> str | None:
+        found = files.get(media_basename(url))
+        return found.h if found is not None else None
+
+    leaf = record_leaf(resource, kept, file_hash)
+    row_id = row_id_of(resource, kept)
+    if leaf is None or row_id is None or leaf[1] not in leaves:
+        return None
+    named = {
+        name: files[name]
+        for url in file_refs(resource, kept)
+        if (name := media_basename(url)) in files
+    }
+    return resource, row_id, leaf[1], {**kept, **file_hashes_to_wire(named)}
+
+
+#: A delivered row that verified: ``(bucket, resource, row_id, leaf,
+#: record to apply)``.
+_Verified = tuple[int, str, str, bytes, dict[str, Any]]
+
+
+def _verify_rows(
+    rows: list[object],
+    listed: Mapping[int, list[ListingRow] | None],
+    wanted: _Wanted,
+) -> tuple[list[_Verified], int]:
+    """``(rows that verified, rows refused)`` of a member's answer — CPU
+    only (leaf hashing), run in a worker thread: each row's committed part
+    hashes to a leaf of its bucket's verified listing."""
+    leaves = {
+        index: frozenset(r.leaf for r in listed_rows)
+        for index, listed_rows in listed.items()
+        if listed_rows is not None
+    }
+    verified: list[_Verified] = []
+    refused = 0
+    for raw in rows:
+        try:
+            index, resource, record = parse_fetched_row(raw)
+        except PageRefused:
+            refused += 1
+            continue
+        if index not in wanted.buckets:
+            refused += 1
+            continue
+        if resource == "posts" and record.get("linked_event_id"):
+            continue  # a feed card: every household mints its own
+        row = _verified_row(resource, record, leaves.get(index, frozenset()))
+        if row is None:
+            refused += 1
+            continue
+        verified.append((index, *row))
+    return verified, refused
+
+
+#: A verified row handed to the receiver: ``(bucket, resource, leaf,
+#: record)``.
+_Applied = tuple[int, str, bytes, dict[str, Any]]
+
+
+def _to_apply(
+    verified: list[_Verified], wanted: _Wanted, local: BucketRows, horizon: str
+) -> list[_Applied]:
+    """The verified rows we lack (:func:`_lacks`), each record with what the page does not commit carried over from OUR copy
+    of the row (review N3: a pin, a moderation mark, reactions, local
+    stamps — the leaf does not cover them, so the deliverer's are never
+    applied and ours must not be reset either). CPU only."""
+    out: list[_Applied] = []
+    seen: set[bytes] = set()
+    for index, resource, row_id, leaf, record in verified:
+        if leaf in seen:
+            continue  # delivered twice
+        seen.add(leaf)
+        if not _lacks(local, wanted, horizon, index, resource, row_id, leaf):
+            continue
+        own = next(
+            (
+                found
+                for name in (resource, *COUNTERPARTS.get(resource, ()))
+                if (found := local.own.get((name, row_id))) is not None
+            ),
+            None,
+        )
+        if own is not None:
+            committed = COMMIT_SPECS[resource].fields
+            record = {
+                **{
+                    k: v
+                    for k, v in own.items()
+                    if k not in committed and k not in _NOT_CARRIED
+                },
+                **record,
+            }
+        out.append((index, resource, leaf, record))
+    return out
+
+
+#: Fields of our own copy never carried onto a verified row: its file
+#: hashes and GFS descriptors describe OUR files (the verified row brings
+#: its own hashes).
+_NOT_CARRIED: frozenset[str] = frozenset(
+    {FILES_FIELD, FILES_SUITE_FIELD, MEDIA_REFS_FIELD}
+)
+
+
+def _still_missing(
+    listed: Mapping[int, list[ListingRow] | None],
+    verified: list[_Verified],
+    wanted: _Wanted,
+    local: BucketRows,
+    horizon: str,
+    applied: list[_Applied],
+    held: set[bytes],
+) -> tuple[dict[int, int], dict[int, tuple[bytes, int]], dict[int, tuple[bytes, int]]]:
+    """Per listed bucket, how many of its signed leaves are still not
+    accounted for — judged on OUR rows as they are after the apply (review
+    N1: what the receiver silently refused is still missing). A leaf is
+    accounted for when we hold it, or a delivered row with that leaf
+    verified and its OWN identity shows we do not need it (ours is newer,
+    deleted here, the owner's). The listing's labels never count. CPU
+    only.
+
+    Also the buckets whose every missing leaf was a row handed to the
+    receiver that did not land, ``index -> (our bucket hash now, rows
+    missing)``: refused by its own rules (R3 — asking again brings the same
+    row), and those with a row only *held* back (its parent not here yet;
+    S1)."""
+    settled = {
+        leaf
+        for index, resource, row_id, leaf, _record in verified
+        if not _lacks(local, wanted, horizon, index, resource, row_id, leaf)
+    }
+    handed = {leaf for _index, _resource, leaf, _record in applied}
+    still: dict[int, int] = {}
+    refused: dict[int, tuple[bytes, int]] = {}
+    holding: dict[int, tuple[bytes, int]] = {}
+    for index, listed_rows in listed.items():
+        if listed_rows is None:
+            continue
+        mine = [r.leaf for r in local.rows.get(index, [])]
+        missing = {r.leaf for r in listed_rows} - set(mine) - settled
+        still[index] = len(missing)
+        if missing and missing <= handed:
+            entry = (bucket_hash(index, mine), len(missing))
+            (holding if missing & held else refused)[index] = entry
+    return still, refused, holding
+
+
+def _wanted_ids(rows: list[object]) -> frozenset[tuple[str, str]]:
+    """The identities a member's answer names (and their counterparts) —
+    whose own records the requester keeps (:func:`_to_apply`). Unverified:
+    at worst we keep a few of our own records for nothing."""
+    out: set[tuple[str, str]] = set()
+    for raw in rows:
+        try:
+            _index, resource, record = parse_fetched_row(raw)
+        except PageRefused:
+            continue
+        row_id = row_id_of(resource, record)
+        if row_id is None:
+            continue
+        for name in (resource, *COUNTERPARTS.get(resource, ())):
+            out.add((name, row_id))
+    return frozenset(out)
+
+
+def _known_files(space_id: str, applied: list[_Applied]) -> dict[str, str]:
+    """``content name -> SHA-256`` of the files the applied rows name: the
+    receiver stores a hashed file under its content name, whose bytes —
+    once they arrive — hash to it; until then the re-read takes the hash
+    from here."""
+    known: dict[str, str] = {}
+    for *_, record in applied:
+        for name, fh in parse_file_hashes(record).items():
+            known[space_content_media_name(space_id, fh.h, name)] = fh.h
+    return known
+
+
+def _host_listings(
+    asked: list[int], scan: BucketRows, vector: bytes, hosting: bool
+) -> list[dict]:
+    """The Phase 2 listings of the asked buckets — CPU only, run in a worker
+    thread: proven ones as of the page; a bucket changed here since the page
+    listed as it is now (``current``) when we act as the space's host
+    (trusted like our stream), else ``held: false``."""
+    out: list[dict] = []
+    for index in asked:
+        rows = scan.rows.get(index, [])
+        if len(rows) > MAX_LISTING_ROWS:
+            out.append(listing_to_wire(index, None))
+            continue
+        try:
+            verify_listing(index, rows, vector)
+            out.append(listing_to_wire(index, rows))
+        except PageRefused:
+            out.append(
+                listing_to_wire(index, rows, current=True)
+                if hosting
+                else listing_to_wire(index, None)
+            )
+    return out
+
+
+def _fetch_answer(
+    asked: list[int],
+    scan: BucketRows,
+    vector: bytes,
+    max_record_bytes: int | None,
+) -> tuple[list[dict], list[dict]]:
+    """A deliverer's answer from its export of the asked buckets — CPU only,
+    run in a worker thread: per bucket its listing when our rows of it hash
+    to the page's signed bucket (else ``held: false``), then the proven
+    buckets' rows, bounded (:data:`MAX_FETCH_ROWS`,
+    :data:`MAX_FETCH_BYTES`, *max_record_bytes* each)."""
+    out: list[dict] = []
+    fetched: list[dict] = []
+    used = 0
+    for index in asked:
+        listed = scan.rows.get(index, [])
+        proven = len(listed) <= MAX_LISTING_ROWS
+        if proven:
+            try:
+                verify_listing(index, listed, vector)
+            except PageRefused:
+                proven = False  # changed here since the page
+        out.append(listing_to_wire(index, listed if proven else None))
+        if not proven or scan.records is None:
+            continue
+        for resource, record in scan.records.get(index, []):
+            wire = fetched_row_to_wire(index, resource, record)
+            size = len(orjson.dumps(wire))
+            if max_record_bytes is not None and size > max_record_bytes:
+                continue  # over the requester's frame cap
+            if len(fetched) >= MAX_FETCH_ROWS or used + size > MAX_FETCH_BYTES:
+                break
+            fetched.append(wire)
+            used += size
+    return out, fetched
+
+
+#: Verified rows apply in stream order (a list before its tasks, a post
+#: before its comments and poll).
+_RESOURCE_RANK: dict[str, int] = {r: k for k, r in enumerate(RESOURCE_ORDER)}
+
+#: Phase 3: ``(space_id, deliverer) ->`` one incremental BEGIN to that
+#: member household now (the scheduler's ``sync_with``): the fetch rides it.
+RoundRequest = Callable[[str, str], Awaitable[None]]
+
+#: Phase 3: ``(space_id, deliverer, resource, record) ->`` what of the
+#: verified row was held back only for now (a parent not held yet) or
+#: failed — the receiver's normal merge rules.
+ApplyVerified = Callable[[str, str, str, dict], Awaitable[HeldBack]]
+
+#: A round asks at most this many member households, one after another.
+MAX_FETCH_ASKS: int = 3
+
+#: An ask unanswered this long is given up (the next round asks again).
+FETCH_ANSWER_WAIT_S: float = 300.0
+
+#: Spaces whose stuck buckets (:class:`_Stuck`) are remembered, oldest
+#: dropped first — at most 256 buckets each, ~100 bytes a bucket.
+MAX_STUCK_SPACES: int = 256
+
+
+@dataclass(slots=True)
+class _Stuck:
+    """Re-review R3 (memory only): buckets of the page *root* whose every
+    missing row a member delivered, verified, and our receiver refused by
+    its own rules (an id held in another space, newer words kept, …).
+    Asking again would bring the same rows; such a bucket is not asked of
+    members again while OUR bucket is unchanged — ``index -> (our bucket
+    hash then, rows missing)``. The status keeps them missing.
+
+    A bucket whose rows were only HELD BACK (a parent not here yet) is
+    counted in ``holds``, answer after answer; at :data:`HELD_BACK_LIMIT`
+    in a row it is stuck too — its parent is outside the page and will
+    not come from a member. A row landing starts every count over."""
+
+    root: bytes
+    buckets: dict[int, tuple[bytes, int]] = field(default_factory=dict)
+    holds: dict[int, int] = field(default_factory=dict)
+
+
+class _DeliverySeats(Protocol):
+    async def list_instances_with_roles(
+        self, space_id: str, roles: frozenset[str]
+    ) -> list[str]: ...
+
+
+class _DeliveryVersions(Protocol):
+    async def space_member_supports(
+        self, instance_id: str, *, min_version: int
+    ) -> bool: ...
 
 
 def _classify(
@@ -244,6 +701,7 @@ class SyncPageService:
     """Sync pages on the §25.6 session (see the module docstring)."""
 
     __slots__ = (
+        "_apply_verified",
         "_asked",
         "_checks",
         "_clock_ms",
@@ -252,17 +710,25 @@ class SyncPageService:
         "_conflicts",
         "_crypto",
         "_exporters",
+        "_fetching",
         "_hosts",
         "_locks",
         "_monotonic",
         "_on_change",
         "_own_instance_id",
         "_repo",
+        "_request_round",
+        "_round_left",
+        "_rounds",
+        "_seats",
         "_seqs",
+        "_silent",
         "_sleep",
         "_spaces",
         "_state",
+        "_stuck",
         "_tasks",
+        "_versions",
         "_wanted",
     )
 
@@ -310,6 +776,20 @@ class SyncPageService:
         self._checks: OrderedDict[str, _Compare] = OrderedDict()
         #: space → the (epoch, signer) whose equivocation we saw.
         self._conflicts: OrderedDict[str, tuple[int, str]] = OrderedDict()
+        #: Phase 3 verified fetch (:meth:`attach_member_fetch`); ``None``:
+        #: not wired — only the hosts are asked.
+        self._seats: _DeliverySeats | None = None
+        self._versions: _DeliveryVersions | None = None
+        self._silent: Callable[[str], bool] | None = None
+        self._request_round: RoundRequest | None = None
+        self._apply_verified: ApplyVerified | None = None
+        #: space → rounds so far (the rotation step); the round's deliverers
+        #: still to ask; when its ask went out (monotonic).
+        self._rounds: dict[str, int] = {}
+        self._round_left: dict[str, list[str]] = {}
+        self._fetching: dict[str, float] = {}
+        #: space → the buckets a member fetch cannot complete (R3).
+        self._stuck: OrderedDict[str, _Stuck] = OrderedDict()
 
     # ─── The page held here ───────────────────────────────────────────
 
@@ -606,11 +1086,16 @@ class SyncPageService:
             held is not None
             and held.page.signer == self._own_instance_id
             and page.signer != self._own_instance_id
+            and space.owner_instance_id != self._own_instance_id
         ):
-            # We sign this space too (the owner and a delegated admin): our
-            # own page and its delta chain stay; another signer's page is
-            # never stored over it (it would break our chain and make our
-            # next page look like equivocation to the members).
+            # A delegated admin signs this space too: its own page and its
+            # delta chain stay; another signer's page is never stored over it
+            # (it would break its chain and make its next page look like
+            # equivocation to the members). The OWNER does take a newer page
+            # its delegated admin signed (same epoch — verified above) while
+            # the owner was offline: it then compares and catches up from
+            # members (Phase 3). Its next page starts a chain of its own
+            # (``prev_root`` null, the full vector), which is no conflict.
             return False
         if "vector" in body:
             vector = vector_from_wire(body["vector"])
@@ -786,8 +1271,26 @@ class SyncPageService:
                         continue  # ahead in this bucket
                     unexplained.append(index)
             asked = unexplained[:MAX_LISTING_BUCKETS]
-            host = await self._host_for(space, page.signer) if asked else None
-            self._wanted.pop(space_id, None)
+            # Phase 3: no host answers (silent, or we are the owner) — the
+            # rows and their proof come from a member household instead.
+            from_members = bool(asked) and await self._no_host_answers(space_id)
+            # Buckets a member fetch of this page cannot complete (R3):
+            # still missing, never asked of members again.
+            stuck = (
+                self._stuck_now(space_id, page.root, vector, unexplained)
+                if from_members
+                else {}
+            )
+            host = (
+                await self._host_for(space, page.signer)
+                if asked and not from_members
+                else None
+            )
+            replaced = self._wanted.pop(space_id, None)
+            if replaced is not None and replaced.fetch:
+                # Its answer is now dropped (the ask is gone): no ask is in
+                # flight any more, so this compare's round may ask at once.
+                self._fetching.pop(space_id, None)
             if host is not None:
                 # Rides the next incremental BEGIN to that host (periodic or
                 # Sync now) — never a BEGIN of its own.
@@ -800,12 +1303,18 @@ class SyncPageService:
                 )
                 while len(self._wanted) > MAX_TRACKED:
                     self._wanted.pop(next(iter(self._wanted)))
+            todo = frozenset(unexplained) - stuck.keys()
             result = _Compare(
                 root=page.root,
                 differing=len(differing),
                 unexplained=len(unexplained),
-                missing=0 if not unexplained else None,
-                unresolved=len(unexplained) - len(asked),
+                missing=(
+                    sum(stuck.values())
+                    if not todo
+                    else (0 if not unexplained else None)
+                ),
+                unresolved=0 if not todo else len(unexplained) - len(asked),
+                todo=todo,
             )
             self._remember(space_id, result)
             log.info(
@@ -819,10 +1328,56 @@ class SyncPageService:
                 f"; the next round to {host} lists {len(asked)}" if host else "",
             )
             await self._changed(space_id)
+            if from_members and todo:
+                await self._fetch_round(space_id)
             return result
         except Exception:
             log.exception("sync page: comparing space %s failed", space_id)
             return None
+
+    def _stuck_now(
+        self, space_id: str, root: bytes, vector: bytes, unexplained: list[int]
+    ) -> dict[int, int]:
+        """The unexplained buckets still stuck for page *root* (R3): ours
+        unchanged since the fetch that could not complete them — ``index ->
+        rows missing``. A changed bucket of ours is asked again."""
+        held = self._stuck.get(space_id)
+        if held is None or held.root != root:
+            return {}
+        out: dict[int, int] = {}
+        for index in unexplained:
+            entry = held.buckets.get(index)
+            ours = vector[index * HASH_BYTES : (index + 1) * HASH_BYTES]
+            if entry is not None and entry[0] == ours:
+                out[index] = entry[1]
+        return out
+
+    def _note_stuck(
+        self,
+        space_id: str,
+        root: bytes,
+        found: Mapping[int, tuple[bytes, int]],
+        holding: Mapping[int, tuple[bytes, int]] | None = None,
+    ) -> dict[int, tuple[bytes, int]]:
+        """Remember *found* (refused by rule) as stuck, count one more hold
+        for each bucket of *holding* and remember those at
+        :data:`HELD_BACK_LIMIT` as stuck too. The buckets stuck now."""
+        held = self._stuck.get(space_id)
+        if held is None or held.root != root:
+            held = _Stuck(root=root)
+        out = dict(found)
+        for index, entry in (holding or {}).items():
+            held.holds[index] = held.holds.get(index, 0) + 1
+            if held.holds[index] >= HELD_BACK_LIMIT:
+                out[index] = entry
+        for index in out:
+            held.holds.pop(index, None)
+        held.buckets.update(out)
+        self._stuck[space_id] = held
+        self._stuck.move_to_end(space_id)
+        while len(self._stuck) > MAX_STUCK_SPACES:
+            self._stuck.popitem(last=False)
+        return out
 
     def _remember(self, space_id: str, result: _Compare) -> None:
         self._checks[space_id] = result
@@ -859,6 +1414,26 @@ class SyncPageService:
             return None
         return list(wanted.buckets)
 
+    def have_for(
+        self,
+        space_id: str,
+        to_instance_id: str,
+        page_ref: Mapping[str, Any] | None,
+    ) -> str | None:
+        """Phase 3: the ``have`` hint of our next BEGIN of *space_id* to
+        *to_instance_id* when its ``buckets`` are a verified fetch from that
+        member household (it then also asks for the rows, ``rows: true``);
+        else ``None``."""
+        wanted = self._wanted.get(space_id)
+        if (
+            wanted is None
+            or not wanted.fetch
+            or wanted.host != to_instance_id
+            or _root_of_ref(page_ref) != wanted.root
+        ):
+            return None
+        return wanted.have
+
     async def take_listing(
         self, *, space_id: str, sync_id: str, provider: str, records: object
     ) -> None:
@@ -894,9 +1469,25 @@ class SyncPageService:
         if wanted is None or wanted.host != provider:
             return
         records = wanted.received.pop(sync_id, None)
+        rows = wanted.rows.pop(sync_id, [])
+        wanted.row_bytes.pop(sync_id, None)
         if not records:
+            if (
+                wanted.fetch
+                and self._asked is not None
+                and _root_of_ref(self._asked(sync_id)) == wanted.root
+            ):
+                # Our fetch rode this BEGIN and the member answered with no
+                # listing (it holds no page, or not ours): an answer all the
+                # same — the round goes on to its next member at once.
+                self._wanted.pop(space_id, None)
+                self._fetching.pop(space_id, None)
+                self._spawn(self._fetch_next(space_id), f"sync-page-fetch-{space_id}")
             return
         self._wanted.pop(space_id, None)
+        if wanted.fetch:
+            await self._fetch_done(space_id, provider, wanted, records, rows)
+            return
         try:
             local = await self._state.rows_in(
                 space_id, wanted.buckets, cutoff=wanted.cutoff
@@ -935,9 +1526,401 @@ class SyncPageService:
                 unexplained=check.unexplained,
                 missing=missing,
                 unresolved=check.unresolved + unresolved,
+                todo=check.todo,
             ),
         )
         await self._changed(space_id)
+
+    # ─── Verified fetch from any member (requester, Phase 3) ──────────
+
+    def attach_member_fetch(
+        self,
+        *,
+        seats: _DeliverySeats,
+        versions: _DeliveryVersions,
+        silent: Callable[[str], bool],
+        request: RoundRequest,
+        apply: ApplyVerified,
+    ) -> None:
+        """Wire the verified fetch (``docs/protocol/sync-pages.md`` Phase 3):
+        ``seats`` / ``versions`` — what the deliverer picker reads
+        (:func:`~.trusted_helpers.member_deliverers`); ``silent(space_id)``
+        — whether the households acting as the space's host left this round
+        unanswered (``HostContact.is_silent``); ``request(space_id,
+        deliverer)`` — one incremental BEGIN to that member now, which
+        carries the fetch (:meth:`buckets_for` / :meth:`have_for`);
+        ``apply(space_id, deliverer, resource, record)`` — apply one verified
+        row through the normal receiver (whether it landed)."""
+        self._seats = seats
+        self._versions = versions
+        self._silent = silent
+        self._request_round = request
+        self._apply_verified = apply
+
+    def _host_silent(self, space_id: str) -> bool:
+        if self._silent is None:
+            return False
+        try:
+            return bool(self._silent(space_id))
+        except Exception:
+            log.exception("sync page: reading the host silence of %s", space_id)
+            return False
+
+    async def _no_host_answers(self, space_id: str) -> bool:
+        """Whether member households deliver: the households acting as the
+        space's host are silent — or we ARE its owner, with no host above
+        us: back after a long absence, a newer page our delegated admin
+        signed meanwhile proves what we lack."""
+        if self._request_round is None:
+            return False
+        space = await self._spaces.get(space_id)
+        if space is not None and space.owner_instance_id == self._own_instance_id:
+            return True
+        return self._host_silent(space_id)
+
+    def _spawn(self, coro: Awaitable[None], name: str) -> None:
+        task = asyncio.ensure_future(coro)
+        task.set_name(name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def host_silent(self, space_id: str) -> None:
+        """The scheduler found *space_id*'s acting hosts silent this round:
+        catch up from a member household what the newest page proves we
+        lack (compare first when the held page has no verdict yet)."""
+        self._spawn(self._on_host_silent(space_id), f"sync-page-silent-{space_id}")
+
+    async def _on_host_silent(self, space_id: str) -> None:
+        try:
+            space = await self._spaces.get(space_id)
+            held = await self._held(space) if space is not None else None
+            if held is None or held.page.signer == self._own_instance_id:
+                return
+            check = self._checks.get(space_id)
+            if check is None or check.root != held.page.root:
+                self.compare_soon(space_id)  # it then goes to a member
+                return
+            if check.todo:
+                await self._fetch_round(space_id)
+        except Exception:
+            log.exception("sync page: catching up %s from a member failed", space_id)
+
+    async def _fetch_round(self, space_id: str) -> None:
+        """One round of asks: the member households at v_95 (never a host,
+        never us, never a follower), sorted and rotated from a stable
+        per-household offset plus one step per round, at most
+        :data:`MAX_FETCH_ASKS`, one at a time while no host answers and a
+        bucket is still to fetch. One ask in flight per space."""
+        asked_at = self._fetching.get(space_id)
+        if asked_at is not None and self._monotonic() - asked_at < FETCH_ANSWER_WAIT_S:
+            return  # an ask is in flight; its answer goes on with the round
+        if (
+            self._seats is None
+            or self._versions is None
+            or not await self._no_host_answers(space_id)
+        ):
+            return
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return
+        hosts = await self._hosts(space) if self._hosts is not None else []
+        rnd = self._rounds.get(space_id, 0)
+        self._rounds[space_id] = rnd + 1
+        while len(self._rounds) > MAX_TRACKED:
+            self._rounds.pop(next(iter(self._rounds)))
+        deliverers = await member_deliverers(
+            self._seats,
+            self._versions,
+            space_id,
+            exclude={*hosts, space.owner_instance_id, self._own_instance_id},
+            offset=helper_offset(self._own_instance_id, space_id) + rnd,
+        )
+        if not deliverers:
+            log.info(
+                "sync page: no host answers for %s and no member household at "
+                "v_%d can deliver verified rows — waiting for the host",
+                space_id,
+                FederationCapability.MIN_FOR_SYNC_PAGES,
+            )
+            return
+        self._round_left[space_id] = deliverers[:MAX_FETCH_ASKS]
+        await self._fetch_next(space_id)
+
+    async def _fetch_next(self, space_id: str) -> None:
+        """Ask the round's next deliverer for the buckets still to fetch:
+        the fetch rides the next incremental BEGIN to it (``buckets``,
+        ``rows: true``, ``have``), asked for now."""
+        self._fetching.pop(space_id, None)
+        left = self._round_left.get(space_id) or []
+        while left:
+            if not await self._no_host_answers(space_id):
+                left.clear()  # a host answers again: it is the source
+                return
+            deliverer = left.pop(0)
+            space = await self._spaces.get(space_id)
+            held = await self._held(space) if space is not None else None
+            check = self._checks.get(space_id)
+            if (
+                space is None
+                or held is None
+                or check is None
+                or check.root != held.page.root
+                or not check.todo
+                or self._request_round is None
+            ):
+                left.clear()
+                return
+            todo = sorted(check.todo)
+            start = (self._rounds.get(space_id, 1) - 1) * MAX_LISTING_BUCKETS
+            start %= len(todo)
+            window = (todo[start:] + todo[:start])[:MAX_LISTING_BUCKETS]
+            scan = await self._state.rows_in(space_id, window, cutoff=held.page.cutoff)
+            buckets, leaves = _fit_hint(window, scan.rows)
+            self._wanted[space_id] = _Wanted(
+                host=deliverer,
+                root=held.page.root,
+                vector=held.row.vector,
+                cutoff=held.page.cutoff,
+                buckets=tuple(buckets),
+                fetch=True,
+                have=hint_to_wire(leaves),
+                page_at=page_time(held.page),
+                owner=space.owner_instance_id == self._own_instance_id,
+            )
+            while len(self._wanted) > MAX_TRACKED:
+                self._wanted.pop(next(iter(self._wanted)))
+            self._fetching[space_id] = self._monotonic()
+            log.info(
+                "sync page: no host answers for %s — asking member household "
+                "%s for %d bucket(s) of page %d, verified",
+                space_id,
+                deliverer,
+                len(buckets),
+                held.page.seq,
+            )
+            try:
+                await self._request_round(space_id, deliverer)
+            except Exception:
+                log.exception("sync page: asking %s for rows failed", deliverer)
+            return
+
+    async def take_rows(
+        self, *, space_id: str, sync_id: str, provider: str, records: object
+    ) -> None:
+        """``__rows__`` chunk records of a verified fetch our BEGIN asked,
+        from the household it asked, for the page it asked about — kept
+        (bounded: :data:`MAX_FETCH_ROWS` rows, :data:`MAX_FETCH_BYTES`)
+        until its sentinel; anything else is dropped."""
+        wanted = self._wanted.get(space_id)
+        if (
+            wanted is None
+            or not wanted.fetch
+            or wanted.host != provider
+            or not isinstance(records, list)
+            or self._asked is None
+            or _root_of_ref(self._asked(sync_id)) != wanted.root
+        ):
+            log.info("sync page: unasked rows from %s dropped", provider)
+            return
+        got = wanted.rows.setdefault(sync_id, [])
+        used = wanted.row_bytes.get(sync_id, 0)
+        for raw in records:
+            size = len(orjson.dumps(raw))
+            if len(got) >= MAX_FETCH_ROWS or used + size > MAX_FETCH_BYTES:
+                log.info(
+                    "sync page: rows of space %s from %s over the cap — the "
+                    "rest is asked of the next member",
+                    space_id,
+                    provider,
+                )
+                break
+            got.append(raw)
+            used += size
+        wanted.row_bytes[sync_id] = used
+        while len(wanted.rows) > MAX_PENDING_LISTINGS:
+            stale = next(iter(wanted.rows))
+            wanted.rows.pop(stale)
+            wanted.row_bytes.pop(stale, None)
+
+    async def _fetch_done(
+        self,
+        space_id: str,
+        provider: str,
+        wanted: _Wanted,
+        records: list[object],
+        rows: list[object],
+    ) -> None:
+        """A verified fetch's sentinel: verify the listings against the
+        page's signed buckets, each delivered row by its own leaf, apply the
+        rows we lack through the normal receiver, narrow the verdict, and
+        ask the round's next member for what is still missing."""
+        self._fetching.pop(space_id, None)  # answered
+        try:
+            try:
+                listed = _fetched_listings(records, wanted.buckets, wanted.vector)
+            except PageRefused as exc:
+                log.warning(
+                    "sync page: refused the answer of %s for space %s: %s",
+                    provider,
+                    space_id,
+                    exc,
+                )
+                listed = {}
+            # Our rows now (the round's own stream already applied), with
+            # our own records of the rows delivered (review N3).
+            local = await self._state.rows_in(
+                space_id,
+                wanted.buckets,
+                cutoff=wanted.cutoff,
+                keep_ids=_wanted_ids(rows) if listed else frozenset(),
+            )
+            horizon = _horizon(self._clock_ms())
+            verified, applied, held = (
+                await self._apply_rows(
+                    space_id, provider, wanted, listed, rows, local, horizon
+                )
+                if listed
+                else ([], [], set())
+            )
+            check = self._checks.get(space_id)
+            if check is None or check.root != wanted.root:
+                return  # a newer page came meanwhile; its compare decides
+            # Completeness by LEAVES only, on our rows as they are NOW
+            # (security review 1, re-review N1): what the receiver refused
+            # without saying so is still missing.
+            if applied:
+                local = await self._state.rows_in(
+                    space_id,
+                    wanted.buckets,
+                    cutoff=wanted.cutoff,
+                    known=_known_files(space_id, applied),
+                )
+            # A refusal by rule marks a bucket stuck at once (R3); a row
+            # held back for its parent only after HELD_BACK_LIMIT answers
+            # in a row (S1) — its parent may still come.
+            still, refused, holding = await asyncio.to_thread(
+                _still_missing,
+                listed,
+                verified,
+                wanted,
+                local,
+                horizon,
+                applied,
+                held,
+            )
+            landed = sum(
+                1
+                for index, _resource, leaf, _record in applied
+                if any(leaf == row.leaf for row in local.rows.get(index, []))
+            )
+            revived: frozenset[int] = frozenset()
+            if landed:
+                # A row landed: a row refused before may land now (its
+                # parent came) — those buckets are to fetch again (S1).
+                gone = self._stuck.pop(space_id, None)
+                if gone is not None and gone.root == wanted.root:
+                    revived = frozenset(gone.buckets)
+            stuck = (
+                self._note_stuck(space_id, wanted.root, refused, holding)
+                if refused or holding
+                else {}
+            )
+            complete = frozenset(i for i, n in still.items() if not n)
+            todo = (check.todo | revived) - complete - stuck.keys()
+            short = sum(1 for i, n in still.items() if n and i not in stuck)
+            # The verdict counts the buckets stuck from earlier answers too:
+            # a stuck bucket is missing rows, never "up to date" (S1).
+            earlier = self._stuck.get(space_id)
+            stuck_before = (
+                sum(n for i, (_ours, n) in earlier.buckets.items() if i not in still)
+                if earlier is not None and earlier.root == wanted.root
+                else 0
+            )
+            self._remember(
+                space_id,
+                _Compare(
+                    root=check.root,
+                    differing=check.differing,
+                    unexplained=check.unexplained,
+                    missing=sum(still.values()) + stuck_before,
+                    unresolved=len(todo) - short,
+                    todo=todo,
+                ),
+            )
+            log.info(
+                "sync page: verified catch-up of space %s from %s: %d row(s) "
+                "applied, %d bucket(s) complete, %d still to fetch%s",
+                space_id,
+                provider,
+                landed,
+                len(complete),
+                len(todo),
+                (
+                    f", {len(stuck)} bucket(s) refused here by the receiver "
+                    "(missing, not asked again for this page)"
+                    if stuck
+                    else ""
+                ),
+            )
+            await self._changed(space_id)
+            if todo:
+                self._spawn(self._fetch_next(space_id), f"sync-page-fetch-{space_id}")
+            else:
+                self._round_left.pop(space_id, None)
+        except Exception:
+            log.exception("sync page: a verified fetch of %s failed", space_id)
+
+    async def _apply_rows(
+        self,
+        space_id: str,
+        provider: str,
+        wanted: _Wanted,
+        listed: Mapping[int, list[ListingRow] | None],
+        rows: list[object],
+        local: BucketRows,
+        horizon: str,
+    ) -> tuple[list[_Verified], list[_Applied], set[bytes]]:
+        """Verify and apply the delivered rows: ``(rows that verified, rows
+        handed to the receiver)``. Whether one landed is judged after, from
+        our own rows (:func:`_still_missing`) — never from the receiver's
+        answer, which does not see every silent refusal.
+
+        Nothing the deliverer says about a row is trusted but what the page
+        signs: the row's own committed part must hash to a leaf of its
+        bucket's verified listing (the listing's labels and change times
+        play no part), and whether we lack it is decided from the row's own
+        identity against OUR rows (:func:`_lacks`). Anything else is refused
+        (one WARNING per answer). The hashing runs in a worker thread."""
+        verified, refused = await asyncio.to_thread(_verify_rows, rows, listed, wanted)
+        if refused:
+            log.warning(
+                "sync page: refused %d row(s) of space %s from %s — not a row "
+                "of a verified listing (tampered, stale or unasked)",
+                refused,
+                space_id,
+                provider,
+            )
+        if self._apply_verified is None:
+            return verified, [], set()
+        apply = await asyncio.to_thread(_to_apply, verified, wanted, local, horizon)
+        apply.sort(key=lambda v: _RESOURCE_RANK.get(v[1], len(_RESOURCE_RANK)))
+        held: set[bytes] = set()  # held back for now, or failed: no rule
+        for _index, resource, leaf, record in apply:
+            try:
+                outcome = await self._apply_verified(
+                    space_id, provider, resource, record
+                )
+            except Exception:
+                log.exception(
+                    "sync page: applying a verified %s row of %s failed",
+                    resource,
+                    space_id,
+                )
+                held.add(leaf)
+                continue
+            if outcome.count or outcome.failed:
+                held.add(leaf)
+        return verified, apply, held
 
     # ─── Listings (provider) ──────────────────────────────────────────
 
@@ -963,29 +1946,16 @@ class SyncPageService:
         if held is None or not page_ref or page_ref.get("root") != held.page.root:
             return [listing_to_wire(i, None) for i in asked]
         scan = await self._state.rows_in(space_id, asked, cutoff=held.page.cutoff)
-        out: list[dict] = []
         hosting = await serves_as_host(
             self._spaces,  # type: ignore[arg-type]
             space,
             own_instance_id=self._own_instance_id,
         )
-        for index in asked:
-            rows = scan.rows.get(index, [])
-            if len(rows) > MAX_LISTING_ROWS:
-                out.append(listing_to_wire(index, None))
-                continue
-            try:
-                verify_listing(index, rows, held.row.vector)
-                out.append(listing_to_wire(index, rows))
-            except PageRefused:
-                # Changed here since the page: as the space's host we list
-                # the bucket as it is now (trusted like our stream); anyone
-                # else cannot prove it.
-                out.append(
-                    listing_to_wire(index, rows, current=True)
-                    if hosting
-                    else listing_to_wire(index, None)
-                )
+        # The proofs (bucket hashes over every listed leaf) run in a worker
+        # thread, like the export's hashing.
+        out = await asyncio.to_thread(
+            _host_listings, asked, scan, held.row.vector, hosting
+        )
         log.info(
             "sync page: listed %d of %d bucket(s) of space %s",
             sum(1 for r in out if r.get("held") or r.get("current")),
@@ -993,6 +1963,56 @@ class SyncPageService:
             space_id,
         )
         return out
+
+    async def fetch_records(
+        self,
+        *,
+        space_id: str,
+        page_ref: Mapping[str, Any] | None,
+        buckets: list[int],
+        requester_version: int,
+        have: frozenset[bytes] | None,
+        max_record_bytes: int | None,
+    ) -> tuple[list[dict], list[dict]]:
+        """A verified fetch (Phase 3; any member household serves it): per
+        asked bucket the ``__listing__`` record when our rows of it still
+        hash to the page the requester holds (the same page we hold), and
+        then its rows the *have* hint does not name, as ``__rows__``
+        records — at most :data:`MAX_FETCH_ROWS` rows and
+        :data:`MAX_FETCH_BYTES`, each at most *max_record_bytes* (a
+        relay-seated requester's frame cap). A bucket changed here since the
+        page is ``held: false`` (never ``current``, never a row we cannot
+        prove)."""
+        if requester_version < FederationCapability.MIN_FOR_SYNC_PAGES:
+            return [], []
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return [], []
+        held = await self._held(space)
+        asked = buckets[:MAX_LISTING_BUCKETS]
+        if held is None or not page_ref or page_ref.get("root") != held.page.root:
+            return [listing_to_wire(i, None) for i in asked], []
+        scan = await self._state.rows_in(
+            space_id,
+            asked,
+            cutoff=held.page.cutoff,
+            keep_records=True,
+            skip=have or frozenset(),
+        )
+        # The export's hashing already ran in worker threads (rows_in); the
+        # proofs and the answer's sizing do too.
+        out, fetched = await asyncio.to_thread(
+            _fetch_answer, asked, scan, held.row.vector, max_record_bytes
+        )
+        log.info(
+            "sync page: listed %d of %d bucket(s) of space %s for a verified "
+            "fetch, %d row(s)",
+            sum(1 for r in out if r.get("held")),
+            len(out),
+            space_id,
+            len(fetched),
+        )
+        return out, fetched
 
     # ─── Status ───────────────────────────────────────────────────────
 

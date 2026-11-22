@@ -1046,6 +1046,7 @@ python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after m
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
 python .claude/skills/federation-demo/harness.py gfs-private-channel-multi
+python .claude/skills/federation-demo/harness.py members-page-catchup   # host c down, b catches up from the plain member a, verified (v_95); restarts b and c — before gfs-admin-seed
 python .claude/skills/federation-demo/harness.py gfs-admin-seed   # last before verify: needs relay-pair (a ↔ d) and, for the withdrawn-listing checks, gfs-b-up; restarts a and e
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-b-down
@@ -1334,6 +1335,38 @@ retired seeds are still refused.
 
 ```bash
 python .claude/skills/federation-demo/harness.py gfs-admin-seed
+```
+
+### ``members-page-catchup`` — the host is down, a member catches up from a plain member, verified (v_95)
+
+Sync pages Phase 3 (``docs/protocol/sync-pages.md``). Roles (``_PC_*`` in
+the harness): host c, the member that falls behind b, the plain member that
+delivers a. a never syncs from b here (b may still hold stale provider
+sessions for a process of a that earlier steps restarted) and is not
+restarted (its hourly stream budget toward b, the salon host ``verify``
+asks for its page, stays for ``verify``). The chain runs the step before
+``gfs-admin-seed``, whose restart of a right before ``verify`` it keeps.
+
+c creates a fresh private space, writes two posts and a wiki page and only
+then invites b and a, so c's first signed page (sealed on the first join's
+sentinel) commits all three; "Sync now" brings it to both, and b's status
+reads it as a match. b goes down and its copies of the posts and the page
+are removed from its database (what lost deliveries would leave — the one
+place the step writes app state); then the host c goes down (no delegated
+admin). b comes back: its BEGIN to c goes unanswered for
+``HOST_ANSWER_WAIT_S``, so b asks the plain member a — not an admin or
+moderator — for the rows of the buckets its page proves it lacks, checks
+every row against c's signed page and applies it. With c still down the
+step asserts that b shows both posts (same words) and the page, that its
+log names the verified catch-up from a and refuses nothing, and that b's
+sync status reads ``up_to_date`` with ``page.match: true``. b and c are
+respawned at the end. ``verify`` (state key ``page_catchup``) re-checks
+that b holds all three and reads the space up to date. A tampered row and
+a forged listing are covered by
+``tests/federation/sync/space/test_pages_fetch.py``.
+
+```bash
+python .claude/skills/federation-demo/harness.py members-page-catchup
 ```
 
 ### ``gfs-fallback-switch`` — the GFS fallback for an existing pair (v_54)

@@ -16,6 +16,10 @@ One picker for both v_92 fallbacks — the scheduler's helper
 * sorted by instance id, then started at a stable per-household offset
   (:func:`helper_offset`), so the members of a silent space spread over its
   helpers instead of all asking the first one. Fixed, never random.
+
+The same picker, with any member seat and v_95, chooses the households a
+member asks for **verified** rows while the host is silent (sync pages Phase
+3, :func:`member_deliverers`).
 """
 
 from __future__ import annotations
@@ -25,12 +29,16 @@ from collections.abc import Iterable
 from typing import Protocol
 
 from ....domain.federation_capabilities import FederationCapability
-from ....domain.space import SpaceRole
+from ....domain.space import WRITER_ROLES, SpaceRole
 
 #: The seats a trusted helper holds.
 HELPER_ROLES: frozenset[str] = frozenset(
     {SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value}
 )
+
+#: The seats a v_95 verified-fetch deliverer holds (sync pages Phase 3): any
+#: member seat — owner, admin, moderator, member — never a follower's.
+DELIVERER_ROLES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
 
 class _Seats(Protocol):
@@ -59,20 +67,20 @@ async def trusted_helpers(
     *,
     exclude: Iterable[str],
     offset: int = 0,
+    roles: frozenset[str] = HELPER_ROLES,
+    min_version: int = FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
 ) -> list[str]:
     """The trusted helper households of *space_id* at v_92, sorted, minus
     *exclude* (this household, the space's hosts), rotated to start at
-    *offset* (modulo their number)."""
+    *offset* (modulo their number). *roles* / *min_version* make the same
+    picker choose the v_95 verified-fetch deliverers
+    (:func:`member_deliverers`)."""
     skip = set(exclude) | {""}
-    ids = sorted(
-        set(await seats.list_instances_with_roles(space_id, HELPER_ROLES)) - skip
-    )
+    ids = sorted(set(await seats.list_instances_with_roles(space_id, roles)) - skip)
     out = [
         iid
         for iid in ids
-        if await versions.space_member_supports(
-            iid, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
-        )
+        if await versions.space_member_supports(iid, min_version=min_version)
     ]
     if not out:
         return []
@@ -80,4 +88,35 @@ async def trusted_helpers(
     return out[start:] + out[:start]
 
 
-__all__ = ["HELPER_ROLES", "helper_offset", "trusted_helpers"]
+async def member_deliverers(
+    seats: _Seats,
+    versions: _Versions,
+    space_id: str,
+    *,
+    exclude: Iterable[str],
+    offset: int = 0,
+) -> list[str]:
+    """Who a member asks for verified rows while the space's hosts are
+    silent (sync pages Phase 3, v_95): every member household — any member
+    seat, never a follower-only one — at ``MIN_FOR_SYNC_PAGES``, other than
+    *exclude*; sorted and rotated like :func:`trusted_helpers`. No trust in
+    the deliverer is needed (every row is checked against the signed page),
+    so admins and moderators get no priority (owner decision 2)."""
+    return await trusted_helpers(
+        seats,
+        versions,
+        space_id,
+        exclude=exclude,
+        offset=offset,
+        roles=DELIVERER_ROLES,
+        min_version=FederationCapability.MIN_FOR_SYNC_PAGES,
+    )
+
+
+__all__ = [
+    "DELIVERER_ROLES",
+    "HELPER_ROLES",
+    "helper_offset",
+    "member_deliverers",
+    "trusted_helpers",
+]

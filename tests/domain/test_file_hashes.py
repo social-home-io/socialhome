@@ -15,6 +15,7 @@ from socialhome.domain.file_hashes import (
     FileHash,
     UnsupportedFileHashSuite,
     blob_hash,
+    content_media_ext,
     file_hashes_to_wire,
     is_space_content_media_name,
     parse_file_hashes,
@@ -134,3 +135,18 @@ def test_the_wire_carries_no_size_and_ignores_one():
     assert wire[FILES_FIELD] == {"a.webp": {"h": H1}}
     parsed = parse_file_hashes(_wire({"a.webp": {"h": H1, "size": "junk"}}))
     assert list(parsed) == ["a.webp"] and parsed["a.webp"].h == H1
+
+
+def test_content_media_ext_is_the_one_rule_of_the_content_name() -> None:
+    """Phase 3 re-review R2: a sync page commits this extension with the
+    file's hash, so it must be what a content name keeps."""
+    for name, ext in (
+        ("a.webp", ".webp"),
+        ("sd-0123.webm", ".webm"),
+        ("no-ext", ""),
+        ("a.we-bp", ""),
+        ("a.toolongextension", ""),
+        (".hidden", ""),
+    ):
+        assert content_media_ext(name) == ext, name
+        assert space_content_media_name("sp-1", H1, name).endswith(ext)

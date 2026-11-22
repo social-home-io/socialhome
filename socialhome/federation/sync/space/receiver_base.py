@@ -10,6 +10,7 @@ import logging
 import pathlib
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -43,6 +44,17 @@ if TYPE_CHECKING:
     from ....services.page_conflict_service import PageConflictService
 
 log = logging.getLogger(__name__)
+
+#: Sync pages Phase 3: ``(space_id, deliverer)`` while
+#: :meth:`~.receiver.SpaceSyncReceiver.apply_verified` applies ONE row that
+#: was checked against the space authority's signed page — the row is the
+#: signer's own, so it passes where a host's record passes
+#: (:meth:`ReceiverBase._acts_as_host`), for that space and deliverer and
+#: nowhere else. Task-local (a context variable), so a concurrent stream of
+#: the same household is never taken as verified.
+VERIFIED_ROW: ContextVar[tuple[str, str] | None] = ContextVar(
+    "space_sync_verified_row", default=None
+)
 
 
 class _GfsMediaSink(Protocol):
@@ -160,7 +172,12 @@ class ReceiverBase:
         names)."""
         hashes = parse_file_hashes(record) if from_host else None
         direct = self._media_names.localize(
-            space_id, provider, urls, held=held or (), hashes=hashes
+            space_id,
+            provider,
+            urls,
+            held=held or (),
+            hashes=hashes,
+            verified=VERIFIED_ROW.get() == (space_id, provider),
         )
         if self._gfs_media is None:
             return direct
@@ -213,10 +230,14 @@ class ReceiverBase:
         admin household that invited us while delegation is on
         (:mod:`socialhome.federation.host_equivalence`) — whose chunks are
         then taken whole, like the owner's. Without an authorship binder
-        (no seat repo) only the owner counts."""
+        (no seat repo) only the owner counts. A row verified against the
+        signed sync page (:data:`VERIFIED_ROW`, Phase 3) passes too."""
         if space is None or not provider:
             return False
         if space.owner_instance_id == provider:
+            return True
+        verified = VERIFIED_ROW.get()
+        if verified is not None and verified == (space.id, provider):
             return True
         if self._authorship is None:
             return False

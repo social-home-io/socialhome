@@ -72,6 +72,7 @@ from ...owner_bound_id import (
 from ...space_scope import archive_refusal
 from .exporter import (
     ALLOWED_RESOURCES,
+    FETCHED_ROWS_RESOURCE,
     LISTING_RESOURCE,
     REMOVAL_RESOURCES,
     ROSTER_RESOURCES,
@@ -88,7 +89,7 @@ from .receive_stickies import StickiesMixin
 from .receive_tasks import TasksMixin
 from .receive_timetables import TimetablesMixin
 from .receive_zones import ZonesMixin
-from .receiver_base import ReceiverBase, _GfsMediaSink, _sync_event
+from .receiver_base import VERIFIED_ROW, ReceiverBase, _GfsMediaSink, _sync_event
 from .stream_health import HeldBack, HeldBackStreaks, StreamHealth
 
 if TYPE_CHECKING:
@@ -156,6 +157,10 @@ class _SyncPageSink(Protocol):
 
     async def listing_done(
         self, *, space_id: str, sync_id: str, provider: str
+    ) -> None: ...
+
+    async def take_rows(
+        self, *, space_id: str, sync_id: str, provider: str, records: object
     ) -> None: ...
 
 
@@ -701,6 +706,20 @@ class SpaceSyncReceiver(
             self._health.applied(sync_id, index)
             return
 
+        if resource == FETCHED_ROWS_RESOURCE:
+            # Phase 3: rows of a verified fetch we asked for — never applied
+            # here as a stream; the page service checks each against the
+            # signed page at the sentinel (:meth:`apply_verified`).
+            if self._sync_pages is not None:
+                await self._sync_pages.take_rows(
+                    space_id=space_id,
+                    sync_id=sync_id,
+                    provider=from_instance,
+                    records=records,
+                )
+            self._health.applied(sync_id, index)
+            return
+
         if resource not in ALLOWED_RESOURCES:
             # A newer provider's resource: dropped by rule, never retried.
             self._health.applied(sync_id, index)
@@ -743,6 +762,68 @@ class SpaceSyncReceiver(
             space_id,
             from_instance,
         )
+
+    async def apply_verified(
+        self, space_id: str, provider: str, resource: str, record: dict[str, Any]
+    ) -> HeldBack:
+        """Sync pages Phase 3: apply ONE row a member household (*provider*)
+        delivered that was checked against the space authority's signed page
+        (its committed part hashes to a leaf of a listing that hashes to the
+        signed bucket). The row is the signer's own, so it passes where a
+        host's record passes (:data:`~.receiver_base.VERIFIED_ROW`) — the
+        same admission, the same merge rules (last writer wins, tombstones,
+        a deleted row stays deleted), nothing else.
+
+        What was held back only for now (``count``) or failed (``failed``):
+        besides the merge rules' own holds, a row whose parent is not held
+        here at all yet — a comment / poll / schedule / listing before its
+        post, a task before its list, a gallery item before its album —
+        counts as held back (Phase 3 re-review S1): it lands once the parent
+        does, so it is no refusal by rule. Whether it landed is judged by
+        the caller from its own rows."""
+        token = VERIFIED_ROW.set((space_id, provider))
+        try:
+            outcome = await self._apply(resource, space_id, [record], provider=provider)
+        finally:
+            VERIFIED_ROW.reset(token)
+        if not outcome.count and await self._parent_missing(space_id, resource, record):
+            outcome.count += 1
+        return outcome
+
+    async def _parent_missing(
+        self, space_id: str, resource: str, record: dict[str, Any]
+    ) -> bool:
+        """Whether *record*'s parent row is held nowhere here yet (in no
+        space, and not deleted here) — the only case it may still arrive.
+        One held in another space, or deleted here, is a refusal by rule.
+        (A deleted post stays held, soft-deleted.)"""
+        match resource:
+            case "comments" | "polls" | "schedules" | "bazaar":
+                post_id = str(record.get("post_id") or "")
+                return (
+                    bool(post_id) and await self._space_post_repo.get(post_id) is None
+                )
+            case "tasks" | "tasks_archived":
+                list_id = str(record.get("list_id") or "")
+                return (
+                    bool(list_id)
+                    and await self._space_task_repo.get_list(list_id) is None
+                    and not await self._space_task_repo.is_list_deleted(
+                        list_id, space_id=space_id
+                    )
+                )
+            case "gallery":
+                album_id = str(record.get("album_id") or "")
+                return (
+                    record.get("kind") != "album"
+                    and bool(album_id)
+                    and self._gallery_repo is not None
+                    and await self._gallery_repo.get_album(album_id) is None
+                    and not await self._gallery_repo.is_album_deleted(
+                        album_id, space_id=space_id
+                    )
+                )
+        return False
 
     async def _dispatch(
         self,

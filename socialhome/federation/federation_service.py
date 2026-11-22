@@ -109,7 +109,7 @@ from ..peer_http import post_to_peer
 from ..rate_limiter import RateLimiter
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
-from ..sync_page import parse_bucket_request, parse_page_ref
+from ..sync_page import parse_bucket_request, parse_fetch_request, parse_page_ref
 from ..task_drain import wait_tasks_done
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
@@ -1171,6 +1171,7 @@ class FederationService:
         roster_digest: dict | None = None,
         page_ref: dict | None = None,
         buckets: list[int] | None = None,
+        fetch_have: str | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -1190,6 +1191,7 @@ class FederationService:
             roster_digest=roster_digest,
             page_ref=page_ref,
             buckets=buckets,
+            fetch_have=fetch_have,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -3352,6 +3354,7 @@ class FederationService:
         roster_digest: dict | None = None,
         page_ref: dict | None = None,
         buckets: list[int] | None = None,
+        have: str | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
@@ -3408,6 +3411,7 @@ class FederationService:
                 roster_digest=roster_digest,
                 page_ref=page_ref,
                 buckets=buckets,
+                fetch_have=have,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -3437,6 +3441,10 @@ class FederationService:
             if buckets:
                 # … and the bucket listings the stream should end with.
                 payload["buckets"] = list(buckets)
+                if have is not None:
+                    # Phase 3: a verified fetch from a member household.
+                    payload["rows"] = True
+                    payload["have"] = have
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
@@ -5598,6 +5606,7 @@ class FederationService:
         space_id = event.space_id or payload.get("space_id") or ""
         if not sync_id or not space_id:
             return
+        want_rows, have = parse_fetch_request(payload)
         decision = await self._sync_manager.begin_session(
             sync_id=sync_id,
             space_id=space_id,
@@ -5613,6 +5622,10 @@ class FederationService:
             page_ref=parse_page_ref(payload.get("page")),
             # v_95: the buckets whose listings the stream ends with.
             buckets=parse_bucket_request(payload.get("buckets")),
+            # Phase 3: a verified fetch also wants those buckets' rows, minus
+            # those its ``have`` hint names (a malformed hint: listings only).
+            want_rows=want_rows,
+            have=have,
         )
         if not decision.accepted and decision.next_event is not None:
             if (
@@ -5869,6 +5882,7 @@ class FederationService:
                 roster_digest=pending.roster_digest,
                 page_ref=pending.page_ref,
                 buckets=pending.buckets,
+                fetch_have=pending.fetch_have,
             )
         except ConnectionError:
             # Closed while the offer was applied (reaped, superseded):

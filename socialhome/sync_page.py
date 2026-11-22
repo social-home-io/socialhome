@@ -51,6 +51,7 @@ from .authority_sig import (
 )
 from .canonical_json import canonical_bytes, canonical_str
 from .crypto import b64url_decode, b64url_encode
+from .domain.file_hashes import content_media_ext
 
 # ─── Suites ──────────────────────────────────────────────────────────────
 
@@ -111,12 +112,17 @@ PAGE_FIELDS: frozenset[str] = frozenset(
 
 
 def _no_floats(value: Any) -> Any:
-    """*value* with every float as its decimal string (``repr``: the
-    shortest round-trip form, the same on every CPython)."""
-    if value is None or type(value) in (str, int, bool):
+    """*value* with every float as ``"f:"`` + its decimal string (``repr``:
+    the shortest round-trip form, the same on every CPython) and every
+    string as ``"s:"`` + itself — so the float ``1.5`` and the string
+    ``"1.5"`` commit differently (the leaf pins the type of what is
+    applied, Phase 3 review N4)."""
+    if value is None or isinstance(value, (int, bool)):
         return value
+    if isinstance(value, str):  # an enum of strings too, as JSON spells it
+        return "s:" + str.__str__(value)
     if isinstance(value, float):
-        return repr(value)
+        return "f:" + repr(value)
     if isinstance(value, dict):
         return {str(k): _no_floats(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -158,6 +164,9 @@ class _HostOnly(Exception):
 
 
 def _file_hash(url: Any, file_hash: FileHashOf) -> str | None:
+    """A file reference as committed: its content SHA-256 and the extension
+    it is served with (:func:`content_media_ext` — re-review R2: the hash
+    alone would let a deliverer choose how a verified file is served)."""
     if url is None or url == "":
         return None
     if not isinstance(url, str):
@@ -165,13 +174,15 @@ def _file_hash(url: Any, file_hash: FileHashOf) -> str | None:
     h = file_hash(url)
     if not h:
         raise _HostOnly
-    return h
+    name = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    return h + content_media_ext(name)
 
 
 def _files(value: Any, file_hash: FileHashOf) -> Any:
-    """A file field (one URL, or a list of them) as content hashes."""
+    """A file field (one URL, or a list of them, in its order) as content
+    hashes."""
     if isinstance(value, (list, tuple)):
-        return sorted(h for v in value if (h := _file_hash(v, file_hash)) is not None)
+        return [h for v in value if (h := _file_hash(v, file_hash)) is not None]
     return _file_hash(value, file_hash)
 
 
@@ -197,30 +208,37 @@ class CommitSpec:
     nested_fields: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     shape: Mapping[str, Callable[[Any], Any]] = field(default_factory=dict)
     skip: Callable[[Mapping[str, Any]], bool] | None = None
+    #: List fields whose order means something (pictures, poll options,
+    #: schedule slots, timetable entries): committed IN ORDER. Every other
+    #: list is a set and committed sorted.
+    ordered: tuple[str, ...] = ()
+
+
+_POLL_OPTION_KEYS = ("id", "text")
+_SCHEDULE_SLOT_KEYS = ("id", "slot_date", "start_time", "end_time", "position")
+_POLL_META_KEYS = ("post_id", "question", "closes_at", "closed", "allow_multiple")
 
 
 def _poll_options(value: Any) -> Any:
     if not isinstance(value, list):
         return []
-    return _sorted_list(
-        {"id": o.get("id"), "text": o.get("text")} for o in value if isinstance(o, dict)
-    )
+    return [
+        {k: o.get(k) for k in _POLL_OPTION_KEYS} for o in value if isinstance(o, dict)
+    ]
 
 
 def _schedule_slots(value: Any) -> Any:
     if not isinstance(value, list):
         return []
-    keep = ("id", "slot_date", "start_time", "end_time", "position")
-    return _sorted_list(
-        {k: s.get(k) for k in keep} for s in value if isinstance(s, dict)
-    )
+    return [
+        {k: s.get(k) for k in _SCHEDULE_SLOT_KEYS} for s in value if isinstance(s, dict)
+    ]
 
 
 def _poll_meta(value: Any) -> Any:
     if not isinstance(value, dict):
         return None
-    keep = ("post_id", "question", "closes_at", "closed", "allow_multiple")
-    return {k: value.get(k) for k in keep}
+    return {k: value.get(k) for k in _POLL_META_KEYS}
 
 
 _TASK_FIELDS = (
@@ -279,6 +297,7 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
                 "link_preview",
             ),
             files=("media_url", "image_urls"),
+            ordered=("image_urls",),
             # A calendar event's feed card: every household mints its own
             # (own id, own words) — never committed, on any side.
             skip=lambda r: bool(r.get("linked_event_id")),
@@ -413,12 +432,14 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
             id_key="post_id",
             stamps=(),
             shape={"meta": _poll_meta, "options": _poll_options},
+            ordered=("options",),
         ),
         "schedules": CommitSpec(
             fields=("post_id", "title", "deadline", "slots", "finalized_slot_id"),
             id_key="post_id",
             stamps=("deadline",),
             shape={"slots": _schedule_slots},
+            ordered=("slots",),
         ),
         "space_zones_deleted": _tombstone("created_by"),
         "space_zones": CommitSpec(
@@ -458,6 +479,7 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
             ),
             id_key="post_id",
             files=("image_urls",),
+            ordered=("image_urls",),
             stamps=("created_at", "end_time", "sold_at"),
         ),
         "timetables_deleted": _tombstone("created_by"),
@@ -479,7 +501,8 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
                 "overrides",
                 "validity",
                 "assignees",
-            )
+            ),
+            ordered=("entries",),
         ),
     }
 )
@@ -547,7 +570,7 @@ def commit_form(
             elif name in spec.stamps:
                 value = _stamp(value)
             value = _no_floats(value)
-            if isinstance(value, list):
+            if isinstance(value, list) and name not in spec.ordered:
                 value = _sorted_list(value)
             projection[name] = value
     except _HostOnly:
@@ -988,6 +1011,22 @@ SUPERSEDED_BY: Mapping[str, str] = MappingProxyType(
     }
 )
 
+
+def _counterparts() -> Mapping[str, tuple[str, ...]]:
+    pairs: dict[str, list[str]] = {}
+    for moved, live in SUPERSEDED_BY.items():
+        if moved.endswith("_deleted"):
+            continue  # a tombstone is no counterpart: delete wins
+        pairs.setdefault(moved, []).append(live)
+        pairs.setdefault(live, []).append(moved)
+    return MappingProxyType({k: tuple(v) for k, v in pairs.items()})
+
+
+#: One stored row under two identities (Phase 3): a task is ``tasks:T``
+#: while live and ``tasks_archived:T`` while archived — not a tombstone,
+#: the same row moved. ``resource -> its counterpart resources``.
+COUNTERPARTS: Mapping[str, tuple[str, ...]] = _counterparts()
+
 #: Resources keyed by their post: gone with the post.
 POST_KEYED: frozenset[str] = frozenset({"polls", "schedules", "bazaar"})
 
@@ -1121,12 +1160,131 @@ def parse_bucket_request(raw: object) -> list[int] | None:
     return out
 
 
+# ─── Verified fetch from any member (Phase 3) ────────────────────────────
+
+#: A fetch answer carries at most this many rows …
+MAX_FETCH_ROWS: int = 256
+#: … and at most this many bytes of them (their JSON).
+MAX_FETCH_BYTES: int = 512 * 1024
+#: The requester's ``have`` hint: the leaves it holds in the asked buckets,
+#: each as its first :data:`HINT_PREFIX_BYTES` bytes, at most this many.
+MAX_HINT_LEAVES: int = 2048
+HINT_PREFIX_BYTES: int = 8
+
+
+def hint_to_wire(leaves: Iterable[bytes]) -> str:
+    """The ``have`` hint of a fetch: the 8-byte prefixes of *leaves*."""
+    return b64url_encode(b"".join(leaf[:HINT_PREFIX_BYTES] for leaf in leaves))
+
+
+def hint_from_wire(raw: object) -> frozenset[bytes] | None:
+    """A received ``have`` hint (``None``: none sent). Raises
+    :class:`PageRefused` for a malformed or oversized one."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise PageRefused("malformed have hint")
+    blob = _b64(raw)
+    if len(blob) % HINT_PREFIX_BYTES or len(blob) > MAX_HINT_LEAVES * (
+        HINT_PREFIX_BYTES
+    ):
+        raise PageRefused("malformed have hint")
+    return frozenset(
+        blob[k : k + HINT_PREFIX_BYTES] for k in range(0, len(blob), HINT_PREFIX_BYTES)
+    )
+
+
+def parse_fetch_request(
+    payload: Mapping[str, Any],
+) -> tuple[bool, frozenset[bytes] | None]:
+    """``(rows wanted, have hint)`` of a ``sync_mode: "buckets"`` BEGIN:
+    rows only for ``rows: true``; a malformed hint asks for no rows at all
+    (listings only), never for every row."""
+    if payload.get("rows") is not True:
+        return False, None
+    try:
+        return True, hint_from_wire(payload.get("have"))
+    except PageRefused:
+        return False, None
+
+
+def fetched_row_to_wire(index: int, resource: str, record: Mapping[str, Any]) -> dict:
+    """A ``__rows__`` record: one row of bucket *index* a deliverer holds
+    exactly as the page commits it."""
+    return {"i": index, "r": resource, "row": dict(record)}
+
+
+def parse_fetched_row(raw: object) -> tuple[int, str, dict[str, Any]]:
+    """A received ``__rows__`` record, strictly parsed: a committed
+    resource, a row with an id, of the bucket it names. Raises
+    :class:`PageRefused`."""
+    if not isinstance(raw, dict):
+        raise PageRefused("fetched row is not an object")
+    index, resource, record = raw.get("i"), raw.get("r"), raw.get("row")
+    if (
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < BUCKETS
+        or not isinstance(resource, str)
+        or resource not in COMMITTED_RESOURCES
+        or not isinstance(record, dict)
+    ):
+        raise PageRefused("malformed fetched row")
+    row_id = row_id_of(resource, record)
+    if row_id is None or len(row_id) > MAX_LISTING_FIELD:
+        raise PageRefused("malformed fetched row")
+    if row_key(resource, row_id)[0] != index:
+        raise PageRefused("a fetched row of another bucket")
+    return index, resource, record
+
+
+def fetched_record(resource: str, record: Mapping[str, Any]) -> dict[str, Any]:
+    """*record* cut down to what its commit form covers — the only part of
+    a row from a deliverer that its leaf proves, so the only part applied:
+    EVERY allow-listed field, nested and shaped ones projected exactly as
+    the commit form projects them. Its leaf equals the full record's.
+
+    What is applied is a function of the leaf alone (re-reviews N4, R1):
+
+    * an absent field — or nested key — is applied as ``None``, as the leaf
+      commits it: a receiver reads an absent key as "keep what is held", so
+      a deliverer dropping a field the signer cleared (a task's due date)
+      would otherwise apply a row nobody signed;
+    * a timestamp in its one UTC form, a set (an unordered list) in its
+      committed order; ordered lists keep the order the leaf commits;
+    * floats and strings are told apart by the leaf itself
+      (:func:`_no_floats`).
+
+    File references are the one part a leaf does not pin — the caller
+    checks their shape (review N1)."""
+    spec = COMMIT_SPECS[resource]
+    out: dict[str, Any] = {}
+    for name in spec.fields:
+        value = record.get(name)
+        if name in spec.shape:
+            value = spec.shape[name](value)
+        elif name in spec.nested_files:
+            keep = spec.nested_fields.get(name, (spec.nested_files[name],))
+            value = {k: value.get(k) for k in keep} if isinstance(value, dict) else None
+        elif name in spec.stamps:
+            value = _stamp(value)
+        if isinstance(value, list) and name not in spec.ordered:
+            value = sorted(value, key=lambda v: canonical_str(_no_floats(v)))
+        out[name] = value
+    return out
+
+
 __all__ = [
     "BUCKETS",
     "CHANGE_TIME_FIELDS",
     "COMMITTED_RESOURCES",
     "COMMIT_SPECS",
+    "COUNTERPARTS",
     "HASH_BYTES",
+    "HINT_PREFIX_BYTES",
+    "MAX_FETCH_BYTES",
+    "MAX_FETCH_ROWS",
+    "MAX_HINT_LEAVES",
     "MAX_LISTING_BUCKETS",
     "MAX_LISTING_ROWS",
     "MAX_PAGE_FUTURE_SKEW_MS",
@@ -1150,13 +1308,19 @@ __all__ = [
     "delta_to_bytes",
     "delta_to_wire",
     "differing_buckets",
+    "fetched_record",
+    "fetched_row_to_wire",
     "file_refs",
+    "hint_from_wire",
+    "hint_to_wire",
     "is_conflict",
     "is_superseded",
     "leaf_of",
     "listing_to_wire",
     "page_time",
     "parse_bucket_request",
+    "parse_fetch_request",
+    "parse_fetched_row",
     "parse_listing",
     "parse_page",
     "parse_page_ref",

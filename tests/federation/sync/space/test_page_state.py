@@ -36,10 +36,16 @@ from socialhome.federation.sync.space.exporter import (
 )
 from socialhome.federation.sync.space.page_state import PageStateHasher
 from socialhome.federation.sync.space.window import SyncWindows
-from socialhome.services.inbound_media_store import space_direct_media_name
+from socialhome.services.inbound_media_store import (
+    media_basename,
+    space_direct_media_name,
+)
 from socialhome.sync_page import (
+    HINT_PREFIX_BYTES,
     VectorBuilder,
     differing_buckets,
+    fetched_record,
+    record_leaf,
     row_key,
 )
 from tests.federation.sync.space.test_sync_coverage import (
@@ -49,9 +55,11 @@ from tests.federation.sync.space.test_sync_coverage import (
     HOST,
     SPACE,
     T0,
+    TASK,
     Case,
     Home,
     _post,
+    _task,
     homes,  # noqa: F401 — the fixture
 )
 
@@ -262,3 +270,89 @@ async def test_rows_with_files_hash_the_same_on_both_sides(homes, seed):  # noqa
     assert h_rows > 0
     assert differing_buckets(h_vec, m_vec) == []
     assert h_rows == m_rows
+
+
+# ── Phase 3: a deliverer's records ───────────────────────────────────────
+
+
+async def test_a_deliverer_keeps_the_records_of_the_asked_buckets_with_hashes(
+    homes,  # noqa: F811
+):
+    """A member re-exports a host's post (its files under the member's own
+    names): the record it would deliver carries the files' content hashes,
+    and the committed part of it hashes to the very leaf it lists — so a
+    third household can verify it without holding the files."""
+    host, member = homes
+    await _post_with_files(host)
+    await _stream(host, member)
+    index = row_key("posts", "post-1")[0]
+    scan = await _state(member).rows_in(SPACE, [index], cutoff=None, keep_records=True)
+    ((listed,),) = [scan.rows[index]]
+    assert scan.records is not None
+    ((resource, record),) = scan.records[index]
+    assert resource == "posts" and record["files_suite"] == "sha256"
+    hashes = {name: entry["h"] for name, entry in record["files"].items()}
+    got = record_leaf(
+        "posts",
+        fetched_record("posts", record),
+        lambda url: hashes.get(media_basename(url)),
+    )
+    assert got == (index, listed.leaf)
+
+
+async def test_a_deliverer_skips_rows_the_requester_holds(homes):  # noqa: F811
+    host, _member = homes
+    await _post(host)
+    await _post(host, "post-2")
+    i1, i2 = row_key("posts", "post-1")[0], row_key("posts", "post-2")[0]
+    state = _state(host)
+    plain = await state.rows_in(SPACE, [i1, i2], cutoff=None)
+    assert plain.records is None  # Phase 2 listings keep no records
+    held = plain.rows[i1][0].leaf[:HINT_PREFIX_BYTES]
+    scan = await state.rows_in(
+        SPACE, [i1, i2], cutoff=None, keep_records=True, skip=frozenset({held})
+    )
+    assert scan.records is not None
+    kept = [r["id"] for rows in scan.records.values() for _res, r in rows]
+    assert kept == ["post-2"]
+    assert len(scan.rows[i1]) == 1  # still listed in full
+
+
+async def test_a_requester_keeps_its_own_records_and_counterparts(homes):  # noqa: F811
+    """Phase 3 re-review N2 / N3: our own records of the delivered
+    identities, from any bucket (their uncommitted columns carry over), and
+    every held task under its live or archived identity with its change
+    time."""
+    host, _member = homes
+    await _post(host)
+    await _post(host, "post-2")
+    i2 = row_key("posts", "post-2")[0]
+    scan = await _state(host).rows_in(
+        SPACE,
+        [i2],
+        cutoff=None,
+        keep_ids=frozenset({("posts", "post-1"), ("tasks", "nope")}),
+    )
+    assert set(scan.own) == {("posts", "post-1")}
+    assert scan.own[("posts", "post-1")]["id"] == "post-1"
+    assert scan.held_any == {}  # no task held
+    await _task(host)
+    scan = await _state(host).rows_in(SPACE, [i2], cutoff=None)
+    assert list(scan.held_any) == [("tasks", TASK)]
+    assert scan.held_any[("tasks", TASK)] is not None
+
+
+async def test_known_content_names_hash_without_their_bytes(homes):  # noqa: F811
+    """Phase 3 re-review N1: a verified row just applied names its file by
+    content; the bytes may still be on the way, so the re-read takes the
+    hash from the applied row (``known``)."""
+    host, _member = homes
+    await _post(host, image_urls=["api/media/sc-new.webp"])
+    index = row_key("posts", "post-1")[0]
+    state = _state(host)
+    without = await state.rows_in(SPACE, [index], cutoff=None)
+    assert without.rows[index] == []  # unhashable: host-only
+    h = hashlib.sha256(b"x").hexdigest()
+    known = await state.rows_in(SPACE, [index], cutoff=None, known={"sc-new.webp": h})
+    ((row,),) = [known.rows[index]]
+    assert row.row_id == "post-1"

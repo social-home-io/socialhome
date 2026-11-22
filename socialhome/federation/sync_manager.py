@@ -117,6 +117,10 @@ class PendingSyncRequest:
     page_ref: dict | None = None
     #: The ``buckets`` the BEGIN asked listings for (v_95).
     buckets: list[int] | None = None
+    #: Phase 3: the ``have`` hint when those buckets are a verified fetch
+    #: from a member household (the BEGIN carried ``rows: true``) — a relay
+    #: re-BEGIN carries it too.
+    fetch_have: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -235,6 +239,7 @@ class SyncSessionManager:
         roster_digest: dict | None = None,
         page_ref: dict | None = None,
         buckets: list[int] | None = None,
+        fetch_have: str | None = None,
     ) -> None:
         """Remember a ``SPACE_SYNC_BEGIN`` we are about to send.
 
@@ -255,6 +260,7 @@ class SyncSessionManager:
             roster_digest=roster_digest,
             page_ref=page_ref,
             buckets=buckets,
+            fetch_have=fetch_have,
         )
 
     def pending_sync_request(self, sync_id: str) -> PendingSyncRequest | None:
@@ -497,6 +503,8 @@ class SyncSessionManager:
         have_seq: int | None = None,
         page_ref: dict | None = None,
         buckets: list[int] | None = None,
+        want_rows: bool = False,
+        have: frozenset[bytes] | None = None,
     ) -> SyncDecision:
         """Admit a new sync session.
 
@@ -648,6 +656,8 @@ class SyncSessionManager:
             have_seq=have_seq,
             page_ref=page_ref,
             buckets=buckets,
+            want_rows=want_rows,
+            have=have,
         )
         self._sessions[sync_id] = record
         return SyncDecision(accepted=True)
@@ -717,6 +727,7 @@ class SyncSessionManager:
         roster_digest: dict | None = None,
         page_ref: dict | None = None,
         buckets: list[int] | None = None,
+        fetch_have: str | None = None,
     ) -> str:
         """Requester-side handling of ``SPACE_SYNC_OFFER``.
 
@@ -761,6 +772,7 @@ class SyncSessionManager:
                 roster_digest=roster_digest,
                 page_ref=page_ref,
                 buckets=buckets,
+                fetch_have=fetch_have,
             )
             self._sessions[sync_id] = record
 
@@ -858,6 +870,10 @@ class SyncSessionManager:
             payload["page"] = record.page_ref
         if record.buckets:
             payload["buckets"] = list(record.buckets)
+            if record.fetch_have is not None:
+                # Phase 3: the same verified fetch the direct BEGIN asked.
+                payload["rows"] = True
+                payload["have"] = record.fetch_have
         # The retry is a BEGIN of ours like any other: recorded (so its
         # answer and its listings are recognised) and with its HTTPS receive
         # session open (so its chunks are not dropped as an unknown id).
@@ -870,6 +886,7 @@ class SyncSessionManager:
             roster_digest=record.roster_digest,
             page_ref=record.page_ref,
             buckets=list(record.buckets) if record.buckets else None,
+            fetch_have=record.fetch_have,
         )
         self.register_requester_https_session(
             sync_id=new_sync_id,

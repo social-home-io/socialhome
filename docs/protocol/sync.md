@@ -364,6 +364,46 @@ requester per 30 min in all, `SPACE_MEDIA_WANTED` included) — 200 × 48 =
 9 600 small requests a day in all, ~4 800 per helper. Nothing fans out: one
 requester, one helper, one space per round.
 
+#### Verified fetch from any member (v_95, sync pages Phase 3)
+
+The helper resume above is limited to the helper's own people's rows,
+because a row on the mesh is not signed by itself. With signed sync pages
+([sync-pages.md](./sync-pages.md#phase-3-as-built-v_95)) that limit goes
+for everything the newest page commits: the same silent round also calls
+`SyncPageService.host_silent`, and the member asks **any** member
+household (any member seat — not only admins and moderators — never a
+follower, never the host; the helper picker with other roles, the same
+stable offset, at most 3 per round, one at a time) for the rows of the
+buckets its page proves it lacks — on an ordinary incremental BEGIN to it
+(`buckets` + `rows` + `have`, like the host's listing ask). The deliverer serves only buckets it
+holds unchanged since that page (`held: false` for the rest); the member
+checks every listing against the signed bucket hashes and every row's
+committed part against a listed leaf, refuses anything else (one
+WARNING), and applies what passes through the normal receiver as the host's
+row — that row only. A partial answer goes on to the next member; a host
+heard again stops it. Once nothing is left, the space reads **up to date**
+while the host is still offline.
+
+The helper resume is unchanged and runs next to it: it covers the rows
+newer than the page (its own people's), while the verified fetch covers
+every row the page commits, from anyone. What a page does not commit (item
+state such as reactions and votes, the chat, member pictures, the roster,
+a calendar event's feed card) still comes only from the host; files still
+come on view (`SPACE_MEDIA_WANTED`).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Member (behind)
+    participant H as Host (offline)
+    participant D as Any member household
+    M->>H: SPACE_SYNC_BEGIN (periodic tick)
+    Note over M: 120 s, no answer → silent → compare with the held page
+    M->>D: SPACE_SYNC_BEGIN (incremental) + buckets + rows + have (offset + round)
+    D->>M: its chunks, then __listing__ + __rows__ (proven buckets only) + sentinel
+    Note over M: verify against the signed page → apply → next member if anything is left
+```
+
 ### Sync status
 
 A member household tells its people whether a space it does not host needs
