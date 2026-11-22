@@ -258,7 +258,8 @@ class SpaceSyncStatusService(BusPublisherMixin):
     async def may_be_missing(self, space_id: str) -> bool:
         """Only the "Some posts may be missing" warning of the space (the
         Spaces list's dot) — no outbox reads. ``False`` for an unknown
-        space or one hosted here."""
+        space, or one hosted here unless a newer page of its delegated admin
+        proved posts missing (sync pages Phase 3)."""
         space = await self._space_repo.get(space_id)
         if space is None:
             return False

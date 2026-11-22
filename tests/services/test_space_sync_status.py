@@ -691,6 +691,24 @@ async def test_the_owner_reads_its_delegated_admins_newer_page(env):
     assert status.to_wire().get("page") is None
 
 
+async def test_the_owners_list_dot_reads_the_page_memo_only(env):
+    """The Spaces list never reads the page (``read_page=False``): the
+    owner's "may be missing" comes from the last full read's verdict."""
+    reads: list[str] = []
+
+    async def position(space, hosts):
+        reads.append(space.id)
+        return _position(match=False, missing=2, signer_role="admin")
+
+    env.svc.attach_pages(position)
+    assert await env.svc.may_be_missing("mine") is False  # no full read yet
+    assert reads == []
+    status = await env.svc.status("mine")
+    assert status.state is SpaceSyncState.BEHIND
+    assert await env.svc.may_be_missing("mine") is True
+    assert reads == ["mine"]
+
+
 async def test_behind_when_a_listing_proved_a_row_missing(env):
     async def position(space, hosts):
         return _position(match=False, missing=2, differing_buckets=3)
