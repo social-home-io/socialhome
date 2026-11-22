@@ -782,8 +782,10 @@ Phases added after the initial publish are documented inline in
   open sign-up (``gfs-up`` turns ``[policy] open_signup`` on; every
   household's ``[gfs] default_url`` points at the demo GFS): the step is
   offered, ``/gfs/info`` proves ``open_signup`` in its signed block, the
-  connection lands ``active``, a second connect is ``409``, then c
-  disconnects again. Needs a fresh ``up`` (the config key) and ``gfs-up``.
+  connection lands ``active``, a second connect is ``409``, c's Discover ›
+  Global lists every space the GFS directory lists without a restart, then
+  c disconnects again and the list empties. Needs a fresh ``up`` (the config
+  key) and ``gfs-up``.
 * ``space-post-routed`` — mesh-routed SPACE_POST_CREATED via
   SPACE_ROUTED through a relay that never decrypts the inner
   payload.

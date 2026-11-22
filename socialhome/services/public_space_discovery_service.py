@@ -1,11 +1,18 @@
-"""Public-space discovery — periodic poll of paired GFS instances.
+"""Public-space discovery — poll of the household's GFS directories.
 
 Each active GFS connection maintains a directory of public spaces that
-have opted-in to discovery. This service polls all paired GFS instances
-on an interval and mirrors the results into ``public_space_cache`` so
-the client can browse without touching any GFS on every page load.
+have opted-in to discovery. This service polls every active connection
+and mirrors the results into ``public_space_cache`` so the client can
+browse without touching any GFS on every page load.
 
-If no GFS connections are paired the service is a no-op.
+It polls once at startup, then hourly — and at once whenever a GFS
+connection is added or removed (:meth:`on_connections_changed`, wired to
+:class:`GfsConnectionService`'s connected / removed hooks), so a new
+GFS's spaces show without a restart and a removed one's go with it.
+
+A tick in which every active connection's directory answered is a full
+snapshot: rows it didn't list are dropped. A tick in which one didn't
+answer keeps the rows for :data:`DEFAULT_CACHE_TTL_HOURS` (fail-soft).
 
 The poll is best-effort: errors are logged and the next tick retries.
 """
@@ -19,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 import aiohttp
 
+from ..domain.federation import GfsConnection
 from ..domain.space import (
     normalize_category,
     normalize_join_mode,
@@ -144,6 +152,13 @@ class PublicSpaceDiscoveryService:
         if self._refresh_event is not None:
             self._refresh_event.set()
 
+    async def on_connections_changed(self, conn: GfsConnection) -> None:
+        """A GFS connection became active or was removed: refresh now, so
+        Discover gains or loses its spaces without waiting for the hourly
+        tick (or a restart). Only wakes the loop — never blocks the
+        connect / disconnect request on a directory download."""
+        await self.refresh_now()
+
     # ─── Public single-tick API (also drivable from tests) ───────────────
 
     async def poll_once(self) -> int:
@@ -151,13 +166,16 @@ class PublicSpaceDiscoveryService:
         if self._gfs_connection_repo is None:
             return 0
 
+        tick_started = datetime.now(UTC).isoformat()
         active_connections = await self._gfs_connection_repo.list_active()
-        if not active_connections:
-            return 0
 
         total = 0
+        complete = True
         for conn in active_connections:
             listings = await self._fetch_directory(conn.inbox_url)
+            if listings is None:
+                complete = False
+                continue
             for listing in listings:
                 if await self._repo.is_instance_blocked(listing.instance_id):
                     continue
@@ -168,11 +186,21 @@ class PublicSpaceDiscoveryService:
                 pin = merge_pin(held, listing.join_contact, space_id=listing.space_id)
                 if pin is not None and pin != held:
                     await self._repo.set_pin(listing.space_id, pin)
-                await self._repo.upsert(replace(listing, join_contact=None))
+                # Stamped with the tick's start: exactly the snapshot cutoff
+                # below (kept), whatever the wall clock does meanwhile.
+                await self._repo.upsert(
+                    replace(listing, join_contact=None, cached_at=tick_started)
+                )
             total += len(listings)
 
-        # Purge stale cache rows.
-        cutoff = (datetime.now(UTC) - timedelta(hours=self._cache_ttl)).isoformat()
+        # Every directory answered (or there is no GFS left): this tick is the
+        # whole picture, so a row it didn't write — a space a GFS dropped, or
+        # one of a GFS no longer connected — goes now. Otherwise only rows
+        # past the TTL go: a GFS that is briefly down keeps its spaces listed.
+        if complete:
+            cutoff = tick_started
+        else:
+            cutoff = (datetime.now(UTC) - timedelta(hours=self._cache_ttl)).isoformat()
         purged = await self._repo.purge_older_than(cutoff)
         if purged:
             log.debug("public_space_discovery: purged %d stale rows", purged)
@@ -210,14 +238,17 @@ class PublicSpaceDiscoveryService:
             except asyncio.CancelledError:
                 return
 
-    async def _fetch_directory(self, gfs_url: str) -> list[PublicSpaceListing]:
+    async def _fetch_directory(self, gfs_url: str) -> list[PublicSpaceListing] | None:
+        """The directory *gfs_url* serves, or ``None`` when it didn't answer
+        with one (no session, network error, non-200, unreadable body) — so
+        the tick knows it isn't a full snapshot."""
         client = self._http_client
         if client is None:
             log.debug(
                 "public_space_discovery: no shared HTTP session wired — skipping %s",
                 gfs_url,
             )
-            return []
+            return None
         # The GFS serves its public directory at ``/gfs/spaces``
         # (``global_server/routes/__init__.py``). ``/api/public_spaces`` is
         # *this household's own* API route — polling it 404'd forever.
@@ -237,7 +268,7 @@ class PublicSpaceDiscoveryService:
                         url,
                         resp.status,
                     )
-                    return []
+                    return None
                 # Bounded read: a paired GFS is still remote input, and
                 # aiohttp caps nothing by default — an unbounded body would
                 # let a hostile directory OOM the household. Over the cap
@@ -248,7 +279,7 @@ class PublicSpaceDiscoveryService:
                     limit=MAX_GFS_DIRECTORY_BODY_BYTES,
                 )
                 if body is None:
-                    return []
+                    return None
         except (aiohttp.ClientError, TimeoutError) as exc:
             # Fail-soft: a down or slow GFS is expected now and then. One
             # line naming the URL, no traceback; the next tick retries.
@@ -257,7 +288,7 @@ class PublicSpaceDiscoveryService:
                 url,
                 exc,
             )
-            return []
+            return None
         except Exception as exc:
             # Anything else is a bug: still fail-soft, but keep the
             # traceback visible.
@@ -267,11 +298,11 @@ class PublicSpaceDiscoveryService:
                 exc,
                 exc_info=True,
             )
-            return []
+            return None
 
         items = body.get("spaces") if isinstance(body, dict) else body
         if not isinstance(items, list):
-            return []
+            return None
         if len(items) > MAX_GFS_DIRECTORY_ITEMS:
             # Independent of the byte cap: a body well under the size limit
             # can still carry an enormous number of minimal rows, each of

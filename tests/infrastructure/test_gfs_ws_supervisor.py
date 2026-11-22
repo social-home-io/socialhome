@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
@@ -309,6 +310,53 @@ async def test_forget_closes_a_removed_connections_socket_at_once(http_session):
             assert stops == ["http://gfs2.test"]
         finally:
             await supervisor.stop()
+
+
+async def test_add_opens_a_new_connections_socket_at_once(http_session):
+    """A connection that just became active gets its socket now, not at the
+    next reconcile (up to 30 s). A running one is left alone, a pending one
+    and a stopped supervisor start nothing."""
+    started: list[str] = []
+
+    class _StubClient:
+        def __init__(self, *, gfs_url, **_kwargs):
+            self.gfs_url = gfs_url
+
+        def is_alive(self) -> bool:
+            return True
+
+        async def start(self):
+            started.append(self.gfs_url)
+
+        async def stop(self):
+            return None
+
+    with patch(
+        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
+        _StubClient,
+    ):
+        supervisor = GfsWebSocketSupervisor(
+            repo=_FakeRepo([]),
+            instance_id="sh-1",
+            signing_key=b"\x00" * 32,
+            session_factory=lambda: http_session,
+            on_relay=AsyncMock(),
+            reconcile_interval_seconds=3600.0,  # never ticks in this test
+        )
+        await supervisor.start()
+        try:
+            new = _make_conn("g1", "http://gfs1.test")
+            await supervisor.add(new)
+            assert supervisor.is_running("g1")
+            await supervisor.add(new)  # already running: no second socket
+            pending = replace(_make_conn("g2", "http://gfs2.test"), status="pending")
+            await supervisor.add(pending)
+            assert not supervisor.is_running("g2")
+            assert started == ["http://gfs1.test"]
+        finally:
+            await supervisor.stop()
+        await supervisor.add(_make_conn("g3", "http://gfs3.test"))
+        assert not supervisor.is_running("g3")
 
 
 async def test_supervisor_restarts_dead_client_on_reconcile(http_session):

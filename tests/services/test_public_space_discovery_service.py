@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -529,6 +530,87 @@ async def test_poll_once_no_active_connections_returns_zero(env):
     )
     n = await svc.poll_once()
     assert n == 0
+
+
+async def test_poll_once_with_no_gfs_left_drops_every_listing(env):
+    """REGRESSION: with no connection left (the last GFS was removed) the
+    poll returned early and never purged — its spaces stayed in Discover."""
+    _, repo, gfs_repo = env
+    await repo.upsert(_listing("sp-left"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={"spaces": []}),
+    )
+    assert await svc.poll_once() == 0
+    assert await repo.list_active() == []
+
+
+async def test_poll_once_drops_what_an_answering_directory_no_longer_lists(env):
+    """Every directory answered: the tick is a full snapshot, so a space no
+    longer listed goes now, not after the 24 h TTL."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    await repo.upsert(_listing("sp-gone"))
+    body = {"spaces": [{"space_id": "sp-kept", "instance_id": "i", "name": "K"}]}
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+    await svc.poll_once()
+    assert {s.space_id for s in await repo.list_active()} == {"sp-kept"}
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        _StubSession(status=503, body={}),
+        _StubSession(body={"not_spaces": "x"}),
+        None,  # no shared HTTP session wired yet
+    ],
+)
+async def test_poll_once_keeps_listings_when_a_directory_did_not_answer(env, session):
+    """A GFS that is briefly down (or answered no directory) is no snapshot:
+    its spaces stay listed until the TTL."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    await repo.upsert(_listing("sp-kept"))
+    svc = PublicSpaceDiscoveryService(
+        repo, gfs_connection_repo=gfs_repo, http_client=session
+    )
+    await svc.poll_once()
+    assert {s.space_id for s in await repo.list_active()} == {"sp-kept"}
+
+
+async def test_connections_changed_refreshes_without_waiting_for_the_tick(env):
+    """REGRESSION (owner report): a GFS connected at runtime showed its
+    spaces only after a restart — the loop slept its hourly interval. The
+    connected / removed hook wakes it at once."""
+    _, repo, gfs_repo = env
+    session = _StubSession(
+        body={"spaces": [{"space_id": "sp-new", "instance_id": "i", "name": "N"}]}
+    )
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        poll_interval_seconds=3600.0,
+        http_client=session,
+    )
+    await svc.start()
+    try:
+        await asyncio.sleep(0.05)  # the startup tick: no GFS yet
+        assert session.calls == []
+        conn = _gfs_conn("gfs-1")
+        await gfs_repo.save(conn)
+        await svc.on_connections_changed(conn)
+        for _ in range(100):
+            if await repo.list_active():
+                break
+            await asyncio.sleep(0.02)
+        assert [s.space_id for s in await repo.list_active()] == ["sp-new"]
+    finally:
+        await svc.stop()
 
 
 async def test_poll_once_multiple_gfs(env):

@@ -4068,7 +4068,7 @@ sequenceDiagram
     Note over HA,G2: G2 is never contacted — not on publish,<br/>not on a settings edit, not on withdrawal
     HA->>M: SPACE_CONFIG_CHANGED<br/>(space_meta.gfs_servers: owner-signed [G1])
     UB->>HB: GET /api/public_spaces
-    HB->>G1: poll GET /gfs/spaces (hourly, or on refresh)
+    HB->>G1: poll GET /gfs/spaces (at start, on a GFS connected<br/>or removed, hourly, or on refresh)
     G1-->>HB: space list (owning_instance, join_mode,<br/>identity_public_key, join_contact)
     Note over HB: verifies join_contact under the space<br/>authority key, pins that key on first sight
     HB-->>UB: Discover › Global
@@ -4083,6 +4083,22 @@ sequenceDiagram
     G1->>HA: redeem → space_session seat
     HA-->>HB: ACK (space snapshot + key) via G1
 ```
+
+**What Discover › Global lists.** The household keeps the directories of
+its ACTIVE GFS connections in `public_space_cache`
+(`PublicSpaceDiscoveryService`). It polls `GET /gfs/spaces` on every active
+connection at start, hourly, on an admin's `POST /api/public_spaces/refresh`
+— and at once when a connection becomes active or is removed (the
+`GfsConnectionService` connected / removed hooks; the hook only wakes the
+poll, so connecting or disconnecting never waits on a download). A tick in
+which every directory answered is a full snapshot: a space no GFS lists any
+more, or one listed only by a GFS the household left, drops out right away
+(with no GFS left the cache empties). If any directory didn't answer,
+nothing is dropped early: unlisted spaces go after the 24 h TTL. (A GFS
+that answers 200 with a partial list is taken at its word until the next
+tick.) A pending connection (awaiting the GFS
+operator) lists nothing. There is no realtime frame for a directory change:
+Discover reads `GET /api/public_spaces` each time it opens.
 
 A paired household's request (`SPACE_JOIN_REQUEST`) goes straight to the
 host over the pairing; the GFS path below is for a host we never paired
@@ -4367,7 +4383,8 @@ contest a ban.
 
 ## Implementation
 
-- `socialhome/services/public_space_service.py` — client side.
+- `socialhome/services/public_space_discovery_service.py` — client side:
+  the directory poll behind Discover › Global.
 - `socialhome/global_server/public.py`,
   `socialhome/global_server/federation.py` — GFS directory. A listed
   space's public page (`/spaces/{id}`) is a hand-off page to the pinned
