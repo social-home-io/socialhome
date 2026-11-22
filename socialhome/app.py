@@ -3844,6 +3844,15 @@ def create_app(config: Config | None = None) -> web.Application:
         repos.public_space,
         gfs_connection_repo=repos.gfs_connection,
     )
+    # A connection added or removed refreshes Discover at once — not at the
+    # next hourly tick (before, a new GFS's spaces showed only after a
+    # restart, and a removed one's stayed listed).
+    gfs_connection_service.attach_on_connected(
+        public_space_discovery.on_connections_changed
+    )
+    gfs_connection_service.attach_on_removed(
+        public_space_discovery.on_connections_changed
+    )
 
     # ── Map tile proxy ───────────────────────────────────────────────────
     # OSM returns 403 to browser-issued tile requests (a browser cannot set
@@ -6285,6 +6294,9 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_ws_supervisor.attach_space_media_request_handler(responder.handle)
         await gfs_ws_supervisor.start()
         app[K.gfs_ws_supervisor_key] = gfs_ws_supervisor
+        # A new active connection's push socket opens at once, not at the
+        # next reconcile.
+        gfs_connection_service.attach_on_connected(gfs_ws_supervisor.add)
         # A removed connection's push socket closes at once: nothing that
         # server pushes after the household left it is taken in.
         gfs_connection_service.attach_on_removed(

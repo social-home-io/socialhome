@@ -4100,11 +4100,16 @@ def cmd_gfs_open_signup() -> None:
        ``/gfs/signup-token`` → ``/gfs/register``) → ``201`` ``active``.
     4. ``GET`` again reports ``already_connected``; a second ``POST`` is
        ``409 ALREADY_CONNECTED``.
+    5. Without a restart, c's Discover › Global (``GET /api/public_spaces``)
+       lists every space the GFS directory lists — the connect refreshes
+       it (it used to wait for the hourly poll, so only a restart showed
+       them) — and after the disconnect it lists none.
 
     c is the household no ``gfs-*`` step pairs with the GFS, so the step
     disconnects it again at the end to leave the topology as it found it
-    (the GFS keeps the registration row, which no other step counts). Five
-    requests in all — far below c's per-minute API bucket.
+    (the GFS keeps the registration row, which no other step counts). At
+    most a couple of dozen requests, one per second while waiting — below
+    c's per-minute API bucket.
     """
     state = _load()
     if not state or not _gfs_alive(state):
@@ -4159,11 +4164,36 @@ def cmd_gfs_open_signup() -> None:
     if s != 409 or (dup.get("error") or {}).get("code") != "ALREADY_CONNECTED":
         raise SystemExit(f"gfs-open-signup: second connect: HTTP {s} {dup!r}")
 
+    s, directory = _request(f"{gfs_url}/gfs/spaces")
+    _must("gfs-open-signup(directory)", s, directory, ok=(200,))
+    listed = {sp["space_id"] for sp in directory.get("spaces") or []}
+    _wait_global_listing(base, c["token"], lambda got: listed <= got, "connect")
+    print(f"  c: Discover lists the GFS's {len(listed)} space(s) without a restart")
+
     s, body = _request(
         f"{base}/api/gfs/connections/{conn['id']}", token=c["token"], method="DELETE"
     )
     _must("gfs-open-signup(disconnect)", s, body, ok=(204,))
+    _wait_global_listing(base, c["token"], lambda got: not got, "disconnect")
     print("gfs-open-signup: ok (c paired via open sign-up, then disconnected)")
+
+
+def _wait_global_listing(base: str, token: str, ok, when: str) -> None:
+    """Poll c's ``GET /api/public_spaces`` (once a second, at most 10 s) until
+    ``ok(space ids)`` — the directory refresh a GFS connect / disconnect
+    triggers, with no restart in between."""
+    got: set[str] = set()
+    for _ in range(10):
+        s, rows = _request(f"{base}/api/public_spaces?limit=200", token=token)
+        rows = _must(f"gfs-open-signup(listing after {when})", s, rows, ok=(200,))
+        got = {r["space_id"] for r in rows}
+        if ok(got):
+            return
+        time.sleep(1.0)
+    raise SystemExit(
+        f"gfs-open-signup: Discover after {when} lists {sorted(got)!r} — the"
+        " directory was not refreshed without a restart"
+    )
 
 
 def _active_gfs_ids(state: dict, label: str) -> list[str]:
