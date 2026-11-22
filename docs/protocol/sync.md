@@ -1532,9 +1532,15 @@ holds there for that space: that session does not count against the caps,
 and it is closed once the new BEGIN passes every check (slots, the hourly
 budget, membership) — a refused BEGIN never stops a live stream. Its
 stream stops at the next chunk (the closed session record, either
-transport), and the requester's own slot count drops it at once. A
-requester that restarted mid-stream does not hold its slots until the
-30-minute reaper. A BEGIN refused for lack of a slot is answered
+transport). The requester never sends a BEGIN of a space while one of
+it to that provider is in flight or its stream is still arriving
+(`SyncSessionManager.syncing_from`, the scheduler's in-flight slots, the
+mesh catch-up): Sync now, a periodic tick or an echo during a long full
+stream is skipped, not sent — so the replacement only ever meets the
+orphan of a requester that restarted mid-stream, which then does not hold
+its slots until the 30-minute reaper. The relay re-BEGIN after an ICE
+timeout is recorded and opens its HTTPS receive session like any other
+BEGIN of ours, so its chunks and listings are taken. A BEGIN refused for lack of a slot is answered
 `SPACE_SYNC_DIRECT_FAILED {reason: "too_many_sessions" | "node_capacity"}`.
 That refusal spends **none** of the requester's 5 / h budget for the space:
 the provider checks capacity before it charges the hourly bucket. No

@@ -757,8 +757,10 @@ class _Listed:
     def asks(self) -> list[tuple[str, list[int]]]:
         """What the next round's BEGIN to each acting host would ask."""
         out = []
+        held = self.env.held()
+        ref = held.ref() if held is not None else None
         for host in [*self.env.hosts, HOST, ADMIN]:
-            buckets = self.env.svc.buckets_for(SPACE, host)
+            buckets = self.env.svc.buckets_for(SPACE, host, ref)
             if buckets and (host, buckets) not in out:
                 out.append((host, buckets))
         return out
@@ -1068,6 +1070,20 @@ async def test_a_listing_of_an_older_ask_is_never_checked_against_a_newer_page()
     assert t.asks  # still asked for the new page
     await t.deliver()
     assert (await t.position()).missing == 2
+
+
+async def test_no_buckets_on_a_begin_naming_a_newer_page_than_the_ask():
+    """Re-review: a newer page is held while its compare waits out the
+    spacing; the old ask's buckets on a BEGIN that names the new page would
+    make the host export for listings we drop. Only the ask's own page
+    carries them."""
+    t = _Listed([_row("lost")], [])
+    await t.take_page()
+    old_ref = t.env.held().ref()
+    assert t.env.svc.buckets_for(SPACE, HOST, old_ref)
+    newer = _signed(vector=_vec(7), seq=60, issued_at=T0 + 1)
+    assert t.env.svc.buckets_for(SPACE, HOST, newer.ref()) is None
+    assert t.env.svc.buckets_for(SPACE, HOST, None) is None
 
 
 async def test_a_judged_page_is_not_compared_again_after_the_wait():

@@ -123,7 +123,9 @@ class _Wire:
         """The next round to the host (periodic or Sync now)."""
         assert self.member_pages is not None
         await self.member_pages.wait_idle()
-        buckets = self.member_pages.buckets_for(SPACE, HOST)
+        buckets = self.member_pages.buckets_for(
+            SPACE, HOST, await self.member_pages.ref_for(SPACE)
+        )
         self.rounds += 1
         sync_id = f"R{self.rounds}"
         if buckets:

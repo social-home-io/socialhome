@@ -620,6 +620,68 @@ async def test_trigger_relay_sync_returns_new_begin_for_initial_mode_s15():
     assert decision.next_payload["space_id"] == "sp-1"
 
 
+async def test_a_relay_retry_is_recorded_and_its_receive_session_opened():
+    """Re-review (pre-existing): the relay re-BEGIN after an ICE timeout
+    minted a fresh sync id that nothing recorded — its chunks were dropped
+    as an unknown id (no session, no pending request for the quiet-relay
+    path) and its listings as unasked. It is a BEGIN of ours like any
+    other: recorded with what it asks, its HTTPS receive session open."""
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        sync_mode="incremental",
+        page_ref={"root": "r"},
+        buckets=[3],
+    )
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode="incremental",
+            page_ref={"root": "r"},
+            buckets=[3],
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    new_id = decision.next_payload["sync_id"]
+    assert mgr.get_session("s1") is None
+    request = mgr.pending_sync_request(new_id)
+    assert request is not None
+    assert (request.provider_instance_id, request.sync_mode) == ("host", "incremental")
+    assert (request.page_ref, request.buckets) == ({"root": "r"}, [3])
+    session = mgr.get_session(new_id)
+    assert session is not None and session.transport_mode == "https"
+    assert (session.requester_instance_id, session.provider_instance_id) == (
+        "us",
+        "host",
+    )
+
+
+async def test_syncing_from_sees_a_live_sync_of_ours_only():
+    mgr = _mgr()
+    mgr.register_requester_https_session(
+        sync_id="r1",
+        space_id="sp",
+        requester_instance_id="us",
+        provider_instance_id="host",
+    )
+    now = time.time()
+    assert mgr.syncing_from("sp", "us", "host", now=now)
+    assert not mgr.syncing_from("sp", "us", "other", now=now)
+    assert not mgr.syncing_from("sp-2", "us", "host", now=now)
+    # Idle past RECEIVING_IDLE_S (an offline host): no longer running.
+    assert not mgr.syncing_from("sp", "us", "host", now=now + RECEIVING_IDLE_S + 1)
+    mgr.get_session("r1").sentinel_landed = True
+    assert not mgr.syncing_from("sp", "us", "host", now=now)
+
+
 async def test_trigger_relay_sync_aborts_tier3_per_25_8_18():
     """§25.8.18: full sync MUST NOT fall back to relay."""
     mgr = SyncSessionManager(_FakeFedRepo())

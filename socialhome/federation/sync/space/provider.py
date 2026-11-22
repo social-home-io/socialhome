@@ -1084,6 +1084,8 @@ class SpaceSyncService:
         sync pages): only to a member household (a writer seat); the page
         service gates on its version. Nothing when none were asked."""
         buckets = list(getattr(session, "buckets", None) or [])
+        if _stopped(session):
+            return
         if (
             not buckets
             or self._sync_pages is None

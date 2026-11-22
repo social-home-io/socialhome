@@ -229,6 +229,8 @@ def queue():
 def sync_manager():
     mgr = MagicMock()
     mgr.reap_stale = MagicMock(return_value=0)
+    #: No sync of ours is running unless a test says so.
+    mgr.syncing_from = MagicMock(return_value=False)
     return mgr
 
 
@@ -393,6 +395,10 @@ async def test_a_periodic_begin_echoes_the_last_cleanly_applied_snapshot(
         await sched.enqueue_sync_for_space(
             space_id="sp-1", peer_instance_id="peer-b", sync_mode="incremental"
         )
+        await asyncio.sleep(0.05)
+        # The first round to peer-a is over (a BEGIN of a space never goes
+        # out while one of it to that provider is still in flight).
+        sched._inflight.clear()
         await sched.enqueue_sync_for_space(space_id="sp-1", peer_instance_id="peer-a")
         await asyncio.sleep(0.05)
     finally:
@@ -1427,12 +1433,14 @@ async def test_a_slot_that_never_completes_is_reclaimed(bus, queue, sync_manager
         await queue.stop()
 
 
-async def test_a_new_begin_of_a_space_frees_the_slot_of_the_one_it_replaces(
+async def test_sync_now_during_a_running_stream_never_cuts_it_off(
     bus, queue, sync_manager
 ):
-    """Review A1/B2 (c): the host replaces our earlier session of a space
-    with the new BEGIN's, so our slot count follows — the replaced session
-    stops counting at once, not after the in-flight TTL."""
+    """Re-review: the provider replaces our earlier session of a space with
+    a new BEGIN's, so a BEGIN while one is in flight — or while its stream
+    still runs after the in-flight slot aged out (a long full stream) —
+    would cut the running stream off. It is skipped instead; once the
+    stream is over the space is asked for again."""
     fed = _FakeFederation(confirmed={"host"})
     sched = _many_spaces_sched(bus, queue, sync_manager, fed, 2)
     sched.wire()
@@ -1440,15 +1448,29 @@ async def test_a_new_begin_of_a_space_frees_the_slot_of_the_one_it_replaces(
     try:
         await sched._tick_once()
         await _settle(5)
-        assert len(sched._inflight["host"]) == 2
+        first = [b["payload"] for b in _begins(fed)]
+        assert sorted(b["space_id"] for b in first) == ["sp-0", "sp-1"]
+        # Sync now of sp-0 while its BEGIN is in flight: not sent.
         await sched.enqueue_sync_for_space(space_id="sp-0", peer_instance_id="host")
         await _settle(5)
-        begins = [b["payload"] for b in _begins(fed)]
-        assert [b["space_id"] for b in begins].count("sp-0") == 2
+        assert len(_begins(fed)) == 2
+        # The in-flight slot aged out, but the stream is still arriving.
         held = sched._inflight["host"]
-        assert len(held) == 2
-        assert begins[-1]["sync_id"] in held
-        assert sorted(space for space, _at in held.values()) == ["sp-0", "sp-1"]
+        for sync_id, (space_id, _at) in list(held.items()):
+            held[sync_id] = (
+                space_id,
+                scheduler_mod.time.monotonic() - scheduler_mod.INFLIGHT_BEGIN_TTL_S - 1,
+            )
+        sync_manager.syncing_from.side_effect = lambda space, _own, _p: space == "sp-0"
+        await sched.enqueue_sync_for_space(space_id="sp-0", peer_instance_id="host")
+        await _settle(5)
+        assert len(_begins(fed)) == 2
+        # The stream ended: the next ask goes out.
+        sync_manager.syncing_from.side_effect = None
+        sync_manager.syncing_from.return_value = False
+        await sched.enqueue_sync_for_space(space_id="sp-0", peer_instance_id="host")
+        await _settle(5)
+        assert [b["payload"]["space_id"] for b in _begins(fed)].count("sp-0") == 2
     finally:
         await sched.stop()
         await queue.stop()
@@ -2061,9 +2083,15 @@ def _helper_sched(
     return sched, contact, resume
 
 
-async def _round(sched) -> None:
+async def _round(sched, *, later: bool = True) -> None:
     """One periodic tick with its queued BEGINs actually sent (the queue
-    drains on stop)."""
+    drains on stop). Ticks are 30 min apart: an unanswered BEGIN of the
+    last one is past its in-flight TTL by the next (without that, a BEGIN
+    of the space still in flight is skipped, never sent over it).
+    ``later=False``: the slots a test set up are live now."""
+    for held in sched._inflight.values() if later else ():
+        for sync_id, (space_id, at) in list(held.items()):
+            held[sync_id] = (space_id, at - scheduler_mod.INFLIGHT_BEGIN_TTL_S - 1)
     await sched._queue.start()
     await sched._tick_once()
     await sched._queue.stop()
@@ -2685,7 +2713,7 @@ async def test_a_parked_begin_causes_no_fallback(
         f"held-{i}": ("sp-other", time.monotonic())
         for i in range(scheduler_mod.MAX_ACTIVE_SESSIONS_PER_INSTANCE)
     }
-    await _round(sched)
+    await _round(sched, later=False)
     await _wait_checks(sched)
     assert sched._federation.sent == []
     assert sched._helper_checks == {}
@@ -3056,7 +3084,9 @@ async def test_begin_carries_our_sync_page_only_to_a_v95_provider(
             raise RuntimeError("boom")
         return ref
 
-    def _buckets_for(space_id, to):
+    def _buckets_for(space_id, to, page_ref):
+        # The ask is for the page the BEGIN names (the one we hold).
+        assert page_ref == ref
         return [7] if (space_id, to) == ("sp-1", "owner-o") else None
 
     sched.attach_sync_pages(_ref_for, _buckets_for)
@@ -3100,7 +3130,7 @@ async def test_a_mesh_begin_carries_our_sync_page(bus, queue, sync_manager):
     async def _ref_for(space_id):
         return ref
 
-    sched.attach_sync_pages(_ref_for, lambda space_id, to: [3])
+    sched.attach_sync_pages(_ref_for, lambda space_id, to, page_ref: [3])
     await sched._tick_once()
     assert fed.mesh_fields[-1]["page_ref"] == ref
     assert fed.mesh_fields[-1]["buckets"] == [3]

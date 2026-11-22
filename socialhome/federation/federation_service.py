@@ -3329,6 +3329,17 @@ class FederationService:
                 # Not a failure: the confirmed-peer sweep owns this host, so
                 # the caller should stop asking about it.
                 return True
+            if self._sync_manager.syncing_from(
+                space_id, self._own_instance_id, host_instance_id
+            ):
+                # Not a failure either: our sync of the space from that host
+                # is running, and a new BEGIN would make the host replace it.
+                log.debug(
+                    "mesh catch-up of %s from %s skipped: a sync of it is running",
+                    space_id,
+                    host_instance_id,
+                )
+                return True
             sync_id = uuid.uuid4().hex
             self._sync_manager.record_sync_request(
                 sync_id=sync_id,

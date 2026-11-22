@@ -381,7 +381,9 @@ class SpaceSyncScheduler:
         self._roster_digest: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: v_95 — ``space_id ->`` the sync page we hold (BEGIN ``page``).
         self._sync_page_ref: Callable[[str], Awaitable[dict | None]] | None = None
-        self._sync_page_buckets: Callable[[str, str], list[int] | None] | None = None
+        self._sync_page_buckets: Callable[[str, str, dict], list[int] | None] | None = (
+            None
+        )
         #: v_89 member directory version echo (see :meth:`attach_directory_echo`).
         self._directory_echo: Callable[[str, str], Awaitable[int | None]] | None = None
         #: Moderation queue echo (see :meth:`attach_moderation_echo`).
@@ -602,7 +604,7 @@ class SpaceSyncScheduler:
     def attach_sync_pages(
         self,
         ref_for: Callable[[str], Awaitable[dict | None]],
-        buckets_for: Callable[[str, str], list[int] | None] | None = None,
+        buckets_for: Callable[[str, str, dict], list[int] | None] | None = None,
     ) -> None:
         """``ref_for(space_id)`` → the sync page we hold for the space, as a
         BEGIN's ``page`` (v_95, ``SyncPageService.ref_for``), or ``None``.
@@ -630,7 +632,7 @@ class SpaceSyncScheduler:
             if ref is not None:
                 out["page"] = ref
                 buckets = (
-                    self._sync_page_buckets(space_id, to_instance_id)
+                    self._sync_page_buckets(space_id, to_instance_id, ref)
                     if self._sync_page_buckets is not None
                     else None
                 )
@@ -1064,13 +1066,29 @@ class SpaceSyncScheduler:
                 peer_instance_id
             ):
                 prefer_direct = False
+            # One sync of a space per provider at a time: the provider
+            # replaces our earlier session of the space with a new BEGIN's,
+            # so a BEGIN while one is in flight or its stream runs (Sync now,
+            # a tick, an echo during a long full stream) would cut it off.
+            # It is skipped; what it carried rides the next round. Only a
+            # restart (nothing in flight here) leaves an orphan to replace.
+            if any(
+                sp == space_id
+                for sp, _at in self._inflight.get(peer_instance_id, {}).values()
+            ) or self._sync_manager.syncing_from(
+                space_id, self._own_instance_id, peer_instance_id
+            ):
+                log.debug(
+                    "space sync %s → %s skipped: a sync of it is running",
+                    space_id,
+                    peer_instance_id,
+                )
+                return
             sync_id = uuid.uuid4().hex
-            held = self._inflight.setdefault(peer_instance_id, {})
-            # The provider replaces our earlier session of this space with
-            # this one: that slot is free now, not after the TTL.
-            for earlier in [s for s, (sp, _) in held.items() if sp == space_id]:
-                del held[earlier]
-            held[sync_id] = (space_id, time.monotonic())
+            self._inflight.setdefault(peer_instance_id, {})[sync_id] = (
+                space_id,
+                time.monotonic(),
+            )
             fields = await self.begin_fields(
                 space_id=space_id,
                 peer_instance_id=peer_instance_id,

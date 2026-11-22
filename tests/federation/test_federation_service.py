@@ -2060,6 +2060,7 @@ async def test_begin_mesh_catchup_sync_registers_session_and_sends_for_mesh_host
     session and ship SPACE_SYNC_BEGIN(prefer_direct=False) via mesh fallback."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     sync_manager.close_session = MagicMock()
     svc.attach_sync_manager(sync_manager)
@@ -2100,10 +2101,40 @@ async def test_begin_mesh_catchup_sync_registers_session_and_sends_for_mesh_host
 
 
 @pytest.mark.asyncio
+async def test_begin_mesh_catchup_sync_never_cuts_off_a_running_sync():
+    """Re-review: our sync of the space from that host is running (a long
+    catch-up stream): a new BEGIN would make the host replace it, so none
+    is sent — reported as handled, not as a transient failure."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
+    sync_manager.syncing_from = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock()
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        shipped = await svc.begin_mesh_catchup_sync(
+            space_id="sp-1", host_instance_id="host-1"
+        )
+    assert shipped is True
+    sync_manager.syncing_from.assert_called_once_with(
+        "sp-1", svc._own_instance_id, "host-1"
+    )
+    sync_manager.record_sync_request.assert_not_called()
+    sync_manager.register_requester_https_session.assert_not_called()
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_begin_mesh_catchup_sync_carries_the_authority_echo():
     """v_46: the BEGIN to a mesh-only owner carries the echo it is given."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
     send_mock = AsyncMock(
@@ -2130,6 +2161,7 @@ async def test_begin_mesh_catchup_sync_carries_the_roster_digest():
     the digest is recorded with the request for a relay re-BEGIN."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
     send_mock = AsyncMock(
@@ -2155,6 +2187,7 @@ async def test_begin_mesh_catchup_sync_carries_the_moderation_echo():
     moderation items it holds — an empty list is an echo too."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
     send_mock = AsyncMock(
@@ -2180,6 +2213,7 @@ async def test_begin_mesh_catchup_sync_noop_for_confirmed_host():
     """A CONFIRMED host is a no-op — the SpaceSyncScheduler already syncs it."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
 
@@ -2202,6 +2236,7 @@ async def test_begin_mesh_catchup_sync_closes_session_on_send_failure():
     (no dangling session leak) and no exception propagates."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     sync_manager.close_session = MagicMock()
     svc.attach_sync_manager(sync_manager)
@@ -2236,6 +2271,7 @@ async def test_begin_mesh_catchup_sync_transient_failure_is_info(caplog, error, 
     INFO, not a WARNING per tick. Any other failure stays a WARNING."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
     send_mock = AsyncMock(

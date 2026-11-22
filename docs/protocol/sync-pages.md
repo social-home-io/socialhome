@@ -656,6 +656,9 @@ What shipped, where it is more exact than the design above:
   false}` and the bucket stays unresolved. A delete on the host shows in
   its tombstone's bucket, not in a current listing, so a delete we missed
   is not counted missing there (the 30-min sync heals it). The requester
+  asks only on a BEGIN that names the page the ask is for (a newer page
+  held while its compare waits out the spacing carries no `buckets` — the
+  host would export for listings we drop). It
   takes listings only from the household its BEGIN asked, for a space it
   asked about, and only for the page that BEGIN asked about (its
   pending-request record keeps the `page` it carried): a round that

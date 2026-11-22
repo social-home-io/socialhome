@@ -838,12 +838,24 @@ class SyncPageService:
             return None
         return signer if signer in hosts else hosts[0]
 
-    def buckets_for(self, space_id: str, to_instance_id: str) -> list[int] | None:
+    def buckets_for(
+        self,
+        space_id: str,
+        to_instance_id: str,
+        page_ref: Mapping[str, Any] | None,
+    ) -> list[int] | None:
         """``buckets`` for our next BEGIN of *space_id* to *to_instance_id*:
         the unexplained buckets of the last compare, when it is the host
         they are asked of; else ``None``."""
         wanted = self._wanted.get(space_id)
-        if wanted is None or wanted.host != to_instance_id:
+        if (
+            wanted is None
+            or wanted.host != to_instance_id
+            or _root_of_ref(page_ref) != wanted.root
+        ):
+            # A newer page is held and its compare is still waiting: the
+            # host would list buckets for a page we no longer hold, and we
+            # would drop them — no export for nothing.
             return None
         return list(wanted.buckets)
 

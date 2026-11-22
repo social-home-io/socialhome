@@ -357,6 +357,29 @@ class SyncSessionManager:
             for s in self._sessions.values()
         )
 
+    def syncing_from(
+        self,
+        space_id: str,
+        requester_instance_id: str,
+        provider_instance_id: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Whether our sync of ``space_id`` from ``provider_instance_id`` is
+        live: a requester session whose sentinel has not landed, opened or
+        fed a chunk in the last :data:`RECEIVING_IDLE_S`. A new BEGIN for
+        that space would make the provider replace it (one sync of a space
+        per household) — the running stream must finish instead."""
+        current = now if now is not None else time.time()
+        return any(
+            s.space_id == space_id
+            and s.requester_instance_id == requester_instance_id
+            and s.provider_instance_id == provider_instance_id
+            and not s.sentinel_landed
+            and current - max(s.created_at, s.last_activity) <= RECEIVING_IDLE_S
+            for s in self._sessions.values()
+        )
+
     def reap_stale(self, ttl_seconds: float, *, now: float | None = None) -> int:
         """Close sessions idle for more than ``ttl_seconds``.
 
@@ -835,6 +858,26 @@ class SyncSessionManager:
             payload["page"] = record.page_ref
         if record.buckets:
             payload["buckets"] = list(record.buckets)
+        # The retry is a BEGIN of ours like any other: recorded (so its
+        # answer and its listings are recognised) and with its HTTPS receive
+        # session open (so its chunks are not dropped as an unknown id).
+        self.record_sync_request(
+            sync_id=new_sync_id,
+            space_id=record.space_id,
+            provider_instance_id=record.provider_instance_id,
+            sync_mode=record.sync_mode,
+            have_seq=record.have_seq,
+            roster_digest=record.roster_digest,
+            page_ref=record.page_ref,
+            buckets=list(record.buckets) if record.buckets else None,
+        )
+        self.register_requester_https_session(
+            sync_id=new_sync_id,
+            space_id=record.space_id,
+            requester_instance_id=record.requester_instance_id,
+            provider_instance_id=record.provider_instance_id,
+            sync_mode=record.sync_mode,
+        )
         return SyncDecision(
             accepted=True,
             reason="relay_fallback",

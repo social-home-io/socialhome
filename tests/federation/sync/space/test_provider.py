@@ -213,6 +213,36 @@ async def _listing_session(provider, *, version=95, member=True, buckets=(4, 9))
     return pages, session, frames
 
 
+async def test_a_stream_replaced_before_its_listings_pays_no_listing_export(
+    provider,
+):
+    """Re-review: a session replaced while its content chunks went out stops
+    before the listings are built — the full-space export is not paid."""
+    pages = _ListingPages()
+    provider.attach_sync_pages(pages)
+
+    async def gate(space_id, requester):
+        return True
+
+    provider.attach_member_gate(gate)
+    session = _FakeSession(sync_mode="incremental")
+    session.peer_version = 95
+    session.page_ref = {"root": b"\x01" * 32}
+    session.buckets = [4]
+    session.closed = False
+    sent = session.rtc.sent
+
+    async def send_chunk(data):
+        sent.append(data)
+        if len(sent) == 2:  # the last content chunk: then replaced
+            session.closed = True
+
+    session.rtc.send_chunk = send_chunk
+    await provider.stream_initial(session)
+    assert len(sent) == 2
+    assert not any("buckets" in c for c in pages.calls)
+
+
 async def test_the_listings_ride_the_stream_before_its_sentinel(provider):
     """v_95: the ``buckets`` a BEGIN names come back as ``__listing__``
     chunks (under the content key) at the end of that same stream, right
