@@ -1,8 +1,25 @@
-"""Outbound roster sync on pair-confirm (§4 / §11 / §23).
+"""Outbound roster sync on pair-confirm and on every fresh connect (§4 / §11 / §23).
 
 Subscribes to :class:`PairingConfirmed` and pushes a single
 ``USERS_SYNC`` envelope to the freshly-paired peer carrying every
-local household member's profile. Without this, the peer's
+local household member's profile.
+
+It sends the same snapshot again each time a paired household connects
+fresh — :class:`PeerCapabilitiesAdvertised`, which a household's
+``INSTANCE_CAPABILITIES_UPDATED`` raises here and which it sends on every
+startup — so a member it missed while it was away (a child account added
+while it was offline, an envelope that aged out of the outbox) arrives
+then. A reconnect that changes nothing sends nothing: we keep, per
+household, a digest of the last snapshot it accepted from us
+(:attr:`UsersSyncOutbound._sent`, in memory, like the peer directory's), so
+a household that restarts over and over gets the snapshot once until a
+member actually changes. After our own restart the first reconnect sends
+once again.
+
+The snapshot carries ``complete: true``: it names every member the
+household may see, so the receiver takes a member it no longer names as
+removed (``FederationInboundService._on_users_sync``) — which also heals a
+``USER_REMOVED`` it missed. Without this, the peer's
 ``remote_users`` mirror sits empty until each member *individually*
 edits their profile — which is rarely the first thing people do
 after pairing, so households would see only the admin (whoever
@@ -29,27 +46,25 @@ Guardian blocks (§CP.F2): a protected account goes to a household where
 someone its guardian blocked is homed with its name only — ``bio``,
 ``picture_hash`` and ``status`` ``null``, no picture bytes — like
 ``USER_UPDATED`` and ``USER_STATUS_UPDATED`` do.
-
-Roster re-send (:meth:`UsersSyncOutbound.resend_roster_if_due`): before
-new members went out on creation, a member added after a pairing (a child
-account, typically, who never edits a profile) never reached the paired
-household. On the first start of a build whose
-:data:`ROSTER_RESEND_GENERATION` is above the one stored in
-``instance_config``, every paired household gets one fresh snapshot — the
-same one, same filters — so existing pairs heal without anyone acting.
-Bump the generation to heal a future roster bug the same way.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from ..domain.events import PairingConfirmed
+from ..canonical_json import canonical_bytes
+from ..domain.events import (
+    PairingConfirmed,
+    PeerCapabilitiesAdvertised,
+    PeerUnpaired,
+)
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
+from .peer_outbound import ConfirmedPeerBroadcaster
 from .protection_gate import ProtectionGateMixin
 from .user_identity_binding import user_identity_binding_fields
 from .visibility import VisibilityMixin
@@ -57,7 +72,6 @@ from .visibility import VisibilityMixin
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
     from ..repositories.federation_repo import AbstractFederationRepo
-    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
     from ..repositories.peer_user_visibility_repo import (
         AbstractPeerUserVisibilityRepo,
     )
@@ -66,16 +80,16 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: ``instance_config`` key holding the last roster re-send generation run.
-ROSTER_RESEND_KEY = "federation.roster_resend_generation"
+#: Snapshot entry fields left out of the per-household digest: the instance
+#: assertion is re-signed with a fresh ``issued_at`` on every build, and the
+#: picture bytes are covered by ``picture_hash``.
+_UNSTABLE_FIELDS = frozenset(
+    {"user_assertion_signature", "user_assertion_issued_at", "picture_webp_base64"}
+)
 
-#: Raise to send every paired household the roster once more on the next
-#: start. 1 — members created after a pairing were never sent.
-ROSTER_RESEND_GENERATION = 1
 
-
-class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
-    """Send ``USERS_SYNC`` to a freshly-confirmed peer."""
+class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroadcaster):
+    """Send ``USERS_SYNC`` to a freshly-confirmed or freshly-connected peer."""
 
     # Narrow the mixin's ``FederationService | None`` slot — always wired.
     _federation: FederationService
@@ -85,8 +99,8 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
         "_child_protection",
         "_federation",
         "_federation_repo",
-        "_instance_config",
         "_picture_repo",
+        "_sent",
         "_user_repo",
     )
 
@@ -99,15 +113,16 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
         profile_picture_repo: AbstractProfilePictureRepo | None = None,
         visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
         federation_repo: AbstractFederationRepo | None = None,
-        instance_config: AbstractInstanceConfigRepo | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
         self._user_repo = user_repo
-        # Both only for :meth:`resend_roster_if_due` (the paired households,
-        # and where the generation run last is kept).
+        # The paired (social) households: a fresh connect is answered only
+        # for one of them — never a household met through an invite link.
         self._federation_repo = federation_repo
-        self._instance_config = instance_config
+        #: household → digest of the last snapshot it accepted from us.
+        #: Bounded by the paired households; dropped on unpair.
+        self._sent: dict[str, str] = {}
         # Optional so test wiring without picture bytes still works —
         # ``picture_webp_base64`` is just omitted in that case and
         # receivers fall back to the ``picture_hash`` URL.
@@ -119,54 +134,31 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
 
     def wire(self) -> None:
         self._bus.subscribe(PairingConfirmed, self._on_pair_confirmed)
+        self._bus.subscribe(PeerCapabilitiesAdvertised, self._on_peer_connected)
+        self._bus.subscribe(PeerUnpaired, self._on_unpaired)
 
     async def _on_pair_confirmed(self, event: PairingConfirmed) -> None:
         await self.send_snapshot(event.instance_id)
 
-    async def resend_roster_if_due(self) -> int:
-        """Send every paired household one snapshot when this build's
-        :data:`ROSTER_RESEND_GENERATION` has not run here yet; returns the
-        number of households sent to (0 when not due).
+    async def _on_peer_connected(self, event: PeerCapabilitiesAdvertised) -> None:
+        """A paired household connected fresh: the snapshot, unless it
+        already has this very one from us."""
+        if event.instance_id not in await self.list_confirmed_peer_ids():
+            return
+        await self.send_snapshot(event.instance_id, only_if_changed=True)
 
-        Paired (social) households only — the list profile updates go to;
-        never a household met through an invite link, never a GFS. Each
-        send is an ordinary ``send_event``: a peer that is unreachable gets
-        it from the outbox. A failure to list the households raises (the
-        startup step logs it at WARNING) and records nothing, so the next
-        start tries again — the generation is recorded only once the
-        snapshots were handed to the transport.
+    async def _on_unpaired(self, event: PeerUnpaired) -> None:
+        self._sent.pop(event.instance_id, None)
+
+    async def send_snapshot(
+        self, peer_id: str, *, only_if_changed: bool = False
+    ) -> None:
+        """Send ``peer_id`` one ``USERS_SYNC`` of every (visible) local user.
+
+        ``only_if_changed`` skips the send when the household already
+        accepted this same snapshot from us (a reconnect that changes
+        nothing).
         """
-        if self._instance_config is None or self._federation_repo is None:
-            return 0
-        raw = await self._instance_config.get(ROSTER_RESEND_KEY)
-        try:
-            done = int(raw) if raw else 0
-        except ValueError:
-            done = 0
-        if done >= ROSTER_RESEND_GENERATION:
-            return 0
-        # Not the fail-soft ``list_confirmed_peer_ids``: an empty list on a
-        # repo error would record the generation with nobody healed.
-        own = self._federation.own_instance_id
-        peers = [
-            p.id
-            for p in await self._federation_repo.list_social_instances()
-            if p.id and p.id != own
-        ]
-        for peer_id in peers:
-            await self.send_snapshot(peer_id)
-        await self._instance_config.set(
-            ROSTER_RESEND_KEY, str(ROSTER_RESEND_GENERATION)
-        )
-        log.info(
-            "users-sync: roster generation %d sent to %d paired household(s)",
-            ROSTER_RESEND_GENERATION,
-            len(peers),
-        )
-        return len(peers)
-
-    async def send_snapshot(self, peer_id: str) -> None:
-        """Send ``peer_id`` one ``USERS_SYNC`` of every (visible) local user."""
         own = getattr(self._federation, "_own_instance_id", "")
         if not peer_id or peer_id == own:
             return
@@ -245,11 +237,32 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
         if not payload_users:
             return
 
+        digest = snapshot_digest(payload_users)
+        if only_if_changed and self._sent.get(peer_id) == digest:
+            return
         try:
-            await self._federation.send_event(
+            result = await self._federation.send_event(
                 to_instance_id=peer_id,
                 event_type=FederationEventType.USERS_SYNC,
-                payload={"users": payload_users},
+                # ``complete``: every member this household may see — the
+                # receiver takes one it no longer names as removed.
+                payload={"users": payload_users, "complete": True},
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug("users-sync: send to %s failed: %s", peer_id, exc, exc_info=True)
+            return
+        # Only a snapshot the household accepted counts; one left in the
+        # outbox goes again on its next connect.
+        if getattr(result, "ok", False):
+            self._sent[peer_id] = digest
+        else:
+            self._sent.pop(peer_id, None)
+
+
+def snapshot_digest(payload_users: list[dict]) -> str:
+    """What the household holds after this snapshot, ignoring re-signing."""
+    stable = [
+        {k: v for k, v in entry.items() if k not in _UNSTABLE_FIELDS}
+        for entry in payload_users
+    ]
+    return hashlib.sha256(canonical_bytes(stable)).hexdigest()

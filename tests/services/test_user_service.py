@@ -17,7 +17,11 @@ from socialhome.domain.child_protection import (
     AccountProtectedError,
     ProtectedCapability,
 )
-from socialhome.domain.events import UserStatusChanged
+from socialhome.domain.events import (
+    UserProfileUpdated,
+    UserProvisioned,
+    UserStatusChanged,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.user_repo import SqliteUserRepo
@@ -122,6 +126,25 @@ async def test_deprovision_and_reactivate(stack):
     assert got.state == "inactive"
     u2 = await stack.provision_user("pascal")
     assert u2.state == "active"
+
+
+async def test_reactivating_announces_the_profile_not_a_new_account(stack):
+    """A reactivated member goes back to paired households (their profile,
+    ``UserProfileUpdated``) without re-running what a new account does
+    (``UserProvisioned``: calendar seeding, space seating)."""
+    await stack.provision_user("pascal")
+    await stack.user_svc.deprovision("pascal")
+    seen: list = []
+
+    async def _record(event) -> None:
+        seen.append(event)
+
+    stack.bus.subscribe(UserProfileUpdated, _record)
+    stack.bus.subscribe(UserProvisioned, _record)
+    u2 = await stack.user_svc.provision(username="pascal", display_name="Pascal V")
+    assert [type(e) for e in seen] == [UserProfileUpdated]
+    assert seen[0].user_id == u2.user_id
+    assert seen[0].display_name == "Pascal V"
 
 
 async def test_reserved_username_rejected(stack):

@@ -4143,6 +4143,32 @@ class FederationInboundService(ProtectionGateMixin):
                     exc,
                     exc_info=True,
                 )
+        if event.payload.get("complete") is True:
+            await self._drop_unnamed_remote_users(event.from_instance, users)
+
+    async def _drop_unnamed_remote_users(self, instance_id: str, users: list) -> None:
+        """A complete snapshot names every member of ``instance_id`` we may
+        see: one we hold that it leaves out was removed, or hidden from us
+        — both mean ``USER_REMOVED`` (which we may have missed while away).
+
+        Only rows homed on the sender (``list_remote_for_instance``), so a
+        household can only ever drop its own people. A user who moved out
+        to another household is left alone: their old row is a forwarding
+        pointer, not a member. Only a snapshot marked ``complete`` counts —
+        an older sender's carries no marker and drops nobody.
+        """
+        named = {str(u.get("user_id")) for u in users if isinstance(u, dict)}
+        for remote in await self._user_repo.list_remote_for_instance(instance_id):
+            if remote.user_id in named:
+                continue
+            if await self._user_repo.get_move_link(remote.user_id) is not None:
+                continue
+            log.info(
+                "USERS_SYNC: %s no longer names user %s — removing",
+                instance_id,
+                remote.user_id,
+            )
+            await self._remove_remote_user(remote.user_id)
 
     async def _on_user_updated(self, event: FederationEvent) -> None:
         await self._upsert_remote_user(event.from_instance, event.payload)
@@ -4175,6 +4201,13 @@ class FederationInboundService(ProtectionGateMixin):
             refuse(event, "user is not homed on the sending household", user=user_id)
             return
         log.info("USER_REMOVED: flagging remote user %s as deprovisioned", user_id)
+        await self._remove_remote_user(user_id)
+
+    async def _remove_remote_user(self, user_id: str) -> None:
+        """Deprovision a remote user and purge their content here — the
+        effect of ``USER_REMOVED``, also applied to a member a complete
+        ``USERS_SYNC`` no longer names. The caller checked the user is
+        homed on the sending household."""
         await self._user_repo.mark_remote_deprovisioned(user_id)
 
         if self._moment_repo is not None:

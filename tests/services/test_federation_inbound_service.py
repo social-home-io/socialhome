@@ -1746,6 +1746,106 @@ async def test_users_sync_one_bad_user_does_not_drop_the_rest(
     assert any("boom" in r.getMessage() for r in caplog.records)
 
 
+async def _seed_sync_peer(db, peer_id: str) -> None:
+    await db.enqueue(
+        """INSERT INTO remote_instances(
+               id, display_name, remote_identity_pk,
+               key_self_to_remote, key_remote_to_self,
+               remote_inbox_url, local_inbox_id,
+               status, source, created_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            peer_id,
+            peer_id,
+            "aa" * 32,
+            "enc",
+            "enc",
+            f"https://{peer_id}/wh",
+            f"wh-{peer_id}",
+            "confirmed",
+            "manual",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+
+
+async def _seed_remote(db, user_id: str, instance_id: str, username: str) -> None:
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        (user_id, instance_id, username, username.title()),
+    )
+
+
+async def _deprovisioned(db) -> dict[str, bool]:
+    rows = await db.fetchall("SELECT user_id, deprovisioned_at FROM remote_users")
+    return {r["user_id"]: r["deprovisioned_at"] is not None for r in rows}
+
+
+async def _sync(inbound, users: list[str], **extra) -> None:
+    await inbound._on_users_sync(
+        _event(
+            FederationEventType.USERS_SYNC,
+            {
+                "users": [
+                    {"user_id": derive_user_id(_PK_AA, n), "username": n} for n in users
+                ],
+                **extra,
+            },
+            from_instance="peer-a",
+        )
+    )
+
+
+async def test_complete_users_sync_removes_a_member_it_no_longer_names(db, inbound):
+    """A ``USER_REMOVED`` missed while away heals on the next snapshot — for
+    the sender's own people only, never another household's."""
+    await _seed_sync_peer(db, "peer-a")
+    await _seed_sync_peer(db, "peer-b")
+    inbound._federation_service = _BindingFakeFederation({"peer-a": _PK_AA})
+    gone = derive_user_id(_PK_AA, "sam")
+    await _seed_remote(db, gone, "peer-a", "sam")
+    await _seed_remote(db, "u-other", "peer-b", "olga")
+
+    await _sync(inbound, ["alice"], complete=True)
+
+    state = await _deprovisioned(db)
+    assert state[gone] is True
+    assert state[derive_user_id(_PK_AA, "alice")] is False
+    assert state["u-other"] is False
+
+
+async def test_users_sync_without_complete_removes_nobody(db, inbound):
+    """An older sender's snapshot carries no marker: never authoritative."""
+    await _seed_sync_peer(db, "peer-a")
+    inbound._federation_service = _BindingFakeFederation({"peer-a": _PK_AA})
+    sam = derive_user_id(_PK_AA, "sam")
+    await _seed_remote(db, sam, "peer-a", "sam")
+
+    await _sync(inbound, ["alice"])
+    await _sync(inbound, ["alice"], complete="yes")
+
+    assert (await _deprovisioned(db))[sam] is False
+
+
+async def test_complete_users_sync_leaves_a_member_who_moved_out(db, inbound):
+    """A moved-out member's old row is a forwarding pointer, not a member."""
+    await _seed_sync_peer(db, "peer-a")
+    inbound._federation_service = _BindingFakeFederation({"peer-a": _PK_AA})
+    moved = derive_user_id(_PK_AA, "max")
+    await _seed_remote(db, moved, "peer-a", "max")
+    await db.enqueue(
+        "UPDATE remote_users SET moved_to_user_id='u-new', moved_to_instance_id="
+        "'peer-z', move_issued_at='2026-01-01T00:00:00+00:00', move_link='{}'"
+        " WHERE user_id=?",
+        (moved,),
+    )
+
+    await _sync(inbound, ["alice"], complete=True)
+
+    assert (await _deprovisioned(db))[moved] is False
+
+
 # ─── USERS_SYNC — per-user identity binding (proto v_25) ──────────
 
 

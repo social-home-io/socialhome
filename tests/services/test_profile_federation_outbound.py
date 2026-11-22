@@ -22,7 +22,11 @@ from socialhome.crypto import (
     generate_identity_keypair,
     verify_user_identity_assertion,
 )
-from socialhome.domain.events import UserProfileUpdated, UserProvisioned
+from socialhome.domain.events import (
+    UserDeprovisioned,
+    UserProfileUpdated,
+    UserProvisioned,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import User, UserIdentityAssertion
 from socialhome.infrastructure.event_bus import EventBus
@@ -661,3 +665,23 @@ async def test_an_unknown_new_member_sends_nothing():
     bus, fed, _out, _cp = _gated()
     await bus.publish(_provisioned("u-gone"))
     assert fed.sent == []
+
+
+# ─── Removed member (UserDeprovisioned) ────────────────────────────────────
+
+
+async def test_a_removed_member_leaves_every_paired_household():
+    """Before, a removed member stayed listed on paired households."""
+    bus, fed, _out, _cp = _gated(blocked=())
+    await bus.publish(UserDeprovisioned(user_id="u1", username="alice"))
+    assert sorted(fed.sent, key=lambda s: s[0]) == [
+        ("peer-1", FederationEventType.USER_REMOVED, {"user_id": "u1"}),
+        ("peer-2", FederationEventType.USER_REMOVED, {"user_id": "u1"}),
+    ]
+
+
+async def test_a_removed_member_skips_a_household_they_were_hidden_from():
+    """Hiding already sent that household ``USER_REMOVED``."""
+    bus, fed, _out, _cp = _gated(blocked=(), hidden=("peer-2",))
+    await bus.publish(UserDeprovisioned(user_id="u1", username="alice"))
+    assert [to for to, _ev, _p in fed.sent] == ["peer-1"]

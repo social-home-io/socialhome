@@ -325,10 +325,6 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "non-space exclusion",
             "capability re-ask on upgrade",
         ),
-        "socialhome/services/users_sync_outbound.py": (
-            "non-space exclusion",
-            "household roster re-send to paired households",
-        ),
     },
 }
 
@@ -419,7 +415,6 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/services/peer_directory_service.py": 1,
         "socialhome/services/peer_outbound.py": 1,
         "socialhome/services/resync_on_upgrade.py": 1,
-        "socialhome/services/users_sync_outbound.py": 1,
     },
 }
 

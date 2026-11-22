@@ -2260,23 +2260,23 @@ def _wire_federation_stack(
     # USERS_SYNC envelope carrying every (visible) local user so their
     # remote_users mirror is populated immediately. Without this the
     # peer only sees household members who happen to edit their profile
-    # after pairing — which usually means only the admin shows up.
+    # after pairing — which usually means only the admin shows up. The same
+    # snapshot goes again when a paired household connects fresh (its
+    # startup capabilities), unless it already has it.
     users_sync_outbound = UsersSyncOutbound(
         bus=bus,
         federation_service=federation_service,
         user_repo=user_repo,
         profile_picture_repo=profile_picture_repo,
         visibility_repo=peer_user_visibility_repo,
-        # The once-per-generation roster re-send at startup (existing pairs
-        # heal members they never got).
+        # A fresh connect (PeerCapabilitiesAdvertised) is answered with the
+        # snapshot only for a paired (social) household.
         federation_repo=federation_repo,
-        instance_config=app[K.instance_config_repo_key],
     )
     # §CP.F2: a protected account's name only (no picture, bio or status) to
     # a blocked person's household.
     users_sync_outbound.attach_child_protection(app[K.child_protection_service_key])
     users_sync_outbound.wire()
-    app[K.users_sync_outbound_key] = users_sync_outbound
     # §CP.F2: what a block drops from the outbox is replaced by one snapshot.
     profile_federation_outbound.attach_snapshot_sender(
         users_sync_outbound.send_snapshot
@@ -6466,10 +6466,6 @@ def create_app(config: Config | None = None) -> web.Application:
         #    c. After an upgrade (OURS increased since last boot), ask peers
         #       to re-advertise theirs — capabilities only, no content
         #       replay; one-shot per upgrade (persisted last-OURS).
-        #    d. Once per roster generation (``instance_config``), every paired
-        #       household gets a fresh ``USERS_SYNC`` — heals members a pair
-        #       never got (those created after the pairing, before new
-        #       members were sent on creation).
         # The outbound this startup wired, taken now — not looked up when the
         # background step gets to it, so the announcement always goes to the
         # same object whatever replaces the app key later.
@@ -6486,18 +6482,12 @@ def create_app(config: Config | None = None) -> web.Application:
                 identity_repo=federation_repo,
             )
 
-        users_sync_outbound = app[K.users_sync_outbound_key]
-
-        async def _resend_roster_if_due() -> None:
-            await users_sync_outbound.resend_roster_if_due()
-
         nonlocal startup_announcer
         startup_announcer = StartupAnnouncer(
             [
                 ("post-restore reconnect", recovery_reconnect_service.maybe_reconnect),
                 ("capabilities announcement", _announce_capabilities),
                 ("capability re-sync on upgrade", _resync_capabilities_if_upgraded),
-                ("roster re-send (once per generation)", _resend_roster_if_due),
             ]
         )
         await startup_announcer.start()

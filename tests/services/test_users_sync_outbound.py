@@ -23,15 +23,16 @@ from socialhome.crypto import (
     generate_identity_keypair,
     verify_user_identity_assertion,
 )
-from socialhome.domain.events import PairingConfirmed
+from socialhome.domain.events import (
+    PairingConfirmed,
+    PeerCapabilitiesAdvertised,
+    PeerUnpaired,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import UserIdentityAssertion, UserStatus
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.services.users_sync_outbound import (
-    ROSTER_RESEND_GENERATION,
-    ROSTER_RESEND_KEY,
-    UsersSyncOutbound,
-)
+from socialhome.services.users_sync_outbound import UsersSyncOutbound
+from socialhome.services.users_sync_outbound import snapshot_digest as users_sync_digest
 
 
 class _FakeFederationService:
@@ -562,7 +563,7 @@ async def test_protected_profile_is_name_only_to_a_blocked_household(peer):
     assert mom["picture_webp_base64"] == base64.b64encode(b"MOM").decode()
 
 
-# ─── Roster re-send once per generation (existing pairs heal) ─────────────
+# ─── Snapshot on every fresh connect ──────────────────────────────────────
 
 
 class _Peer:
@@ -580,102 +581,134 @@ class _FakeFedRepo:
         return [_Peer(p) for p in self._peers]
 
 
-class _FakeInstanceConfig:
-    def __init__(self, values: dict[str, str] | None = None) -> None:
-        self.values = dict(values or {})
-
-    async def get(self, key: str) -> str | None:
-        return self.values.get(key)
-
-    async def set(self, key: str, value: str) -> None:
-        self.values[key] = value
+class _Result:
+    def __init__(self, ok: bool) -> None:
+        self.ok = ok
 
 
-def _resender(config: _FakeInstanceConfig | None, peers=("peer-1", "peer-2")):
-    fed = _FakeFederationService()
+class _ResultFederation(_FakeFederationService):
+    """``send_event`` answers like the real one: a ``DeliveryResult``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ok = True
+
+    async def send_event(self, *, to_instance_id, event_type, payload):
+        self.sent.append((to_instance_id, event_type, payload))
+        return _Result(self.ok)
+
+
+def _connecting(peers=("peer-1", "peer-2")):
+    bus = EventBus()
+    fed = _ResultFederation()
+    users = [
+        _FakeUser("u-alice", "alice", "Alice"),
+        _FakeUser("u-maria", "maria", "Maria"),
+    ]
     vis = _FakeVisibilityRepo()
     vis.hide("peer-2", "u-maria")
     out = UsersSyncOutbound(
-        bus=EventBus(),
+        bus=bus,
         federation_service=fed,
-        user_repo=_FakeUserRepo(
-            [
-                _FakeUser("u-alice", "alice", "Alice"),
-                _FakeUser("u-maria", "maria", "Maria"),
-            ]
-        ),
+        user_repo=_FakeUserRepo(users),
         visibility_repo=vis,
         federation_repo=_FakeFedRepo([*peers, "own-inst"]),
-        instance_config=config,
     )
-    return out, fed
+    out.wire()
+    return bus, fed, users
 
 
-async def test_roster_resend_sends_every_paired_household_one_snapshot_once():
-    config = _FakeInstanceConfig()
-    out, fed = _resender(config)
+def _back(peer: str) -> PeerCapabilitiesAdvertised:
+    return PeerCapabilitiesAdvertised(instance_id=peer)
 
-    assert await out.resend_roster_if_due() == 2
-    by_peer = {to: payload for to, ev, payload in fed.sent}
-    assert all(ev is FederationEventType.USERS_SYNC for _to, ev, _p in fed.sent)
-    assert set(by_peer) == {"peer-1", "peer-2"}  # never our own instance
-    # Same snapshot, same per-pair hide list.
-    assert [u["user_id"] for u in by_peer["peer-1"]["users"]] == [
-        "u-alice",
-        "u-maria",
+
+async def test_snapshot_is_marked_complete():
+    bus, fed, _users = _connecting()
+    await bus.publish(PairingConfirmed(instance_id="peer-1"))
+    assert fed.sent[0][2]["complete"] is True
+
+
+async def test_a_paired_household_connecting_fresh_gets_the_snapshot():
+    """A household that was away (a child added meanwhile) gets everyone
+    it may see on its next connect — same filters as at pairing."""
+    bus, fed, _users = _connecting()
+    await bus.publish(_back("peer-2"))
+    assert len(fed.sent) == 1
+    to, ev, payload = fed.sent[0]
+    assert (to, ev) == ("peer-2", FederationEventType.USERS_SYNC)
+    assert [u["user_id"] for u in payload["users"]] == ["u-alice"]  # hide list
+
+
+async def test_a_household_that_is_not_a_paired_one_gets_nothing():
+    """Capabilities also arrive from households met through an invite link
+    (and our own row): never a roster for them."""
+    bus, fed, _users = _connecting()
+    await bus.publish(_back("link-household"))
+    await bus.publish(_back("own-inst"))
+    assert fed.sent == []
+
+
+async def test_a_flapping_reconnect_does_not_resend_the_same_snapshot():
+    bus, fed, _users = _connecting()
+    for _ in range(5):
+        await bus.publish(_back("peer-1"))
+    assert len(fed.sent) == 1
+
+
+async def test_a_reconnect_after_a_member_changed_sends_again():
+    bus, fed, users = _connecting()
+    await bus.publish(_back("peer-1"))
+    users.append(_FakeUser("u-kid", "kid", "Kid"))
+    await bus.publish(_back("peer-1"))
+    assert len(fed.sent) == 2
+    assert "u-kid" in [u["user_id"] for u in fed.sent[1][2]["users"]]
+
+
+async def test_pair_confirm_counts_as_the_household_having_the_snapshot():
+    bus, fed, _users = _connecting()
+    await bus.publish(PairingConfirmed(instance_id="peer-1"))
+    await bus.publish(_back("peer-1"))
+    assert len(fed.sent) == 1
+
+
+async def test_a_snapshot_not_accepted_goes_again_on_the_next_connect():
+    """Left in the outbox (or refused): the next connect sends it again."""
+    bus, fed, _users = _connecting()
+    fed.ok = False
+    await bus.publish(_back("peer-1"))
+    fed.ok = True
+    await bus.publish(_back("peer-1"))
+    await bus.publish(_back("peer-1"))
+    assert len(fed.sent) == 2
+
+
+async def test_unpair_forgets_what_the_household_had():
+    bus, fed, _users = _connecting()
+    await bus.publish(_back("peer-1"))
+    await bus.publish(PeerUnpaired(instance_id="peer-1"))
+    await bus.publish(_back("peer-1"))
+    assert len(fed.sent) == 2
+
+
+def test_digest_ignores_re_signing_and_picture_bytes():
+    """The instance assertion is re-signed with a fresh ``issued_at`` on
+    every build; the bytes are covered by ``picture_hash``."""
+    a = [
+        {
+            "user_id": "u",
+            "picture_hash": "h",
+            "picture_webp_base64": "AAA",
+            "user_assertion_signature": "s1",
+            "user_assertion_issued_at": "t1",
+        }
     ]
-    assert [u["user_id"] for u in by_peer["peer-2"]["users"]] == ["u-alice"]
-    assert config.values[ROSTER_RESEND_KEY] == str(ROSTER_RESEND_GENERATION)
-
-    fed.sent.clear()
-    assert await out.resend_roster_if_due() == 0
-    assert fed.sent == []
-
-
-async def test_roster_resend_with_no_pairs_still_records_the_generation():
-    config = _FakeInstanceConfig()
-    out, fed = _resender(config, peers=())
-    assert await out.resend_roster_if_due() == 0
-    assert fed.sent == []
-    assert config.values[ROSTER_RESEND_KEY] == str(ROSTER_RESEND_GENERATION)
-
-
-@pytest.mark.parametrize("stored", ["0", "", "garbage"])
-async def test_roster_resend_runs_for_an_older_or_unreadable_generation(stored):
-    out, _fed = _resender(_FakeInstanceConfig({ROSTER_RESEND_KEY: stored}))
-    assert await out.resend_roster_if_due() == 2
-
-
-async def test_roster_resend_without_instance_config_does_nothing():
-    out, fed = _resender(None)
-    assert await out.resend_roster_if_due() == 0
-    assert fed.sent == []
-
-
-async def test_roster_resend_without_federation_repo_records_nothing():
-    config = _FakeInstanceConfig()
-    out, fed = _resender(config)
-    out._federation_repo = None
-    assert await out.resend_roster_if_due() == 0
-    assert fed.sent == []
-    assert ROSTER_RESEND_KEY not in config.values
-
-
-class _BrokenFedRepo:
-    async def list_social_instances(self):
-        raise RuntimeError("db is busy")
-
-
-async def test_roster_resend_retries_next_start_when_listing_peers_fails():
-    """A transient repo error must not record the generation with nobody
-    healed — this is the one chance to heal those pairs."""
-    config = _FakeInstanceConfig()
-    out, _fed = _resender(config)
-    out._federation_repo = _BrokenFedRepo()
-    with pytest.raises(RuntimeError):
-        await out.resend_roster_if_due()
-    assert ROSTER_RESEND_KEY not in config.values
-
-    out._federation_repo = _FakeFedRepo(["peer-1"])
-    assert await out.resend_roster_if_due() == 1
-    assert config.values[ROSTER_RESEND_KEY] == str(ROSTER_RESEND_GENERATION)
+    b = [
+        {
+            "user_id": "u",
+            "picture_hash": "h",
+            "user_assertion_signature": "s2",
+            "user_assertion_issued_at": "t2",
+        }
+    ]
+    assert users_sync_digest(a) == users_sync_digest(b)
+    assert users_sync_digest(a) != users_sync_digest([{**b[0], "picture_hash": "h2"}])
