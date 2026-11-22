@@ -25,7 +25,7 @@ import pytest
 from socialhome.canonical_json import canonical_str
 from socialhome.crypto import ed25519_public_key
 from socialhome.domain.file_hashes import space_content_media_name
-from socialhome.domain.post import Post, PostType
+from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.domain.task import TaskStatus
@@ -1243,3 +1243,123 @@ async def test_a_bucket_our_receiver_refuses_is_not_asked_again(trio, caplog):
     assert pos is not None and pos.match is False and pos.missing == 1
     # Memory is bounded and per page: a newer page forgets it.
     assert len(r_pages._stuck) == 1
+
+
+async def test_a_child_held_back_for_its_parent_is_never_stuck(trio):
+    """Re-review S1 (the PoC): the requester lacks post-2 and its comment
+    c-9; the deliverer withholds the post-2 row. The comment verifies but
+    waits for its post — held back, not refused by rule — so its bucket is
+    not marked stuck, the space never reads matched while either is
+    missing, and the next honest round brings both."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _post(host)
+    await _stream(host, requester)
+    await _post(host, "post-2", content="while you were away")
+    await host.repos.space_post.add_comment(
+        Comment(
+            id="c-9",
+            post_id="post-2",
+            author=ANNA,
+            type=CommentType.TEXT,
+            created_at=T0_DT,
+            content="first!",
+        ),
+        space_id=SPACE,
+    )
+    await _stream(host, member)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+
+    def withhold_post(listings, rows):
+        return listings, [
+            r for r in rows if not (r["r"] == "posts" and r["row"]["id"] == "post-2")
+        ]
+
+    wire.forge = withhold_post
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert await requester.repos.space_post.get("post-2") is None
+    comment_bucket = row_key("comments", "c-9")[0]
+    stuck = r_pages._stuck.get(SPACE)
+    assert stuck is None or comment_bucket not in stuck.buckets
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is not True
+    # The next round, honest: the post lands, then its comment.
+    wire.forge = None
+    asks = len(wire.asks)
+    r_pages.host_silent(SPACE)
+    await wire.settle()
+    assert len(wire.asks) > asks
+    assert await requester.repos.space_post.get("post-2") is not None
+    assert await requester.repos.space_post.get_comment("c-9") is not None
+    pos = await _position(requester, r_pages)
+    assert pos is not None and (pos.match, pos.missing) == (True, 0)
+
+
+async def test_a_stuck_bucket_keeps_the_verdict_off_matched(trio):
+    """Re-review S1 (verdict): a bucket refused by rule in one answer stays
+    missing when a LATER answer completes every other bucket — the verdict
+    counts the remembered stuck rows, never "matched"."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _missed_content(host, member, requester)
+    space = await requester.repos.space.get(SPACE)
+    assert space is not None
+    await requester.repos.space.save(replace(space, id="sp-elsewhere"))
+    await requester.repos.space_post.save(
+        "sp-elsewhere",
+        Post(
+            id="post-2",
+            author=ANNA,
+            type=PostType.TEXT,
+            created_at=T0_DT,
+            content="another space's post",
+        ),
+    )
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    page_bucket = row_key("pages", PAGE)[0]
+
+    def only_the_post(listings, rows):
+        # The first answer leaves the wiki page's bucket out entirely.
+        return (
+            [x for x in listings if x["i"] != page_bucket],
+            [r for r in rows if r["r"] != "pages"],
+        )
+
+    wire.forge = only_the_post
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert r_pages._stuck.get(SPACE) is not None
+    # The wiki page reaches us another way (the host's stream); the next
+    # answer then completes its bucket without landing anything — the
+    # verdict must still count the stuck post.
+    await _stream(host, requester)
+    assert await requester.repos.page.get_space_page(PAGE, space_id=SPACE)
+    wire.forge = None
+    r_pages.host_silent(SPACE)
+    await wire.settle()
+    assert [a[0] for a in wire.asks].count(MEMBER) >= 2
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is not True and pos.missing == 1
+
+
+@pytest.mark.parametrize(
+    ("resource", "record", "held"),
+    [
+        ("tasks", {"id": "t-x", "list_id": "no-list", "title": "x"}, 1),
+        ("polls", {"post_id": "no-post", "meta": {"question": "Q"}}, 1),
+        ("schedules", {"post_id": "no-post", "title": "T"}, 1),
+        ("gallery", {"kind": "item", "id": "g-x", "album_id": "no-album"}, 1),
+        ("gallery", {"kind": "album", "id": "a-x"}, 0),
+        ("comments", {"id": "c-x", "post_id": "post-1", "author": ANNA}, 0),
+    ],
+)
+async def test_a_verified_row_before_its_parent_is_held_back(
+    trio, resource, record, held
+):
+    """Re-review S1: ``apply_verified`` reports a row whose parent is held
+    nowhere here as held back for now — never a refusal by rule."""
+    _host, _member, requester, *_rest = trio
+    await _post(requester)
+    outcome = await requester.receiver.apply_verified(SPACE, MEMBER, resource, record)
+    assert outcome.count == held

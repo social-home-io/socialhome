@@ -117,6 +117,7 @@ from ....sync_page import (
 from ...host_equivalence import serves_as_host
 from .exporter import RESOURCE_ORDER, record_batches
 from .page_state import BucketRows
+from .stream_health import HeldBack
 from .trusted_helpers import helper_offset, member_deliverers
 
 if TYPE_CHECKING:
@@ -575,9 +576,10 @@ _RESOURCE_RANK: dict[str, int] = {r: k for k, r in enumerate(RESOURCE_ORDER)}
 #: member household now (the scheduler's ``sync_with``): the fetch rides it.
 RoundRequest = Callable[[str, str], Awaitable[None]]
 
-#: Phase 3: ``(space_id, deliverer, resource, record) ->`` whether the
-#: verified row landed (the receiver's normal merge rules).
-ApplyVerified = Callable[[str, str, str, dict], Awaitable[bool]]
+#: Phase 3: ``(space_id, deliverer, resource, record) ->`` what of the
+#: verified row was held back only for now (a parent not held yet) or
+#: failed — the receiver's normal merge rules.
+ApplyVerified = Callable[[str, str, str, dict], Awaitable[HeldBack]]
 
 #: A round asks at most this many member households, one after another.
 MAX_FETCH_ASKS: int = 3
@@ -1747,12 +1749,12 @@ class SyncPageService:
                 keep_ids=_wanted_ids(rows) if listed else frozenset(),
             )
             horizon = _horizon(self._clock_ms())
-            verified, applied = (
+            verified, applied, held = (
                 await self._apply_rows(
                     space_id, provider, wanted, listed, rows, local, horizon
                 )
                 if listed
-                else ([], [])
+                else ([], [], set())
             )
             check = self._checks.get(space_id)
             if check is None or check.root != wanted.root:
@@ -1767,26 +1769,50 @@ class SyncPageService:
                     cutoff=wanted.cutoff,
                     known=_known_files(space_id, applied),
                 )
+            # Only a refusal by rule can mark a bucket stuck (S1): a row
+            # held back for its parent lands once the parent does.
+            refused_by_rule = [a for a in applied if a[2] not in held]
             still, stuck = await asyncio.to_thread(
-                _still_missing, listed, verified, wanted, local, horizon, applied
+                _still_missing,
+                listed,
+                verified,
+                wanted,
+                local,
+                horizon,
+                refused_by_rule,
             )
-            if stuck:
-                self._note_stuck(space_id, wanted.root, stuck)
             landed = sum(
                 1
                 for index, _resource, leaf, _record in applied
                 if any(leaf == row.leaf for row in local.rows.get(index, []))
             )
+            revived: frozenset[int] = frozenset()
+            if landed:
+                # A row landed: a row refused before may land now (its
+                # parent came) — those buckets are to fetch again (S1).
+                gone = self._stuck.pop(space_id, None)
+                if gone is not None and gone.root == wanted.root:
+                    revived = frozenset(gone.buckets)
+            if stuck:
+                self._note_stuck(space_id, wanted.root, stuck)
             complete = frozenset(i for i, n in still.items() if not n)
-            todo = check.todo - complete - stuck.keys()
+            todo = (check.todo | revived) - complete - stuck.keys()
             short = sum(1 for i, n in still.items() if n and i not in stuck)
+            # The verdict counts the buckets stuck from earlier answers too:
+            # a stuck bucket is missing rows, never "up to date" (S1).
+            earlier = self._stuck.get(space_id)
+            stuck_before = (
+                sum(n for i, (_ours, n) in earlier.buckets.items() if i not in still)
+                if earlier is not None and earlier.root == wanted.root
+                else 0
+            )
             self._remember(
                 space_id,
                 _Compare(
                     root=check.root,
                     differing=check.differing,
                     unexplained=check.unexplained,
-                    missing=sum(still.values()),
+                    missing=sum(still.values()) + stuck_before,
                     unresolved=len(todo) - short,
                     todo=todo,
                 ),
@@ -1823,7 +1849,7 @@ class SyncPageService:
         rows: list[object],
         local: BucketRows,
         horizon: str,
-    ) -> tuple[list[_Verified], list[_Applied]]:
+    ) -> tuple[list[_Verified], list[_Applied], set[bytes]]:
         """Verify and apply the delivered rows: ``(rows that verified, rows
         handed to the receiver)``. Whether one landed is judged after, from
         our own rows (:func:`_still_missing`) — never from the receiver's
@@ -1845,19 +1871,26 @@ class SyncPageService:
                 provider,
             )
         if self._apply_verified is None:
-            return verified, []
+            return verified, [], set()
         apply = await asyncio.to_thread(_to_apply, verified, wanted, local, horizon)
         apply.sort(key=lambda v: _RESOURCE_RANK.get(v[1], len(_RESOURCE_RANK)))
-        for _index, resource, _leaf, record in apply:
+        held: set[bytes] = set()  # held back for now, or failed: no rule
+        for _index, resource, leaf, record in apply:
             try:
-                await self._apply_verified(space_id, provider, resource, record)
+                outcome = await self._apply_verified(
+                    space_id, provider, resource, record
+                )
             except Exception:
                 log.exception(
                     "sync page: applying a verified %s row of %s failed",
                     resource,
                     space_id,
                 )
-        return verified, apply
+                held.add(leaf)
+                continue
+            if outcome.count or outcome.failed:
+                held.add(leaf)
+        return verified, apply, held
 
     # ─── Listings (provider) ──────────────────────────────────────────
 

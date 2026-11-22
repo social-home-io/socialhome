@@ -765,21 +765,55 @@ class SpaceSyncReceiver(
 
     async def apply_verified(
         self, space_id: str, provider: str, resource: str, record: dict[str, Any]
-    ) -> bool:
+    ) -> HeldBack:
         """Sync pages Phase 3: apply ONE row a member household (*provider*)
         delivered that was checked against the space authority's signed page
         (its committed part hashes to a leaf of a listing that hashes to the
         signed bucket). The row is the signer's own, so it passes where a
         host's record passes (:data:`~.receiver_base.VERIFIED_ROW`) — the
         same admission, the same merge rules (last writer wins, tombstones,
-        a deleted row stays deleted), nothing else. Whether it landed (not
-        held back, no failed write)."""
+        a deleted row stays deleted), nothing else.
+
+        What was held back only for now (``count``) or failed (``failed``):
+        besides the merge rules' own holds, a row whose parent is not held
+        here at all yet — a comment / poll / schedule / listing before its
+        post, a task before its list, a gallery item before its album —
+        counts as held back (Phase 3 re-review S1): it lands once the parent
+        does, so it is no refusal by rule. Whether it landed is judged by
+        the caller from its own rows."""
         token = VERIFIED_ROW.set((space_id, provider))
         try:
             outcome = await self._apply(resource, space_id, [record], provider=provider)
         finally:
             VERIFIED_ROW.reset(token)
-        return not outcome.count and not outcome.failed
+        if not outcome.count and await self._parent_missing(resource, record):
+            outcome.count += 1
+        return outcome
+
+    async def _parent_missing(self, resource: str, record: dict[str, Any]) -> bool:
+        """Whether *record*'s parent row is held nowhere here (in no space —
+        one held in another space is a refusal by rule)."""
+        match resource:
+            case "comments" | "polls" | "schedules" | "bazaar":
+                post_id = str(record.get("post_id") or "")
+                return (
+                    bool(post_id) and await self._space_post_repo.get(post_id) is None
+                )
+            case "tasks" | "tasks_archived":
+                list_id = str(record.get("list_id") or "")
+                return (
+                    bool(list_id)
+                    and await self._space_task_repo.get_list(list_id) is None
+                )
+            case "gallery":
+                album_id = str(record.get("album_id") or "")
+                return (
+                    record.get("kind") != "album"
+                    and bool(album_id)
+                    and self._gallery_repo is not None
+                    and await self._gallery_repo.get_album(album_id) is None
+                )
+        return False
 
     async def _dispatch(
         self,

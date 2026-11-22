@@ -933,13 +933,19 @@ between asks, and a stale memo would prove nothing.
    unresolved. With nothing left the space reads **up to date** through the
    status's one `_request_recheck` path, also while the host is offline.
    Buckets still to fetch go to the round's next member. A bucket whose
-   every missing row was delivered, verified and then refused by our own
-   receiver's rules (an id held here in another space, newer words kept)
-   would come back the same from every member: it is remembered for that
-   page (memory only, at most 256 spaces, dropped when our bucket changes
-   or a newer page comes) and not asked of members again; it stays
-   **missing** in the status (re-review R3). The host's stream, or the
-   next page, settles it.
+   every missing row was delivered, verified and then refused **by rule**
+   by our own receiver (an id held here in another space, newer words
+   kept) would come back the same from every member: it is remembered for
+   that page (memory only, at most 256 spaces, dropped when our bucket
+   changes or a newer page comes) and not asked of members again
+   (re-review R3). A row only **held back** — its parent not held here at
+   all yet: a comment, poll, schedule or listing before its post, a task
+   before its list, a gallery item before its album (`apply_verified`
+   reports it in `HeldBack.count`) — never marks a bucket, and whenever a
+   verified row lands the space's remembered buckets are asked again (the
+   parent may have come). A remembered bucket stays **missing** in every
+   later verdict of that page, so it never reads up to date (re-review
+   S1). The host's stream, or the next page, settles it.
 
 **The owner back from a long absence is a requester too.** While the owner
 household was offline a seed-holding delegated admin may have sealed newer
