@@ -51,6 +51,7 @@ from .authority_sig import (
 )
 from .canonical_json import canonical_bytes, canonical_str
 from .crypto import b64url_decode, b64url_encode
+from .domain.file_hashes import content_media_ext
 
 # ─── Suites ──────────────────────────────────────────────────────────────
 
@@ -163,6 +164,9 @@ class _HostOnly(Exception):
 
 
 def _file_hash(url: Any, file_hash: FileHashOf) -> str | None:
+    """A file reference as committed: its content SHA-256 and the extension
+    it is served with (:func:`content_media_ext` — re-review R2: the hash
+    alone would let a deliverer choose how a verified file is served)."""
     if url is None or url == "":
         return None
     if not isinstance(url, str):
@@ -170,7 +174,8 @@ def _file_hash(url: Any, file_hash: FileHashOf) -> str | None:
     h = file_hash(url)
     if not h:
         raise _HostOnly
-    return h
+    name = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    return h + content_media_ext(name)
 
 
 def _files(value: Any, file_hash: FileHashOf) -> Any:
@@ -234,17 +239,6 @@ def _poll_meta(value: Any) -> Any:
     if not isinstance(value, dict):
         return None
     return {k: value.get(k) for k in _POLL_META_KEYS}
-
-
-#: The keys each ``shape`` projection commits — what a fetched record keeps
-#: of that field (Phase 3, :func:`fetched_record`).
-_SHAPE_KEYS: Mapping[Callable[[Any], Any], tuple[str, ...]] = MappingProxyType(
-    {
-        _poll_options: _POLL_OPTION_KEYS,
-        _schedule_slots: _SCHEDULE_SLOT_KEYS,
-        _poll_meta: _POLL_META_KEYS,
-    }
-)
 
 
 _TASK_FIELDS = (
@@ -1244,38 +1238,35 @@ def parse_fetched_row(raw: object) -> tuple[int, str, dict[str, Any]]:
     return index, resource, record
 
 
-def _keep_keys(value: Any, keys: tuple[str, ...]) -> Any:
-    if isinstance(value, dict):
-        return {k: value[k] for k in keys if k in value}
-    if isinstance(value, list):
-        return [_keep_keys(v, keys) for v in value if isinstance(v, dict)]
-    return value
-
-
 def fetched_record(resource: str, record: Mapping[str, Any]) -> dict[str, Any]:
     """*record* cut down to what its commit form covers — the only part of
     a row from a deliverer that its leaf proves, so the only part applied:
-    the allow-listed fields (nested ones and shaped ones by their committed
-    keys). Its leaf equals the full record's.
+    EVERY allow-listed field, nested and shaped ones projected exactly as
+    the commit form projects them. Its leaf equals the full record's.
 
-    Normalised where the commit form is (review N4), so what is applied is
-    a function of the leaf alone: a timestamp in its one UTC form, a set
-    (an unordered list) in its committed order; ordered lists keep the
-    order the leaf commits. Floats and strings are told apart by the leaf
-    itself (:func:`_no_floats`). File references are the one part a leaf
-    does not pin — the caller checks their shape (review N1)."""
+    What is applied is a function of the leaf alone (re-reviews N4, R1):
+
+    * an absent field — or nested key — is applied as ``None``, as the leaf
+      commits it: a receiver reads an absent key as "keep what is held", so
+      a deliverer dropping a field the signer cleared (a task's due date)
+      would otherwise apply a row nobody signed;
+    * a timestamp in its one UTC form, a set (an unordered list) in its
+      committed order; ordered lists keep the order the leaf commits;
+    * floats and strings are told apart by the leaf itself
+      (:func:`_no_floats`).
+
+    File references are the one part a leaf does not pin — the caller
+    checks their shape (review N1)."""
     spec = COMMIT_SPECS[resource]
     out: dict[str, Any] = {}
     for name in spec.fields:
-        if name not in record:
-            continue
-        value = record[name]
+        value = record.get(name)
         if name in spec.shape:
-            value = _keep_keys(value, _SHAPE_KEYS[spec.shape[name]])
+            value = spec.shape[name](value)
         elif name in spec.nested_files:
             keep = spec.nested_fields.get(name, (spec.nested_files[name],))
-            value = _keep_keys(value, keep) if isinstance(value, dict) else value
-        elif name in spec.stamps and isinstance(value, str):
+            value = {k: value.get(k) for k in keep} if isinstance(value, dict) else None
+        elif name in spec.stamps:
             value = _stamp(value)
         if isinstance(value, list) and name not in spec.ordered:
             value = sorted(value, key=lambda v: canonical_str(_no_floats(v)))

@@ -72,6 +72,7 @@ from ....sync_page import (
     COMMIT_SPECS,
     COMMITTED_RESOURCES,
     COUNTERPARTS,
+    HASH_BYTES,
     MAX_FETCH_BYTES,
     MAX_FETCH_ROWS,
     MAX_HINT_LEAVES,
@@ -85,6 +86,7 @@ from ....sync_page import (
     SyncPage,
     UnsupportedPageSuite,
     apply_delta,
+    bucket_hash,
     delta_from_bytes,
     delta_from_wire,
     delta_to_bytes,
@@ -441,26 +443,36 @@ def _still_missing(
     wanted: _Wanted,
     local: BucketRows,
     horizon: str,
-) -> dict[int, int]:
+    applied: list[_Applied],
+) -> tuple[dict[int, int], dict[int, tuple[bytes, int]]]:
     """Per listed bucket, how many of its signed leaves are still not
     accounted for — judged on OUR rows as they are after the apply (review
     N1: what the receiver silently refused is still missing). A leaf is
     accounted for when we hold it, or a delivered row with that leaf
     verified and its OWN identity shows we do not need it (ours is newer,
     deleted here, the owner's). The listing's labels never count. CPU
-    only."""
+    only.
+
+    Also the buckets whose every missing leaf was a row handed to the
+    receiver that did not land (R3: refused by its own rules — asking again
+    brings the same row): ``index -> (our bucket hash now, rows missing)``."""
     settled = {
         leaf
         for index, resource, row_id, leaf, _record in verified
         if not _lacks(local, wanted, horizon, index, resource, row_id, leaf)
     }
+    handed = {leaf for _index, _resource, leaf, _record in applied}
     still: dict[int, int] = {}
+    stuck: dict[int, tuple[bytes, int]] = {}
     for index, listed_rows in listed.items():
         if listed_rows is None:
             continue
-        held = {r.leaf for r in local.rows.get(index, [])}
-        still[index] = len({r.leaf for r in listed_rows} - held - settled)
-    return still
+        mine = [r.leaf for r in local.rows.get(index, [])]
+        missing = {r.leaf for r in listed_rows} - set(mine) - settled
+        still[index] = len(missing)
+        if missing and missing <= handed:
+            stuck[index] = (bucket_hash(index, mine), len(missing))
+    return still, stuck
 
 
 def _wanted_ids(rows: list[object]) -> frozenset[tuple[str, str]]:
@@ -573,6 +585,23 @@ MAX_FETCH_ASKS: int = 3
 #: An ask unanswered this long is given up (the next round asks again).
 FETCH_ANSWER_WAIT_S: float = 300.0
 
+#: Spaces whose stuck buckets (:class:`_Stuck`) are remembered, oldest
+#: dropped first — at most 256 buckets each, ~100 bytes a bucket.
+MAX_STUCK_SPACES: int = 256
+
+
+@dataclass(slots=True)
+class _Stuck:
+    """Re-review R3 (memory only): buckets of the page *root* whose every
+    missing row a member delivered, verified, and our receiver refused by
+    its own rules (an id held in another space, newer words kept, …).
+    Asking again would bring the same rows; such a bucket is not asked of
+    members again while OUR bucket is unchanged — ``index -> (our bucket
+    hash then, rows missing)``. The status keeps them missing."""
+
+    root: bytes
+    buckets: dict[int, tuple[bytes, int]] = field(default_factory=dict)
+
 
 class _DeliverySeats(Protocol):
     async def list_instances_with_roles(
@@ -684,6 +713,7 @@ class SyncPageService:
         "_sleep",
         "_spaces",
         "_state",
+        "_stuck",
         "_tasks",
         "_versions",
         "_wanted",
@@ -745,6 +775,8 @@ class SyncPageService:
         self._rounds: dict[str, int] = {}
         self._round_left: dict[str, list[str]] = {}
         self._fetching: dict[str, float] = {}
+        #: space → the buckets a member fetch cannot complete (R3).
+        self._stuck: OrderedDict[str, _Stuck] = OrderedDict()
 
     # ─── The page held here ───────────────────────────────────────────
 
@@ -1229,6 +1261,13 @@ class SyncPageService:
             # Phase 3: no host answers (silent, or we are the owner) — the
             # rows and their proof come from a member household instead.
             from_members = bool(asked) and await self._no_host_answers(space_id)
+            # Buckets a member fetch of this page cannot complete (R3):
+            # still missing, never asked of members again.
+            stuck = (
+                self._stuck_now(space_id, page.root, vector, unexplained)
+                if from_members
+                else {}
+            )
             host = (
                 await self._host_for(space, page.signer)
                 if asked and not from_members
@@ -1251,13 +1290,18 @@ class SyncPageService:
                 )
                 while len(self._wanted) > MAX_TRACKED:
                     self._wanted.pop(next(iter(self._wanted)))
+            todo = frozenset(unexplained) - stuck.keys()
             result = _Compare(
                 root=page.root,
                 differing=len(differing),
                 unexplained=len(unexplained),
-                missing=0 if not unexplained else None,
-                unresolved=len(unexplained) - len(asked),
-                todo=frozenset(unexplained),
+                missing=(
+                    sum(stuck.values())
+                    if not todo
+                    else (0 if not unexplained else None)
+                ),
+                unresolved=0 if not todo else len(unexplained) - len(asked),
+                todo=todo,
             )
             self._remember(space_id, result)
             log.info(
@@ -1271,12 +1315,41 @@ class SyncPageService:
                 f"; the next round to {host} lists {len(asked)}" if host else "",
             )
             await self._changed(space_id)
-            if from_members:
+            if from_members and todo:
                 await self._fetch_round(space_id)
             return result
         except Exception:
             log.exception("sync page: comparing space %s failed", space_id)
             return None
+
+    def _stuck_now(
+        self, space_id: str, root: bytes, vector: bytes, unexplained: list[int]
+    ) -> dict[int, int]:
+        """The unexplained buckets still stuck for page *root* (R3): ours
+        unchanged since the fetch that could not complete them — ``index ->
+        rows missing``. A changed bucket of ours is asked again."""
+        held = self._stuck.get(space_id)
+        if held is None or held.root != root:
+            return {}
+        out: dict[int, int] = {}
+        for index in unexplained:
+            entry = held.buckets.get(index)
+            ours = vector[index * HASH_BYTES : (index + 1) * HASH_BYTES]
+            if entry is not None and entry[0] == ours:
+                out[index] = entry[1]
+        return out
+
+    def _note_stuck(
+        self, space_id: str, root: bytes, found: Mapping[int, tuple[bytes, int]]
+    ) -> None:
+        held = self._stuck.get(space_id)
+        if held is None or held.root != root:
+            held = _Stuck(root=root)
+        held.buckets.update(found)
+        self._stuck[space_id] = held
+        self._stuck.move_to_end(space_id)
+        while len(self._stuck) > MAX_STUCK_SPACES:
+            self._stuck.popitem(last=False)
 
     def _remember(self, space_id: str, result: _Compare) -> None:
         self._checks[space_id] = result
@@ -1694,17 +1767,19 @@ class SyncPageService:
                     cutoff=wanted.cutoff,
                     known=_known_files(space_id, applied),
                 )
-            still = await asyncio.to_thread(
-                _still_missing, listed, verified, wanted, local, horizon
+            still, stuck = await asyncio.to_thread(
+                _still_missing, listed, verified, wanted, local, horizon, applied
             )
+            if stuck:
+                self._note_stuck(space_id, wanted.root, stuck)
             landed = sum(
                 1
                 for index, _resource, leaf, _record in applied
                 if any(leaf == row.leaf for row in local.rows.get(index, []))
             )
             complete = frozenset(i for i, n in still.items() if not n)
-            todo = check.todo - complete
-            short = sum(1 for n in still.values() if n)
+            todo = check.todo - complete - stuck.keys()
+            short = sum(1 for i, n in still.items() if n and i not in stuck)
             self._remember(
                 space_id,
                 _Compare(
@@ -1718,12 +1793,18 @@ class SyncPageService:
             )
             log.info(
                 "sync page: verified catch-up of space %s from %s: %d row(s) "
-                "applied, %d bucket(s) complete, %d still to fetch",
+                "applied, %d bucket(s) complete, %d still to fetch%s",
                 space_id,
                 provider,
                 landed,
                 len(complete),
                 len(todo),
+                (
+                    f", {len(stuck)} bucket(s) refused here by the receiver "
+                    "(missing, not asked again for this page)"
+                    if stuck
+                    else ""
+                ),
             )
             await self._changed(space_id)
             if todo:

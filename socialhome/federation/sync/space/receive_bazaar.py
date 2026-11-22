@@ -21,7 +21,7 @@ from ....domain.post import (
 )
 from ....domain.space_media_fields import item_media_urls
 from ....services.inbound_media_store import space_media_refs
-from .receiver_base import ReceiverBase
+from .receiver_base import VERIFIED_ROW, ReceiverBase
 from .stream_health import HeldBack
 
 if TYPE_CHECKING:
@@ -67,6 +67,7 @@ class BazaarMixin(ReceiverBase):
                     ),
                     # v_85 — the host's hashes only.
                     hashes=parse_file_hashes(r) if bazaar_from_host else None,
+                    verified=VERIFIED_ROW.get() == (space_id, provider),
                 )
                 listing = names.item("bazaar", listing)
                 try:

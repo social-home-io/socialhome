@@ -79,6 +79,7 @@ class SpaceMediaNamer:
         *,
         held: Iterable[str | None] = (),
         hashes: Mapping[str, FileHash] | None = None,
+        verified: bool = False,
     ) -> SpaceMediaLocalization:
         """This household's names for the files *urls* of an item household
         *origin* delivered, given the files the stored row already shows
@@ -89,7 +90,12 @@ class SpaceMediaNamer:
         Per file, first match: a file the row holds keeps its name; our own
         file as the sender calls it keeps ours; a file the row holds under
         the sender's name keeps it; a hashed file takes its content name;
-        anything else its sender-bound name."""
+        anything else its sender-bound name.
+
+        *verified* (a row checked against a signed sync page, Phase 3): a
+        hashed file ALWAYS takes its content name — the leaf commits the
+        hash and extension, never the name, so a held name (our old cover)
+        must not win over it (re-review R2)."""
         if not space_id or not origin:
             return SpaceMediaLocalization()
         held_names = {n for n in (media_basename(u) for u in held) if n}
@@ -104,10 +110,13 @@ class SpaceMediaNamer:
             name = media_basename(url)
             if not name or name in names or is_reserved_media_name(name):
                 continue
+            fh = hashes.get(name) if hashes else None
+            if verified and fh is not None:
+                names[name] = space_content_media_name(space_id, fh.h, name)
+                continue
             if name in held_names:
                 continue  # the same file, by the name it has here
             direct = space_direct_media_name(space_id, origin, name)
-            fh = hashes.get(name) if hashes else None
             names[name] = (
                 own_names.get(name)
                 # A legacy row keeps the file it holds from this sender —

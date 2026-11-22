@@ -13,16 +13,18 @@ stand-in; the "wire" hands the requester's fetch to the deliverer's real
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import orjson
 import pytest
 
 from socialhome.canonical_json import canonical_str
 from socialhome.crypto import ed25519_public_key
+from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
@@ -56,6 +58,7 @@ from tests.federation.sync.space.test_sync_coverage import (
     SPACE,
     TASK,
     Home,
+    _event,
     _home,
     _page,
     _post,
@@ -486,7 +489,7 @@ async def test_followers_and_older_members_are_never_asked(trio):
     ("edited_at", "verdict"),
     [
         ("2027-01-15 08:02:00", "1 bucket(s) complete"),
-        ("2030-01-01 00:00:00", "1 still to fetch"),
+        ("2030-01-01 00:00:00", "1 bucket(s) refused here by the receiver"),
     ],
 )
 async def test_unsigned_change_times_cannot_roll_back_a_newer_local_edit(
@@ -498,8 +501,9 @@ async def test_unsigned_change_times_cannot_roll_back_a_newer_local_edit(
     row is ahead, whatever the listing says — up to the horizon (now plus the
     page skew): a far-future stamp of ours never counts as newer (review 5),
     so the page's version is handed to the receiver — whose merge rules
-    still keep the newer words of a post: nothing landed, so the bucket is
-    still to fetch (judged on our rows after the apply, review N1)."""
+    still keep the newer words of a post: nothing landed, so the row is
+    still missing (judged on our rows after the apply, review N1) — and not
+    asked again for this page (R3)."""
     host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
     await _post(host)
     await _stream(host, requester)
@@ -959,7 +963,7 @@ async def test_a_row_the_receiver_silently_refuses_is_still_missing(trio, caplog
     assert held is not None and held[0] == "sp-elsewhere"
     pos = await _position(requester, r_pages)
     assert pos is not None and pos.match is not True and pos.missing == 1
-    assert "1 still to fetch" in caplog.text
+    assert "1 bucket(s) refused here by the receiver" in caplog.text
 
 
 async def _archive(h: Home, at: datetime) -> None:
@@ -1066,3 +1070,176 @@ async def test_a_verified_row_keeps_our_pin_moderation_and_reactions(trio):
     assert post.reactions == {"🎉": frozenset({CARL})}
     pos = await _position(requester, r_pages)
     assert pos is not None and (pos.match, pos.missing) == (True, 0)
+
+
+# ── Fable re-review R1–R3 ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("forged", [True, False])
+async def test_a_cleared_field_dropped_by_the_deliverer_is_still_cleared(trio, forged):
+    """Re-review R1 (the PoC): the host cleared a task's due date and
+    description and changed its title. The leaf commits an absent field as
+    ``null``, so a deliverer can drop both keys and keep the leaf; the
+    receiver reads an absent key as "keep what is held" and would apply a
+    hybrid nobody signed (the new title with the old due date). Every
+    committed field is applied, absent ones as cleared."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _task(host)
+    got = await host.repos.space_task.get(TASK)
+    assert got is not None
+    await host.repos.space_task.save(
+        replace(got[1], description="rinse first", due_date=date(2026, 11, 20)),
+        space_id=SPACE,
+    )
+    await _stream(host, requester)
+    got = await host.repos.space_task.get(TASK)
+    assert got is not None
+    await host.repos.space_task.save(
+        replace(
+            got[1],
+            title="Dishes, now",
+            description=None,
+            due_date=None,
+            updated_at=T0_DT + timedelta(hours=1),
+        ),
+        space_id=SPACE,
+    )
+    await _stream(host, member)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+
+    def drop_cleared(listings, rows):
+        for r in rows:
+            if r["r"] == "tasks":
+                r["row"].pop("due_date", None)
+                r["row"].pop("description", None)
+        return listings, rows
+
+    if forged:
+        wire.forge = drop_cleared
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert [a[0] for a in wire.asks] == [MEMBER]
+    task = await requester.repos.space_task.get(TASK)
+    assert task is not None
+    assert task[1].title == "Dishes, now"
+    assert task[1].due_date is None and task[1].description is None
+    pos = await _position(requester, r_pages)
+    assert pos is not None and (pos.match, pos.missing) == (True, 0)
+
+
+async def _cover(h: Home, url: str) -> None:
+    held = await h.repos.space_cal.get_event("ev-1")
+    assert held is not None
+    await h.repos.space_cal.save_event(replace(held[1], cover_url=url), space_id=SPACE)
+
+
+@pytest.mark.parametrize("forged", [True, False])
+async def test_a_new_cover_named_after_our_old_file_takes_its_content_name(
+    trio, forged
+):
+    """Re-review R2 (the PoC): the host changed an event's cover. The leaf
+    commits the new cover's hash and extension, not its name — a deliverer
+    names it after the file OUR copy of the event already shows, with the
+    new hash in the map. A held name used to win over the hash, so we kept
+    the old picture; a verified file now always takes its content name."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _event(host)
+    await _cover(host, "api/media/a.webp")
+    await _stream(host, requester)
+    held = await requester.repos.space_cal.get_event("ev-1")
+    assert held is not None and held[1].cover_url
+    old_name = held[1].cover_url.rsplit("/", 1)[-1]
+    await _cover(host, "api/media/a_t.webp")
+    await _stream(host, member)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    new_hash = hashlib.sha256(b"a_t.webp").hexdigest()
+
+    def rename_to_ours(listings, rows):
+        for r in rows:
+            if r["r"] == "calendar":
+                r["row"]["cover_url"] = "api/media/" + old_name
+                r["row"]["files"] = {old_name: {"h": new_hash}}
+                r["row"]["files_suite"] = "sha256"
+        return listings, rows
+
+    if forged:
+        wire.forge = rename_to_ours
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert [a[0] for a in wire.asks] == [MEMBER]
+    got = await requester.repos.space_cal.get_event("ev-1")
+    assert got is not None
+    assert got[1].cover_url == "api/media/" + space_content_media_name(
+        SPACE, new_hash, "x.webp"
+    )
+    pos = await _position(requester, r_pages)
+    assert pos is not None and (pos.match, pos.missing) == (True, 0)
+
+
+async def test_a_file_served_under_another_extension_is_refused(trio, caplog):
+    """Re-review R2: the extension a verified file is served with is
+    committed with its hash — a deliverer cannot turn a picture into an
+    ``.svg`` (or anything else) on the requester."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _picture_missed(host, member, requester)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+
+    def other_ext(listings, rows):
+        for r in rows:
+            if r["row"].get("id") == "post-2":
+                name = r["row"]["media_url"].rsplit("/", 1)[-1]
+                svg = name.rsplit(".", 1)[0] + ".svg"
+                r["row"]["media_url"] = "api/media/" + svg
+                r["row"]["files"] = {svg: r["row"]["files"][name]}
+        return listings, rows
+
+    wire.forge = other_ext
+    with caplog.at_level(logging.WARNING):
+        assert await _round(host_pages, r_pages, "s-r")
+        await wire.settle()
+    assert await requester.repos.space_post.get("post-2") is None
+    assert "refused 1 row(s)" in caplog.text
+
+
+async def test_a_bucket_our_receiver_refuses_is_not_asked_again(trio, caplog):
+    """Re-review R3: a verified row our own receiver refuses (here an id
+    held in another space) would come back from every member on every
+    round — up to 3 asks with full exports each, until the host returns.
+    Such a bucket is remembered for the page and not asked again; the
+    status keeps it missing, honestly."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _missed_content(host, member, requester)
+    space = await requester.repos.space.get(SPACE)
+    assert space is not None
+    await requester.repos.space.save(replace(space, id="sp-elsewhere"))
+    await requester.repos.space_post.save(
+        "sp-elsewhere",
+        Post(
+            id="post-2",
+            author=ANNA,
+            type=PostType.TEXT,
+            created_at=T0_DT,
+            content="another space's post",
+        ),
+    )
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    with caplog.at_level(logging.INFO):
+        assert await _round(host_pages, r_pages, "s-r")
+        await wire.settle()
+    assert "refused here by the receiver" in caplog.text
+    asks = len(wire.asks)
+    assert asks >= 1
+    # The next silent round and a fresh compare of the same page: no ask.
+    r_pages.host_silent(SPACE)
+    await wire.settle()
+    await r_pages.compare(SPACE)
+    await wire.settle()
+    assert len(wire.asks) == asks
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is False and pos.missing == 1
+    # Memory is bounded and per page: a newer page forgets it.
+    assert len(r_pages._stuck) == 1

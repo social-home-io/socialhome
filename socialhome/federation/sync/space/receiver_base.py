@@ -172,7 +172,12 @@ class ReceiverBase:
         names)."""
         hashes = parse_file_hashes(record) if from_host else None
         direct = self._media_names.localize(
-            space_id, provider, urls, held=held or (), hashes=hashes
+            space_id,
+            provider,
+            urls,
+            held=held or (),
+            hashes=hashes,
+            verified=VERIFIED_ROW.get() == (space_id, provider),
         )
         if self._gfs_media is None:
             return direct

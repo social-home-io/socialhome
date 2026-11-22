@@ -256,7 +256,7 @@ class PagesMixin(ReceiverBase):
         self, space_id: str, provider: str, r: dict[str, Any]
     ) -> bool:
         """Is ``r`` a host version (``seq``) streamed by the space's host?"""
-        if "seq" not in r or not provider:
+        if r.get("seq") is None or not provider:
             return False
         space = await self._space_repo.get(space_id)
         return await self._acts_as_host(space, provider)
@@ -286,7 +286,7 @@ class PagesMixin(ReceiverBase):
         # A row verified against the signed sync page (Phase 3) is the
         # host's version too — its ``seq`` and ``version_hash`` are committed.
         from_host = provider == host or VERIFIED_ROW.get() == (space_id, provider)
-        if host and from_host and "seq" in r:
+        if host and from_host and r.get("seq") is not None:
             version = canonical_from_wire(r)
             if version is None:
                 log.warning(

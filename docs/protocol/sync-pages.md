@@ -559,11 +559,22 @@ What shipped, where it is more exact than the design above:
   means something commit **in order**: a post's and a bazaar listing's
   `image_urls`, poll options, schedule slots, timetable entries
   (`CommitSpec.ordered`); every other list is set-like and sorted —
-  strings by code point, anything else by its canonical JSON. A fetched
-  row is applied in that committed spelling (`fetched_record`: one stamp
-  form, set-like lists sorted). Per resource, beyond the §2 table:
+  strings by code point, anything else by its canonical JSON. A file
+  reference commits as its content SHA-256 plus the extension it is served
+  with (`<sha256>.webp`, `content_media_ext` — the one extension rule of
+  a content name, so every household derives the same; re-review R2). A
+  fetched row is applied in that committed spelling (`fetched_record`:
+  every committed field, an absent one as `null`; one stamp form; set-like
+  lists sorted). Per resource, beyond the §2 table:
   - A calendar event's **feed card** (a post with `linked_event_id`) is
     never committed: every household mints its own (own id, own words).
+  - **Suite.** The Phase 3 reviews changed the commit form (typed strings
+    and floats, ordered lists, file extensions) under the same
+    `sh-sync-leaf:v1:` prefix and `PAGE_SUITE_SHA256_B256`: v_95 was never
+    released or deployed (the owner confirmed nothing from
+    `feat/sync-pages` runs anywhere), so no page under the earlier form
+    exists and no sibling suite is needed. Any change after release is a
+    new page suite (§3).
   - `posts` also commits `media_url` (as a hash); `file_meta` keeps
     `url` (as a hash), `mime_type`, `original_name`, `size_bytes`; the
     link card keeps `url`, `title`, `description`, `site_name`,
@@ -900,8 +911,16 @@ between asks, and a stale memo would prove nothing.
    descriptor, …) is never applied; those uncommitted fields come from
    **our own** copy of the row when we hold one (re-review N3: a pin, a
    moderation mark, reactions and their stamps, local stamps are kept, not
-   reset), minus our file hashes and GFS descriptors. Every refused row of
-   an answer is counted in one WARNING.
+   reset), minus our file hashes and GFS descriptors. Every **committed**
+   field is applied, an absent one as `null` — the leaf commits it so, and
+   a receiver reads an absent key as "keep what is held", so a deliverer
+   dropping a field the signer cleared (a task's due date, its
+   description) would otherwise apply a row nobody signed (re-review R1).
+   A verified file always takes its **content name** (`sc-…` from the
+   committed hash and extension), never a name our copy of the row already
+   shows: a deliverer naming the new cover after our old file would
+   otherwise keep the old picture (re-review R2). Every refused row of an
+   answer is counted in one WARNING.
 5. Verified rows apply in stream order (lists before tasks, posts before
    comments and polls) through the normal receiver (`_apply`), one row at a
    time, with `VERIFIED_ROW` set to `(space, deliverer)`: the row passes
@@ -913,7 +932,14 @@ between asks, and a stale memo would prove nothing.
    rows still missing keep `match: false` (behind); the rest stays
    unresolved. With nothing left the space reads **up to date** through the
    status's one `_request_recheck` path, also while the host is offline.
-   Buckets still to fetch go to the round's next member.
+   Buckets still to fetch go to the round's next member. A bucket whose
+   every missing row was delivered, verified and then refused by our own
+   receiver's rules (an id held here in another space, newer words kept)
+   would come back the same from every member: it is remembered for that
+   page (memory only, at most 256 spaces, dropped when our bucket changes
+   or a newer page comes) and not asked of members again; it stays
+   **missing** in the status (re-review R3). The host's stream, or the
+   next page, settles it.
 
 **The owner back from a long absence is a requester too.** While the owner
 household was offline a seed-holding delegated admin may have sealed newer
@@ -945,6 +971,16 @@ seed holder sealed a page (no delegated admin, or none online) is in no
 page; it reaches the owner — and everyone else — the existing way: each
 author's household delivers its own rows (live events, the outbox, the
 §25.6 stream and `SPACE_SYNC_RESUME`).
+
+**Archive wins over a member fetch (a known gap).** A task we hold
+archived (`tasks_archived:T`) settles a page's live `tasks:T`, as a
+tombstone settles a live row (`is_superseded`). So a member that missed
+an un-archive while the host is offline counts that leaf as settled and
+reads **up to date** while it still holds the task archived — until the
+host's stream (or the author's live event) brings the un-archive. Kept:
+un-archiving is rare, the outcome is a stale archive flag, never a row
+nobody signed, and judging an archive against an un-archive by change
+times would need the archive time committed.
 
 **Partial answers are fine.** A deliverer that changed a bucket since the
 page, holds the page under another root, or is behind itself answers
@@ -1014,7 +1050,11 @@ requester asks one member at a time):
   + 50 KB + 512 KiB) ≈ 84 MB a day — reached only by a member that keeps
   missing ≥ 256 rows per ask, i.e. one that really lacks that much.
 - **Storage**: none. The ask is memory only (one per space, as Phase 2's;
-  5 min until an unanswered one is given up).
+  5 min until an unanswered one is given up); so are the buckets our
+  receiver refused (R3: ≤ 256 spaces × ≤ 256 buckets × ~100 B).
+- **Rows our receiver refuses** (R3): one ask brings them, after that 0 —
+  without it, up to 3 asks with a full export each, every 30-min round,
+  until the host returned.
 
 **Security** (beyond §6):
 
@@ -1023,6 +1063,9 @@ requester asks one member at a time):
 | Forged or truncated listing | does not hash to the signed bucket → the whole answer refused (WARNING), the buckets stay to fetch |
 | Tampered row | its committed part does not hash to the listed leaf → refused (WARNING); the rest of the answer is kept |
 | A file reference rewritten (full URL, reserved `dm-` / `sg-` name, a `?query`) while the hash map keeps the leaf | refused: every file reference must be in the canonical local shape (re-review N1) |
+| A field the signer cleared, dropped from the row (absent reads as "keep") | applied as cleared: every committed field is applied, absent as `null` (re-review R1) |
+| A new file named after the one our copy already shows, or served under another extension | the content name of the committed hash is used, never a held name; the extension is committed with the hash (re-review R2) |
+| A row our receiver refuses, asked for again and again | remembered per page, not asked again; still missing in the status (re-review R3) |
 | A row the receiver refuses without an error (id held in another space, unbound tombstone id, newer words kept) | still missing: completeness is re-read from our rows after the apply (re-review N1) |
 | The page's archived copy of a task we hold live and edited since (or, as the owner, at all) | not applied: the live counterpart is the same row (re-review N2); a delete still wins |
 | Uncommitted fields (pin, moderation, reactions) | never the deliverer's; ours are carried onto the verified version (re-review N3) |

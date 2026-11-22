@@ -197,7 +197,12 @@ def test_post_commit_form_golden():
             "hidden_from_feed": False,
             "media_url": None,
             # Pictures in their order (review N4): order means something.
-            "image_urls": ["s:" + _hashes("b.webp"), "s:" + _hashes("a.webp")],
+            # Each file as its content hash + the extension it is served
+            # with (re-review R2).
+            "image_urls": [
+                "s:" + _hashes("b.webp") + ".webp",
+                "s:" + _hashes("a.webp") + ".webp",
+            ],
             "file_meta": None,
             "link_preview": None,
         },
@@ -358,8 +363,14 @@ def test_files_hash_by_content_and_unhashable_rows_are_host_only():
     assert file_refs("posts", post) == ["api/media/f.pdf", "api/media/t.webp"]
     form = commit_form("posts", post, _hashes)
     assert form is not None
-    assert form["v"]["file_meta"]["url"] == "s:" + _hashes("f.pdf")
-    assert form["v"]["link_preview"]["thumbnail_url"] == "s:" + _hashes("t.webp")
+    assert form["v"]["file_meta"]["url"] == "s:" + _hashes("f.pdf") + ".pdf"
+    assert form["v"]["link_preview"]["thumbnail_url"] == (
+        "s:" + _hashes("t.webp") + ".webp"
+    )
+    # Re-review R2: the extension a file is served with is committed.
+    assert record_leaf("comments", host, same.get) != record_leaf(
+        "comments", {**host, "media_url": "api/media/a.svg"}, lambda u: "ab" * 32
+    )
 
 
 def test_gallery_system_albums_are_left_out():
@@ -791,7 +802,12 @@ def test_a_fetched_record_keeps_only_what_the_page_commits():
     }
     got = fetched_record("posts", record)
     assert set(got) <= set(COMMIT_SPECS["posts"].fields)
-    assert got["file_meta"] == {"url": "api/media/a.webp", "mime_type": "x"}
+    assert got["file_meta"] == {
+        "url": "api/media/a.webp",
+        "mime_type": "x",
+        "original_name": None,
+        "size_bytes": None,
+    }
     assert record_leaf("posts", got, lambda u: "a" * 64) == record_leaf(
         "posts", record, lambda u: "a" * 64
     )
@@ -815,7 +831,15 @@ def test_fetched_poll_and_schedule_shapes_keep_their_order_and_committed_keys():
         "responses": [{"user_id": "u"}],
     }
     got = fetched_record("schedules", schedule)
-    assert got["slots"] == [{"id": "s2", "slot_date": "2027-01-01"}]
+    assert got["slots"] == [
+        {
+            "id": "s2",
+            "slot_date": "2027-01-01",
+            "start_time": None,
+            "end_time": None,
+            "position": None,
+        }
+    ]
     assert "responses" not in got
     assert record_leaf("schedules", got, _no_files) == record_leaf(
         "schedules", schedule, _no_files
@@ -881,3 +905,17 @@ def test_a_string_never_commits_like_a_number_or_flag():
         assert record_leaf("stickies", base, _no_files) != record_leaf(
             "stickies", {**base, "position_x": other}, _no_files
         ), other
+
+
+def test_a_fetched_record_applies_every_committed_field_absent_as_none():
+    """Re-review R1: the leaf commits an absent field as ``null``, and a
+    receiver reads an absent key as "keep what is held" — so a deliverer
+    dropping a field the signer cleared would apply a row nobody signed.
+    Every committed field is applied, absent ones as ``None``."""
+    task = {"id": "t", "list_id": "l", "title": "New title"}
+    got = fetched_record("tasks", task)
+    assert set(got) == set(COMMIT_SPECS["tasks"].fields)
+    assert got["due_date"] is None and got["description"] is None
+    assert record_leaf("tasks", got, _no_files) == record_leaf("tasks", task, _no_files)
+    post = fetched_record("posts", {"id": "p", "file_meta": "not a dict"})
+    assert post["file_meta"] is None and post["link_preview"] is None
