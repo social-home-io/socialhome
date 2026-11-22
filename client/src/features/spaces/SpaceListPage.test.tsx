@@ -247,13 +247,14 @@ describe('SpaceListPage — "Some posts may be missing" dot', () => {
     SPACES.map((x) => (ids.includes(x.id) ? { ...x, sync_may_be_missing: true } : x))
   const dot = (row: Element) => row.querySelector('[data-testid="space-sync-dot"]')
 
-  it('only on a space whose posts may be missing, as an image with its words', async () => {
+  it('only on a space whose posts may be missing: a ⚠ shape with its words', async () => {
     wire({ spaces: missing('sA') })
     const r = await renderPage()
     const choir = (await r.findByText('Choir')).closest('a')!
     const d = dot(choir)!
     expect(d.getAttribute('role')).toBe('img')
     expect(d.getAttribute('aria-label')).toBe('Some posts may be missing')
+    expect(d.textContent).toContain('⚠')
     expect(choir.getAttribute('aria-label')).toContain('Some posts may be missing')
     expect(dot(r.getByText('Band').closest('a')!)).toBeNull()
   })

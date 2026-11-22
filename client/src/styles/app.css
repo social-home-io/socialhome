@@ -30735,14 +30735,13 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   color: var(--sh-text-muted);
 }
 
-/* Spaces list: a dot only for "Some posts may be missing" (role="img"
-   with its words; the row's label says it too). */
-.sh-spaces-sync-dot {
+/* Spaces list: a small ⚠ only for "Some posts may be missing" (a shape,
+   not colour alone; role="img" with its words, also in the row's label). */
+.sh-spaces-sync-warn {
   flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--sh-warning);
+  color: var(--sh-warning);
+  font-size: var(--sh-font-size-sm);
+  line-height: 1;
 }
 
 /* Settings → "Is everything here?" */
@@ -30791,10 +30790,10 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
    "Sending" glyph); tapping it opens the reason. Padded to a 36 px tap
    target without moving the line. */
 .sh-post-not-sent {
-  display: inline-flex;
-  align-items: baseline;
+  /* Inline text flow: a wrapped second line starts under the ○, never
+     indented past it. */
+  display: inline-block;
   align-self: flex-start;
-  gap: 4px;
   max-width: 100%;
   margin-block: -9px;
   padding-block: 9px;
@@ -30807,6 +30806,7 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   text-align: start;
   cursor: pointer;
 }
+.sh-post-not-sent .sh-receipt { margin-inline-end: 4px; }
 .sh-post-not-sent:focus-visible {
   outline: 2px solid var(--sh-focus-ring);
   outline-offset: 2px;

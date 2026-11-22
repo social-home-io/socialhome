@@ -25,8 +25,10 @@ describe('syncView — one plain state per status', () => {
   it.each([
     [{ state: 'up_to_date' }, 'here'],
     [{ state: 'catching_up' }, 'latest'],
-    // One failed round: not worth a warning yet.
-    [{ state: 'behind' }, 'latest'],
+    // A failed round and no stream running: "Checking again soon".
+    [{ state: 'behind' }, 'retry'],
+    // No complete stream ever, not (yet) a warning: still getting ready.
+    [{ state: 'behind', last_ok_at: null }, 'preparing'],
     [{ state: 'host_offline' }, 'away'],
     [{ state: 'never' }, 'preparing'],
     [{ state: 'behind', may_be_missing: true }, 'missing'],
@@ -43,6 +45,7 @@ describe('the header chip', () => {
   it('shows only the warning, the first join and a slow catch-up', () => {
     expect(syncChipKind(sync({ state: 'behind', may_be_missing: true }), false)).toBe('missing')
     expect(syncChipKind(sync({ state: 'never' }), false)).toBe('preparing')
+    expect(syncChipKind(sync({ state: 'behind', last_ok_at: null }), false)).toBe('preparing')
     expect(syncChipKind(sync({ state: 'catching_up' }), false)).toBeNull()
     expect(syncChipKind(sync({ state: 'catching_up' }), true)).toBe('latest')
   })
@@ -111,9 +114,10 @@ describe('the settings wording', () => {
   it('headings, with the host household by name', () => {
     expect(syncHeading('here', 'The Müllers')).toBe("Everything's here")
     expect(syncHeading('latest', null)).toBe('Getting the latest…')
+    expect(syncHeading('retry', null)).toBe('Checking again soon')
     expect(syncHeading('missing', null)).toBe('Some posts may be missing')
-    expect(syncHeading('away', 'The Müllers')).toBe('The Müllers is away')
-    expect(syncHeading('away', null)).toBe('The host is away')
+    expect(syncHeading('away', 'The Müllers')).toBe("Can't reach The Müllers right now")
+    expect(syncHeading('away', null)).toBe("Can't reach the host right now")
     expect(syncHeading('preparing', null)).toBe('Getting the space ready')
   })
 
@@ -127,11 +131,13 @@ describe('the settings wording', () => {
     expect(syncBody('missing', sync(), null, false).text)
       .toBe("We'll keep trying every 30 minutes. You can check now.")
     expect(syncBody('away', sync({ last_ok_at: at }), null, false)).toEqual({
-      text: "You're seeing everything up to {time}. What you post goes out when they're back.",
+      text: "You're seeing everything up to {time}. What you post goes out once the connection is back.",
       time: { iso: at, style: 'since' },
     })
     expect(syncBody('away', sync({ last_ok_at: null }), null, false).text)
-      .toBe("What you post goes out when they're back.")
+      .toBe('What you post goes out once the connection is back.')
+    expect(syncBody('retry', sync({ state: 'behind' }), 'Ann', false).text)
+      .toBe("The last check didn't bring everything. It tries again every 30 minutes.")
     expect(syncBody('preparing', sync(), 'Ann', false).text)
       .toBe("The first posts from Ann haven't arrived yet.")
     expect(syncBody('latest', sync(), 'Ann', false).text)
@@ -201,6 +207,12 @@ describe('parseSpaceSync', () => {
       page: { seq: 4, at: 'x', match: null, missing: null, differing_buckets: 2,
         signer_role: null, conflict: false },
     })
+  })
+
+  it('keeps a readable next_check_at, drops a bad one', () => {
+    expect(parseSpaceSync({ state: 'up_to_date', next_check_at: '2026-11-22T10:00:00+00:00' })?.next_check_at)
+      .toBe('2026-11-22T10:00:00+00:00')
+    expect(parseSpaceSync({ state: 'up_to_date', next_check_at: 'soon' })).not.toHaveProperty('next_check_at')
   })
 
   it('an older server without the new fields reads as no warning, nothing unsent', () => {

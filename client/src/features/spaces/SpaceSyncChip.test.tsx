@@ -69,6 +69,11 @@ describe('SpaceSyncChip', () => {
     expect(theChip(chip({ ...base, state }).container)).toBeNull()
   })
 
+  it('a first unclean stream (no ok ever, no warning) still reads "Getting the space ready…"', () => {
+    const { container } = chip({ ...base, state: 'behind', last_ok_at: null })
+    expect(text(container)).toBe('Getting the space ready…')
+  })
+
   it('no space-level "waiting to send" any more', () => {
     const { container } = chip({ ...base, state: 'up_to_date', waiting_to_send: 3 })
     expect(theChip(container)).toBeNull()

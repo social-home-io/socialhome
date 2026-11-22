@@ -429,6 +429,9 @@ export interface SpaceSyncWire {
   /** Posts written here that no other household has yet ("Not sent
    *  yet" on the post; the SPA marks only the viewer's own). */
   unsent_posts: string[]
+  /** Only while "Check now" is refused: when it works again (UTC ISO
+   *  8601; the limit is per space for the whole household). */
+  next_check_at?: string
   page?: SpaceSyncPageWire
 }
 

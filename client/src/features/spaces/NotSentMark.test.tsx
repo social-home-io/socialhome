@@ -12,7 +12,7 @@ describe('NotSentMark', () => {
     expect(b.querySelector('.sh-receipt--pending')?.getAttribute('aria-hidden')).toBe('true')
     expect(b.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(b)
-    expect(b.textContent).toBe('○Not sent yet — goes out when The Müllers is back')
+    expect(b.textContent).toBe('○Not sent yet — goes out once The Müllers can be reached')
     expect(b.getAttribute('aria-expanded')).toBe('true')
     fireEvent.click(b)
     expect(b.textContent).toBe('○Not sent yet')
@@ -21,7 +21,7 @@ describe('NotSentMark', () => {
   it('names "the host" when the name is not known', () => {
     const { container } = render(<NotSentMark hostName={null} hostedHere={false} />)
     fireEvent.click(mark(container))
-    expect(mark(container).textContent).toBe('○Not sent yet — goes out when the host is back')
+    expect(mark(container).textContent).toBe('○Not sent yet — goes out once the host can be reached')
   })
 
   it('on the host household it waits for the others', () => {

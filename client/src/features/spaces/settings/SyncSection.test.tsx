@@ -55,7 +55,7 @@ describe('SyncSection — "Is everything here?"', () => {
 
   it.each([
     ['catching_up', false, '↻Getting the latest…', 'New posts from The Müllers are on their way.'],
-    ['behind', false, '↻Getting the latest…', 'New posts from The Müllers are on their way.'],
+    ['behind', false, '⏳Getting the space ready', "The first posts from The Müllers haven't arrived yet."],
     ['behind', true, '⚠Some posts may be missing', "We'll keep trying every 30 minutes. You can check now."],
     ['never', false, '⏳Getting the space ready', "The first posts from The Müllers haven't arrived yet."],
   ])('%s (may be missing: %s)', (state, missing, head, text) => {
@@ -64,17 +64,27 @@ describe('SyncSection — "Is everything here?"', () => {
     expect(body(container)).toBe(text)
   })
 
-  it('an away host: neutral heading by name, what you see and when it goes out', () => {
-    const { container } = section({ ...base, state: 'host_offline' })
-    expect(heading(container)).toBe('☾The Müllers is away')
+  it('one failed round after an ok, no stream: "Checking again soon", not "on their way"', () => {
+    const { container } = section({ ...base, state: 'behind' })
+    expect(heading(container)).toBe('↻Checking again soon')
+    expect(body(container)).toBe("The last check didn't bring everything. It tries again every 30 minutes.")
+  })
+
+  it('an away host: neutral, plural-safe, with a full date (not a bare time)', () => {
+    const at = '2026-11-21T07:03:00Z'
+    const { container } = section({ ...base, state: 'host_offline', last_ok_at: at })
+    expect(heading(container)).toBe("☾Can't reach The Müllers right now")
     expect(container.querySelector('.sh-sync-card__state--away')).not.toBeNull()
-    expect(body(container)).toMatch(/^You're seeing everything up to .+\. What you post goes out when they're back\.$/)
+    expect(body(container)).toMatch(/^You're seeing everything up to .+\. What you post goes out once the connection is back\.$/)
+    const shown = container.querySelector('.sh-sync-card__body time')!.textContent!
+    expect(shown).toMatch(/21/)
+    expect(shown).toMatch(/Nov/)
   })
 
   it('without a known name it says "the host"', () => {
     const { container } = section({ ...base, state: 'host_offline' }, { hostName: null })
-    expect(heading(container)).toBe('☾The host is away')
-    expect(why(container)?.textContent).toBe('Checking needs the host to be online.')
+    expect(heading(container)).toBe("☾Can't reach the host right now")
+    expect(why(container)?.textContent).toBe('Checking works again once the host can be reached.')
     const here = section({ ...base, state: 'up_to_date', last_ok_at: null }, { hostName: null })
     expect(body(here.container)).toBe('Checked with the host.')
   })
@@ -117,7 +127,7 @@ describe('Check now', () => {
     const b = button(container)!
     expect(b.disabled).toBe(true)
     const reason = why(container)!
-    expect(reason.textContent).toBe('Checking needs The Müllers to be online.')
+    expect(reason.textContent).toBe('Checking works again once The Müllers can be reached.')
     expect(b.getAttribute('aria-describedby')).toBe(reason.id)
   })
 
@@ -143,6 +153,19 @@ describe('Check now', () => {
     expect(why(container)?.textContent).toBe('You can check again in 1 min')
     await act(async () => { vi.advanceTimersByTime(31_000) })
     expect(why(container)).toBeNull()
+    expect(button(container)?.disabled).toBe(false)
+  })
+
+  it('a reload already knows the wait (next_check_at) and counts down', () => {
+    const next = new Date(Date.now() + 25 * 60_000 - 1000).toISOString()
+    const { container } = section({ ...base, state: 'behind', may_be_missing: true, next_check_at: next })
+    expect(button(container)?.disabled).toBe(true)
+    expect(why(container)?.textContent).toBe('You can check again in 25 min')
+  })
+
+  it('a next_check_at in the past leaves Check now on', () => {
+    const past = new Date(Date.now() - 1000).toISOString()
+    const { container } = section({ ...base, state: 'behind', may_be_missing: true, next_check_at: past })
     expect(button(container)?.disabled).toBe(false)
   })
 

@@ -17,9 +17,9 @@ import { ApiError, api } from '@/api'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { formatLocale, t } from '@/i18n/i18n'
-import { localSinceTime, relativeDocsTime } from '@/utils/relativeTime'
+import { relativeDocsTime } from '@/utils/relativeTime'
 import {
-  SYNC_ICON, syncBody, syncDetailLines, syncHeading, syncView, useSpaceSync,
+  SYNC_ICON, parseSpaceSync, syncBody, syncDetailLines, syncHeading, syncView, useSpaceSync,
   type SyncBody,
 } from '../spaceSync'
 
@@ -29,6 +29,16 @@ function fullDate(iso: string): string {
   return Number.isNaN(at.getTime())
     ? iso
     : at.toLocaleString(formatLocale(), { dateStyle: 'full', timeStyle: 'short' })
+}
+
+/** "Mon 21 Nov, 07:03" in the UI language — a date, never a bare time. */
+function shortDateTime(iso: string): string {
+  const at = new Date(iso)
+  return Number.isNaN(at.getTime())
+    ? iso
+    : at.toLocaleString(formatLocale(), {
+      weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+    })
 }
 
 /** Sentence case: a host name or fallback may start the sentence. */
@@ -45,7 +55,7 @@ function Body({ body }: { body: SyncBody }) {
     <p class="sh-muted sh-sync-card__body">
       {before}
       <time dateTime={iso} title={fullDate(iso)}>
-        {style === 'since' ? localSinceTime(iso) : relativeDocsTime(iso)}
+        {style === 'since' ? shortDateTime(iso) : relativeDocsTime(iso)}
       </time>
       {after}
     </p>
@@ -68,8 +78,14 @@ export function SyncSection({ spaceId, sync, hostedHere, hostName, isAdmin }: {
 }) {
   const live = useSpaceSync(spaceId, sync)
   const [asking, setAsking] = useState(false)
-  /** When Check now works again (the server's ``retry_after_s``). */
+  /** When Check now works again: the detail's ``next_check_at`` (so a
+   *  reload knows), else the server's ``retry_after_s`` on a 429. */
+  const nextCheckAt = parseSpaceSync(sync)?.next_check_at ?? null
   const [blockedUntil, setBlockedUntil] = useState<number | null>(null)
+  useEffect(() => {
+    const at = nextCheckAt ? Date.parse(nextCheckAt) : NaN
+    if (at > Date.now()) setBlockedUntil(at)
+  }, [nextCheckAt])
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (blockedUntil === null) return

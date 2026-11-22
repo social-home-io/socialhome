@@ -23,20 +23,23 @@ export type SpaceSyncState = SpaceSyncWire['state']
 
 /** What the member is told:
  *  * ``here`` — Everything's here (a space hosted here too);
- *  * ``latest`` — Getting the latest… (a stream arriving, or one round
- *    that didn't bring everything: not worth a warning yet);
+ *  * ``latest`` — Getting the latest… (a stream is arriving);
+ *  * ``retry`` — Checking again soon (a round didn't bring everything
+ *    and no stream runs: not worth a warning yet);
  *  * ``missing`` — Some posts may be missing (the one warning);
- *  * ``away`` — the host household is away (neutral, settings only);
- *  * ``preparing`` — Getting the space ready (nothing arrived yet). */
-export type SyncView = 'here' | 'latest' | 'missing' | 'away' | 'preparing'
+ *  * ``away`` — the host household can't be reached (neutral, settings
+ *    only);
+ *  * ``preparing`` — Getting the space ready (nothing complete arrived
+ *    yet — a first unclean stream too). */
+export type SyncView = 'here' | 'latest' | 'retry' | 'missing' | 'away' | 'preparing'
 
 export function syncView(sync: SpaceSync, hostedHere = false): SyncView {
   if (hostedHere) return 'here'
   if (sync.may_be_missing) return 'missing'
   switch (sync.state) {
     case 'up_to_date': return 'here'
-    case 'catching_up':
-    case 'behind': return 'latest'
+    case 'catching_up': return 'latest'
+    case 'behind': return sync.last_ok_at ? 'retry' : 'preparing'
     case 'host_offline': return 'away'
     case 'never': return 'preparing'
   }
@@ -46,6 +49,7 @@ export function syncView(sync: SpaceSync, hostedHere = false): SyncView {
 export const SYNC_ICON: Record<SyncView, string> = {
   here: '✓',
   latest: '↻',
+  retry: '↻',
   missing: '⚠',
   away: '☾',
   preparing: '⏳',
@@ -63,9 +67,9 @@ export type ChipKind = 'missing' | 'preparing' | 'latest'
 
 export function syncChipKind(sync: SpaceSync | null | undefined, slow: boolean): ChipKind | null {
   if (!sync) return null
-  if (sync.may_be_missing) return 'missing'
-  if (sync.state === 'never') return 'preparing'
-  if (sync.state === 'catching_up' && slow) return 'latest'
+  const view = syncView(sync)
+  if (view === 'missing' || view === 'preparing') return view
+  if (view === 'latest' && slow) return 'latest'
   return null
 }
 
@@ -103,6 +107,7 @@ export function syncHeading(view: SyncView, hostName: string | null): string {
   switch (view) {
     case 'here': return t('space.sync.heading.here')
     case 'latest': return t('space.sync.heading.latest')
+    case 'retry': return t('space.sync.heading.retry')
     case 'missing': return t('space.sync.missing')
     case 'away': return hostName
       ? t('space.sync.heading.away', { host: hostName })
@@ -113,8 +118,8 @@ export function syncHeading(view: SyncView, hostName: string | null): string {
 
 /** The settings' sentence under the heading. A ``{time}`` left in
  *  ``text`` is the caller's to fill from ``time`` — as a ``<time>`` with
- *  the full date — in the ``relative`` ("5 min ago") or ``since`` ("8:03",
- *  "Mon 18:40") shape (``utils/relativeTime``). */
+ *  the full date — in the ``relative`` ("5 min ago") or ``since`` shape: a
+ *  full date and time, "Mon 21 Nov, 07:03". */
 export interface SyncBody {
   text: string
   time: { iso: string; style: 'relative' | 'since' } | null
@@ -131,6 +136,7 @@ export function syncBody(
       ? { text: t('space.sync.body.here', { host: name, time: '{time}' }), time: { iso: at, style: 'relative' } }
       : { text: t('space.sync.body.here_no_time', { host: name }), time: null }
     case 'latest': return { text: t('space.sync.body.latest', { host: name }), time: null }
+    case 'retry': return { text: t('space.sync.body.retry'), time: null }
     case 'missing': return { text: t('space.sync.body.missing'), time: null }
     case 'away': return at
       ? { text: t('space.sync.body.away', { time: '{time}' }), time: { iso: at, style: 'since' } }
@@ -192,6 +198,9 @@ export function parseSpaceSync(raw: unknown): SpaceSync | null {
     unsent_posts: Array.isArray(r.unsent_posts)
       ? r.unsent_posts.filter((p): p is string => typeof p === 'string')
       : [],
+  }
+  if (typeof r.next_check_at === 'string' && !Number.isNaN(Date.parse(r.next_check_at))) {
+    sync.next_check_at = r.next_check_at
   }
   const page = parsePage(r.page)
   if (page) sync.page = page

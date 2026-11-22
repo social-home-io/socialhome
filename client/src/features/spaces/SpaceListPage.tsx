@@ -96,12 +96,13 @@ function SpaceRowEnd({ needs, unread }: { needs: number; unread: number }) {
   return null
 }
 
-/** "Some posts may be missing" on a row: a small dot with its words for
- *  assistive tech (never colour alone — the row's label says it too). */
-function SyncMissingDot() {
+/** "Some posts may be missing" on a row: a small ⚠ in the warning colour
+ *  — a shape, not colour alone — with its words for assistive tech (the
+ *  row's label says them too). Text presentation, so the colour applies. */
+function SyncMissingMark() {
   return (
-    <span class="sh-spaces-sync-dot" role="img" aria-label={t('space.sync.missing')}
-          title={t('space.sync.missing')} data-testid="space-sync-dot" />
+    <span class="sh-spaces-sync-warn" role="img" aria-label={t('space.sync.missing')}
+          title={t('space.sync.missing')} data-testid="space-sync-dot">{'\u26A0\uFE0E'}</span>
   )
 }
 
@@ -131,7 +132,7 @@ function MemberRow({ space: s, following }: { space: Space; following?: boolean 
       name={s.name}
       meta={meta}
       label={rowLabel(s, meta, needs, unread, missing)}
-      end={<>{missing && <SyncMissingDot />}<SpaceRowEnd needs={needs} unread={unread} /></>}
+      end={<>{missing && <SyncMissingMark />}<SpaceRowEnd needs={needs} unread={unread} /></>}
     />
   )
 }

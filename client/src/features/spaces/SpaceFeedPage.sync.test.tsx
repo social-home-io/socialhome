@@ -100,7 +100,7 @@ describe('"Not sent yet" on the viewer\'s own posts', () => {
     expect(mark(r, 'sent')).toBeNull()    // reached a household
     tl.fireEvent.click(mark(r, 'mine')!)
     await tl.waitFor(() => expect(mark(r, 'mine')!.textContent)
-      .toBe('○Not sent yet — goes out when The Müllers is back'))
+      .toBe('○Not sent yet — goes out once The Müllers can be reached'))
   })
 
   it('the mark goes once the post went out (live frame)', async () => {
