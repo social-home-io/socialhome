@@ -80,6 +80,7 @@ from socialhome.federation.media_https_backoff import (
     MediaPostResult,
 )
 from socialhome.federation.routed_envelope import SpaceRoutedHandler
+from socialhome.federation.sync_manager import SyncSessionManager
 from socialhome.federation.transport import (
     FederationTransport,
     _TransportSendResult,
@@ -2090,6 +2091,40 @@ async def test_begin_bucket_listing_asks_the_host_over_the_relay(supports):
         "page": ref,
         "buckets": [7, 2],
     }
+
+
+@pytest.mark.asyncio
+async def test_a_listing_sessions_chunks_reach_the_receiver():
+    """v_95: the host's ``__listing__`` chunks for a listing session we
+    asked for find the requester session (registered before the BEGIN left)
+    and reach the receiver — also for its sentinel."""
+    svc, _ = _make_service()
+    svc.attach_sync_manager(SyncSessionManager(InMemoryFederationRepo()))
+    receiver = MagicMock()
+    receiver.on_chunk = AsyncMock()
+    svc._space_sync_receiver = receiver
+    send_mock = AsyncMock(return_value=DeliveryResult(instance_id="host-1", ok=True))
+    with (
+        patch.object(
+            FederationService, "space_member_supports", AsyncMock(return_value=True)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        assert await svc.begin_bucket_listing(
+            "sp-1", "host-1", {"root": "r"}, [3], "L1"
+        )
+    for chunk in ("listing-bytes", "sentinel-bytes"):
+        await svc._handle_space_sync_chunk(
+            types.SimpleNamespace(
+                from_instance="host-1",
+                space_id="sp-1",
+                payload={"sync_id": "L1", "chunk": chunk},
+            )
+        )
+    assert [c.args[0] for c in receiver.on_chunk.await_args_list] == [
+        "listing-bytes",
+        "sentinel-bytes",
+    ]
 
 
 # ─── begin_mesh_catchup_sync ──────────────────────────────────────────────

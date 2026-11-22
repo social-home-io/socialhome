@@ -3337,6 +3337,14 @@ class FederationService:
                 exc_info=True,
             )
             return False
+        log.info(
+            "sync %s: bucket-listing BEGIN to %s: ok=%s via=%s error=%s",
+            sync_id,
+            host_instance_id,
+            getattr(result, "ok", None),
+            getattr(result, "via", None),
+            getattr(result, "error", None),
+        )
         return bool(getattr(result, "ok", False))
 
     async def begin_mesh_catchup_sync(
@@ -5595,6 +5603,14 @@ class FederationService:
             # v_95: the buckets a ``sync_mode: "buckets"`` session lists.
             buckets=parse_bucket_request(payload.get("buckets")),
         )
+        if payload.get("sync_mode") == "buckets":
+            log.info(
+                "sync %s: bucket-listing BEGIN from %s for %s: %s",
+                sync_id,
+                event.from_instance,
+                space_id,
+                "accepted" if decision.accepted else getattr(decision, "reason", "?"),
+            )
         if not decision.accepted and decision.next_event is not None:
             if (
                 decision.next_event is FederationEventType.SPACE_SYNC_REJECTED
@@ -6271,8 +6287,8 @@ class FederationService:
         if record is None:
             record = self._open_quiet_relay_session(sync_id, event.from_instance)
         if record is None:
-            log.debug(
-                "SPACE_SYNC_CHUNK for unknown sync_id=%s from %s",
+            log.info(
+                "SPACE_SYNC_CHUNK for unknown sync_id=%s from %s — dropped",
                 sync_id,
                 event.from_instance,
             )
