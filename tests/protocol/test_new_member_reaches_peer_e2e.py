@@ -25,7 +25,6 @@ from socialhome.app_keys import (
     db_key,
     federation_service_key,
     instance_config_repo_key,
-    startup_announcer_key,
     user_service_key,
     users_sync_outbound_key,
 )
@@ -99,9 +98,8 @@ async def test_an_existing_pair_gets_the_members_it_missed_once(
     monkeypatch,
 ):
     a, b, a_id, a_pk, b_id = houses
-    # Startup ran with no peer pinned yet; let it finish, then pretend this
-    # household was paired under a build without the fix.
-    await a[startup_announcer_key].wait()
+    # Startup ran with no peer pinned yet (the fixture waits for it); pretend
+    # this household was paired under a build without the fix.
     await a[instance_config_repo_key].delete(ROSTER_RESEND_KEY)
     # A child B never got (created before the fix, after the pairing) and a
     # member hidden from B.

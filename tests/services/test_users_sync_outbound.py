@@ -650,3 +650,32 @@ async def test_roster_resend_without_instance_config_does_nothing():
     out, fed = _resender(None)
     assert await out.resend_roster_if_due() == 0
     assert fed.sent == []
+
+
+async def test_roster_resend_without_federation_repo_records_nothing():
+    config = _FakeInstanceConfig()
+    out, fed = _resender(config)
+    out._federation_repo = None
+    assert await out.resend_roster_if_due() == 0
+    assert fed.sent == []
+    assert ROSTER_RESEND_KEY not in config.values
+
+
+class _BrokenFedRepo:
+    async def list_social_instances(self):
+        raise RuntimeError("db is busy")
+
+
+async def test_roster_resend_retries_next_start_when_listing_peers_fails():
+    """A transient repo error must not record the generation with nobody
+    healed — this is the one chance to heal those pairs."""
+    config = _FakeInstanceConfig()
+    out, _fed = _resender(config)
+    out._federation_repo = _BrokenFedRepo()
+    with pytest.raises(RuntimeError):
+        await out.resend_roster_if_due()
+    assert ROSTER_RESEND_KEY not in config.values
+
+    out._federation_repo = _FakeFedRepo(["peer-1"])
+    assert await out.resend_roster_if_due() == 1
+    assert config.values[ROSTER_RESEND_KEY] == str(ROSTER_RESEND_GENERATION)

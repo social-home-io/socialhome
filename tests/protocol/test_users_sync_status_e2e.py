@@ -20,7 +20,12 @@ from types import MappingProxyType
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key, event_bus_key, federation_service_key
+from socialhome.app_keys import (
+    db_key,
+    event_bus_key,
+    federation_service_key,
+    startup_announcer_key,
+)
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 from socialhome.domain.events import PairingConfirmed
@@ -82,6 +87,9 @@ async def houses(aiohttp_client, tmp_path):
     b = create_app(_config(tmp_path, "b"))
     for app in (a, b):
         await aiohttp_client(app)
+        # Background startup steps (the roster re-send among them) finish
+        # before any peer is pinned, so none of them sends to the pair.
+        await app[startup_announcer_key].wait()
     a_id, a_pk = await _identity(a)
     b_id, b_pk = await _identity(b)
     await _pin(a, b_id, b_pk)

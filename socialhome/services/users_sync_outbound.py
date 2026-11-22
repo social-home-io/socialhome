@@ -50,7 +50,6 @@ from typing import TYPE_CHECKING
 from ..domain.events import PairingConfirmed
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
-from .peer_outbound import ConfirmedPeerBroadcaster
 from .protection_gate import ProtectionGateMixin
 from .user_identity_binding import user_identity_binding_fields
 from .visibility import VisibilityMixin
@@ -75,7 +74,7 @@ ROSTER_RESEND_KEY = "federation.roster_resend_generation"
 ROSTER_RESEND_GENERATION = 1
 
 
-class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroadcaster):
+class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
     """Send ``USERS_SYNC`` to a freshly-confirmed peer."""
 
     # Narrow the mixin's ``FederationService | None`` slot — always wired.
@@ -130,10 +129,14 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroad
         number of households sent to (0 when not due).
 
         Paired (social) households only — the list profile updates go to;
-        never a household met through an invite link, never a GFS. A peer
-        that is unreachable gets it from the outbox like any send.
+        never a household met through an invite link, never a GFS. Each
+        send is an ordinary ``send_event``: a peer that is unreachable gets
+        it from the outbox. A failure to list the households raises (the
+        startup step logs it at WARNING) and records nothing, so the next
+        start tries again — the generation is recorded only once the
+        snapshots were handed to the transport.
         """
-        if self._instance_config is None:
+        if self._instance_config is None or self._federation_repo is None:
             return 0
         raw = await self._instance_config.get(ROSTER_RESEND_KEY)
         try:
@@ -142,7 +145,14 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroad
             done = 0
         if done >= ROSTER_RESEND_GENERATION:
             return 0
-        peers = await self.list_confirmed_peer_ids()
+        # Not the fail-soft ``list_confirmed_peer_ids``: an empty list on a
+        # repo error would record the generation with nobody healed.
+        own = self._federation.own_instance_id
+        peers = [
+            p.id
+            for p in await self._federation_repo.list_social_instances()
+            if p.id and p.id != own
+        ]
         for peer_id in peers:
             await self.send_snapshot(peer_id)
         await self._instance_config.set(

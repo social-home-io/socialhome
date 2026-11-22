@@ -235,6 +235,8 @@ async def test_outbound_after_rename_signs_new_username(sender):
     bob = await sender.user_svc.provision(
         username="bob", display_name="Bob", source="manual"
     )
+    # Creating bob already announced him to the peer; only the rename here.
+    sender.fed.sent.clear()
 
     await sender.user_svc.rename_username("bob", "bobby")
 
@@ -277,6 +279,7 @@ async def test_outbound_binding_with_stale_username_would_not_verify(sender):
     rename, verify would reject it — the new-username assertion above is the
     only one that passes. This pins the failure mode the fix prevents."""
     await sender.user_svc.provision(username="bob", display_name="Bob", source="manual")
+    sender.fed.sent.clear()  # the creation's own announcement
     await sender.user_svc.rename_username("bob", "bobby")
     payload = sender.fed.sent[0][2]
 
