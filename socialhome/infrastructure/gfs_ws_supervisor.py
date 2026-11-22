@@ -332,6 +332,20 @@ class GfsWebSocketSupervisor:
             conn.inbox_url,
         )
 
+    async def add(self, conn: GfsConnection) -> None:
+        """Open *conn*'s push socket now — it just became active.
+
+        The mirror of :meth:`forget`: without it a new connection waited for
+        the next reconcile (up to :data:`DEFAULT_RECONCILE_INTERVAL_SECONDS`)
+        before its server could push anything. Starting the client only
+        spawns its background loop — no network call here."""
+        if conn.status != "active" or self._stop.is_set():
+            return
+        running = self._clients.get(conn.id)
+        if running is not None and running.is_alive():
+            return
+        await self._start_client(conn)
+
     async def forget(self, gfs_id: str) -> None:
         """Close *gfs_id*'s push socket now — its connection was removed.
 
