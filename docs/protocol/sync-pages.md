@@ -640,8 +640,8 @@ What shipped, where it is more exact than the design above:
   that moves `authority_key_epoch` or `identity_public_key` (every path:
   rotate, adopt, re-pin). A held page of another epoch is ignored anyway.
 - **Lazy seal.** As in §4, plus: a signer that holds another signer's page
-  younger than 15 min does not seal on top of it — nor while that page is
-  still being compared or its catch-up from members (Phase 3) still has
+  younger than 15 min does not seal on top of it — nor while its
+  catch-up from members (Phase 3) still has
   buckets to fetch, for at most `CATCH_UP_HOLD_S` (2 h) after its compare
   (final review I3: the owner's own seal would replace the page it is
   catching up to, end the catch-up and commit the incomplete state; the
@@ -678,12 +678,12 @@ What shipped, where it is more exact than the design above:
      bucket. That bucket is then explained **exactly** (ours is the page's
      plus the move; an old tombstone, in the page, never explains
      anything). The bucket of the row's other identity — where the page may
-     still hold the old version — is a *partner*: we cannot recompute the
-     page's leaf there, and the page may never have held that row (one we
-     created and deleted unseen by the signer, which a deliverer could
-     otherwise use to hide a missing row), so it is still asked like any
-     other; it counts as explained only once nobody can prove it (Phase 3:
-     a whole round answers `held: false` — each member made the same move).
+     still hold the old version — is **not** explained: we cannot recompute
+     the page's leaf there, and it may hold another signed row we lack (an
+     adversarial re-review showed crediting it hid a missing row behind a
+     delete). It is asked like any other and, when nobody can prove it
+     (Phase 3: a whole round answers `held: false` — each member made the
+     same move), it goes dry: not asked again, unresolved.
   2. **Listings only for unexplained buckets**, at most
      `MAX_LISTING_BUCKETS` = 8 per compare; the rest stay unresolved until
      the next page. They are asked of ONE household acting as host (the
@@ -1006,15 +1006,15 @@ between asks, and a stale memo would prove nothing.
 7. **A bucket nobody can prove is not asked again** (final review I1). A
    change made after the page that carries no change time — a poll
    closed, an edit whose stamp a receiver does not keep, a delete or move
-   whose partner bucket is not ours alone — changes the bucket on every
+   (the bucket of its other identity) — changes the bucket on every
    member too, so every member answers `held: false`. Once every member
    household of a round (`MAX_FETCH_ASKS`, or fewer when fewer exist) has
    answered `held: false` for a bucket, it is **dry**: not asked again
    while our own bucket is unchanged (memory only, kept with the stuck
-   buckets, per page). A dry bucket is unresolved — `match` stays `null`
-   and the Phase-1 state shows — unless it is the partner of a move we
-   hold (step 1 of the compare), which then counts as explained. Without
-   this the round asked every tick, for nothing, until the host returned.
+   buckets, per page; a dry bucket that changes here is asked again). A
+   dry bucket is unresolved — `match` stays `null` and the Phase-1 state
+   shows: nobody proved it complete. Without this the round asked every
+   tick, for nothing, until the host returned.
 
 **The owner back from a long absence is a requester too.** While the owner
 household was offline a seed-holding delegated admin may have sealed newer

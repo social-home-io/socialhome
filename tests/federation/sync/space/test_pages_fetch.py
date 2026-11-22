@@ -1554,11 +1554,12 @@ async def test_a_change_after_the_page_never_asks_without_end(trio, change):
     assert pos is not None and pos.match is not False
     if change in (_delete_post_1, _archive_task):
         # A delete or an archive we hold explains its own bucket exactly;
-        # the bucket of the row's other identity is asked once (the page
-        # may never have held that row), and nobody holding it as the page
-        # does, it counts as explained: up to date.
-        assert pos.match is True
+        # the bucket of the row's other identity is asked once (it may hold
+        # another signed row we lack) and, nobody able to prove it, is not
+        # asked again: unresolved, the Phase-1 state shows.
         assert asks == 1
+        check = r_pages._checks[SPACE]
+        assert check.unexplained == 1 and not check.todo
 
 
 async def _host_listing_round(wire: _Wire, host_pages: SyncPageService) -> None:
@@ -1728,3 +1729,32 @@ async def test_the_owners_seal_hold_is_bounded(trio):
     now[0] += CATCH_UP_HOLD_S
     page = await host_pages.seal_if_due(SPACE)
     assert page is not None and page.signer == HOST
+
+
+async def test_a_delete_never_hides_a_missing_row_in_its_bucket(trio):
+    """Final review I1, re-review: the page holds posts A and Q in one
+    bucket; we never got Q. Everyone then deletes A and the host goes
+    silent. Our tombstone explains its own bucket exactly, but A's bucket
+    may hold more than A: every member answering ``held: false`` there (each
+    deleted A too) proves nothing about Q — never "up to date"."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    target = row_key("posts", "post-a")[0]
+    q_id = next(
+        f"q{k}" for k in range(100_000) if row_key("posts", f"q{k}")[0] == target
+    )
+    await _post(host, "post-a", content="A")
+    await _stream(host, requester)
+    await _post(host, q_id, content="Q")
+    await _stream(host, member)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    for h in (host, member, requester):
+        assert await h.repos.space_post.soft_delete("post-a", space_id=SPACE)
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    for _ in range(3):
+        r_pages.host_silent(SPACE)
+        await wire.settle()
+    assert len(wire.asks) <= MAX_FETCH_ASKS
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is not True
