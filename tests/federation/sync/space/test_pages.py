@@ -8,6 +8,7 @@ import base64
 import hashlib
 import logging
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import orjson
 
@@ -32,9 +33,7 @@ from socialhome.sync_page import (
     PAGE_MIN_INTERVAL_S,
     VECTOR_BYTES,
     ListingRow,
-    apply_delta,
     bucket_hash,
-    delta_from_wire,
     listing_to_wire,
     parse_page,
     parse_page_ref,
@@ -81,11 +80,9 @@ class _Repo:
     async def get(self, space_id):
         return self.rows.get(space_id)
 
-    async def put(self, page):
+    async def put(self, page, *, key):
         self.rows[page.space_id] = page
-
-    async def delete(self, space_id):
-        self.rows.pop(space_id, None)
+        return True
 
 
 class _Spaces:
@@ -162,11 +159,13 @@ class _Exporter:
 
     def __init__(self) -> None:
         self.changed_above: int | None = None
+        self.probes = 0
 
     async def list_records(self, space_id):
         return []
 
     async def iter_changed(self, space_id, since):
+        self.probes += 1
         if self.changed_above is not None and self.changed_above > since:
             yield [{"id": "p"}]
 
@@ -259,6 +258,8 @@ def _signed(*, vector=None, seq=50, issued_at=T0, prev_root=None, signer=HOST, e
 
 
 async def _sealed_for_member(page, *, vector=None, delta=None, sync_id="s-1"):
+    """*delta*: a body as a pre-final-review signer sent it to the holder of
+    its previous page (changed buckets only, no vector) — refused now."""
     body: dict = {"page": page.to_wire()}
     if delta is not None:
         body["delta"] = delta
@@ -284,7 +285,7 @@ async def test_the_owner_seals_its_first_page():
     assert (page.signer, page.epoch, page.seq, page.rows) == (HOST, 3, 100, 10)
     assert page.root == root_of(env.state.vec) and page.prev_root is None
     row = env.repo.rows[SPACE]
-    assert row.vector == env.state.vec and row.delta is None
+    assert row.vector == env.state.vec
     assert env.changes == [SPACE]
 
 
@@ -331,7 +332,7 @@ async def test_no_new_seal_while_the_space_is_unchanged_or_the_page_is_young():
     assert env.state.calls == 1
 
 
-async def test_a_changed_space_seals_after_15_minutes_with_a_delta():
+async def test_a_changed_space_seals_after_15_minutes():
     env = _Env()
     first = await env.svc.seal_if_due(SPACE)
     env.exporter.changed_above = 150
@@ -343,8 +344,31 @@ async def test_a_changed_space_seals_after_15_minutes_with_a_delta():
     second = await env.svc.seal_if_due(SPACE)
     assert second is not None and first is not None
     assert second.prev_root == first.root and second.seq == 160
-    row = env.repo.rows[SPACE]
-    assert row.delta == bytes([9]) + b"\x09" * 32
+    assert env.repo.rows[SPACE].vector == env.state.vec  # no delta is kept
+
+
+async def test_the_quiet_probe_runs_once_per_change_of_the_counter():
+    """Final review minor 9: every BEGIN to the signer asks whether a seal
+    is due; the "changed since the page?" probe reads the exporters. Its
+    answer is kept against the change counter: while ``current_seq`` does
+    not move, no BEGIN probes again — and once a change is found for a page,
+    it stays found until the next page."""
+    env = _Env()
+    first = await env.svc.seal_if_due(SPACE)
+    assert first is not None
+    env.now += (PAGE_MIN_INTERVAL_S + 1) * 1000
+    for _ in range(3):
+        assert await env.svc.seal_if_due(SPACE) is None  # quiet
+    assert env.exporter.probes == 1
+    env.seqs.seq = 150  # something changed somewhere
+    env.exporter.changed_above = 150
+    env.now = first.issued_at + 60_000  # young: no seal yet
+    for _ in range(3):
+        assert await env.svc.seal_if_due(SPACE) is None
+    assert env.exporter.probes == 2
+    env.now = first.issued_at + PAGE_MIN_INTERVAL_S * 1000
+    page = await env.svc.seal_if_due(SPACE)
+    assert page is not None and env.exporter.probes == 2
 
 
 async def test_a_new_cutoff_day_reseals_a_young_page():
@@ -420,7 +444,10 @@ async def test_only_when_newer_than_the_requesters_page():
     assert await _sentinel(env, ref=older.ref()) is not None
 
 
-async def test_the_previous_page_gets_only_the_delta():
+async def test_the_previous_page_gets_the_full_vector():
+    """Final review I4: no delta. A requester that holds the signer's
+    previous page (or any other) gets the page and the whole vector; one
+    that holds the current page gets nothing (its BEGIN ref says so)."""
     env = _Env()
     first = await env.svc.seal_if_due(SPACE)
     env.exporter.changed_above = 150
@@ -431,13 +458,9 @@ async def test_the_previous_page_gets_only_the_delta():
     second = await env.svc.seal_if_due(SPACE)
     assert first is not None and second is not None
     body = _open(env, await _sentinel(env, ref=first.ref()))
-    assert "vector" not in body
-    delta = delta_from_wire(body["delta"])
-    assert apply_delta(_vec(1), delta) == env.state.vec
-    # Two pages behind (a ref that is not the previous page): full vector.
-    stale = _signed(issued_at=T0 - 5, vector=_vec(3))
-    body = _open(env, await _sentinel(env, ref=stale.ref()))
-    assert "vector" in body
+    assert set(body) == {"page", "vector"}
+    assert vector_from_wire(body["vector"]) == env.state.vec
+    assert await _sentinel(env, ref=second.ref()) is None
 
 
 async def test_a_sentinel_starts_a_due_seal_in_the_background():
@@ -461,7 +484,6 @@ async def test_a_member_stores_a_verified_page_and_its_vector():
     await env.svc.wait_idle()
     assert ok and env.held() == page
     assert env.repo.rows[SPACE].vector == _vec(2)
-    assert env.repo.rows[SPACE].delta is None
 
 
 async def test_a_forged_page_is_refused(caplog):
@@ -542,7 +564,10 @@ async def test_an_older_page_never_replaces_the_newer_one():
     assert env.held() == newer
 
 
-async def test_a_delta_applies_to_the_previous_page():
+async def test_a_page_without_its_vector_is_refused_even_after_its_previous():
+    """Final review I4: there is no delta any more — a body carrying the
+    changed buckets of the page we hold instead of the vector is refused,
+    and ours is kept."""
     env = _Env(own=ME, seed=None)
     first = _signed(vector=_vec(2))
     await env.svc.receive(
@@ -564,12 +589,12 @@ async def test_a_delta_applies_to_the_previous_page():
         sealed=await _sealed_for_member(second, delta=delta),
     )
     await env.svc.wait_idle()
-    assert ok and env.held() == second
-    assert env.repo.rows[SPACE].vector == bytes(new_vec)
+    assert not ok and env.held() == first
+    assert env.repo.rows[SPACE].vector == _vec(2)
 
 
-async def test_a_bogus_delta_cannot_roll_a_member_back():
-    """Review finding: a relay sending a newer page with an unusable delta
+async def test_a_page_without_a_vector_cannot_roll_a_member_back():
+    """Review finding: a relay sending a newer page with no usable vector
     must not make us drop ours (and then take an older page)."""
     env = _Env(own=ME, seed=None)
     p2 = _signed(vector=_vec(2), seq=20, issued_at=T0 + 20)
@@ -669,26 +694,6 @@ async def test_a_page_that_does_not_open_is_a_one_line_refusal(caplog):
     assert "does not open" in caplog.text and "Traceback" not in caplog.text
 
 
-async def test_a_delta_without_its_previous_page_is_refused_and_ours_kept():
-    env = _Env(own=ME, seed=None)
-    held = _signed(vector=_vec(2))
-    await env.svc.receive(
-        space_id=SPACE,
-        sync_id="s-1",
-        provider=HOST,
-        sealed=await _sealed_for_member(held),
-    )
-    second = _signed(vector=_vec(5), seq=70, issued_at=T0 + 9, prev_root=b"\x01" * 32)
-    ok = await env.svc.receive(
-        space_id=SPACE,
-        sync_id="s-1",
-        provider=HOST,
-        sealed=await _sealed_for_member(second, delta=[]),
-    )
-    await env.svc.wait_idle()
-    assert not ok and env.held() == held  # next BEGIN names it: full vector
-
-
 async def test_equivocation_is_detected_logged_and_flagged(caplog):
     env = _Env(own=ME, seed=None)
     a = _signed(vector=_vec(2), seq=50, issued_at=T0)
@@ -707,7 +712,7 @@ async def test_equivocation_is_detected_logged_and_flagged(caplog):
     assert "EQUIVOCATION" in caplog.text
     assert a.page_hash() in caplog.text and b.page_hash() in caplog.text
     assert env.held() == b  # the newer issued_at is kept
-    pos = await env.svc.position(env.spaces.space, [HOST])
+    pos = await env.svc.position(env.spaces.space)
     assert pos is not None and pos.conflict
 
 
@@ -834,7 +839,7 @@ class _Listed:
         await self.env.svc.listing_done(space_id=SPACE, sync_id=sync_id, provider=host)
 
     async def position(self):
-        return await self.env.svc.position(self.env.spaces.space, [HOST])
+        return await self.env.svc.position(self.env.spaces.space)
 
 
 async def test_a_new_page_is_compared_and_a_match_reads_up_to_date():
@@ -849,7 +854,7 @@ async def test_a_new_page_is_compared_and_a_match_reads_up_to_date():
         0,
         0,
     )
-    assert state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is (
+    assert state_with_page(SpaceSyncState.HOST_OFFLINE, pos, now=datetime.now(UTC)) is (
         SpaceSyncState.UP_TO_DATE
     )
     assert t.asks == [] and t.env.requests == []
@@ -926,6 +931,45 @@ async def test_a_busy_member_ahead_in_many_buckets_fetches_nothing_and_matches()
     assert t.asks == [] and t.env.requests == []
 
 
+async def test_no_listing_export_for_a_page_the_same_round_replaced():
+    """Final review minor 9: the round that carries our listings ends with a
+    sentinel whose newer page replaces the one they are for. Its listings
+    are dropped before our rows are read — no export of the space for
+    nothing (the newer page's own compare decides)."""
+    present = [_row(f"p{k}") for k in range(10)]
+    lost = _row("lost")
+    t = _Listed(present + [lost], present)
+    await t.take_page()
+    ((host, buckets),) = t.asks
+    t.asked["R1"] = t.env.held().ref()
+    await t.env.svc.take_listing(
+        space_id=SPACE,
+        sync_id="R1",
+        provider=host,
+        records=[listing_to_wire(i, []) for i in buckets],
+    )
+    newer = _signed(vector=_vec(9), seq=60, issued_at=T0 + 1)
+    t.env.gate = asyncio.Event()  # its compare waits out the 15-min spacing
+    assert await t.env.svc.receive(  # the same round's sentinel
+        space_id=SPACE,
+        sync_id="R1",
+        provider=host,
+        sealed=await _sealed_for_member(newer, vector=_vec(9), sync_id="R1"),
+    )
+    reads: list[list[int]] = []
+    real = t.env.state.rows_in
+
+    async def counting(space_id, wanted, *, cutoff=None):
+        reads.append(list(wanted))
+        return await real(space_id, wanted, cutoff=cutoff)
+
+    t.env.state.rows_in = counting
+    await t.env.svc.listing_done(space_id=SPACE, sync_id="R1", provider=host)
+    assert reads == []
+    t.env.gate.set()
+    await t.env.svc.wait_idle()
+
+
 async def test_a_signer_not_our_host_and_a_member_ahead_matches():
     old = [_row(f"p{k}") for k in range(5)]
     t = _Listed(old, old + [_row("live", marker=NEW)], signer=ADMIN)
@@ -952,7 +996,10 @@ async def test_a_missing_row_is_proven_by_one_listing_on_the_next_round():
     await t.deliver()
     pos = await t.position()
     assert pos is not None and (pos.match, pos.missing) == (False, 1)
-    assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND
+    assert (
+        state_with_page(SpaceSyncState.UP_TO_DATE, pos, now=datetime.now(UTC))
+        is SpaceSyncState.BEHIND
+    )
     assert t.asks == []  # answered: the next round asks nothing
 
 
@@ -1230,7 +1277,7 @@ async def test_compares_are_coalesced_to_one_per_15_minutes():
     await env.svc.wait_idle()
     assert env.state.calls == 2  # one deferred compare, not two
     assert env.slept == [PAGE_MIN_INTERVAL_S - 60]
-    pos = await env.svc.position(env.spaces.space, [HOST])
+    pos = await env.svc.position(env.spaces.space)
     assert pos is not None and pos.seq == 30 and pos.match is True
 
 
@@ -1254,7 +1301,7 @@ async def test_wait_idle_never_spins_on_finished_tasks():
 
 async def test_no_page_no_position():
     env = _Env(own=ME, seed=None)
-    assert await env.svc.position(env.spaces.space, [HOST]) is None
+    assert await env.svc.position(env.spaces.space) is None
 
 
 # ── Phase 3: a deliverer's answer is bounded ─────────────────────────────

@@ -188,9 +188,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         #: v_95 — ``(space, acting hosts) ->`` what the newest signed sync
         #: page says about our copy (``SyncPageService.position``). ``None``:
         #: the Phase-1 rules alone.
-        self._pages: (
-            Callable[[Space, list[str]], Awaitable[SyncPagePosition | None]] | None
-        ) = None
+        self._pages: Callable[[Space], Awaitable[SyncPagePosition | None]] | None = None
         #: Outcomes being recorded and rechecks running (:meth:`_spawn`).
         self._tasks: set[asyncio.Task] = set()
         #: ``space_id ->`` the posts this household broadcast in it that no
@@ -225,7 +223,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
 
     def attach_pages(
         self,
-        position: Callable[[Space, list[str]], Awaitable[SyncPagePosition | None]],
+        position: Callable[[Space], Awaitable[SyncPagePosition | None]],
     ) -> None:
         """Wire the v_95 sync pages: the state also says "up to date as of
         page N" (even while the host is offline) or "behind: a newer page
@@ -258,8 +256,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
     async def may_be_missing(self, space_id: str) -> bool:
         """Only the "Some posts may be missing" warning of the space (the
         Spaces list's dot) — no outbox reads. ``False`` for an unknown
-        space, or one hosted here unless a newer page of its delegated admin
-        proved posts missing (sync pages Phase 3)."""
+        space and for one hosted here."""
         space = await self._space_repo.get(space_id)
         if space is None:
             return False
@@ -278,22 +275,14 @@ class SpaceSyncStatusService(BusPublisherMixin):
         and the list would start one per space at once (after a restart
         none has one)."""
         if space.owner_instance_id == self._own_instance_id:
-            # The owner has no host to be behind — except a newer page its
-            # delegated admin signed while the owner was offline (sync pages
-            # Phase 3): compared like a member's, it can read behind until
-            # the verified fetch brought what the page commits. Our own page
-            # is never compared (match stays ``None``): up to date. Read and
-            # memoised like a member's (the list reads the memo only).
-            owned = await self._page_of(space, [], read_page=read_page)
-            if owned is None or owned.match is None:
-                return SpaceSyncState.UP_TO_DATE, None, None, False
-            proven = owned.match is False and (owned.missing or 0) > 0
-            return (
-                state_with_page(SpaceSyncState.UP_TO_DATE, owned),
-                None,
-                owned,
-                proven,
-            )
+            # The owner has no host to be behind: a space hosted here is up
+            # to date and never warns (final review minor 1 — the Space
+            # settings say "Everything's here"). A newer page its delegated
+            # admin signed while the owner was away is still read (the read
+            # starts its compare after a restart, and the owner's catch-up
+            # from members, Phase 3, follows it) and shown as the page.
+            owned = await self._page_of(space, read_page=read_page)
+            return SpaceSyncState.UP_TO_DATE, None, owned, False
         hosts = await self._hosts(space)
         outcomes = await self._outcomes.outcomes(space.id, hosts)
         receiving = (
@@ -302,8 +291,8 @@ class SpaceSyncStatusService(BusPublisherMixin):
             else False
         )
         state, last_ok = sync_state(outcomes, receiving=receiving, now=self._clock())
-        page = await self._page_of(space, hosts, read_page=read_page)
-        state = state_with_page(state, page)
+        page = await self._page_of(space, read_page=read_page)
+        state = state_with_page(state, page, now=self._clock())
         proven = page is not None and page.match is False and (page.missing or 0) > 0
         return (
             state,
@@ -315,7 +304,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         )
 
     async def _page_of(
-        self, space: Space, hosts: list[str], *, read_page: bool
+        self, space: Space, *, read_page: bool
     ) -> SyncPagePosition | None:
         """The page position: read from the page service and memoised, or
         (*read_page* ``False``, the Spaces list) the memo of the last read."""
@@ -323,7 +312,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
             return self._page_memo.get(space.id)
         if self._pages is None:
             return None
-        page = await self._pages(space, hosts)
+        page = await self._pages(space)
         self._page_memo[space.id] = page
         self._page_memo.move_to_end(space.id)
         while len(self._page_memo) > MAX_TRACKED:

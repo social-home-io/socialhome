@@ -224,7 +224,7 @@ async def _missed_content(host: Home, member: Home, requester: Home) -> None:
 
 async def _position(home: Home, pages: SyncPageService):
     space = await home.repos.space.get(SPACE)
-    return await pages.position(space, [HOST])
+    return await pages.position(space)
 
 
 async def test_the_proofs_and_answers_never_block_the_event_loop(trio, monkeypatch):
@@ -278,7 +278,8 @@ async def test_a_member_catches_up_the_hosts_posts_and_pages_from_a_plain_member
     pos = await _position(requester, r_pages)
     assert pos is not None and (pos.match, pos.missing) == (True, 0)
     assert (
-        state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is SpaceSyncState.UP_TO_DATE
+        state_with_page(SpaceSyncState.HOST_OFFLINE, pos, now=datetime.now(UTC))
+        is SpaceSyncState.UP_TO_DATE
     )
     assert "verified catch-up of space" in caplog.text
     # Our copy now hashes to the page: a fresh compare finds nothing.
@@ -685,12 +686,13 @@ async def test_the_owner_back_from_a_long_absence_catches_up_from_members(trio):
         prev_root=None,
         space_seed=SEED,
     )
-    await member.repos.space_sync_page.put(
+    assert await member.repos.space_sync_page.put(
         StoredSyncPage(
             space_id=SPACE,
             page_json=canonical_str(admin_page.to_wire()),
             vector=vector,
-        )
+        ),
+        key=PK_HEX,
     )
     # The owner's requester wiring (the app wires it the same everywhere).
     wire = _Wire(host_pages)
@@ -793,12 +795,13 @@ async def _admin_page_reaches_owner(
         prev_root=None,
         space_seed=SEED,
     )
-    await member.repos.space_sync_page.put(
+    assert await member.repos.space_sync_page.put(
         StoredSyncPage(
             space_id=SPACE,
             page_json=canonical_str(admin_page.to_wire()),
             vector=vector,
-        )
+        ),
+        key=PK_HEX,
     )
     wire = _Wire(host_pages)
     wire.deliverers[MEMBER] = member_pages
@@ -1646,12 +1649,13 @@ async def test_the_owners_catch_up_is_not_cut_short_by_its_own_seal(trio):
         prev_root=None,
         space_seed=SEED,
     )
-    await member.repos.space_sync_page.put(
+    assert await member.repos.space_sync_page.put(
         StoredSyncPage(
             space_id=SPACE,
             page_json=canonical_str(admin_page.to_wire()),
             vector=vector,
-        )
+        ),
+        key=PK_HEX,
     )
     wire = _Wire(host_pages)
     wire.deliverers[MEMBER] = member_pages

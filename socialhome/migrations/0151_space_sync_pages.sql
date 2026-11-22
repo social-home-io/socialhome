@@ -9,15 +9,22 @@
 --   prev_root, page_suite, authority_sig, authority_sig_suite}``.
 -- * ``vector`` — its 256 × 32-byte bucket vector (exactly 8 192 bytes); it
 --   hashes to the page's ``root``.
--- * ``delta`` — on the signer only: the buckets that changed since its
---   previous page (33 bytes each: index + hash, ≤ 256), sent to a member
---   that holds that previous page instead of the full vector. NULL on a
---   member and on a signer's first page.
 --
--- No per-row data and no history: ≤ 17 KB per space on a signer, ≈ 9 KB on
--- a member (owner decision 2026-11-21: "use as little storage as
--- possible"). The row is replaced when a newer page is sealed or verified,
--- and deleted on a space-authority rotation (an old-epoch page is stale).
+-- Edited in place (final review I4, 2026-11-22): an earlier draft of this
+-- migration had a third column, ``delta`` (the signer's changed buckets
+-- since its previous page). It almost never applied — a busy host seals
+-- every 15 min and members ask every 30, so a requester rarely holds
+-- exactly the previous page — and was removed with its wire field. This
+-- file was never on ``main`` nor in any release (v_95 is unreleased, the
+-- owner confirmed nothing from ``feat/sync-pages`` runs anywhere), so no
+-- database has the old shape and no follow-up migration is needed.
+--
+-- No per-row data and no history: ≈ 9 KB per space, on a signer and on a
+-- member alike (owner decision 2026-11-21: "use as little storage as
+-- possible"). The row is replaced only by a newer page, sealed or verified
+-- (``space_sync_page_repo.put`` checks the order key in the same
+-- statement), and deleted on a space-authority rotation (an old-epoch page
+-- is stale).
 --
 -- CLAUDE.md "audit before a migration":
 --
@@ -40,21 +47,20 @@
 --         duplicated per provider row and lost with that provider's seat.
 --       * Memory only — a member would say "never" after every restart
 --         until the host's next sentinel, and could not say "up to date as
---         of page N" while the host is offline (the point of Phase 2); the
---         signer could not send a delta after a restart.
+--         of page N" while the host is offline (the point of Phase 2), nor
+--         prove rows to another member (Phase 3).
 --       * ``instance_config`` KV — one key per space in a settings store,
 --         a binary vector as text, and no cleanup when the space goes.
 --       * A per-row leaf table (option C) — 56 B × rows (2.8 MB at 50 000
 --         rows); the owner chose no leaf cache (decision 4).
---   (3) Smallest possible change: one new table, three columns, keyed by
+--   (3) Smallest possible change: one new table, two data columns, keyed by
 --       the space (``WITHOUT ROWID``), dropped with the space. No backfill:
 --       the first BEGIN after the upgrade seals or carries the first page.
 
 CREATE TABLE IF NOT EXISTS space_sync_pages (
     space_id   TEXT PRIMARY KEY REFERENCES spaces(id) ON DELETE CASCADE,
     page_json  TEXT NOT NULL,
-    vector     BLOB NOT NULL CHECK (length(vector) = 8192),
-    delta      BLOB CHECK (delta IS NULL OR length(delta) % 33 = 0)
+    vector     BLOB NOT NULL CHECK (length(vector) = 8192)
 ) WITHOUT ROWID;
 
 -- A space-authority rotation retires the key every held page was signed

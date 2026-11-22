@@ -729,7 +729,7 @@ export default function SpaceFeedPage() {
       />
       {/* Only when this household is not up to date with the space (or
        *  our own items still wait to go out) — on every section. */}
-      {s && !s.archived && <SpaceSyncChip spaceId={spaceId} sync={s.sync} />}
+      {s && !s.archived && <SpaceSyncChip spaceId={spaceId} sync={s.sync} hostedHere={hostedHere} />}
       {/* The hero and "Needs you" open the Feed only: the other sections
        *  are tools, and the top bar already names the space. */}
       {s && feedList && (

@@ -924,6 +924,7 @@
   "space.sync.chip_aria": "{status} is the chip's own text (e.g. \"Some posts may be missing\"). Read by screen readers.",
   "space.sync.heading.away": "{host} is the name of the household that hosts the space (e.g. \"The Müllers\", often plural). Word it so the verb does not agree with the name. Neutral, not a warning.",
   "space.sync.body.here": "{host} = the host household's name, or space.sync.host_fallback. {time} is a relative time like \"5 min ago\". The first letter of the sentence is capitalised by the app, so {host} may start it.",
+  "space.sync.body.here_page": "Shown when this household's copy matched the space's signed record (a 'page', not a Pages document). No host is named: any member household may have passed the record on. {time} is a relative time like \"5 min ago\"; the app capitalises the first letter.",
   "space.sync.body.away": "{time} is a full date and time (\"Mon 21 Nov, 07:03\"): the last moment this household had everything.",
   "space.sync.host_fallback": "Stands in for the host household's name when it is not known, mid-sentence. Lower case: the app capitalises it at the start of a sentence.",
   "space.sync.check_again_in": "{m} = whole minutes until \"Check now\" works again. Under a disabled button.",

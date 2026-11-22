@@ -10,7 +10,7 @@
  *     ends).
  *
  * An away host and a single failed round show nothing here (settings
- * only). Every chip has an icon and words, never colour alone. Screen
+ * only), and a space hosted here never shows one. Every chip has an icon and words, never colour alone. Screen
  * readers hear only a change INTO the warning (``role="status"``).
  */
 import { addBase } from '@/baseUrl'
@@ -27,10 +27,15 @@ const ICON = {
   latest: SYNC_ICON.latest,
 } as const
 
-export function SpaceSyncChip({ spaceId, sync }: { spaceId: string; sync: unknown }) {
+export function SpaceSyncChip({ spaceId, sync, hostedHere = false }: {
+  spaceId: string
+  sync: unknown
+  /** This household hosts the space: it has everything — never a chip. */
+  hostedHere?: boolean
+}) {
   const live = useSpaceSync(spaceId, sync)
   const slow = useHeldFor(live?.state === 'catching_up', CATCHING_UP_CHIP_DELAY_MS)
-  const kind = syncChipKind(live, slow)
+  const kind = syncChipKind(live, slow, hostedHere)
   const announce = useMissingAnnouncement(kind === 'missing')
   if (!live) return null
   const label = kind ? syncChipLabel(kind) : ''

@@ -7,8 +7,9 @@
  * arrives as the ``space.sync_state`` frame, which updates the heading.
  *
  * Check now is hidden on the household hosting the space, and disabled
- * with a visible reason (``aria-describedby``) while the host is away or
- * after the server said "not yet" (its ``retry_after_s``). The plumbing
+ * with a visible reason (``aria-describedby``) after the server said "not
+ * yet" (its ``retry_after_s``). It stays enabled while the host is away: a
+ * check asks the host again, and finds it back. The plumbing
  * — signed page, parts that differ, signer, outbox, last sync — sits in a
  * collapsed **Details** for space admins only.
  */
@@ -99,11 +100,9 @@ export function SyncSection({ spaceId, sync, hostedHere, hostName, isAdmin }: {
 
   const view = syncView(live, hostedHere)
   const reasonId = `space-sync-why-${spaceId}`
-  const reason = view === 'away'
-    ? t('space.sync.check_needs_host', { host: hostName || t('space.sync.host_fallback') })
-    : blockedUntil !== null
-      ? t('space.sync.check_again_in', { m: String(minutesLeft(blockedUntil)) })
-      : null
+  const reason = blockedUntil !== null
+    ? t('space.sync.check_again_in', { m: String(minutesLeft(blockedUntil)) })
+    : null
 
   const checkNow = async () => {
     setAsking(true)

@@ -396,7 +396,7 @@ class ChunkBuilder:
         """Build the final ``__complete__`` envelope for the session.
 
         ``page_sealed`` (v_95, ``docs/protocol/sync-pages.md``) — the
-        provider's newest signed sync page with its vector or delta, already
+        provider's newest signed sync page with its bucket vector, already
         sealed under the space content key (``{epoch, payload}``, like a
         chunk's ``encrypted_payload``): the sentinel's signature covers the
         ciphertext; nothing of the page rides in the clear. An older

@@ -656,10 +656,10 @@ def _position(**over) -> SyncPagePosition:
 async def test_up_to_date_as_of_the_page_while_the_host_is_offline(env):
     """The host went silent, but our copy matches its newest page
     (relayed by any member): up to date, checked against page N."""
-    seen: list[tuple[str, list[str]]] = []
+    seen: list[str] = []
 
-    async def position(space, hosts):
-        seen.append((space.id, hosts))
+    async def position(space):
+        seen.append(space.id)
         return _position()
 
     env.svc.attach_pages(position)
@@ -667,50 +667,33 @@ async def test_up_to_date_as_of_the_page_while_the_host_is_offline(env):
     status = await env.svc.status("sp")
     assert status.state is SpaceSyncState.UP_TO_DATE
     assert status.to_wire()["page"]["seq"] == 812
-    assert seen[-1] == ("sp", ["owner"])
+    assert seen[-1] == "sp"
 
 
-async def test_the_owner_reads_its_delegated_admins_newer_page(env):
-    """Phase 3: back after a long absence the owner holds a newer page its
-    delegated admin signed; a compare proving rows missing reads behind,
-    a match up to date. Its own page (never compared) changes nothing."""
+async def test_a_space_hosted_here_never_warns(env):
+    """Final review minor 1: back after a long absence the owner holds a
+    newer page its delegated admin signed and catches up from members
+    (Phase 3) — but a space hosted here never reads behind and never shows
+    the "may be missing" warning or its dot: the status service and the
+    Space settings ("Everything's here") agree. The page is still shown."""
     current = [_position(match=False, missing=3, signer_role="admin")]
 
-    async def position(space, hosts):
+    async def position(space):
         return current[0]
 
     env.svc.attach_pages(position)
     status = await env.svc.status("mine")
-    assert status.state is SpaceSyncState.BEHIND
+    assert status.state is SpaceSyncState.UP_TO_DATE
+    assert status.to_wire()["may_be_missing"] is False
     assert status.to_wire()["page"]["missing"] == 3
-    current[0] = _position(signer_role="admin")
-    assert (await env.svc.status("mine")).state is SpaceSyncState.UP_TO_DATE
+    assert await env.svc.may_be_missing("mine") is False
     current[0] = _position(match=None, missing=None)  # our own page
     status = await env.svc.status("mine")
     assert status.state is SpaceSyncState.UP_TO_DATE
-    assert status.to_wire().get("page") is None
-
-
-async def test_the_owners_list_dot_reads_the_page_memo_only(env):
-    """The Spaces list never reads the page (``read_page=False``): the
-    owner's "may be missing" comes from the last full read's verdict."""
-    reads: list[str] = []
-
-    async def position(space, hosts):
-        reads.append(space.id)
-        return _position(match=False, missing=2, signer_role="admin")
-
-    env.svc.attach_pages(position)
-    assert await env.svc.may_be_missing("mine") is False  # no full read yet
-    assert reads == []
-    status = await env.svc.status("mine")
-    assert status.state is SpaceSyncState.BEHIND
-    assert await env.svc.may_be_missing("mine") is True
-    assert reads == ["mine"]
 
 
 async def test_behind_when_a_listing_proved_a_row_missing(env):
-    async def position(space, hosts):
+    async def position(space):
         return _position(match=False, missing=2, differing_buckets=3)
 
     env.svc.attach_pages(position)
@@ -721,7 +704,7 @@ async def test_behind_when_a_listing_proved_a_row_missing(env):
 
 
 async def test_no_verdict_yet_keeps_the_phase_1_state(env):
-    async def position(space, hosts):
+    async def position(space):
         return _position(match=None, missing=None, differing_buckets=3)
 
     env.svc.attach_pages(position)
@@ -731,7 +714,7 @@ async def test_no_verdict_yet_keeps_the_phase_1_state(env):
 
 
 async def test_no_page_keeps_the_phase_1_status_and_wire(env):
-    async def position(space, hosts):
+    async def position(space):
         return None
 
     env.svc.attach_pages(position)
@@ -743,7 +726,7 @@ async def test_no_page_keeps_the_phase_1_status_and_wire(env):
 async def test_a_new_page_sends_a_frame_when_the_state_moves(env):
     current: list[SyncPagePosition | None] = [None]
 
-    async def position(space, hosts):
+    async def position(space):
         return current[0]
 
     env.svc.attach_pages(position)
@@ -767,7 +750,7 @@ async def test_a_new_page_sends_a_frame_when_the_state_moves(env):
 
 
 async def test_a_proven_missing_row_may_be_missing(env):
-    async def position(space, hosts):
+    async def position(space):
         return _position(match=False, missing=2, differing_buckets=3)
 
     env.svc.attach_pages(position)
@@ -777,7 +760,7 @@ async def test_a_proven_missing_row_may_be_missing(env):
 
 
 async def test_a_first_mismatch_without_a_proof_is_no_warning(env):
-    async def position(space, hosts):
+    async def position(space):
         return _position(match=None, missing=None, differing_buckets=3)
 
     env.svc.attach_pages(position)
@@ -860,7 +843,7 @@ async def test_the_spaces_list_read_never_starts_a_page_compare(env):
     reads the verdict the last full read saw."""
     asked: list[str] = []
 
-    async def position(space, hosts):
+    async def position(space):
         asked.append(space.id)
         return _position(match=False, missing=2, differing_buckets=3)
 

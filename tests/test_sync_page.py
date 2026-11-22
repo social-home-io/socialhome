@@ -29,14 +29,9 @@ from socialhome.sync_page import (
     PageRefused,
     UnsupportedPageSuite,
     VectorBuilder,
-    apply_delta,
     bucket_hash,
     change_time,
     commit_form,
-    delta_from_bytes,
-    delta_from_wire,
-    delta_to_bytes,
-    delta_to_wire,
     differing_buckets,
     fetched_record,
     fetched_row_to_wire,
@@ -58,7 +53,6 @@ from socialhome.sync_page import (
     row_key,
     sign_page,
     superseded_key,
-    vector_delta,
     vector_from_wire,
     vector_to_wire,
     verify_listing,
@@ -384,7 +378,7 @@ def test_every_committed_resource_has_an_id_key():
         assert spec.id_key in spec.fields, resource
 
 
-# ── Vector, root, delta ──────────────────────────────────────────────────
+# ── Vector, root ─────────────────────────────────────────────────────────
 
 
 def test_vector_builder_is_order_independent():
@@ -408,41 +402,13 @@ def test_a_changed_row_changes_exactly_its_bucket():
     assert differing_buckets(va, vb) == [row_key("tasks", "t7")[0]]
 
 
-def test_delta_round_trip():
+def test_vector_round_trip():
     recs = [{"id": f"t{i}", "title": str(i)} for i in range(300)]
-    old, new = VectorBuilder(), VectorBuilder()
+    builder = VectorBuilder()
     for r in recs:
-        old.add("tasks", r, _no_files)
-    for r in recs[:290]:
-        new.add(
-            "tasks",
-            {**r, "title": r["title"] + "!"} if r["id"] < "t2" else r,
-            _no_files,
-        )
-    vo, vn = old.finish(), new.finish()
-    delta = vector_delta(vo, vn)
-    assert apply_delta(vo, delta) == vn
-    assert delta_from_wire(delta_to_wire(delta)) == delta
-    assert delta_from_bytes(delta_to_bytes(delta)) == delta
-    assert len(delta_to_bytes(delta)) == 33 * len(delta)
-    assert vector_from_wire(vector_to_wire(vn)) == vn
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "x",
-        [[0, "AA"]],
-        [[256, b64url_encode(b"\0" * 32)]],
-        [[-1, b64url_encode(b"\0" * 32)]],
-        [[True, b64url_encode(b"\0" * 32)]],
-        [[1, b64url_encode(b"\0" * 32)], [1, b64url_encode(b"\0" * 32)]],
-        [[i % 256, b64url_encode(b"\0" * 32)] for i in range(257)],
-    ],
-)
-def test_malformed_deltas_are_refused(bad):
-    with pytest.raises(PageRefused):
-        delta_from_wire(bad)
+        builder.add("tasks", r, _no_files)
+    vector = builder.finish()
+    assert vector_from_wire(vector_to_wire(vector)) == vector
 
 
 def test_malformed_vector_refused():

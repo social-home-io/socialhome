@@ -14,9 +14,8 @@
   newest page this household holds — sealed here or verified from another
   provider (the member-to-member relay) — sealed under the space content
   key like a chunk, and only to a requester at
-  ``MIN_FOR_SYNC_PAGES`` whose BEGIN shows an older page (or none). Next to
-  it the vector **delta** when the requester holds the signer's previous
-  page, else the full vector.
+  ``MIN_FOR_SYNC_PAGES`` whose BEGIN shows an older page (or none) — with
+  its full bucket vector (no delta: final review I4).
 * **Verify and store (member).** A received page must pass
   :func:`~socialhome.sync_page.verify_page` against the key and epoch this
   household pins, be newer than the one held, and come with a vector that
@@ -86,12 +85,7 @@ from ....sync_page import (
     PageRefused,
     SyncPage,
     UnsupportedPageSuite,
-    apply_delta,
     bucket_hash,
-    delta_from_bytes,
-    delta_from_wire,
-    delta_to_bytes,
-    delta_to_wire,
     differing_buckets,
     fetched_record,
     fetched_row_to_wire,
@@ -110,7 +104,6 @@ from ....sync_page import (
     row_id_of,
     row_key,
     sign_page,
-    vector_delta,
     vector_from_wire,
     vector_to_wire,
     verify_listing,
@@ -797,6 +790,7 @@ class SyncPageService:
         "_monotonic",
         "_on_change",
         "_own_instance_id",
+        "_probes",
         "_repo",
         "_request_round",
         "_round_left",
@@ -853,6 +847,9 @@ class SyncPageService:
         self._comparing: set[str] = set()
         self._compared_at: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        #: space → ``(page seq, change counter then, changed)``: the last
+        #: answer of the seal's quiet probe (final review minor 9).
+        self._probes: OrderedDict[str, tuple[int, int, bool]] = OrderedDict()
         self._tasks: set[asyncio.Task] = set()
         #: space → the last compare of our copy with its page.
         self._checks: OrderedDict[str, _Compare] = OrderedDict()
@@ -901,6 +898,12 @@ class SyncPageService:
             return None
         held = await self._held(space)
         return None if held is None else held.page.ref()
+
+    async def _held_root(self, space_id: str) -> bytes | None:
+        """The root of the page held for *space_id* now, or ``None``."""
+        space = await self._spaces.get(space_id)
+        held = await self._held(space) if space is not None else None
+        return None if held is None else held.page.root
 
     # ─── Seal (signer) ────────────────────────────────────────────────
 
@@ -1000,19 +1003,15 @@ class SyncPageService:
             prev_root=own.page.root if own is not None else None,
             space_seed=seed,
         )
-        delta = (
-            delta_to_bytes(vector_delta(own.row.vector, vector))
-            if own is not None
-            else None
-        )
-        await self._repo.put(
+        if not await self._repo.put(
             StoredSyncPage(
                 space_id=space_id,
                 page_json=canonical_str(page.to_wire()),
                 vector=vector,
-                delta=delta,
-            )
-        )
+            ),
+            key=str(space.identity_public_key),
+        ):
+            return None  # re-pinned or a newer page stored meanwhile
         log.info(
             "sync page: sealed page %d of space %s (%d rows, %.2f s)",
             seq,
@@ -1046,7 +1045,14 @@ class SyncPageService:
     async def _changed_since(self, space_id: str, seq: int) -> bool:
         """Whether a committed row of the space was stamped above *seq* —
         the ``is_quiet`` probe of the committed resources; reads up to the
-        first changed row."""
+        first changed row. Memoised (final review minor 9): every BEGIN to
+        the signer asks, so a "changed" stays changed for that page, and a
+        "quiet" holds while the change counter has not moved."""
+        now_seq = await self._seqs.current_seq()
+        memo = self._probes.get(space_id)
+        if memo is not None and memo[0] == seq and (memo[2] or memo[1] == now_seq):
+            return memo[2]
+        changed = False
         for resource in COMMITTED_RESOURCES:
             exporter = self._exporters.get(resource)
             if exporter is None:
@@ -1054,10 +1060,17 @@ class SyncPageService:
             batches = record_batches(exporter, space_id, since=seq)
             try:
                 async for _batch in batches:
-                    return True
+                    changed = True
+                    break
             finally:
                 await batches.aclose()
-        return False
+            if changed:
+                break
+        self._probes[space_id] = (seq, now_seq, changed)
+        self._probes.move_to_end(space_id)
+        while len(self._probes) > MAX_TRACKED:
+            self._probes.popitem(last=False)
+        return changed
 
     # ─── Carry (any provider) ─────────────────────────────────────────
 
@@ -1094,18 +1107,9 @@ class SyncPageService:
                 )
                 if ref_key >= page.order_key():
                     return None
-            body: dict[str, Any] = {"page": page.to_wire()}
-            if (
-                ref is not None
-                and held.row.delta is not None
-                and page.prev_root is not None
-                and ref.get("root") == page.prev_root
-                and ref.get("signer") == page.signer
-                and ref.get("epoch") == page.epoch
-            ):
-                body["delta"] = delta_to_wire(delta_from_bytes(held.row.delta))
-            else:
-                body["vector"] = vector_to_wire(held.row.vector)
+            # Always the whole vector (final review I4: a delta against the
+            # requester's page fit too rarely to earn its column and rules).
+            body = {"page": page.to_wire(), "vector": vector_to_wire(held.row.vector)}
             epoch, ciphertext = await self._crypto.encrypt_chunk(
                 space_id=space_id, sync_id=sync_id, plaintext=orjson.dumps(body)
             )
@@ -1197,7 +1201,7 @@ class SyncPageService:
             and space.owner_instance_id != self._own_instance_id
         ):
             # A delegated admin signs this space too: its own page and its
-            # delta chain stay; another signer's page is never stored over it
+            # prev_root chain stay; another signer's page is never stored over it
             # (it would break its chain and make its next page look like
             # equivocation to the members). The OWNER does take a newer page
             # its delegated admin signed (same epoch — verified above) while
@@ -1205,30 +1209,22 @@ class SyncPageService:
             # members (Phase 3). Its next page starts a chain of its own
             # (``prev_root`` null, the full vector), which is no conflict.
             return False
-        if "vector" in body:
-            vector = vector_from_wire(body["vector"])
-        elif (
-            "delta" in body
-            and held is not None
-            and held.page.signer == page.signer
-            and held.page.root == page.prev_root
-        ):
-            vector = apply_delta(held.row.vector, delta_from_wire(body["delta"]))
-        else:
-            # A delta against a page we do not hold. Refused WITHOUT
-            # dropping ours: an honest provider sends a delta only for the
-            # page our BEGIN named, so this is a stale race or a relay trying
-            # to roll us back (drop the newer page, then offer an older one).
-            raise PageRefused("a delta without its previous page")
+        if "vector" not in body:
+            # Refused WITHOUT dropping ours: dropping it would let a relay
+            # roll us back (drop the newer page, then offer an older one).
+            raise PageRefused("a page without its vector")
+        vector = vector_from_wire(body["vector"])
         if root_of(vector) != page.root:
             raise PageRefused("the vector does not hash to the page's root")
-        await self._repo.put(
+        if not await self._repo.put(
             StoredSyncPage(
                 space_id=space_id,
                 page_json=canonical_str(page.to_wire()),
                 vector=vector,
-            )
-        )
+            ),
+            key=str(space.identity_public_key),
+        ):
+            return False  # re-pinned or a newer page stored meanwhile
         log.debug(
             "sync page: stored page %d of space %s from %s (signer %s)",
             page.seq,
@@ -1631,6 +1627,11 @@ class SyncPageService:
         self._wanted.pop(space_id, None)
         if wanted.fetch:
             await self._fetch_done(space_id, provider, wanted, records, rows)
+            return
+        if await self._held_root(space_id) != wanted.root:
+            # The same round's sentinel stored a newer page: these listings
+            # are for the page it replaced — dropped before any export (final
+            # review minor 9); the newer page's compare decides.
             return
         try:
             local = await self._state.rows_in(
@@ -2179,14 +2180,13 @@ class SyncPageService:
 
     # ─── Status ───────────────────────────────────────────────────────
 
-    async def position(self, space: Space, hosts: list[str]) -> SyncPagePosition | None:
+    async def position(self, space: Space) -> SyncPagePosition | None:
         """What the newest page says about our copy of *space* (``None``:
         no page held). ``match``: nothing the page commits to is missing
         here — no unexplained differing bucket, or every listing asked
         showed no missing row; ``False`` only when a listing PROVED a
         missing row; ``None`` while not compared, a listing is pending, or
         a bucket stayed unresolved."""
-        del hosts  # kept for the status service's signature
         held = await self._held(space)
         if held is None:
             return None

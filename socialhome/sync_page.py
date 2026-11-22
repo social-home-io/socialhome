@@ -652,67 +652,6 @@ def differing_buckets(a: bytes, b: bytes) -> list[int]:
     ]
 
 
-# ─── Vector delta ────────────────────────────────────────────────────────
-
-
-def vector_delta(old: bytes, new: bytes) -> list[tuple[int, bytes]]:
-    """The buckets of *new* that differ from *old*."""
-    return [
-        (i, new[i * HASH_BYTES : (i + 1) * HASH_BYTES])
-        for i in differing_buckets(old, new)
-    ]
-
-
-def apply_delta(vector: bytes, delta: Sequence[tuple[int, bytes]]) -> bytes:
-    """*vector* with *delta*'s buckets replaced."""
-    out = bytearray(vector)
-    for i, h in delta:
-        out[i * HASH_BYTES : (i + 1) * HASH_BYTES] = h
-    return bytes(out)
-
-
-def delta_to_bytes(delta: Sequence[tuple[int, bytes]]) -> bytes:
-    """A delta for storage: 33 bytes per bucket (index, hash)."""
-    return b"".join(bytes([i]) + h for i, h in delta)
-
-
-def delta_from_bytes(raw: bytes) -> list[tuple[int, bytes]]:
-    step = HASH_BYTES + 1
-    if len(raw) % step:
-        raise ValueError("malformed stored delta")
-    return [(raw[k], raw[k + 1 : k + step]) for k in range(0, len(raw), step)]
-
-
-def delta_to_wire(delta: Sequence[tuple[int, bytes]]) -> list[list[Any]]:
-    return [[i, b64url_encode(h)] for i, h in delta]
-
-
-def delta_from_wire(raw: object) -> list[tuple[int, bytes]]:
-    """A received delta, bounded and strict: ≤ 256 distinct buckets, each a
-    32-byte hash. Raises :class:`PageRefused`."""
-    if not isinstance(raw, list) or len(raw) > BUCKETS:
-        raise PageRefused("malformed delta")
-    seen: set[int] = set()
-    out: list[tuple[int, bytes]] = []
-    for item in raw:
-        if not (
-            isinstance(item, list)
-            and len(item) == 2
-            and isinstance(item[0], int)
-            and not isinstance(item[0], bool)
-            and 0 <= item[0] < BUCKETS
-            and item[0] not in seen
-            and isinstance(item[1], str)
-        ):
-            raise PageRefused("malformed delta entry")
-        h = _b64(item[1])
-        if len(h) != HASH_BYTES:
-            raise PageRefused("malformed delta hash")
-        seen.add(item[0])
-        out.append((item[0], h))
-    return out
-
-
 def vector_to_wire(vector: bytes) -> str:
     return b64url_encode(vector)
 
@@ -1299,14 +1238,9 @@ __all__ = [
     "SyncPage",
     "UnsupportedPageSuite",
     "VectorBuilder",
-    "apply_delta",
     "bucket_hash",
     "change_time",
     "commit_form",
-    "delta_from_bytes",
-    "delta_from_wire",
-    "delta_to_bytes",
-    "delta_to_wire",
     "differing_buckets",
     "fetched_record",
     "fetched_row_to_wire",
@@ -1330,7 +1264,6 @@ __all__ = [
     "row_key",
     "sign_page",
     "superseded_key",
-    "vector_delta",
     "vector_from_wire",
     "vector_to_wire",
     "verify_listing",

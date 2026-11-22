@@ -65,9 +65,11 @@ export const CATCHING_UP_CHIP_DELAY_MS = 10_000
  *  and a single failed round show no chip at all. */
 export type ChipKind = 'missing' | 'preparing' | 'latest'
 
-export function syncChipKind(sync: SpaceSync | null | undefined, slow: boolean): ChipKind | null {
+export function syncChipKind(
+  sync: SpaceSync | null | undefined, slow: boolean, hostedHere = false,
+): ChipKind | null {
   if (!sync) return null
-  const view = syncView(sync)
+  const view = syncView(sync, hostedHere)
   if (view === 'missing' || view === 'preparing') return view
   if (view === 'latest' && slow) return 'latest'
   return null
@@ -131,10 +133,15 @@ export function syncBody(
   if (hostedHere) return { text: t('space.sync.hosted_here'), time: null }
   const at = sync.last_ok_at
   const name = host(hostName)
+  // A match with the signed page may come from any member household (the
+  // page is relayed): its own time, and no host named.
+  const matched = sync.page?.match === true ? sync.page.at : null
   switch (view) {
-    case 'here': return at
-      ? { text: t('space.sync.body.here', { host: name, time: '{time}' }), time: { iso: at, style: 'relative' } }
-      : { text: t('space.sync.body.here_no_time', { host: name }), time: null }
+    case 'here': return matched
+      ? { text: t('space.sync.body.here_page', { time: '{time}' }), time: { iso: matched, style: 'relative' } }
+      : at
+        ? { text: t('space.sync.body.here', { host: name, time: '{time}' }), time: { iso: at, style: 'relative' } }
+        : { text: t('space.sync.body.here_no_time', { host: name }), time: null }
     case 'latest': return { text: t('space.sync.body.latest', { host: name }), time: null }
     case 'retry': return { text: t('space.sync.body.retry'), time: null }
     case 'missing': return { text: t('space.sync.body.missing'), time: null }

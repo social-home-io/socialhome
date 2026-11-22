@@ -187,7 +187,7 @@ async def _round(host_pages, member_pages, sync_id: str) -> bool:
 
 async def _position(member, member_pages):
     space = await member.repos.space.get(SPACE)
-    return await member_pages.position(space, [HOST])
+    return await member_pages.position(space)
 
 
 async def test_a_page_round_trips_and_the_member_matches_it(pair):
@@ -217,7 +217,8 @@ async def test_a_page_round_trips_and_the_member_matches_it(pair):
         is None
     )
     assert (
-        state_with_page(SpaceSyncState.HOST_OFFLINE, pos) is SpaceSyncState.UP_TO_DATE
+        state_with_page(SpaceSyncState.HOST_OFFLINE, pos, now=datetime.now(UTC))
+        is SpaceSyncState.UP_TO_DATE
     )
 
 
@@ -240,7 +241,10 @@ async def test_a_missing_row_is_proven_by_the_hosts_listing(pair):
     assert wire.asks == [[row_key("posts", "post-2")[0]]]
     pos = await _position(member, member_pages)
     assert pos is not None and (pos.match, pos.missing) == (False, 1)
-    assert state_with_page(SpaceSyncState.UP_TO_DATE, pos) is SpaceSyncState.BEHIND
+    assert (
+        state_with_page(SpaceSyncState.UP_TO_DATE, pos, now=datetime.now(UTC))
+        is SpaceSyncState.BEHIND
+    )
     await wire.round()  # answered: the next round asks nothing
     assert len(wire.asks) == 1
 

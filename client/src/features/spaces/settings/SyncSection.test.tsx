@@ -84,7 +84,6 @@ describe('SyncSection — "Is everything here?"', () => {
   it('without a known name it says "the host"', () => {
     const { container } = section({ ...base, state: 'host_offline' }, { hostName: null })
     expect(heading(container)).toBe("☾Can't reach the host right now")
-    expect(why(container)?.textContent).toBe('Checking works again once the host can be reached.')
     const here = section({ ...base, state: 'up_to_date', last_ok_at: null }, { hostName: null })
     expect(body(here.container)).toBe('Checked with the host.')
   })
@@ -122,13 +121,21 @@ describe('Check now', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/spaces/s1/sync')
   })
 
-  it('is disabled with a visible reason while the host is away', () => {
+  it('stays enabled while the host is away: a check asks it again, and finds it back', () => {
     const { container } = section({ ...base, state: 'host_offline' })
-    const b = button(container)!
-    expect(b.disabled).toBe(true)
-    const reason = why(container)!
-    expect(reason.textContent).toBe('Checking works again once The Müllers can be reached.')
-    expect(b.getAttribute('aria-describedby')).toBe(reason.id)
+    expect(button(container)!.disabled).toBe(false)
+    expect(why(container)).toBeNull()
+  })
+
+  it('after a match with the signed page: its time, and no host named', () => {
+    const at = ago(20)
+    const { container } = section({
+      ...base, last_ok_at: ago(200), state: 'up_to_date',
+      page: { seq: 4, at, match: true, missing: 0, differing_buckets: 0, signer_role: 'owner', conflict: false },
+    })
+    expect(body(container)).not.toContain('The Müllers')
+    expect(body(container)).toContain('nothing is missing')
+    expect(container.querySelector('.sh-sync-card__body time')?.getAttribute('datetime')).toBe(at)
   })
 
   it('rate-limited: disabled with "You can check again in {m} min", then back', async () => {

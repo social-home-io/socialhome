@@ -1,9 +1,9 @@
 """The newest sync page a household holds per space (migration 0151).
 
 ``docs/protocol/sync-pages.md``: one row per space, the same on the signer
-and on a member — the signed header, its bucket vector and (signer only)
-the delta since its previous page. Replaced by a newer page, deleted on an
-authority rotation and with the space.
+and on a member — the signed header and its bucket vector. Replaced only by
+a newer page, deleted on an authority rotation (trigger) and with the
+space.
 """
 
 from __future__ import annotations
@@ -20,12 +20,11 @@ class AbstractSpaceSyncPageRepo(Protocol):
         """The page held for the space, or ``None``."""
         ...
 
-    async def put(self, page: StoredSyncPage) -> None:
-        """Store *page* as the space's page (replacing the one held)."""
-        ...
-
-    async def delete(self, space_id: str) -> None:
-        """Drop the space's page (an authority rotation)."""
+    async def put(self, page: StoredSyncPage, *, key: str) -> bool:
+        """Store *page* — verified (or signed) under the space public key
+        *key* (hex) — as the space's page, only while the space still pins
+        that key and the page's epoch, and only over an older page by
+        ``(epoch, issued_at, seq)``. Whether it was stored."""
         ...
 
 
@@ -39,7 +38,7 @@ class SqliteSpaceSyncPageRepo:
 
     async def get(self, space_id: str) -> StoredSyncPage | None:
         row = await self._db.fetchone(
-            "SELECT page_json, vector, delta FROM space_sync_pages WHERE space_id=?",
+            "SELECT page_json, vector FROM space_sync_pages WHERE space_id=?",
             (space_id,),
         )
         if row is None:
@@ -48,23 +47,38 @@ class SqliteSpaceSyncPageRepo:
             space_id=space_id,
             page_json=str(row["page_json"]),
             vector=bytes(row["vector"]),
-            delta=bytes(row["delta"]) if row["delta"] is not None else None,
         )
 
-    async def put(self, page: StoredSyncPage) -> None:
-        # A space this household no longer holds has no row to hang the
-        # page on: the FK makes the INSERT a no-op instead of an error.
-        await self._db.enqueue(
-            "INSERT INTO space_sync_pages(space_id, page_json, vector, delta)"
-            " SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM spaces WHERE id=?)"
-            " ON CONFLICT(space_id) DO UPDATE SET page_json=excluded.page_json,"
-            " vector=excluded.vector, delta=excluded.delta",
-            (page.space_id, page.page_json, page.vector, page.delta, page.space_id),
-        )
-
-    async def delete(self, space_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM space_sync_pages WHERE space_id=?", (space_id,)
+    async def put(self, page: StoredSyncPage, *, key: str) -> bool:
+        # One statement, so nothing slips in between the checks and the
+        # write (final review minor 6): the space must still pin the key and
+        # epoch the page was verified against (a space this household no
+        # longer holds has no row — nothing is stored), and a held page is
+        # replaced only by a newer one.
+        return (
+            await self._db.enqueue_rowcount(
+                "INSERT INTO space_sync_pages(space_id, page_json, vector)"
+                " SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM spaces WHERE id=?"
+                " AND lower(identity_public_key)=lower(?)"
+                " AND COALESCE(authority_key_epoch, 0)=json_extract(?, '$.epoch'))"
+                " ON CONFLICT(space_id) DO UPDATE SET"
+                " page_json=excluded.page_json, vector=excluded.vector"
+                " WHERE (json_extract(excluded.page_json, '$.epoch'),"
+                " json_extract(excluded.page_json, '$.issued_at'),"
+                " json_extract(excluded.page_json, '$.seq'))"
+                " > (json_extract(space_sync_pages.page_json, '$.epoch'),"
+                " json_extract(space_sync_pages.page_json, '$.issued_at'),"
+                " json_extract(space_sync_pages.page_json, '$.seq'))",
+                (
+                    page.space_id,
+                    page.page_json,
+                    page.vector,
+                    page.space_id,
+                    key,
+                    page.page_json,
+                ),
+            )
+            > 0
         )
 
 

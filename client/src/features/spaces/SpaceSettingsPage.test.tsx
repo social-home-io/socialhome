@@ -507,11 +507,12 @@ describe('SpaceSettingsPage — "Is everything here?" on a space hosted elsewher
     stores.conns.connections.value = []
   })
 
-  it('names the host household and shows the Details to a space admin', async () => {
+  it('a match with the signed page names no host; the Details for a space admin', async () => {
     role = 'admin'
     const view = await mount()
     const section = await view.findByTestId('space-sync-section')
-    await waitFor(() => expect(section.textContent).toContain('Checked with The Müllers'))
+    await waitFor(() => expect(section.textContent).toContain('nothing is missing'))
+    expect(section.textContent).not.toContain('The Müllers')
     expect(view.getByTestId('space-sync-now')).toBeTruthy()
     expect(view.getByTestId('space-sync-details').textContent).toContain('Matches page 41')
   })

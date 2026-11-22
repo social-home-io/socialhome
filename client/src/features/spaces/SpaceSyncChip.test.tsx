@@ -18,8 +18,8 @@ import { SpaceSyncChip } from './SpaceSyncChip'
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
 const base = { last_ok_at: ago(5), waiting_to_send: 0, may_be_missing: false, unsent_posts: [] }
 
-function chip(sync: unknown) {
-  return render(<SpaceSyncChip spaceId="s1" sync={sync} />)
+function chip(sync: unknown, hostedHere = false) {
+  return render(<SpaceSyncChip spaceId="s1" sync={sync} hostedHere={hostedHere} />)
 }
 
 const theChip = (c: Element) => c.querySelector('[data-testid="space-sync-chip"]')
@@ -34,6 +34,12 @@ beforeEach(() => { handlers.clear() })
 afterEach(() => { vi.useRealTimers() })
 
 describe('SpaceSyncChip', () => {
+  it('a space hosted here never shows the warning', () => {
+    const { container } = chip({ ...base, state: 'behind', may_be_missing: true }, true)
+    expect(theChip(container)).toBeNull()
+    expect(live(container)).toBe('')
+  })
+
   it('up to date: no chip, nothing said', () => {
     const { container } = chip({ ...base, state: 'up_to_date' })
     expect(theChip(container)).toBeNull()
