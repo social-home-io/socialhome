@@ -50,6 +50,7 @@ someone its guardian blocked is homed with its name only — ``bio``,
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -64,6 +65,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
+from ..task_drain import wait_tasks_done
 from .peer_outbound import ConfirmedPeerBroadcaster
 from .protection_gate import ProtectionGateMixin
 from .user_identity_binding import user_identity_binding_fields
@@ -102,6 +104,7 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroad
         "_child_protection",
         "_federation",
         "_federation_repo",
+        "_inflight",
         "_picture_repo",
         "_sent",
         "_user_repo",
@@ -126,6 +129,8 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroad
         #: household → digest of the last snapshot it accepted from us.
         #: Bounded by the paired households; dropped on unpair.
         self._sent: dict[str, str] = {}
+        #: household → its fresh-connect snapshot task still running.
+        self._inflight: dict[str, asyncio.Task[None]] = {}
         # Optional so test wiring without picture bytes still works —
         # ``picture_webp_base64`` is just omitted in that case and
         # receivers fall back to the ``picture_hash`` URL.
@@ -145,10 +150,30 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin, ConfirmedPeerBroad
 
     async def _on_peer_connected(self, event: PeerCapabilitiesAdvertised) -> None:
         """A paired household connected fresh: the snapshot, unless it
-        already has this very one from us."""
-        if event.instance_id not in await self.list_confirmed_peer_ids():
+        already has this very one from us.
+
+        In the background: the event is raised inside the inbound
+        capabilities handler, before it records the household's version,
+        and a send to a household that just came back can take a while
+        (a new DataChannel, an inbox timeout) — awaited here it held that
+        handler, and the version, for as long. One send per household at a
+        time: a reconnect while one is in flight adds nothing.
+        """
+        peer_id = event.instance_id
+        if peer_id in self._inflight:
             return
-        await self.send_snapshot(event.instance_id, only_if_changed=True)
+        if peer_id not in await self.list_confirmed_peer_ids():
+            return
+        task = asyncio.create_task(
+            self.send_snapshot(peer_id, only_if_changed=True),
+            name=f"users-sync-connect:{peer_id}",
+        )
+        self._inflight[peer_id] = task
+        task.add_done_callback(lambda _t: self._inflight.pop(peer_id, None))
+
+    async def drain(self) -> None:
+        """Wait for the fresh-connect snapshots in flight (shutdown, tests)."""
+        await wait_tasks_done(self._inflight.values)
 
     async def _on_unpaired(self, event: PeerUnpaired) -> None:
         self._sent.pop(event.instance_id, None)

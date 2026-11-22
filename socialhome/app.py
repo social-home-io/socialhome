@@ -2277,6 +2277,7 @@ def _wire_federation_stack(
     # a blocked person's household.
     users_sync_outbound.attach_child_protection(app[K.child_protection_service_key])
     users_sync_outbound.wire()
+    app[K.users_sync_outbound_key] = users_sync_outbound
     # §CP.F2: what a block drops from the outbox is replaced by one snapshot.
     profile_federation_outbound.attach_snapshot_sender(
         users_sync_outbound.send_snapshot
@@ -6520,6 +6521,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # deletes) are published off the author's lock; send them while
         # the federation client and the database are still up.
         await app[K.highlight_service_key].stop()
+        # Fresh-connect roster snapshots still being sent.
+        await app[K.users_sync_outbound_key].drain()
         # Upload batches still open become their "new photos" rows first.
         await gallery_upload_batcher.stop()
         # Deliver the notifications still queued while the database, the

@@ -619,15 +619,17 @@ def _connecting(peers=("peer-1", "peer-2")):
         federation_repo=_FakeFedRepo([*peers, "own-inst"]),
     )
     out.wire()
-    return bus, fed, users
+    return bus, fed, users, out
 
 
-def _back(peer: str) -> PeerCapabilitiesAdvertised:
-    return PeerCapabilitiesAdvertised(instance_id=peer)
+async def _back(bus, out, peer: str) -> None:
+    """``peer`` connects fresh; wait for the background snapshot."""
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id=peer))
+    await out.drain()
 
 
 async def test_snapshot_is_complete_dated_and_queued_latest_only():
-    bus, fed, _users = _connecting()
+    bus, fed, _users, _out = _connecting()
     await bus.publish(PairingConfirmed(instance_id="peer-1"))
     payload = fed.sent[0][2]
     assert payload["complete"] is True
@@ -638,10 +640,10 @@ async def test_snapshot_is_complete_dated_and_queued_latest_only():
 
 async def test_a_snapshot_only_accepted_by_a_gfs_relay_goes_again():
     """A relay's ``ok`` means queued there (it may expire), not received."""
-    bus, fed, _users = _connecting()
+    bus, fed, _users, out = _connecting()
     fed.via = "gfs_relay"
-    await bus.publish(_back("peer-1"))
-    await bus.publish(_back("peer-1"))
+    await _back(bus, out, "peer-1")
+    await _back(bus, out, "peer-1")
     assert len(fed.sent) == 2
 
 
@@ -667,8 +669,8 @@ async def test_an_unreadable_hide_list_sends_no_snapshot():
 async def test_a_paired_household_connecting_fresh_gets_the_snapshot():
     """A household that was away (a child added meanwhile) gets everyone
     it may see on its next connect — same filters as at pairing."""
-    bus, fed, _users = _connecting()
-    await bus.publish(_back("peer-2"))
+    bus, fed, _users, out = _connecting()
+    await _back(bus, out, "peer-2")
     assert len(fed.sent) == 1
     to, ev, payload = fed.sent[0]
     assert (to, ev) == ("peer-2", FederationEventType.USERS_SYNC)
@@ -678,52 +680,70 @@ async def test_a_paired_household_connecting_fresh_gets_the_snapshot():
 async def test_a_household_that_is_not_a_paired_one_gets_nothing():
     """Capabilities also arrive from households met through an invite link
     (and our own row): never a roster for them."""
-    bus, fed, _users = _connecting()
-    await bus.publish(_back("link-household"))
-    await bus.publish(_back("own-inst"))
+    bus, fed, _users, out = _connecting()
+    await _back(bus, out, "link-household")
+    await _back(bus, out, "own-inst")
     assert fed.sent == []
 
 
 async def test_a_flapping_reconnect_does_not_resend_the_same_snapshot():
-    bus, fed, _users = _connecting()
+    bus, fed, _users, out = _connecting()
     for _ in range(5):
-        await bus.publish(_back("peer-1"))
+        await _back(bus, out, "peer-1")
     assert len(fed.sent) == 1
 
 
 async def test_a_reconnect_after_a_member_changed_sends_again():
-    bus, fed, users = _connecting()
-    await bus.publish(_back("peer-1"))
+    bus, fed, users, out = _connecting()
+    await _back(bus, out, "peer-1")
     users.append(_FakeUser("u-kid", "kid", "Kid"))
-    await bus.publish(_back("peer-1"))
+    await _back(bus, out, "peer-1")
     assert len(fed.sent) == 2
     assert "u-kid" in [u["user_id"] for u in fed.sent[1][2]["users"]]
 
 
 async def test_pair_confirm_counts_as_the_household_having_the_snapshot():
-    bus, fed, _users = _connecting()
+    bus, fed, _users, out = _connecting()
     await bus.publish(PairingConfirmed(instance_id="peer-1"))
-    await bus.publish(_back("peer-1"))
+    await _back(bus, out, "peer-1")
     assert len(fed.sent) == 1
 
 
 async def test_a_snapshot_not_accepted_goes_again_on_the_next_connect():
     """Left in the outbox (or refused): the next connect sends it again."""
-    bus, fed, _users = _connecting()
+    bus, fed, _users, out = _connecting()
     fed.ok = False
-    await bus.publish(_back("peer-1"))
+    await _back(bus, out, "peer-1")
     fed.ok = True
-    await bus.publish(_back("peer-1"))
-    await bus.publish(_back("peer-1"))
+    await _back(bus, out, "peer-1")
+    await _back(bus, out, "peer-1")
     assert len(fed.sent) == 2
 
 
 async def test_unpair_forgets_what_the_household_had():
-    bus, fed, _users = _connecting()
-    await bus.publish(_back("peer-1"))
+    bus, fed, _users, out = _connecting()
+    await _back(bus, out, "peer-1")
     await bus.publish(PeerUnpaired(instance_id="peer-1"))
-    await bus.publish(_back("peer-1"))
+    await _back(bus, out, "peer-1")
     assert len(fed.sent) == 2
+
+
+async def test_a_reconnect_while_a_snapshot_is_in_flight_adds_nothing():
+    bus, fed, _users, out = _connecting()
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id="peer-1"))
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id="peer-1"))
+    await out.drain()
+    assert len(fed.sent) == 1
+
+
+async def test_the_fresh_connect_send_does_not_hold_the_event():
+    """Raised inside the inbound capabilities handler, before it records
+    the household's version: the send must not block it."""
+    bus, fed, _users, out = _connecting()
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id="peer-1"))
+    assert fed.sent == []  # not yet: it runs in the background
+    await out.drain()
+    assert len(fed.sent) == 1
 
 
 def test_digest_ignores_re_signing_and_picture_bytes():

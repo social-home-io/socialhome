@@ -27,6 +27,7 @@ from socialhome.app_keys import (
     db_key,
     federation_service_key,
     user_service_key,
+    users_sync_outbound_key,
 )
 from socialhome.domain.federation import (
     DeliveryResult,
@@ -76,6 +77,8 @@ class _Wire:
                     {"proto_version": OURS},
                 )
             )
+        # The snapshot answering a fresh connect goes out in the background.
+        await self.a[users_sync_outbound_key].drain()
 
     def syncs(self) -> int:
         return self.sent.count(FET.USERS_SYNC)
