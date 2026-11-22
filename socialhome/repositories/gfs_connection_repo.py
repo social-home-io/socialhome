@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Collection
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -20,6 +21,9 @@ class AbstractGfsConnectionRepo(Protocol):
     async def list_active(self) -> list[GfsConnection]: ...
     async def list_all(self) -> list[GfsConnection]: ...
     async def update_status(self, gfs_id: str, status: str) -> None: ...
+    async def transition_status(
+        self, gfs_id: str, status: str, expected: Collection[str]
+    ) -> bool: ...
     async def update_display_name(self, gfs_id: str, display_name: str) -> None: ...
     async def update_gfs_instance_id(
         self, gfs_id: str, gfs_instance_id: str
@@ -147,6 +151,23 @@ class SqliteGfsConnectionRepo:
             "UPDATE gfs_connections SET status=? WHERE id=?",
             (status, gfs_id),
         )
+
+    async def transition_status(
+        self, gfs_id: str, status: str, expected: Collection[str]
+    ) -> bool:
+        """Compare-and-set: move *gfs_id* to *status* only while it is in one
+        of *expected*. Returns whether this call changed the row — of callers
+        racing on one transition exactly one sees ``True``, and a removed
+        connection is never brought back."""
+        wanted = tuple(expected)
+        if not wanted:
+            return False
+        marks = ",".join("?" * len(wanted))
+        changed = await self._db.enqueue_rowcount(
+            f"UPDATE gfs_connections SET status=? WHERE id=? AND status IN ({marks})",
+            (status, gfs_id, *wanted),
+        )
+        return changed > 0
 
     async def update_display_name(self, gfs_id: str, display_name: str) -> None:
         await self._db.enqueue(

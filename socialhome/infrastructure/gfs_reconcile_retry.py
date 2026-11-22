@@ -14,6 +14,10 @@ past those it stays pending and the hourly ``/gfs/info`` pass
 .GfsInfoRefreshScheduler`) calls :meth:`GfsReconcileRetry.run_pending`.
 A verified signature failure ends it without a reconcile.
 
+The same per-connection loop also carries the pending-approval check
+(:meth:`~socialhome.services.gfs_connection_service.GfsConnectionService
+.check_approval`), on its own, longer schedule (``delays``).
+
 The run callback answers ``"done"`` (gate passed, reconcile ran), ``"retry"``
 (still retryable) or ``"skip"`` (refused — stop). Lifecycle per
 ``replay_cache_scheduler.py``: a ``_stop`` event, set in :meth:`stop`.
@@ -40,10 +44,21 @@ RunFn = Callable[[str], Awaitable[str]]
 class GfsReconcileRetry:
     """Per-connection bounded retry of gate + reconcile."""
 
-    __slots__ = ("_pending", "_run", "_stop", "_tasks")
+    __slots__ = ("_delays", "_name", "_pending", "_run", "_stop", "_tasks")
 
-    def __init__(self, run: RunFn) -> None:
+    def __init__(
+        self,
+        run: RunFn,
+        *,
+        delays: tuple[float, ...] | None = None,
+        name: str = "gfs-reconcile-retry",
+    ) -> None:
         self._run = run
+        #: This retry's own schedule; ``None`` reads :data:`RETRY_DELAYS_S`.
+        self._delays = delays
+        #: Names its tasks and log lines (``gfs-approval`` for the approval
+        #: check), so the two users of this loop read apart.
+        self._name = name
         self._pending: set[str] = set()
         self._tasks: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
@@ -61,7 +76,10 @@ class GfsReconcileRetry:
         if task is not None and not task.done():
             return
         self._tasks[gfs_id] = asyncio.create_task(
-            self._loop(gfs_id, RETRY_DELAYS_S), name=f"gfs-reconcile-retry-{gfs_id}"
+            self._loop(
+                gfs_id, RETRY_DELAYS_S if self._delays is None else self._delays
+            ),
+            name=f"{self._name}-{gfs_id}",
         )
 
     def cancel(self, gfs_id: str) -> None:
@@ -123,7 +141,7 @@ class GfsReconcileRetry:
         try:
             result = await self._run(gfs_id)
         except Exception:
-            log.warning("gfs: reconcile retry failed for %s", gfs_id, exc_info=True)
+            log.warning("%s failed for %s", self._name, gfs_id, exc_info=True)
             return False
         if result in ("done", "skip"):
             self._pending.discard(gfs_id)

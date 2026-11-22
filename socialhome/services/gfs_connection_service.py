@@ -120,6 +120,13 @@ from ..domain.space_item import COMPRESSED_PAYLOAD_SUITES, PAYLOAD_SUITE_ZLIB_DI
 from ..domain.space_place import place_pin_of, place_pin_wire
 from ..domain.subscriber_accepts import OUR_ACCEPTS
 from ..federation.keywrap_seal import KEM_SUITE_X25519
+from ..gfs_client_status import (
+    CLIENT_STATUSES,
+    UnsupportedClientStatusSigSuite,
+    sign_status_request,
+    status_request_ts,
+    verify_client_status,
+)
 from ..gfs_proof import (
     PROOF_CAPABILITY,
     PROOF_ROUTE,
@@ -128,6 +135,7 @@ from ..gfs_proof import (
     normalize_gfs_base_url,
     verify_possession_proof,
 )
+from ..infrastructure.gfs_reconcile_retry import GfsReconcileRetry
 from ..moment_public_media import is_blob_id
 from ..outbound_fetch import OutboundFetchRefused, open_pinned_session
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
@@ -449,6 +457,36 @@ PROOF_REUSE_S: float = 300.0
 #: the next capability question proves again.
 LISTING_PROOF_TTL_S: float = 3600.0
 
+#: When a connection awaiting its GFS operator's approval asks again
+#: (:meth:`GfsConnectionService.check_approval`): 1 min doubling to 1 h —
+#: seven questions in the first ~2 h — then once per hourly ``/gfs/info``
+#: pass. Read when the service is built (a test seam).
+APPROVAL_RETRY_DELAYS_S: tuple[float, ...] = (
+    60.0,
+    120.0,
+    240.0,
+    480.0,
+    960.0,
+    1920.0,
+    3600.0,
+)
+
+#: How long a ``suspended`` connection keeps asking its GFS (seconds),
+#: counted from when it became suspended: 7 days (owner decision, security
+#: review of #1414). Past it the household stops asking — an hourly question
+#: forever would tell that GFS every hour that this household is still
+#: around. ``pending`` keeps asking on the backoff. In memory: a restart
+#: counts the 7 days from the start again; removing the connection and
+#: connecting again starts over. Read at call time (a test seam).
+SUSPENDED_ASK_FOR_S: float = 7 * 24 * 3600.0
+
+#: What :meth:`GfsConnectionService.check_approval` answers — the
+#: :class:`GfsReconcileRetry` vocabulary: ``done`` (approved, now active),
+#: ``retry`` (still pending or suspended, or no verified answer — asked again)
+#: or ``skip`` (nothing to ask: no such connection, it is active, or it has
+#: been suspended for :data:`SUSPENDED_ASK_FOR_S`).
+ApprovalResult = Literal["done", "retry", "skip"]
+
 #: v_57 — a listing target no space's list has named for this long has its
 #: RAM caches evicted.
 LISTING_TARGET_IDLE_S: float = 24 * 3600.0
@@ -484,6 +522,7 @@ class GfsConnectionService:
         "_addressee_key",
         "_anon_publish",
         "_anon_warned",
+        "_approval_retry",
         "_authority_rotation",
         "_caps_warned",
         "_change_lock",
@@ -540,6 +579,7 @@ class GfsConnectionService:
         "_space_media",
         "_space_repo",
         "_suite_refused_at",
+        "_suspended_since",
         "_target_warned",
         "_targeted_publish",
         "_theme_repo",
@@ -729,6 +769,11 @@ class GfsConnectionService:
         # Failed ``POST /gfs/publish`` calls wait here for a retry —
         # identity-free bodies only, in memory, bounded (see the module).
         self._publish_retry = GfsPublishRetryQueue(self._retry_publish)
+        # A connection awaiting its GFS operator's approval asks again on a
+        # bounded backoff (:meth:`check_approval`); nothing runs without one.
+        self._approval_retry = GfsReconcileRetry(
+            self.check_approval, delays=APPROVAL_RETRY_DELAYS_S, name="gfs-approval"
+        )
         #: v_49 — called after a publish that carried the owner's authority
         #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
         self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
@@ -785,6 +830,9 @@ class GfsConnectionService:
         # ``time.monotonic()`` of each connection's latest successful proof —
         # the reconnect gate's reuse window (:data:`PROOF_REUSE_S`).
         self._proven_at: dict[str, float] = {}
+        # ``time.monotonic()`` of when each connection was seen ``suspended``
+        # first (this run): it stops asking :data:`SUSPENDED_ASK_FOR_S` later.
+        self._suspended_since: dict[str, float] = {}
         #: v_57 — the owner's signed GFS list as THIS household may use it
         #: (:meth:`GfsServerSelectionService.member_servers`); ``None`` until
         #: wired, and then every caller falls back to its own connections.
@@ -1087,12 +1135,19 @@ class GfsConnectionService:
             )
 
     async def start(self) -> None:
-        """Start the GFS publish retry loop (app ``on_startup``)."""
+        """Start the GFS publish retry loop and ask again for every
+        connection still awaiting its operator's approval — or suspended by
+        it (app ``on_startup``)."""
         await self._publish_retry.start()
+        for conn in await self._repo.list_all():
+            if conn.status in ("pending", "suspended"):
+                self._approval_retry.schedule(conn.id)
 
     async def stop(self) -> None:
-        """Stop the GFS publish retry loop (app ``on_cleanup``)."""
+        """Stop the GFS publish retry loop and the approval checks (app
+        ``on_cleanup``)."""
         await self._publish_retry.stop()
+        await self._approval_retry.stop()
 
     def attach_join_contact_keys(
         self, keywrap_public_key_hex: str, keywrap_sig: str
@@ -1293,12 +1348,191 @@ class GfsConnectionService:
         if proven:
             self._proven_at[conn.id] = time.monotonic()
         if conn.status == "active":
-            for hook in self._on_connected:
-                try:
-                    await hook(conn)
-                except Exception:
-                    log.exception("gfs: on-connected hook failed for %s", conn.id)
+            await self._run_on_connected(conn)
+        else:
+            # Awaiting the operator: ask on a backoff until they decide.
+            self._approval_retry.schedule(conn.id)
         return conn
+
+    async def _run_on_connected(self, conn: GfsConnection) -> None:
+        """Run every on-connected hook for a connection that just became
+        active (in order; one failing never skips the next)."""
+        for hook in self._on_connected:
+            try:
+                await hook(conn)
+            except Exception:
+                log.exception("gfs: on-connected hook failed for %s", conn.id)
+
+    async def check_approval(self, gfs_id: str) -> ApprovalResult:
+        """Ask *gfs_id*'s GFS whether its operator approved this household.
+
+        Only for a ``pending`` or ``suspended`` connection (anything else:
+        ``skip``, no request). Rides ``POST /gfs/proof`` with a ``client``
+        question signed by this household's identity key, naming the GFS key
+        pinned for this connection and a minute-floored time
+        (:mod:`socialhome.gfs_client_status`); the answer counts only when its
+        signature verifies against that pinned key, over this question's
+        fresh nonce and the WHOLE question as sent — so nobody can fake an
+        approval, replay one, or tamper with the question to get a signed
+        ``unknown``.
+
+        * ``active`` → the connection turns active and the on-connected hooks
+          run (push socket, Discover, the GFS-needed bell) — ``done``;
+        * ``pending`` → the connection stays (or, after an unban, turns back)
+          ``pending`` — ``retry``;
+        * ``unknown`` (the operator rejected or removed it) or ``banned`` →
+          the connection is ``suspended`` (the connections list shows it) —
+          ``retry``: it keeps being asked for :data:`SUSPENDED_ASK_FOR_S`
+          (7 days), so an unban or a GFS whose database was restored brings
+          it back without a new code; past that, ``skip`` — asked no more;
+        * no verified answer (an older GFS, a forged / unsigned / malformed
+          one, an unsigned ``400`` for a stale question) or no answer at all
+          → ``retry``, nothing changes.
+
+        Every status change is compare-and-set on the stored row
+        (:meth:`~AbstractGfsConnectionRepo.transition_status`): a connection
+        removed — or turned active another way — while the question was out
+        is never revived or announced twice, and of two checks answering at
+        once only the one that moved the row runs the hooks.
+
+        Never raises.
+        """
+        conn = await self._repo.get(gfs_id)
+        if conn is None or conn.status not in ("pending", "suspended"):
+            return "skip"
+        if conn.status == "suspended" and self._suspended_too_long(gfs_id):
+            log.info(
+                "GFS %r (%s) has held this household suspended for 7 days — "
+                "no longer asking; remove it and connect again with a new code",
+                conn.display_name,
+                conn.inbox_url,
+            )
+            return "skip"
+        if not self._own_instance_id or not self._own_signing_key:
+            return "retry"
+        status = await self._ask_client_status(conn)
+        if status is None:
+            return "retry"
+        if status == "active":
+            if not await self._repo.transition_status(
+                gfs_id, "active", ("pending", "suspended")
+            ):
+                # Removed, or active already — whoever moved it ran the hooks.
+                return "skip"
+            self._suspended_since.pop(gfs_id, None)
+            current = await self._repo.get(gfs_id)
+            if current is None:
+                return "skip"
+            log.info(
+                "GFS %r (%s) approved this household — connected",
+                current.display_name,
+                current.inbox_url,
+            )
+            await self._run_on_connected(current)
+            return "done"
+        if status == "pending":
+            if await self._repo.transition_status(gfs_id, "pending", ("suspended",)):
+                self._suspended_since.pop(gfs_id, None)
+                log.info(
+                    "GFS %r (%s) holds this household as pending again — "
+                    "waiting for its operator",
+                    conn.display_name,
+                    conn.inbox_url,
+                )
+            return "retry"
+        if await self._repo.transition_status(gfs_id, "suspended", ("pending",)):
+            self._suspended_since[gfs_id] = time.monotonic()
+            log.warning(
+                "GFS %r (%s) answered %r for this household: its operator "
+                "%s it — connection suspended (still asked for 7 days); "
+                "remove it and connect again with a new code",
+                conn.display_name,
+                conn.inbox_url,
+                status,
+                "banned" if status == "banned" else "rejected or removed",
+            )
+        return "retry"
+
+    def _suspended_too_long(self, gfs_id: str) -> bool:
+        """Whether *gfs_id* has been suspended for :data:`SUSPENDED_ASK_FOR_S`.
+        A suspended connection first seen in this run (a restart) starts its
+        window now."""
+        since = self._suspended_since.setdefault(gfs_id, time.monotonic())
+        return time.monotonic() - since >= SUSPENDED_ASK_FOR_S
+
+    async def check_pending_approvals(self) -> int:
+        """One more question for every connection still awaiting approval
+        whose backoff ran out — the hourly pass. Returns how many settled."""
+        return await self._approval_retry.run_pending()
+
+    def approvals_pending(self) -> set[str]:
+        """Connections whose approval status is still being asked for."""
+        return self._approval_retry.pending()
+
+    async def wait_approvals_idle(self) -> None:
+        """Wait for every running approval backoff (tests)."""
+        await self._approval_retry.wait_idle()
+
+    async def _ask_client_status(self, conn: GfsConnection) -> str | None:
+        """The approval state *conn*'s GFS signed for this household, or
+        ``None`` when there is no verified answer. Never raises."""
+        nonce = new_proof_nonce()
+        question = sign_status_request(
+            self._own_signing_key,
+            conn.public_key,
+            self._own_instance_id,
+            nonce,
+            ts=status_request_ts(time.time()),
+        )
+        gfs_url = conn.inbox_url.rstrip("/")
+        try:
+            client = self._client()
+        except RuntimeError:
+            return None
+        outcome, body = await self._post_proof(
+            client, gfs_url, {"nonce": nonce, "client": question.to_wire()}
+        )
+        if outcome != "ok" or not isinstance(body, dict):
+            return None
+        status = body.get("client_status")
+        sig = body.get("client_status_sig")
+        suite = body.get("client_status_sig_suite")
+        if (
+            not (
+                isinstance(status, str)
+                and isinstance(sig, str)
+                and isinstance(suite, str)
+            )
+            or status not in CLIENT_STATUSES
+        ):
+            # An older GFS answers the plain proof only: ask again later.
+            log.info(
+                "GFS %s answered no signed approval status — asking again later",
+                gfs_url,
+            )
+            return None
+        try:
+            ok = verify_client_status(
+                conn.public_key, nonce, question, status, sig, suite
+            )
+        except UnsupportedClientStatusSigSuite:
+            log.warning(
+                "GFS %s signed its approval status with the unknown suite %r — "
+                "ignored, asking again later",
+                gfs_url,
+                suite[:64],
+            )
+            return None
+        if not ok:
+            log.warning(
+                "GFS %s approval status %r does not verify against the key "
+                "pinned for this connection and this question — ignored, "
+                "asking again later",
+                gfs_url,
+                status,
+            )
+            return None
+        return status
 
     async def _require_possession(self, gfs_url: str, info: dict) -> bool:
         """Demand proof of possession from a GFS that offers it.
@@ -1366,6 +1600,47 @@ class GfsConnectionService:
             for c in await self._repo.list_all()
         )
 
+    @staticmethod
+    async def _post_proof(
+        client: aiohttp.ClientSession, gfs_url: str, payload: dict
+    ) -> tuple[Literal["ok", "busy", "unreachable"], object]:
+        """``POST {gfs_url}/gfs/proof`` with *payload*. Never raises.
+
+        ``("ok", body)`` for a 200 — the decoded JSON (``None`` when it is not
+        JSON) — else ``("busy", None)`` (429) or ``("unreachable", None)``: no
+        answer, a 5xx, a 404 / 405 from a node that does not know the route
+        (yet) — a rolling deploy behind a balancer — a redirect, a WAF's 403,
+        a 400: unexpected, retryable, never a verdict about the key."""
+        try:
+            async with client.post(
+                f"{gfs_url}{PROOF_ROUTE}",
+                json=payload,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 429:
+                    log.warning("GFS %s rate-limited %s", gfs_url, PROOF_ROUTE)
+                    return "busy", None
+                if resp.status != 200:
+                    log.warning(
+                        "GFS %s %s answered HTTP %d — retryable, not a verdict "
+                        "about its key%s",
+                        gfs_url,
+                        PROOF_ROUTE,
+                        resp.status,
+                        " (an approval question refused: check this household's clock)"
+                        if resp.status == 400 and "client" in payload
+                        else "",
+                    )
+                    return "unreachable", None
+                try:
+                    return "ok", await resp.json()
+                except aiohttp.ContentTypeError, ValueError:
+                    return "ok", None
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            log.warning("GFS %s unreachable during %s: %s", gfs_url, PROOF_ROUTE, exc)
+            return "unreachable", None
+
     async def _prove(
         self,
         gfs_url: str,
@@ -1389,36 +1664,9 @@ class GfsConnectionService:
             except RuntimeError:
                 return "unreachable"
         nonce = new_proof_nonce()
-        try:
-            async with client.post(
-                f"{gfs_url}{PROOF_ROUTE}",
-                json={"nonce": nonce},
-                allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 429:
-                    log.warning("GFS %s rate-limited %s", gfs_url, PROOF_ROUTE)
-                    return "busy"
-                if resp.status != 200:
-                    # A 5xx, a 404 / 405 from a node that does not know the
-                    # route (yet) — a rolling deploy behind a balancer — a
-                    # redirect, a WAF's 403, a 400: unexpected, retryable,
-                    # never a verdict about the key.
-                    log.warning(
-                        "GFS %s %s answered HTTP %d — retryable, not a verdict "
-                        "about its key",
-                        gfs_url,
-                        PROOF_ROUTE,
-                        resp.status,
-                    )
-                    return "unreachable"
-                try:
-                    body = await resp.json()
-                except aiohttp.ContentTypeError, ValueError:
-                    body = None
-        except (TimeoutError, aiohttp.ClientError) as exc:
-            log.warning("GFS %s unreachable during %s: %s", gfs_url, PROOF_ROUTE, exc)
-            return "unreachable"
+        outcome, body = await self._post_proof(client, gfs_url, {"nonce": nonce})
+        if outcome != "ok":
+            return outcome
         if not isinstance(body, dict):
             log.warning("GFS %s returned a malformed possession proof", gfs_url)
             return "failed"
@@ -2647,6 +2895,11 @@ class GfsConnectionService:
         Sends nothing inline: the ``on_disconnect`` hook (the seat keeper)
         only records local state and schedules its unsubscribes in the
         background."""
+        # First: no approval check may land on a connection being removed
+        # (the status flip is compare-and-set as well — this stops the
+        # question itself). Removing and connecting again starts over.
+        self._approval_retry.cancel(gfs_id)
+        self._suspended_since.pop(gfs_id, None)
         conn = await self._repo.get(gfs_id)
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")

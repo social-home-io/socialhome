@@ -6325,6 +6325,9 @@ def create_app(config: Config | None = None) -> web.Application:
             # A reconcile still held back by a retryable proof answer gets
             # another gate + reconcile each pass until it runs or is refused.
             await reconcile_retry.run_pending()
+            # A connection still awaiting its GFS operator's approval past
+            # its backoff asks once more each pass (none pending: nothing).
+            await gfs_connection_service.check_pending_approvals()
             return refreshed
 
         gfs_info_refresh = GfsInfoRefreshScheduler(_hourly_gfs_refresh)

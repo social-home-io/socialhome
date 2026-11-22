@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import asdict
 
 import orjson
@@ -26,6 +27,7 @@ from ...domain.space_item import (
 )
 from ...domain.space_place import PlacePin, place_pin_wire
 from ...domain.subscriber_accepts import parse_accepts
+from ...gfs_client_status import parse_status_request
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
@@ -51,7 +53,8 @@ _SUBSCRIBE_ACTIONS = frozenset({"subscribe", "unsubscribe"})
 _MAX_WIRE_ID_CHARS = 128
 
 #: Body cap for ``POST /gfs/proof`` — a ``{"nonce": "<43 chars>"}`` object is
-#: ~60 bytes; anything near this is not a proof request.
+#: ~60 bytes, ~250 with a pending household's ``client`` question; anything
+#: near this cap is not a proof request.
 _PROOF_MAX_BODY_BYTES = 1024
 
 
@@ -369,10 +372,25 @@ class GfsProofView(GfsBaseView):
     address that forwards the challenge here gets back a proof for THIS
     address, which fails at its own.
 
+    A household still waiting for the operator's approval adds an optional
+    ``client: {instance_id, sig, sig_suite, ts}`` — its question, signed with
+    the key it registered, at a minute-floored time
+    (:mod:`socialhome.gfs_client_status`). The answer then also carries
+    ``client_status`` (``active`` / ``pending`` / ``banned``, or ``unknown``
+    for an unknown instance and a bad signature alike) with
+    ``client_status_sig`` + ``client_status_sig_suite``: this server's
+    signature over that status, the household's nonce and the whole
+    question. A question names the key of the GFS it is for; one naming
+    another key reads ``unknown``. An unsupported suite, a signature that is
+    not 64 bytes or a stale / future ``ts`` is an unsigned ``400``. That is
+    how a pending household learns it was approved — the GFS holds no
+    address to tell it, and refuses a pending household's WebSocket.
+
     Unauthenticated: body-capped (:data:`_PROOF_MAX_BODY_BYTES`) and
     rate-limited per IP (:func:`~socialhome.global_server.public
-    .build_proof_rate_limit`). ``400`` for a missing / malformed nonce,
-    ``503`` when this node cannot sign.
+    .build_proof_rate_limit`). ``400`` for a missing / malformed nonce or a
+    malformed, unsupported or stale ``client`` block, ``503`` when this node
+    cannot sign.
     """
 
     async def post(self) -> web.Response:
@@ -381,26 +399,45 @@ class GfsProofView(GfsBaseView):
             body = orjson.loads(raw)
         except ValueError as exc:
             raise web.HTTPBadRequest(reason="Invalid JSON body") from exc
-        nonce = parse_proof_nonce(body.get("nonce") if isinstance(body, dict) else None)
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(reason="Invalid field: nonce")
+        nonce = parse_proof_nonce(body.get("nonce"))
         if nonce is None:
             raise web.HTTPBadRequest(reason="Invalid field: nonce")
+        question = None
+        if "client" in body:
+            # Unsigned 400 for anything off — an unsupported suite, a sig
+            # that is not 64 bytes, a stale or future ``ts``: nothing is
+            # signed for a question this server would not verify as asked.
+            question = parse_status_request(body["client"], now=time.time())
+            if question is None:
+                raise web.HTTPBadRequest(reason="Invalid field: client")
         cfg = self.svc(K.gfs_config_key)
         cluster = self.svc(K.gfs_cluster_key)
         if not _can_prove(cfg, cluster):
             return web.json_response({"error": "unavailable"}, status=503)
         base_url = bindable_base_url(cfg.base_url)
         sig, suite = cluster.sign_possession_proof(nonce, base_url)
-        return web.json_response(
-            {
-                # Informational: the proof binds the key, not this node's id.
-                "gfs_instance_id": cfg.instance_id,
-                "gfs_key": cluster.own_public_key_hex,
-                "base_url": base_url,
-                "nonce": nonce,
-                "proof_sig": sig,
-                "proof_sig_suite": suite,
-            }
-        )
+        answer = {
+            # Informational: the proof binds the key, not this node's id.
+            "gfs_instance_id": cfg.instance_id,
+            "gfs_key": cluster.own_public_key_hex,
+            "base_url": base_url,
+            "nonce": nonce,
+            "proof_sig": sig,
+            "proof_sig_suite": suite,
+        }
+        if question is not None:
+            status = await self.svc(K.gfs_federation_key).client_status(
+                nonce, question, gfs_key=cluster.own_public_key_hex
+            )
+            status_sig, status_suite = cluster.sign_client_status(
+                nonce, question, status
+            )
+            answer["client_status"] = status
+            answer["client_status_sig"] = status_sig
+            answer["client_status_sig_suite"] = status_suite
+        return web.json_response(answer)
 
 
 class SignupTokenView(GfsBaseView):
