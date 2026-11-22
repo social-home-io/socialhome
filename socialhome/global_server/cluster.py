@@ -46,7 +46,7 @@ from ..crypto import (
 from ..domain.space import normalize_category, normalize_join_mode
 from ..domain.space_place import PlacePin, parse_place_pin_wire, place_pin_wire
 from ..domain.subscriber_accepts import parse_accepts
-from ..gfs_client_status import sign_client_status
+from ..gfs_client_status import StatusRequest, sign_client_status
 from ..gfs_proof import sign_possession_proof
 from ..space_join_contact import parse_join_contact
 from .cluster_relay import (
@@ -965,20 +965,18 @@ class ClusterService:
         return sign_possession_proof(self._signing_key, nonce, base_url)
 
     def sign_client_status(
-        self, instance_id: str, nonce: str, request_sig: str, status: str
+        self, nonce: str, request: StatusRequest, status: str
     ) -> tuple[str, str]:
-        """Sign a household's approval state for its ``POST /gfs/proof``
-        question (signature *request_sig*, :mod:`socialhome.gfs_client_status`)
-        with the identity key.
+        """Sign a household's approval state as the answer to its
+        ``POST /gfs/proof`` question *request* — every field of it bound
+        (:mod:`socialhome.gfs_client_status`) — with the identity key.
 
         Returns ``(client_status_sig, client_status_sig_suite)``, or
         ``("", "")`` without a signing key (the route answers ``503`` first).
         """
         if not self._signing_key:
             return "", ""
-        return sign_client_status(
-            self._signing_key, instance_id, nonce, request_sig, status
-        )
+        return sign_client_status(self._signing_key, nonce, request, status)
 
     # ─── Node registry API ────────────────────────────────────────────
 

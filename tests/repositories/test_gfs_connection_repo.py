@@ -165,6 +165,23 @@ async def test_list_active_still_filters_to_active_only(repo):
     assert [r.id for r in active] == ["g-active"]
 
 
+async def test_transition_status_is_compare_and_set(repo):
+    """Moves the row only out of an expected status, and says whether it
+    did — two callers racing on one transition: exactly one wins."""
+    await repo.save(
+        _conn_with("g-1", status="pending", paired_at="2026-06-01 00:00:00")
+    )
+    assert await repo.transition_status("g-1", "active", ("pending", "suspended"))
+    assert (await repo.get("g-1")).status == "active"
+    # Already active: no second transition.
+    assert not await repo.transition_status("g-1", "active", ("pending", "suspended"))
+    assert not await repo.transition_status("g-1", "suspended", ("pending",))
+    assert (await repo.get("g-1")).status == "active"
+    # A removed connection is never brought back.
+    assert not await repo.transition_status("gone", "active", ("pending",))
+    assert await repo.get("gone") is None
+
+
 async def test_list_active_listings_for_space(repo):
     """Only ACTIVE publications on ACTIVE connections, ordered by the GFS's
     instance id (a stable order, so an unchanged list compares equal)."""

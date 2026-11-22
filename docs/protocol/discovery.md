@@ -809,10 +809,11 @@ sequenceDiagram
     participant O as Operator
     Note over H: app start, or a pairing that answered pending
     loop 1 min, 2, 4, 8, 16, 32, 60 min — then each hourly /gfs/info pass
-        H->>G: POST /gfs/proof {nonce, client: {instance_id, sig, sig_suite}}
+        H->>G: POST /gfs/proof {nonce, client: {instance_id, sig, sig_suite, ts}}
+        Note over G: unsupported suite, sig not 64 bytes,<br/>ts stale / ahead → unsigned 400 (H asks again later)
         Note over G: verify sig (for THIS gfs_key) against the registered key<br/>(dummy key when unknown — same work)
         G-->>H: {proof…, client_status, client_status_sig, client_status_sig_suite}
-        Note over H: verify against the PINNED GFS key,<br/>this nonce, own instance id and own question sig
+        Note over H: verify against the PINNED GFS key,<br/>this nonce and its own whole question
     end
     O->>G: admin portal: accept (or reject / ban)
     H->>G: POST /gfs/proof {nonce, client}
@@ -820,49 +821,73 @@ sequenceDiagram
     Note over H: status → active, on-connected hooks:<br/>push socket, Discover refresh, GFS-needed bell
 ```
 
-- **The question** is `client: {instance_id, sig, sig_suite}`; `sig` is
+- **The question** is `client: {instance_id, sig, sig_suite, ts}`; `sig` is
   Ed25519 over `b"gfs-client-status-request:v1:"` + canonical JSON of
-  `{gfs_key, instance_id, nonce, suite}` (`socialhome/gfs_client_status.py`),
-  where `gfs_key` is the key the household pinned for that GFS. A GFS answers
+  `{gfs_key, instance_id, nonce, suite, ts}`
+  (`socialhome/gfs_client_status.py`), where `gfs_key` is the key the
+  household pinned for that GFS and `ts` its clock in unix seconds floored to
+  the minute (no finer reading leaves the house). A GFS answers
   a question naming another key with `unknown`, so a GFS that saw the question
   can't replay it at another GFS to learn whether — or how — the household is
   registered there. Only a pending (or suspended) household sends it, and only
   to the GFS it registered with: the one place this request identifies it.
+- **What the GFS refuses unsigned.** A question whose suite it does not
+  support, whose `sig` is not exactly 64 bytes, or whose `ts` is more than
+  10 min old or more than 2 min ahead of its clock gets a plain `400` — no
+  status, nothing signed. So a signed `unknown` only ever means "no such
+  registration" or "the signature did not verify", and a question captured
+  on the path stops working after 10 min instead of telling its holder the
+  household's status forever. No random delay is added anywhere.
 - **The answer** adds `client_status` — `active`, `pending` or `banned` for a
   question that verifies against the key the instance registered, and
   `unknown` for an unknown instance and a bad signature alike (the GFS
   verifies an unknown instance against the fixed dummy key, as for the
   WebSocket hello, so the endpoint is no oracle for who is registered) — with
   `client_status_sig`, Ed25519 over `b"gfs-client-status:v1:"` + canonical
-  JSON of `{gfs_key, instance_id, nonce, request_sig, status, suite}` under the
-  GFS identity key (`request_sig` is the question's signature as the GFS
-  received it), and `client_status_sig_suite` (`ed25519`; an unknown suite is
+  JSON of `{gfs_key, instance_id, nonce, request_sig, request_suite,
+  request_ts, status, suite}` under the GFS identity key (the `request_*`
+  fields are the question as the GFS received it — the whole question is
+  bound), and `client_status_sig_suite` (`ed25519`; an unknown suite is
   refused, never defaulted).
 - **What the household trusts.** Only an answer whose signature verifies
   against the key it pinned for that connection, over this question's fresh
-  nonce, its own instance id and its own question signature — a forged,
-  unsigned, relabelled or replayed status is ignored with a WARNING and
-  nothing changes. Someone on the path who breaks the question's signature
-  gets a signed `unknown` for the broken question, which does not verify for
-  the household's — so it can't get a household suspended. No URL is bound: a
-  relay that forwards the question unchanged gets back that GFS's genuine
-  answer. No timestamp: the nonce makes every answer fresh, and
-  a skewed clock must never read as a rejection.
+  nonce and its own question exactly as sent (id, signature, suite, time) —
+  a forged, unsigned, relabelled or replayed status is ignored with a WARNING
+  and nothing changes. Someone on the path who alters any part of the
+  question gets at most a signed `unknown` for the altered question, which
+  does not verify for the household's — so it can't get a household
+  suspended. No URL is bound: a relay that forwards the question unchanged
+  gets back that GFS's genuine answer. The household reads every non-200
+  (the unsigned `400` for a stale question included) as "ask again later",
+  so a skewed clock never reads as a rejection.
 - **Outcomes.** `active` → the row turns `active` and the normal
   on-connected hooks run (the push socket opens, Discover refreshes — its
   spaces appear without a restart — and the GFS's `/gfs/info` refresh
   follows on the socket's connect). `unknown` (the operator rejected it, which
   deletes the row, or removed it) or `banned` → the row turns `suspended` and
   the connections list shows "Suspended"; remove it and connect again with a
-  new code. A suspended row is still asked (same backoff, then hourly), so an
-  unban (the GFS row goes back to `pending`, then the operator accepts) or a
-  GFS whose database was restored brings it back without a new code.
-  `pending`, no answer, a 4xx / 5xx or an older GFS that answers only the
-  plain proof → ask again later.
+  new code. A suspended row is still asked (same backoff, then hourly) for
+  **7 days** from when it became suspended, so an unban (the GFS row goes
+  back to `pending`, then the operator accepts) or a GFS whose database was
+  restored brings it back without a new code. After 7 days it stops asking:
+  an hourly question forever would tell that GFS every hour that the
+  household is still around. The 7 days are counted in memory — a restart
+  counts them from the start again — and removing the connection and
+  connecting again starts over. A `pending` row keeps asking on the backoff
+  until the operator decides. `pending`, no answer, a 4xx / 5xx or an older
+  GFS that answers only the plain proof → ask again later.
+- **One transition, once.** Every status change is a compare-and-set on the
+  stored row (`UPDATE … SET status=? WHERE id=? AND status IN (…)`): only
+  the check that moved the row runs the on-connected hooks, so two checks
+  answering together open one push socket, and a connection removed — or
+  turned active by its registration — while a question was out is never
+  revived or announced twice. Removing a connection stops its approval check
+  before anything else.
 - **Cost.** Only a `pending` or `suspended` connection asks — none, no
   request.
-  One ~250-byte request per question: seven in the first ~2 h, then one per
-  hour (the jittered hourly `/gfs/info` pass) until the operator decides.
+  One ~260-byte request per question: seven in the first ~2 h, then one per
+  hour (the jittered hourly `/gfs/info` pass) until the operator decides —
+  for a suspended row at most 7 days, so at most ~170 questions.
   `/gfs/proof` stays rate-limited 20 / min / IP.
 - **When it flips.** The SPA's connections list reads the new status on its
   next load (no live frame); onboarding's "waiting for approval" note says to

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import asdict
 
 import orjson
@@ -372,21 +373,24 @@ class GfsProofView(GfsBaseView):
     address, which fails at its own.
 
     A household still waiting for the operator's approval adds an optional
-    ``client: {instance_id, sig, sig_suite}`` — its question, signed with the
-    key it registered (:mod:`socialhome.gfs_client_status`). The answer then
-    also carries ``client_status`` (``active`` / ``pending`` / ``banned``, or
-    ``unknown`` for an unknown instance and a bad signature alike) with
+    ``client: {instance_id, sig, sig_suite, ts}`` — its question, signed with
+    the key it registered, at a minute-floored time
+    (:mod:`socialhome.gfs_client_status`). The answer then also carries
+    ``client_status`` (``active`` / ``pending`` / ``banned``, or ``unknown``
+    for an unknown instance and a bad signature alike) with
     ``client_status_sig`` + ``client_status_sig_suite``: this server's
-    signature over that status, the household's nonce, instance id and
-    question signature. A question names the key of the GFS it is for; one
-    naming another key reads ``unknown``. That
-    is how a pending household learns it was approved — the GFS holds no
+    signature over that status, the household's nonce and the whole
+    question. A question names the key of the GFS it is for; one naming
+    another key reads ``unknown``. An unsupported suite, a signature that is
+    not 64 bytes or a stale / future ``ts`` is an unsigned ``400``. That is
+    how a pending household learns it was approved — the GFS holds no
     address to tell it, and refuses a pending household's WebSocket.
 
     Unauthenticated: body-capped (:data:`_PROOF_MAX_BODY_BYTES`) and
     rate-limited per IP (:func:`~socialhome.global_server.public
     .build_proof_rate_limit`). ``400`` for a missing / malformed nonce or a
-    malformed ``client`` block, ``503`` when this node cannot sign.
+    malformed, unsupported or stale ``client`` block, ``503`` when this node
+    cannot sign.
     """
 
     async def post(self) -> web.Response:
@@ -402,7 +406,10 @@ class GfsProofView(GfsBaseView):
             raise web.HTTPBadRequest(reason="Invalid field: nonce")
         question = None
         if "client" in body:
-            question = parse_status_request(body["client"])
+            # Unsigned 400 for anything off — an unsupported suite, a sig
+            # that is not 64 bytes, a stale or future ``ts``: nothing is
+            # signed for a question this server would not verify as asked.
+            question = parse_status_request(body["client"], now=time.time())
             if question is None:
                 raise web.HTTPBadRequest(reason="Invalid field: client")
         cfg = self.svc(K.gfs_config_key)
@@ -421,16 +428,11 @@ class GfsProofView(GfsBaseView):
             "proof_sig_suite": suite,
         }
         if question is not None:
-            instance_id, client_sig, client_suite = question
             status = await self.svc(K.gfs_federation_key).client_status(
-                instance_id,
-                nonce,
-                client_sig,
-                client_suite,
-                gfs_key=cluster.own_public_key_hex,
+                nonce, question, gfs_key=cluster.own_public_key_hex
             )
             status_sig, status_suite = cluster.sign_client_status(
-                instance_id, nonce, client_sig, status
+                nonce, question, status
             )
             answer["client_status"] = status
             answer["client_status_sig"] = status_sig

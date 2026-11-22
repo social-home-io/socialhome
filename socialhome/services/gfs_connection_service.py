@@ -68,7 +68,6 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -125,6 +124,7 @@ from ..gfs_client_status import (
     CLIENT_STATUSES,
     UnsupportedClientStatusSigSuite,
     sign_status_request,
+    status_request_ts,
     verify_client_status,
 )
 from ..gfs_proof import (
@@ -471,10 +471,20 @@ APPROVAL_RETRY_DELAYS_S: tuple[float, ...] = (
     3600.0,
 )
 
+#: How long a ``suspended`` connection keeps asking its GFS (seconds),
+#: counted from when it became suspended: 7 days (owner decision, security
+#: review of #1414). Past it the household stops asking — an hourly question
+#: forever would tell that GFS every hour that this household is still
+#: around. ``pending`` keeps asking on the backoff. In memory: a restart
+#: counts the 7 days from the start again; removing the connection and
+#: connecting again starts over. Read at call time (a test seam).
+SUSPENDED_ASK_FOR_S: float = 7 * 24 * 3600.0
+
 #: What :meth:`GfsConnectionService.check_approval` answers — the
 #: :class:`GfsReconcileRetry` vocabulary: ``done`` (approved, now active),
 #: ``retry`` (still pending or suspended, or no verified answer — asked again)
-#: or ``skip`` (nothing to ask: no such connection, or it is active).
+#: or ``skip`` (nothing to ask: no such connection, it is active, or it has
+#: been suspended for :data:`SUSPENDED_ASK_FOR_S`).
 ApprovalResult = Literal["done", "retry", "skip"]
 
 #: v_57 — a listing target no space's list has named for this long has its
@@ -569,6 +579,7 @@ class GfsConnectionService:
         "_space_media",
         "_space_repo",
         "_suite_refused_at",
+        "_suspended_since",
         "_target_warned",
         "_targeted_publish",
         "_theme_repo",
@@ -819,6 +830,9 @@ class GfsConnectionService:
         # ``time.monotonic()`` of each connection's latest successful proof —
         # the reconnect gate's reuse window (:data:`PROOF_REUSE_S`).
         self._proven_at: dict[str, float] = {}
+        # ``time.monotonic()`` of when each connection was seen ``suspended``
+        # first (this run): it stops asking :data:`SUSPENDED_ASK_FOR_S` later.
+        self._suspended_since: dict[str, float] = {}
         #: v_57 — the owner's signed GFS list as THIS household may use it
         #: (:meth:`GfsServerSelectionService.member_servers`); ``None`` until
         #: wired, and then every caller falls back to its own connections.
@@ -1354,12 +1368,13 @@ class GfsConnectionService:
 
         Only for a ``pending`` or ``suspended`` connection (anything else:
         ``skip``, no request). Rides ``POST /gfs/proof`` with a ``client``
-        question signed by this household's identity key and naming the GFS
-        key pinned for this connection (:mod:`socialhome.gfs_client_status`);
-        the answer counts only when its signature verifies against that
-        pinned key, over this question's fresh nonce, this household's id and
-        this question's own signature — so nobody can fake an approval,
-        replay one, or swap in a broken question to get a signed ``unknown``.
+        question signed by this household's identity key, naming the GFS key
+        pinned for this connection and a minute-floored time
+        (:mod:`socialhome.gfs_client_status`); the answer counts only when its
+        signature verifies against that pinned key, over this question's
+        fresh nonce and the WHOLE question as sent — so nobody can fake an
+        approval, replay one, or tamper with the question to get a signed
+        ``unknown``.
 
         * ``active`` → the connection turns active and the on-connected hooks
           run (push socket, Discover, the GFS-needed bell) — ``done``;
@@ -1367,56 +1382,83 @@ class GfsConnectionService:
           ``pending`` — ``retry``;
         * ``unknown`` (the operator rejected or removed it) or ``banned`` →
           the connection is ``suspended`` (the connections list shows it) —
-          ``retry``: it keeps being asked, so an unban or a GFS whose database
-          was restored brings it back without a new code;
+          ``retry``: it keeps being asked for :data:`SUSPENDED_ASK_FOR_S`
+          (7 days), so an unban or a GFS whose database was restored brings
+          it back without a new code; past that, ``skip`` — asked no more;
         * no verified answer (an older GFS, a forged / unsigned / malformed
-          one) or no answer at all → ``retry``, nothing changes.
+          one, an unsigned ``400`` for a stale question) or no answer at all
+          → ``retry``, nothing changes.
+
+        Every status change is compare-and-set on the stored row
+        (:meth:`~AbstractGfsConnectionRepo.transition_status`): a connection
+        removed — or turned active another way — while the question was out
+        is never revived or announced twice, and of two checks answering at
+        once only the one that moved the row runs the hooks.
 
         Never raises.
         """
         conn = await self._repo.get(gfs_id)
         if conn is None or conn.status not in ("pending", "suspended"):
             return "skip"
+        if conn.status == "suspended" and self._suspended_too_long(gfs_id):
+            log.info(
+                "GFS %r (%s) has held this household suspended for 7 days — "
+                "no longer asking; remove it and connect again with a new code",
+                conn.display_name,
+                conn.inbox_url,
+            )
+            return "skip"
         if not self._own_instance_id or not self._own_signing_key:
             return "retry"
         status = await self._ask_client_status(conn)
         if status is None:
             return "retry"
-        # Re-read: the connection may have been removed (or changed) while
-        # the question was out — never resurrect or re-announce it.
-        current = await self._repo.get(gfs_id)
-        if current is None or current.status not in ("pending", "suspended"):
-            return "skip"
         if status == "active":
-            await self._repo.update_status(gfs_id, "active")
+            if not await self._repo.transition_status(
+                gfs_id, "active", ("pending", "suspended")
+            ):
+                # Removed, or active already — whoever moved it ran the hooks.
+                return "skip"
+            self._suspended_since.pop(gfs_id, None)
+            current = await self._repo.get(gfs_id)
+            if current is None:
+                return "skip"
             log.info(
                 "GFS %r (%s) approved this household — connected",
                 current.display_name,
                 current.inbox_url,
             )
-            await self._run_on_connected(replace(current, status="active"))
+            await self._run_on_connected(current)
             return "done"
-        wanted = "pending" if status == "pending" else "suspended"
-        if current.status != wanted:
-            await self._repo.update_status(gfs_id, wanted)
-            if wanted == "suspended":
-                log.warning(
-                    "GFS %r (%s) answered %r for this household: its operator "
-                    "%s it — connection suspended (still asked hourly); remove "
-                    "it and connect again with a new code",
-                    current.display_name,
-                    current.inbox_url,
-                    status,
-                    "banned" if status == "banned" else "rejected or removed",
-                )
-            else:
+        if status == "pending":
+            if await self._repo.transition_status(gfs_id, "pending", ("suspended",)):
+                self._suspended_since.pop(gfs_id, None)
                 log.info(
                     "GFS %r (%s) holds this household as pending again — "
                     "waiting for its operator",
-                    current.display_name,
-                    current.inbox_url,
+                    conn.display_name,
+                    conn.inbox_url,
                 )
+            return "retry"
+        if await self._repo.transition_status(gfs_id, "suspended", ("pending",)):
+            self._suspended_since[gfs_id] = time.monotonic()
+            log.warning(
+                "GFS %r (%s) answered %r for this household: its operator "
+                "%s it — connection suspended (still asked for 7 days); "
+                "remove it and connect again with a new code",
+                conn.display_name,
+                conn.inbox_url,
+                status,
+                "banned" if status == "banned" else "rejected or removed",
+            )
         return "retry"
+
+    def _suspended_too_long(self, gfs_id: str) -> bool:
+        """Whether *gfs_id* has been suspended for :data:`SUSPENDED_ASK_FOR_S`.
+        A suspended connection first seen in this run (a restart) starts its
+        window now."""
+        since = self._suspended_since.setdefault(gfs_id, time.monotonic())
+        return time.monotonic() - since >= SUSPENDED_ASK_FOR_S
 
     async def check_pending_approvals(self) -> int:
         """One more question for every connection still awaiting approval
@@ -1436,7 +1478,11 @@ class GfsConnectionService:
         ``None`` when there is no verified answer. Never raises."""
         nonce = new_proof_nonce()
         question = sign_status_request(
-            self._own_signing_key, conn.public_key, self._own_instance_id, nonce
+            self._own_signing_key,
+            conn.public_key,
+            self._own_instance_id,
+            nonce,
+            ts=status_request_ts(time.time()),
         )
         gfs_url = conn.inbox_url.rstrip("/")
         try:
@@ -1444,7 +1490,7 @@ class GfsConnectionService:
         except RuntimeError:
             return None
         outcome, body = await self._post_proof(
-            client, gfs_url, {"nonce": nonce, "client": question}
+            client, gfs_url, {"nonce": nonce, "client": question.to_wire()}
         )
         if outcome != "ok" or not isinstance(body, dict):
             return None
@@ -1467,13 +1513,7 @@ class GfsConnectionService:
             return None
         try:
             ok = verify_client_status(
-                conn.public_key,
-                self._own_instance_id,
-                nonce,
-                question["sig"],
-                status,
-                sig,
-                suite,
+                conn.public_key, nonce, question, status, sig, suite
             )
         except UnsupportedClientStatusSigSuite:
             log.warning(
@@ -2852,6 +2892,11 @@ class GfsConnectionService:
         Sends nothing inline: the ``on_disconnect`` hook (the seat keeper)
         only records local state and schedules its unsubscribes in the
         background."""
+        # First: no approval check may land on a connection being removed
+        # (the status flip is compare-and-set as well — this stops the
+        # question itself). Removing and connecting again starts over.
+        self._approval_retry.cancel(gfs_id)
+        self._suspended_since.pop(gfs_id, None)
         conn = await self._repo.get(gfs_id)
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
@@ -2860,7 +2905,6 @@ class GfsConnectionService:
                 await hook(conn)
             except Exception:
                 log.exception("gfs: on-disconnect hook failed for %s", gfs_id)
-        self._approval_retry.cancel(gfs_id)
         self._forget_connection_pins(gfs_id)
         # ``repo.delete`` removes this connection's publication rows itself,
         # without passing through :meth:`unpublish_space`, so note the spaces

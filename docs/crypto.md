@@ -1245,22 +1245,30 @@ the operator approved it. Two signatures, both suite-tagged
 (`CLIENT_STATUS_SIG_SUITE_ED25519 = "ed25519"`, validated against
 `SUPPORTED_CLIENT_STATUS_SIG_SUITES`; unknown → `UnsupportedClientStatusSigSuite`,
 never a default): the household's question `client: {instance_id, sig,
-sig_suite}`, Ed25519 with its identity key over
+sig_suite, ts}`, Ed25519 with its identity key over
 `b"gfs-client-status-request:v1:"` + canonical JSON of `{gfs_key, instance_id,
-nonce, suite}` (`gfs_key` = the key it pinned for that GFS, so another GFS
-can't replay the question elsewhere), and the GFS's answer
-`client_status_sig` (+ `client_status_sig_suite`), Ed25519 with the GFS
-identity key over `b"gfs-client-status:v1:"` + canonical JSON of `{gfs_key,
-instance_id, nonce, request_sig, status, suite}`. The household verifies the
-answer against the key it PINNED for the connection, with its own fresh
-nonce, instance id and question signature, so a status can be neither forged,
-relabelled, replayed, lifted from another household's answer nor obtained for
-a question someone on the path swapped in. The GFS answers the real status only to a question that
-verifies against the registered key; an unknown instance is verified against
-a fixed dummy key and, like a bad signature, reads `unknown` — no oracle for
-who is registered. No URL is bound (a relay forwarding the question unchanged
-to the real GFS gets the real answer) and no timestamp (the nonce gives freshness; a skewed clock
-must never read as a rejection). The prefixes are distinct from each other,
+nonce, suite, ts}` (`gfs_key` = the key it pinned for that GFS, so another GFS
+can't replay the question elsewhere; `ts` = unix seconds floored to the
+minute), and the GFS's answer `client_status_sig` (+
+`client_status_sig_suite`), Ed25519 with the GFS identity key over
+`b"gfs-client-status:v1:"` + canonical JSON of `{gfs_key, instance_id, nonce,
+request_sig, request_suite, request_ts, status, suite}` — the WHOLE question
+is bound, not just its signature. The household verifies the answer against
+the key it PINNED for the connection, with its own fresh nonce and its own
+question exactly as it sent it, so a status can be neither forged,
+relabelled, replayed, lifted from another household's answer nor obtained
+for a question someone on the path altered (its signature, its suite or its
+time). Before it signs anything the GFS refuses, with an UNSIGNED `400`, a
+question whose suite it does not support, whose `sig` is not exactly 64
+bytes, or whose `ts` is older than 10 min or more than 2 min ahead — so a
+signed `unknown` means only "no such registration" or "the signature did not
+verify", and a captured question is no lasting status oracle. The household
+reads any non-200 as "ask again later": a skewed clock never reads as a
+rejection. The GFS answers the real status only to a question that verifies
+against the registered key; an unknown instance is verified against a fixed
+dummy key and, like a bad signature, reads `unknown` — no oracle for who is
+registered. No URL is bound (a relay forwarding the question unchanged to the
+real GFS gets the real answer). The prefixes are distinct from each other,
 from `gfs-proof:v1:` and from the capability block's.
 
 The suite-tag retrofit promised in earlier revisions of this doc is

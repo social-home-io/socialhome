@@ -8,12 +8,21 @@ takes nothing from the requester but the nonce.
 
 from __future__ import annotations
 
+import time
+from unittest.mock import patch
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, generate_identity_keypair
-from socialhome.gfs_client_status import sign_status_request, verify_client_status
+from socialhome.gfs_client_status import (
+    CLIENT_STATUS_REQUEST_MAX_AGE_S,
+    CLIENT_STATUS_REQUEST_MAX_FUTURE_S,
+    sign_status_request,
+    status_request_ts,
+    verify_client_status,
+)
 from socialhome.gfs_proof import (
     PROOF_CAPABILITY,
     PROOF_ROUTE,
@@ -25,6 +34,7 @@ from socialhome.global_server import public
 from socialhome.global_server.app_keys import gfs_cluster_key, gfs_fed_repo_key
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.routes import relay as relay_routes
 from socialhome.global_server.server import create_gfs_app
 
 BASE_URL = "https://gfs.proof.test"
@@ -263,39 +273,61 @@ async def _register(client, kp, instance_id: str, status: str) -> None:
     )
 
 
-async def _ask(client, kp, instance_id: str, n: int = 50, *, gfs_key: str = ""):
-    """POST a signed question → ``(nonce, question sig, response)``. Asks
-    the GFS at *client* unless *gfs_key* names another one."""
+async def _gfs_key(client) -> str:
+    return (await (await client.get("/gfs/info")).json())["public_key"]
+
+
+async def _ask(
+    client,
+    kp,
+    instance_id: str,
+    n: int = 50,
+    *,
+    gfs_key: str = "",
+    ts: int | None = None,
+    edit=None,
+):
+    """POST a signed question → ``(nonce, question, response)``. Asks the
+    GFS at *client* unless *gfs_key* names another one; *edit* rewrites the
+    wire ``client`` block after signing (an on-path edit)."""
     if not gfs_key:
-        gfs_key = (await (await client.get("/gfs/info")).json())["public_key"]
+        gfs_key = await _gfs_key(client)
     nonce = new_proof_nonce()
-    question = sign_status_request(kp.private_key, gfs_key, instance_id, nonce)
-    body = {"nonce": nonce, "client": question}
+    question = sign_status_request(
+        kp.private_key,
+        gfs_key,
+        instance_id,
+        nonce,
+        ts=status_request_ts(time.time()) if ts is None else ts,
+    )
+    block = question.to_wire()
+    if edit is not None:
+        block = edit(block)
+    body = {"nonce": nonce, "client": block}
     resp = await client.post(PROOF_ROUTE, json=body, headers=_ip(n))
-    return nonce, question["sig"], resp
+    return nonce, question, resp
 
 
 @pytest.mark.parametrize("status", ["pending", "active", "banned"])
 async def test_a_registered_household_learns_its_status_signed(client, status):
     home = generate_identity_keypair()
     await _register(client, home, "home-a", status)
-    info = await (await client.get("/gfs/info")).json()
-    nonce, q_sig, resp = await _ask(client, home, "home-a")
+    gfs_key = await _gfs_key(client)
+    nonce, question, resp = await _ask(client, home, "home-a")
     assert resp.status == 200
     body = await resp.json()
     assert body["client_status"] == status
     assert verify_client_status(
-        info["public_key"],
-        "home-a",
+        gfs_key,
         nonce,
-        q_sig,
+        question,
         status,
         body["client_status_sig"],
         body["client_status_sig_suite"],
     )
     # The possession proof rides along unchanged.
     assert verify_possession_proof(
-        info["public_key"], nonce, BASE_URL, body["proof_sig"], body["proof_sig_suite"]
+        gfs_key, nonce, BASE_URL, body["proof_sig"], body["proof_sig_suite"]
     )
 
 
@@ -304,17 +336,16 @@ async def test_an_unknown_instance_and_a_bad_signature_answer_the_same(client):
     home = generate_identity_keypair()
     impostor = generate_identity_keypair()
     await _register(client, home, "home-a", "active")
-    info = await (await client.get("/gfs/info")).json()
+    gfs_key = await _gfs_key(client)
     for n, (kp, iid) in enumerate(((impostor, "home-a"), (home, "home-gone"))):
-        nonce, q_sig, resp = await _ask(client, kp, iid, n=60 + n)
+        nonce, question, resp = await _ask(client, kp, iid, n=60 + n)
         assert resp.status == 200
         body = await resp.json()
         assert body["client_status"] == "unknown"
         assert verify_client_status(
-            info["public_key"],
-            iid,
+            gfs_key,
             nonce,
-            q_sig,
+            question,
             "unknown",
             body["client_status_sig"],
             body["client_status_sig_suite"],
@@ -340,18 +371,66 @@ async def test_a_question_meant_for_another_gfs_reads_unknown(client):
     assert (await resp.json())["client_status"] == "unknown"
 
 
-async def test_an_unknown_question_suite_reads_unknown(client):
+@pytest.mark.parametrize("suite", ["ed448", "ED25519", ""])
+async def test_a_tampered_question_suite_gets_no_signed_status(client, suite):
+    """Finding 1: an on-path edit of ``sig_suite`` used to make the GFS sign
+    ``unknown`` over the household's real id, nonce and signature — which
+    the household accepted and suspended on. Now it is an unsigned ``400``
+    (the household asks again later) and nothing is signed."""
     home = generate_identity_keypair()
     await _register(client, home, "home-a", "active")
-    nonce = new_proof_nonce()
-    info = await (await client.get("/gfs/info")).json()
-    block = sign_status_request(home.private_key, info["public_key"], "home-a", nonce)
-    block["sig_suite"] = "ed448"
-    resp = await client.post(
-        PROOF_ROUTE, json={"nonce": nonce, "client": block}, headers=_ip(70)
+    _, _, resp = await _ask(
+        client, home, "home-a", n=70, edit=lambda b: {**b, "sig_suite": suite}
     )
-    assert resp.status == 200
-    assert (await resp.json())["client_status"] == "unknown"
+    assert resp.status == 400
+    assert "client_status_sig" not in await resp.text()
+
+
+async def test_a_replayed_question_past_its_window_gets_no_signed_status(client):
+    """Finding 2: a captured question is no lasting status oracle. Inside
+    its window it is answered; replayed after it, the GFS refuses it with
+    an unsigned ``400`` and signs nothing."""
+    home = generate_identity_keypair()
+    await _register(client, home, "home-a", "pending")
+    gfs_key = await _gfs_key(client)
+    nonce = new_proof_nonce()
+    asked_at = status_request_ts(time.time())
+    question = sign_status_request(
+        home.private_key, gfs_key, "home-a", nonce, ts=asked_at
+    )
+    body = {"nonce": nonce, "client": question.to_wire()}
+    fresh = await client.post(PROOF_ROUTE, json=body, headers=_ip(74))
+    assert (await fresh.json())["client_status"] == "pending"
+    later = time.time() + CLIENT_STATUS_REQUEST_MAX_AGE_S + 120
+    with patch.object(relay_routes.time, "time", return_value=later):
+        replay = await client.post(PROOF_ROUTE, json=body, headers=_ip(75))
+    assert replay.status == 400
+    assert "client_status" not in await replay.text()
+
+
+async def test_a_question_from_the_future_gets_no_signed_status(client):
+    home = generate_identity_keypair()
+    await _register(client, home, "home-a", "active")
+    ahead = status_request_ts(time.time()) + CLIENT_STATUS_REQUEST_MAX_FUTURE_S + 120
+    _, _, resp = await _ask(client, home, "home-a", n=76, ts=ahead)
+    assert resp.status == 400
+
+
+@pytest.mark.parametrize("size", [0, 32, 63, 65])
+async def test_a_question_sig_of_the_wrong_length_gets_no_signed_status(client, size):
+    """Finding 5: ``sig`` must decode to exactly 64 bytes — refused before
+    the GFS signs anything."""
+    home = generate_identity_keypair()
+    await _register(client, home, "home-a", "active")
+    _, _, resp = await _ask(
+        client,
+        home,
+        "home-a",
+        n=77,
+        edit=lambda b: {**b, "sig": b64url_encode(b"x" * size)},
+    )
+    assert resp.status == 400
+    assert "client_status" not in await resp.text()
 
 
 @pytest.mark.parametrize(
@@ -360,7 +439,7 @@ async def test_an_unknown_question_suite_reads_unknown(client):
         "x",
         [],
         {"instance_id": "home-a"},
-        {"instance_id": 1, "sig": "s", "sig_suite": "ed25519"},
+        {"instance_id": 1, "sig": "s", "sig_suite": "ed25519", "ts": 0},
     ],
 )
 async def test_a_malformed_client_block_is_400(client, block):
