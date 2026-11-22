@@ -383,6 +383,7 @@ class _SyncPages(Protocol):
         requester: str,
         requester_version: int,
         requester_ref: Any,
+        fetch: bool = False,
     ) -> None: ...
 
 
@@ -614,6 +615,7 @@ class SpaceSyncService:
             requester=session.requester_instance_id,
             requester_version=await self._session_version(session),
             requester_ref=getattr(session, "page_ref", None),
+            fetch=bool(getattr(session, "want_rows", False)),
         )
 
     async def _sentinel_proof(self, space_id: str) -> dict | None:
@@ -1041,13 +1043,15 @@ class SpaceSyncService:
                 owner_statement=await self._sentinel_statement(space_id),
                 inviter_proof=await self._sentinel_proof(space_id),
             )
-            await self._offer_page(session)
             if _stopped(session):
                 return
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.
             session.stream_clean = not any_failure
             sent_sentinel = await self._send(session, sentinel)
+            # v_95: after the sentinel shipped (a network send of its own
+            # never delays the stream's end — security check 2, L7).
+            await self._offer_page(session)
             if not sent_sentinel.ok:
                 session.stream_clean = False
             # An ``incremental`` session is the periodic re-sync of a

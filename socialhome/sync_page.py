@@ -66,6 +66,18 @@ class UnsupportedPageSuite(ValueError):
     never defaulted (crypto-suite rule)."""
 
 
+#: How a ``SPACE_SYNC_PAGE``'s ``page_sealed`` is sealed: AES-256-GCM under
+#: the space content key (``encrypt_chunk``), its ``seal_suite`` on the
+#: wire. A new wire shape (v_95, unreleased): the field is required.
+PAGE_SEAL_SUITE_AESGCM_256: str = "aes256gcm-space-content-key"
+SUPPORTED_PAGE_SEAL_SUITES: frozenset[str] = frozenset({PAGE_SEAL_SUITE_AESGCM_256})
+
+
+class UnsupportedPageSealSuite(ValueError):
+    """A ``page_sealed`` names no or an unknown ``seal_suite``. Refused —
+    never defaulted (crypto-suite rule)."""
+
+
 class PageRefused(ValueError):
     """A page failed verification (malformed, wrong space, epoch, signature,
     clock skew, or a vector that does not hash to its root)."""
@@ -1228,7 +1240,9 @@ __all__ = [
     "MAX_LISTING_ROWS",
     "MAX_PAGE_FUTURE_SKEW_MS",
     "PAGE_MIN_INTERVAL_S",
+    "PAGE_SEAL_SUITE_AESGCM_256",
     "PAGE_SUITE_SHA256_B256",
+    "SUPPORTED_PAGE_SEAL_SUITES",
     "SUPPORTED_PAGE_SUITES",
     "VECTOR_BYTES",
     "CommitSpec",
@@ -1236,6 +1250,7 @@ __all__ = [
     "ListingRow",
     "PageRefused",
     "SyncPage",
+    "UnsupportedPageSealSuite",
     "UnsupportedPageSuite",
     "VectorBuilder",
     "bucket_hash",

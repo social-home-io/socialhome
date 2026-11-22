@@ -27,6 +27,7 @@ from socialhome.canonical_json import canonical_str
 from socialhome.crypto import ed25519_public_key
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.space import SpaceMember, SpaceRole
 from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.domain.task import Task, TaskList, TaskStatus
@@ -368,6 +369,15 @@ async def partial(trio, tmp_dir):
     await host_pages.seal_if_due(SPACE)
     assert await _round(host_pages, member_pages, "s-m")
     other = await _home(tmp_dir / "other.db", "u-olga")
+    # Its person holds a member seat (a follower household drops pages).
+    await other.repos.space.save_member(
+        SpaceMember(
+            space_id=SPACE,
+            user_id="u-olga",
+            role=SpaceRole.MEMBER.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
     await other.db.enqueue(
         "UPDATE spaces SET identity_public_key=? WHERE id=?", (PK_HEX, SPACE)
     )

@@ -384,7 +384,7 @@ row — that row only. A partial answer goes on to the next member; a host
 heard again stops it. Once nothing is left, the space reads **up to date**
 while the host is still offline. A bucket every member household on the
 page answers `held: false` for (each changed it after the page too: a
-delete, a poll closed) is paused for 3 h — still unresolved, never "up to
+delete, a poll closed) is paused for 1 h — still unresolved, never "up to
 date" — so a silent host never costs one ask per tick for nothing; a member
 on another page sends no listing and is no "no"; a delete or archive we hold explains
 its own bucket locally. The owner, back from a long absence with a newer
@@ -507,8 +507,9 @@ commitment to the space's state (a **page**: 256 bucket hashes under one
 root). It pushes each new page — `SPACE_SYNC_PAGE`, sealed under the
 content key — to every member household (never a follower), at most once
 an hour per space (one multi upload per GFS for the GFS-reached ones); a
-member whose BEGIN `page` is older than the page last pushed gets the
-same event from that provider alone, and any member relays it that way. A member keeps the newest page and its
+member whose BEGIN `page` is older than the page a signer last pushed
+gets that page from the signer alone (a plain member relays it only in a
+verified-fetch session, while no host answers). A member keeps the newest page and its
 vector, compares its own rows with each newer page (at most every 15
 minutes): differences explained by its own newer rows cost nothing; the
 rest is settled by at most 8 bucket listings an acting host appends to

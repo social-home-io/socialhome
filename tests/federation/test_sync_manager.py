@@ -1361,3 +1361,18 @@ def test_receiving_counts_only_a_stream_from_an_acting_host():
     assert not mgr.receiving("sp", "me", ["owner", "admin"], now=now + 10)
     assert mgr.receiving("sp", "me", ["owner", "co-member"], now=now + 10)
     assert not mgr.receiving("sp", "me", [], now=now + 10)
+
+
+@pytest.mark.parametrize("sync_id", ["page:push", "a b", "", "x" * 129, "s/1"])
+async def test_a_malformed_sync_id_is_refused(sync_id):
+    """Security check 2, L4: a session id is the requester's word inside the
+    content key's AAD; only letters, digits, ``_`` and ``-`` (≤ 128) — so it
+    never takes a label another use seals under (``page:push``)."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    decision = await mgr.begin_session(
+        sync_id=sync_id,
+        space_id="sp",
+        requester_instance_id="peer",
+        provider_instance_id="me",
+    )
+    assert not decision.accepted and decision.reason == "malformed_sync_id"

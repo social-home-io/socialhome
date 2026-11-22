@@ -142,6 +142,7 @@ async def test_the_stream_end_offers_the_page_never_on_the_sentinel(provider):
             "requester": session.requester_instance_id,
             "requester_version": 95,
             "requester_ref": {"signer": "h"},
+            "fetch": False,
         }
     ]
 

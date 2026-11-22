@@ -21,6 +21,7 @@ Implements the security audit fixes from §25.6.2:
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 from collections import defaultdict, deque
@@ -34,6 +35,10 @@ from .sync_rtc import (
     SyncRtcSession,
     SyncSessionRecord,
 )
+
+#: A sync session id: the requester's word, part of the content key's AAD
+#: (``space_id:epoch:sync_id``) — letters, digits, ``_`` and ``-`` only.
+SYNC_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 log = logging.getLogger(__name__)
 
@@ -520,6 +525,12 @@ class SyncSessionManager:
         ``SPACE_SYNC_DIRECT_FAILED`` event the caller should send back
         to the requester.
         """
+        if not SYNC_ID_RE.fullmatch(sync_id):
+            # A session id is a requester's word that ends up in the content
+            # key's AAD (``space_id:epoch:sync_id``): letters, digits, ``_``
+            # and ``-`` only, so it never takes a label another use seals
+            # under (``page:push`` — security check 2, L4).
+            return SyncDecision(accepted=False, reason="malformed_sync_id")
         if sync_id in self._sessions:
             return SyncDecision(accepted=False, reason="duplicate_sync_id")
 

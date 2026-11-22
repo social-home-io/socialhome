@@ -70,8 +70,10 @@ checked against the signed page, not against who delivered it.
 ## Event types
 
 - **`SPACE_SYNC_PAGE`** (new in v_95, never released before): `{page_sealed:
-  {epoch, payload}}` — the signed page and its 256 bucket hashes, sealed
-  under the space content key (AAD `space_id:epoch:space-sync-page`)
+  {epoch, payload, seal_suite}}` (`seal_suite` =
+  `PAGE_SEAL_SUITE_AESGCM_256`, required; an unknown or missing one is
+  refused, `UnsupportedPageSealSuite`) — the signed page and its 256 bucket hashes, sealed
+  under the space content key (AAD `space_id:epoch:page:push` — a `:` no session id may hold, so a chunk sealed for a requester-chosen `sync_id` never opens as a page)
   inside the per-pair encrypted payload; only `space_id` routes it. From
   the signer to every member household (pushed, ≤ 1 / h per space), or
   from any member-seated provider to one household whose BEGIN named an
@@ -348,7 +350,7 @@ sequenceDiagram
   170 B, inside the encrypted payload.
 - **`SPACE_SYNC_PAGE`**: `{page_sealed: {epoch, payload}}`, the page and
   its vector sealed with `encrypt_chunk` under the space content key (AAD
-  `space_id:epoch:space-sync-page`), inside the envelope's own encrypted
+  `space_id:epoch:page:push` — a `:` no session id may hold, so a chunk sealed for a requester-chosen `sync_id` never opens as a page), inside the envelope's own encrypted
   payload (encryption-first: only `space_id` and the routing fields are
   in the clear). The plaintext is `{page, vector}` — ≈ 11.4 KB of JSON,
   ≈ 15.3 KB sealed (measured).
@@ -364,13 +366,21 @@ sequenceDiagram
     hourly per space**: a seal within the hour after the last push marks
     the space due; the scheduler's tick (every 30 min) pushes the newest
     page held then, once — never a queue of pages.
-  - **A stale BEGIN ref.** At the end of a stream the provider compares
-    the requester's `page` with the page it offers — for the signer the
-    page it last pushed (a page sealed since waits for its hourly push, so
-    BEGINs never undo the coalescing), for a member the page it holds —
-    and when the ref is older (or absent), sends the same event to that
-    one household (`send_with_mesh_fallback`). "Sync now" is a BEGIN like
-    any other: a member that missed a push gets the page at once.
+  - **A stale BEGIN ref.** After a stream's sentinel ships, a **signer**
+    (the household whose held page is its own) compares the requester's
+    `page` with the page it LAST PUSHED and, when the ref is older (or
+    absent), sends THAT page — never a newer one waiting for its hour
+    mark, so BEGINs never undo the coalescing — to that one household
+    (`send_with_mesh_fallback`). A plain member never answers an ordinary
+    BEGIN's ref: a tick sends one BEGIN to every peer, so every member
+    holding the newer page answering would make ≈ N²/2 copies of each page
+    (security check 2, M1). It relays its page only in a verified-fetch
+    session (Phase 3: the requester's hosts are silent, no signer answers
+    it). A ref the requester signed itself is never answered: a delegated
+    admin keeps its own page and never stores another signer's, so its ref
+    would look stale forever (M2) — only the owner takes an admin's page.
+    "Sync now" is a BEGIN like any other: a member that missed a push gets
+    the page from each signer it asks, once.
 - **Offline members get only the newest page**: the outbox keeps one row
   per (space, peer) for this event (`supersede_key` `sync-page:<space>`;
   a newer page replaces a queued older one, the multi path included). A
@@ -379,7 +389,9 @@ sequenceDiagram
 - **Followers and non-members get no page**: the fan-out names only the
   writer households (a page's vector covers member-only resources, e.g.
   zones), and a provider sends the targeted event only to a writer
-  household. A non-member on a mesh path sees `SPACE_ROUTED` ciphertext;
+  household. The receiving half: a household holding no member seat drops
+  a page sent to it by mistake (`holds_member_seat`; security check 2,
+  L5). A non-member on a mesh path sees `SPACE_ROUTED` ciphertext;
   a GFS sees the sealed multi body.
 - **Lazy seal.** When the provider is a signer and a stream to a member
   ends, it seals a page if all of these hold:
@@ -473,7 +485,7 @@ one ≈ 15.8 KB body + one key wrap per mailbox (≈ 100 B × 50 ≈ 5 KB).
 | Trigger | Recipients × items × bytes | Busy space, per day | Small space (2 000 rows, 50 changes, 5 paired households) |
 |---|---|---|---|
 | Push on seal, ≤ 1 / h per space | per push: 100 direct × 15.8 KB ≈ 1.58 MB + 2 multi uploads × ≈ 21 KB ≈ 42 KB ≈ **1.62 MB host upload**; changes every ~45 s keep the space changed, so ≤ 24 pushes | ≈ **39 MB** host upload; the 2 GFSs hand each of their 50 mailboxes the 15.8 KB body (≈ 38 MB/day of GFS egress, not the host's) | ≤ 24 × 5 × 15.8 KB ≈ 1.9 MB, far less in practice (a quiet space is neither resealed nor pushed) |
-| A stale BEGIN ref (a member that missed a push) | 1 × 15.8 KB to that household | a returning member: once; ≈ 0 otherwise (a member holding the last pushed page gets nothing) | ≈ 0 |
+| A stale BEGIN ref (a member that missed a push) | 1 × 15.8 KB to that household from each signer it syncs with (k ≤ 1 + delegated admins), never from a plain member | a returning member: once per signer; ≈ 0 otherwise (a member holding a signer's last pushed page gets nothing from it) | ≈ 0 |
 | `page` ref in every BEGIN | 200 members × 48 BEGINs × ≈ 0.2 KB (170 B JSON, encrypted) | ≈ **2 MB** | ≈ 0.05 MB |
 | Seal | 1 export + hash, ≤ 1 / 15 min, only when a BEGIN finds the space changed (the "changed?" probe is memoised on the change counter) | ≤ 96 × 6 s on x86 (2–4× on a Pi) | ≤ 96 × 0.1 s |
 | Member compare | 1 recompute per newer page, ≤ 1 / 15 min, `to_thread` | ≤ 24 × 6 s per member (one per pushed page) | trivial |
@@ -495,8 +507,17 @@ one ≈ 15.8 KB body + one key wrap per mailbox (≈ 100 B × 50 ≈ 5 KB).
   every 30), so the full vector went every round: ≈ 147 MB/day. A 1-h
   resend rule halved that (≈ 74 MB/day); the push halves it again and
   makes delivery independent of BEGINs: one event, one receive path.
-- **Amplification**: one seal makes at most one push an hour — 1 × N
-  members, never N × M; a member's BEGIN costs at most one targeted page.
+- **Amplification**: one signer's seals make at most one push an hour —
+  1 × N members, never N × M; a member's BEGIN costs at most one targeted
+  page, and only from a signer.
+- **k signers** (both kept — owner decision 2026-11-22): the owner and every
+  seed-holding delegated admin acting as host seal and push their own
+  pages, each at most hourly, so the push budget is **k × ≈ 39 MB/day** in
+  the busy space (k = 2, an owner and one admin: ≈ 78 MB/day). Not
+  bounded further: a delegated admin keeps only its own page, so it cannot
+  tell whether it is the newest signer; an admin seals only on BEGINs it
+  receives (members BEGIN to every acting host), and while the owner is
+  away (the case delegation is for) only the admin seals.
 - **The 30-min quiet BEGIN stays.** It is the host-liveness probe
   (`HostContact`) and the watermark exchange, and it catches a member that
   missed a push. Phase 3's `page_match` is what would make the daily full
@@ -666,7 +687,7 @@ What shipped, where it is more exact than the design above:
   (`issued_at` is needed for the order key). Hashes are base64url without
   padding; the vector is one base64url string. `SPACE_SYNC_PAGE` carries
   `page_sealed` = `{epoch, payload}` from `encrypt_chunk` (content key, AAD
-  `space_id:epoch:space-sync-page`), ≤ 24 KiB, always with the full vector
+  `space_id:epoch:page:push` — a `:` no session id may hold, so a chunk sealed for a requester-chosen `sync_id` never opens as a page), ≤ 24 KiB, always with the full vector
   (no delta: final review I4, see §5) — pushed by the signer to every
   writer household at most hourly, and sent to one household at
   `MIN_FOR_SYNC_PAGES` whose BEGIN `page` is absent or older by
@@ -692,14 +713,29 @@ What shipped, where it is more exact than the design above:
 - **Rotation.** A trigger on `spaces` drops the page in the same statement
   that moves `authority_key_epoch` or `identity_public_key` (every path:
   rotate, adopt, re-pin). A held page of another epoch is ignored anyway.
-- **Lazy seal.** As in §4, plus: a signer that holds another signer's page
-  younger than 15 min does not seal on top of it — nor while its
+- **Lazy seal.** As in §4, plus (both signers kept — owner decision
+  2026-11-22): a signer that holds another signer's page younger than
+  15 min does not seal on top of it — nor while that page has **no
+  verdict yet** (its compare waits out the 15-min spacing, or a restart
+  lost the memory-only verdict: the state is derived from the stored page
+  plus "no verdict"; its compare is started), for at most
+  `CATCH_UP_HOLD_S` (2 h) since it was first seen so (security check 2,
+  H1 routes 2 and 3) — nor while its
   catch-up from members (Phase 3) still has
   buckets to fetch, for at most `CATCH_UP_HOLD_S` (2 h) after its compare
   (final review I3: the owner's own seal would replace the page it is
   catching up to, end the catch-up and commit the incomplete state; the
   bound keeps a catch-up nobody can serve from stopping the seals for
-  good). The "changed since the page?" probe is memoised on the change
+  good). **A returning signer waits** (H1 route 1): one whose own page is
+  older than `PAGE_MATCH_FRESH_S` (2 h — it sealed nothing that long, it
+  was away) in a space with delegated admin authority — another seed
+  holder may have sealed meanwhile — does not seal at its first BEGIN but
+  waits `RETURN_GRACE_S` (45 min): that signer's newer page (its queued
+  push, or our own tick's BEGIN whose stale ref it answers) arrives, is
+  stored (newer than our old page) and judged, and the holds above
+  decide. Otherwise its seal would be newer than the admin's page, which
+  would then be refused as "not newer" and never compared. The "changed
+  since the page?" probe is memoised on the change
   counter (`current_seq`): a "changed" holds for that page, a "quiet" while
   the counter has not moved — every BEGIN to the signer asks (minor 9).
   Accepted exception: when
@@ -737,7 +773,7 @@ What shipped, where it is more exact than the design above:
      adversarial re-review showed crediting it hid a missing row behind a
      delete). It is asked like any other and, when nobody can prove it
      (Phase 3: every member household on the page answers `held: false`
-     — each made the same move), it goes dry: paused for 3 h, unresolved.
+     — each made the same move), it goes dry: paused for 1 h, unresolved.
   2. **Listings only for unexplained buckets**, at most
      `MAX_LISTING_BUCKETS` = 8 per compare; the rest stay unresolved until
      the next page. They are asked of ONE household acting as host (the
@@ -1072,15 +1108,19 @@ between asks, and a stale memo would prove nothing.
      silenced every bucket after one ask.
    - **The quorum is every member household we can ask** (`_eligible`, all
      of `member_deliverers`, not only the ≤ 3 of a round). Once each has
-     answered `held: false` for a bucket it is **dry**.
-   - **Dry is a pause** of `DRY_RECHECK_S` (3 h, six rounds): then the
+     answered `held: false` for a bucket it is **dry**. Only the nays of
+     households we can ask NOW count: one removed since, or no longer at
+     v_95, falls out (security check 2, L1).
+   - **Dry is a pause** of `DRY_RECHECK_S` (1 h, two rounds — shorter
+     than the owner's seal hold of 2 h, so a paused bucket is asked again
+     before the hold ends; security check 2, L2): then the
      bucket is asked again from scratch. It **stays to fetch** (`todo`):
      unresolved — `match` stays `null`, the Phase-1 state shows — and it
      never releases the owner's seal hold (only a complete catch-up or
      `CATCH_UP_HOLD_S` does).
    Memory only, per page, with the stuck buckets. Without the pause the
    round asked every tick, for nothing, until the host returned; with it
-   a bucket nobody can prove costs one round every 3 h.
+   a bucket nobody can prove costs one round an hour.
 
 **The owner back from a long absence is a requester too.** While the owner
 household was offline a seed-holding delegated admin may have sealed newer
@@ -1189,8 +1229,8 @@ requester asks one member at a time):
   and none once nothing is left to fetch (`todo` empty) — a caught-up
   member costs nothing while the host stays offline. A bucket every member
   household on the page answered `held: false` for (dry, step 7) is paused
-  for 3 h: a change nobody can prove costs one round every 3 h, not one
-  per tick.
+  for 1 h: a change nobody can prove costs one round an hour, not one per
+  tick.
 - **Worst realistic case**: a global space with 200 member households and
   50 000 rows, the host offline for a day, every member missing the host's
   last ~2 h (≈ 170 changes at 2 000 a day). 170 rows fall into ≈ 125
@@ -1230,7 +1270,7 @@ requester asks one member at a time):
 | Extra fields in a row (reactions, pins, `updated_at`, `linked_event_id`, …) | never applied — only the committed part is (`fetched_record`); a feed card is left out |
 | Inflated change time in a listing, to roll back a newer local row | a row changed here after the page's signed `issued_at` is ahead; otherwise the page's version is the signer's own, applied under the host's rules exactly as the host's stream would |
 | A row of another space / bucket, a non-committed resource | refused at parse (`parse_fetched_row`) |
-| Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked. A bucket is paused (dry) only once **every** member household on the page answered `held: false`, and only for 3 h; it stays unresolved meanwhile (never "up to date"), and never releases the owner's seal hold (HIGH-1). The one residual: when a single member household can be asked at all, that household alone can keep a bucket unresolved — withholding by the only source, which no proof can overcome |
+| Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked. A bucket is paused (dry) only once **every** member household on the page answered `held: false`, and only for 1 h; it stays unresolved meanwhile (never "up to date"), and never releases the owner's seal hold (HIGH-1). The one residual: when a single member household can be asked at all, that household alone can keep a bucket unresolved — withholding by the only source, which no proof can overcome |
 | A deliverer on another page (or forging that it is) | no listing at all — no nay, the next member is asked (HIGH-1) |
 | Unasked answer, or one from another household | dropped |
 | A follower asking | the deliverer's member gate sends nothing; a follower is never asked |

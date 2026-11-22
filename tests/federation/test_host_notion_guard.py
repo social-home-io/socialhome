@@ -52,6 +52,11 @@ ALLOWED: dict[tuple[str, str], str] = {
         "are WE the owner: only the owner takes a newer page its delegated "
         "admin signed over its own; a delegated admin keeps its own chain"
     ),
+    ("federation/sync/space/pages.py", "offer_page"): (
+        "is the REQUESTER the owner: only the owner takes a page another "
+        "signer sealed over its own; a delegated admin's self-signed ref is "
+        "never stale (it keeps its own page), the owner's may be"
+    ),
     ("federation/sync/space/scheduler.py", "_tick_owner_catch_up"): (
         "are WE the owner: only the owner has no host above it whose silence "
         "would start its catch-up from members (sync pages Phase 3), so it "
