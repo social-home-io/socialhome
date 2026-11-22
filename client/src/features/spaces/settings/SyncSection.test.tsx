@@ -21,6 +21,7 @@ vi.mock('@/ws', () => ({
 }))
 
 import { ApiError } from '@/api'
+import { setLocale } from '@/i18n/i18n'
 import { SyncSection } from './SyncSection'
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
@@ -125,6 +126,19 @@ describe('Check now', () => {
     const { container } = section({ ...base, state: 'host_offline' })
     expect(button(container)!.disabled).toBe(false)
     expect(why(container)).toBeNull()
+  })
+
+  it('a sentence that starts with its time starts with a capital (de)', async () => {
+    await setLocale('de')
+    try {
+      const { container } = section({
+        ...base, state: 'up_to_date',
+        page: { seq: 4, at: ago(20), match: true, missing: 0, differing_buckets: 0, signer_role: 'owner', conflict: false },
+      })
+      expect(body(container)).toMatch(/^Vor 20 Min\. geprüft: Es fehlt nichts\.$/)
+    } finally {
+      await setLocale('en')
+    }
   })
 
   it('after a match with the signed page: its time, and no host named', () => {

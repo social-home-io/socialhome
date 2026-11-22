@@ -52,11 +52,13 @@ function Body({ body }: { body: SyncBody }) {
   if (!body.time) return <p class="sh-muted sh-sync-card__body">{text}</p>
   const [before, after = ''] = text.split('{time}')
   const { iso, style } = body.time
+  const shown = style === 'since' ? shortDateTime(iso) : relativeDocsTime(iso)
   return (
     <p class="sh-muted sh-sync-card__body">
       {before}
       <time dateTime={iso} title={fullDate(iso)}>
-        {style === 'since' ? shortDateTime(iso) : relativeDocsTime(iso)}
+        {/* A sentence may start with its time ("Vor 12 Min. geprüft …"). */}
+        {before ? shown : capitalised(shown)}
       </time>
       {after}
     </p>
