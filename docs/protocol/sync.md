@@ -442,12 +442,16 @@ the **GFS "took it" note** is memory only and lost on a restart; on a
 its own (the payloads are sealed, so the query cannot pick ours first —
 that would need a column). The time rule counts from this household's own
 start too: rounds missed while it was down are no failed rounds, so after
-a restart the warning needs two failed rounds again; with no `ok` ever it
+a restart the warning needs two failed rounds again (up to three when the
+first round runs right after the start, since that round's answer can land
+before the start time is a round old); with no `ok` ever it
 counts from the host's seat here (`space_instances.joined_at`, when we
 joined) — a first unclean stream reads "Getting the space ready". The
 Spaces list reads the page verdict the last full read saw and never starts
 a page compare itself. `next_check_at` (UTC, only while "Sync now" is
-refused) comes from the per-space limit, which the whole household shares.
+refused) comes from the per-space limit, which the whole household shares. It
+is not carried in the `space.sync_state` frame: another family member's open
+settings page learns of the limit on its own next press (or a reload).
 
 **Signed sync pages (v_95).** The household acting as host that holds the
 space's authority seed seals, lazily and at most every 15 minutes, a signed
