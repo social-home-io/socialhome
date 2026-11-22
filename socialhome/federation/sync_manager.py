@@ -505,8 +505,12 @@ class SyncSessionManager:
         # requester's 5 / h for that space — a household that restarts and
         # asks for more spaces than the cap at once retries the rest
         # (``SpaceSyncDeferred``) and would otherwise lock itself out.
+        # A v_95 bucket-listing session is short and has a budget of its own
+        # (``LISTING_RATE_LIMIT_PER_HOUR``): streams holding every slot —
+        # e.g. left by a requester that restarted — never block it.
         if (
-            self.active_sessions_for_instance(requester_instance_id)
+            sync_mode != "buckets"
+            and self.active_sessions_for_instance(requester_instance_id)
             >= MAX_ACTIVE_SESSIONS_PER_INSTANCE
         ):
             return SyncDecision(

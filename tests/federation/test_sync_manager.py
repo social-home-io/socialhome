@@ -246,6 +246,18 @@ async def test_begin_session_blocks_at_concurrent_cap_s6():
     )
     assert blocked.accepted is False
     assert blocked.reason == "too_many_sessions"
+    # v_95: a bucket-listing session is short and has its own hourly budget:
+    # streams holding every slot (e.g. orphaned by a requester's restart)
+    # never block it. The node-wide cap still applies.
+    listing = await mgr.begin_session(
+        sync_id="L1",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="buckets",
+        buckets=[1],
+    )
+    assert listing.accepted is True
 
 
 @pytest.mark.parametrize("have_seq", [None, 0, 17])

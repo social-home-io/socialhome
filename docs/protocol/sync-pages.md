@@ -630,7 +630,11 @@ What shipped, where it is more exact than the design above:
   writer seat). A `buckets` session has its own budget at the provider —
   4 per hour per (household, space), `LISTING_RATE_LIMIT_PER_HOUR` — so it
   never spends the 5/h stream budget a catch-up needs (and a busy catch-up
-  never starves it). Each record is `{i, held: true, rows: [[resource, row_id,
+  never starves it); nor does it count against the 3 concurrent streams
+  per household (streams left by a requester's restart would otherwise
+  block it for up to 30 minutes). The node-wide session cap still applies.
+  The requester remembers the session before its BEGIN leaves (a fast path
+  may answer first). Each record is `{i, held: true, rows: [[resource, row_id,
   leaf, change_time], …]}` or `{i, held: false}`: a provider lists a bucket
   as of the page only when its own rows of it still hash to the
   requester's page (the same page it holds). A bucket changed since the
