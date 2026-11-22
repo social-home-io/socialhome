@@ -19956,7 +19956,9 @@ def _verify_sync_page(state: dict) -> list[str]:
         )
         return ((detail or {}).get("sync") or {}).get("page") if s == 200 else None
 
-    deadline = time.monotonic() + 90.0
+    # A compare that needs bucket listings waits on a round trip to b, which
+    # may still be re-establishing its link to a restarted a: up to 4 min.
+    deadline = time.monotonic() + 240.0
     sync_page = _status_page()
     while (
         not sync_page or sync_page.get("match") is None
