@@ -15036,6 +15036,20 @@ def cmd_verify() -> None:
     else:
         print("  (gfs-admin-seed check skipped — run 'gfs-admin-seed')")
 
+    # 13z2. members-page-catchup (v_95, sync pages Phase 3): what a caught
+    #     up from a plain member while the host was down is still there,
+    #     and a reads the space up to date.
+    if state.get("page_catchup"):
+        before = len(failures)
+        _check_page_catchup(state, failures)
+        if len(failures) == before:
+            print(
+                "  members-page-catchup: a still holds what it verified from a "
+                "member while the host was down; up to date ✓"
+            )
+    else:
+        print("  (members-page-catchup check skipped — run 'members-page-catchup')")
+
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
     #    Anything we can't account for (i.e. doesn't match the
@@ -19821,6 +19835,323 @@ def cmd_bazaar_faq() -> None:
     state["bazaar_faq"] = {"entry_id": keep["entry_id"], "question": reworded}
     _save(state)
     print("bazaar-faq: ok")
+
+
+#: ``members-page-catchup`` roles: the host, the member that falls behind
+#: and the plain member that delivers: c hosts, b falls behind, a delivers.
+#: a never syncs FROM b here (b may still hold stale provider sessions for a
+#: process of a that earlier steps restarted), and a is not restarted: its
+#: hourly stream budget toward b for the salon (which ``verify`` asks for
+#: its page) stays for ``verify``. The gfs chain runs this step before
+#: ``gfs-admin-seed``, whose restart of a right before ``verify`` it keeps.
+_PC_HOST, _PC_LAG, _PC_DLV = "c", "b", "a"
+
+
+def _respawn_plain(state: dict, label: str) -> None:
+    """Start a killed household again: :func:`_respawn` (which waits for
+    its GFS socket) for a household on the GFS, else wait until it answers
+    HTTP (b and c in the gfs chain hold no GFS connection)."""
+    if label in ("a", "d", "e"):
+        _respawn(state, label)
+        return
+    info = state["instances"][label]
+    info["pid"] = _spawn(label, info["port"])
+    _save(state)
+    _wait_ready(info["port"])
+    print(f"  {label} back: pid={info['pid']}")
+
+
+@_offline_step
+def cmd_members_page_catchup() -> None:
+    """Sync pages Phase 3 (v_95) — with the host offline, a member that is
+    behind catches up the host's posts and wiki page from a PLAIN member
+    household, every row verified against the host's signed sync page.
+
+    Prereqs: ``up`` + ``pair`` (a, b, c paired with each other). The gfs
+    chain runs it before ``gfs-admin-seed``, ``all`` before ``verify``. Roles (``_PC_*``): host c,
+    the member behind b, the plain member delivering a.
+
+    1. The host creates a fresh private space, writes two posts and a wiki
+       page, THEN invites the two members — so its first sealed page (sealed
+       lazily on the first join's sentinel) commits all three. Both join;
+       "Sync now" brings each the signed page, and the lagging member's
+       status reads it as a match.
+    2. The lagging member goes down. Its copies of the two posts and the
+       page are removed from its database (what lost deliveries would
+       leave). The host — no delegated admin in the space — goes down too.
+    3. The lagging member comes back. Its BEGIN to the host goes unanswered
+       for ``HOST_ANSWER_WAIT_S``: the host is silent. It asks the other
+       member household (not an admin, not a moderator: no trust needed) for
+       the rows of the buckets its page proves it lacks; that member serves
+       the buckets it holds unchanged; every row is verified against the
+       signed page and applied.
+    4. Asserted, with the host still down: the member shows both posts and
+       the page; its log names the verified catch-up from the deliverer and
+       no refused row; its sync status reads ``up_to_date`` with
+       ``page.match: true``.
+
+    Both are respawned at the end whatever happened. ``verify`` checks
+    again that the member holds all three and reads the space up to date.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' and 'pair' first")
+    a, b, c = (state["instances"][k] for k in (_PC_LAG, _PC_HOST, _PC_DLV))
+    a_url, b_url, c_url = (f"http://127.0.0.1:{x['port']}" for x in (a, b, c))
+    step = "members-page-catchup"
+    marker = f"page-catchup-{time.time_ns()}"
+
+    s, space = _request(
+        f"{b_url}/api/spaces",
+        token=b["token"],
+        method="POST",
+        body={
+            "name": "Catch-up lab",
+            "space_type": "private",
+            "join_mode": "invite_only",
+            "emoji": "📒",
+        },
+    )
+    space_id = _must(f"{step}: the host creates a space", s, space, ok=(201,))["id"]
+    posts: list[tuple[str, str]] = []
+    for n in (1, 2):
+        content = f"{marker} post {n}"
+        s, post = _request(
+            f"{b_url}/api/spaces/{space_id}/posts",
+            token=b["token"],
+            method="POST",
+            body={"type": "text", "content": content},
+        )
+        posts.append((_must(f"{step}: the host posts", s, post, ok=(201,))["id"], content))
+    page_body = f"{marker} — the house rules"
+    s, page = _request(
+        f"{b_url}/api/spaces/{space_id}/pages",
+        token=b["token"],
+        method="POST",
+        body={"title": "Rules", "content": page_body},
+    )
+    page_id = _must(f"{step}: the host writes a page", s, page, ok=(200, 201))["id"]
+    for label, inst in ((_PC_LAG, a), (_PC_DLV, c)):
+        s, inv = _request(
+            f"{b_url}/api/spaces/{space_id}/remote-invites",
+            token=b["token"],
+            method="POST",
+            body={
+                "invitee_instance_id": inst["instance_id"],
+                "invitee_user_id": inst["user_id"],
+            },
+        )
+        _must(f"{step}: the host invites {label}", s, inv, ok=(201,))
+    time.sleep(4)  # SPACE_PRIVATE_INVITE federates
+    _accept_remote_invite(state, _PC_LAG, space_id)
+    _accept_remote_invite(state, _PC_DLV, space_id)
+
+    def _holds_all(label: str) -> bool:
+        have = {
+            r[0]
+            for r in _rows(
+                label,
+                "SELECT id FROM space_posts WHERE space_id=? AND deleted=0",
+                (space_id,),
+            )
+        }
+        held_page = _rows(
+            label,
+            "SELECT 1 FROM space_pages WHERE id=? AND deleted_at IS NULL",
+            (page_id,),
+        )
+        return {p for p, _ in posts} <= have and bool(held_page)
+
+    for label in (_PC_LAG, _PC_DLV):
+        _poll(
+            f"{label} to hold the host's posts and page",
+            lambda lb=label: _holds_all(lb),
+            timeout=120.0,
+        )
+    print(f"  host {_PC_HOST}'s space {space_id}: two posts + a page; {_PC_LAG} and {_PC_DLV} joined, hold them ✓")
+
+    def _held_page(label: str) -> dict | None:
+        rows = _rows(
+            label,
+            "SELECT page_json FROM space_sync_pages WHERE space_id=?",
+            (space_id,),
+        )
+        return json.loads(rows[0][0]) if rows else None
+
+    for label, inst, url in ((_PC_LAG, a, a_url), (_PC_DLV, c, c_url)):
+        deadline = time.monotonic() + 150.0
+        asked = 0
+        next_ask = 0.0
+        while time.monotonic() < deadline:
+            got = _held_page(label)
+            if (
+                got
+                and got.get("signer") == b["instance_id"]
+                and got.get("rows", 0) >= 3
+            ):
+                break
+            if asked < 3 and time.monotonic() >= next_ask:
+                _request(
+                    f"{url}/api/spaces/{space_id}/sync",
+                    token=inst["token"],
+                    method="POST",
+                )
+                asked += 1
+                next_ask = time.monotonic() + 20.0
+            time.sleep(1.0)
+        else:
+            raise SystemExit(
+                f"{step}: {label} holds no page of the host committing the posts and "
+                f"the page after {asked} sync rounds (got {_held_page(label)!r})"
+            )
+    signed = _held_page(_PC_LAG)
+    if _held_page(_PC_DLV) != signed:
+        raise SystemExit(f"{step}: the members hold different pages of the host")
+    _poll(
+        "a's status to compare its copy with b's page and match",
+        lambda: (
+            ((_sync_state_of(state, _PC_LAG, space_id) or {}).get("page") or {}).get(
+                "match"
+            )
+            is True
+        ),
+        timeout=90.0,
+    )
+    print(
+        f"  both members hold the host's signed page {signed['seq']} ({signed['rows']} rows); "
+        f"{_PC_LAG}'s copy matches it ✓"
+    )
+
+    a_down = b_down = False
+    try:
+        _kill_household(_PC_LAG, a)
+        a_down = True
+        # What lost deliveries would leave: a never got the posts or the page.
+        # Written while a is down — the one write this step does behind a
+        # backend's back (the posts' child rows go with them, ON DELETE
+        # CASCADE).
+        conn = sqlite3.connect(_instance_dir(_PC_LAG) / "socialhome.db")
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.executemany(
+                "DELETE FROM space_posts WHERE id=?", [(p,) for p, _ in posts]
+            )
+            conn.execute("DELETE FROM space_pages WHERE id=?", (page_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        if _holds_all(_PC_LAG):
+            raise SystemExit(f"{step}: {_PC_LAG} still holds the content after the removal")
+        _kill_household(_PC_HOST, b)
+        b_down = True
+        print(f"  {_PC_LAG} lost the posts and the page; the host {_PC_HOST} is down too ✓")
+        # The respawn starts a fresh log.txt: read it whole (the lines name
+        # this fresh space, so nothing older can match).
+        t0 = time.time()
+        _respawn_plain(state, _PC_LAG)
+        a_down = False
+        _poll(
+            "a to catch up the posts and the page from a member while b is down",
+            lambda: _holds_all(_PC_LAG),
+            timeout=360.0,
+            interval=2.0,
+        )
+        took = time.time() - t0
+        contents = {
+            r[0]: r[1]
+            for r in _rows(
+                _PC_LAG,
+                "SELECT id, content FROM space_posts WHERE space_id=?",
+                (space_id,),
+            )
+        }
+        for post_id, content in posts:
+            if contents.get(post_id) != content:
+                raise SystemExit(
+                    f"{step}: {_PC_LAG}'s post {post_id} reads {contents.get(post_id)!r}"
+                )
+        caught = [
+            x
+            for x in _log_lines_matching(
+                _PC_LAG, f"verified catch-up of space {space_id}"
+            )
+            if c["instance_id"] in x
+        ]
+        if not caught:
+            raise SystemExit(
+                f"{step}: {_PC_LAG} holds the content again, but its log names no "
+                f"verified catch-up from {_PC_DLV}. Check {_log_path(_PC_LAG)}."
+            )
+        refused = [
+            x
+            for x in _log_lines_matching(_PC_LAG, "sync page: refused")
+            if space_id in x
+        ]
+        if refused:
+            raise SystemExit(f"{step}: {_PC_LAG} refused rows of an honest member: {refused!r}")
+        status = _poll(
+            "a's status to read the space up to date with b still down",
+            lambda: (
+                (got := _sync_state_of(state, _PC_LAG, space_id))
+                and got.get("state") == "up_to_date"
+                and (got.get("page") or {}).get("match") is True
+                and got
+            ),
+            timeout=90.0,
+        )
+        print(
+            f"  {_PC_LAG} back, host {_PC_HOST} still down: it asked the plain member {_PC_DLV}, verified every "
+            "row against the host's page and shows both posts and the page after "
+            f"{took:.0f} s; status {status.get('state')} "
+            f"(page {status['page'].get('seq')}, match) ✓"
+        )
+    finally:
+        if a_down and not _alive(a["pid"]):  # never a second copy
+            _respawn_plain(state, _PC_LAG)
+        if b_down and not _alive(b["pid"]):
+            _respawn_plain(state, _PC_HOST)
+    state = _load()
+    state["page_catchup"] = {
+        "space_id": space_id,
+        "posts": [list(p) for p in posts],
+        "page_id": page_id,
+    }
+    _save(state)
+    print(f"{step}: ok")
+
+
+def _check_page_catchup(state: dict, failures: list[str]) -> None:
+    """``verify`` hook for ``members-page-catchup``: a still holds what it
+    caught up from a member, and reads the space up to date."""
+    got = state["page_catchup"]
+    space_id = got["space_id"]
+    contents = {
+        r[0]: r[1]
+        for r in _rows(
+            _PC_LAG,
+            "SELECT id, content FROM space_posts WHERE space_id=?",
+            (space_id,),
+        )
+    }
+    for post_id, content in got["posts"]:
+        if contents.get(post_id) != content:
+            failures.append(
+                f"members-page-catchup: {_PC_LAG}'s post {post_id} reads "
+                f"{contents.get(post_id)!r}, not the caught-up {content!r}"
+            )
+    if not _rows(
+        _PC_LAG,
+        "SELECT 1 FROM space_pages WHERE id=? AND deleted_at IS NULL",
+        (got["page_id"],),
+    ):
+        failures.append(
+            f"members-page-catchup: {_PC_LAG} no longer holds the caught-up page"
+        )
+    status = _sync_state_of(state, _PC_LAG, space_id) or {}
+    if status.get("state") != "up_to_date":
+        failures.append(
+            f"members-page-catchup: {_PC_LAG} reads the space {status!r}, not up_to_date"
+        )
 
 
 def cmd_down() -> None:
@@ -27765,6 +28096,10 @@ def main() -> None:
         # GFS, a approves, e reads. Last: it gives e a space-session seat
         # with a, which the bootstrap-only steps above must not see.
         cmd_gfs_join_request()
+        # ``members-page-catchup`` (v_95, sync pages Phase 3): host c down,
+        # b catches up c's posts and page from the plain member a, every row
+        # verified against c's signed page. Restarts b and c.
+        cmd_members_page_catchup()
         # The closing check: every step's state still holds, and the log
         # audit is clean — offline steps' lines only inside their windows.
         cmd_verify()

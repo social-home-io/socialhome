@@ -273,6 +273,45 @@ async def test_no_listings_for_an_older_household_a_follower_or_none_asked(
         assert not any("buckets" in c for c in pages.calls)
 
 
+class _FetchPages(_ListingPages):
+    async def fetch_records(self, **kwargs):
+        self.calls.append({"fetch": True, **kwargs})
+        listings = [{"i": b, "held": True, "rows": []} for b in kwargs["buckets"]]
+        return listings, [{"i": 4, "r": "posts", "row": {"id": "p"}}]
+
+
+async def test_a_verified_fetch_rides_the_stream_listings_then_rows(provider):
+    """Phase 3: an ordinary incremental BEGIN to any member household with
+    ``buckets`` and ``rows: true`` — its stream ends with the listings, then
+    the proven rows as ``__rows__`` chunks under the content key, then the
+    sentinel; the page service gets the hint and the record cap of the
+    requester's path. No session kind or budget of its own."""
+    pages = _FetchPages()
+    provider.attach_sync_pages(pages)
+
+    async def gate(space_id, requester):
+        return True
+
+    provider.attach_member_gate(gate)
+    session = _FakeSession(sync_mode="incremental")
+    session.peer_version = 95
+    session.page_ref = {"root": b"\x01" * 32}
+    session.buckets = [4]
+    session.want_rows = True
+    session.have = frozenset({b"\x00" * 8})
+    await provider.stream_initial(session)
+    frames = [orjson.loads(f) for f in session.rtc.sent]
+    resources = [f["resource"] for f in frames]
+    assert resources[-3:] == ["__listing__", "__rows__", "__complete__"]
+    plain = orjson.loads(base64.urlsafe_b64decode(frames[-2]["encrypted_payload"]))
+    assert plain["records"] == [{"i": 4, "r": "posts", "row": {"id": "p"}}]
+    call = next(c for c in pages.calls if c.get("fetch"))
+    assert call["have"] == frozenset({b"\x00" * 8})
+    assert call["max_record_bytes"] is None  # not a relay-seated requester
+    assert not any("buckets" in c and not c.get("fetch") for c in pages.calls)
+    assert frames[-1]["chunk_count"] == len(frames) - 1
+
+
 async def test_no_page_service_no_page_field(provider):
     session = _FakeSession()
     await provider.stream_initial(session)

@@ -126,6 +126,7 @@ class _PageSink:
         self.calls: list[dict] = []
         self.listings: list[dict] = []
         self.done: list[dict] = []
+        self.rows: list[dict] = []
 
     async def receive(self, **kwargs):
         self.calls.append(kwargs)
@@ -136,6 +137,9 @@ class _PageSink:
 
     async def listing_done(self, **kwargs):
         self.done.append(kwargs)
+
+    async def take_rows(self, **kwargs):
+        self.rows.append(kwargs)
 
 
 async def test_a_verified_sentinel_hands_its_sync_page_on(bus, receiver, peer_setup):
@@ -214,6 +218,41 @@ async def test_listing_chunks_and_their_sentinel_reach_the_page_service(
     )
     await r.on_chunk(serialise_chunk(sentinel), from_instance="peer-a")
     assert sink.done == [{"space_id": "sp-1", "sync_id": "L1", "provider": "peer-a"}]
+
+
+async def test_fetched_row_chunks_go_to_the_page_service_never_applied(
+    bus, receiver, peer_setup
+):
+    """Phase 3: ``__rows__`` chunks of a verified fetch go to the page
+    service (checked against the signed page at the sentinel) — a row is
+    never applied straight off the stream."""
+    r, _space_repo, _ = receiver
+    _peer, kp = peer_setup
+    sink = _PageSink()
+    r.attach_sync_pages(sink)
+    records = [{"i": 3, "r": "posts", "row": {"id": "p", "content": "x"}}]
+    _, ciphertext = await _FakeCrypto().encrypt_chunk(
+        space_id="sp-1",
+        sync_id="F1",
+        plaintext=orjson.dumps({"records": records, "chunk_index": 1}),
+    )
+    chunk = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "F1",
+            "resource": "__rows__",
+            "space_id": "sp-1",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 1,
+            "is_last": False,
+            "encrypted_payload": ciphertext,
+        },
+    )
+    await r.on_chunk(serialise_chunk(chunk), from_instance="peer-a")
+    assert sink.rows == [
+        {"space_id": "sp-1", "sync_id": "F1", "provider": "peer-a", "records": records}
+    ]
 
 
 async def test_on_chunk_rejects_unknown_peer(receiver, peer_setup):

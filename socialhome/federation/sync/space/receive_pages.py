@@ -19,7 +19,12 @@ from ....services.page_conflict_service import (
     page_too_large,
 )
 from ...owner_bound_id import SPACE_PAGE_KIND, OwnerBinding, check_owner_bound_id
-from .receiver_base import ReceiverBase, _log_sync_refusal, _sync_event
+from .receiver_base import (
+    VERIFIED_ROW,
+    ReceiverBase,
+    _log_sync_refusal,
+    _sync_event,
+)
 from .stream_health import HeldBack
 
 if TYPE_CHECKING:
@@ -278,7 +283,10 @@ class PagesMixin(ReceiverBase):
         mode, host = await engine.mode(space_id)
         if mode is PageMode.HOST:
             return True
-        if host and provider == host and "seq" in r:
+        # A row verified against the signed sync page (Phase 3) is the
+        # host's version too — its ``seq`` and ``version_hash`` are committed.
+        from_host = provider == host or VERIFIED_ROW.get() == (space_id, provider)
+        if host and from_host and "seq" in r:
             version = canonical_from_wire(r)
             if version is None:
                 log.warning(

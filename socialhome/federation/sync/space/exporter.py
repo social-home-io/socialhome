@@ -162,6 +162,11 @@ REMOVAL_RESOURCES: frozenset[str] = frozenset(
 #: Never part of a content stream, so not in :data:`ALLOWED_RESOURCES`.
 LISTING_RESOURCE: str = "__listing__"
 
+#: … and, for a verified fetch (Phase 3: ``rows: true``), the rows of the
+#: buckets it lists (``socialhome.sync_page.fetched_row_to_wire``). Checked
+#: against the signed page by the requester, never applied as a stream.
+FETCHED_ROWS_RESOURCE: str = "__rows__"
+
 
 #: Sentinel resource sent over the channel after all real chunks.
 #: Not encrypted (no payload to hide); only signed.
@@ -453,7 +458,10 @@ class ChunkBuilder:
         is_last: bool,
         chunk_index: int | None = None,
     ) -> dict[str, Any]:
-        if resource not in ALLOWED_RESOURCES and resource != LISTING_RESOURCE:
+        if resource not in ALLOWED_RESOURCES and resource not in (
+            LISTING_RESOURCE,
+            FETCHED_ROWS_RESOURCE,
+        ):
             raise ValueError(f"resource {resource!r} not in ALLOWED_RESOURCES")
         body: dict[str, Any] = {"records": records}
         if chunk_index is not None:

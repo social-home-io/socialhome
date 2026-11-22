@@ -505,6 +505,27 @@ async def test_handle_space_sync_begin_parses_the_have_seq_echo(svc, wire, parse
     assert kwargs["sync_mode"] == "incremental"
 
 
+async def test_handle_space_sync_begin_parses_a_verified_fetch(svc):
+    """Phase 3: ``rows: true`` + the ``have`` hint reach the session parsed;
+    a malformed hint asks for listings only."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(accepted=False, next_event=None)
+    )
+    hint = base64.urlsafe_b64encode(b"\x05" * 8).decode().rstrip("=")
+    for extra, parsed in (
+        ({"rows": True, "have": hint}, (True, frozenset({b"\x05" * 8}))),
+        ({"rows": True, "have": 3}, (False, None)),
+        ({}, (False, None)),
+    ):
+        payload = {"sync_id": "s", "space_id": "sp", "sync_mode": "buckets", **extra}
+        await svc._handle_space_sync_begin(
+            _event("SPACE_SYNC_BEGIN", payload, space_id="sp")
+        )
+        kwargs = svc._sync_manager.begin_session.await_args.kwargs
+        assert (kwargs["want_rows"], kwargs["have"]) == parsed
+
+
 async def test_handle_space_sync_begin_parses_the_sync_page(svc):
     """v_95: the BEGIN's ``page`` reaches the session parsed (root as raw
     bytes); a malformed one is dropped — the requester then gets the full
@@ -976,6 +997,7 @@ def _solicited(svc, *, provider="peer-1", space_id="sp"):
             roster_digest=None,
             page_ref=None,
             buckets=None,
+            fetch_have=None,
         ),
     )
 

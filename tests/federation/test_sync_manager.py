@@ -1276,6 +1276,47 @@ async def test_the_relay_retry_carries_the_asked_buckets():
         )
     decision = await mgr.trigger_relay_sync("s1")
     assert decision.next_payload["buckets"] == [5, 2]
+    assert "rows" not in decision.next_payload
+
+
+async def test_the_relay_retry_carries_a_verified_fetch():
+    """Sync pages Phase 3: the relay re-BEGIN asks the member household for
+    the same rows (``rows: true`` + the ``have`` hint) as the first BEGIN,
+    and records them for its own retry."""
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="member",
+        sync_mode="incremental",
+        buckets=[5],
+        fetch_have="AAAAAAAAAAA",
+    )
+    pending = mgr.pending_sync_request("s1")
+    assert pending.fetch_have == "AAAAAAAAAAA"
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="member",
+            space_id="sp",
+            sync_mode=pending.sync_mode,
+            buckets=pending.buckets,
+            fetch_have=pending.fetch_have,
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    payload = decision.next_payload
+    assert (payload["buckets"], payload["rows"], payload["have"]) == (
+        [5],
+        True,
+        "AAAAAAAAAAA",
+    )
+    retry = mgr.pending_sync_request(payload["sync_id"])
+    assert retry is not None and retry.fetch_have == "AAAAAAAAAAA"
 
 
 # ─── Sync status: is a stream of a space arriving? ─────────────────────────

@@ -72,6 +72,7 @@ from ...owner_bound_id import (
 from ...space_scope import archive_refusal
 from .exporter import (
     ALLOWED_RESOURCES,
+    FETCHED_ROWS_RESOURCE,
     LISTING_RESOURCE,
     REMOVAL_RESOURCES,
     ROSTER_RESOURCES,
@@ -88,7 +89,7 @@ from .receive_stickies import StickiesMixin
 from .receive_tasks import TasksMixin
 from .receive_timetables import TimetablesMixin
 from .receive_zones import ZonesMixin
-from .receiver_base import ReceiverBase, _GfsMediaSink, _sync_event
+from .receiver_base import VERIFIED_ROW, ReceiverBase, _GfsMediaSink, _sync_event
 from .stream_health import HeldBack, HeldBackStreaks, StreamHealth
 
 if TYPE_CHECKING:
@@ -156,6 +157,10 @@ class _SyncPageSink(Protocol):
 
     async def listing_done(
         self, *, space_id: str, sync_id: str, provider: str
+    ) -> None: ...
+
+    async def take_rows(
+        self, *, space_id: str, sync_id: str, provider: str, records: object
     ) -> None: ...
 
 
@@ -701,6 +706,20 @@ class SpaceSyncReceiver(
             self._health.applied(sync_id, index)
             return
 
+        if resource == FETCHED_ROWS_RESOURCE:
+            # Phase 3: rows of a verified fetch we asked for — never applied
+            # here as a stream; the page service checks each against the
+            # signed page at the sentinel (:meth:`apply_verified`).
+            if self._sync_pages is not None:
+                await self._sync_pages.take_rows(
+                    space_id=space_id,
+                    sync_id=sync_id,
+                    provider=from_instance,
+                    records=records,
+                )
+            self._health.applied(sync_id, index)
+            return
+
         if resource not in ALLOWED_RESOURCES:
             # A newer provider's resource: dropped by rule, never retried.
             self._health.applied(sync_id, index)
@@ -743,6 +762,24 @@ class SpaceSyncReceiver(
             space_id,
             from_instance,
         )
+
+    async def apply_verified(
+        self, space_id: str, provider: str, resource: str, record: dict[str, Any]
+    ) -> bool:
+        """Sync pages Phase 3: apply ONE row a member household (*provider*)
+        delivered that was checked against the space authority's signed page
+        (its committed part hashes to a leaf of a listing that hashes to the
+        signed bucket). The row is the signer's own, so it passes where a
+        host's record passes (:data:`~.receiver_base.VERIFIED_ROW`) — the
+        same admission, the same merge rules (last writer wins, tombstones,
+        a deleted row stays deleted), nothing else. Whether it landed (not
+        held back, no failed write)."""
+        token = VERIFIED_ROW.set((space_id, provider))
+        try:
+            outcome = await self._apply(resource, space_id, [record], provider=provider)
+        finally:
+            VERIFIED_ROW.reset(token)
+        return not outcome.count and not outcome.failed
 
     async def _dispatch(
         self,

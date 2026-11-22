@@ -47,6 +47,7 @@ from ....domain.space_media_ref import (
 )
 from ....services.space_media_names import space_own_files
 from .exporter import (
+    FETCHED_ROWS_RESOURCE,
     LISTING_RESOURCE,
     RESOURCE_ORDER,
     BatchedExporter,
@@ -363,6 +364,17 @@ class _SyncPages(Protocol):
         buckets: list[int],
         requester_version: int,
     ) -> list[dict]: ...
+
+    async def fetch_records(
+        self,
+        *,
+        space_id: str,
+        page_ref: Any,
+        buckets: list[int],
+        requester_version: int,
+        have: frozenset[bytes] | None,
+        max_record_bytes: int | None,
+    ) -> tuple[list[dict], list[dict]]: ...
 
     async def sentinel_page(
         self,
@@ -1082,7 +1094,14 @@ class SpaceSyncService:
     ) -> AsyncIterator[dict[str, Any]]:
         """``__listing__`` chunks for the ``buckets`` the BEGIN named (v_95,
         sync pages): only to a member household (a writer seat); the page
-        service gates on its version. Nothing when none were asked."""
+        service gates on its version. Nothing when none were asked.
+
+        Phase 3 (``rows: true`` — a verified fetch, which any member
+        household may be asked): the listings of the buckets this household
+        can prove (held unchanged since the page; never ``current``), then
+        those buckets' rows the requester's ``have`` hint does not name, as
+        ``__rows__`` chunks — bounded (rows, bytes, the record cap of the
+        requester's path)."""
         buckets = list(getattr(session, "buckets", None) or [])
         if _stopped(session):
             return
@@ -1095,13 +1114,24 @@ class SpaceSyncService:
             )
         ):
             return
+        rows: list[dict] = []
         try:
-            records = await self._sync_pages.listing_records(
-                space_id=session.space_id,
-                page_ref=getattr(session, "page_ref", None),
-                buckets=buckets,
-                requester_version=await self._session_version(session),
-            )
+            if getattr(session, "want_rows", False):
+                records, rows = await self._sync_pages.fetch_records(
+                    space_id=session.space_id,
+                    page_ref=getattr(session, "page_ref", None),
+                    buckets=buckets,
+                    requester_version=await self._session_version(session),
+                    have=getattr(session, "have", None),
+                    max_record_bytes=record_limit,
+                )
+            else:
+                records = await self._sync_pages.listing_records(
+                    space_id=session.space_id,
+                    page_ref=getattr(session, "page_ref", None),
+                    buckets=buckets,
+                    requester_version=await self._session_version(session),
+                )
         except Exception:
             log.exception(
                 "sync %s: listings of space %s failed",
@@ -1116,15 +1146,19 @@ class SpaceSyncService:
             session.space_id,
             session.requester_instance_id,
         )
-        async for envelope in self._builder.build_chunks(
-            exporter=_Listings(records),
-            space_id=session.space_id,
-            sync_id=session.sync_id,
-            sig_suite=self._sig_suite,
-            next_index=_allocator(session) if indexed else None,
-            max_record_bytes=record_limit,
+        for part in (
+            _Listings(records),
+            _Listings(rows, resource=FETCHED_ROWS_RESOURCE),
         ):
-            yield envelope
+            async for envelope in self._builder.build_chunks(
+                exporter=part,
+                space_id=session.space_id,
+                sync_id=session.sync_id,
+                sig_suite=self._sig_suite,
+                next_index=_allocator(session) if indexed else None,
+                max_record_bytes=record_limit,
+            ):
+                yield envelope
 
     async def _plan(self, session: SyncSessionRecord) -> list[ResourceExporter]:
         """The exporters this session streams, in :data:`RESOURCE_ORDER`,
@@ -1691,14 +1725,16 @@ def _stopped(session: SyncSessionRecord) -> bool:
 
 
 class _Listings:
-    """The bucket listings a BEGIN's ``buckets`` asked for, as an exporter."""
+    """The bucket listings a BEGIN's ``buckets`` asked for, as an exporter
+    (or, Phase 3, its fetched rows: *resource* ``__rows__``)."""
 
-    resource = LISTING_RESOURCE
+    __slots__ = ("_records", "resource")
 
-    __slots__ = ("_records",)
-
-    def __init__(self, records: list[dict[str, Any]]) -> None:
+    def __init__(
+        self, records: list[dict[str, Any]], resource: str = LISTING_RESOURCE
+    ) -> None:
         self._records = records
+        self.resource = resource
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
         return list(self._records)

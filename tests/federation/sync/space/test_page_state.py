@@ -36,10 +36,16 @@ from socialhome.federation.sync.space.exporter import (
 )
 from socialhome.federation.sync.space.page_state import PageStateHasher
 from socialhome.federation.sync.space.window import SyncWindows
-from socialhome.services.inbound_media_store import space_direct_media_name
+from socialhome.services.inbound_media_store import (
+    media_basename,
+    space_direct_media_name,
+)
 from socialhome.sync_page import (
+    HINT_PREFIX_BYTES,
     VectorBuilder,
     differing_buckets,
+    fetched_record,
+    record_leaf,
     row_key,
 )
 from tests.federation.sync.space.test_sync_coverage import (
@@ -262,3 +268,49 @@ async def test_rows_with_files_hash_the_same_on_both_sides(homes, seed):  # noqa
     assert h_rows > 0
     assert differing_buckets(h_vec, m_vec) == []
     assert h_rows == m_rows
+
+
+# ── Phase 3: a deliverer's records ───────────────────────────────────────
+
+
+async def test_a_deliverer_keeps_the_records_of_the_asked_buckets_with_hashes(
+    homes,  # noqa: F811
+):
+    """A member re-exports a host's post (its files under the member's own
+    names): the record it would deliver carries the files' content hashes,
+    and the committed part of it hashes to the very leaf it lists — so a
+    third household can verify it without holding the files."""
+    host, member = homes
+    await _post_with_files(host)
+    await _stream(host, member)
+    index = row_key("posts", "post-1")[0]
+    scan = await _state(member).rows_in(SPACE, [index], cutoff=None, keep_records=True)
+    ((listed,),) = [scan.rows[index]]
+    assert scan.records is not None
+    ((resource, record),) = scan.records[index]
+    assert resource == "posts" and record["files_suite"] == "sha256"
+    hashes = {name: entry["h"] for name, entry in record["files"].items()}
+    got = record_leaf(
+        "posts",
+        fetched_record("posts", record),
+        lambda url: hashes.get(media_basename(url)),
+    )
+    assert got == (index, listed.leaf)
+
+
+async def test_a_deliverer_skips_rows_the_requester_holds(homes):  # noqa: F811
+    host, _member = homes
+    await _post(host)
+    await _post(host, "post-2")
+    i1, i2 = row_key("posts", "post-1")[0], row_key("posts", "post-2")[0]
+    state = _state(host)
+    plain = await state.rows_in(SPACE, [i1, i2], cutoff=None)
+    assert plain.records is None  # Phase 2 listings keep no records
+    held = plain.rows[i1][0].leaf[:HINT_PREFIX_BYTES]
+    scan = await state.rows_in(
+        SPACE, [i1, i2], cutoff=None, keep_records=True, skip=frozenset({held})
+    )
+    assert scan.records is not None
+    kept = [r["id"] for rows in scan.records.values() for _res, r in rows]
+    assert kept == ["post-2"]
+    assert len(scan.rows[i1]) == 1  # still listed in full

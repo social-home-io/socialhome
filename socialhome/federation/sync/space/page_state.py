@@ -25,9 +25,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ....domain.file_hashes import FileHash, file_hashes_to_wire
 from ....services.inbound_media_store import media_basename
 from ....sync_page import (
     COMMITTED_RESOURCES,
+    HINT_PREFIX_BYTES,
+    MAX_FETCH_ROWS,
     ListingRow,
     VectorBuilder,
     change_time,
@@ -41,7 +44,6 @@ from .exporter import RESOURCE_ORDER, record_batches
 from .window import pinned_cutoff
 
 if TYPE_CHECKING:
-    from ....domain.file_hashes import FileHash
     from .exporter import ResourceExporter
     from .window import SyncWindows
 
@@ -104,16 +106,32 @@ class PageStateHasher:
         return vector, builder.rows
 
     async def rows_in(
-        self, space_id: str, buckets: Iterable[int], *, cutoff: str | None
+        self,
+        space_id: str,
+        buckets: Iterable[int],
+        *,
+        cutoff: str | None,
+        keep_records: bool = False,
+        skip: frozenset[bytes] = frozenset(),
     ) -> BucketRows:
         """The committed rows of *buckets* (with the page's *cutoff*): per
         bucket its rows as :class:`~socialhome.sync_page.ListingRow`
         (resource, id, leaf, change time); and every live row this household
         holds as gone — deleted, archived — (:data:`SUPERSEDED_BY`). One
         export of the space, like :meth:`vector`; only the asked buckets'
-        rows are kept."""
+        rows are kept.
+
+        *keep_records* (a v_95 deliverer, Phase 3): also each row's record —
+        with the content hashes of its files (``files``) — unless its leaf's
+        8-byte prefix is in *skip* (the requester holds it), at most
+        :data:`~socialhome.sync_page.MAX_FETCH_ROWS` per bucket."""
         wanted = frozenset(buckets)
-        out = BucketRows(rows={i: [] for i in wanted}, gone=set())
+        out = BucketRows(
+            rows={i: [] for i in wanted},
+            gone=set(),
+            records={i: [] for i in wanted} if keep_records else None,
+            skip=skip,
+        )
         with pinned_cutoff(space_id, cutoff):
             for resource in RESOURCE_ORDER:
                 if resource not in COMMITTED_RESOURCES:
@@ -151,6 +169,24 @@ class BucketRows:
 
     rows: dict[int, list[ListingRow]]
     gone: set[tuple[str, str]]
+    #: Per bucket ``(resource, record)`` a deliverer may send (Phase 3);
+    #: ``None`` unless asked for.
+    records: dict[int, list[tuple[str, dict[str, Any]]]] | None = None
+    #: Leaf prefixes whose records are not kept (the requester holds them).
+    skip: frozenset[bytes] = frozenset()
+
+
+def _with_files(
+    resource: str, record: dict[str, Any], hashes: dict[str, str]
+) -> dict[str, Any]:
+    """*record* with the ``files`` hash map of the files its commit form
+    hashes — keyed by file name, as every v_85 sender keys it."""
+    found = {
+        name: FileHash(h)
+        for url in file_refs(resource, record)
+        if (h := hashes.get(url)) and (name := media_basename(url))
+    }
+    return {**record, **file_hashes_to_wire(found)} if found else record
 
 
 def _collect(
@@ -175,6 +211,13 @@ def _collect(
             out.rows[index].append(
                 ListingRow(resource, row_id, found[1], change_time(record))
             )
+            kept = out.records.get(index) if out.records is not None else None
+            if (
+                kept is not None
+                and len(kept) < MAX_FETCH_ROWS
+                and found[1][:HINT_PREFIX_BYTES] not in out.skip
+            ):
+                kept.append((resource, _with_files(resource, record, hashes)))
 
 
 def _add_all(

@@ -2119,6 +2119,41 @@ async def test_begin_mesh_catchup_sync_registers_session_and_sends_for_mesh_host
 
 
 @pytest.mark.asyncio
+async def test_a_mesh_begin_to_a_member_carries_a_verified_fetch():
+    """Sync pages Phase 3: the incremental BEGIN to a mesh-only member
+    household carries the fetch (``buckets`` + ``rows: true`` + ``have``)
+    inside the encrypted payload, and records the hint for a retry."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(return_value=DeliveryResult(instance_id="m-1", ok=True))
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        await svc.begin_mesh_catchup_sync(
+            space_id="sp-1",
+            host_instance_id="m-1",
+            sync_mode="incremental",
+            page_ref={"root": "r"},
+            buckets=[7],
+            have="AAAAAAAAAAA",
+        )
+    payload = send_mock.call_args.kwargs["payload"]
+    assert (payload["buckets"], payload["rows"], payload["have"]) == (
+        [7],
+        True,
+        "AAAAAAAAAAA",
+    )
+    recorded = sync_manager.record_sync_request.call_args.kwargs
+    assert recorded["fetch_have"] == "AAAAAAAAAAA"
+
+
+@pytest.mark.asyncio
 async def test_begin_mesh_catchup_sync_never_cuts_off_a_running_sync():
     """Re-review: our sync of the space from that host is running (a long
     catch-up stream): a new BEGIN would make the host replace it, so none

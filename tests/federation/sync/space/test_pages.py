@@ -27,6 +27,8 @@ from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.federation.sync.space.page_state import BucketRows
 from socialhome.federation.sync.space.pages import SyncPageService
 from socialhome.sync_page import (
+    MAX_FETCH_BYTES,
+    MAX_FETCH_ROWS,
     PAGE_MIN_INTERVAL_S,
     VECTOR_BYTES,
     ListingRow,
@@ -595,19 +597,63 @@ async def test_a_bogus_delta_cannot_roll_a_member_back():
     assert env.held() == p2
 
 
-async def test_a_signer_keeps_its_own_page_over_another_signers():
+async def test_a_delegated_admin_keeps_its_own_page_over_another_signers():
+    env = _Env(own=ADMIN)
+    env.spaces.space = _space(
+        features=replace(SpaceFeatures(), delegated_admin_authority=True)
+    )
+    env.spaces.local = ["u-admin"]
+    env.spaces.members = [
+        SpaceMember(
+            space_id=SPACE,
+            user_id="u-admin",
+            role=SpaceRole.ADMIN.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    ]
+    own = await env.svc.seal_if_due(SPACE)
+    assert own is not None and own.signer == ADMIN
+    other = _signed(signer=HOST, issued_at=T0 + 5_000, seq=999, vector=_vec(7))
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(other, vector=_vec(7)),
+    )
+    await env.svc.wait_idle()
+    assert env.held() == own
+
+
+async def test_the_owner_takes_a_newer_page_its_delegated_admin_signed():
+    """Phase 3: back after a long absence, the owner stores the newer page
+    its delegated admin sealed meanwhile (same epoch) and compares its copy
+    with it; its own next page starts a fresh chain (no conflict)."""
     env = _Env()
     own = await env.svc.seal_if_due(SPACE)
     assert own is not None
     other = _signed(signer=ADMIN, issued_at=T0 + 5_000, seq=999, vector=_vec(7))
-    assert not await env.svc.receive(
+    assert await env.svc.receive(
         space_id=SPACE,
         sync_id="s-1",
         provider=ADMIN,
         sealed=await _sealed_for_member(other, vector=_vec(7)),
     )
     await env.svc.wait_idle()
-    assert env.held() == own
+    assert env.held() == other
+    assert env.state.calls == 2  # the seal, then the compare
+    # An older page of the admin (its previous one) is still refused.
+    older = _signed(signer=ADMIN, issued_at=T0 + 1_000, seq=900, vector=_vec(8))
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=ADMIN,
+        sealed=await _sealed_for_member(older, vector=_vec(8)),
+    )
+    # 15 min later the space changed: the owner seals on its own chain again.
+    env.now = T0 + 5_000 + PAGE_MIN_INTERVAL_S * 1000
+    env.exporter.changed_above = 10**9
+    page = await env.svc.seal_if_due(SPACE)
+    assert page is not None and page.signer == HOST and page.prev_root is None
 
 
 async def test_a_page_that_does_not_open_is_a_one_line_refusal(caplog):
@@ -1209,3 +1255,50 @@ async def test_wait_idle_never_spins_on_finished_tasks():
 async def test_no_page_no_position():
     env = _Env(own=ME, seed=None)
     assert await env.svc.position(env.spaces.space, [HOST]) is None
+
+
+# ── Phase 3: a deliverer's answer is bounded ─────────────────────────────
+
+
+async def test_a_deliverers_answer_is_bounded_in_rows_bytes_and_record_size():
+    """Rows past MAX_FETCH_ROWS or MAX_FETCH_BYTES are left for the next
+    ask; a record over the requester's frame cap is never sent; an older
+    requester gets nothing."""
+    env = _Env()
+    rows = [_row(rid) for rid in _ids_in_distinct_buckets(3, "p")]
+    env.state.vec = _vector_of(rows)
+    big = "x" * 4000
+
+    async def rows_in(space_id, buckets, *, cutoff=None, keep_records=False, skip=()):
+        listed = {i: [r for r in rows if _bucket(r) == i] for i in buckets}
+        records = {
+            i: [("posts", {"id": r.row_id, "content": big}) for _ in range(400)]
+            for i in buckets
+            for r in listed[i]
+        }
+        return BucketRows(rows=listed, gone=set(), records=records)
+
+    env.state.rows_in = rows_in
+    page = await env.svc.seal_if_due(SPACE)
+    assert page is not None
+    buckets = [_bucket(r) for r in rows]
+
+    async def fetch(**over):
+        args = {
+            "space_id": SPACE,
+            "page_ref": parse_page_ref(page.ref()),
+            "buckets": buckets,
+            "requester_version": V,
+            "have": frozenset(),
+            "max_record_bytes": None,
+        }
+        return await env.svc.fetch_records(**{**args, **over})
+
+    listings, fetched = await fetch()
+    assert [r["held"] for r in listings] == [True, True, True]
+    assert len(fetched) <= MAX_FETCH_ROWS
+    assert sum(len(orjson.dumps(r)) for r in fetched) <= MAX_FETCH_BYTES
+    assert len(fetched) == MAX_FETCH_BYTES // len(orjson.dumps(fetched[0]))
+    _listings, fetched = await fetch(max_record_bytes=1000)
+    assert fetched == []  # every record over the requester's frame cap
+    assert await fetch(requester_version=V - 1) == ([], [])

@@ -5,12 +5,15 @@ from __future__ import annotations
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.space import SpaceRole
 from socialhome.federation.sync.space.trusted_helpers import (
+    DELIVERER_ROLES,
     HELPER_ROLES,
     helper_offset,
+    member_deliverers,
     trusted_helpers,
 )
 
 V92 = FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+V95 = FederationCapability.MIN_FOR_SYNC_PAGES
 
 
 class _Seats:
@@ -67,3 +70,28 @@ async def test_no_helper_at_v92_is_an_empty_list() -> None:
 def test_the_offset_is_stable_and_differs_per_household() -> None:
     assert helper_offset("member-a", "sp") == helper_offset("member-a", "sp")
     assert helper_offset("member-a", "sp") != helper_offset("member-b", "sp")
+
+
+def test_deliverers_hold_any_member_seat_never_a_followers() -> None:
+    assert DELIVERER_ROLES == frozenset(
+        {
+            SpaceRole.OWNER.value,
+            SpaceRole.ADMIN.value,
+            SpaceRole.MODERATOR.value,
+            SpaceRole.MEMBER.value,
+        }
+    )
+    assert SpaceRole.SUBSCRIBER.value not in DELIVERER_ROLES
+
+
+async def test_deliverers_are_v95_member_households_rotated() -> None:
+    """Sync pages Phase 3: a plain member qualifies (the rows are verified,
+    not trusted); a household before v_95 cannot answer a fetch."""
+    seats = _Seats(["m-b", "self", "host", "m-a", "old"])
+    fed = _Fed({"m-a": V95, "m-b": V95 + 1, "old": V95 - 1, "host": V95})
+    got = await member_deliverers(seats, fed, "sp", exclude={"self", "host"})
+    assert got == ["m-a", "m-b"]
+    assert seats.asked == [DELIVERER_ROLES]
+    assert await member_deliverers(
+        seats, fed, "sp", exclude={"self", "host"}, offset=1
+    ) == ["m-b", "m-a"]

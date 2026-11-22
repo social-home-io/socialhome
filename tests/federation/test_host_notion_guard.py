@@ -38,6 +38,15 @@ ALLOWED: dict[tuple[str, str], str] = {
         "a label, not a host check: the status says whether the sync page "
         "was signed by the owner or by a delegated admin"
     ),
+    ("federation/sync/space/pages.py", "_no_host_answers"): (
+        "are WE the owner: only the owner has no host above it, so it asks "
+        "member households for a newer page's rows at once (sync pages "
+        "Phase 3); a delegated admin waits for its owner like any member"
+    ),
+    ("federation/sync/space/pages.py", "_receive"): (
+        "are WE the owner: only the owner takes a newer page its delegated "
+        "admin signed over its own; a delegated admin keeps its own chain"
+    ),
     ("services/space_member_directory.py", "_owns"): (
         "are WE the owner: only the owner takes a card a delegated admin "
         "passes on, and a delegated admin passes cards on to it"

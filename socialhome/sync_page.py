@@ -199,28 +199,42 @@ class CommitSpec:
     skip: Callable[[Mapping[str, Any]], bool] | None = None
 
 
+_POLL_OPTION_KEYS = ("id", "text")
+_SCHEDULE_SLOT_KEYS = ("id", "slot_date", "start_time", "end_time", "position")
+_POLL_META_KEYS = ("post_id", "question", "closes_at", "closed", "allow_multiple")
+
+
 def _poll_options(value: Any) -> Any:
     if not isinstance(value, list):
         return []
     return _sorted_list(
-        {"id": o.get("id"), "text": o.get("text")} for o in value if isinstance(o, dict)
+        {k: o.get(k) for k in _POLL_OPTION_KEYS} for o in value if isinstance(o, dict)
     )
 
 
 def _schedule_slots(value: Any) -> Any:
     if not isinstance(value, list):
         return []
-    keep = ("id", "slot_date", "start_time", "end_time", "position")
     return _sorted_list(
-        {k: s.get(k) for k in keep} for s in value if isinstance(s, dict)
+        {k: s.get(k) for k in _SCHEDULE_SLOT_KEYS} for s in value if isinstance(s, dict)
     )
 
 
 def _poll_meta(value: Any) -> Any:
     if not isinstance(value, dict):
         return None
-    keep = ("post_id", "question", "closes_at", "closed", "allow_multiple")
-    return {k: value.get(k) for k in keep}
+    return {k: value.get(k) for k in _POLL_META_KEYS}
+
+
+#: The keys each ``shape`` projection commits — what a fetched record keeps
+#: of that field (Phase 3, :func:`fetched_record`).
+_SHAPE_KEYS: Mapping[Callable[[Any], Any], tuple[str, ...]] = MappingProxyType(
+    {
+        _poll_options: _POLL_OPTION_KEYS,
+        _schedule_slots: _SCHEDULE_SLOT_KEYS,
+        _poll_meta: _POLL_META_KEYS,
+    }
+)
 
 
 _TASK_FIELDS = (
@@ -1121,12 +1135,122 @@ def parse_bucket_request(raw: object) -> list[int] | None:
     return out
 
 
+# ─── Verified fetch from any member (Phase 3) ────────────────────────────
+
+#: A fetch answer carries at most this many rows …
+MAX_FETCH_ROWS: int = 256
+#: … and at most this many bytes of them (their JSON).
+MAX_FETCH_BYTES: int = 512 * 1024
+#: The requester's ``have`` hint: the leaves it holds in the asked buckets,
+#: each as its first :data:`HINT_PREFIX_BYTES` bytes, at most this many.
+MAX_HINT_LEAVES: int = 2048
+HINT_PREFIX_BYTES: int = 8
+
+
+def hint_to_wire(leaves: Iterable[bytes]) -> str:
+    """The ``have`` hint of a fetch: the 8-byte prefixes of *leaves*."""
+    return b64url_encode(b"".join(leaf[:HINT_PREFIX_BYTES] for leaf in leaves))
+
+
+def hint_from_wire(raw: object) -> frozenset[bytes] | None:
+    """A received ``have`` hint (``None``: none sent). Raises
+    :class:`PageRefused` for a malformed or oversized one."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise PageRefused("malformed have hint")
+    blob = _b64(raw)
+    if len(blob) % HINT_PREFIX_BYTES or len(blob) > MAX_HINT_LEAVES * (
+        HINT_PREFIX_BYTES
+    ):
+        raise PageRefused("malformed have hint")
+    return frozenset(
+        blob[k : k + HINT_PREFIX_BYTES] for k in range(0, len(blob), HINT_PREFIX_BYTES)
+    )
+
+
+def parse_fetch_request(
+    payload: Mapping[str, Any],
+) -> tuple[bool, frozenset[bytes] | None]:
+    """``(rows wanted, have hint)`` of a ``sync_mode: "buckets"`` BEGIN:
+    rows only for ``rows: true``; a malformed hint asks for no rows at all
+    (listings only), never for every row."""
+    if payload.get("rows") is not True:
+        return False, None
+    try:
+        return True, hint_from_wire(payload.get("have"))
+    except PageRefused:
+        return False, None
+
+
+def fetched_row_to_wire(index: int, resource: str, record: Mapping[str, Any]) -> dict:
+    """A ``__rows__`` record: one row of bucket *index* a deliverer holds
+    exactly as the page commits it."""
+    return {"i": index, "r": resource, "row": dict(record)}
+
+
+def parse_fetched_row(raw: object) -> tuple[int, str, dict[str, Any]]:
+    """A received ``__rows__`` record, strictly parsed: a committed
+    resource, a row with an id, of the bucket it names. Raises
+    :class:`PageRefused`."""
+    if not isinstance(raw, dict):
+        raise PageRefused("fetched row is not an object")
+    index, resource, record = raw.get("i"), raw.get("r"), raw.get("row")
+    if (
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < BUCKETS
+        or not isinstance(resource, str)
+        or resource not in COMMITTED_RESOURCES
+        or not isinstance(record, dict)
+    ):
+        raise PageRefused("malformed fetched row")
+    row_id = row_id_of(resource, record)
+    if row_id is None or len(row_id) > MAX_LISTING_FIELD:
+        raise PageRefused("malformed fetched row")
+    if row_key(resource, row_id)[0] != index:
+        raise PageRefused("a fetched row of another bucket")
+    return index, resource, record
+
+
+def _keep_keys(value: Any, keys: tuple[str, ...]) -> Any:
+    if isinstance(value, dict):
+        return {k: value[k] for k in keys if k in value}
+    if isinstance(value, list):
+        return [_keep_keys(v, keys) for v in value if isinstance(v, dict)]
+    return value
+
+
+def fetched_record(resource: str, record: Mapping[str, Any]) -> dict[str, Any]:
+    """*record* cut down to what its commit form covers — the only part of
+    a row from a deliverer that its leaf proves, so the only part applied:
+    the allow-listed fields (nested ones and shaped ones by their committed
+    keys, in the order delivered). Its leaf equals the full record's."""
+    spec = COMMIT_SPECS[resource]
+    out: dict[str, Any] = {}
+    for name in spec.fields:
+        if name not in record:
+            continue
+        value = record[name]
+        if name in spec.shape:
+            value = _keep_keys(value, _SHAPE_KEYS[spec.shape[name]])
+        elif name in spec.nested_files:
+            keep = spec.nested_fields.get(name, (spec.nested_files[name],))
+            value = _keep_keys(value, keep) if isinstance(value, dict) else value
+        out[name] = value
+    return out
+
+
 __all__ = [
     "BUCKETS",
     "CHANGE_TIME_FIELDS",
     "COMMITTED_RESOURCES",
     "COMMIT_SPECS",
     "HASH_BYTES",
+    "HINT_PREFIX_BYTES",
+    "MAX_FETCH_BYTES",
+    "MAX_FETCH_ROWS",
+    "MAX_HINT_LEAVES",
     "MAX_LISTING_BUCKETS",
     "MAX_LISTING_ROWS",
     "MAX_PAGE_FUTURE_SKEW_MS",
@@ -1150,13 +1274,19 @@ __all__ = [
     "delta_to_bytes",
     "delta_to_wire",
     "differing_buckets",
+    "fetched_record",
+    "fetched_row_to_wire",
     "file_refs",
+    "hint_from_wire",
+    "hint_to_wire",
     "is_conflict",
     "is_superseded",
     "leaf_of",
     "listing_to_wire",
     "page_time",
     "parse_bucket_request",
+    "parse_fetch_request",
+    "parse_fetched_row",
     "parse_listing",
     "parse_page",
     "parse_page_ref",

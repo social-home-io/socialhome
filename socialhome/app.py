@@ -2527,6 +2527,8 @@ def _wire_federation_stack(
         scheduler=space_sync_scheduler,
         status=app[K.space_sync_status_key],
         sync_manager=sync_manager,
+        federation_service=federation_service,
+        host_contact=host_contact,
         own_instance_id=identity.instance_id,
     )
     # v_92 — a member household that views a space file it misses asks the
@@ -2682,6 +2684,8 @@ def _build_sync_pages(
     scheduler: SpaceSyncScheduler,
     status: SpaceSyncStatusService,
     sync_manager: SyncSessionManager,
+    federation_service: FederationService,
+    host_contact: HostContact,
     own_instance_id: str,
 ) -> SyncPageService:
     """v_95 sync pages (``docs/protocol/sync-pages.md``): the provider's
@@ -2699,7 +2703,7 @@ def _build_sync_pages(
     )
     provider.attach_sync_pages(pages)
     receiver.attach_sync_pages(pages)
-    scheduler.attach_sync_pages(pages.ref_for, pages.buckets_for)
+    scheduler.attach_sync_pages(pages.ref_for, pages.buckets_for, pages.have_for)
     status.attach_pages(pages.position)
 
     async def _hosts(space) -> list[str]:
@@ -2719,6 +2723,17 @@ def _build_sync_pages(
         return request.page_ref
 
     pages.attach_asks(_asked)
+    # Phase 3 — while no acting host answers (or we are the owner), what
+    # the newest page proves we lack comes from any member household: the
+    # fetch rides an ordinary incremental BEGIN to it, every row verified.
+    pages.attach_member_fetch(
+        seats=seat_repo,
+        versions=federation_service,
+        silent=host_contact.is_silent,
+        request=scheduler.sync_with,
+        apply=receiver.apply_verified,
+    )
+    scheduler.attach_host_silent(pages.host_silent)
     return pages
 
 

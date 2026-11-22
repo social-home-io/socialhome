@@ -277,7 +277,22 @@ class SpaceSyncStatusService(BusPublisherMixin):
         and the list would start one per space at once (after a restart
         none has one)."""
         if space.owner_instance_id == self._own_instance_id:
-            return SpaceSyncState.UP_TO_DATE, None, None, False
+            # The owner has no host to be behind — except a newer page its
+            # delegated admin signed while the owner was offline (sync pages
+            # Phase 3): compared like a member's, it can read behind until
+            # the verified fetch brought what the page commits. Our own page
+            # is never compared (match stays ``None``): up to date. Read and
+            # memoised like a member's (the list reads the memo only).
+            owned = await self._page_of(space, [], read_page=read_page)
+            if owned is None or owned.match is None:
+                return SpaceSyncState.UP_TO_DATE, None, None, False
+            proven = owned.match is False and (owned.missing or 0) > 0
+            return (
+                state_with_page(SpaceSyncState.UP_TO_DATE, owned),
+                None,
+                owned,
+                proven,
+            )
         hosts = await self._hosts(space)
         outcomes = await self._outcomes.outcomes(space.id, hosts)
         receiving = (
@@ -286,16 +301,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
             else False
         )
         state, last_ok = sync_state(outcomes, receiving=receiving, now=self._clock())
-        if not read_page:
-            page = self._page_memo.get(space.id)
-        elif self._pages is not None:
-            page = await self._pages(space, hosts)
-            self._page_memo[space.id] = page
-            self._page_memo.move_to_end(space.id)
-            while len(self._page_memo) > MAX_TRACKED:
-                self._page_memo.popitem(last=False)
-        else:
-            page = None
+        page = await self._page_of(space, hosts, read_page=read_page)
         state = state_with_page(state, page)
         proven = page is not None and page.match is False and (page.missing or 0) > 0
         return (
@@ -306,6 +312,22 @@ class SpaceSyncStatusService(BusPublisherMixin):
                 state, outcomes, proven_missing=proven, since=self._started_at
             ),
         )
+
+    async def _page_of(
+        self, space: Space, hosts: list[str], *, read_page: bool
+    ) -> SyncPagePosition | None:
+        """The page position: read from the page service and memoised, or
+        (*read_page* ``False``, the Spaces list) the memo of the last read."""
+        if not read_page:
+            return self._page_memo.get(space.id)
+        if self._pages is None:
+            return None
+        page = await self._pages(space, hosts)
+        self._page_memo[space.id] = page
+        self._page_memo.move_to_end(space.id)
+        while len(self._page_memo) > MAX_TRACKED:
+            self._page_memo.popitem(last=False)
+        return page
 
     async def _unsent(self, space_id: str) -> tuple[str, ...]:
         """Our posts of the space no member household has yet, newest

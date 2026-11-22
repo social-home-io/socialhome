@@ -13,6 +13,7 @@ from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.post import Post, PostType
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.federation.sync.space.receiver_base import (
+    VERIFIED_ROW,
     _bound_here,
     _log_sync_refusal,
     _log_tombstone_refusals,
@@ -346,6 +347,26 @@ async def test_only_the_owner_is_the_host_without_an_authorship_binder(setup):
     assert not await r._acts_as_host(owned, "")
     assert not await r._acts_as_host(None, "peer-a")
     assert await r._is_host("sp-1", "peer-a")
+
+
+async def test_a_verified_row_passes_as_the_hosts_for_its_space_and_deliverer_only(
+    setup,
+):
+    """Sync pages Phase 3: while one row checked against the signed page is
+    applied, its deliverer passes where the host passes — for that space and
+    that deliverer, and never outside the context."""
+    r, _c, _kp = setup
+    space = SimpleNamespace(id="sp-1", owner_instance_id="peer-a")
+    other = SimpleNamespace(id="sp-2", owner_instance_id="peer-a")
+    assert not await r._acts_as_host(space, "peer-b")
+    token = VERIFIED_ROW.set(("sp-1", "peer-b"))
+    try:
+        assert await r._acts_as_host(space, "peer-b")
+        assert not await r._acts_as_host(space, "peer-c")
+        assert not await r._acts_as_host(other, "peer-b")
+    finally:
+        VERIFIED_ROW.reset(token)
+    assert not await r._acts_as_host(space, "peer-b")
 
 
 async def test_a_vetted_actor_from_a_member_without_a_binder_is_nobody(setup):

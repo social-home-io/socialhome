@@ -20,6 +20,8 @@ from socialhome.sync_page import (
     BUCKETS,
     COMMIT_SPECS,
     COMMITTED_RESOURCES,
+    HINT_PREFIX_BYTES,
+    MAX_HINT_LEAVES,
     PAGE_SUITE_SHA256_B256,
     SUPPORTED_PAGE_SUITES,
     VECTOR_BYTES,
@@ -36,13 +38,19 @@ from socialhome.sync_page import (
     delta_to_bytes,
     delta_to_wire,
     differing_buckets,
+    fetched_record,
+    fetched_row_to_wire,
     file_refs,
+    hint_from_wire,
+    hint_to_wire,
     is_conflict,
     is_superseded,
     leaf_of,
     listing_to_wire,
     page_time,
     parse_bucket_request,
+    parse_fetch_request,
+    parse_fetched_row,
     parse_listing,
     parse_page_ref,
     record_leaf,
@@ -682,3 +690,128 @@ def test_superseded_rows_are_not_missing():
     assert superseded_key("posts_deleted", "p1") == ("posts", "p1")
     assert superseded_key("tasks_archived", "t1") == ("tasks", "t1")
     assert superseded_key("posts", "p1") is None
+
+
+# ── Verified fetch (Phase 3) ─────────────────────────────────────────────
+
+
+def test_a_fetch_hint_round_trips_as_8_byte_leaf_prefixes():
+    leaves = [hashlib.sha256(bytes([i])).digest() for i in range(5)]
+    wire = hint_to_wire(leaves)
+    assert hint_from_wire(wire) == frozenset(
+        leaf[:HINT_PREFIX_BYTES] for leaf in leaves
+    )
+    assert hint_from_wire(hint_to_wire([])) == frozenset()
+    assert hint_from_wire(None) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        5,
+        b64url_encode(b"\0" * 7),
+        b64url_encode(b"\0" * 8 * (MAX_HINT_LEAVES + 1)),
+    ],
+)
+def test_a_malformed_or_oversized_hint_is_refused(bad):
+    with pytest.raises(PageRefused):
+        hint_from_wire(bad)
+
+
+def test_a_fetch_request_wants_rows_only_when_asked_and_well_formed():
+    leaf = hashlib.sha256(b"x").digest()
+    assert parse_fetch_request({}) == (False, None)
+    assert parse_fetch_request({"rows": "yes"}) == (False, None)
+    assert parse_fetch_request({"rows": True}) == (True, None)
+    assert parse_fetch_request({"rows": True, "have": hint_to_wire([leaf])}) == (
+        True,
+        frozenset({leaf[:HINT_PREFIX_BYTES]}),
+    )
+    # A malformed hint: listings only, never every row.
+    assert parse_fetch_request({"rows": True, "have": 5}) == (False, None)
+
+
+def test_a_fetched_row_round_trips():
+    record = {"id": "p1", "content": "hi"}
+    index = row_key("posts", "p1")[0]
+    assert parse_fetched_row(fetched_row_to_wire(index, "posts", record)) == (
+        index,
+        "posts",
+        record,
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "x",
+        {"i": 0, "r": "posts", "row": "x"},
+        {"i": 300, "r": "posts", "row": {"id": "p"}},
+        {"i": 0, "r": "members", "row": {"id": "p"}},  # host-only: never fetched
+        {"i": 0, "r": "chat_messages", "row": {"id": "p"}},
+        {"i": True, "r": "posts", "row": {"id": "p"}},
+        {"i": 0, "r": "posts", "row": {"content": "no id"}},
+    ],
+)
+def test_a_malformed_fetched_row_is_refused(bad):
+    with pytest.raises(PageRefused):
+        parse_fetched_row(bad)
+
+
+def test_a_fetched_row_of_another_bucket_is_refused():
+    index = row_key("posts", "p1")[0]
+    with pytest.raises(PageRefused):
+        parse_fetched_row(fetched_row_to_wire((index + 1) % 256, "posts", {"id": "p1"}))
+
+
+def test_a_fetched_record_keeps_only_what_the_page_commits():
+    """Uncommitted fields of a delivered row are never applied: the leaf
+    does not cover them, so a deliverer could set them at will (reactions,
+    a pin, a far-future ``updated_at``, a GFS descriptor, a feed-card link)."""
+    record = {
+        "id": "p1",
+        "space_id": SPACE,
+        "author": "anna",
+        "type": "text",
+        "content": "hi",
+        "created_at": "2026-01-01 00:00:00",
+        "reactions": {"x": ["mallory"]},
+        "reaction_stamps": {"x": {}},
+        "pinned": True,
+        "moderated": True,
+        "media_refs": {"x": 1},
+        "updated_at": "2099-01-01 00:00:00",
+        "comment_count": 99,
+        "file_meta": {"url": "api/media/a.webp", "mime_type": "x", "evil": 1},
+    }
+    got = fetched_record("posts", record)
+    assert set(got) <= set(COMMIT_SPECS["posts"].fields)
+    assert got["file_meta"] == {"url": "api/media/a.webp", "mime_type": "x"}
+    assert record_leaf("posts", got, lambda u: "a" * 64) == record_leaf(
+        "posts", record, lambda u: "a" * 64
+    )
+
+
+def test_fetched_poll_and_schedule_shapes_keep_their_order_and_committed_keys():
+    poll = {
+        "post_id": "p1",
+        "meta": {"question": "Q", "closed": False, "votes_total": 9},
+        "options": [{"id": "b", "text": "B", "votes": 3}, {"id": "a", "text": "A"}],
+        "votes": [{"user_id": "u", "option_id": "a"}],
+    }
+    got = fetched_record("polls", poll)
+    assert got["options"] == [{"id": "b", "text": "B"}, {"id": "a", "text": "A"}]
+    assert "votes" not in got and "votes_total" not in got["meta"]
+    assert record_leaf("polls", got, _no_files) == record_leaf("polls", poll, _no_files)
+    schedule = {
+        "post_id": "p2",
+        "title": "T",
+        "slots": [{"id": "s2", "slot_date": "2027-01-01", "answers": {"u": "yes"}}],
+        "responses": [{"user_id": "u"}],
+    }
+    got = fetched_record("schedules", schedule)
+    assert got["slots"] == [{"id": "s2", "slot_date": "2027-01-01"}]
+    assert "responses" not in got
+    assert record_leaf("schedules", got, _no_files) == record_leaf(
+        "schedules", schedule, _no_files
+    )

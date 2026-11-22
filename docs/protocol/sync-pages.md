@@ -1,9 +1,11 @@
 # Sync pages (signed state pages)
 
-**Status: Phase 2 (signed pages, the "behind?" check) is implemented at
-v_95 — see [Phase 2 as built](#phase-2-as-built-v_95). Phase 3 (verified
-fetch from any member) is design only.** It builds on [sync.md](./sync.md),
-the §25.6 space sync.
+**Status: Phase 2 (signed pages, the "behind?" check) and Phase 3
+(verified fetch from any member) are implemented at v_95 — see [Phase 2
+as built](#phase-2-as-built-v_95) and [Phase 3 as
+built](#phase-3-as-built-v_95). The anti-entropy part of Phase 3
+(`page_match`) is not built yet.** It builds on [sync.md](./sync.md), the
+§25.6 space sync.
 
 The space authority signs a small **page** now and then: a commitment to
 the space's current content, split into 256 **buckets**. A member keeps
@@ -69,11 +71,14 @@ household ignores them.
 - `SPACE_SYNC_CHUNK` sentinel (`__complete__`): `page_sealed` (Phase 2).
 - `SPACE_SYNC_BEGIN`: `page` (a reference to the requester's newest page)
   and `buckets` (≤ 8: the listings the stream should end with; Phase 2 on
-  the incremental BEGIN to an acting host). Phase 3 adds `vector_hint`,
-  the rows, a BEGIN to any member household, and `page_match`.
+  the incremental BEGIN to an acting host). Phase 3 as built adds `rows:
+  true` and `have` (8-byte prefixes of the leaves the requester holds in
+  those buckets) on an ordinary incremental BEGIN to any member household
+  while no host answers. `page_match` is not built.
 - New in-stream resource, carried in ordinary chunks right before the
   sentinel: `__listing__` (one bucket's rows — identity, leaf, change
-  time; Phase 2).
+  time; Phase 2) and `__rows__` (one row record of a listed bucket;
+  Phase 3).
 
 ## 1. Log or state? (decision)
 
@@ -363,6 +368,10 @@ sequenceDiagram
   field, so no household needs a full stream to cross v_95.
 
 ### Phase 3: verified fetch from any member
+
+*The design as reviewed; what shipped is in [Phase 3 as
+built](#phase-3-as-built-v_95): the fetch rides an ordinary incremental
+BEGIN (`buckets` + `rows` + `have`), no `page_match` yet.*
 
 ```mermaid
 sequenceDiagram
@@ -731,6 +740,245 @@ What shipped, where it is more exact than the design above:
   "buckets"`, listings, `page_match` (all Phase 3); SPA text for the page
   ("as of page N"), the API field is there.
 
+## Phase 3 as built (v_95)
+
+**Goal (owner):** sync even when neither the host nor a delegated admin is
+available. A member that is behind catches up from **any** member household
+that holds the content, and checks every row against the newest signed page
+it holds, so the deliverer needs no trust. Same version as Phase 2
+(`MIN_FOR_SYNC_PAGES` = 95, still unreleased): no new event type, no new
+field an older household must understand, no `SYNC_RECORD_LINES` entry.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Member behind
+    participant H as Host (and delegated admin) — offline
+    participant D as Member household (any seat but a follower's)
+    R->>H: SPACE_SYNC_BEGIN (periodic tick)
+    Note over R,H: no answer within HOST_ANSWER_WAIT_S (120 s) → silent
+    Note over R: compare held page P with own rows → buckets to fetch (todo)<br/>(at once, or kept from the last compare)
+    R->>D: SPACE_SYNC_BEGIN (an ordinary incremental one), page=ref(P),<br/>buckets ≤ 8, rows=true, have=8-byte leaf prefixes R holds
+    Note over D: holds P? its own rows of each bucket hash to P's bucket?
+    D->>R: its usual incremental chunks (its writers' rows)
+    D->>R: __listing__ per bucket (held: rows+leaves | held: false)
+    D->>R: __rows__ (rows of held buckets R lacks, ≤ 256 rows, ≤ 512 KiB)
+    D->>R: sentinel
+    Note over R: listing → signed bucket hash? row's committed part → listed leaf<br/>of a row R lacks? → apply as the host's row (that row only)
+    R->>D: SPACE_SYNC_COMPLETE
+    Note over R: buckets still to fetch → next member of the round (≤ 3)<br/>host heard again → stop; status: match → up to date
+```
+
+**Trigger — only while the host is silent.** The scheduler's trigger 10
+already waits `HOST_ANSWER_WAIT_S` for an answer from the households acting
+as the space's host; when none comes it marks the space silent
+(`HostContact.went_silent`) and now also calls `SyncPageService.host_silent`
+(`SpaceSyncScheduler.attach_host_silent`). A compare that finds unexplained
+buckets while the host is silent asks a member instead of the host. **One
+path**: the compare decides what is missing (`todo`, the unexplained
+buckets not yet proven complete) and keeps ONE ask (`_Wanted`) that rides
+the next incremental BEGIN to the household it is meant for — the acting
+host (Phase 2: `buckets`, listings before the sentinel) or, while no host
+answers, a member household (Phase 3: the same `buckets` plus `rows` and
+`have`). A member's answer narrows `todo`; what is left goes to the
+round's next member. No member is ever asked
+while a host answers (`HostContact.is_silent`), and a host heard again in
+the middle of a round stops it before the next ask. The one exception is
+the owner itself, which has no host above it (see "The owner back from a
+long absence" below).
+
+**Picking deliverers** (`trusted_helpers.member_deliverers`, the helper
+picker with other roles): every household with a live **member seat**
+(owner, admin, moderator, member) in our roster mirror at v_95, never
+a follower-only household, never us, never a household acting as host;
+sorted, rotated from the stable per-household offset (`helper_offset`, never
+random) plus one step per round, at most `MAX_FETCH_ASKS` = 3 asked one
+after another per round — the next one only when an answer leaves
+buckets to fetch; an unanswered ask holds the round until it is given up
+(`FETCH_ANSWER_WAIT_S`, 5 min), and the next silent round asks the next
+member. Admins and moderators get no priority (owner
+decision 2). The window of buckets asked also rotates per round, so a
+bucket nobody can prove never blocks the others.
+
+**Request** — no session kind, budget or cap exemption of its own: the
+ordinary incremental BEGIN to that member (`SpaceSyncScheduler.sync_with`,
+the BEGIN a tick sends a paired co-member; over the mesh for a mesh-only
+one), carrying Phase 2's `page` and `buckets` plus `rows: true` and
+`have` (`SyncPageService.have_for`, through `_page_fields_for`) — the
+first 8 bytes of every leaf the requester holds in the asked buckets
+(base64url, ≤ `MAX_HINT_LEAVES` = 2 048 prefixes; buckets are dropped
+from the ask until the hint fits, the first always goes). All inside the
+per-pair encrypted payload. It obeys every rule of a BEGIN: never over a
+running sync of the space from that household (the ask then rides the
+next one), the provider's 5 / h stream budget and session cap; a relay
+retry after an ICE timeout carries the same `rows` / `have`
+(`PendingSyncRequest.fetch_have`). A malformed hint asks for listings
+only (`parse_fetch_request`), never every row. The only difference from
+Phase 2's ask: the member is not an acting host, so it never sends a
+`current` listing and its answer is checked row by row.
+
+**Deliverer** (`SyncPageService.fetch_records`, any member household): it
+serves only a requester holding a member seat in its roster mirror (the
+provider's member gate — a follower gets the bare sentinel) and only for
+the page it holds itself (the same root). Per asked bucket it recomputes its
+own rows: when they hash to the page's signed bucket, it sends the listing
+and then the rows the hint does not name, as `__rows__` records
+(`{i, r, row}`, the full exporter record plus the content hashes of its
+files, `files`); otherwise `held: false` and no row of that bucket — it
+never sends a row it cannot prove. The listings and rows end its normal
+incremental stream, right before the sentinel (`_listing_chunks`).
+Bounded per answer: `MAX_FETCH_ROWS` = 256 rows and `MAX_FETCH_BYTES` =
+512 KiB, a record over the GFS frame cap of a relay-seated requester is
+left out. One export of the space per ask (the same cost as a listing).
+
+**Receiver** (`SyncPageService._fetch_done`, `SpaceSyncReceiver
+.apply_verified`):
+
+1. Only an answer to the ask our BEGIN carried, from the household we
+   asked, for the page it asked about (the pending-request record); at
+   most 256 rows / 512 KiB are kept from it, the rest dropped on receipt.
+   Classified at the sentinel, after the round's own rows applied.
+2. Each listing must parse, be of an asked bucket, appear once and hash to
+   the signed bucket of the held page — or the **whole answer** is refused
+   (one WARNING), as in Phase 2. A `current` listing (a host's rows as
+   they are now, which Phase 2 takes from an acting host) proves nothing
+   from a member: that bucket counts as not held, and a deliverer never
+   sends one with rows.
+3. Only the listing's **leaves** count: its labels (resource, row id) and
+   change times are not signed, so they play no part in what is applied. A
+   delivered row counts only if its own committed part hashes to a leaf of
+   its bucket's verified listing, and whether we lack it is decided from
+   the row's own identity (the leaf commits to it) against **our** rows: we
+   hold no row of that identity (and it is not deleted / archived here
+   since), or hold another version that we did not change after the page's
+   signed `issued_at` — so a deliverer cannot roll a newer local edit back
+   to the page's version. (A bucket's status counts still read the labels:
+   a forged label can make a bucket look incomplete, or a row deleted here
+   look gone, but never applies anything.)
+4. The row is cut down to its **committed part** (`sync_page.fetched_record`:
+   the commit form's allow-list, nested and shaped fields by their committed
+   keys, in the order delivered) plus the file hashes of its committed file
+   references; that part must hash to the listed leaf. Anything else in the
+   record (reactions, votes, bids, a pin, a moderation flag, `updated_at`,
+   a GFS descriptor, …) is never applied. Every refused row of an answer is
+   counted in one WARNING.
+5. Verified rows apply in stream order (lists before tasks, posts before
+   comments and polls) through the normal receiver (`_apply`), one row at a
+   time, with `VERIFIED_ROW` set to `(space, deliverer)`: the row passes
+   where a host's record passes (`_acts_as_host`, and a page's host
+   version by `seq`), for that space, that deliverer and that row only —
+   the same merge rules (last writer wins, a deleted row stays deleted,
+   tombstones), the same archive refusal and owner-bound id checks.
+6. The verdict narrows: a bucket whose missing rows all landed is complete;
+   rows still missing keep `match: false` (behind); the rest stays
+   unresolved. With nothing left the space reads **up to date** through the
+   status's one `_request_recheck` path, also while the host is offline.
+   Buckets still to fetch go to the round's next member.
+
+**The owner back from a long absence is a requester too.** While the owner
+household was offline a seed-holding delegated admin may have sealed newer
+pages (§3). The owner takes such a page over its own older one — same
+epoch, verified, newer by `(epoch, issued_at, seq)`; a delegated admin
+still never stores another signer's page over its own — compares its copy
+with it and, having no host above it, goes straight to member households
+(the admin's included; never itself as "the host") for what the page proves
+it lacks, content whose author household is offline now included. Its sync
+status, otherwise always up to date, follows that compare (`behind` while
+rows are proven missing). Its next own page starts a new chain (`prev_root`
+null, the full vector), which is no conflict. Limits: the owner is the wiki
+pages' sequencer (v_48), so it never takes a page *version* from a stream —
+a verified wiki page row is ignored there and the admin's page edits reach
+it the existing way (proposals). **Boundary:** content created while **no**
+seed holder sealed a page (no delegated admin, or none online) is in no
+page; it reaches the owner — and everyone else — the existing way: each
+author's household delivers its own rows (live events, the outbox, the
+§25.6 stream and `SPACE_SYNC_RESUME`).
+
+**Partial answers are fine.** A deliverer that changed a bucket since the
+page, holds the page under another root, or is behind itself answers
+`held: false` for it; the round asks the next member for what is left.
+
+**Older households degrade.** A household below v_95 is never picked (no
+pages, no fetch); with no deliverer at v_95 the member waits for the host
+(logged once per round). A deliverer at v_95 that does not know `rows`
+(none exist: same unreleased version) would answer listings only, which
+classify but deliver nothing.
+
+**What stays out** — still only from the host's §25.6 stream:
+
+- item state and host-only resources (§2): reactions and their stamps, poll
+  votes, RSVPs, schedule answers, bazaar bids, the chat, `member_pictures`,
+  `members` / `bans` (the roster has its own repair);
+- the uncommitted fields of committed rows: a post's location, pin,
+  moderation, bot, linked highlight, link-card opt-out; `updated_at` /
+  `created_at` where the commit form leaves them out (a wiki page, a sticky,
+  a zone: the receiver's local default applies until the host's stream);
+  counters (`comment_count`, `item_count`);
+- a calendar event's **feed card** (a post with `linked_event_id`): not
+  committed (Phase 2 — every household mints its own), and never applied
+  from a member either;
+- rows created after the newest page (the helper resume below still covers
+  the helpers' own people's rows, unchanged);
+- media bytes: a verified row's files are named by their content hash; the
+  bytes come when someone opens them (`SPACE_MEDIA_WANTED`: the host, or a
+  trusted helper while the host is silent).
+
+The v_92 trusted-helper resume stays as it was (rows newer than the page,
+own people's only); Phase 3 runs next to it and covers everything the page
+commits, from anyone.
+
+**Not built from the Phase 3 design:** `page_match` in BEGIN and the
+bucket-diff anti-entropy that would replace the daily full stream; the
+deliverer checking the full signed page sent in the BEGIN (it must hold the
+same page — members converge on the newest page through the sentinel
+relay, and a deliverer with another page answers `held: false`).
+
+**Cost** (recipients × items × bytes per trigger; nothing fans out — one
+requester asks one member at a time):
+
+| Per ask | Small space (2 000 rows, ~8 per bucket) | Big space (50 000 rows, ~195 per bucket) |
+|---|---|---|
+| BEGIN (8 buckets, `have`) | ≈ 0.6 KiB | ≈ 12.5 KiB raw, ≈ 17 KB encoded |
+| Listings (8 buckets) | ≈ 2 KB | ≈ 50 KB |
+| Rows | only rows the requester lacks, ≤ 256 / 512 KiB | same |
+| CPU | one export on each side | one export on each side (≈ 6 s on x86 per the Phase 2 measurement; several times that on a Pi) |
+
+- **Per round**: ≤ 3 asks per behind member per silent space, one round per
+  30-min tick (plus one when a newer page arrives while the host is silent),
+  and none once nothing is left to fetch (`todo` empty) — a caught-up
+  member costs nothing while the host stays offline.
+- **Worst realistic case**: a global space with 200 member households and
+  50 000 rows, the host offline for a day, every member missing the host's
+  last ~2 h (≈ 170 changes at 2 000 a day). 170 rows fall into ≈ 125
+  buckets (1 − e^(−170/256) ≈ 49 %), i.e. 16 asks of 8 buckets — 6 rounds
+  (3 h) at 3 asks per round. Per member: 125 listings × 6 KB ≈ 750 KB +
+  hints 125 × 1.6 KB ≈ 200 KB + rows 170 × ~0.6 KB ≈ 100 KB ≈ **1.1 MB**;
+  all 200 members ≈ **210 MB**, once (the host's stream would have been
+  ≈ 20 MB — the price of proof is the listings). Load per deliverer: 200 ×
+  3 asks spread by the offsets over 199 member households ≈ 3 asks (3
+  exports) per deliverer per round, each on a BEGIN within the provider's
+  usual 5 / h per (requester, space). After the catch-up: 0.
+- **Upper bound** per member and silent space: 48 rounds × 3 asks × (17 KB
+  + 50 KB + 512 KiB) ≈ 84 MB a day — reached only by a member that keeps
+  missing ≥ 256 rows per ask, i.e. one that really lacks that much.
+- **Storage**: none. The ask is memory only (one per space, as Phase 2's;
+  5 min until an unanswered one is given up).
+
+**Security** (beyond §6):
+
+| Threat | Outcome |
+|---|---|
+| Forged or truncated listing | does not hash to the signed bucket → the whole answer refused (WARNING), the buckets stay to fetch |
+| Tampered row | its committed part does not hash to the listed leaf → refused (WARNING); the rest of the answer is kept |
+| Extra fields in a row (reactions, pins, `updated_at`, `linked_event_id`, …) | never applied — only the committed part is (`fetched_record`); a feed card is left out |
+| Inflated change time in a listing, to roll back a newer local row | a row changed here after the page's signed `issued_at` is ahead; otherwise the page's version is the signer's own, applied under the host's rules exactly as the host's stream would |
+| A row of another space / bucket, a non-committed resource | refused at parse (`parse_fetched_row`) |
+| Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked |
+| Unasked answer, or one from another household | dropped |
+| A follower asking | the deliverer's member gate sends nothing; a follower is never asked |
+| Oversized answer | ≤ 256 rows / 512 KiB kept, the rest dropped |
+| Privacy | the hint (leaf prefixes), listings and rows travel only inside the encrypted BEGIN and chunks under the content key, between member households; the GFS sees none of it (relay mode carries sealed frames) |
+
 ## Implementation pointers
 
 - Phase 2 (built): `socialhome/sync_page.py` (commit form, hashing, page
@@ -744,9 +992,21 @@ What shipped, where it is more exact than the design above:
   `authority_sig.py` (`space_sync_page`), migration `0151`
   (`space_sync_pages` + the rotation trigger), `domain/space_sync_page.py`
   and `services/space_sync_status.py` (status), `MIN_FOR_SYNC_PAGES`.
-- Phase 3 (planned): `provider.py` (`buckets` mode), `scheduler.py`
-  (rotation through members), `receiver_base.py` (`verified` next to
-  `_acts_as_host`), `watermark.py` (`page_match` → `full_at`).
+- Phase 3 (built): `sync_page.py` (`fetched_record`, the `have` hint,
+  `__rows__` records, `parse_fetch_request`), `page_state.py`
+  (`rows_in(keep_records=True)`), `pages.py` (`have_for`,
+  `fetch_records`, `host_silent`, `_fetch_round` / `_fetch_next` /
+  `_fetch_done`, the owner's page), `trusted_helpers.py`
+  (`member_deliverers`), `provider.py` (`__rows__` after the listings),
+  `receiver.py` (`__rows__` → the page service, `apply_verified`),
+  `receiver_base.py` (`VERIFIED_ROW` in `_acts_as_host`),
+  `receive_pages.py` (a verified page is the host's version),
+  `scheduler.py` (`sync_with`, `rows` / `have` in `_page_fields_for`,
+  `attach_host_silent`), `federation_service.py` / `sync_manager.py` /
+  `sync_rtc.py` (`rows` / `have` on BEGIN, the mesh BEGIN and the relay
+  retry), `space_sync_status.py` (the owner's status); demo step
+  `members-page-catchup`.
+- Phase 3 (planned, not built): `watermark.py` (`page_match` → `full_at`).
 
 ## Spec references
 
