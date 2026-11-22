@@ -145,25 +145,26 @@ async def test_the_sentinel_carries_the_sync_page_for_the_requester(provider):
     ]
 
 
-@pytest.mark.parametrize("member", [True, False])
-async def test_every_seated_household_gets_the_page_subscribers_too(provider, member):
-    """Owner decision (B1 revised): a seated subscriber household gets the
-    same page as a member — the member-only kinds are not committed, so the
-    vector holds nothing a subscriber seat may not see. Seated is what the
-    session's admission proves (a non-seated household gets no session at
-    all, see ``test_sync_manager``); the member gate plays no part here."""
+@pytest.mark.parametrize("gate", [False, None])
+async def test_a_follower_household_gets_no_page_and_no_vector(provider, gate):
+    """Review B1: the page's vector covers member-only resources (zones), so
+    a follower-only household (no writer seat) — or a provider with no
+    member gate wired — never gets the page."""
     pages = _FakePages()
     provider.attach_sync_pages(pages)
+    if gate is not None:
 
-    async def gate(space_id, requester):
-        return member
+        async def follower(space_id, requester):
+            return gate
 
-    provider.attach_member_gate(gate)
+        provider.attach_member_gate(follower)
     session = _FakeSession()
     session.peer_version = 95
     await provider.stream_initial(session)
     last = orjson.loads(session.rtc.sent[-1])
-    assert last["page_sealed"] == {"epoch": 1, "payload": "sealed"}
+    assert last["resource"] == SENTINEL_RESOURCE
+    assert "page_sealed" not in last
+    assert pages.calls == []
 
 
 async def test_a_replaced_https_stream_stops_at_its_next_chunk(provider):
@@ -227,20 +228,18 @@ async def test_the_listings_ride_the_stream_before_its_sentinel(provider):
     assert frames[-1]["chunk_count"] == len(frames) - 1
 
 
-async def test_a_seated_subscriber_gets_its_listings_too(provider):
-    _pages, _session, frames = await _listing_session(provider, member=False)
-    assert [f["resource"] for f in frames][-2:] == ["__listing__", "__complete__"]
-
-
-@pytest.mark.parametrize(("version", "buckets"), [(94, (4,)), (95, ())])
-async def test_no_listings_for_an_older_household_or_none_asked(
-    provider, version, buckets
+@pytest.mark.parametrize(
+    ("version", "member", "buckets"),
+    [(94, True, (4,)), (95, False, (4,)), (95, True, ())],
+)
+async def test_no_listings_for_an_older_household_a_follower_or_none_asked(
+    provider, version, member, buckets
 ):
     pages, _session, frames = await _listing_session(
-        provider, version=version, buckets=buckets
+        provider, version=version, member=member, buckets=buckets
     )
     assert "__listing__" not in [f["resource"] for f in frames]
-    if not buckets:
+    if not member or not buckets:
         assert not any("buckets" in c for c in pages.calls)
 
 

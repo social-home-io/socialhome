@@ -585,9 +585,15 @@ class SpaceSyncService:
     async def _sentinel_page(self, session: SyncSessionRecord) -> dict | None:
         """v_95: the sentinel's sealed sync page for this requester, or
         ``None`` (no page service, an older requester, nothing newer).
-        To every household the session's admission seated — members and
-        subscribers alike: the page commits no member-only kind (zones)."""
-        if self._sync_pages is None:
+        Only to a member household (a writer seat): the page's vector covers
+        member-only resources (zones), which a follower never gets."""
+        if (
+            self._sync_pages is None
+            or self._member_gate is None
+            or not await self._member_gate(
+                session.space_id, session.requester_instance_id
+            )
+        ):
             return None
         return await self._sync_pages.sentinel_page(
             space_id=session.space_id,
@@ -1075,11 +1081,17 @@ class SpaceSyncService:
         record_limit: int | None,
     ) -> AsyncIterator[dict[str, Any]]:
         """``__listing__`` chunks for the ``buckets`` the BEGIN named (v_95,
-        sync pages): to any household the session's admission seated, as the
-        page is; the page service gates on its version. Nothing when none
-        were asked."""
+        sync pages): only to a member household (a writer seat); the page
+        service gates on its version. Nothing when none were asked."""
         buckets = list(getattr(session, "buckets", None) or [])
-        if not buckets or self._sync_pages is None:
+        if (
+            not buckets
+            or self._sync_pages is None
+            or self._member_gate is None
+            or not await self._member_gate(
+                session.space_id, session.requester_instance_id
+            )
+        ):
             return
         try:
             records = await self._sync_pages.listing_records(

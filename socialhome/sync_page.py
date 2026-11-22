@@ -420,9 +420,21 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
             stamps=("deadline",),
             shape={"slots": _schedule_slots},
         ),
-        # Not committed: ``space_zones`` / ``space_zones_deleted`` — member
-        # only (a subscriber seat never gets them), and a seated subscriber
-        # household checks the same page as a member.
+        "space_zones_deleted": _tombstone("created_by"),
+        "space_zones": CommitSpec(
+            fields=(
+                "id",
+                "space_id",
+                "name",
+                "latitude",
+                "longitude",
+                "radius_m",
+                "created_by",
+                "created_at",
+                "color",
+                "icon",
+            )
+        ),
         "bazaar": CommitSpec(
             # The listing without its bids (item state).
             fields=(
@@ -970,6 +982,7 @@ SUPERSEDED_BY: Mapping[str, str] = MappingProxyType(
         "calendar_deleted": "calendar",
         "gallery_albums_deleted": "gallery",
         "gallery_items_deleted": "gallery",
+        "space_zones_deleted": "space_zones",
         "timetables_deleted": "timetables",
         "tasks_archived": "tasks",
     }

@@ -427,37 +427,6 @@ async def test_begin_session_silently_drops_non_member_s1():
     assert d.next_event is None
 
 
-async def test_a_non_seated_household_gets_no_session_so_no_page_or_listing():
-    """Sync pages ride only an admitted session: a household with no seat in
-    the space (no ``space_instances`` row) is never admitted, so it gets no
-    stream, no page, no vector and no listing — even when its BEGIN names a
-    page and buckets."""
-
-    async def check_member(space_id, instance_id):
-        return instance_id == "seated"
-
-    mgr = SyncSessionManager(_FakeFedRepo(), check_member=check_member)
-    d = await mgr.begin_session(
-        sync_id="s-out",
-        space_id="sp-1",
-        requester_instance_id="stranger",
-        provider_instance_id="me",
-        sync_mode="incremental",
-        page_ref={"root": "x"},
-        buckets=[1, 2],
-    )
-    assert d.accepted is False and mgr.get_session("s-out") is None
-    ok = await mgr.begin_session(
-        sync_id="s-in",
-        space_id="sp-1",
-        requester_instance_id="seated",
-        provider_instance_id="me",
-        sync_mode="incremental",
-        buckets=[1, 2],
-    )
-    assert ok.accepted and mgr.get_session("s-in").buckets == [1, 2]
-
-
 async def test_begin_session_rejects_non_member_dissolved_with_reason():
     """S-1 backstop: a non-member with a ``reject_reason`` classifier
     returning ``"dissolved"`` gets a SPACE_SYNC_REJECTED follow-up so

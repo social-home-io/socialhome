@@ -98,11 +98,9 @@ def _state(home: Home) -> PageStateHasher:
 
 
 def _committed(case: Case) -> bool:
-    """Cases about host-only resources (the roster, member pictures) and
-    member-only ones (zones: a subscriber seat never gets them)."""
+    """Cases about host-only resources (the roster, member pictures)."""
     return not any(
-        w in case.name
-        for w in ("member role", "member banned", "member picture", "zone")
+        w in case.name for w in ("member role", "member banned", "member picture")
     )
 
 
@@ -142,45 +140,6 @@ async def test_host_only_resources_never_enter_the_vector(homes):  # noqa: F811
     # The harness seats three members and no content: nothing committed.
     assert rows == 0
     assert vec == VectorBuilder().finish()
-
-
-@pytest.mark.parametrize(
-    "case", [c for c in CASES if "zone" in c.name], ids=lambda c: c.name
-)
-async def test_a_member_and_a_subscriber_hash_the_same_rows(
-    homes,  # noqa: F811
-    case: Case,
-):
-    """Owner decision (B1 revised): a seated subscriber household checks
-    the same page as a member. The member holds the members' places
-    (zones), the subscriber never does — the commitment leaves them out,
-    so both hash the same rows identically."""
-    host, member = homes
-    await _post(host)
-    await case.seed(host)
-    await _stream(host, member)  # the member household: zones included
-    await case.change(host)
-    await _stream(host, member)
-    zones = ("space_zones", "space_zones_deleted")
-    zone_rows = [
-        await collect_batches(record_batches(member.exporters[r], SPACE))
-        for r in zones
-        if r in member.exporters
-    ]
-    assert any(zone_rows), "the case gives the member no zone row"
-    h_vec, h_rows = await _state(host).vector(SPACE)
-    m_vec, m_rows = await _state(member).vector(SPACE)
-    # The subscriber: the same rows without any zone (it never gets them).
-    subscriber = dict(member.exporters)
-    for r in zones:
-        subscriber.pop(r, None)
-    s_vec, s_rows = await PageStateHasher(
-        exporters=subscriber,
-        windows=SyncWindows(member.repos.space),
-        files=_Hasher(),
-    ).vector(SPACE)
-    assert h_rows == m_rows == s_rows > 0
-    assert h_vec == m_vec == s_vec
 
 
 async def test_a_file_without_a_hash_keeps_its_row_out(homes):  # noqa: F811
