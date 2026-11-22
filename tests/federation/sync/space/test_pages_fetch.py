@@ -22,14 +22,17 @@ from datetime import UTC, date, datetime, timedelta
 import orjson
 import pytest
 
+import tests.federation.sync.space.test_sync_coverage as coverage
 from socialhome.canonical_json import canonical_str
 from socialhome.crypto import ed25519_public_key
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
-from socialhome.domain.task import TaskStatus
+from socialhome.domain.task import Task, TaskList, TaskStatus
+from socialhome.federation.owner_bound_id import SPACE_PAGE_KIND, SPACE_TASK_LIST_KIND
 from socialhome.federation.sync.space.pages import (
+    CATCH_UP_HOLD_S,
     FETCH_ANSWER_WAIT_S,
     MAX_FETCH_ASKS,
     SyncPageService,
@@ -62,6 +65,7 @@ from tests.federation.sync.space.test_sync_coverage import (
     TASK_LIST,
     Home,
     _album,
+    _bound,
     _event,
     _home,
     _page,
@@ -1301,11 +1305,20 @@ async def test_a_child_held_back_for_its_parent_is_never_stuck(trio):
     assert pos is not None and (pos.match, pos.missing) == (True, 0)
 
 
-async def test_a_stuck_bucket_keeps_the_verdict_off_matched(trio):
+async def test_a_stuck_bucket_keeps_the_verdict_off_matched(trio, monkeypatch):
     """Re-review S1 (verdict): a bucket refused by rule in one answer stays
     missing when a LATER answer completes every other bucket — the verdict
     counts the remembered stuck rows, never "matched"."""
     host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    # The wiki page in a bucket apart from post-2's (owner-bound ids are
+    # random per run: in post-2's bucket the forge below would drop the
+    # post's listing too, 1 run in 256).
+    page_id = next(
+        i
+        for i in iter(lambda: _bound(SPACE_PAGE_KIND), None)
+        if row_key("pages", i)[0] != row_key("posts", "post-2")[0]
+    )
+    monkeypatch.setattr(coverage, "PAGE", page_id)
     await _missed_content(host, member, requester)
     space = await requester.repos.space.get(SPACE)
     assert space is not None
@@ -1322,7 +1335,7 @@ async def test_a_stuck_bucket_keeps_the_verdict_off_matched(trio):
     )
     await host_pages.seal_if_due(SPACE)
     assert await _round(host_pages, member_pages, "s-m")
-    page_bucket = row_key("pages", PAGE)[0]
+    page_bucket = row_key("pages", page_id)[0]
 
     def only_the_post(listings, rows):
         # The first answer leaves the wiki page's bucket out entirely.
@@ -1339,7 +1352,7 @@ async def test_a_stuck_bucket_keeps_the_verdict_off_matched(trio):
     # answer then completes its bucket without landing anything — the
     # verdict must still count the stuck post.
     await _stream(host, requester)
-    assert await requester.repos.page.get_space_page(PAGE, space_id=SPACE)
+    assert await requester.repos.page.get_space_page(page_id, space_id=SPACE)
     wire.forge = None
     r_pages.host_silent(SPACE)
     await wire.settle()
@@ -1404,11 +1417,35 @@ async def test_a_child_held_back_answer_after_answer_is_stuck_at_the_limit(trio)
     host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
     await _post(host)
     await _stream(host, requester)
-    await _task(host)
+    task_bucket = row_key("tasks", TASK)[0]
+    # The list in a bucket of its own: owner-bound ids are random per run,
+    # and a withheld list in the task's bucket is a missing row the next
+    # member may deliver — that bucket is rightly never stuck (1 run in 256
+    # minted them into one bucket and failed here).
+    list_id = next(
+        i
+        for i in iter(lambda: _bound(SPACE_TASK_LIST_KIND), None)
+        if row_key("task_lists", i)[0] != task_bucket
+    )
+    await host.repos.space_task.save_list(
+        TaskList(id=list_id, name="Chores", created_by=ANNA), space_id=SPACE
+    )
+    await host.repos.space_task.save(
+        Task(
+            id=TASK,
+            list_id=list_id,
+            title="Dishes",
+            status=TaskStatus.TODO,
+            position=0,
+            created_by=ANNA,
+            created_at=T0_DT,
+            updated_at=T0_DT,
+        ),
+        space_id=SPACE,
+    )
     await _stream(host, member)
     await host_pages.seal_if_due(SPACE)
     assert await _round(host_pages, member_pages, "s-m")
-    task_bucket = row_key("tasks", TASK)[0]
 
     def withhold_list(listings, rows):
         return listings, [r for r in rows if r["r"] != "task_lists"]
@@ -1431,3 +1468,259 @@ async def test_a_child_held_back_answer_after_answer_is_stuck_at_the_limit(trio)
     assert await requester.repos.space_task.get(TASK) is None
     pos = await _position(requester, r_pages)
     assert pos is not None and pos.match is not True
+
+
+# ── Final review I1: a change after the page that no member can prove ────
+
+PAGE_DT = datetime.fromtimestamp(1_800_000_000, UTC)  # the harness clock
+
+
+async def _delete_post_1(h: Home) -> None:
+    assert await h.repos.space_post.soft_delete("post-1", space_id=SPACE)
+
+
+async def _archive_task(h: Home) -> None:
+    await _archive(h, PAGE_DT + timedelta(minutes=2))
+
+
+async def _edit_comment_after(h: Home) -> None:
+    await h.repos.space_post.edit_comment(
+        "c-1",
+        "first, edited",
+        space_id=SPACE,
+        edited_at=(PAGE_DT + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
+async def _close_poll(h: Home) -> None:
+    await h.repos.space_poll.close_in_space("post-2", space_id=SPACE)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [_delete_post_1, _archive_task, _close_poll, _edit_comment_after],
+    ids=["delete", "archive", "poll-close", "comment-edit"],
+)
+async def test_a_change_after_the_page_never_asks_without_end(trio, change):
+    """Final review I1: the host seals, then a change (a delete, a task
+    archive, a poll closed, a comment edit) reaches every household and
+    the host goes silent. No member can prove the old bucket any more (each changed it
+    too). The space settles — matched, or a stable state that asks no
+    more — after a bounded number of asks, never one ask per tick."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _post(host)
+    await _post(host, "post-2", content="second")
+    await host.repos.space_post.add_comment(
+        Comment(
+            id="c-1",
+            post_id="post-2",
+            author=CARL,
+            type=CommentType.TEXT,
+            created_at=T0_DT,
+            content="first",
+        ),
+        space_id=SPACE,
+    )
+    await host.repos.space_poll.create_poll_if_absent(
+        post_id="post-2",
+        question="Lunch?",
+        closes_at=None,
+        allow_multiple=False,
+        options=[{"id": "opt-a", "text": "Pizza", "position": 0}],
+    )
+    await _task(host)
+    await _stream(host, member)
+    await _stream(host, requester)
+    page = await host_pages.seal_if_due(SPACE)
+    assert page is not None
+    assert await _round(host_pages, member_pages, "s-m")
+    for h in (host, member, requester):  # the live events reach everyone
+        await change(h)
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    for _ in range(3):
+        r_pages.host_silent(SPACE)
+        await wire.settle()
+    asks = len(wire.asks)
+    assert asks <= MAX_FETCH_ASKS
+    for _ in range(5):
+        r_pages.host_silent(SPACE)
+        await wire.settle()
+    assert len(wire.asks) == asks  # stable: no ask per tick
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is not False
+    if change in (_delete_post_1, _archive_task):
+        # A delete or an archive we hold explains its own bucket exactly;
+        # the bucket of the row's other identity is asked once (the page
+        # may never have held that row), and nobody holding it as the page
+        # does, it counts as explained: up to date.
+        assert pos.match is True
+        assert asks == 1
+
+
+async def _host_listing_round(wire: _Wire, host_pages: SyncPageService) -> None:
+    """Phase 2: the next round to the (answering) host carries ``buckets``;
+    the host lists them before its sentinel, the requester classifies."""
+    ref = await wire.requester.ref_for(SPACE)
+    buckets = wire.requester.buckets_for(SPACE, HOST, ref)
+    assert buckets
+    wire.asked["H1"] = ref
+    records = await host_pages.listing_records(
+        space_id=SPACE,
+        page_ref=parse_page_ref(ref),
+        buckets=buckets,
+        requester_version=95,
+    )
+    await wire.requester.take_listing(
+        space_id=SPACE,
+        sync_id="H1",
+        provider=HOST,
+        records=orjson.loads(orjson.dumps(records)),
+    )
+    await wire.requester.listing_done(space_id=SPACE, sync_id="H1", provider=HOST)
+
+
+async def test_a_phase_2_match_stays_matched_when_the_host_goes_silent(trio):
+    """Final review I2: the host's listing settled every asked bucket (a
+    poll closed after the page, everywhere — no change time explains it):
+    up to date. The host then goes silent: no member is asked for the
+    settled buckets and the space stays up to date."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _post(host, "post-2", content="second")
+    await host.repos.space_poll.create_poll_if_absent(
+        post_id="post-2",
+        question="Lunch?",
+        closes_at=None,
+        allow_multiple=False,
+        options=[{"id": "opt-a", "text": "Pizza", "position": 0}],
+    )
+    await _stream(host, member)
+    await _stream(host, requester)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    for h in (host, member, requester):
+        await _close_poll(h)
+    wire.silent = False
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    await _host_listing_round(wire, host_pages)
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is True
+    wire.silent = True
+    for _ in range(3):
+        r_pages.host_silent(SPACE)
+        await wire.settle()
+    assert wire.asks == []
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is True
+
+
+async def test_the_owners_catch_up_is_not_cut_short_by_its_own_seal(trio):
+    """Final review I3: back from a long absence, the owner takes a
+    20-minute-old page of its delegated admin that commits 30 posts it
+    lacks. A member's BEGIN mid catch-up asks the owner's sentinel, which
+    would seal over the admin's page and end the catch-up after 8 of 30 —
+    the owner's own page then committing the incomplete state. The owner
+    holds its seal while that page's catch-up has buckets to fetch, and
+    goes on round by round (its per-tick round: no host above it ever
+    goes silent), until it holds all 30."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    clock = host_pages._clock_ms
+    clock.ms += 3_600_000
+    for k in range(30):
+        await _post(member, f"away-{k}", author=CARL, content=f"while away {k}")
+    space = await member.repos.space.get(SPACE)
+    cutoff = await member_pages._state.cutoff(SPACE)
+    vector, rows = await member_pages._state.vector(SPACE, cutoff=cutoff)
+    admin_page = sign_page(
+        space_id=SPACE,
+        epoch=int(space.authority_key_epoch or 0),
+        signer=MEMBER,
+        seq=10,
+        issued_at=clock.ms - 20 * 60_000,
+        cutoff=cutoff,
+        rows=rows,
+        vector=vector,
+        prev_root=None,
+        space_seed=SEED,
+    )
+    await member.repos.space_sync_page.put(
+        StoredSyncPage(
+            space_id=SPACE,
+            page_json=canonical_str(admin_page.to_wire()),
+            vector=vector,
+        )
+    )
+    wire = _Wire(host_pages)
+    wire.deliverers[MEMBER] = member_pages
+    await _seat(host, MEMBER, BOB, "admin")
+    host_pages.attach_hosts(wire.hosts)
+    host_pages.attach_asks(wire.asked_page)
+    host_pages.attach_member_fetch(
+        seats=host.repos.space_remote_member,
+        versions=versions,
+        silent=lambda space_id: False,
+        request=wire.request,
+        apply=host.receiver.apply_verified,
+    )
+    sealed = await member_pages.sentinel_page(
+        space_id=SPACE,
+        sync_id="s-o",
+        requester_version=95,
+        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
+    )
+    assert await host_pages.receive(
+        space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
+    )
+    await host_pages.wait_idle()  # compared; the first ask is out
+    assert wire.asks
+    # A member's BEGIN reaches the owner: its sentinel would seal now.
+    await host_pages.sentinel_page(
+        space_id=SPACE, sync_id="s-b", requester_version=95, requester_ref=None
+    )
+    await host_pages.wait_idle()
+    await wire.settle()
+    for _ in range(8):  # the owner's per-tick rounds
+        host_pages.host_silent(SPACE)
+        await wire.settle()
+        await host_pages.sentinel_page(
+            space_id=SPACE, sync_id="s-t", requester_version=95, requester_ref=None
+        )
+        await host_pages.wait_idle()
+    for k in range(30):
+        assert await host.repos.space_post.get(f"away-{k}") is not None, k
+    # Caught up, the owner sealed its own page again — over the complete
+    # state, the one the admin's page commits.
+    ref = await host_pages.ref_for(SPACE)
+    assert ref is not None and ref["signer"] == HOST
+    assert parse_page_ref(ref)["root"] == admin_page.root
+
+
+async def test_the_owners_seal_hold_is_bounded(trio):
+    """Final review I3, the bound: no member household answers the owner's
+    catch-up (here: none reachable). The owner holds its seal over the
+    admin's page only for CATCH_UP_HOLD_S after the compare, never for
+    good."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    now = [1_000.0]
+    host_pages._monotonic = lambda: now[0]
+    versions.version[MEMBER] = 94  # no member household can deliver
+    wire = await _admin_page_reaches_owner(
+        host, member, host_pages, member_pages, versions, own
+    )
+    assert wire.asks == []
+    await _post(host, "post-owner", content="the owner writes again")
+    host_pages._clock_ms.ms += 2 * PAGE_MIN_INTERVAL_S * 1000  # not young
+    check = host_pages._checks.get(SPACE)
+    assert check is not None and check.todo
+    assert await host_pages.seal_if_due(SPACE) is None  # held: catching up
+    now[0] += CATCH_UP_HOLD_S
+    page = await host_pages.seal_if_due(SPACE)
+    assert page is not None and page.signer == HOST

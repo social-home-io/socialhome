@@ -81,6 +81,7 @@ from ....sync_page import (
     MAX_PAGE_FUTURE_SKEW_MS,
     PAGE_MIN_INTERVAL_S,
     PAGE_SUITE_SHA256_B256,
+    SUPERSEDED_BY,
     ListingRow,
     PageRefused,
     SyncPage,
@@ -107,6 +108,7 @@ from ....sync_page import (
     record_leaf,
     root_of,
     row_id_of,
+    row_key,
     sign_page,
     vector_delta,
     vector_from_wire,
@@ -134,6 +136,11 @@ MAX_SEALED_PAGE_CHARS: int = 24 * 1024
 
 #: Spaces whose compare result / conflict flag is remembered.
 MAX_TRACKED: int = 4096
+
+#: A signer holding another signer's page does not seal over it while that
+#: page's catch-up still has buckets to fetch — for at most this long after
+#: its compare (final review I3: four 30-min rounds, 96 buckets of asks).
+CATCH_UP_HOLD_S: float = 2 * 3600.0
 
 #: Rounds per space whose listing records are kept until their sentinel.
 MAX_PENDING_LISTINGS: int = 8
@@ -186,6 +193,10 @@ class _Compare:
     #: Phase 3: the unexplained buckets not yet proven complete here — what a
     #: verified fetch from a member still asks for while no host answers.
     todo: frozenset[int] = frozenset()
+    #: I1: unexplained buckets that differ by a move of ours as far as we
+    #: can tell (:func:`_moved_since` partners) — still asked; when nobody
+    #: can prove one (dry) it counts as explained, not unresolved.
+    partner: frozenset[int] = frozenset()
 
 
 @dataclass(slots=True)
@@ -614,6 +625,14 @@ class _Stuck:
     root: bytes
     buckets: dict[int, tuple[bytes, int]] = field(default_factory=dict)
     holds: dict[int, int] = field(default_factory=dict)
+    #: Final review I1: per bucket, our bucket hash then and the member
+    #: households that answered ``held: false`` for it …
+    nays: dict[int, tuple[bytes, frozenset[str]]] = field(default_factory=dict)
+    #: … and the buckets a whole round answered so (``index -> our bucket
+    #: hash then``): no member can prove them (each changed the bucket since
+    #: the page too — an edit or a close with no change time), so they are
+    #: not asked again while ours is unchanged. Unresolved, never missing.
+    dry: dict[int, bytes] = field(default_factory=dict)
 
 
 class _DeliverySeats(Protocol):
@@ -634,9 +653,10 @@ def _classify(
     vector: bytes,
     local: BucketRows,
     horizon: str,
-) -> tuple[int, int]:
-    """``(missing rows, unresolved buckets)`` of one round's listings
-    against our rows (*local*, read after that round's rows were applied).
+) -> tuple[int, int, frozenset[int]]:
+    """``(missing rows, unresolved buckets, buckets settled)`` of one round's
+    listings against our rows (*local*, read after that round's rows were
+    applied); a bucket is settled when its listing shows no row missing.
     A local change time past *horizon* (:func:`_horizon`) never makes our
     version the newer one. Raises :class:`PageRefused` for a listing that
     is malformed, of a bucket not asked, repeated, or that does not hash to
@@ -644,6 +664,7 @@ def _classify(
     seen: set[int] = set()
     missing = 0
     unresolved = 0
+    settled: set[int] = set()
     for raw in records:
         index, rows, current = parse_listing(raw)
         if index not in buckets or index in seen:
@@ -658,6 +679,7 @@ def _classify(
         # bucket since the page) — trusted as its stream is: we only ever
         # ask a household acting as the space's host.
         mine = {(r.resource, r.row_id): r for r in local.rows.get(index, [])}
+        before = missing
         for row in rows:
             have = mine.get((row.resource, row.row_id))
             if have is None:
@@ -670,7 +692,66 @@ def _classify(
             ):
                 missing += 1
         # A row of ours not listed was created after the page: ahead.
-    return missing, unresolved + len(buckets) - len(seen)
+        if missing == before:
+            settled.add(index)
+    return missing, unresolved + len(buckets) - len(seen), frozenset(settled)
+
+
+def _partners(resource: str) -> tuple[str, ...]:
+    """The other identities one stored row moves between: a tombstone's or
+    an archived copy's live row (:data:`SUPERSEDED_BY`), a live task's
+    archived copy (:data:`COUNTERPARTS`)."""
+    live = SUPERSEDED_BY.get(resource)
+    return tuple(
+        dict.fromkeys(((live,) if live else ()) + COUNTERPARTS.get(resource, ()))
+    )
+
+
+def _moved_since(
+    differing: list[int], scan: BucketRows, vector: bytes
+) -> tuple[set[int], set[int]]:
+    """Final review I1: ``(exact, partner)`` — the differing buckets a MOVE
+    we hold explains: a delete (its tombstone), an archive or un-archive
+    (the row under its other identity), which carries no change time of its
+    own (a tombstone keeps the row's ``created_at``). CPU only.
+
+    A moved row of ours (its other identity in a differing bucket too) is
+    not in the page when its bucket WITHOUT it hashes to the page's signed
+    bucket. That bucket is then explained **exactly** (*exact*): ours is the
+    page's plus those rows, nothing of it is missing — an old tombstone (in
+    the page) never explains anything. The bucket of each such row's other
+    identity (the version the page may hold) is a *partner*: it differs by
+    that move as far as we can tell, but we cannot recompute the page's
+    leaf there, and the page may never have held that row (one we created
+    and deleted unseen by the signer) — so a partner bucket is still asked
+    of a member like any other, and counts as explained only when nobody
+    can prove it (a whole round answers ``held: false``: each made the same
+    move). Tried: every such row of the bucket at once, then each alone."""
+    differ = set(differing)
+    exact: set[int] = set()
+    partner: set[int] = set()
+    for index in differing:
+        rows = scan.rows.get(index, [])
+        moved = [
+            k
+            for k, r in enumerate(rows)
+            if any(row_key(p, r.row_id)[0] in differ for p in _partners(r.resource))
+        ]
+        if not moved:
+            continue
+        signed = vector[index * HASH_BYTES : (index + 1) * HASH_BYTES]
+        tries = [moved] + ([[k] for k in moved] if len(moved) > 1 else [])
+        for drop in tries:
+            kept = [r.leaf for k, r in enumerate(rows) if k not in drop]
+            if bucket_hash(index, kept) != signed:
+                continue
+            exact.add(index)
+            for k in drop:
+                partner.update(
+                    row_key(p, rows[k].row_id)[0] for p in _partners(rows[k].resource)
+                )
+            break
+    return exact, (partner & differ) - exact
 
 
 def _now_ms() -> int:
@@ -719,6 +800,7 @@ class SyncPageService:
         "_repo",
         "_request_round",
         "_round_left",
+        "_round_size",
         "_rounds",
         "_seats",
         "_seqs",
@@ -787,6 +869,9 @@ class SyncPageService:
         #: still to ask; when its ask went out (monotonic).
         self._rounds: dict[str, int] = {}
         self._round_left: dict[str, list[str]] = {}
+        #: space → how many member households its current round asks (a
+        #: bucket all of them answer ``held: false`` for is dry — I1).
+        self._round_size: dict[str, int] = {}
         self._fetching: dict[str, float] = {}
         #: space → the buckets a member fetch cannot complete (R3).
         self._stuck: OrderedDict[str, _Stuck] = OrderedDict()
@@ -887,13 +972,16 @@ class SyncPageService:
             young = self._clock_ms() - own.page.issued_at < PAGE_MIN_INTERVAL_S * 1000
             if young and _cutoff_day(own.page.cutoff) == _cutoff_day(cutoff):
                 return None
-        elif (
-            held is not None
-            and self._clock_ms() - held.page.issued_at < PAGE_MIN_INTERVAL_S * 1000
+        elif held is not None and (
+            self._clock_ms() - held.page.issued_at < PAGE_MIN_INTERVAL_S * 1000
+            or self._catching_up(space_id, held.page.root)
         ):
             # Another signer's page (the owner's, held by a delegated admin
             # that also syncs as a member) is fresh: the space has a recent
             # page, so we do not add one of our own on top of every one of it.
+            # Nor while we still catch up what it proves we lack (final
+            # review I3): our page would replace it, end the catch-up and
+            # commit the incomplete state.
             return None
         # Read before the export (as a stream's snapshot): a row changed while
         # we hash is stamped above it, so the next seal sees it as changed.
@@ -934,6 +1022,26 @@ class SyncPageService:
         )
         await self._changed(space_id)
         return page
+
+    def _catching_up(self, space_id: str, root: bytes) -> bool:
+        """Whether the held page *root* (another signer's) is still being
+        compared, or its catch-up from members still has buckets to fetch
+        (the verified fetch wired) — for at most
+        :data:`CATCH_UP_HOLD_S` after its compare (no member household to
+        ask, or none answering, must not stop our seals for good)."""
+        if self._request_round is None:
+            return False  # no verified fetch wired: nothing to wait for
+        if space_id in self._comparing:
+            return True
+        check = self._checks.get(space_id)
+        at = self._compared_at.get(space_id)
+        return (
+            check is not None
+            and check.root == root
+            and bool(check.todo)
+            and at is not None
+            and self._monotonic() - at < CATCH_UP_HOLD_S
+        )
 
     async def _changed_since(self, space_id: str, seq: int) -> bool:
         """Whether a committed row of the space was stamped above *seq* —
@@ -1256,13 +1364,19 @@ class SyncPageService:
             vector, _rows = await self._state.vector(space_id, cutoff=page.cutoff)
             differing = differing_buckets(vector, held.row.vector)
             unexplained: list[int] = []
+            partner: set[int] = set()
             if differing:
                 scan = await self._state.rows_in(
                     space_id, differing, cutoff=page.cutoff
                 )
                 newer_than = page_time(page)
                 horizon = _horizon(self._clock_ms())
+                moved, partner = await asyncio.to_thread(
+                    _moved_since, differing, scan, held.row.vector
+                )
                 for index in differing:
+                    if index in moved:
+                        continue  # ours = the page's + a delete / move of ours
                     rows = scan.rows.get(index, [])
                     if any(
                         r.marker is not None and newer_than < r.marker <= horizon
@@ -1276,10 +1390,10 @@ class SyncPageService:
             from_members = bool(asked) and await self._no_host_answers(space_id)
             # Buckets a member fetch of this page cannot complete (R3):
             # still missing, never asked of members again.
-            stuck = (
+            stuck, dry = (
                 self._stuck_now(space_id, page.root, vector, unexplained)
                 if from_members
-                else {}
+                else ({}, set())
             )
             host = (
                 await self._host_for(space, page.signer)
@@ -1303,18 +1417,17 @@ class SyncPageService:
                 )
                 while len(self._wanted) > MAX_TRACKED:
                     self._wanted.pop(next(iter(self._wanted)))
-            todo = frozenset(unexplained) - stuck.keys()
+            todo = frozenset(unexplained) - stuck.keys() - dry
             result = _Compare(
                 root=page.root,
                 differing=len(differing),
                 unexplained=len(unexplained),
-                missing=(
-                    sum(stuck.values())
-                    if not todo
-                    else (0 if not unexplained else None)
+                missing=sum(stuck.values()) if not todo else None,
+                unresolved=(
+                    len(dry - partner) if not todo else len(unexplained) - len(asked)
                 ),
-                unresolved=0 if not todo else len(unexplained) - len(asked),
                 todo=todo,
+                partner=frozenset(partner),
             )
             self._remember(space_id, result)
             log.info(
@@ -1337,20 +1450,57 @@ class SyncPageService:
 
     def _stuck_now(
         self, space_id: str, root: bytes, vector: bytes, unexplained: list[int]
-    ) -> dict[int, int]:
-        """The unexplained buckets still stuck for page *root* (R3): ours
-        unchanged since the fetch that could not complete them — ``index ->
-        rows missing``. A changed bucket of ours is asked again."""
+    ) -> tuple[dict[int, int], set[int]]:
+        """The unexplained buckets still stuck for page *root* (R3) — ``index
+        -> rows missing`` — and still dry (I1): ours unchanged since the
+        fetch that could not complete them. A changed bucket of ours is
+        asked again."""
         held = self._stuck.get(space_id)
         if held is None or held.root != root:
-            return {}
+            return {}, set()
         out: dict[int, int] = {}
+        dry: set[int] = set()
         for index in unexplained:
             entry = held.buckets.get(index)
             ours = vector[index * HASH_BYTES : (index + 1) * HASH_BYTES]
             if entry is not None and entry[0] == ours:
                 out[index] = entry[1]
-        return out
+            elif held.dry.get(index) == ours:
+                dry.add(index)
+        return out, dry
+
+    def _stuck_for(self, space_id: str, root: bytes) -> _Stuck:
+        """The space's :class:`_Stuck` record for page *root* (a new one for
+        a newer page), most recent last, bounded."""
+        held = self._stuck.get(space_id)
+        if held is None or held.root != root:
+            held = _Stuck(root=root)
+        self._stuck[space_id] = held
+        self._stuck.move_to_end(space_id)
+        while len(self._stuck) > MAX_STUCK_SPACES:
+            self._stuck.popitem(last=False)
+        return held
+
+    def _note_nays(
+        self, space_id: str, root: bytes, provider: str, nays: Mapping[int, bytes]
+    ) -> set[int]:
+        """Final review I1: *provider* answered ``held: false`` for the
+        buckets of *nays* (``index -> our bucket hash now``). A bucket every
+        member household of the round answered so is dry. Every bucket dry
+        for page *root* now."""
+        held = self._stuck_for(space_id, root)
+        need = max(1, self._round_size.get(space_id, 1))
+        for index, ours in nays.items():
+            prev = held.nays.get(index)
+            who = (prev[1] if prev is not None and prev[0] == ours else frozenset()) | {
+                provider
+            }
+            if len(who) >= need:
+                held.dry[index] = ours
+                held.nays.pop(index, None)
+            else:
+                held.nays[index] = (ours, who)
+        return set(held.dry)
 
     def _note_stuck(
         self,
@@ -1362,9 +1512,7 @@ class SyncPageService:
         """Remember *found* (refused by rule) as stuck, count one more hold
         for each bucket of *holding* and remember those at
         :data:`HELD_BACK_LIMIT` as stuck too. The buckets stuck now."""
-        held = self._stuck.get(space_id)
-        if held is None or held.root != root:
-            held = _Stuck(root=root)
+        held = self._stuck_for(space_id, root)
         out = dict(found)
         for index, entry in (holding or {}).items():
             held.holds[index] = held.holds.get(index, 0) + 1
@@ -1373,10 +1521,6 @@ class SyncPageService:
         for index in out:
             held.holds.pop(index, None)
         held.buckets.update(out)
-        self._stuck[space_id] = held
-        self._stuck.move_to_end(space_id)
-        while len(self._stuck) > MAX_STUCK_SPACES:
-            self._stuck.popitem(last=False)
         return out
 
     def _remember(self, space_id: str, result: _Compare) -> None:
@@ -1492,7 +1636,7 @@ class SyncPageService:
             local = await self._state.rows_in(
                 space_id, wanted.buckets, cutoff=wanted.cutoff
             )
-            missing, unresolved = _classify(
+            missing, unresolved, settled = _classify(
                 records,
                 wanted.buckets,
                 wanted.vector,
@@ -1506,7 +1650,7 @@ class SyncPageService:
                 provider,
                 exc,
             )
-            missing, unresolved = 0, len(wanted.buckets)
+            missing, unresolved, settled = 0, len(wanted.buckets), frozenset()
         log.info(
             "sync page: listings of space %s from %s: %d row(s) missing, %d "
             "bucket(s) unresolved",
@@ -1526,7 +1670,10 @@ class SyncPageService:
                 unexplained=check.unexplained,
                 missing=missing,
                 unresolved=check.unresolved + unresolved,
-                todo=check.todo,
+                # Final review I2: a bucket the listing settled is complete —
+                # a host gone silent later must not ask a member for it.
+                todo=check.todo - settled,
+                partner=check.partner,
             ),
         )
         await self._changed(space_id)
@@ -1644,6 +1791,7 @@ class SyncPageService:
             )
             return
         self._round_left[space_id] = deliverers[:MAX_FETCH_ASKS]
+        self._round_size[space_id] = len(self._round_left[space_id])
         await self._fetch_next(space_id)
 
     async def _fetch_next(self, space_id: str) -> None:
@@ -1817,16 +1965,30 @@ class SyncPageService:
             if landed:
                 # A row landed: a row refused before may land now (its
                 # parent came) — those buckets are to fetch again (S1).
-                gone = self._stuck.pop(space_id, None)
+                gone = self._stuck.get(space_id)
                 if gone is not None and gone.root == wanted.root:
                     revived = frozenset(gone.buckets)
+                    gone.buckets.clear()
+                    gone.holds.clear()
             stuck = (
                 self._note_stuck(space_id, wanted.root, refused, holding)
                 if refused or holding
                 else {}
             )
+            # I1: a bucket the whole round answers ``held: false`` for is
+            # proven by nobody — not asked again while ours is unchanged.
+            dry = self._note_nays(
+                space_id,
+                wanted.root,
+                provider,
+                {
+                    i: bucket_hash(i, [r.leaf for r in local.rows.get(i, [])])
+                    for i, rows_of in listed.items()
+                    if rows_of is None
+                },
+            )
             complete = frozenset(i for i, n in still.items() if not n)
-            todo = (check.todo | revived) - complete - stuck.keys()
+            todo = (check.todo | revived) - complete - stuck.keys() - dry
             short = sum(1 for i, n in still.items() if n and i not in stuck)
             # The verdict counts the buckets stuck from earlier answers too:
             # a stuck bucket is missing rows, never "up to date" (S1).
@@ -1843,8 +2005,9 @@ class SyncPageService:
                     differing=check.differing,
                     unexplained=check.unexplained,
                     missing=sum(still.values()) + stuck_before,
-                    unresolved=len(todo) - short,
+                    unresolved=len(todo) - short + len(dry - check.partner),
                     todo=todo,
+                    partner=check.partner,
                 ),
             )
             log.info(

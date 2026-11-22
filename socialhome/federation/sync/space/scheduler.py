@@ -474,9 +474,10 @@ class SpaceSyncScheduler:
     def attach_host_silent(self, on_silent: Callable[[str], None]) -> None:
         """``on_silent(space_id)`` — called when trigger 10 finds a space's
         acting hosts silent (sync pages Phase 3,
-        ``SyncPageService.host_silent``): what the newest signed page proves
-        we lack is fetched, verified, from a member household. Next to the
-        helper resume, which covers rows newer than the page."""
+        ``SyncPageService.host_silent``), and every tick for each space we
+        own (no host above us): what the newest signed page proves we lack
+        is fetched, verified, from a member household. Next to the helper
+        resume, which covers rows newer than the page."""
         self._host_silent = on_silent
 
     def set_row_marks(self, marks: tuple[int, int]) -> None:
@@ -1274,6 +1275,28 @@ class SpaceSyncScheduler:
             log.exception("space-sync-scheduler: listing hosted-elsewhere spaces")
             self._host_ask_due = {}
         await self._tick_sweeps()
+        await self._tick_owner_catch_up()
+
+    async def _tick_owner_catch_up(self) -> None:
+        """Sync pages Phase 3 (final review I3): no host above us ever goes
+        silent for a space WE own, so the page service hears of each one
+        every tick — its catch-up from members, when a newer page our
+        delegated admin sealed while we were away proves we lack rows, goes
+        on round by round (a no-op otherwise)."""
+        if self._host_silent is None:
+            return
+        try:
+            spaces = await self._list_local_spaces()
+        except Exception:
+            log.exception("space-sync-scheduler: listing owned spaces failed")
+            return
+        for space in spaces:
+            if space.owner_instance_id != self._own_instance_id:
+                continue
+            try:
+                self._host_silent(space.id)
+            except Exception:
+                log.exception("space %s: the owner's catch-up round failed", space.id)
 
     async def _tick_sweeps(self) -> None:
         """The tick's sync sweeps (mesh-only hosts, confirmed peers)."""

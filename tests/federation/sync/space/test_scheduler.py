@@ -3230,3 +3230,23 @@ async def test_a_verified_fetch_rides_an_ordinary_begin_to_that_member(
     assert fed.mesh_fields[-1]["have"] == "AAAAAAAAAAA"
     await sched.sync_with("sp-1", sched._own_instance_id)  # never ourselves
     assert len(fed.mesh_catchups) == 1
+
+
+async def test_every_tick_gives_the_owner_its_catch_up_round(bus, queue, sync_manager):
+    """Final review I3: no host above the owner ever goes silent, so the
+    owner's catch-up from members (a newer page its delegated admin sealed
+    while it was away) would get one round only. Every tick tells the page
+    service about each space we own; a space hosted elsewhere only through
+    its host's silence."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [_space("sp-mine"), _space("sp-theirs", owner_instance_id="host-x")],
+    )
+    rounds: list[str] = []
+    sched.attach_host_silent(rounds.append)
+    await sched._tick_once()
+    assert rounds == ["sp-mine"]
