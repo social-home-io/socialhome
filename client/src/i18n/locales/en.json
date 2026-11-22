@@ -6640,6 +6640,7 @@
   "space.sync.body.here": "Checked with {host} {time}.",
   "space.sync.body.here_no_time": "Checked with {host}.",
   "space.sync.body.here_page": "Checked {time}: nothing is missing.",
+  "space.sync.body.hosted_latest": "Getting what an admin household received while this one was away.",
   "space.sync.body.latest": "New posts from {host} are on their way.",
   "space.sync.body.missing": "We'll keep trying every 30 minutes. You can check now.",
   "space.sync.body.away": "You're seeing everything up to {time}. What you post goes out once the connection is back.",

@@ -89,6 +89,18 @@ describe('SyncSection — "Is everything here?"', () => {
     expect(body(here.container)).toBe('Checked with the host.')
   })
 
+  it('a space hosted here catching up says so — no warning, no Check now', () => {
+    const { container } = section(
+      { ...base, state: 'catching_up', may_be_missing: false },
+      { hostedHere: true },
+    )
+    expect(heading(container)).toBe('↻Getting the latest…')
+    expect(body(container)).toBe(
+      'Getting what an admin household received while this one was away.',
+    )
+    expect(button(container)).toBeNull()
+  })
+
   it('a space hosted here says so, with no Check now', () => {
     const { container } = section({ ...base, state: 'up_to_date', last_ok_at: null }, { hostedHere: true, isAdmin: true })
     expect(heading(container)).toBe("✓Everything's here")

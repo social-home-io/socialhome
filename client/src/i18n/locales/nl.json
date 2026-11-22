@@ -6604,6 +6604,7 @@
   "space.sync.body.here": "Gecontroleerd bij {host} {time}.",
   "space.sync.body.here_no_time": "Gecontroleerd bij {host}.",
   "space.sync.body.here_page": "{time} gecontroleerd: er ontbreekt niets.",
+  "space.sync.body.hosted_latest": "Haalt op wat een beheerdershuishouden kreeg terwijl dit huishouden weg was.",
   "space.sync.body.latest": "Nieuwe berichten van {host} zijn onderweg.",
   "space.sync.body.missing": "We blijven het elke 30 minuten proberen. Je kunt nu controleren.",
   "space.sync.body.away": "Je ziet alles tot {time}. Wat je plaatst, wordt verstuurd zodra de verbinding terug is.",

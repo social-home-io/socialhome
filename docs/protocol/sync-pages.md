@@ -706,8 +706,8 @@ What shipped, where it is more exact than the design above:
      the page's leaf there, and it may hold another signed row we lack (an
      adversarial re-review showed crediting it hid a missing row behind a
      delete). It is asked like any other and, when nobody can prove it
-     (Phase 3: a whole round answers `held: false` — each member made the
-     same move), it goes dry: not asked again, unresolved.
+     (Phase 3: every member household on the page answers `held: false`
+     — each made the same move), it goes dry: paused for 3 h, unresolved.
   2. **Listings only for unexplained buckets**, at most
      `MAX_LISTING_BUCKETS` = 8 per compare; the rest stay unresolved until
      the next page. They are asked of ONE household acting as host (the
@@ -1027,18 +1027,29 @@ between asks, and a stale memo would prove nothing.
    a row landing starts the count over. A remembered bucket stays **missing** in every
    later verdict of that page, so it never reads up to date (re-review
    S1). The host's stream, or the next page, settles it.
-7. **A bucket nobody can prove is not asked again** (final review I1). A
-   change made after the page that carries no change time — a poll
-   closed, an edit whose stamp a receiver does not keep, a delete or move
-   (the bucket of its other identity) — changes the bucket on every
-   member too, so every member answers `held: false`. Once every member
-   household of a round (`MAX_FETCH_ASKS`, or fewer when fewer exist) has
-   answered `held: false` for a bucket, it is **dry**: not asked again
-   while our own bucket is unchanged (memory only, kept with the stuck
-   buckets, per page; a dry bucket that changes here is asked again). A
-   dry bucket is unresolved — `match` stays `null` and the Phase-1 state
-   shows: nobody proved it complete. Without this the round asked every
-   tick, for nothing, until the host returned.
+7. **A bucket nobody can prove is paused, never dropped** (final review
+   I1, reworked after the security check's HIGH-1). A change made after the
+   page that carries no change time — a poll closed, an edit whose stamp a
+   receiver does not keep, a delete or move (the bucket of its other
+   identity) — changes the bucket on every member too, so every member
+   holding the page answers `held: false` for it.
+   - **Only a member on the same page is a nay.** A deliverer that holds
+     no page, an older or a newer one sends **no listing at all** (not
+     `held: false` per bucket): its answer says nothing about any bucket
+     and the round asks the next member. Without that, a member left on an
+     older page (the hourly resend rule makes that common) would have
+     silenced every bucket after one ask.
+   - **The quorum is every member household we can ask** (`_eligible`, all
+     of `member_deliverers`, not only the ≤ 3 of a round). Once each has
+     answered `held: false` for a bucket it is **dry**.
+   - **Dry is a pause** of `DRY_RECHECK_S` (3 h, six rounds): then the
+     bucket is asked again from scratch. It **stays to fetch** (`todo`):
+     unresolved — `match` stays `null`, the Phase-1 state shows — and it
+     never releases the owner's seal hold (only a complete catch-up or
+     `CATCH_UP_HOLD_S` does).
+   Memory only, per page, with the stuck buckets. Without the pause the
+   round asked every tick, for nothing, until the host returned; with it
+   a bucket nobody can prove costs one round every 3 h.
 
 **The owner back from a long absence is a requester too.** While the owner
 household was offline a seed-holding delegated admin may have sealed newer
@@ -1059,11 +1070,13 @@ archived (re-review N2). **Delete wins**, as everywhere in sync: a
 `*_deleted` tombstone is an identity the owner lacks, so a delete the
 admin's page commits removes the owner's live row even if the owner edited
 it offline — the same outcome the live delete event and the host's stream
-would have had. Its sync status stays **up to date** with no warning
-(final review minor 1: a space hosted here never reads behind or shows
-"may be missing" — the Space settings say "Everything's here" and the feed
-shows no chip); the page and its compare are kept for the admin Details
-and the catch-up. **Every tick** the scheduler starts the owner's next
+would have had. Its sync status never shows the "may be missing" warning
+(final review minor 1: no ⚠ for a space hosted here). While that page's
+verdict is not a match — rows proven missing or buckets unresolved — it
+reads **catching up** ("Getting the latest…: getting what an admin
+household received while this one was away"), never "up to date"
+(security check HIGH-1); with a match, or once its own page is held
+again, **up to date**. **Every tick** the scheduler starts the owner's next
 round for each space it owns (`_tick_owner_catch_up`): no host above the
 owner ever goes silent, so without it the catch-up would get one round
 only, and while it has buckets to fetch the owner does not seal over the
@@ -1091,8 +1104,9 @@ times would need the archive time committed.
 2026-11-22, see [Decisions](#decisions-owner-2026-11-22)).**
 
 **Partial answers are fine.** A deliverer that changed a bucket since the
-page, holds the page under another root, or is behind itself answers
-`held: false` for it; the round asks the next member for what is left.
+page answers `held: false` for it; one that holds another page (or none)
+answers with no listing at all. Either way the round asks the next member
+for what is left.
 
 **Older households degrade.** A household below v_95 is never picked (no
 pages, no fetch); with no deliverer at v_95 the member waits for the host
@@ -1142,9 +1156,10 @@ requester asks one member at a time):
 - **Per round**: ≤ 3 asks per behind member per silent space, one round per
   30-min tick (plus one when a newer page arrives while the host is silent),
   and none once nothing is left to fetch (`todo` empty) — a caught-up
-  member costs nothing while the host stays offline. A bucket a whole round
-  answered `held: false` for (dry, step 7) leaves `todo`: a change nobody
-  can prove costs one round, not one per tick (final review I1).
+  member costs nothing while the host stays offline. A bucket every member
+  household on the page answered `held: false` for (dry, step 7) is paused
+  for 3 h: a change nobody can prove costs one round every 3 h, not one
+  per tick.
 - **Worst realistic case**: a global space with 200 member households and
   50 000 rows, the host offline for a day, every member missing the host's
   last ~2 h (≈ 170 changes at 2 000 a day). 170 rows fall into ≈ 125
@@ -1184,7 +1199,8 @@ requester asks one member at a time):
 | Extra fields in a row (reactions, pins, `updated_at`, `linked_event_id`, …) | never applied — only the committed part is (`fetched_record`); a feed card is left out |
 | Inflated change time in a listing, to roll back a newer local row | a row changed here after the page's signed `issued_at` is ahead; otherwise the page's version is the signer's own, applied under the host's rules exactly as the host's stream would |
 | A row of another space / bucket, a non-committed resource | refused at parse (`parse_fetched_row`) |
-| Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked |
+| Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked. A bucket is paused (dry) only once **every** member household on the page answered `held: false`, and only for 3 h; it stays unresolved meanwhile (never "up to date"), and never releases the owner's seal hold (HIGH-1). The one residual: when a single member household can be asked at all, that household alone can keep a bucket unresolved — withholding by the only source, which no proof can overcome |
+| A deliverer on another page (or forging that it is) | no listing at all — no nay, the next member is asked (HIGH-1) |
 | Unasked answer, or one from another household | dropped |
 | A follower asking | the deliverer's member gate sends nothing; a follower is never asked |
 | Oversized answer | ≤ 256 rows / 512 KiB kept, the rest dropped |

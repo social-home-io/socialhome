@@ -6631,6 +6631,7 @@
   "space.sync.body.here": "Comprobado con {host} {time}.",
   "space.sync.body.here_no_time": "Comprobado con {host}.",
   "space.sync.body.here_page": "Comprobado {time}: no falta nada.",
+  "space.sync.body.hosted_latest": "Recuperando lo que recibió un hogar administrador mientras este no estaba.",
   "space.sync.body.latest": "{host} está enviando publicaciones nuevas.",
   "space.sync.body.missing": "Seguiremos intentándolo cada 30 minutos. Puedes comprobarlo ahora.",
   "space.sync.body.away": "Ves todo hasta {time}. Lo que publiques se enviará cuando vuelva la conexión.",

@@ -6604,6 +6604,7 @@
   "space.sync.body.here": "{host} hat es {time} bestätigt.",
   "space.sync.body.here_no_time": "{host} hat es bestätigt.",
   "space.sync.body.here_page": "{time} geprüft: Es fehlt nichts.",
+  "space.sync.body.hosted_latest": "Holt, was ein Admin-Haushalt bekommen hat, während dieser weg war.",
   "space.sync.body.latest": "{host} schickt gerade neue Beiträge.",
   "space.sync.body.missing": "Wir versuchen es weiter alle 30 Minuten. Du kannst jetzt prüfen.",
   "space.sync.body.away": "Du siehst alles bis {time}. Was du postest, geht raus, sobald die Verbindung wieder da ist.",

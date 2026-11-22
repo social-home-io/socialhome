@@ -277,14 +277,24 @@ class SpaceSyncStatusService(BusPublisherMixin):
         and the list would start one per space at once (after a restart
         none has one)."""
         if space.owner_instance_id == self._own_instance_id:
-            # The owner has no host to be behind: a space hosted here is up
-            # to date and never warns (final review minor 1 — the Space
-            # settings say "Everything's here"). A newer page its delegated
-            # admin signed while the owner was away is still read (the read
-            # starts its compare after a restart, and the owner's catch-up
-            # from members, Phase 3, follows it) and shown as the page.
+            # The owner has no host to be behind, and a space hosted here
+            # never shows the "may be missing" warning (final review minor
+            # 1). But a newer page its delegated admin signed while the owner
+            # was away, whose verdict is not a match (rows missing, buckets
+            # unresolved), means the owner's catch-up from members (Phase 3)
+            # is still going: **catching up**, never "up to date" on it
+            # (security check HIGH-1). The read also starts the compare
+            # after a restart.
             owned = await self._page_of(space, read_page=read_page)
-            return SpaceSyncState.UP_TO_DATE, None, owned, False
+            catching_up = (
+                owned is not None
+                and owned.signer_role != "owner"
+                and owned.match is not True
+            )
+            state = (
+                SpaceSyncState.CATCHING_UP if catching_up else SpaceSyncState.UP_TO_DATE
+            )
+            return state, None, owned, False
         hosts = await self._hosts(space)
         outcomes = await self._outcomes.outcomes(space.id, hosts)
         receiving = (

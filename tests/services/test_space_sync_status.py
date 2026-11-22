@@ -670,12 +670,13 @@ async def test_up_to_date_as_of_the_page_while_the_host_is_offline(env):
     assert seen[-1] == "sp"
 
 
-async def test_a_space_hosted_here_never_warns(env):
-    """Final review minor 1: back after a long absence the owner holds a
-    newer page its delegated admin signed and catches up from members
-    (Phase 3) — but a space hosted here never reads behind and never shows
-    the "may be missing" warning or its dot: the status service and the
-    Space settings ("Everything's here") agree. The page is still shown."""
+async def test_a_space_hosted_here_never_warns_but_shows_its_catch_up(env):
+    """Final review minor 1 + security check HIGH-1: back after a long
+    absence the owner holds a newer page its delegated admin signed and
+    catches up from members (Phase 3). While that page's verdict is not a
+    match (rows missing, or buckets unresolved) the owner reads **catching
+    up** — never "up to date" — but a space hosted here never shows the
+    "may be missing" warning or its dot. Its own page: up to date."""
     current = [_position(match=False, missing=3, signer_role="admin")]
 
     async def position(space):
@@ -683,13 +684,16 @@ async def test_a_space_hosted_here_never_warns(env):
 
     env.svc.attach_pages(position)
     status = await env.svc.status("mine")
-    assert status.state is SpaceSyncState.UP_TO_DATE
+    assert status.state is SpaceSyncState.CATCHING_UP
     assert status.to_wire()["may_be_missing"] is False
     assert status.to_wire()["page"]["missing"] == 3
     assert await env.svc.may_be_missing("mine") is False
+    current[0] = _position(match=None, missing=None, signer_role="admin")
+    assert (await env.svc.status("mine")).state is SpaceSyncState.CATCHING_UP
+    current[0] = _position(match=True, missing=0, signer_role="admin")
+    assert (await env.svc.status("mine")).state is SpaceSyncState.UP_TO_DATE
     current[0] = _position(match=None, missing=None)  # our own page
-    status = await env.svc.status("mine")
-    assert status.state is SpaceSyncState.UP_TO_DATE
+    assert (await env.svc.status("mine")).state is SpaceSyncState.UP_TO_DATE
 
 
 async def test_behind_when_a_listing_proved_a_row_missing(env):

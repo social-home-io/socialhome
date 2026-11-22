@@ -33,6 +33,7 @@ from socialhome.domain.task import Task, TaskList, TaskStatus
 from socialhome.federation.owner_bound_id import SPACE_PAGE_KIND, SPACE_TASK_LIST_KIND
 from socialhome.federation.sync.space.pages import (
     CATCH_UP_HOLD_S,
+    DRY_RECHECK_S,
     FETCH_ANSWER_WAIT_S,
     MAX_FETCH_ASKS,
     SyncPageService,
@@ -1561,11 +1562,13 @@ async def test_a_change_after_the_page_never_asks_without_end(trio, change):
     if change in (_delete_post_1, _archive_task):
         # A delete or an archive we hold explains its own bucket exactly;
         # the bucket of the row's other identity is asked once (it may hold
-        # another signed row we lack) and, nobody able to prove it, is not
-        # asked again: unresolved, the Phase-1 state shows.
+        # another signed row we lack) and, nobody able to prove it, is
+        # paused (dry): still to fetch and unresolved — the Phase-1 state
+        # shows — but not asked again until DRY_RECHECK_S (HIGH-1).
         assert asks == 1
         check = r_pages._checks[SPACE]
-        assert check.unexplained == 1 and not check.todo
+        assert check.unexplained == 1 and len(check.todo) == 1
+        assert r_pages._paused(SPACE, check.root) == set(check.todo)
 
 
 async def _host_listing_round(wire: _Wire, host_pages: SyncPageService) -> None:
@@ -1767,3 +1770,152 @@ async def test_a_delete_never_hides_a_missing_row_in_its_bucket(trio):
     assert len(wire.asks) <= MAX_FETCH_ASKS
     pos = await _position(requester, r_pages)
     assert pos is not None and pos.match is not True
+
+
+# ── Security check HIGH-1: the dry rule must never become a permanent stop ──
+
+
+def _all_not_held(listings, rows):
+    """A forged answer: every asked bucket ``held: false``, no row."""
+    return [{"i": x["i"], "held": False} for x in listings], []
+
+
+async def _silent_ticks(r_pages, wire, n: int) -> None:
+    for _ in range(n):
+        r_pages.host_silent(SPACE)
+        await wire.settle()
+
+
+async def test_poc_a_a_member_on_another_page_is_no_nay(trio):
+    """HIGH-1 PoC A (no attacker): the hourly page rule leaves the member
+    household on page P1 while the requester holds P2. Its answer — it does
+    not hold P2 — says nothing about any bucket: no listing, no nay, never
+    dry. Once the member holds P2, the next silent round catches up."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _missed_content(host, member, requester)
+    assert await host_pages.seal_if_due(SPACE) is not None
+    assert await _round(host_pages, member_pages, "s-m")  # M holds P1
+    host_pages._clock_ms.ms += (PAGE_MIN_INTERVAL_S + 60) * 1000
+    await _post(host, "post-3", content="later")
+    await _stream(host, member)
+    assert await host_pages.seal_if_due(SPACE) is not None  # P2
+    assert await _round(host_pages, r_pages, "s-r", newest=True)  # R holds P2
+    await wire.settle()
+    assert await requester.repos.space_post.get("post-2") is None
+    stuck = r_pages._stuck.get(SPACE)
+    assert stuck is None or not stuck.dry
+    assert await _round(host_pages, member_pages, "s-m2", newest=True)  # M: P2
+    await _silent_ticks(r_pages, wire, 2)
+    assert await requester.repos.space_post.get("post-2") is not None
+    assert await requester.repos.space_post.get("post-3") is not None
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is True
+
+
+async def test_poc_b_one_forged_not_held_answer_is_no_permanent_stop(trio):
+    """HIGH-1 PoC B: one deliverer answers ``held: false`` for every bucket
+    (forged, or it really changed them). That pauses the bucket only for
+    DRY_RECHECK_S: then it is asked again, and an honest answer completes
+    it. Until then the space never reads up to date."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    now = [5_000.0]
+    r_pages._monotonic = lambda: now[0]
+    await _missed_content(host, member, requester)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    wire.forge = _all_not_held
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    asks = len(wire.asks)
+    await _silent_ticks(r_pages, wire, 3)
+    assert len(wire.asks) == asks  # paused: no ask per tick
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is not True
+    wire.forge = None
+    now[0] += DRY_RECHECK_S
+    await _silent_ticks(r_pages, wire, 1)
+    assert await requester.repos.space_post.get("post-2") is not None
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is True
+
+
+async def test_poc_c_the_owner_never_seals_an_incomplete_page_on_a_nay(trio):
+    """HIGH-1 PoC C: back from a long absence, the owner takes its admin's
+    page committing 30 posts it lacks; the admin's household (its only
+    deliverer) answers ``held: false`` for every bucket. Dry buckets stay
+    to fetch: the seal hold is not released by them (only a complete
+    catch-up or CATCH_UP_HOLD_S), and the owner's verdict never reads
+    matched."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    now = [5_000.0]
+    host_pages._monotonic = lambda: now[0]
+    await _post(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    for k in range(30):
+        await _post(member, f"away-{k}", author=CARL, content=f"while away {k}")
+    wire = _Wire(host_pages)
+    wire.forge = _all_not_held
+    wire.deliverers[MEMBER] = member_pages
+    wire.silent = False
+    await _seat(host, MEMBER, BOB, "admin")
+    host_pages.attach_hosts(wire.hosts)
+    host_pages.attach_asks(wire.asked_page)
+    host_pages.attach_member_fetch(
+        seats=host.repos.space_remote_member,
+        versions=versions,
+        silent=lambda space_id: False,
+        request=wire.request,
+        apply=host.receiver.apply_verified,
+    )
+    space = await member.repos.space.get(SPACE)
+    vector, rows = await member_pages._state.vector(SPACE, cutoff=own.cutoff)
+    admin_page = sign_page(
+        space_id=SPACE,
+        epoch=int(space.authority_key_epoch or 0),
+        signer=MEMBER,
+        seq=own.seq + 10,
+        issued_at=own.issued_at + 60_000,
+        cutoff=own.cutoff,
+        rows=rows,
+        vector=vector,
+        prev_root=None,
+        space_seed=SEED,
+    )
+    assert await member.repos.space_sync_page.put(
+        StoredSyncPage(
+            space_id=SPACE,
+            page_json=canonical_str(admin_page.to_wire()),
+            vector=vector,
+        ),
+        key=PK_HEX,
+    )
+    sealed = await member_pages.sentinel_page(
+        space_id=SPACE,
+        sync_id="s-o",
+        requester_version=95,
+        requester_ref=parse_page_ref(
+            {**(await host_pages.ref_for(SPACE) or {}), "newest": True}
+        ),
+    )
+    assert await host_pages.receive(
+        space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
+    )
+    await wire.settle()
+    await _silent_ticks(host_pages, wire, 4)
+    host_pages._clock_ms.ms += 2 * PAGE_MIN_INTERVAL_S * 1000  # a seal is due
+    assert await host_pages.seal_if_due(SPACE) is None  # held: not complete
+    pos = await _position(host, host_pages)
+    assert pos is not None and pos.match is not True
+    assert (
+        sum(
+            [
+                await host.repos.space_post.get(f"away-{k}") is not None
+                for k in range(30)
+            ]
+        )
+        == 0
+    )
+    now[0] += CATCH_UP_HOLD_S  # the bound still holds
+    assert await host_pages.seal_if_due(SPACE) is not None

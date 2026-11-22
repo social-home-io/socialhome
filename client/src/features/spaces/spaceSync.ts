@@ -34,7 +34,9 @@ export type SpaceSyncState = SpaceSyncWire['state']
 export type SyncView = 'here' | 'latest' | 'retry' | 'missing' | 'away' | 'preparing'
 
 export function syncView(sync: SpaceSync, hostedHere = false): SyncView {
-  if (hostedHere) return 'here'
+  // Hosted here: never a warning — only "getting the latest" while the
+  // owner catches up to a page its delegated admin signed while it was away.
+  if (hostedHere) return sync.state === 'catching_up' ? 'latest' : 'here'
   if (sync.may_be_missing) return 'missing'
   switch (sync.state) {
     case 'up_to_date': return 'here'
@@ -130,7 +132,11 @@ export interface SyncBody {
 export function syncBody(
   view: SyncView, sync: SpaceSync, hostName: string | null, hostedHere: boolean,
 ): SyncBody {
-  if (hostedHere) return { text: t('space.sync.hosted_here'), time: null }
+  if (hostedHere) {
+    return view === 'latest'
+      ? { text: t('space.sync.body.hosted_latest'), time: null }
+      : { text: t('space.sync.hosted_here'), time: null }
+  }
   const at = sync.last_ok_at
   const name = host(hostName)
   // A match with the signed page may come from any member household (the

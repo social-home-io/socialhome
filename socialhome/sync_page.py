@@ -82,10 +82,12 @@ VECTOR_BYTES: int = BUCKETS * HASH_BYTES
 PAGE_MIN_INTERVAL_S: int = 15 * 60
 #: A requester whose held page is younger than this gets no newer page on
 #: a sentinel — only its own BEGIN ref travels (final review I4 follow-up:
-#: about halves the page traffic of a busy space). "Sync now" asks for the
-#: newest page at once (``newest`` in its ``page`` ref). Below the 75-min
-#: freshness of a match (``domain.space_sync_page.PAGE_MATCH_FRESH_S``), so
-#: a matched page is replaced before its match stops counting.
+#: cuts the page traffic of a busy space by up to half). "Sync now" asks
+#: for the newest page at once (``newest`` in its ``page`` ref). The next
+#: round after this hour brings the newer page, so a held page can be up to
+#: an hour plus one round old; past the 75-min freshness of a match
+#: (``domain.space_sync_page.PAGE_MATCH_FRESH_S``) its match stops counting
+#: and the status falls back to the Phase-1 rules until then.
 PAGE_RESEND_AFTER_S: int = 60 * 60
 #: ``issued_at`` may be at most this far ahead of the receiver's clock.
 MAX_PAGE_FUTURE_SKEW_MS: int = 300 * 1000
