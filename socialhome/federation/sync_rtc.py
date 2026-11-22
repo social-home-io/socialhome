@@ -536,6 +536,10 @@ class SyncSessionRecord:
     #: ``SPACE_SYNC_DIRECT_FAILED`` on the 15 s ICE timeout. Tracked so
     #: ``close_session`` can cancel it cleanly.
     rtc_watcher: Any | None = None
+    #: Set by ``SyncSessionManager.close_session``: the provider's stream of
+    #: a closed session (a new BEGIN replaced it, the requester completed
+    #: it, the reaper dropped it) stops at its next chunk, on either path.
+    closed: bool = False
     #: When a chunk last moved on this session (sent by the provider,
     #: received by the requester). The stale reaper measures idleness from
     #: it, not from ``created_at``: a big stream may run longer than the

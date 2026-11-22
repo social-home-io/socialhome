@@ -650,6 +650,16 @@ def test_a_listing_row_of_another_bucket_is_refused():
         parse_listing(wire)
 
 
+def test_a_listing_naming_a_row_twice_is_refused():
+    index, rows = _listing_rows(2)
+    for wire in (
+        listing_to_wire(index, [rows[0], rows[0]]),
+        listing_to_wire(index, [rows[0], rows[0]], current=True),
+    ):
+        with pytest.raises(PageRefused, match="twice"):
+            parse_listing(wire)
+
+
 def test_an_oversized_listing_is_refused():
     wire = {"i": 0, "held": True, "rows": [["posts", "p", "A" * 43, None]] * 4097}
     with pytest.raises(PageRefused):

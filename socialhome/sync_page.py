@@ -1074,6 +1074,7 @@ def parse_listing(raw: object) -> tuple[int, list[ListingRow] | None, bool]:
     if not isinstance(rows_raw, list) or len(rows_raw) > MAX_LISTING_ROWS:
         raise PageRefused("malformed listing rows")
     rows: list[ListingRow] = []
+    named: set[tuple[str, str]] = set()
     for item in rows_raw:
         if not (isinstance(item, list) and len(item) == 4):
             raise PageRefused("malformed listing row")
@@ -1090,6 +1091,9 @@ def parse_listing(raw: object) -> tuple[int, list[ListingRow] | None, bool]:
         value = _hash_field(leaf, "listing leaf")
         if row_key(resource, row_id)[0] != index:
             raise PageRefused("a listing row of another bucket")
+        if (resource, row_id) in named:
+            raise PageRefused("a listing names a row twice")
+        named.add((resource, row_id))
         rows.append(ListingRow(resource, row_id, value, marker))
     return index, rows, current
 
@@ -1103,7 +1107,8 @@ def verify_listing(index: int, rows: Sequence[ListingRow], vector: bytes) -> Non
 
 
 def parse_bucket_request(raw: object) -> list[int] | None:
-    """The ``buckets`` of a ``sync_mode: "buckets"`` BEGIN: 1 to
+    """The ``buckets`` of a ``SPACE_SYNC_BEGIN`` (listings asked to ride
+    that round's stream): 1 to
     :data:`MAX_LISTING_BUCKETS` distinct indices, or ``None``."""
     if not isinstance(raw, list) or not 0 < len(raw) <= MAX_LISTING_BUCKETS:
         return None

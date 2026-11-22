@@ -156,8 +156,9 @@ REMOVAL_RESOURCES: frozenset[str] = frozenset(
 )
 
 
-#: A ``sync_mode: "buckets"`` session's chunks (v_95, sync pages): each
-#: record one bucket listing (``socialhome.sync_page.listing_to_wire``).
+#: Bucket listings (v_95, sync pages): the chunks a stream appends right
+#: before its sentinel when the BEGIN named ``buckets``; each record one
+#: listing (``socialhome.sync_page.listing_to_wire``).
 #: Never part of a content stream, so not in :data:`ALLOWED_RESOURCES`.
 LISTING_RESOURCE: str = "__listing__"
 

@@ -517,10 +517,7 @@ class SpaceSyncScheduler:
         space = await self._space_repo.get(space_id)
         if space is None or space.dissolved:
             return
-        await self._sync_with(space, space.owner_instance_id)
-
-    async def _sync_with(self, space: Space, host: str) -> None:
-        space_id = space.id
+        host = space.owner_instance_id
         if not host or host == self._own_instance_id:
             return
         if await self._federation.is_confirmed_peer(host):
@@ -616,10 +613,6 @@ class SpaceSyncScheduler:
         round, never a BEGIN of its own."""
         self._sync_page_ref = ref_for
         self._sync_page_buckets = buckets_for
-
-    async def _page_ref_for(self, space_id: str, to_instance_id: str) -> dict | None:
-        fields = await self._page_fields_for(space_id, to_instance_id)
-        return fields.get("page")
 
     async def _page_fields_for(self, space_id: str, to_instance_id: str) -> dict:
         """v_95 fields of a BEGIN to *to_instance_id*: ``page`` (the page we
@@ -1072,10 +1065,12 @@ class SpaceSyncScheduler:
             ):
                 prefer_direct = False
             sync_id = uuid.uuid4().hex
-            self._inflight.setdefault(peer_instance_id, {})[sync_id] = (
-                space_id,
-                time.monotonic(),
-            )
+            held = self._inflight.setdefault(peer_instance_id, {})
+            # The provider replaces our earlier session of this space with
+            # this one: that slot is free now, not after the TTL.
+            for earlier in [s for s, (sp, _) in held.items() if sp == space_id]:
+                del held[earlier]
+            held[sync_id] = (space_id, time.monotonic())
             fields = await self.begin_fields(
                 space_id=space_id,
                 peer_instance_id=peer_instance_id,

@@ -62,6 +62,7 @@ from ....sync_page import (
     COMMITTED_RESOURCES,
     MAX_LISTING_BUCKETS,
     MAX_LISTING_ROWS,
+    MAX_PAGE_FUTURE_SKEW_MS,
     PAGE_MIN_INTERVAL_S,
     PAGE_SUITE_SHA256_B256,
     PageRefused,
@@ -79,6 +80,7 @@ from ....sync_page import (
     page_time,
     parse_listing,
     parse_page,
+    parse_page_ref,
     root_of,
     sign_page,
     vector_delta,
@@ -174,11 +176,14 @@ def _classify(
     buckets: tuple[int, ...],
     vector: bytes,
     local: BucketRows,
+    horizon: str,
 ) -> tuple[int, int]:
     """``(missing rows, unresolved buckets)`` of one round's listings
     against our rows (*local*, read after that round's rows were applied).
-    Raises :class:`PageRefused` for a listing that is malformed, of a bucket
-    not asked, repeated, or that does not hash to the signed bucket."""
+    A local change time past *horizon* (:func:`_horizon`) never makes our
+    version the newer one. Raises :class:`PageRefused` for a listing that
+    is malformed, of a bucket not asked, repeated, or that does not hash to
+    the signed bucket."""
     seen: set[int] = set()
     missing = 0
     unresolved = 0
@@ -203,6 +208,7 @@ def _classify(
                     missing += 1
             elif have.leaf != row.leaf and not (
                 have.marker is not None
+                and have.marker <= horizon
                 and (row.marker is None or have.marker > row.marker)
             ):
                 missing += 1
@@ -214,6 +220,22 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _root_of_ref(ref: Mapping[str, Any] | None) -> bytes | None:
+    parsed = parse_page_ref(ref)
+    return None if parsed is None else parsed["root"]
+
+
+def _horizon(now_ms: int) -> str:
+    """The latest change time we believe, in the
+    :func:`~socialhome.sync_page.change_time` form: now plus the page skew.
+    A row stamped later (a writer's clock far ahead, or on purpose) never
+    explains a differing bucket — or one writer could make every member
+    read "up to date"."""
+    return datetime.fromtimestamp(
+        (now_ms + MAX_PAGE_FUTURE_SKEW_MS) / 1000, UTC
+    ).isoformat(timespec="microseconds")
+
+
 def _cutoff_day(cutoff: str | None) -> str | None:
     return cutoff[:10] if cutoff else None
 
@@ -222,6 +244,7 @@ class SyncPageService:
     """Sync pages on the §25.6 session (see the module docstring)."""
 
     __slots__ = (
+        "_asked",
         "_checks",
         "_clock_ms",
         "_compared_at",
@@ -273,6 +296,9 @@ class SyncPageService:
         self._sleep = sleep
         #: The households acting as a space's host (:meth:`attach_hosts`).
         self._hosts: Callable[[Space], Awaitable[list[str]]] | None = None
+        #: sync_id → the ``page`` of our BEGIN under it, when that BEGIN
+        #: asked bucket listings (:meth:`attach_asks`).
+        self._asked: Callable[[str], Mapping[str, Any] | None] | None = None
         #: space → the listings our next BEGIN to its host asks for.
         self._wanted: dict[str, _Wanted] = {}
         #: Spaces with a compare pending; space → when it last compared.
@@ -347,12 +373,16 @@ class SyncPageService:
         lock = self._locks.setdefault(space_id, asyncio.Lock())
         if lock.locked():
             return None
-        async with lock:
-            try:
-                return await self._seal_if_due(space_id)
-            except Exception:
-                log.exception("sync page: sealing a page of %s failed", space_id)
-                return None
+        try:
+            async with lock:
+                try:
+                    return await self._seal_if_due(space_id)
+                except Exception:
+                    log.exception("sync page: sealing a page of %s failed", space_id)
+                    return None
+        finally:
+            if self._locks.get(space_id) is lock:
+                del self._locks[space_id]
 
     async def _seal_if_due(self, space_id: str) -> SyncPage | None:
         space = await self._spaces.get(space_id)
@@ -654,24 +684,35 @@ class SyncPageService:
         is one of them)."""
         self._hosts = hosts
 
+    def attach_asks(self, asked: Callable[[str], Mapping[str, Any] | None]) -> None:
+        """``asked(sync_id)`` — the ``page`` (wire form) our BEGIN under that
+        id carried when it asked bucket listings (``None``: it asked none —
+        the requester's pending-request record). A listing is
+        taken only for the page the current ask is about: a round that
+        carried an older ask (a newer page came meanwhile) brings listings
+        made for that older page."""
+        self._asked = asked
+
     async def _compare_if_unjudged(self, space_id: str) -> None:
         """A sentinel brought no newer page: compare the held page only if
         it has no verdict yet — compare results live in memory, so after a
         restart the stored page would otherwise wait for the next page.
         Never a second compare of a judged page. Fail-soft."""
         try:
-            if space_id in self._comparing:
+            if space_id in self._comparing or await self._judged(space_id):
                 return
-            space = await self._spaces.get(space_id)
-            held = await self._held(space) if space is not None else None
-            if held is None or held.page.signer == self._own_instance_id:
-                return
-            check = self._checks.get(space_id)
-            if check is not None and check.root == held.page.root:
-                return  # judged already
             self.compare_soon(space_id)
         except Exception:
             log.exception("sync page: checking the verdict of %s failed", space_id)
+
+    async def _judged(self, space_id: str) -> bool:
+        """The page held now already has a verdict (or is our own)."""
+        space = await self._spaces.get(space_id)
+        held = await self._held(space) if space is not None else None
+        if held is None or held.page.signer == self._own_instance_id:
+            return True
+        check = self._checks.get(space_id)
+        return check is not None and check.root == held.page.root
 
     def compare_soon(self, space_id: str) -> None:
         """A newer page was stored: compare our copy with it — at once, or,
@@ -696,6 +737,8 @@ class SyncPageService:
                     await self._sleep(wait)
             # From here a newer page schedules its own (spaced) compare.
             self._comparing.discard(space_id)
+            if await self._judged(space_id):
+                return  # compared while we waited: nothing new to check
             await self.compare(space_id)
         finally:
             self._comparing.discard(space_id)
@@ -733,10 +776,12 @@ class SyncPageService:
                     space_id, differing, cutoff=page.cutoff
                 )
                 newer_than = page_time(page)
+                horizon = _horizon(self._clock_ms())
                 for index in differing:
                     rows = scan.rows.get(index, [])
                     if any(
-                        r.marker is not None and r.marker > newer_than for r in rows
+                        r.marker is not None and newer_than < r.marker <= horizon
+                        for r in rows
                     ):
                         continue  # ahead in this bucket
                     unexplained.append(index)
@@ -808,9 +853,16 @@ class SyncPageService:
         """``__listing__`` chunk records from the household our BEGIN asked
         (bounded). Anything else is dropped."""
         wanted = self._wanted.get(space_id)
-        if wanted is None or wanted.host != provider or not isinstance(records, list):
+        if (
+            wanted is None
+            or wanted.host != provider
+            or not isinstance(records, list)
+            or self._asked is None
+            or _root_of_ref(self._asked(sync_id)) != wanted.root
+        ):
             log.info(
-                "sync page: listing chunk of session %s from %s dropped (not asked)",
+                "sync page: listing chunk of session %s from %s dropped (not "
+                "asked, or asked for an older page)",
                 sync_id,
                 provider,
             )
@@ -838,7 +890,11 @@ class SyncPageService:
                 space_id, wanted.buckets, cutoff=wanted.cutoff
             )
             missing, unresolved = _classify(
-                records, wanted.buckets, wanted.vector, local
+                records,
+                wanted.buckets,
+                wanted.vector,
+                local,
+                _horizon(self._clock_ms()),
             )
         except PageRefused as exc:
             log.warning(
@@ -881,7 +937,7 @@ class SyncPageService:
         buckets: list[int],
         requester_version: int,
     ) -> list[dict]:
-        """The ``__listing__`` records of a ``sync_mode: "buckets"`` session:
+        """The ``__listing__`` records for the ``buckets`` a BEGIN named:
         per asked bucket its rows (identity, leaf, change time) when our
         rows of it still hash to the page the requester holds — the same
         page we hold — else ``held: false``. One export of the space."""

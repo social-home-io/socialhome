@@ -36,10 +36,10 @@ checked against the signed page, not against who delivered it.
    space changed since the stored page, at most once every 15 min. There
    is no timer, no push and no fan-out.
 4. **Phase 3 reuses the §25.6 session.** A member sends `SPACE_SYNC_BEGIN`
-   with `sync_mode: "buckets"` to **any** member household. That household
+   carrying `buckets` to **any** member household. That household
    streams, for each requested bucket it still holds unchanged, the bucket
    listing and the rows. The receiver accepts a row only if its leaf is in
-   a listing that hashes to the signed vector. The same mode replaces the
+   a listing that hashes to the signed vector. The same round replaces the
    host's daily full anti-entropy stream with a bucket diff.
 5. **Few new parts:** one suite tag (`PAGE_SUITE_SHA256_B256`), one
    authority event type (`space_sync_page`, under the existing
@@ -494,8 +494,8 @@ protocol v_95, with adversarial review).
 
 **Phase 3: verified fetch from any member** (one PR, same v_95 if it
 ships in the same release, otherwise v_96).
-1. `sync_mode: "buckets"` on the provider (any member household), with
-   listings, hints and `not_held`.
+1. `buckets` on a BEGIN to any member household (the Phase 2 listing
+   rides that round), with listings, hints and `not_held`.
 2. The receiver's `verified` path, which replaces the own-rows-only limit
    of `resume.py` / `trusted_helpers.py` wherever a page covers a bucket.
    Rows created after the page keep today's helper replay.
@@ -610,6 +610,9 @@ What shipped, where it is more exact than the design above:
      `updated_at`, `last_edited_at`, `archived_at`, `sold_at`, `deleted_at`
      the record carries) is after the page's `issued_at` is explained: we
      are ahead there (live events between pages). Not fetched, not counted.
+     A change time later than now + 300 s (the page skew) explains
+     nothing, here or in step 3: one writer stamping rows far in the
+     future must not make every member read "up to date".
   2. **Listings only for unexplained buckets**, at most
      `MAX_LISTING_BUCKETS` = 8 per compare; the rest stay unresolved until
      the next page. They are asked of ONE household acting as host (the
@@ -639,7 +642,8 @@ What shipped, where it is more exact than the design above:
   of listing records right before the sentinel, under the space content
   key (the chunk AAD), counted in the sentinel's `chunk_count`
   (`SpaceSyncService._listing_chunks`); only to a member household (a
-  writer seat). No session kind, budget or session-cap rule of its own:
+  writer seat) — as is the page itself on the sentinel: its vector covers
+  member-only resources (zones), so a follower gets neither. No session kind, budget or session-cap rule of its own:
   the round's admission rules apply. Each record is `{i, held: true,
   rows: [[resource, row_id, leaf, change_time], …]}` or `{i, held:
   false}`: a provider lists a bucket as of the page only when its own rows
@@ -653,10 +657,18 @@ What shipped, where it is more exact than the design above:
   its tombstone's bucket, not in a current listing, so a delete we missed
   is not counted missing there (the 30-min sync heals it). The requester
   takes listings only from the household its BEGIN asked, for a space it
-  asked about; a listing must hash to the page's signed bucket (unless
-  `current`), name only rows of that bucket and committed resources, and
-  stay within 4 096 rows — otherwise the whole answer is refused (WARNING)
-  and those buckets stay unresolved. A round that brings no listing (an
+  asked about, and only for the page that BEGIN asked about (its
+  pending-request record keeps the `page` it carried): a round that
+  carried an older ask, while a newer page's compare replaced it, brings
+  listings made for the older page — they are dropped, never checked
+  against the newer one. A listing must hash to the page's signed bucket
+  (unless `current`), name only rows of that bucket and committed
+  resources, each row once, and stay within 4 096 rows — otherwise the
+  whole answer is refused (WARNING) and those buckets stay unresolved.
+  The change times in a listing are the provider's word: Phase 2 asks
+  only an acting host, whose stream it trusts anyway; a provider that is
+  not (Phase 3, any member) must not be trusted on them — its listing
+  proves the leaves, not which version is newer. A round that brings no listing (an
   older host) keeps them asked for the next round. After a restart the
   lost verdict is rebuilt: the held page is compared again and the next
   round asks. Phase 3 adds: the same `buckets` on a BEGIN to any member
@@ -679,8 +691,11 @@ What shipped, where it is more exact than the design above:
   (50 000 rows: ≈ 195 rows per bucket × ~32 B, base64 and JSON; ≤ 50 KB)
   to a round that runs anyway — no extra round trip, no extra BEGIN; at
   most one compare per 15 min per member and space, and only on a
-  mismatch. The provider pays one export of the space for that round's
-  listing (as a seal: ~6 s at 50 000 rows, see *Measured*).
+  mismatch. The provider pays one full-space export for a BEGIN that
+  carries `buckets` (as a seal or a full stream: ~5.8 s at 50 000 rows
+  today, see *Measured*; much less once the exporters' keyset query is
+  fixed), at most 5 / h per member and space — the round's own budget, as
+  for a full stream.
 - **Status** (`GET /api/spaces/{id}` `sync.page`, also in the
   `space.sync_state` frame). Rules
   (`domain/space_sync_page.state_with_page`): a running stream stays

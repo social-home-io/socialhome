@@ -584,8 +584,16 @@ class SpaceSyncService:
 
     async def _sentinel_page(self, session: SyncSessionRecord) -> dict | None:
         """v_95: the sentinel's sealed sync page for this requester, or
-        ``None`` (no page service, an older requester, nothing newer)."""
-        if self._sync_pages is None:
+        ``None`` (no page service, an older requester, nothing newer).
+        Only to a member household (a writer seat): the page's vector covers
+        member-only resources (zones), which a follower never gets."""
+        if (
+            self._sync_pages is None
+            or self._member_gate is None
+            or not await self._member_gate(
+                session.space_id, session.requester_instance_id
+            )
+        ):
             return None
         return await self._sync_pages.sentinel_page(
             space_id=session.space_id,
@@ -962,6 +970,8 @@ class SpaceSyncService:
                     next_index=_allocator(session) if indexed else None,
                     max_record_bytes=record_limit,
                 ):
+                    if _stopped(session):
+                        return
                     sent = await self._send_chunk(session, envelope, waits)
                     chunk_count += 1
                     if sent:
@@ -994,6 +1004,8 @@ class SpaceSyncService:
             # the sentinel (the requester classifies on it, after this
             # stream's rows are applied).
             async for envelope in self._listing_chunks(session, indexed, record_limit):
+                if _stopped(session):
+                    return
                 chunk_count += 1
                 if await self._send_chunk(session, envelope, waits):
                     session.touch()
@@ -1016,6 +1028,8 @@ class SpaceSyncService:
                 inviter_proof=await self._sentinel_proof(space_id),
                 page_sealed=await self._sentinel_page(session),
             )
+            if _stopped(session):
+                return
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.
             session.stream_clean = not any_failure
@@ -1526,6 +1540,8 @@ class SpaceSyncService:
                 next_index=_allocator(session) if indexed else None,
                 max_record_bytes=await self._record_limit(session),
             ):
+                if _stopped(session):
+                    return
                 result = await self._send(session, envelope)
                 if result.error == SYNC_ERROR_RTC_CHANNEL:
                     # The channel is gone; the rest of the slice would only
@@ -1658,8 +1674,22 @@ class SpaceSyncService:
         )
 
 
+def _stopped(session: SyncSessionRecord) -> bool:
+    """The session was closed under its stream (a new BEGIN of the same
+    requester and space replaced it, or it ended): stop streaming."""
+    if not getattr(session, "closed", False):
+        return False
+    log.info(
+        "sync %s: stream of space %s to %s stopped (session closed)",
+        session.sync_id,
+        session.space_id,
+        session.requester_instance_id,
+    )
+    return True
+
+
 class _Listings:
-    """The bucket listings of a ``buckets`` session as an exporter."""
+    """The bucket listings a BEGIN's ``buckets`` asked for, as an exporter."""
 
     resource = LISTING_RESOURCE
 

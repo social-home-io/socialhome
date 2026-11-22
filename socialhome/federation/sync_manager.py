@@ -311,6 +311,7 @@ class SyncSessionManager:
         sess = self._sessions.pop(sync_id, None)
         if sess is None:
             return
+        sess.closed = True
         if sess.rtc_watcher is not None:
             # Stop the requester-side wait_ready / chunk-drain task
             # before tearing down the RTC handle so the loop doesn't
@@ -495,7 +496,12 @@ class SyncSessionManager:
         # BEGIN for the space replaces the session it left (it restarted, or
         # gave up on it) — otherwise that orphan holds a slot until the
         # 30-min reaper and its BEGINs are refused ``too_many_sessions``.
-        self._replace_sessions_of(requester_instance_id, space_id, provider_instance_id)
+        # The sessions it replaces do not count against the caps; they are
+        # closed only once this BEGIN passes every check below, so a refused
+        # BEGIN never stops a live stream.
+        replaced = self._sessions_of(
+            requester_instance_id, space_id, provider_instance_id
+        )
 
         # Capacity before the hourly budget: a BEGIN refused for lack of a
         # slot was never served, so it must not spend one of the
@@ -503,7 +509,7 @@ class SyncSessionManager:
         # asks for more spaces than the cap at once retries the rest
         # (``SpaceSyncDeferred``) and would otherwise lock itself out.
         if (
-            self.active_sessions_for_instance(requester_instance_id)
+            self.active_sessions_for_instance(requester_instance_id) - len(replaced)
             >= MAX_ACTIVE_SESSIONS_PER_INSTANCE
         ):
             return SyncDecision(
@@ -513,7 +519,7 @@ class SyncSessionManager:
                 next_payload={"sync_id": sync_id, "reason": "too_many_sessions"},
             )
 
-        if len(self._sessions) >= MAX_SIGNALING_SESSIONS:
+        if len(self._sessions) - len(replaced) >= MAX_SIGNALING_SESSIONS:
             return SyncDecision(
                 accepted=False,
                 reason="node_capacity",
@@ -589,6 +595,15 @@ class SyncSessionManager:
                     next_payload=payload,
                 )
 
+        for sid in replaced:
+            log.info(
+                "sync %s: replaced by a new BEGIN from %s for space %s",
+                sid,
+                requester_instance_id,
+                space_id,
+            )
+            self.close_session(sid)
+
         rtc = SyncRtcSession(
             sync_id=sync_id,
             space_id=space_id,
@@ -614,26 +629,18 @@ class SyncSessionManager:
         self._sessions[sync_id] = record
         return SyncDecision(accepted=True)
 
-    def _replace_sessions_of(
+    def _sessions_of(
         self, requester_instance_id: str, space_id: str, provider_instance_id: str
-    ) -> None:
-        """Close the sessions *requester_instance_id* holds with us for
-        *space_id* (provider side), before its new BEGIN is admitted."""
-        stale = [
+    ) -> list[str]:
+        """The sessions *requester_instance_id* holds with us for *space_id*
+        (provider side) — what its new BEGIN of that space replaces."""
+        return [
             sid
             for sid, rec in self._sessions.items()
             if rec.requester_instance_id == requester_instance_id
             and rec.space_id == space_id
             and rec.provider_instance_id == provider_instance_id
         ]
-        for sid in stale:
-            log.info(
-                "sync %s: replaced by a new BEGIN from %s for space %s",
-                sid,
-                requester_instance_id,
-                space_id,
-            )
-            self.close_session(sid)
 
     def register_requester_https_session(
         self,

@@ -689,7 +689,7 @@ class SpaceSyncReceiver(
             return
 
         if resource == LISTING_RESOURCE:
-            # v_95: bucket listings of a ``buckets`` session we asked for —
+            # v_95: bucket listings our BEGIN's ``buckets`` asked for —
             # the page service checks the session and the sender.
             if self._sync_pages is not None:
                 await self._sync_pages.take_listing(

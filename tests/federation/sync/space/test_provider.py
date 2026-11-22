@@ -124,6 +124,11 @@ async def test_the_sentinel_carries_the_sync_page_for_the_requester(provider):
     its version and the ``page`` its BEGIN named go along."""
     pages = _FakePages()
     provider.attach_sync_pages(pages)
+
+    async def member(space_id, requester):
+        return True
+
+    provider.attach_member_gate(member)
     session = _FakeSession()
     session.page_ref = {"signer": "h"}
     session.peer_version = 95
@@ -138,6 +143,49 @@ async def test_the_sentinel_carries_the_sync_page_for_the_requester(provider):
             "requester_ref": {"signer": "h"},
         }
     ]
+
+
+@pytest.mark.parametrize("gate", [False, None])
+async def test_a_follower_household_gets_no_page_and_no_vector(provider, gate):
+    """Review B1: the page's vector covers member-only resources (zones), so
+    a follower-only household (no writer seat) — or a provider with no
+    member gate wired — never gets the page."""
+    pages = _FakePages()
+    provider.attach_sync_pages(pages)
+    if gate is not None:
+
+        async def follower(space_id, requester):
+            return gate
+
+        provider.attach_member_gate(follower)
+    session = _FakeSession()
+    session.peer_version = 95
+    await provider.stream_initial(session)
+    last = orjson.loads(session.rtc.sent[-1])
+    assert last["resource"] == SENTINEL_RESOURCE
+    assert "page_sealed" not in last
+    assert pages.calls == []
+
+
+async def test_a_replaced_https_stream_stops_at_its_next_chunk(provider):
+    """Review A1/B2: a session the requester's new BEGIN replaced is closed;
+    its stream stops at the next chunk (https here, rtc the same) — no
+    sentinel, so it never keeps streaming beside the new one."""
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+    session.closed = False
+    federation = AsyncMock()
+
+    async def send(**kwargs):
+        session.closed = True  # replaced while the first chunk was in flight
+        return MagicMock(ok=True, error=None)
+
+    federation.send_with_mesh_fallback.side_effect = send
+    provider.attach_federation(federation)
+    await provider.stream_initial(session)
+    assert federation.send_with_mesh_fallback.await_count == 1
+    federation.close_sync_session.assert_not_called()
 
 
 class _ListingPages(_FakePages):

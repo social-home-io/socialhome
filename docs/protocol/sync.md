@@ -1527,9 +1527,13 @@ capability gate.
 **A provider with no free slot.** The provider admits at most 3
 concurrent syncs per household (S-6) and caps its signalling sessions
 overall (S-8). A household runs one sync of a space with a provider at a
-time, so a new BEGIN from it for a space first closes the session it still
-holds there for that space (`SyncSessionManager._replace_sessions_of`) —
-a requester that restarted mid-stream does not hold its slots until the
+time, so a new BEGIN from it for a space replaces the session it still
+holds there for that space: that session does not count against the caps,
+and it is closed once the new BEGIN passes every check (slots, the hourly
+budget, membership) — a refused BEGIN never stops a live stream. Its
+stream stops at the next chunk (the closed session record, either
+transport), and the requester's own slot count drops it at once. A
+requester that restarted mid-stream does not hold its slots until the
 30-minute reaper. A BEGIN refused for lack of a slot is answered
 `SPACE_SYNC_DIRECT_FAILED {reason: "too_many_sessions" | "node_capacity"}`.
 That refusal spends **none** of the requester's 5 / h budget for the space:

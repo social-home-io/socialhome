@@ -270,6 +270,73 @@ async def test_a_new_begin_replaces_the_requesters_session_of_that_space():
     assert blocked.reason == "too_many_sessions"
 
 
+async def test_a_refused_begin_never_kills_the_live_session():
+    """Review A1/B2: the replacement runs only once the new BEGIN is
+    admitted — one refused by the hourly budget or the member check leaves
+    the session it would have replaced streaming."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    for i in range(SYNC_BEGIN_RATE_LIMIT_PER_HOUR):
+        d = await mgr.begin_session(
+            sync_id=f"s-{i}",
+            space_id="sp-0",
+            requester_instance_id="alice",
+            provider_instance_id="me",
+            sync_mode="incremental",
+        )
+        assert d.accepted
+    live = f"s-{SYNC_BEGIN_RATE_LIMIT_PER_HOUR - 1}"
+    refused = await mgr.begin_session(
+        sync_id="s-over",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="incremental",
+    )
+    assert refused.reason == "rate_limited"
+    assert mgr.get_session(live) is not None
+    assert not mgr.get_session(live).closed
+
+    member = SyncSessionManager(
+        _FakeFedRepo(), check_member=AsyncMock(return_value=True)
+    )
+    assert (
+        await member.begin_session(
+            sync_id="m-1",
+            space_id="sp-0",
+            requester_instance_id="alice",
+            provider_instance_id="me",
+        )
+    ).accepted
+    member._check_member = AsyncMock(return_value=False)
+    gone = await member.begin_session(
+        sync_id="m-2",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    assert gone.accepted is False
+    assert member.get_session("m-1") is not None
+
+
+async def test_a_replaced_session_is_marked_closed_so_its_stream_stops():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    await mgr.begin_session(
+        sync_id="old",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    old = mgr.get_session("old")
+    assert old is not None and old.closed is False
+    await mgr.begin_session(
+        sync_id="new",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    assert old.closed is True and mgr.get_session("old") is None
+
+
 async def test_begin_session_blocks_at_concurrent_cap_s6():
     """3 active sessions per instance."""
     mgr = SyncSessionManager(_FakeFedRepo())

@@ -693,7 +693,7 @@ async def _take(env: _Env, page, vector) -> bool:
 
 
 OLD = "2026-01-01T00:00:00.000000+00:00"  # before the page (T0 = 2027-01-15)
-NEW = "2027-02-01T00:00:00.000000+00:00"  # after the page
+NEW = "2027-01-15T08:01:00.000000+00:00"  # after the page, within the skew
 
 
 def _row(rid: str, version: int = 1, marker: str | None = OLD, resource="posts"):
@@ -739,6 +739,10 @@ class _Listed:
         self.forge = None  # a function(records) -> records
         self.signer = signer
         self.rounds = 0
+        #: sync_id → the ``page`` its BEGIN carried when it asked listings (what the
+        #: requester's pending-request record holds).
+        self.asked: dict[str, dict] = {}
+        self.env.svc.attach_asks(self.asked.get)
 
         async def rows_in(space_id, buckets, *, cutoff=None):
             wanted = set(buckets)
@@ -775,6 +779,7 @@ class _Listed:
             records = self.forge(records)
         self.rounds += 1
         sync_id = f"R{self.rounds}"
+        self.asked[sync_id] = self.env.held().ref()
         await self.env.svc.take_listing(
             space_id=SPACE, sync_id=sync_id, provider=host, records=records
         )
@@ -1011,6 +1016,71 @@ async def test_a_hosts_current_listing_settles_a_changed_bucket():
         await t.deliver()
         pos = await t.position()
         assert pos is not None and (pos.match, pos.missing) == expect
+
+
+FAR = "2031-01-01T00:00:00.000000+00:00"  # far past T0 + the 300 s skew
+
+
+async def test_a_far_future_change_time_explains_nothing():
+    """Review B3: a member that stamps rows far in the future must not make
+    a differing bucket "ahead" (explained) — nor win against the host's row
+    in a listing — or one writer could make everyone read up to date."""
+    host = [_row("p1", version=1, marker=OLD)]
+    t = _Listed(host, [_row("p1", version=2, marker=FAR)])
+    await t.take_page()
+    assert t.asks == [(HOST, [_bucket(host[0])])]  # not explained
+    await t.deliver()
+    pos = await t.position()
+    assert pos is not None and (pos.match, pos.missing) == (False, 1)
+    # Within the skew a newer change time still explains the bucket.
+    soon = "2027-01-15T08:05:00.000000+00:00"  # T0 is 08:00:00 UTC
+    t = _Listed(host, [_row("p1", version=2, marker=soon)])
+    await t.take_page()
+    assert t.asks == []
+    assert (await t.position()).match is True
+
+
+async def test_a_listing_of_an_older_ask_is_never_checked_against_a_newer_page():
+    """Review A3: a new page's compare replaces the ask while the round that
+    carried the older ask is still streaming — that round's listings were
+    made for the older page and are dropped, not refused against the new
+    one (the new ask stays pending for its own round)."""
+    lost = _row("lost")
+    t = _Listed([lost], [])
+    await t.take_page()
+    t.asked["R1"] = t.env.held().ref()
+    ((host, buckets),) = t.asks
+    old_records = [
+        listing_to_wire(i, [r for r in t.host_rows if _bucket(r) == i]) for i in buckets
+    ]
+    # A newer page (another row lost too) arrives and is compared.
+    lost2 = _row("lost-2")
+    t.host_rows.append(lost2)
+    t.page_vector = _vector_of(t.host_rows)
+    page = _signed(vector=t.page_vector, seq=60, issued_at=T0 + 1)
+    assert await _take(t.env, page, t.page_vector)
+    await t.env.svc.take_listing(
+        space_id=SPACE, sync_id="R1", provider=host, records=old_records
+    )
+    await t.env.svc.listing_done(space_id=SPACE, sync_id="R1", provider=host)
+    pos = await t.position()
+    assert pos is not None and pos.seq == 60 and pos.match is None
+    assert t.asks  # still asked for the new page
+    await t.deliver()
+    assert (await t.position()).missing == 2
+
+
+async def test_a_judged_page_is_not_compared_again_after_the_wait():
+    """Review A3 (b): a compare requested while the page's compare ran
+    waits out the spacing and then finds the page judged — no second
+    full-space export of the same page."""
+    rows = [_row("p1")]
+    t = _Listed(rows, rows)
+    await t.take_page()
+    assert t.env.state.calls == 1
+    t.env.svc.compare_soon(SPACE)  # e.g. a status read racing the compare
+    await t.env.svc.wait_idle()
+    assert t.env.state.calls == 1
 
 
 async def test_an_unasked_listing_is_dropped():

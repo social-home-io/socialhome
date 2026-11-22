@@ -1427,6 +1427,33 @@ async def test_a_slot_that_never_completes_is_reclaimed(bus, queue, sync_manager
         await queue.stop()
 
 
+async def test_a_new_begin_of_a_space_frees_the_slot_of_the_one_it_replaces(
+    bus, queue, sync_manager
+):
+    """Review A1/B2 (c): the host replaces our earlier session of a space
+    with the new BEGIN's, so our slot count follows — the replaced session
+    stops counting at once, not after the in-flight TTL."""
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _many_spaces_sched(bus, queue, sync_manager, fed, 2)
+    sched.wire()
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await _settle(5)
+        assert len(sched._inflight["host"]) == 2
+        await sched.enqueue_sync_for_space(space_id="sp-0", peer_instance_id="host")
+        await _settle(5)
+        begins = [b["payload"] for b in _begins(fed)]
+        assert [b["space_id"] for b in begins].count("sp-0") == 2
+        held = sched._inflight["host"]
+        assert len(held) == 2
+        assert begins[-1]["sync_id"] in held
+        assert sorted(space for space, _at in held.values()) == ["sp-0", "sp-1"]
+    finally:
+        await sched.stop()
+        await queue.stop()
+
+
 async def test_a_waiting_space_is_asked_for_once_with_the_strongest_mode(
     bus, queue, sync_manager
 ):

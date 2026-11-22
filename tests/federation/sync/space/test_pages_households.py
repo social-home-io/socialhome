@@ -112,6 +112,9 @@ class _Wire:
         self.member_pages: SyncPageService | None = None
         self.asks: list[list[int]] = []
         self.rounds = 0
+        #: sync_id → the ``page`` that round's BEGIN carried with its
+        #: ``buckets`` (the requester's pending-request record).
+        self.asked: dict[str, dict] = {}
 
     async def hosts(self, space) -> list[str]:
         return [HOST]
@@ -125,6 +128,7 @@ class _Wire:
         sync_id = f"R{self.rounds}"
         if buckets:
             self.asks.append(list(buckets))
+            self.asked[sync_id] = await self.member_pages.ref_for(SPACE)
             records = await self.host_pages.listing_records(
                 space_id=SPACE,
                 page_ref=parse_page_ref(await self.member_pages.ref_for(SPACE)),
@@ -157,6 +161,7 @@ async def pair(homes):  # noqa: F811
     wire = _Wire(host_pages)
     wire.member_pages = member_pages
     member_pages.attach_hosts(wire.hosts)
+    member_pages.attach_asks(wire.asked.get)
     yield host, member, host_pages, member_pages, clock, wire
 
 
