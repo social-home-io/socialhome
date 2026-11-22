@@ -21,10 +21,12 @@ rounds no longer counts as the host answering (``sync_state``).
 
 :meth:`status` turns the rows into one state at read time
 (:func:`~socialhome.domain.space_sync_status.sync_state`), plus how many of
-our own items of the space still wait in the outbox. The space's owner
-household is always up to date. When the computed state or the waiting count
-changes after an outcome, a stream start or a change of the space's outbox
-rows (:meth:`SpaceSyncStatusService.outbox_changed`),
+our own items of the space still wait in the outbox, the one warning
+"Some posts may be missing" (``may_be_missing``) and the posts of ours no
+member household has yet (``unsent_posts``, "Not sent yet"). The space's
+owner household is always up to date. When any of those changes after an
+outcome, a stream start, a GFS taking one of our posts or a change of the
+space's outbox rows (:meth:`SpaceSyncStatusService.outbox_changed`),
 :class:`SpaceSyncStateChanged` goes on the bus — the realtime layer sends
 the members a ``space.sync_state`` frame. Nothing
 here goes on the wire to another household.
