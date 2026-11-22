@@ -558,6 +558,23 @@ ships in the same release, otherwise v_96).
    `no_link_preview`, `pinned` and `moderated` (§2). This is a known limit,
    with no receiver change.
 
+## Decisions (owner, 2026-11-22)
+
+8. **A page signed by any seed-holding delegated admin counts as the host
+   for rows (`VERIFIED_ROW`) — signed off.** A verified row passes the
+   receiver exactly where a row from the space's acting host passes
+   (`_acts_as_host`): for that space, that deliverer and that row only.
+   That widens who may cause a row to be written here — from "the host (or
+   a trusted helper, its own people's rows only)" to "any member household,
+   for any row a page of the owner or of a seed-holding delegated admin
+   commits". The page's signature is what makes it safe: the row must hash
+   to a leaf of a listing that hashes to the bucket the space authority
+   signed, so a deliverer can withhold or delay, never invent or alter a
+   row. What it can still do: replay the page's version of a row we
+   changed offline before the page's `issued_at` (the same outcome as the
+   host's stream), and learn our `have` prefixes. Raised as final-review
+   minor 4; the owner signed it off on 2026-11-22.
+
 ## Phase 2 as built (v_95)
 
 What shipped, where it is more exact than the design above:
@@ -1063,20 +1080,8 @@ un-archiving is rare, the outcome is a stale archive flag, never a row
 nobody signed, and judging an archive against an un-archive by change
 times would need the archive time committed.
 
-**For review: the trust `VERIFIED_ROW` widens (final review minor 4,
-needs the owner's sign-off).** A verified row passes the receiver exactly
-where a row from the space's acting host passes (`_acts_as_host`): for
-that space, that deliverer and that row only. That is a real widening of
-who may cause a row to be written here — from "the host (or a trusted
-helper, own people's rows only)" to "any member household, for any row
-the signed page commits". The page's signature is what makes it safe: the
-row must hash to a leaf of a listing that hashes to the bucket the space
-authority signed, so a deliverer can withhold or delay, never invent or
-alter a row. What it can still do: replay the page's version of a row
-we changed offline before the page's `issued_at` (the same outcome as the
-host's stream), and learn our `have` prefixes. This is the design's core
-decision (owner decision 2, 2026-11-21) and it is listed here plainly so
-the review can confirm it, not because it changed.
+**The trust `VERIFIED_ROW` widens — signed off (owner decision 8,
+2026-11-22, see [Decisions](#decisions-owner-2026-11-22)).**
 
 **Partial answers are fine.** A deliverer that changed a bucket since the
 page, holds the page under another root, or is behind itself answers
