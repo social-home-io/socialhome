@@ -796,7 +796,9 @@ random) plus one step per round, at most `MAX_FETCH_ASKS` = 3 asked one
 after another per round — the next one only when an answer leaves
 buckets to fetch; an unanswered ask holds the round until it is given up
 (`FETCH_ANSWER_WAIT_S`, 5 min), and the next silent round asks the next
-member. Admins and moderators get no priority (owner
+member; an answer with no listing at all counts as an answer (the next
+member is asked at once), and a newer page's compare that replaces the ask
+frees the round for its own ask at once. Admins and moderators get no priority (owner
 decision 2). The window of buckets asked also rotates per round, so a
 bucket nobody can prove never blocks the others.
 
@@ -829,7 +831,11 @@ never sends a row it cannot prove. The listings and rows end its normal
 incremental stream, right before the sentinel (`_listing_chunks`).
 Bounded per answer: `MAX_FETCH_ROWS` = 256 rows and `MAX_FETCH_BYTES` =
 512 KiB, a record over the GFS frame cap of a relay-seated requester is
-left out. One export of the space per ask (the same cost as a listing).
+left out. One export of the space per ask (the same cost as a listing);
+its hashing, the proofs and the answer's sizing run in worker threads
+(`rows_in`, `_fetch_answer`; Phase 2's `_host_listings` too), the database
+reads stay async. A scan memo per page root is not kept: the rows change
+between asks, and a stale memo would prove nothing.
 
 **Receiver** (`SyncPageService._fetch_done`, `SpaceSyncReceiver
 .apply_verified`):
@@ -851,10 +857,17 @@ left out. One export of the space per ask (the same cost as a listing).
    the row's own identity (the leaf commits to it) against **our** rows: we
    hold no row of that identity (and it is not deleted / archived here
    since), or hold another version that we did not change after the page's
-   signed `issued_at` — so a deliverer cannot roll a newer local edit back
-   to the page's version. (A bucket's status counts still read the labels:
-   a forged label can make a bucket look incomplete, or a row deleted here
-   look gone, but never applies anything.)
+   signed `issued_at` (and before now plus the page skew — a far-future
+   stamp of ours never counts as newer) — so a deliverer cannot roll a
+   newer local edit back to the page's version. **Completeness is judged by
+   leaves only, never by labels:** a listed leaf is accounted for when we
+   hold it, it landed in this round, or a delivered row with that leaf
+   verified and its own identity showed we do not need it (ours is newer,
+   it is deleted here, the owner holds it); every other listed leaf is
+   missing. A deliverer that withholds a row and relabels its leaf with the
+   id of a row we hold as deleted therefore leaves the bucket incomplete —
+   the space never reads "up to date" on its word (security review, with a
+   regression test).
 4. The row is cut down to its **committed part** (`sync_page.fetched_record`:
    the commit form's allow-list, nested and shaped fields by their committed
    keys, in the order delivered) plus the file hashes of its committed file
@@ -882,7 +895,12 @@ epoch, verified, newer by `(epoch, issued_at, seq)`; a delegated admin
 still never stores another signer's page over its own — compares its copy
 with it and, having no host above it, goes straight to member households
 (the admin's included; never itself as "the host") for what the page proves
-it lacks, content whose author household is offline now included. Its sync
+it lacks, content whose author household is offline now included. It takes
+only rows it LACKS — an identity it holds no version of, tombstones
+included — and never replaces a version it holds: the admin's page may
+predate the owner's own offline edits, and what the owner applies it then
+spreads as the host (security review; tested with tasks and stickies, which
+are taken whole). A row it holds in another version counts as settled. Its sync
 status, otherwise always up to date, follows that compare (`behind` while
 rows are proven missing). Its next own page starts a new chain (`prev_root`
 null, the full vector), which is no conflict. Limits: the owner is the wiki

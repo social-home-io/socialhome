@@ -23,6 +23,7 @@ from socialhome.canonical_json import canonical_str
 from socialhome.crypto import ed25519_public_key
 from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
+from socialhome.domain.task import TaskStatus
 from socialhome.federation.sync.space.pages import (
     FETCH_ANSWER_WAIT_S,
     MAX_FETCH_ASKS,
@@ -30,6 +31,7 @@ from socialhome.federation.sync.space.pages import (
 )
 from socialhome.sync_page import (
     MAX_FETCH_ROWS,
+    PAGE_MIN_INTERVAL_S,
     hint_from_wire,
     parse_page_ref,
     row_key,
@@ -49,11 +51,15 @@ from tests.federation.sync.space.test_sync_coverage import (
     HOST,
     PAGE,
     SPACE,
+    TASK,
     Home,
     _home,
     _page,
     _post,
+    _sticky,
     _stream,
+    _task,
+    _task_done,
     homes,  # noqa: F401 — the fixture
 )
 
@@ -205,6 +211,35 @@ async def _position(home: Home, pages: SyncPageService):
     return await pages.position(space, [HOST])
 
 
+async def test_the_proofs_and_answers_never_block_the_event_loop(trio, monkeypatch):
+    """Review 6: the leaf hashing of an answer (the requester's row checks,
+    the deliverer's proofs and sizing, Phase 2's host listings) runs in
+    worker threads (CLAUDE.md "CPU-bound work"); the DB reads stay async."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _missed_content(host, member, requester)
+    page = await host_pages.seal_if_due(SPACE)
+    assert page is not None
+    assert await _round(host_pages, member_pages, "s-m")
+    ran: list[str] = []
+    real = asyncio.to_thread
+
+    async def recording(fn, *args, **kwargs):
+        ran.append(getattr(fn, "__name__", repr(fn)))
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", recording)
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert await requester.repos.space_post.get("post-2") is not None
+    await host_pages.listing_records(
+        space_id=SPACE,
+        page_ref=parse_page_ref(page.ref()),
+        buckets=[row_key("posts", "post-2")[0]],
+        requester_version=95,
+    )
+    assert {"_verify_rows", "_fetch_answer", "_host_listings"} <= set(ran)
+
+
 async def test_a_member_catches_up_the_hosts_posts_and_pages_from_a_plain_member(
     trio, caplog
 ):
@@ -344,6 +379,46 @@ async def test_a_partial_answer_then_the_next_member(partial):
     assert pos is not None and pos.match is True
 
 
+async def test_an_answer_without_listings_goes_on_to_the_next_member(partial):
+    """Review 4: the member our fetch rode answered with no listing at all
+    (no page held, or not ours). It is an answer all the same: the ask is
+    not left in flight — the round goes on to its next member at once."""
+    _h, _m, requester, host_pages, _mp, r_pages, wire, _v = partial
+    answers: list[int] = []
+
+    def first_empty(listings, rows):
+        answers.append(1)
+        return ([], []) if len(answers) == 1 else (listings, rows)
+
+    wire.forge = first_empty
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert [a[0] for a in wire.asks] == [OTHER, MEMBER]
+    got = await requester.repos.space_post.get("post-2")
+    assert got is not None and got[1].content == "while you were away"
+
+
+async def test_a_newer_page_during_an_ask_starts_its_own_round(trio):
+    """Review 3: a compare (a newer page) replaces the ask in flight — whose
+    answer would now be dropped — so it must not wait for it: its own round
+    asks at once."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _missed_content(host, member, requester)
+    await host_pages.seal_if_due(SPACE)
+    del wire.deliverers[MEMBER]  # the first ask goes unanswered
+    assert await _round(host_pages, member_pages, "s-m")
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert len(wire.asks) == 1
+    host_pages._clock_ms.ms += (PAGE_MIN_INTERVAL_S + 60) * 1000
+    await _post(host, "post-3", content="later")
+    await _stream(host, member)
+    assert await host_pages.seal_if_due(SPACE) is not None
+    assert await _round(host_pages, r_pages, "s-r2")
+    await wire.settle()
+    assert len(wire.asks) == 2
+
+
 async def test_a_host_heard_mid_round_stops_the_member_asks(partial):
     _h, _m, requester, host_pages, _mp, r_pages, wire, _v = partial
 
@@ -403,11 +478,20 @@ async def test_followers_and_older_members_are_never_asked(trio):
     assert await requester.repos.space_post.get("post-2") is None
 
 
-async def test_unsigned_change_times_cannot_roll_back_a_newer_local_edit(trio, caplog):
+@pytest.mark.parametrize(
+    ("edited_at", "applied"),
+    [("2027-01-15 08:02:00", 0), ("2030-01-01 00:00:00", 1)],
+)
+async def test_unsigned_change_times_cannot_roll_back_a_newer_local_edit(
+    trio, caplog, edited_at, applied
+):
     """A listing's change times are not signed. A deliverer that claims a
     far-future one cannot make the page's (older) version of a row replace
     our edit made after the page: past the page's signed ``issued_at`` our
-    row is ahead, whatever the listing says."""
+    row is ahead, whatever the listing says — up to the horizon (now plus the
+    page skew): a far-future stamp of ours never counts as newer (review 5),
+    so the page's version is applied (the merge rules still keep the newer
+    words of a post)."""
     host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
     await _post(host)
     await _stream(host, requester)
@@ -421,7 +505,7 @@ async def test_unsigned_change_times_cannot_roll_back_a_newer_local_edit(trio, c
     assert await _round(host_pages, r_pages, "s-r")  # compare: post-1 differs
     await wire.settle()
     await requester.repos.space_post.edit(
-        "post-1", "my newer edit", space_id=SPACE, edited_at="2030-01-01 00:00:00"
+        "post-1", "my newer edit", space_id=SPACE, edited_at=edited_at
     )
 
     def inflate(listings, rows):
@@ -436,7 +520,7 @@ async def test_unsigned_change_times_cannot_roll_back_a_newer_local_edit(trio, c
         r_pages.host_silent(SPACE)
         await wire.settle()
     assert [a[0] for a in wire.asks] == [MEMBER]
-    assert "0 row(s) applied" in caplog.text
+    assert f"{applied} row(s) applied" in caplog.text
     got = await requester.repos.space_post.get("post-1")
     assert got is not None and got[1].content == "my newer edit"
 
@@ -617,6 +701,136 @@ async def test_the_owner_back_from_a_long_absence_catches_up_from_members(trio):
     assert got is not None and got[1].content == "written while away"
     pos = await _position(host, host_pages)
     assert pos is not None and pos.match is True and pos.signer_role == "admin"
+
+
+async def _deleted_alias_in_post2s_bucket(requester: Home) -> str:
+    """A post id in post-2's bucket that the requester holds as DELETED."""
+    target = row_key("posts", "post-2")[0]
+    alias = next(
+        f"gone{k}" for k in range(100_000) if row_key("posts", f"gone{k}")[0] == target
+    )
+    await _post(requester, alias, content="deleted here")
+    await requester.repos.space_post.soft_delete(alias, space_id=SPACE)
+    return alias
+
+
+@pytest.mark.parametrize("forged", [True, False])
+async def test_a_withheld_row_relabelled_as_a_deleted_one_is_still_missing(
+    trio, forged
+):
+    """Security review 1 (the PoC): the deliverer withholds the row we lack
+    and relabels its leaf in the (verified) listing with the id of a row we
+    hold as deleted in the same bucket. Labels are not signed: completeness
+    is judged by leaves only, so the bucket stays incomplete — never a false
+    "up to date". The control: an honest deliverer completes it."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _missed_content(host, member, requester)
+    alias = await _deleted_alias_in_post2s_bucket(requester)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+
+    def withhold_and_relabel(listings, rows):
+        for listing in listings:
+            for row in listing.get("rows") or []:
+                if row[1] == "post-2":
+                    row[1] = alias
+        rows = [r for r in rows if r["row"].get("id") != "post-2"]
+        return listings, rows
+
+    if forged:
+        wire.forge = withhold_and_relabel
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    pos = await _position(requester, r_pages)
+    got = await requester.repos.space_post.get("post-2")
+    if forged:
+        assert got is None
+        assert pos is not None and pos.match is not True
+    else:
+        assert got is not None
+        assert pos is not None and pos.match is True
+
+
+async def _admin_page_reaches_owner(
+    host, member, host_pages, member_pages, versions, own
+) -> _Wire:
+    """The delegated admin (the member household holding the seed) seals a
+    page from its own copy; its sentinel relays it to the returning owner,
+    whose requester path is wired like the app's; the round settles."""
+    space = await member.repos.space.get(SPACE)
+    vector, rows = await member_pages._state.vector(SPACE, cutoff=own.cutoff)
+    admin_page = sign_page(
+        space_id=SPACE,
+        epoch=int(space.authority_key_epoch or 0),
+        signer=MEMBER,
+        seq=own.seq + 10,
+        issued_at=own.issued_at + 60_000,
+        cutoff=own.cutoff,
+        rows=rows,
+        vector=vector,
+        prev_root=None,
+        space_seed=SEED,
+    )
+    await member.repos.space_sync_page.put(
+        StoredSyncPage(
+            space_id=SPACE,
+            page_json=canonical_str(admin_page.to_wire()),
+            vector=vector,
+        )
+    )
+    wire = _Wire(host_pages)
+    wire.deliverers[MEMBER] = member_pages
+    await _seat(host, MEMBER, BOB, "admin")
+    host_pages.attach_hosts(wire.hosts)
+    host_pages.attach_asks(wire.asked_page)
+    host_pages.attach_member_fetch(
+        seats=host.repos.space_remote_member,
+        versions=versions,
+        silent=lambda space_id: False,
+        request=wire.request,
+        apply=host.receiver.apply_verified,
+    )
+    sealed = await member_pages.sentinel_page(
+        space_id=SPACE,
+        sync_id="s-o",
+        requester_version=95,
+        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE)),
+    )
+    assert await host_pages.receive(
+        space_id=SPACE, sync_id="s-o", provider=MEMBER, sealed=sealed
+    )
+    await wire.settle()
+    return wire
+
+
+async def test_the_owner_never_rolls_its_own_edits_back_to_an_admin_page(trio):
+    """Security review 2: the owner edited a task and a sticky while it was
+    offline; its delegated admin sealed a page WITHOUT those edits. Back, the
+    owner applies only what it lacks (a row it has no version of) — never
+    the page's older version of a row it holds, which it would then spread
+    as the host. Tasks and stickies are taken whole, so this is the case
+    the merge rules do not catch."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _task(host)
+    await _sticky(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    assert await _round(host_pages, member_pages, "s-m")
+    await _task_done(host)  # the owner's own edits, before the admin's page
+    assert await host.repos.sticky.update_content(
+        "sticky-1", "oat milk", space_id=SPACE
+    )
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    wire = await _admin_page_reaches_owner(
+        host, member, host_pages, member_pages, versions, own
+    )
+    assert [a[0] for a in wire.asks] == [MEMBER]
+    task = await host.repos.space_task.get(TASK)
+    assert task is not None and task[1].status is TaskStatus.DONE
+    sticky = await host.repos.sticky.get("sticky-1")
+    assert sticky is not None and sticky.content == "oat milk"
+    assert await host.repos.space_post.get("post-carl") is not None  # it lacked it
 
 
 async def test_an_answer_over_the_row_cap_is_cut(trio):
