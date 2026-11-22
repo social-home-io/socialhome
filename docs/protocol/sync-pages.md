@@ -170,9 +170,10 @@ follows:
   part.
 - **Receipt-local fields dropped**: anything a receiver writes with its own
   clock or ids (listed per resource below).
-- **Order and numbers fixed**: lists are sorted, sets become sorted lists,
-  and there are no floats. Coordinates (already 4 dp) are hashed as their
-  decimal strings.
+- **Order and numbers fixed**: set-like lists are sorted, lists whose
+  order means something keep it, and there are no floats. Coordinates
+  (already 4 dp) are hashed as their decimal strings, typed apart from a
+  string (see "Phase 2 as built").
 - The bytes come from `canonical_bytes` in `socialhome/canonical_json.py`
   (sorted keys, compact, ASCII).
 
@@ -550,9 +551,17 @@ What shipped, where it is more exact than the design above:
 - **Commit form** (`socialhome/sync_page.py`, `COMMIT_SPECS`). Every
   committed field is always present (an absent field hashes as `null`).
   Timestamps in the allow-list are normalised to UTC ISO 8601 with
-  microseconds (the stored forms differ between households). Lists are
-  sorted: lists of strings by code point, anything else by its canonical
-  JSON. Floats are `repr` strings. Per resource, beyond the §2 table:
+  microseconds (the stored forms differ between households). Every
+  string value is committed as `"s:" + value` and every float as
+  `"f:" + repr(value)` (ints, booleans and `null` stay JSON), so a string
+  never commits like a number or another string's float spelling (Phase 3
+  re-review N4: one leaf must mean one applied value). Lists whose order
+  means something commit **in order**: a post's and a bazaar listing's
+  `image_urls`, poll options, schedule slots, timetable entries
+  (`CommitSpec.ordered`); every other list is set-like and sorted —
+  strings by code point, anything else by its canonical JSON. A fetched
+  row is applied in that committed spelling (`fetched_record`: one stamp
+  form, set-like lists sorted). Per resource, beyond the §2 table:
   - A calendar event's **feed card** (a post with `linked_event_id`) is
     never committed: every household mints its own (own id, own words).
   - `posts` also commits `media_url` (as a hash); `file_meta` keeps
@@ -859,22 +868,40 @@ between asks, and a stale memo would prove nothing.
    since), or hold another version that we did not change after the page's
    signed `issued_at` (and before now plus the page skew — a far-future
    stamp of ours never counts as newer) — so a deliverer cannot roll a
-   newer local edit back to the page's version. **Completeness is judged by
-   leaves only, never by labels:** a listed leaf is accounted for when we
-   hold it, it landed in this round, or a delivered row with that leaf
-   verified and its own identity showed we do not need it (ours is newer,
+   newer local edit back to the page's version. One stored row under two
+   identities counts as held under either (`COUNTERPARTS`: `tasks:T` live,
+   `tasks_archived:T` archived — re-review N2), judged by the same rules;
+   a tombstone is no counterpart, **delete wins** (a held `*_deleted`
+   tombstone settles the live row, and a verified tombstone may remove a
+   live row even when it was edited offline). **Completeness is judged by
+   leaves only, never by labels, on our rows as they are after the
+   apply:** the requester re-reads the asked buckets once the rows are
+   handed to the receiver (the hashes of files just named come from the
+   applied rows, their bytes may still be on the way), and a listed leaf
+   is accounted for when we now hold it, or a delivered row with that leaf
+   verified and its own identity shows we do not need it (ours is newer,
    it is deleted here, the owner holds it); every other listed leaf is
-   missing. A deliverer that withholds a row and relabels its leaf with the
+   missing — a row the receiver refused without saying so (an id held in
+   another space, an unbound tombstone id, the newer words of a post
+   kept) stays missing (re-review N1). A deliverer that withholds a row and relabels its leaf with the
    id of a row we hold as deleted therefore leaves the bucket incomplete —
    the space never reads "up to date" on its word (security review, with a
    regression test).
 4. The row is cut down to its **committed part** (`sync_page.fetched_record`:
    the commit form's allow-list, nested and shaped fields by their committed
-   keys, in the order delivered) plus the file hashes of its committed file
-   references; that part must hash to the listed leaf. Anything else in the
-   record (reactions, votes, bids, a pin, a moderation flag, `updated_at`,
-   a GFS descriptor, …) is never applied. Every refused row of an answer is
-   counted in one WARNING.
+   keys, ordered lists in the order delivered) plus the file hashes of its
+   committed file references; that part must hash to the listed leaf. Every
+   file reference must already be in the canonical local shape
+   (`api/media/<name>`, not a name another receiving path owns —
+   `space_media_ref(url) == url`): the leaf commits a file's content, not
+   its name, so a rewritten URL would keep the leaf while the receiver
+   drops the file (re-review N1). Anything else in the delivered record
+   (reactions, votes, bids, a pin, a moderation flag, `updated_at`, a GFS
+   descriptor, …) is never applied; those uncommitted fields come from
+   **our own** copy of the row when we hold one (re-review N3: a pin, a
+   moderation mark, reactions and their stamps, local stamps are kept, not
+   reset), minus our file hashes and GFS descriptors. Every refused row of
+   an answer is counted in one WARNING.
 5. Verified rows apply in stream order (lists before tasks, posts before
    comments and polls) through the normal receiver (`_apply`), one row at a
    time, with `VERIFIED_ROW` set to `(space, deliverer)`: the row passes
@@ -900,7 +927,14 @@ only rows it LACKS — an identity it holds no version of, tombstones
 included — and never replaces a version it holds: the admin's page may
 predate the owner's own offline edits, and what the owner applies it then
 spreads as the host (security review; tested with tasks and stickies, which
-are taken whole). A row it holds in another version counts as settled. Its sync
+are taken whole). A row it holds in another version counts as settled — and
+so does a row it holds under its counterpart identity: a task the owner
+un-archived and edited offline stays live although the admin's page has it
+archived (re-review N2). **Delete wins**, as everywhere in sync: a
+`*_deleted` tombstone is an identity the owner lacks, so a delete the
+admin's page commits removes the owner's live row even if the owner edited
+it offline — the same outcome the live delete event and the host's stream
+would have had. Its sync
 status, otherwise always up to date, follows that compare (`behind` while
 rows are proven missing). Its next own page starts a new chain (`prev_root`
 null, the full vector), which is no conflict. Limits: the owner is the wiki
@@ -929,9 +963,9 @@ classify but deliver nothing.
   `members` / `bans` (the roster has its own repair);
 - the uncommitted fields of committed rows: a post's location, pin,
   moderation, bot, linked highlight, link-card opt-out; `updated_at` /
-  `created_at` where the commit form leaves them out (a wiki page, a sticky,
-  a zone: the receiver's local default applies until the host's stream);
-  counters (`comment_count`, `item_count`);
+  `created_at` where the commit form leaves them out; counters
+  (`comment_count`, `item_count`) — kept as our own copy has them, or the
+  receiver's local default for a row new here, until the host's stream;
 - a calendar event's **feed card** (a post with `linked_event_id`): not
   committed (Phase 2 — every household mints its own), and never applied
   from a member either;
@@ -988,6 +1022,12 @@ requester asks one member at a time):
 |---|---|
 | Forged or truncated listing | does not hash to the signed bucket → the whole answer refused (WARNING), the buckets stay to fetch |
 | Tampered row | its committed part does not hash to the listed leaf → refused (WARNING); the rest of the answer is kept |
+| A file reference rewritten (full URL, reserved `dm-` / `sg-` name, a `?query`) while the hash map keeps the leaf | refused: every file reference must be in the canonical local shape (re-review N1) |
+| A row the receiver refuses without an error (id held in another space, unbound tombstone id, newer words kept) | still missing: completeness is re-read from our rows after the apply (re-review N1) |
+| The page's archived copy of a task we hold live and edited since (or, as the owner, at all) | not applied: the live counterpart is the same row (re-review N2); a delete still wins |
+| Uncommitted fields (pin, moderation, reactions) | never the deliverer's; ours are carried onto the verified version (re-review N3) |
+| One leaf, two applied values (stamp spelling, `1.0` vs `"1.0"`, list order) | strings and floats are typed in the commit form, ordered lists commit in order, and the committed spelling is what is applied (re-review N4) |
+| A household removed from the space since our roster mirror last heard (accepted, re-review N6) | it may still be asked until the roster catches up; it learns only the `have` leaf prefixes and which buckets we lack — no content — and cannot inject: everything it sends must verify against the signed page |
 | Extra fields in a row (reactions, pins, `updated_at`, `linked_event_id`, …) | never applied — only the committed part is (`fetched_record`); a feed card is left out |
 | Inflated change time in a listing, to roll back a newer local row | a row changed here after the page's signed `issued_at` is ahead; otherwise the page's version is the signer's own, applied under the host's rules exactly as the host's stream would |
 | A row of another space / bucket, a non-committed resource | refused at parse (`parse_fetched_row`) |

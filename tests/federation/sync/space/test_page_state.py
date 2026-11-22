@@ -55,9 +55,11 @@ from tests.federation.sync.space.test_sync_coverage import (
     HOST,
     SPACE,
     T0,
+    TASK,
     Case,
     Home,
     _post,
+    _task,
     homes,  # noqa: F401 — the fixture
 )
 
@@ -314,3 +316,43 @@ async def test_a_deliverer_skips_rows_the_requester_holds(homes):  # noqa: F811
     kept = [r["id"] for rows in scan.records.values() for _res, r in rows]
     assert kept == ["post-2"]
     assert len(scan.rows[i1]) == 1  # still listed in full
+
+
+async def test_a_requester_keeps_its_own_records_and_counterparts(homes):  # noqa: F811
+    """Phase 3 re-review N2 / N3: our own records of the delivered
+    identities, from any bucket (their uncommitted columns carry over), and
+    every held task under its live or archived identity with its change
+    time."""
+    host, _member = homes
+    await _post(host)
+    await _post(host, "post-2")
+    i2 = row_key("posts", "post-2")[0]
+    scan = await _state(host).rows_in(
+        SPACE,
+        [i2],
+        cutoff=None,
+        keep_ids=frozenset({("posts", "post-1"), ("tasks", "nope")}),
+    )
+    assert set(scan.own) == {("posts", "post-1")}
+    assert scan.own[("posts", "post-1")]["id"] == "post-1"
+    assert scan.held_any == {}  # no task held
+    await _task(host)
+    scan = await _state(host).rows_in(SPACE, [i2], cutoff=None)
+    assert list(scan.held_any) == [("tasks", TASK)]
+    assert scan.held_any[("tasks", TASK)] is not None
+
+
+async def test_known_content_names_hash_without_their_bytes(homes):  # noqa: F811
+    """Phase 3 re-review N1: a verified row just applied names its file by
+    content; the bytes may still be on the way, so the re-read takes the
+    hash from the applied row (``known``)."""
+    host, _member = homes
+    await _post(host, image_urls=["api/media/sc-new.webp"])
+    index = row_key("posts", "post-1")[0]
+    state = _state(host)
+    without = await state.rows_in(SPACE, [index], cutoff=None)
+    assert without.rows[index] == []  # unhashable: host-only
+    h = hashlib.sha256(b"x").hexdigest()
+    known = await state.rows_in(SPACE, [index], cutoff=None, known={"sc-new.webp": h})
+    ((row,),) = [known.rows[index]]
+    assert row.row_id == "post-1"

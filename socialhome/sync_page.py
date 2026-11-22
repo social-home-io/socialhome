@@ -111,12 +111,17 @@ PAGE_FIELDS: frozenset[str] = frozenset(
 
 
 def _no_floats(value: Any) -> Any:
-    """*value* with every float as its decimal string (``repr``: the
-    shortest round-trip form, the same on every CPython)."""
-    if value is None or type(value) in (str, int, bool):
+    """*value* with every float as ``"f:"`` + its decimal string (``repr``:
+    the shortest round-trip form, the same on every CPython) and every
+    string as ``"s:"`` + itself — so the float ``1.5`` and the string
+    ``"1.5"`` commit differently (the leaf pins the type of what is
+    applied, Phase 3 review N4)."""
+    if value is None or isinstance(value, (int, bool)):
         return value
+    if isinstance(value, str):  # an enum of strings too, as JSON spells it
+        return "s:" + str.__str__(value)
     if isinstance(value, float):
-        return repr(value)
+        return "f:" + repr(value)
     if isinstance(value, dict):
         return {str(k): _no_floats(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -169,9 +174,10 @@ def _file_hash(url: Any, file_hash: FileHashOf) -> str | None:
 
 
 def _files(value: Any, file_hash: FileHashOf) -> Any:
-    """A file field (one URL, or a list of them) as content hashes."""
+    """A file field (one URL, or a list of them, in its order) as content
+    hashes."""
     if isinstance(value, (list, tuple)):
-        return sorted(h for v in value if (h := _file_hash(v, file_hash)) is not None)
+        return [h for v in value if (h := _file_hash(v, file_hash)) is not None]
     return _file_hash(value, file_hash)
 
 
@@ -197,6 +203,10 @@ class CommitSpec:
     nested_fields: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     shape: Mapping[str, Callable[[Any], Any]] = field(default_factory=dict)
     skip: Callable[[Mapping[str, Any]], bool] | None = None
+    #: List fields whose order means something (pictures, poll options,
+    #: schedule slots, timetable entries): committed IN ORDER. Every other
+    #: list is a set and committed sorted.
+    ordered: tuple[str, ...] = ()
 
 
 _POLL_OPTION_KEYS = ("id", "text")
@@ -207,17 +217,17 @@ _POLL_META_KEYS = ("post_id", "question", "closes_at", "closed", "allow_multiple
 def _poll_options(value: Any) -> Any:
     if not isinstance(value, list):
         return []
-    return _sorted_list(
+    return [
         {k: o.get(k) for k in _POLL_OPTION_KEYS} for o in value if isinstance(o, dict)
-    )
+    ]
 
 
 def _schedule_slots(value: Any) -> Any:
     if not isinstance(value, list):
         return []
-    return _sorted_list(
+    return [
         {k: s.get(k) for k in _SCHEDULE_SLOT_KEYS} for s in value if isinstance(s, dict)
-    )
+    ]
 
 
 def _poll_meta(value: Any) -> Any:
@@ -293,6 +303,7 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
                 "link_preview",
             ),
             files=("media_url", "image_urls"),
+            ordered=("image_urls",),
             # A calendar event's feed card: every household mints its own
             # (own id, own words) — never committed, on any side.
             skip=lambda r: bool(r.get("linked_event_id")),
@@ -427,12 +438,14 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
             id_key="post_id",
             stamps=(),
             shape={"meta": _poll_meta, "options": _poll_options},
+            ordered=("options",),
         ),
         "schedules": CommitSpec(
             fields=("post_id", "title", "deadline", "slots", "finalized_slot_id"),
             id_key="post_id",
             stamps=("deadline",),
             shape={"slots": _schedule_slots},
+            ordered=("slots",),
         ),
         "space_zones_deleted": _tombstone("created_by"),
         "space_zones": CommitSpec(
@@ -472,6 +485,7 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
             ),
             id_key="post_id",
             files=("image_urls",),
+            ordered=("image_urls",),
             stamps=("created_at", "end_time", "sold_at"),
         ),
         "timetables_deleted": _tombstone("created_by"),
@@ -493,7 +507,8 @@ COMMIT_SPECS: Mapping[str, CommitSpec] = MappingProxyType(
                 "overrides",
                 "validity",
                 "assignees",
-            )
+            ),
+            ordered=("entries",),
         ),
     }
 )
@@ -561,7 +576,7 @@ def commit_form(
             elif name in spec.stamps:
                 value = _stamp(value)
             value = _no_floats(value)
-            if isinstance(value, list):
+            if isinstance(value, list) and name not in spec.ordered:
                 value = _sorted_list(value)
             projection[name] = value
     except _HostOnly:
@@ -1002,6 +1017,22 @@ SUPERSEDED_BY: Mapping[str, str] = MappingProxyType(
     }
 )
 
+
+def _counterparts() -> Mapping[str, tuple[str, ...]]:
+    pairs: dict[str, list[str]] = {}
+    for moved, live in SUPERSEDED_BY.items():
+        if moved.endswith("_deleted"):
+            continue  # a tombstone is no counterpart: delete wins
+        pairs.setdefault(moved, []).append(live)
+        pairs.setdefault(live, []).append(moved)
+    return MappingProxyType({k: tuple(v) for k, v in pairs.items()})
+
+
+#: One stored row under two identities (Phase 3): a task is ``tasks:T``
+#: while live and ``tasks_archived:T`` while archived — not a tombstone,
+#: the same row moved. ``resource -> its counterpart resources``.
+COUNTERPARTS: Mapping[str, tuple[str, ...]] = _counterparts()
+
 #: Resources keyed by their post: gone with the post.
 POST_KEYED: frozenset[str] = frozenset({"polls", "schedules", "bazaar"})
 
@@ -1225,7 +1256,14 @@ def fetched_record(resource: str, record: Mapping[str, Any]) -> dict[str, Any]:
     """*record* cut down to what its commit form covers — the only part of
     a row from a deliverer that its leaf proves, so the only part applied:
     the allow-listed fields (nested ones and shaped ones by their committed
-    keys, in the order delivered). Its leaf equals the full record's."""
+    keys). Its leaf equals the full record's.
+
+    Normalised where the commit form is (review N4), so what is applied is
+    a function of the leaf alone: a timestamp in its one UTC form, a set
+    (an unordered list) in its committed order; ordered lists keep the
+    order the leaf commits. Floats and strings are told apart by the leaf
+    itself (:func:`_no_floats`). File references are the one part a leaf
+    does not pin — the caller checks their shape (review N1)."""
     spec = COMMIT_SPECS[resource]
     out: dict[str, Any] = {}
     for name in spec.fields:
@@ -1237,6 +1275,10 @@ def fetched_record(resource: str, record: Mapping[str, Any]) -> dict[str, Any]:
         elif name in spec.nested_files:
             keep = spec.nested_fields.get(name, (spec.nested_files[name],))
             value = _keep_keys(value, keep) if isinstance(value, dict) else value
+        elif name in spec.stamps and isinstance(value, str):
+            value = _stamp(value)
+        if isinstance(value, list) and name not in spec.ordered:
+            value = sorted(value, key=lambda v: canonical_str(_no_floats(v)))
         out[name] = value
     return out
 
@@ -1246,6 +1288,7 @@ __all__ = [
     "CHANGE_TIME_FIELDS",
     "COMMITTED_RESOURCES",
     "COMMIT_SPECS",
+    "COUNTERPARTS",
     "HASH_BYTES",
     "HINT_PREFIX_BYTES",
     "MAX_FETCH_BYTES",

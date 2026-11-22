@@ -187,16 +187,17 @@ def test_post_commit_form_golden():
     assert form == {
         "r": "posts",
         "v": {
-            "id": "post-1",
+            "id": "s:post-1",
             "space_id": None,
-            "author": "u-anna",
-            "type": "text",
-            "content": "héllo",
-            "created_at": "2026-11-01T09:00:00.000000+00:00",
-            "edited_at": "2026-11-02T10:00:00.000000+00:00",
+            "author": "s:u-anna",
+            "type": "s:text",
+            "content": "s:héllo",
+            "created_at": "s:2026-11-01T09:00:00.000000+00:00",
+            "edited_at": "s:2026-11-02T10:00:00.000000+00:00",
             "hidden_from_feed": False,
             "media_url": None,
-            "image_urls": sorted([_hashes("a.webp"), _hashes("b.webp")]),
+            # Pictures in their order (review N4): order means something.
+            "image_urls": ["s:" + _hashes("b.webp"), "s:" + _hashes("a.webp")],
             "file_meta": None,
             "link_preview": None,
         },
@@ -220,10 +221,10 @@ def test_leaf_golden_with_string_lists():
     }
     form = commit_form("tasks", task, _no_files)
     assert form is not None
-    assert form["v"]["assignees"] == ['a"', "a#", "b", "é"]
+    assert form["v"]["assignees"] == ['s:a"', "s:a#", "s:b", "s:é"]
     assert (
         leaf_of(form).hex()
-        == "50515e76a6a690757bae120209204f5d1753edf67c0558359d07a1b53ba58cd4"
+        == "930a53470de538e68dcf0d32a5efb0a3e41c9900b7df90bf0d65571e85a89ae1"
     )
 
 
@@ -316,8 +317,12 @@ def test_floats_hash_as_decimal_strings_and_ints_match():
     a = {"id": "s", "position_x": 0.0, "position_y": 10.5}
     form = commit_form("stickies", a, _no_files)
     assert form is not None
-    assert form["v"]["position_x"] == "0.0"
+    assert form["v"]["position_x"] == "f:0.0"
     assert b"10.5" in canonical_bytes(form)
+    # Review N4: the float 10.5 and the string "10.5" commit differently.
+    assert record_leaf("stickies", a, _no_files) != record_leaf(
+        "stickies", {**a, "position_y": "10.5"}, _no_files
+    )
 
 
 def test_timestamp_forms_normalise():
@@ -353,8 +358,8 @@ def test_files_hash_by_content_and_unhashable_rows_are_host_only():
     assert file_refs("posts", post) == ["api/media/f.pdf", "api/media/t.webp"]
     form = commit_form("posts", post, _hashes)
     assert form is not None
-    assert form["v"]["file_meta"]["url"] == _hashes("f.pdf")
-    assert form["v"]["link_preview"]["thumbnail_url"] == _hashes("t.webp")
+    assert form["v"]["file_meta"]["url"] == "s:" + _hashes("f.pdf")
+    assert form["v"]["link_preview"]["thumbnail_url"] == "s:" + _hashes("t.webp")
 
 
 def test_gallery_system_albums_are_left_out():
@@ -815,3 +820,64 @@ def test_fetched_poll_and_schedule_shapes_keep_their_order_and_committed_keys():
     assert record_leaf("schedules", got, _no_files) == record_leaf(
         "schedules", schedule, _no_files
     )
+
+
+# ── Review N4: one leaf, one applied value ───────────────────────────────
+
+
+def test_order_meaningful_lists_commit_in_order():
+    """Pictures, poll options, schedule slots and timetable entries keep
+    their order: a deliverer that reorders them changes the leaf."""
+    post = {"id": "p", "image_urls": ["api/media/a.webp", "api/media/b.webp"]}
+    swapped = {**post, "image_urls": list(reversed(post["image_urls"]))}
+    assert record_leaf("posts", post, _hashes) != record_leaf("posts", swapped, _hashes)
+    poll = {
+        "post_id": "p",
+        "meta": {"question": "Q"},
+        "options": [{"id": "a", "text": "A"}, {"id": "b", "text": "B"}],
+    }
+    assert record_leaf("polls", poll, _no_files) != record_leaf(
+        "polls", {**poll, "options": list(reversed(poll["options"]))}, _no_files
+    )
+    schedule = {
+        "post_id": "p",
+        "title": "T",
+        "slots": [{"id": "s1", "slot_date": "2027-01-01"}, {"id": "s2"}],
+    }
+    assert record_leaf("schedules", schedule, _no_files) != record_leaf(
+        "schedules", {**schedule, "slots": list(reversed(schedule["slots"]))}, _no_files
+    )
+    for name, spec in COMMIT_SPECS.items():
+        for field_name in spec.ordered:
+            assert field_name in spec.fields, (name, field_name)
+
+
+def test_set_like_lists_still_sort():
+    a = {"id": "t", "title": "T", "assignees": ["b", "a"]}
+    b = {**a, "assignees": ["a", "b"]}
+    assert record_leaf("tasks", a, _no_files) == record_leaf("tasks", b, _no_files)
+
+
+def test_a_fetched_record_applies_the_committed_spelling():
+    """The applied value is the one the leaf commits: one stamp spelling,
+    set-like lists sorted, ordered lists as delivered."""
+    task = {
+        "id": "t",
+        "title": "T",
+        "created_at": "2026-11-01T10:00:00+01:00",
+        "assignees": ["b", "a"],
+    }
+    got = fetched_record("tasks", task)
+    assert got["created_at"] == "2026-11-01T09:00:00.000000+00:00"
+    assert got["assignees"] == ["a", "b"]
+    assert record_leaf("tasks", got, _no_files) == record_leaf("tasks", task, _no_files)
+    post = {"id": "p", "image_urls": ["api/media/b.webp", "api/media/a.webp"]}
+    assert fetched_record("posts", post)["image_urls"] == post["image_urls"]
+
+
+def test_a_string_never_commits_like_a_number_or_flag():
+    base = {"id": "s", "position_x": 1}
+    for other in ("1", 1.0, True):
+        assert record_leaf("stickies", base, _no_files) != record_leaf(
+            "stickies", {**base, "position_x": other}, _no_files
+        ), other

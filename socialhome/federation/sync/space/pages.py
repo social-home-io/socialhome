@@ -57,11 +57,21 @@ import orjson
 from ....canonical_json import canonical_str
 from ....crypto import ed25519_public_key
 from ....domain.federation_capabilities import FederationCapability
-from ....domain.file_hashes import file_hashes_to_wire, parse_file_hashes
+from ....domain.file_hashes import (
+    FILES_FIELD,
+    FILES_SUITE_FIELD,
+    file_hashes_to_wire,
+    parse_file_hashes,
+    space_content_media_name,
+)
+from ....domain.media_constraints import space_media_ref
+from ....domain.space_media_ref import MEDIA_REFS_FIELD
 from ....domain.space_sync_page import StoredSyncPage, SyncPagePosition
 from ....services.inbound_media_store import media_basename
 from ....sync_page import (
+    COMMIT_SPECS,
     COMMITTED_RESOURCES,
+    COUNTERPARTS,
     MAX_FETCH_BYTES,
     MAX_FETCH_ROWS,
     MAX_HINT_LEAVES,
@@ -224,7 +234,12 @@ def _lacks(
       predate our own edits, and what we apply we then spread as the host;
     * else we lack it unless we changed our copy after the page's signed
       ``issued_at`` — a change time past *horizon* (:func:`_horizon`, a
-      clock far ahead) never counts as newer."""
+      clock far ahead) never counts as newer.
+
+    One stored row can sit under two identities (:data:`COUNTERPARTS`: a
+    task is ``tasks:T`` live, ``tasks_archived:T`` archived): holding its
+    counterpart is holding the row, judged by the same two rules (review
+    N2). A tombstone is no counterpart — delete wins."""
     mine = next(
         (
             r
@@ -234,15 +249,26 @@ def _lacks(
         None,
     )
     if mine is None:
-        return not is_superseded(resource, row_id, local.gone)
+        if is_superseded(resource, row_id, local.gone):
+            return False
+        for other in COUNTERPARTS.get(resource, ()):
+            if (other, row_id) in local.held_any:
+                marker = local.held_any[(other, row_id)]
+                return not (wanted.owner or _newer(marker, wanted, horizon))
+        return True
     if mine.leaf == leaf or wanted.owner:
         return False
-    newer = (
-        mine.marker is not None
+    return not _newer(mine.marker, wanted, horizon)
+
+
+def _newer(marker: str | None, wanted: _Wanted, horizon: str) -> bool:
+    """Whether a row of ours changed at *marker* is newer than the page
+    (after its signed ``issued_at``, not past *horizon*)."""
+    return (
+        marker is not None
         and wanted.page_at is not None
-        and wanted.page_at < mine.marker <= horizon
+        and wanted.page_at < marker <= horizon
     )
-    return not newer
 
 
 def _fetched_listings(
@@ -292,8 +318,16 @@ def _verified_row(
     listing) — else ``None``. The identity comes from the record itself (the
     leaf commits to it), never from the listing's labels. The record applied
     is that committed part (:func:`~socialhome.sync_page.fetched_record`)
-    plus the content hashes of its files, which the leaf covers."""
+    plus the content hashes of its files, which the leaf covers.
+
+    The leaf commits to a file's CONTENT, not to how the row names it: a
+    reference not in the canonical local shape (``api/media/<name>``, not a
+    name another receiving path owns — :func:`space_media_ref`) is refused,
+    or a deliverer could keep the leaf and have the receiver drop the file
+    (review N1)."""
     kept = fetched_record(resource, record)
+    if any(space_media_ref(url) != url for url in file_refs(resource, kept)):
+        return None
     files = parse_file_hashes(record)
 
     def file_hash(url: str) -> str | None:
@@ -312,26 +346,25 @@ def _verified_row(
     return resource, row_id, leaf[1], {**kept, **file_hashes_to_wire(named)}
 
 
+#: A delivered row that verified: ``(bucket, resource, row_id, leaf,
+#: record to apply)``.
+_Verified = tuple[int, str, str, bytes, dict[str, Any]]
+
+
 def _verify_rows(
     rows: list[object],
     listed: Mapping[int, list[ListingRow] | None],
     wanted: _Wanted,
-    local: BucketRows,
-    horizon: str,
-) -> tuple[list[tuple[str, str, bytes, dict[str, Any]]], set[bytes], int]:
-    """``(rows to apply, leaves we do not need, rows refused)`` of a
-    member's answer — CPU only (leaf hashing), run in a worker thread. A row
-    to apply verified against its bucket's listing and its own identity is
-    one we lack (:func:`_lacks`); a verified row we do not need (we hold it,
-    ours is newer, it is deleted here, we are the owner and hold it)
-    settles its leaf for the completeness count."""
+) -> tuple[list[_Verified], int]:
+    """``(rows that verified, rows refused)`` of a member's answer — CPU
+    only (leaf hashing), run in a worker thread: each row's committed part
+    hashes to a leaf of its bucket's verified listing."""
     leaves = {
         index: frozenset(r.leaf for r in listed_rows)
         for index, listed_rows in listed.items()
         if listed_rows is not None
     }
-    verified: list[tuple[str, str, bytes, dict[str, Any]]] = []
-    settled: set[bytes] = set()
+    verified: list[_Verified] = []
     refused = 0
     for raw in rows:
         try:
@@ -348,11 +381,116 @@ def _verify_rows(
         if row is None:
             refused += 1
             continue
-        if _lacks(local, wanted, horizon, index, row[0], row[1], row[2]):
-            verified.append(row)
-        else:
-            settled.add(row[2])
-    return verified, settled, refused
+        verified.append((index, *row))
+    return verified, refused
+
+
+#: A verified row handed to the receiver: ``(bucket, resource, leaf,
+#: record)``.
+_Applied = tuple[int, str, bytes, dict[str, Any]]
+
+
+def _to_apply(
+    verified: list[_Verified], wanted: _Wanted, local: BucketRows, horizon: str
+) -> list[_Applied]:
+    """The verified rows we lack (:func:`_lacks`), each record with what the page does not commit carried over from OUR copy
+    of the row (review N3: a pin, a moderation mark, reactions, local
+    stamps — the leaf does not cover them, so the deliverer's are never
+    applied and ours must not be reset either). CPU only."""
+    out: list[_Applied] = []
+    seen: set[bytes] = set()
+    for index, resource, row_id, leaf, record in verified:
+        if leaf in seen:
+            continue  # delivered twice
+        seen.add(leaf)
+        if not _lacks(local, wanted, horizon, index, resource, row_id, leaf):
+            continue
+        own = next(
+            (
+                found
+                for name in (resource, *COUNTERPARTS.get(resource, ()))
+                if (found := local.own.get((name, row_id))) is not None
+            ),
+            None,
+        )
+        if own is not None:
+            committed = COMMIT_SPECS[resource].fields
+            record = {
+                **{
+                    k: v
+                    for k, v in own.items()
+                    if k not in committed and k not in _NOT_CARRIED
+                },
+                **record,
+            }
+        out.append((index, resource, leaf, record))
+    return out
+
+
+#: Fields of our own copy never carried onto a verified row: its file
+#: hashes and GFS descriptors describe OUR files (the verified row brings
+#: its own hashes).
+_NOT_CARRIED: frozenset[str] = frozenset(
+    {FILES_FIELD, FILES_SUITE_FIELD, MEDIA_REFS_FIELD}
+)
+
+
+def _still_missing(
+    listed: Mapping[int, list[ListingRow] | None],
+    verified: list[_Verified],
+    wanted: _Wanted,
+    local: BucketRows,
+    horizon: str,
+) -> dict[int, int]:
+    """Per listed bucket, how many of its signed leaves are still not
+    accounted for — judged on OUR rows as they are after the apply (review
+    N1: what the receiver silently refused is still missing). A leaf is
+    accounted for when we hold it, or a delivered row with that leaf
+    verified and its OWN identity shows we do not need it (ours is newer,
+    deleted here, the owner's). The listing's labels never count. CPU
+    only."""
+    settled = {
+        leaf
+        for index, resource, row_id, leaf, _record in verified
+        if not _lacks(local, wanted, horizon, index, resource, row_id, leaf)
+    }
+    still: dict[int, int] = {}
+    for index, listed_rows in listed.items():
+        if listed_rows is None:
+            continue
+        held = {r.leaf for r in local.rows.get(index, [])}
+        still[index] = len({r.leaf for r in listed_rows} - held - settled)
+    return still
+
+
+def _wanted_ids(rows: list[object]) -> frozenset[tuple[str, str]]:
+    """The identities a member's answer names (and their counterparts) —
+    whose own records the requester keeps (:func:`_to_apply`). Unverified:
+    at worst we keep a few of our own records for nothing."""
+    out: set[tuple[str, str]] = set()
+    for raw in rows:
+        try:
+            _index, resource, record = parse_fetched_row(raw)
+        except PageRefused:
+            continue
+        row_id = row_id_of(resource, record)
+        if row_id is None:
+            continue
+        for name in (resource, *COUNTERPARTS.get(resource, ())):
+            out.add((name, row_id))
+    return frozenset(out)
+
+
+def _known_files(space_id: str, applied: list[_Applied]) -> dict[str, str]:
+    """``content name -> SHA-256`` of the files the applied rows name: the
+    receiver stores a hashed file under its content name, whose bytes —
+    once they arrive — hash to it; until then the re-read takes the hash
+    from here."""
+    known: dict[str, str] = {}
+    for *_, record in applied:
+        for name, fh in parse_file_hashes(record).items():
+            known[space_content_media_name(space_id, fh.h, name)] = fh.h
+    return known
 
 
 def _host_listings(
@@ -1527,33 +1665,43 @@ class SyncPageService:
                     exc,
                 )
                 listed = {}
-            # Our rows now (the round's own stream already applied).
+            # Our rows now (the round's own stream already applied), with
+            # our own records of the rows delivered (review N3).
             local = await self._state.rows_in(
-                space_id, wanted.buckets, cutoff=wanted.cutoff
+                space_id,
+                wanted.buckets,
+                cutoff=wanted.cutoff,
+                keep_ids=_wanted_ids(rows) if listed else frozenset(),
             )
             horizon = _horizon(self._clock_ms())
-            landed, settled = (
+            verified, applied = (
                 await self._apply_rows(
                     space_id, provider, wanted, listed, rows, local, horizon
                 )
                 if listed
-                else (set(), set())
+                else ([], [])
             )
             check = self._checks.get(space_id)
             if check is None or check.root != wanted.root:
                 return  # a newer page came meanwhile; its compare decides
-            # Completeness by LEAVES only (security review 1): a listed leaf
-            # is accounted for when we hold it, it landed now, or a delivered
-            # row with that leaf verified and its OWN identity showed we do
-            # not need it (ours is newer, deleted here, the owner's). The
-            # listing's labels are not signed and never count.
-            still: dict[int, int] = {}
-            for index, listed_rows in listed.items():
-                if listed_rows is None:
-                    continue
-                accounted = {r.leaf for r in local.rows.get(index, [])}
-                accounted |= landed | settled
-                still[index] = len({r.leaf for r in listed_rows} - accounted)
+            # Completeness by LEAVES only, on our rows as they are NOW
+            # (security review 1, re-review N1): what the receiver refused
+            # without saying so is still missing.
+            if applied:
+                local = await self._state.rows_in(
+                    space_id,
+                    wanted.buckets,
+                    cutoff=wanted.cutoff,
+                    known=_known_files(space_id, applied),
+                )
+            still = await asyncio.to_thread(
+                _still_missing, listed, verified, wanted, local, horizon
+            )
+            landed = sum(
+                1
+                for index, _resource, leaf, _record in applied
+                if any(leaf == row.leaf for row in local.rows.get(index, []))
+            )
             complete = frozenset(i for i, n in still.items() if not n)
             todo = check.todo - complete
             short = sum(1 for n in still.values() if n)
@@ -1573,7 +1721,7 @@ class SyncPageService:
                 "applied, %d bucket(s) complete, %d still to fetch",
                 space_id,
                 provider,
-                len(landed),
+                landed,
                 len(complete),
                 len(todo),
             )
@@ -1594,9 +1742,11 @@ class SyncPageService:
         rows: list[object],
         local: BucketRows,
         horizon: str,
-    ) -> tuple[set[bytes], set[bytes]]:
-        """Verify and apply the delivered rows: ``(leaves that landed,
-        leaves a verified row showed we do not need)``.
+    ) -> tuple[list[_Verified], list[_Applied]]:
+        """Verify and apply the delivered rows: ``(rows that verified, rows
+        handed to the receiver)``. Whether one landed is judged after, from
+        our own rows (:func:`_still_missing`) — never from the receiver's
+        answer, which does not see every silent refusal.
 
         Nothing the deliverer says about a row is trusted but what the page
         signs: the row's own committed part must hash to a leaf of its
@@ -1604,9 +1754,7 @@ class SyncPageService:
         play no part), and whether we lack it is decided from the row's own
         identity against OUR rows (:func:`_lacks`). Anything else is refused
         (one WARNING per answer). The hashing runs in a worker thread."""
-        verified, settled, refused = await asyncio.to_thread(
-            _verify_rows, rows, listed, wanted, local, horizon
-        )
+        verified, refused = await asyncio.to_thread(_verify_rows, rows, listed, wanted)
         if refused:
             log.warning(
                 "sync page: refused %d row(s) of space %s from %s — not a row "
@@ -1615,23 +1763,20 @@ class SyncPageService:
                 space_id,
                 provider,
             )
-        landed: set[bytes] = set()
         if self._apply_verified is None:
-            return landed, settled
-        verified.sort(key=lambda v: _RESOURCE_RANK.get(v[0], len(_RESOURCE_RANK)))
-        for resource, _row_id, leaf, record in verified:
-            if leaf in landed:
-                continue
+            return verified, []
+        apply = await asyncio.to_thread(_to_apply, verified, wanted, local, horizon)
+        apply.sort(key=lambda v: _RESOURCE_RANK.get(v[1], len(_RESOURCE_RANK)))
+        for _index, resource, _leaf, record in apply:
             try:
-                if await self._apply_verified(space_id, provider, resource, record):
-                    landed.add(leaf)
+                await self._apply_verified(space_id, provider, resource, record)
             except Exception:
                 log.exception(
                     "sync page: applying a verified %s row of %s failed",
                     resource,
                     space_id,
                 )
-        return landed, settled
+        return verified, apply
 
     # ─── Listings (provider) ──────────────────────────────────────────
 

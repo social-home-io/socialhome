@@ -15,12 +15,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import orjson
 import pytest
 
 from socialhome.canonical_json import canonical_str
 from socialhome.crypto import ed25519_public_key
+from socialhome.domain.post import Post, PostType
 from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.domain.task import TaskStatus
@@ -64,6 +67,7 @@ from tests.federation.sync.space.test_sync_coverage import (
 )
 
 PK_HEX = ed25519_public_key(SEED).hex()
+T0_DT = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
 REQUESTER = "requester-household"
 FOLLOWER = "follower-household"
 OTHER = "other-member-household"
@@ -479,19 +483,23 @@ async def test_followers_and_older_members_are_never_asked(trio):
 
 
 @pytest.mark.parametrize(
-    ("edited_at", "applied"),
-    [("2027-01-15 08:02:00", 0), ("2030-01-01 00:00:00", 1)],
+    ("edited_at", "verdict"),
+    [
+        ("2027-01-15 08:02:00", "1 bucket(s) complete"),
+        ("2030-01-01 00:00:00", "1 still to fetch"),
+    ],
 )
 async def test_unsigned_change_times_cannot_roll_back_a_newer_local_edit(
-    trio, caplog, edited_at, applied
+    trio, caplog, edited_at, verdict
 ):
     """A listing's change times are not signed. A deliverer that claims a
     far-future one cannot make the page's (older) version of a row replace
     our edit made after the page: past the page's signed ``issued_at`` our
     row is ahead, whatever the listing says — up to the horizon (now plus the
     page skew): a far-future stamp of ours never counts as newer (review 5),
-    so the page's version is applied (the merge rules still keep the newer
-    words of a post)."""
+    so the page's version is handed to the receiver — whose merge rules
+    still keep the newer words of a post: nothing landed, so the bucket is
+    still to fetch (judged on our rows after the apply, review N1)."""
     host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
     await _post(host)
     await _stream(host, requester)
@@ -520,7 +528,8 @@ async def test_unsigned_change_times_cannot_roll_back_a_newer_local_edit(
         r_pages.host_silent(SPACE)
         await wire.settle()
     assert [a[0] for a in wire.asks] == [MEMBER]
-    assert f"{applied} row(s) applied" in caplog.text
+    assert "0 row(s) applied" in caplog.text
+    assert verdict in caplog.text
     got = await requester.repos.space_post.get("post-1")
     assert got is not None and got[1].content == "my newer edit"
 
@@ -848,3 +857,212 @@ async def test_an_answer_over_the_row_cap_is_cut(trio):
     # The duplicates past the cap were dropped on receipt; the real rows
     # (first in the answer) still landed.
     assert await requester.repos.space_post.get("post-2") is not None
+
+
+# ── Fable re-review N1–N3: what a deliverer cannot do with a verified row ──
+
+
+async def _picture_missed(host: Home, member: Home, requester: Home) -> None:
+    """Like :func:`_missed_content`, with a picture on the missed post."""
+    await _post(host)
+    await _stream(host, requester)
+    await _post(
+        host,
+        "post-2",
+        type=PostType.IMAGE,
+        content="a picture",
+        media_url="api/media/a.webp",
+    )
+    await _stream(host, member)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example/t/{name}",
+        "/api/media/{name}",
+        "api/media/{name}?sig=x",
+        "api/media/dm-{name}",
+    ],
+)
+async def test_a_file_reference_rewritten_off_the_local_shape_is_refused(
+    trio, caplog, url
+):
+    """Review N1 (the PoC): the leaf commits a file by its content hash, not
+    by how the row names it. A deliverer that rewrites the unsigned URL (a
+    full URL, or a name another receiving path owns) keeps the leaf — the
+    receiver would then drop the picture and the bucket count as complete.
+    Such a row is refused; the post stays missing."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _picture_missed(host, member, requester)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+
+    def rewrite(listings, rows):
+        for r in rows:
+            if r["row"].get("id") == "post-2":
+                name = r["row"]["media_url"].rsplit("/", 1)[-1]
+                r["row"]["media_url"] = url.format(name=name)
+        return listings, rows
+
+    wire.forge = rewrite
+    with caplog.at_level(logging.WARNING):
+        assert await _round(host_pages, r_pages, "s-r")
+        await wire.settle()
+    assert await requester.repos.space_post.get("post-2") is None
+    assert "refused 1 row(s)" in caplog.text
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is False and pos.missing == 1
+
+
+async def test_an_honest_picture_post_lands_with_its_picture_and_completes(trio):
+    """The control: the post lands under its content name, and the re-read
+    of our rows (the bytes not here yet) still counts it."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _picture_missed(host, member, requester)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    got = await requester.repos.space_post.get("post-2")
+    assert got is not None and got[1].media_url is not None
+    assert got[1].media_url.startswith("api/media/sc-")
+    pos = await _position(requester, r_pages)
+    assert pos is not None and (pos.match, pos.missing) == (True, 0)
+
+
+async def test_a_row_the_receiver_silently_refuses_is_still_missing(trio, caplog):
+    """Review N1 (b): completeness is judged on our rows after the apply,
+    not on the receiver's answer — a post id held here in ANOTHER space is
+    refused without a held-back count, so it must stay missing."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _missed_content(host, member, requester)
+    space = await requester.repos.space.get(SPACE)
+    assert space is not None
+    await requester.repos.space.save(replace(space, id="sp-elsewhere"))
+    await requester.repos.space_post.save(
+        "sp-elsewhere",
+        Post(
+            id="post-2",
+            author=ANNA,
+            type=PostType.TEXT,
+            created_at=T0_DT,
+            content="another space's post",
+        ),
+    )
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    with caplog.at_level(logging.INFO):
+        assert await _round(host_pages, r_pages, "s-r")
+        await wire.settle()
+    held = await requester.repos.space_post.get("post-2")
+    assert held is not None and held[0] == "sp-elsewhere"
+    pos = await _position(requester, r_pages)
+    assert pos is not None and pos.match is not True and pos.missing == 1
+    assert "1 still to fetch" in caplog.text
+
+
+async def _archive(h: Home, at: datetime) -> None:
+    got = await h.repos.space_task.get(TASK)
+    assert got is not None
+    await h.repos.space_task.save(
+        replace(got[1], archived_at=at, updated_at=at), space_id=SPACE
+    )
+
+
+async def test_the_owner_keeps_its_offline_unarchive_against_an_admin_page(trio):
+    """Review N2 (the owner PoC): ``tasks:T`` and ``tasks_archived:T`` are one
+    row. The owner un-archived and edited a task while away; the admin's
+    page still has it archived. Holding the live counterpart is holding the
+    row: the owner never rolls it back."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _task(host)
+    await _archive(host, T0_DT + timedelta(hours=1))
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    assert await _round(host_pages, member_pages, "s-m")
+    got = await host.repos.space_task.get(TASK)
+    assert got is not None
+    await host.repos.space_task.save(
+        replace(
+            got[1],
+            archived_at=None,
+            title="Dishes, again",
+            updated_at=T0_DT + timedelta(hours=2),
+        ),
+        space_id=SPACE,
+    )
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    wire = await _admin_page_reaches_owner(
+        host, member, host_pages, member_pages, versions, own
+    )
+    assert [a[0] for a in wire.asks] == [MEMBER]
+    task = await host.repos.space_task.get(TASK)
+    assert task is not None
+    assert task[1].archived_at is None and task[1].title == "Dishes, again"
+    assert await host.repos.space_post.get("post-carl") is not None
+
+
+@pytest.mark.parametrize(
+    ("edited", "archived"),
+    [("2027-01-15 08:02:00", False), (None, True)],
+)
+async def test_a_member_keeps_its_live_task_edited_after_the_page(
+    trio, edited, archived
+):
+    """Review N2 (the member PoC): the page has the task archived; we hold
+    it live and edited it after the page — our row is newer, the archive is
+    not applied over it. The control: an unedited live copy takes the
+    page's archive."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _task(host)
+    await _stream(host, requester)
+    await _archive(host, T0_DT + timedelta(hours=1))
+    await _stream(host, member)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    if edited is not None:
+        got = await requester.repos.space_task.get(TASK)
+        assert got is not None
+        stamp = datetime.fromisoformat(edited).replace(tzinfo=UTC)
+        await requester.repos.space_task.save(
+            replace(got[1], title="Dishes, mine", updated_at=stamp),
+            space_id=SPACE,
+        )
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert [a[0] for a in wire.asks] == [MEMBER]
+    task = await requester.repos.space_task.get(TASK)
+    assert task is not None
+    assert (task[1].archived_at is not None) is archived
+
+
+async def test_a_verified_row_keeps_our_pin_moderation_and_reactions(trio):
+    """Review N3: the leaf does not cover a post's pin, moderation mark or
+    reactions, so the deliverer's are never applied — and ours must not be
+    reset by the verified version either."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    await _post(host)
+    await _stream(host, requester)
+    await _post(requester, pinned=True, moderated=True)
+    await requester.repos.space_post.add_reaction(
+        "post-1", "🎉", CARL, space_id=SPACE, stamp="2026-11-01 10:00:00"
+    )
+    await host.repos.space_post.edit(
+        "post-1", "the host's edit", space_id=SPACE, edited_at="2026-11-02 10:00:00"
+    )
+    await _stream(host, member)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert [a[0] for a in wire.asks] == [MEMBER]
+    got = await requester.repos.space_post.get("post-1")
+    assert got is not None
+    post = got[1]
+    assert post.content == "the host's edit"
+    assert post.pinned is True and post.moderated is True
+    assert post.reactions == {"🎉": frozenset({CARL})}
+    pos = await _position(requester, r_pages)
+    assert pos is not None and (pos.match, pos.missing) == (True, 0)
