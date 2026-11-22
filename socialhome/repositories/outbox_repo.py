@@ -60,6 +60,10 @@ log = logging.getLogger(__name__)
 #: not drift from the repo's default limit.
 PURGE_BATCH = 5000
 
+#: Default bound of :meth:`SqliteOutboxRepo.pending_targets_for_space`: the
+#: newest payloads of one space and event type it reads.
+MAX_PENDING_TARGETS = 100
+
 
 #: A pending row still inside its retention window (§4.4.7). ``expires_at``
 #: is ISO-8601 with a ``T`` and a timezone suffix; ``datetime(...)`` puts
@@ -179,6 +183,13 @@ class AbstractOutboxRepo(Protocol):
     ) -> int: ...
     async def count_pending_for(self, instance_id: str) -> int: ...
     async def count_pending_for_space(self, space_id: str) -> int: ...
+    async def pending_targets_for_space(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        *,
+        limit: int = ...,
+    ) -> list[tuple[OutboxPayload, frozenset[str]]]: ...
     async def count_failed_for(self, instance_id: str) -> int: ...
     async def count_pending_with_key_prefix(
         self, instance_id: str, prefix: str
@@ -622,6 +633,44 @@ class SqliteOutboxRepo:
                 default=0,
             )
         )
+
+    async def pending_targets_for_space(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        *,
+        limit: int = MAX_PENDING_TARGETS,
+    ) -> list[tuple[OutboxPayload, frozenset[str]]]:
+        """The stored payloads of *event_type* in *space_id* that still wait
+        in the outbox, newest first (at most *limit*), each with the
+        households whose live row still holds it — the sync status's "Not
+        sent yet" (``FederationService.undelivered_space_items``). A
+        delivered row is gone (``mark_delivered``), a failed one is no wait.
+        One query, over the payload rows of one space."""
+        rows = await self._db.fetchall(
+            "SELECT p.id, p.event_type, p.space_id, p.payload_enc, p.msg_id,"
+            " json_group_array(o.instance_id) AS households"
+            " FROM federation_outbox_payloads p"
+            " JOIN federation_outbox o ON o.payload_id = p.id"
+            f" WHERE p.space_id=? AND p.event_type=? AND {_LIVE.format(t='o')}"
+            " GROUP BY p.id"
+            " ORDER BY p.created_at DESC, p.rowid DESC"
+            " LIMIT ?",
+            (space_id, event_type.value, int(limit)),
+        )
+        return [
+            (
+                OutboxPayload(
+                    id=r["id"],
+                    event_type=FederationEventType(r["event_type"]),
+                    space_id=r["space_id"],
+                    payload_enc=r["payload_enc"],
+                    msg_id=r["msg_id"],
+                ),
+                frozenset(orjson.loads(r["households"])),
+            )
+            for r in rows
+        ]
 
     async def count_failed_for(self, instance_id: str) -> int:
         """Count envelopes permanently given up on for ``instance_id``.

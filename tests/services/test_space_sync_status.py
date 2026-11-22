@@ -722,3 +722,98 @@ async def test_a_new_page_sends_a_frame_when_the_state_moves(env):
     await env.svc.page_changed("unknown")
     await env.svc.settle()
     assert len(env.frames) == 1
+
+
+# ── "Some posts may be missing" ────────────────────────────────────────────
+
+
+async def test_a_proven_missing_row_may_be_missing(env):
+    async def position(space, hosts):
+        return _position(match=False, missing=2, differing_buckets=3)
+
+    env.svc.attach_pages(position)
+    status = await env.svc.status("sp")
+    assert status.may_be_missing is True
+    assert await env.svc.may_be_missing("sp") is True
+
+
+async def test_a_first_mismatch_without_a_proof_is_no_warning(env):
+    async def position(space, hosts):
+        return _position(match=None, missing=None, differing_buckets=3)
+
+    env.svc.attach_pages(position)
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
+    assert (await env.svc.status("sp")).may_be_missing is False
+
+
+async def test_two_failed_rounds_after_an_ok_may_be_missing(env):
+    await _pub(env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=True))
+    env.clock.now = NOW + timedelta(minutes=30)
+    await _pub(
+        env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=False)
+    )
+    assert await env.svc.may_be_missing("sp") is False
+    env.clock.now = NOW + timedelta(minutes=60)
+    await _pub(
+        env, SpaceSyncComplete(space_id="sp", from_instance="owner", clean=False)
+    )
+    assert await env.svc.may_be_missing("sp") is True
+    # The warning goes out as a frame.
+    assert env.frames[-1].sync["may_be_missing"] is True
+
+
+async def test_a_space_hosted_here_or_unknown_is_never_missing(env):
+    assert await env.svc.may_be_missing("mine") is False
+    assert await env.svc.may_be_missing("unknown") is False
+
+
+# ── "Not sent yet" ─────────────────────────────────────────────────────────
+
+
+async def test_unsent_posts_come_from_the_delivery_check(env):
+    asked: list[str] = []
+
+    async def undelivered(space_id: str) -> list[str]:
+        asked.append(space_id)
+        return ["p2", "p1"]
+
+    env.svc.attach_delivery(undelivered)
+    # Nothing in the outbox: nothing can be unsent, nothing is read.
+    assert (await env.svc.status("sp")).unsent_posts == ()
+    assert asked == []
+    env.outbox.pending["sp"] = 2
+    status = await env.svc.status("sp")
+    assert status.unsent_posts == ("p2", "p1")
+    assert status.to_wire()["unsent_posts"] == ["p2", "p1"]
+    # The space's own host household too.
+    env.outbox.pending["mine"] = 1
+    assert (await env.svc.status("mine")).unsent_posts == ("p2", "p1")
+
+
+async def test_a_post_a_gfs_took_is_sent_and_framed(env):
+    async def undelivered(space_id: str) -> list[str]:
+        return ["p2", "p1"]
+
+    env.svc.attach_delivery(undelivered)
+    env.outbox.pending["sp"] = 2
+    env.svc.outbox_changed("sp")
+    await env.svc.settle()
+    assert env.frames[-1].sync["unsent_posts"] == ["p2", "p1"]
+    env.svc.post_reached_gfs("sp", "p2")
+    await env.svc.settle()
+    assert env.frames[-1].sync["unsent_posts"] == ["p1"]
+    assert (await env.svc.status("sp")).unsent_posts == ("p1",)
+
+
+async def test_unsent_posts_are_bounded(env):
+    async def undelivered(space_id: str) -> list[str]:
+        return [f"p{i}" for i in range(80)]
+
+    env.svc.attach_delivery(undelivered)
+    env.outbox.pending["sp"] = 80
+    assert len((await env.svc.status("sp")).unsent_posts) == 50
+
+
+async def test_without_the_delivery_check_nothing_is_unsent(env):
+    env.outbox.pending["sp"] = 3
+    assert (await env.svc.status("sp")).unsent_posts == ()

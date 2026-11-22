@@ -50,6 +50,7 @@ from ..domain.space_sync_status import (
     SpaceSyncResult,
     SpaceSyncState,
     SpaceSyncStatus,
+    may_be_missing,
     parse_utc,
     sync_state,
 )
@@ -68,6 +69,9 @@ RESULT_REFRESH_S: float = 15 * 60
 
 #: Spaces whose last framed status is remembered (frame on change).
 MAX_TRACKED: int = 4096
+
+#: The most "Not sent yet" post ids one status carries (newest first).
+MAX_UNSENT: int = 50
 
 #: A space's recheck holds it this long after it ran; a trigger meanwhile
 #: runs once at the end of that wait. Frames go out at most once per this
@@ -126,6 +130,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
     __slots__ = (
         "_bus",
         "_clock",
+        "_gfs_took",
         "_hosts",
         "_last_sent",
         "_outbox",
@@ -138,6 +143,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         "_space_repo",
         "_stop",
         "_tasks",
+        "_undelivered",
     )
 
     def __init__(
@@ -165,8 +171,8 @@ class SpaceSyncStatusService(BusPublisherMixin):
         #: here now (the session manager). ``None``: never.
         self._receiving = receiving
         self._clock = clock
-        #: space → the (state, waiting count) last framed (frame on change).
-        self._last_sent: OrderedDict[str, tuple[SpaceSyncState, int]] = OrderedDict()
+        #: space → what of its status was last framed (frame on change).
+        self._last_sent: OrderedDict[str, tuple] = OrderedDict()
         #: space → its one recheck in flight (:meth:`_request_recheck`).
         self._rechecks: dict[str, _Recheck] = {}
         self._recheck_spacing_s = recheck_spacing_s
@@ -180,6 +186,30 @@ class SpaceSyncStatusService(BusPublisherMixin):
         ) = None
         #: Outcomes being recorded and rechecks running (:meth:`_spawn`).
         self._tasks: set[asyncio.Task] = set()
+        #: ``space_id ->`` the posts this household broadcast in it that no
+        #: member household has yet
+        #: (``FederationService.undelivered_space_items``). ``None``: none.
+        self._undelivered: Callable[[str], Awaitable[list[str]]] | None = None
+        #: ``(space, post)`` a GFS took from us (member publish): sent,
+        #: whatever the outbox says. Memory only, bounded.
+        self._gfs_took: OrderedDict[tuple[str, str], None] = OrderedDict()
+
+    def attach_delivery(
+        self, undelivered: Callable[[str], Awaitable[list[str]]]
+    ) -> None:
+        """Wire "Not sent yet": *undelivered* names a space's posts no
+        member household has yet (the status's ``unsent_posts``)."""
+        self._undelivered = undelivered
+
+    def post_reached_gfs(self, space_id: str, post_id: str) -> None:
+        """A GFS took our post *post_id* (the member publish): it went
+        out, so it is no longer "Not sent yet" — and the one coalesced
+        recheck frames that."""
+        self._gfs_took[(space_id, post_id)] = None
+        self._gfs_took.move_to_end((space_id, post_id))
+        while len(self._gfs_took) > MAX_TRACKED:
+            self._gfs_took.popitem(last=False)
+        self._request_recheck(space_id)
 
     def attach_pages(
         self,
@@ -213,16 +243,23 @@ class SpaceSyncStatusService(BusPublisherMixin):
             return None
         return await self._status_of(space)
 
-    async def _status_of(
+    async def may_be_missing(self, space_id: str) -> bool:
+        """Only the "Some posts may be missing" warning of the space (the
+        Spaces list's dot) — no outbox reads. ``False`` for an unknown
+        space or one hosted here."""
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return False
+        _state, _last_ok, _page, missing = await self._state_of(space)
+        return missing
+
+    async def _state_of(
         self, space: Space, *, ignore_sync_id: str = ""
-    ) -> SpaceSyncStatus:
-        waiting = await self._outbox.count_pending_for_space(space.id)
+    ) -> tuple[SpaceSyncState, str | None, SyncPagePosition | None, bool]:
+        """The state, the newest ``ok``, the page position and whether
+        posts may be missing. A space hosted here is up to date."""
         if space.owner_instance_id == self._own_instance_id:
-            return SpaceSyncStatus(
-                state=SpaceSyncState.UP_TO_DATE,
-                last_ok_at=None,
-                waiting_to_send=waiting,
-            )
+            return SpaceSyncState.UP_TO_DATE, None, None, False
         hosts = await self._hosts(space)
         outcomes = await self._outcomes.outcomes(space.id, hosts)
         receiving = (
@@ -232,11 +269,43 @@ class SpaceSyncStatusService(BusPublisherMixin):
         )
         state, last_ok = sync_state(outcomes, receiving=receiving, now=self._clock())
         page = await self._pages(space, hosts) if self._pages is not None else None
+        state = state_with_page(state, page)
+        proven = page is not None and page.match is False and (page.missing or 0) > 0
+        return (
+            state,
+            last_ok,
+            page,
+            may_be_missing(state, outcomes, proven_missing=proven),
+        )
+
+    async def _unsent(self, space_id: str) -> tuple[str, ...]:
+        """Our posts of the space no member household has yet, newest
+        first, at most :data:`MAX_UNSENT` — minus those a GFS took."""
+        if self._undelivered is None:
+            return ()
+        posts = [
+            p
+            for p in await self._undelivered(space_id)
+            if (space_id, p) not in self._gfs_took
+        ]
+        return tuple(posts[:MAX_UNSENT])
+
+    async def _status_of(
+        self, space: Space, *, ignore_sync_id: str = ""
+    ) -> SpaceSyncStatus:
+        waiting = await self._outbox.count_pending_for_space(space.id)
+        # Nothing waits in the outbox: nothing can be unsent (no read).
+        unsent = await self._unsent(space.id) if waiting else ()
+        state, last_ok, page, missing = await self._state_of(
+            space, ignore_sync_id=ignore_sync_id
+        )
         return SpaceSyncStatus(
-            state=state_with_page(state, page),
+            state=state,
             last_ok_at=last_ok,
             waiting_to_send=waiting,
             page=page.to_wire() if page is not None else None,
+            may_be_missing=missing,
+            unsent_posts=unsent,
         )
 
     # ─── Outcomes ─────────────────────────────────────────────────────
@@ -434,7 +503,12 @@ class SpaceSyncStatusService(BusPublisherMixin):
 
     async def _recheck(self, space: Space, *, ignore_sync_id: str = "") -> None:
         status = await self._status_of(space, ignore_sync_id=ignore_sync_id)
-        sent = (status.state, status.waiting_to_send)
+        sent = (
+            status.state,
+            status.waiting_to_send,
+            status.may_be_missing,
+            status.unsent_posts,
+        )
         if self._last_sent.get(space.id) == sent:
             return
         self._last_sent[space.id] = sent

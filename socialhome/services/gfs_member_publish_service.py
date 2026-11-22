@@ -508,9 +508,22 @@ class GfsMemberPublishService:
 
     # ── Publishing an item ────────────────────────────────────────────────
 
-    def schedule_post(self, space_id: str, author_user_id: str, inner: dict) -> bool:
+    def schedule_post(
+        self,
+        space_id: str,
+        author_user_id: str,
+        inner: dict,
+        *,
+        on_published: Callable[[], Awaitable[None]] | None = None,
+    ) -> bool:
         """:meth:`schedule_item` for a post."""
-        return self.schedule_item(space_id, author_user_id, ITEM_TYPE_POST, inner)
+        return self.schedule_item(
+            space_id,
+            author_user_id,
+            ITEM_TYPE_POST,
+            inner,
+            on_published=on_published,
+        )
 
     def schedule_item(
         self,

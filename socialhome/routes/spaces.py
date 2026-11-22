@@ -206,8 +206,17 @@ class SpaceCollectionView(BaseView):
                 # "Needs you" — the total the space's More badge shows;
                 # null unless the caller has content authority here.
                 "needs_you": await self._needs_you(s.id, listing.role),
+                # "Some posts may be missing" — the list's dot; the
+                # detail's ``sync.may_be_missing``, never for a follower.
+                "sync_may_be_missing": await self._may_be_missing(s.id, listing.role),
             }
         )
+
+    async def _may_be_missing(self, space_id: str, role: str) -> bool:
+        status_svc = self.request.app.get(space_sync_status_key)
+        if status_svc is None or role == SpaceRole.SUBSCRIBER:
+            return False
+        return await status_svc.may_be_missing(space_id)
 
     async def _needs_you(self, space_id: str, role: str) -> int | None:
         if role not in CONTENT_AUTHORITY_ROLES:
@@ -2300,14 +2309,23 @@ class SpaceSyncTriggerView(BaseView):
         member = await space_svc._require_member(space_id, ctx.user_id)
         space_svc._assert_writable_member(member, action="sync")
         limiter = self.request.app.get(rate_limiter_key)
+        key = f"space-sync-now:{space_id}"
         if limiter is not None and not limiter.is_allowed(
-            f"space-sync-now:{space_id}",
+            key,
             limit=SYNC_NOW_RATE_LIMIT,
             window_s=SYNC_NOW_RATE_WINDOW_S,
         ):
-            return error_response(
-                429, "RATE_LIMITED", "Synced a moment ago — try again later."
+            # When the next one is allowed: the SPA disables "Check now"
+            # with "You can check again in {m} min".
+            wait = limiter.retry_after_s(key, window_s=SYNC_NOW_RATE_WINDOW_S)
+            resp = error_response(
+                429,
+                "RATE_LIMITED",
+                "Synced a moment ago — try again later.",
+                extra={"retry_after_s": wait},
             )
+            resp.headers["Retry-After"] = str(wait)
+            return resp
         targets = await self.svc(space_sync_scheduler_key).sync_now(space_id)
         return web.json_response({"space_id": space_id, "targets": targets}, status=202)
 

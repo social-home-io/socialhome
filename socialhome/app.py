@@ -2508,6 +2508,7 @@ def _wire_federation_stack(
         sync_manager=sync_manager,
         receiver=space_sync_receiver,
         scheduler=space_sync_scheduler,
+        federation_service=federation_service,
         own_instance_id=identity.instance_id,
     )
     # v_95 — signed sync pages: sealed lazily by a signing host, carried on
@@ -2624,11 +2625,13 @@ def _build_space_sync_status(
     sync_manager: SyncSessionManager,
     receiver,
     scheduler,
+    federation_service: FederationService,
     own_instance_id: str,
 ) -> SpaceSyncStatusService:
     """The §25.6 sync status (migration 0150): outcomes from the receiver
     (via the bus), the scheduler's silent-host verdict and the receiver's
-    stream starts; "catching up" from the session manager."""
+    stream starts; "catching up" from the session manager; "Not sent yet"
+    from the outbox (``FederationService.undelivered_space_items``)."""
 
     async def _hosts(space) -> list[str]:
         return await acting_hosts(
@@ -2654,6 +2657,13 @@ def _build_space_sync_status(
     status.wire()
     scheduler.attach_status(status)
     receiver.attach_stream_watch(status)
+
+    async def _unsent_posts(space_id: str) -> list[str]:
+        return await federation_service.undelivered_space_items(
+            space_id, FederationEventType.SPACE_POST_CREATED
+        )
+
+    status.attach_delivery(_unsent_posts)
     return status
 
 
@@ -5724,7 +5734,14 @@ def create_app(config: Config | None = None) -> web.Application:
         # the hashes of the files it streams.
         app[K.space_sync_service_key].attach_file_hasher(file_hasher)
         if gfs_member_publish is not None:
-            space_post_outbound.attach_member_gfs(gfs_member_publish)
+            sync_status = app.get(K.space_sync_status_key)
+            space_post_outbound.attach_member_gfs(
+                gfs_member_publish,
+                # A post a GFS took is no longer "Not sent yet".
+                on_published=(
+                    sync_status.post_reached_gfs if sync_status is not None else None
+                ),
+            )
             # v_60 — our authors' public profiles for a space's GFS followers.
             author_profiles: SpaceAuthorProfileOutbound = SpaceAuthorProfileOutbound(
                 bus=bus,

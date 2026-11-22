@@ -413,6 +413,24 @@ class InMemoryOutboxRepo:
     async def get_payload(self, payload_id: str):
         return self.payloads.get(payload_id)
 
+    async def pending_targets_for_space(self, space_id, event_type, *, limit=100):
+        """Newest stored payload first, with the households still holding a
+        row of it (a test drops a row from ``enqueued`` to deliver it)."""
+        held: dict[str, set[str]] = {}
+        for e in self.enqueued:
+            pid = e["payload_id"]
+            stored = self.payloads.get(pid) if pid is not None else None
+            if (
+                stored is not None
+                and stored.space_id == space_id
+                and stored.event_type is event_type
+            ):
+                held.setdefault(pid, set()).add(e["instance_id"])
+        return [
+            (self.payloads[pid], frozenset(households))
+            for pid, households in reversed(held.items())
+        ][:limit]
+
     def entries(self) -> list[OutboxEntry]:
         """The queued rows as ``list_due`` would return them (test helper)."""
         return [

@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from collections import deque
 
 import orjson
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.federation import FederationEventType
-from socialhome.federation.federation_service import FederationService
+from socialhome.federation.federation_service import (
+    FederationService,
+    _DeferredMeshSend,
+)
 from socialhome.federation.gfs_relay_transport import RELAY_STATUS_THROTTLED
 from socialhome.infrastructure import DeliveryOutcome, EventBus, RetryAfter
 from tests.federation.test_federation_service import (
@@ -268,3 +272,65 @@ async def test_one_seat_twice_in_a_pass_rides_one_group_only():
     assert sorted(len(g) for g in groups) == [2, 2]
     for g in groups:
         assert len({e.instance_id for e in g}) == 2
+
+
+# ─── "Not sent yet": items no member household has (undelivered_space_items)
+
+
+async def test_an_item_every_member_household_still_waits_for_is_undelivered():
+    s = _Sender()
+    await _failing_broadcast(s, paired=2)
+    await s.broadcast(payload={"id": "post-2"})
+    assert await s.svc.undelivered_space_items(_SPACE, POST) == ["post-2"]
+
+
+async def test_an_item_one_household_took_is_sent():
+    s = _Sender()
+    a, _b = await _failing_broadcast(s, paired=2)
+    await s.broadcast(payload={"id": "post-2"})
+    # Delivered to *a* (its row left the outbox), or *a* took it at once.
+    s.outbox.enqueued = [e for e in s.outbox.enqueued if e["instance_id"] != a]
+    assert await s.svc.undelivered_space_items(_SPACE, POST) == []
+
+
+async def test_mailbox_seats_waiting_count_like_paired_households():
+    s = _Sender()
+    await _failing_broadcast(s, seats=2, paired=1)
+    await s.broadcast(payload={"id": "post-3"})
+    assert await s.svc.undelivered_space_items(_SPACE, POST) == ["post-3"]
+
+
+async def test_nothing_is_undelivered_without_another_member_household():
+    s = _Sender()
+    assert await s.svc.undelivered_space_items(_SPACE, POST) == []
+
+
+async def test_a_payload_that_does_not_unwrap_is_skipped():
+    s = _Sender()
+    await _failing_broadcast(s, paired=1)
+    await s.broadcast(payload={"id": "post-4"})
+    for pid, stored in list(s.outbox.payloads.items()):
+        s.outbox.payloads[pid] = dataclasses.replace(stored, payload_enc="bad:bad")
+    assert await s.svc.undelivered_space_items(_SPACE, POST) == []
+
+
+async def test_a_deferred_mesh_send_counts_as_still_waiting():
+    s = _Sender()
+    (paired,) = await _failing_broadcast(s, paired=1)
+    s.repo.add_space_member(_SPACE, "mesh-household")
+    await s.broadcast(payload={"id": "post-5"})
+    s.svc._deferred_mesh_queues["mesh-household"] = deque(
+        [
+            _DeferredMeshSend(
+                space_id=_SPACE,
+                event_type=POST,
+                payload={"id": "post-5"},
+                snapshot=False,
+                size=10,
+            )
+        ]
+    )
+    assert await s.svc.undelivered_space_items(_SPACE, POST) == ["post-5"]
+    # Once the paired household took it, it is sent.
+    s.outbox.enqueued = [e for e in s.outbox.enqueued if e["instance_id"] != paired]
+    assert await s.svc.undelivered_space_items(_SPACE, POST) == []

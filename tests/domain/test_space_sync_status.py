@@ -9,6 +9,7 @@ from socialhome.domain.space_sync_status import (
     SpaceSyncResult,
     SpaceSyncState,
     SpaceSyncStatus,
+    may_be_missing,
     sync_state,
 )
 
@@ -145,7 +146,22 @@ def test_the_wire_shape():
         "state": "behind",
         "last_ok_at": "2026-11-21T10:00:00+00:00",
         "waiting_to_send": 3,
+        "may_be_missing": False,
+        "unsent_posts": [],
     }
+
+
+def test_the_wire_shape_carries_the_warning_and_the_unsent_posts():
+    status = SpaceSyncStatus(
+        state=SpaceSyncState.BEHIND,
+        last_ok_at=None,
+        waiting_to_send=1,
+        may_be_missing=True,
+        unsent_posts=("p1", "p2"),
+    )
+    wire = status.to_wire()
+    assert wire["may_be_missing"] is True
+    assert wire["unsent_posts"] == ["p1", "p2"]
 
 
 def test_parse_result_refuses_unknown_values():
@@ -221,3 +237,72 @@ def test_an_ok_without_a_result_time_answered_at_its_ok_time():
         now=NOW,
     )
     assert state is SpaceSyncState.UP_TO_DATE
+
+
+# ─── "Some posts may be missing" (may_be_missing) ────────────────────────
+
+
+def _missing(rows, *, proven=False):
+    state, _ = sync_state(rows, now=NOW)
+    return may_be_missing(state, rows, proven_missing=proven)
+
+
+def test_one_failed_round_after_an_ok_is_not_yet_missing():
+    # ok 35 min ago, the round after it unclean (5 min ago): one failure.
+    rows = [_o("h", SpaceSyncResult.UNCLEAN, 35, at_min=5)]
+    assert sync_state(rows, now=NOW)[0] is SpaceSyncState.BEHIND
+    assert _missing(rows) is False
+
+
+def test_the_second_failed_round_after_an_ok_may_be_missing():
+    # ok 65 min ago, failed at 35 and now at 5: two rounds without an ok.
+    rows = [_o("h", SpaceSyncResult.UNCLEAN, 65, at_min=5)]
+    assert _missing(rows) is True
+
+
+def test_a_host_refusing_for_two_rounds_may_be_missing():
+    rows = [_o("h", SpaceSyncResult.DEFERRED, 70, at_min=10)]
+    assert sync_state(rows, now=NOW)[0] is SpaceSyncState.BEHIND
+    assert _missing(rows) is True
+
+
+def test_up_to_date_is_never_missing():
+    assert _missing([_o("h", SpaceSyncResult.OK, 10, at_min=10)]) is False
+
+
+def test_an_away_host_is_never_missing_without_a_proof():
+    rows = [_o("h", SpaceSyncResult.UNREACHABLE, 300, at_min=5)]
+    assert sync_state(rows, now=NOW)[0] is SpaceSyncState.HOST_OFFLINE
+    assert _missing(rows) is False
+
+
+def test_never_synced_is_not_missing():
+    assert _missing([_o("h", None, None)]) is False
+
+
+def test_an_unclean_stream_with_no_ok_ever_may_be_missing():
+    assert _missing([_o("h", SpaceSyncResult.UNCLEAN, None, at_min=5)]) is True
+
+
+def test_a_proven_missing_row_is_missing_whatever_the_rounds_say():
+    rows = [_o("h", SpaceSyncResult.OK, 10, at_min=10)]
+    state = SpaceSyncState.BEHIND  # what a page with match false reads
+    assert may_be_missing(state, rows, proven_missing=True) is True
+
+
+def test_a_running_stream_is_not_missing_even_with_a_proof():
+    rows = [_o("h", SpaceSyncResult.UNCLEAN, 300, at_min=5)]
+    assert sync_state(rows, receiving=True, now=NOW)[0] is (SpaceSyncState.CATCHING_UP)
+    assert (
+        may_be_missing(SpaceSyncState.CATCHING_UP, rows, proven_missing=True) is False
+    )
+
+
+def test_the_newest_answer_of_any_acting_host_counts():
+    # The owner failed long ago; the delegated admin answered unclean now.
+    rows = [
+        _o("owner", SpaceSyncResult.UNREACHABLE, 90, at_min=40),
+        _o("admin", SpaceSyncResult.UNCLEAN, None, at_min=2),
+    ]
+    assert sync_state(rows, now=NOW)[0] is SpaceSyncState.BEHIND
+    assert _missing(rows) is True

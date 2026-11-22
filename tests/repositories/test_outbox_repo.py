@@ -1655,3 +1655,45 @@ async def test_a_post_with_its_picture_chunks_counts_once(env):
             ),
         )
     assert await repo.count_pending_for_space("sp-1") == 1
+
+
+# ── "Not sent yet": which households still wait for each stored payload ────
+
+
+async def _targets(env, space_id="sp-1", event_type=None, **kw):
+    return {
+        p.id: households
+        for p, households in await env.outbox_repo.pending_targets_for_space(
+            space_id,
+            event_type or FederationEventType.SPACE_POST_CREATED,
+            **kw,
+        )
+    }
+
+
+async def test_pending_targets_for_space_lists_each_payload_with_its_households(env):
+    repo = env.outbox_repo
+    assert await _targets(env) == {}
+    for peer in ("peer-a", "peer-b"):
+        await _enqueue_ref(env, peer, f"m-{peer}")
+    await _enqueue_ref(env, "peer-a", "m-2", pid="p-2")
+    assert await _targets(env) == {
+        "p-1": frozenset({"peer-a", "peer-b"}),
+        "p-2": frozenset({"peer-a"}),
+    }
+    # A delivered row leaves: that household has the item.
+    await repo.mark_delivered("m-peer-b")
+    assert (await _targets(env))["p-1"] == frozenset({"peer-a"})
+    # Another space or event type: not listed; a failed row is no wait.
+    assert await _targets(env, "other-space") == {}
+    assert (
+        await _targets(env, event_type=FederationEventType.SPACE_COMMENT_CREATED) == {}
+    )
+    await repo.mark_failed("m-2")
+    assert set(await _targets(env)) == {"p-1"}
+
+
+async def test_pending_targets_for_space_is_bounded(env):
+    for i in range(5):
+        await _enqueue_ref(env, "peer-a", f"m-{i}", pid=f"p-{i}")
+    assert len(await _targets(env, limit=3)) == 3

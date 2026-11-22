@@ -2895,6 +2895,11 @@ class FederationService:
         stored = await self._outbox_repo.get_payload(payload_id)
         if stored is None:
             raise ValueError(f"outbox payload {payload_id} is gone")
+        return stored, self._unwrap_outbox_payload(stored)
+
+    def _unwrap_outbox_payload(self, stored: OutboxPayload) -> str:
+        """*stored*'s payload JSON, unwrapped from the local KEK. Raises
+        :class:`ValueError` when it does not unwrap."""
         try:
             raw = self._key_manager.decrypt(
                 stored.payload_enc,
@@ -2903,8 +2908,53 @@ class FederationService:
                 ),
             )
         except Exception as exc:
-            raise ValueError(f"outbox payload {payload_id} does not unwrap") from exc
-        return stored, raw.decode("utf-8")
+            raise ValueError(f"outbox payload {stored.id} does not unwrap") from exc
+        return raw.decode("utf-8")
+
+    async def undelivered_space_items(
+        self, space_id: str, event_type: FederationEventType
+    ) -> list[str]:
+        """The ids of the *event_type* items of *space_id* this household
+        broadcast that NO member household has yet — "Not sent yet" on a
+        post (the sync status). Newest first.
+
+        The audience is the one :meth:`broadcast_to_space_members` sends to
+        (``list_member_instance_ids`` minus us). An item is undelivered
+        only while EVERY household of it still waits for it: a row in our
+        outbox (``pending_targets_for_space``; a delivered row is gone, a
+        mailbox upload to the GFS delivers the multi payload's rows
+        together) or a deferred mesh send. A household that took it at
+        once has no row, so the item is sent. With no other member
+        household there is nobody to send to: nothing is undelivered. The
+        stored payload is unwrapped (local KEK) for the item's ``id``."""
+        audience = {
+            iid
+            for iid in await self._federation_repo.list_member_instance_ids(space_id)
+            if iid and iid != self._own_instance_id
+        }
+        if not audience:
+            return []
+        waiting: dict[str, set[str]] = {}
+        for stored, households in await self._outbox_repo.pending_targets_for_space(
+            space_id, event_type
+        ):
+            try:
+                item_id = _orjson.loads(self._unwrap_outbox_payload(stored)).get("id")
+            except ValueError, AttributeError:
+                continue
+            if isinstance(item_id, str) and item_id:
+                waiting.setdefault(item_id, set()).update(households)
+        for iid, queue in self._deferred_mesh_queues.items():
+            for deferred in queue:
+                item_id = deferred.payload.get("id")
+                if (
+                    deferred.space_id == space_id
+                    and deferred.event_type is event_type
+                    and isinstance(item_id, str)
+                    and item_id
+                ):
+                    waiting.setdefault(item_id, set()).add(iid)
+        return [item for item, held in waiting.items() if audience <= held]
 
     async def seal_outbox_entry(
         self, entry: OutboxEntry, instance: RemoteInstance

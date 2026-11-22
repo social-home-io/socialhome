@@ -1084,15 +1084,16 @@ class _MemberGfs:
     async def channel_space(self, space_id):
         return self.channel
 
-    def schedule_post(self, space_id, author_user_id, inner):
+    def schedule_post(self, space_id, author_user_id, inner, *, on_published=None):
         self.order.append("schedule")
         if self.raises:
             raise RuntimeError("boom")
         self.scheduled.append((space_id, author_user_id, dict(inner)))
+        self.on_published = on_published
         return True
 
 
-def _member_setup(member_gfs, *, media_gfs=None):
+def _member_setup(member_gfs, *, media_gfs=None, on_published=None):
     bus = EventBus()
     federation = AsyncMock()
     keypair = generate_identity_keypair()
@@ -1109,7 +1110,7 @@ def _member_setup(member_gfs, *, media_gfs=None):
         user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
         identity=(keypair, "inst-self"),
     )
-    outbound.attach_member_gfs(member_gfs)
+    outbound.attach_member_gfs(member_gfs, on_published=on_published)
     if media_gfs is not None:
         outbound.attach_media_gfs(media_gfs)
     post = Post(
@@ -1138,6 +1139,27 @@ async def test_the_member_publish_is_scheduled_after_the_broadcast():
     assert (inner["item_type"], inner["item_target"]) == ("post", "post-m")
     assert verify_signed_author_inner(inner)
     assert "item_type" not in relay
+
+
+async def test_a_post_a_gfs_took_is_reported_to_the_listener():
+    """The sync status hears ``(space, post)`` once a GFS took our post —
+    it is then no longer "Not sent yet"."""
+    took: list[tuple[str, str]] = []
+    member = _MemberGfs()
+    bus, _federation, post = _member_setup(
+        member, on_published=lambda s, p: took.append((s, p))
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    assert took == []  # not until a GFS took it
+    await member.on_published()
+    assert took == [("sp-1", "post-m")]
+
+
+async def test_without_a_listener_no_callback_is_handed_over():
+    member = _MemberGfs()
+    bus, _federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    assert member.on_published is None
 
 
 async def test_a_scheduling_failure_is_swallowed():

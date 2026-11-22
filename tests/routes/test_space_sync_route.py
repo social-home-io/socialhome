@@ -221,6 +221,8 @@ async def test_a_space_hosted_here_reads_up_to_date(client):
         "state": "up_to_date",
         "last_ok_at": None,
         "waiting_to_send": 0,
+        "may_be_missing": False,
+        "unsent_posts": [],
     }
 
 
@@ -374,5 +376,59 @@ async def test_sync_now_is_rate_limited_per_space(client):
             f"/api/spaces/{space_id}/sync", headers=_auth(client._admin_token)
         )
     assert resp.status == 429
-    assert (await resp.json())["error"]["code"] == "RATE_LIMITED"
+    error = (await resp.json())["error"]
+    assert error["code"] == "RATE_LIMITED"
+    # When the next check is allowed — the SPA's "You can check again in
+    # {m} min" (header and body say the same).
+    assert 0 < error["retry_after_s"] <= 3600
+    assert resp.headers["Retry-After"] == str(error["retry_after_s"])
     assert begin.await_count == SYNC_NOW_RATE_LIMIT
+
+
+async def _two_failed_rounds(client, space_id: str) -> None:
+    """The host answered ``ok`` an hour ago, then two unclean rounds."""
+    db = client.server.app[_db_key]
+    await db.enqueue(
+        "UPDATE space_instances SET sync_result='unclean',"
+        " sync_ok_at=strftime('%Y-%m-%dT%H:%M:%S+00:00','now','-65 minutes'),"
+        " sync_result_at=strftime('%Y-%m-%dT%H:%M:%S+00:00','now','-5 minutes')"
+        " WHERE space_id=? AND instance_id='host-x'",
+        (space_id,),
+    )
+
+
+async def test_two_failed_rounds_read_may_be_missing(client):
+    space_id = await _remote_space(client)
+    r = await client.get(f"/api/spaces/{space_id}", headers=_auth(client._admin_token))
+    assert (await r.json())["sync"]["may_be_missing"] is False
+    await _two_failed_rounds(client, space_id)
+    r = await client.get(f"/api/spaces/{space_id}", headers=_auth(client._admin_token))
+    sync = (await r.json())["sync"]
+    assert sync["state"] == "behind"
+    assert sync["may_be_missing"] is True
+
+
+async def test_the_spaces_list_marks_a_space_whose_posts_may_be_missing(client):
+    space_id = await _remote_space(client)
+    here = await _create_space(client)
+
+    async def _rows() -> dict:
+        r = await client.get("/api/spaces", headers=_auth(client._admin_token))
+        assert r.status == 200
+        return {row["id"]: row for row in await r.json()}
+
+    rows = await _rows()
+    assert rows[space_id]["sync_may_be_missing"] is False
+    assert rows[here]["sync_may_be_missing"] is False
+    await _two_failed_rounds(client, space_id)
+    rows = await _rows()
+    assert rows[space_id]["sync_may_be_missing"] is True
+    assert rows[here]["sync_may_be_missing"] is False
+
+
+async def test_a_follower_row_never_carries_the_warning(client):
+    space_id = await _remote_space(client, role="subscriber")
+    await _two_failed_rounds(client, space_id)
+    r = await client.get("/api/spaces", headers=_auth(client._admin_token))
+    (row,) = [x for x in await r.json() if x["id"] == space_id]
+    assert row["sync_may_be_missing"] is False

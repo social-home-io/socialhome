@@ -60,6 +60,11 @@ STALE_OK_S: float = 2 * 60 * 60
 #: no longer counts as the host answering: with another host found
 #: unreachable, the space reads "host offline".
 ANSWER_STALE_S: float = 60 * 60
+#: "Some posts may be missing" waits for the SECOND failed round after the
+#: newest ``ok``: rounds come every 30 minutes, so that round's answer is at
+#: least this long after the ``ok`` (one failed round is a hiccup the next
+#: round usually fixes — nobody is warned about it).
+MISSING_AFTER_S: float = 45 * 60
 
 
 @dataclass(slots=True, frozen=True)
@@ -84,12 +89,21 @@ class SpaceSyncStatus:
     #: v_95 — what the newest signed sync page says (``SyncPagePosition``
     #: wire form; ``None``: no page held).
     page: dict | None = None
+    #: "Some posts may be missing" — :func:`may_be_missing`; the one
+    #: warning the SPA shows (header chip, Spaces list dot).
+    may_be_missing: bool = False
+    #: Posts written here that no other household has yet ("Not sent
+    #: yet" on the post): every member household still waits for them in
+    #: our outbox and no GFS took them. Newest first, bounded.
+    unsent_posts: tuple[str, ...] = ()
 
     def to_wire(self) -> dict:
         wire: dict = {
             "state": self.state.value,
             "last_ok_at": self.last_ok_at,
             "waiting_to_send": self.waiting_to_send,
+            "may_be_missing": self.may_be_missing,
+            "unsent_posts": list(self.unsent_posts),
         }
         if self.page is not None:
             wire["page"] = self.page
@@ -168,3 +182,35 @@ def sync_state(
         # Nothing arrived yet (a refusal is no stream).
         return SpaceSyncState.NEVER, None
     return SpaceSyncState.BEHIND, last_ok
+
+
+def may_be_missing(
+    state: SpaceSyncState,
+    outcomes: Iterable[SpaceSyncOutcome],
+    *,
+    proven_missing: bool = False,
+) -> bool:
+    """Whether to tell the member "Some posts may be missing".
+
+    Never while a stream is arriving (**catching up**). Yes when the newest
+    signed sync page PROVED a row missing (*proven_missing*: ``match`` false
+    with ``missing`` > 0 — known only after the round that carried the
+    listing, so it is still true after that automatic sync). Otherwise only
+    **behind** counts, and only from the second failed round after the
+    newest ``ok`` (:data:`MISSING_AFTER_S`) — or with no ``ok`` ever while a
+    stream arrived unclean. An away host (**host offline**) and a space not
+    synced yet (**never**) are no warning."""
+    if state is SpaceSyncState.CATCHING_UP:
+        return False
+    if proven_missing:
+        return True
+    if state is not SpaceSyncState.BEHIND:
+        return False
+    rows = list(outcomes)
+    oks = [at for at in (parse_utc(o.ok_at) for o in rows) if at is not None]
+    if not oks:
+        return True
+    answers = [at for at in map(answered_at, rows) if at is not None]
+    if not answers:
+        return False
+    return max(answers) - max(oks) >= timedelta(seconds=MISSING_AFTER_S)
