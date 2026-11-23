@@ -118,7 +118,7 @@ from ....domain.federation import (
     RemoteInstance,
 )
 from ....domain.federation_capabilities import FederationCapability
-from ....domain.space import Space, SpaceRole, SpaceType
+from ....domain.space import Space, SpaceType
 from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
 from ...host_equivalence import acting_hosts
@@ -591,7 +591,7 @@ class SpaceSyncScheduler:
         budget (5 / h per household and space) would go on 3 Sync now plus
         2 periodic rounds, and the host is the one whose view the status
         reads. Returns the households asked. Only for a space one of our
-        people holds a member seat in (a follower never contacts the host);
+        people holds a seat in (a follower's included, v_96; a bare mirror never contacts the host);
         a space hosted here has no host to ask, so it asks its paired member
         households — the only source of what it lacks. The providers' own
         budget still applies."""
@@ -599,7 +599,7 @@ class SpaceSyncScheduler:
         if space is None or space.dissolved:
             return []
         hosted_here = space.owner_instance_id == self._own_instance_id
-        if not hosted_here and not await self._holds_member_seat(space):
+        if not hosted_here and not await self._holds_seat(space):
             return []
         asked: list[str] = []
         if not hosted_here:
@@ -1539,8 +1539,8 @@ class SpaceSyncScheduler:
         ``Space.owner_instance_id`` is the host, so the predicate is exact
         rather than a heuristic: a space we don't own whose owner is not a
         confirmed peer is reachable only over the mesh. Only spaces we hold
-        a non-follower seat in (:meth:`_list_joined_remote_spaces`) — a
-        space we only follow over a GFS never reveals us to its host. Deliberately calls
+        a seat in (:meth:`_list_joined_remote_spaces`, a follower's
+        included). Deliberately calls
         ``begin_mesh_catchup_sync`` and NOT ``enqueue_sync_for_space`` —
         the latter ships a bare ``send_event`` with no requester-side
         receive session, which cannot serve a mesh host at all.
@@ -1673,10 +1673,9 @@ class SpaceSyncScheduler:
             for space in await self._list_local_spaces():
                 hosted_here = space.owner_instance_id == self._own_instance_id
                 if not hosted_here and not (
-                    space.owner_instance_id and await self._holds_member_seat(space)
+                    space.owner_instance_id and await self._holds_seat(space)
                 ):
-                    # Followed only (or a bare mirror): the GFS shields a
-                    # follower from the host and the members.
+                    # A bare mirror: no seat of ours, nobody to tell.
                     continue
                 if not hosted_here:
                     targets.update(await self._mesh_targets(space))
@@ -1739,35 +1738,29 @@ class SpaceSyncScheduler:
         )
 
     async def _list_joined_remote_spaces(self) -> list[Space]:
-        """Spaces hosted elsewhere in which this household holds a local
-        seat other than a follower (``subscriber``) one.
-
-        The mesh sweeps (catch-up BEGIN, version announcement) contact the
-        host directly, which tells it we exist and care about the space. A
-        PUBLIC space we only follow — or merely mirror from a GFS listing,
-        with no seat at all — must stay invisible to its host: the GFS
-        shields followers from hosts. Only real membership justifies it.
-        """
+        """Spaces hosted elsewhere in which one of our people holds a seat —
+        a follower (``subscriber``) seat included (v_96: a follower is a
+        member with the read-only role on every path, so it BEGINs its host
+        like a member; the provider serves the follower subset). A bare
+        mirror with no seat of ours never contacts the host."""
         out: list[Space] = []
         for space in await self._list_local_spaces():
             host = space.owner_instance_id
             if not host or host == self._own_instance_id:
                 continue
-            if await self._holds_member_seat(space):
+            if await self._holds_seat(space):
                 out.append(space)
         return out
 
-    async def _holds_member_seat(self, space: Space) -> bool:
-        """Whether one of our own people holds a seat other than a follower
-        (``subscriber``) one in *space*."""
+    async def _holds_seat(self, space: Space) -> bool:
+        """Whether one of our own people holds a seat (any role) in *space*."""
         # Our own people only: ``space_members`` also mirrors the host's
         # (the ``members`` resource), whose seats are no membership of ours.
         ours = set(await self._space_repo.list_local_member_user_ids(space.id))
+        if not ours:
+            return False
         members = await self._space_repo.list_members(space.id)
-        return any(
-            m.user_id in ours and str(m.role) != SpaceRole.SUBSCRIBER.value
-            for m in members
-        )
+        return any(m.user_id in ours for m in members)
 
     async def _list_local_spaces(self) -> list[Space]:
         spaces = (
@@ -1775,12 +1768,11 @@ class SpaceSyncScheduler:
             + await self._space_repo.list_by_type(SpaceType.PUBLIC)
             + await self._space_repo.list_by_type(SpaceType.PRIVATE)
         )
-        # A GLOBAL space is synced like any other for its members (a
-        # household seated from an invite link included) — but never for a
-        # household that only follows it: the GFS shields followers from
-        # hosts, so a follower must not BEGIN the host or ask a helper.
+        # A GLOBAL space is synced like any other for its members and
+        # followers (a household seated from an invite link or through the
+        # GFS included) — never for a bare directory mirror with no seat.
         for space in await self._space_repo.list_by_type(SpaceType.GLOBAL):
-            if await self._holds_member_seat(space):
+            if await self._holds_seat(space):
                 spaces.append(space)
         return [s for s in spaces if not s.dissolved]
 
