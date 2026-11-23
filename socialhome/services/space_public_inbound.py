@@ -825,7 +825,10 @@ class SpacePublicInbound:
         THIS space (the channel id was mapped to it locally); then the
         host-relay checks apply (:meth:`_apply_authority_relayed`)."""
         inner = open_channel_authority(
-            opened, space_id=space.id, space_pubkey_hex=space.identity_public_key
+            opened,
+            space_id=space.id,
+            epoch=epoch,
+            space_pubkey_hex=space.identity_public_key,
         )
         if inner is None:
             log.warning(

@@ -2377,3 +2377,31 @@ async def test_a_member_drops_its_channel_when_the_space_leaves_global(env):
     await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
     await env.member.svc.wait_idle()
     assert SPACE_ID not in env.member.spaces.channels
+
+
+@pytest.mark.security
+async def test_the_owner_still_publishes_after_a_restart_before_heal(env):
+    """The owner's publish-only grant names the chosen capable servers when
+    this process has not re-registered the channel yet — its items are not
+    dropped in that window."""
+    _go_global(env)
+    await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    env.owner.svc._registered.clear()  # a fresh process
+    assert [t.id for t in await env.owner.svc.plan(SPACE_ID)] == ["conn-1"]
+    assert await env.owner.svc.publish_current(SPACE_ID, 3, "cmVzdGFydA") == 1
+
+
+async def test_a_global_grant_takes_its_seat_once_the_config_says_global(env):
+    """A grant that arrived before the tier change seats us when the
+    config is applied (no wait for the next reconnect)."""
+    _go_global(env)
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    repo = env.app[gfs_channel_repo_key]
+    await repo.remove_subscriber(channel_id, env.member.h.instance_id)
+    bus = EventBus()
+    env.member.svc.wire(bus)
+    await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
+    await env.member.svc.wait_idle()
+    assert await repo.has_subscription(channel_id, env.member.h.instance_id)

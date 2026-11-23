@@ -746,11 +746,19 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             seed = await self._spaces.get_space_seed(space_id)
             if seed is None:
                 raise RuntimeError(f"no space seed for {space_id}")
-            plain = channel_authority_plaintext(
-                body, space_id=space_id, space_seed=seed
-            )
-            epoch, ct = await self._crypto.encrypt(space_id, plain)
-            return _Sealed(epoch, ct, {}, channel=True)
+            # The signature binds the epoch the item is sealed under: re-read
+            # once if a rotation lands in between.
+            for _attempt in range(2):
+                current = await self._crypto.get_current_epoch(space_id)
+                if current is None:
+                    raise RuntimeError(f"no content key for space {space_id}")
+                plain = channel_authority_plaintext(
+                    body, space_id=space_id, epoch=current, space_seed=seed
+                )
+                epoch, ct = await self._crypto.encrypt(space_id, plain)
+                if epoch == current:
+                    return _Sealed(epoch, ct, {}, channel=True)
+            raise RuntimeError(f"content epoch kept moving for space {space_id}")
         plain = pad_json_object(body)
         epoch, ct = await self._crypto.encrypt(space_id, plain)
         compressed: dict[str, str] = {}

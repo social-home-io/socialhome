@@ -248,6 +248,7 @@ def _sealed(inner=None, *, space_id="sp-1", seed=None) -> bytes:
     return channel_authority_plaintext(
         dict(inner or _REMOVAL),
         space_id=space_id,
+        epoch=3,
         space_seed=seed or _SPACE_KP.private_key,
     )
 
@@ -257,13 +258,15 @@ def test_a_channel_authority_item_round_trips_padded():
     assert len(opened) in ITEM_SIZE_BUCKETS
     assert is_channel_authority(opened)
     got = open_channel_authority(
-        opened, space_id="sp-1", space_pubkey_hex=_SPACE_KP.public_key.hex()
+        opened, space_id="sp-1", epoch=3, space_pubkey_hex=_SPACE_KP.public_key.hex()
     )
     assert got == _REMOVAL
 
 
 @pytest.mark.security
-@pytest.mark.parametrize("case", ["other_key", "other_space", "tampered", "suite"])
+@pytest.mark.parametrize(
+    "case", ["other_key", "other_space", "tampered", "suite", "epoch", "no_epoch"]
+)
 def test_a_channel_authority_item_that_does_not_verify_is_refused(case):
     opened = _sealed(
         seed=generate_space_keypair().private_key if case == "other_key" else None
@@ -273,11 +276,20 @@ def test_a_channel_authority_item_that_does_not_verify_is_refused(case):
         body["inner"]["item_id"] = "p-2"
     if case == "suite":
         body["inner"]["authority_sig_suite"] = "ed25519+mldsa65"
+    if case == "epoch":
+        # Re-sealed under a later epoch by a key holder: the signed epoch
+        # no longer matches.
+        body["epoch"] = 4
+    if case == "no_epoch":
+        del body["epoch"]
     opened = json.dumps(body).encode()
     space_id = "sp-2" if case == "other_space" else "sp-1"
     assert (
         open_channel_authority(
-            opened, space_id=space_id, space_pubkey_hex=_SPACE_KP.public_key.hex()
+            opened,
+            space_id=space_id,
+            epoch=3,
+            space_pubkey_hex=_SPACE_KP.public_key.hex(),
         )
         is None
     )
@@ -289,7 +301,10 @@ def test_an_ordinary_channel_item_is_no_authority_item():
     assert not is_channel_authority(b"not json")
     assert (
         open_channel_authority(
-            opened, space_id="sp-1", space_pubkey_hex=_SPACE_KP.public_key.hex()
+            opened,
+            space_id="sp-1",
+            epoch=3,
+            space_pubkey_hex=_SPACE_KP.public_key.hex(),
         )
         is None
     )
@@ -300,6 +315,9 @@ def test_a_stale_signature_or_padding_is_not_signed_over():
     signs the bare inner."""
     inner = {**_REMOVAL, "authority_sig": "x", "authority_sig_suite": "y", "_pad": "00"}
     got = open_channel_authority(
-        _sealed(inner), space_id="sp-1", space_pubkey_hex=_SPACE_KP.public_key.hex()
+        _sealed(inner),
+        space_id="sp-1",
+        epoch=3,
+        space_pubkey_hex=_SPACE_KP.public_key.hex(),
     )
     assert got == _REMOVAL

@@ -93,7 +93,6 @@ from ..domain.media_constraints import (
     is_reserved_media_name,
     local_media_ref,
 )
-from ..domain.space import SpaceType
 from ..domain.space_media_ref import SpaceMediaRef, media_refs_to_wire
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..gfs_channel import channel_pk_of, derive_channel_seed
@@ -103,6 +102,7 @@ from ..space_media_seal import (
     seal_space_media,
 )
 from ..writer_key import sign_with_writer_key
+from .gfs_channel_service import channel_on
 from .inbound_media_store import media_file_path
 from .space_crypto_service import AUTHORITY_SIG_SUITE_ED25519
 from .space_writer_cert_service import writer_key_min_version
@@ -344,14 +344,12 @@ class SpaceMediaGfsUploader:
 
     async def scope_of(self, space_id: str) -> tuple[str, str]:
         """``(scope, scope_id)`` *space_id*'s blobs are uploaded under: the
-        opaque channel of a PRIVATE space that uses one (``private_gfs``),
-        else the space itself (listed on the GFS)."""
+        opaque channel of a space that uses one — a PRIVATE space with
+        ``private_gfs``, or a GLOBAL space (v_96: once it runs a channel its
+        space-keyed writer-key pin is no longer announced) — else the space
+        itself (listed on the GFS)."""
         space = await self._spaces.get(space_id)
-        if (
-            space is not None
-            and space.space_type is SpaceType.PRIVATE
-            and space.features.private_gfs
-        ):
+        if space is not None and channel_on(space):
             stored = await self._spaces.get_gfs_channel(space_id)
             if stored is not None:
                 return SCOPE_CHANNEL, stored[0]

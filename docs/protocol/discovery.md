@@ -3096,7 +3096,16 @@ from a private channel:
 server; the author publishes once to each listed server, the host adds a
 copy only for an unmarked post, and receivers dedupe by item id (a post by
 its id, comments and reactions by theirs), so a household seated on two
-servers or also reached over federation still applies an item once.
+servers or also reached over federation still applies an item once. Two duplicates remain, both
+deduped on receipt and accepted for P3: a GFS-reached MEMBER (it has a
+mailbox card in the directory) still gets the federation copy through the
+v_91 multi upload next to its channel frame — a GFS-reached FOLLOWER has no
+card and is reached only through its seat; and a household that held a
+space-keyed seat before the space got a channel keeps it (and still applies
+a space-keyed item from a member below v_96) until P6/P7 remove that path.
+The `channel_sent` mark is set when the author's publisher plans the send,
+not when a server confirmed it: a permanently refused publish leaves
+channel-only readers to the host's catch-up.
 
 **Cost (global, 200 author households, 10 000 follower households, one
 channel server; item 4 KiB bucket, wrap 0.1 KiB).** A member post: one
@@ -3104,7 +3113,10 @@ channel server; item 4 KiB bucket, wrap 0.1 KiB).** A member post: one
 mesh members directly, GFS-reached members' mailbox cards in one v_91 multi
 ≈ 4 KiB + n × 0.1 KiB); GFS egress (200 + 10 000) × 4 KiB ≈ 40 MiB; the
 host adds nothing for a marked post (today it re-sent the post on the
-space-keyed relay: another ≈ 40 MiB). Channel creation or a list change:
+space-keyed relay: another ≈ 40 MiB). The federation copy to GFS-reached
+members adds their egress again (m × 4 KiB for m such members — bounded by
+the member count, never the follower count; skipping channel-seated
+households in that multi is the deferred lever). Channel creation or a list change:
 one credentials-only snapshot per household (≈ 2 KiB × 10 200 ≈ 20 MiB,
 rare). The household's own grant also rides every rekey as before.
 

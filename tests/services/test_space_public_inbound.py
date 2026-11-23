@@ -2638,6 +2638,7 @@ async def _channel_authority(env, inner: dict, *, space_seed: bytes | None = Non
     plain = channel_authority_plaintext(
         inner,
         space_id="sp-1",
+        epoch=await env["crypto"].get_current_epoch("sp-1"),
         space_seed=space_seed
         if space_seed is not None
         else env["space_kp"].private_key,

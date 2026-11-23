@@ -1305,12 +1305,12 @@ async def test_a_removal_without_a_content_key_is_dropped(env, caplog):
 # ─── Approved moderated posts: relayed under the author's signature ─────
 
 
-async def _approved_env(env, *, seats=("member",), owner=None):
+async def _approved_env(env, *, seats=("member",), owner=None, stype=SpaceType.PUBLIC):
     """A remote author household whose instance id is its key fingerprint,
     a MODERATED public space, and the post the host just published from the
     queue with the submitter's signed copy."""
     skp = await env["make_space"](
-        "sp-pub", SpaceType.PUBLIC, with_seed=True, owner=owner or env["own_iid"]
+        "sp-pub", stype, with_seed=True, owner=owner or env["own_iid"]
     )
     space = await env["space_repo"].get("sp-pub")
     await env["space_repo"].save(_with_posts_level(space, "moderated"))
@@ -1884,7 +1884,7 @@ async def _channel_inner(env, skp, channels) -> dict:
     opened = await env["crypto"].decrypt(space_id, epoch, ct)
     assert len(opened) in ITEM_SIZE_BUCKETS
     inner = open_channel_authority(
-        opened, space_id=space_id, space_pubkey_hex=skp.public_key.hex()
+        opened, space_id=space_id, epoch=epoch, space_pubkey_hex=skp.public_key.hex()
     )
     assert inner is not None
     return inner
@@ -1987,3 +1987,27 @@ async def test_a_global_space_without_a_channel_keeps_the_space_keyed_relay(env)
     )
     assert len(env["gfs"].calls) == 1
     assert channels.published == []
+
+
+@pytest.mark.security
+async def test_an_approved_post_goes_into_the_channel_with_its_cert(env):
+    skp, author_kp, _iid, post, relay = await _approved_env(env, stype=SpaceType.GLOBAL)
+    channels = _Channels({"sp-pub"})
+    env["sub"].attach_channels(channels)
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=post, space_id="sp-pub", approved_by="mod", public_relay=relay
+        )
+    )
+    assert env["gfs"].calls == []
+    inner = await _channel_inner(env, skp, channels)
+    assert is_approved(inner) and verify_signed_author_inner(inner)
+    _sid, epoch, _ct = channels.published[-1]
+    verify_writer_cert(
+        WriterCert.from_wire(inner["writer_cert"]),
+        space_pubkey=skp.public_key,
+        space_id="sp-pub",
+        epoch=epoch,
+        author_pk=author_kp.public_key,
+        required_scope="comment",
+    )

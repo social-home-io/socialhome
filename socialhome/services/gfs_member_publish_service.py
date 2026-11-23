@@ -317,7 +317,7 @@ class GfsMemberPublishService:
         """Wire the private-space channel service (v_51)."""
         self._channels = channels
 
-    async def _private(self, space_id: str) -> bool:
+    async def _channel_tier(self, space_id: str) -> bool:
         """A tier whose channel this household may hold: PRIVATE, or GLOBAL
         since v_96 (the channel service retires / reconciles both)."""
         space = await self._spaces.get(space_id)
@@ -345,27 +345,27 @@ class GfsMemberPublishService:
         member publisher, which then decides by our grant and cert."""
         return (
             self._channels is not None
-            and await self._private(space_id)
+            and await self._channel_tier(space_id)
             and await self._channels.has_channel(space_id)
         )
 
     async def retire_channel(self, space_id: str) -> None:
         """Before an authority rotation swaps the seed: unregister a private
         space's channel while its key can still be signed for."""
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._channel_tier(space_id):
             await self._channels.retire(space_id)
 
     async def enable_channel(self, space_id: str) -> None:
         """The owner turned a private space's ``private_gfs`` ON: start (or
         keep) its channel, announce it and distribute the grants."""
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._channel_tier(space_id):
             await self._channels.enable(space_id)
 
     async def reconcile_channel(self, space_id: str) -> None:
         """Before an authority-rotation bundle goes out: let the channel
         service start a fresh channel for the new seed (and announce it), so
         the bundle carries grants for it. No-op for other spaces."""
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._channel_tier(space_id):
             await self._channels.on_rotation(space_id)
 
     async def channel_rekey_sent(self, space_id: str) -> None:
@@ -373,7 +373,7 @@ class GfsMemberPublishService:
         private space's channel service renews our own seat now, as the
         members renew theirs on that rekey
         (:meth:`GfsChannelService.on_rekey_sent`). No-op for other spaces."""
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._channel_tier(space_id):
             await self._channels.on_rekey_sent(space_id)
 
     def wire(self, bus: EventBus) -> None:

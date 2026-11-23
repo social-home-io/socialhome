@@ -509,8 +509,8 @@ class GfsChannelService:
     # ── Owner: create / keep / retire ────────────────────────────────────
 
     async def eligible(self, space: Space, *, joining: str | None = None) -> bool:
-        """A PRIVATE space we own whose owner turned ``private_gfs`` ON, our
-        seed matching the pin, with at least one live remote member household
+        """A space we own that may use a channel (:func:`channel_on`: GLOBAL,
+        or PRIVATE with ``private_gfs`` ON), our seed matching the pin, with at least one live remote member household
         — link-joined, paired or mesh-only (``joining`` counts too: the
         seat-live event fires before its ``space_instances`` row lands). A
         space with the option OFF never gets a channel."""
@@ -595,9 +595,7 @@ class GfsChannelService:
             space_id, channel_id, channel_pk_of(channel_seed)
         ):
             return "none"
-        log.info(
-            "gfs.channel: started channel %s for private space %s", channel_id, space_id
-        )
+        log.info("gfs.channel: started channel %s for space %s", channel_id, space_id)
         return "created"
 
     async def _register_all(
@@ -747,7 +745,7 @@ class GfsChannelService:
         self._registered.pop(channel_id, None)
         await self._spaces.set_gfs_channel(space.id, None, None)
         log.info(
-            "gfs.channel: retired channel %s — private space %s no longer uses "
+            "gfs.channel: retired channel %s — space %s no longer uses "
             "the connection server",
             channel_id,
             space.id,
@@ -1020,7 +1018,10 @@ class GfsChannelService:
         if not channel_on(space):
             # The option went off, or the space left the global tier.
             await self.drop_stale(space_id)
-        elif space.space_type is SpaceType.PRIVATE:
+        else:
+            # PRIVATE with the option on, or GLOBAL — a grant that arrived
+            # before the config that made the space a channel tier takes its
+            # seat now (a no-op without a grant for the current epoch).
             self._spawn(self.subscribe(space_id), "subscribe")
 
     async def drop_stale(self, space_id: str) -> bool:
@@ -1307,7 +1308,7 @@ class GfsChannelService:
                     if await self.subscribe(space.id, only=gfs_id):
                         done += 1
             except Exception:
-                log.exception("gfs.channel: heal failed for a private space")
+                log.exception("gfs.channel: heal failed for a channel space")
         return done
 
     async def on_gfs_rebound(self, gfs_id: str) -> None:
@@ -1975,7 +1976,16 @@ class GfsChannelService:
         seed = await self._matching_seed(space)
         if found is None or seed is None:
             return None
-        gfs_ids = (await self._channel_gfs_ids(space))[:MAX_GRANT_GFS_IDS]
+        gfs_ids = await self._channel_gfs_ids(space)
+        if not gfs_ids:
+            # Not re-registered in this process yet (a restart before the
+            # reconnect's heal): the chosen capable servers — the channel
+            # lives there; a server that lost it refuses, and that item is
+            # retried like any transient failure.
+            gfs_ids = tuple(
+                sorted(c.gfs_instance_id for c in await self._chosen_capable(space))
+            )
+        gfs_ids = gfs_ids[:MAX_GRANT_GFS_IDS]
         if not gfs_ids:
             return None
         channel_id, channel_seed = found
@@ -2006,6 +2016,11 @@ class GfsChannelService:
         servers took it on the first attempt."""
         targets = await self.plan(space_id)
         if not targets:
+            log.info(
+                "gfs.channel: no channel server to publish an authority item of "
+                "space %s to right now — federation carries it",
+                space_id,
+            )
             return 0
         return len(await self.publish_sealed(space_id, epoch, ciphertext, targets))
 

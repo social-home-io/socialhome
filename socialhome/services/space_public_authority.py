@@ -164,14 +164,23 @@ def approved_relay_for(relay: object, *, post: Post, space_id: str) -> dict | No
     return out
 
 
+def _signed_payload(bare: dict, epoch: int) -> dict:
+    """What the authority signs for a channel authority item: the inner and
+    the content epoch it is sealed under — so a key holder cannot re-seal an
+    old item under a later epoch (the space-keyed envelope signed its epoch
+    too)."""
+    return {"epoch": epoch, "inner": bare}
+
+
 def channel_authority_plaintext(
-    inner: dict, *, space_id: str, space_seed: bytes
+    inner: dict, *, space_id: str, epoch: int, space_seed: bytes
 ) -> bytes:
-    """The channel plaintext of an authority item (v_96): *inner* signed by
-    the space authority (event ``space_channel_authority``, over the inner
-    without its signature fields and padding) and wrapped as
-    ``{"item_type": "authority", "inner": …}``, padded to the item size
-    buckets like any channel item (JSON: a channel carries JSON only)."""
+    """The channel plaintext of an authority item (v_96): *inner* (without
+    its signature fields and padding) and the content *epoch* it is sealed
+    under, signed by the space authority (event ``space_channel_authority``)
+    and wrapped as ``{"item_type": "authority", "epoch": …, "inner": …}``,
+    padded to the item size buckets like any channel item (JSON: a channel
+    carries JSON only)."""
     bare = {
         k: v for k, v in strip_authority_sig_fields(inner).items() if k != PAD_FIELD
     }
@@ -180,21 +189,25 @@ def channel_authority_plaintext(
         **sign_authority_event(
             event_type=AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
             space_id=space_id,
-            payload=bare,
+            payload=_signed_payload(bare, epoch),
             space_seed=space_seed,
         ),
     }
-    return pad_json_object({"item_type": CHANNEL_AUTHORITY_ITEM_TYPE, "inner": signed})
+    return pad_json_object(
+        {"item_type": CHANNEL_AUTHORITY_ITEM_TYPE, "epoch": epoch, "inner": signed}
+    )
 
 
 def open_channel_authority(
-    opened: bytes, *, space_id: str, space_pubkey_hex: str
+    opened: bytes, *, space_id: str, epoch: int, space_pubkey_hex: str
 ) -> dict | None:
     """The authority inner of an opened channel plaintext, or ``None``: not
     an authority item (``item_type`` other than ``authority`` — an ordinary
-    channel item), or one whose space-authority signature does not verify
-    against the pinned key for *space_id* (an unknown suite included — no
-    default). The returned inner has its signature fields removed."""
+    channel item), one signed for another content epoch than the *epoch*
+    the frame was sealed under, or one whose space-authority signature does
+    not verify against the pinned key for *space_id* (an unknown suite
+    included — no default). The returned inner has its signature fields
+    removed."""
     try:
         body = orjson.loads(opened)
     except ValueError:
@@ -205,14 +218,20 @@ def open_channel_authority(
     ):
         return None
     inner = body.get("inner")
-    if not isinstance(inner, dict):
+    signed_epoch = body.get("epoch")
+    if (
+        not isinstance(inner, dict)
+        or not isinstance(signed_epoch, int)
+        or isinstance(signed_epoch, bool)
+        or signed_epoch != epoch
+    ):
         return None
     bare = strip_authority_sig_fields(inner)
     try:
         ok = verify_authority_event(
             event_type=AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
             space_id=space_id,
-            payload=bare,
+            payload=_signed_payload(bare, epoch),
             authority_sig=str(inner.get("authority_sig") or ""),
             authority_sig_suite=str(inner.get("authority_sig_suite") or ""),
             space_public_key=bytes.fromhex(space_pubkey_hex),
