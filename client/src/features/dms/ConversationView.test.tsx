@@ -542,6 +542,27 @@ describe('ConversationView — composer emoji picker', () => {
   })
 })
 
+describe('ConversationView — picked emoji at the caret', () => {
+  it('replaces the selection and gives focus and the caret back to the field', async () => {
+    const { render, waitFor, fireEvent, ConversationView } = await setup()
+    const { container } = render(<ConversationView conversationId="conv-a" embedded />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-composer-emoji-inline')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    const ta = container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.input(ta, { target: { value: 'see you soon' } })
+    ta.setSelectionRange(8, 12)
+    fireEvent.click(container.querySelector('.sh-composer-emoji-inline')!)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-reaction-frequent .sh-emoji-btn')).not.toBeNull()
+    })
+    fireEvent.click(container.querySelector('.sh-reaction-frequent .sh-emoji-btn')!)
+    expect(ta.value).toBe('see you 👍')
+    await waitFor(() => { expect(document.activeElement).toBe(ta) })
+    expect(ta.selectionStart).toBe('see you 👍'.length)
+  })
+})
+
 describe('ConversationView — embedded, after leaving', () => {
   it('without onLeave shows a neutral note instead of a dead thread', async () => {
     const { render, waitFor, fireEvent, ConversationView } = await setup()

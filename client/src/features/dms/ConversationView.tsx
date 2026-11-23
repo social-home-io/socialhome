@@ -1682,7 +1682,7 @@ export function ConversationView({
   /** Replace ``ta.value[start:end]`` with ``emoji`` and place the caret
    *  immediately after the inserted glyph. Shared by the
    *  ``:shortcode`` autocomplete (range = the typed token) and the
-   *  ``EmojiPickButton`` (range = current caret position). */
+   *  ``EmojiPickButton`` (range = the caret, or the selection). */
   const spliceEmojiIntoTextarea = (emoji: string, range: [number, number]) => {
     const ta = composerInputRef.current
     if (!ta) return
@@ -1700,12 +1700,13 @@ export function ConversationView({
     })
   }
 
-  /** Picker-button entry point — inserts at the current caret position. */
+  /** Picker-button entry point — at the caret, replacing a selection
+   *  like typing would. */
   const insertEmojiAtCursor = (emoji: string) => {
     const ta = composerInputRef.current
     if (!ta) return
-    const pos = ta.selectionStart ?? ta.value.length
-    spliceEmojiIntoTextarea(emoji, [pos, pos])
+    const start = ta.selectionStart ?? ta.value.length
+    spliceEmojiIntoTextarea(emoji, [start, ta.selectionEnd ?? start])
   }
 
   /** Slack-style ``:foo:`` → glyph: scan the textarea value for closed

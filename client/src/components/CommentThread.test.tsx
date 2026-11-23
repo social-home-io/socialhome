@@ -16,6 +16,7 @@ vi.mock('@/components/PersonSheet', () => ({
 }))
 
 import { spaceMembers } from '@/store/spaceMembers'
+import { clearTextDraft } from '@/store/textDrafts'
 import { CommentThread, commentFieldCap } from './CommentThread'
 
 const others = {
@@ -44,6 +45,10 @@ beforeEach(() => {
   cleanup()
   me.is_admin = false
   spaceMembers.value = {}
+  for (const post of ['p-1', 'p-a', 'p-b']) {
+    clearTextDraft(`comment:${post}`)
+    clearTextDraft(`comment:${post}:reply:c-1`)
+  }
 })
 
 describe('CommentThread', () => {
@@ -275,5 +280,138 @@ describe('commentFieldCap', () => {
   })
   it('keeps at least three lines on a tiny visible area (keyboard up)', () => {
     expect(commentFieldCap(150)).toBe(72)
+  })
+})
+
+describe('drafts are per post', () => {
+  const newField = (c: Element) =>
+    c.querySelector<HTMLTextAreaElement>('#sh-comment-new-input')!
+
+  it('text typed under post A does not show under post B, and comes back on A', () => {
+    const r = render(<CommentThread comments={[]} postId="p-a" onReply={vi.fn()} />)
+    fireEvent.input(newField(r.container), { target: { value: 'for A only' } })
+    // The comment sheet is reused for the next post.
+    r.rerender(<CommentThread comments={[]} postId="p-b" onReply={vi.fn()} />)
+    expect(newField(r.container).value).toBe('')
+    r.rerender(<CommentThread comments={[]} postId="p-a" onReply={vi.fn()} />)
+    expect(newField(r.container).value).toBe('for A only')
+  })
+
+  it('two threads on screen keep their own text', () => {
+    const a = render(<CommentThread comments={[]} postId="p-a" onReply={vi.fn()} />)
+    const b = render(<CommentThread comments={[]} postId="p-b" onReply={vi.fn()} />)
+    fireEvent.input(newField(a.container), { target: { value: 'A' } })
+    expect(newField(b.container).value).toBe('')
+  })
+
+  it('a reply draft belongs to its post and its comment', () => {
+    const r = render(<CommentThread comments={[others]} postId="p-a" onReply={vi.fn()} />)
+    fireEvent.click(r.getByText('Reply'))
+    const reply = () => r.container.querySelector<HTMLTextAreaElement>('#sh-comment-reply-input')
+    fireEvent.input(reply()!, { target: { value: 'reply on A' } })
+    r.rerender(<CommentThread comments={[others]} postId="p-b" onReply={vi.fn()} />)
+    // Same comment id under another post: the form is open, its own text empty.
+    expect(reply()!.value).toBe('')
+    r.rerender(<CommentThread comments={[others]} postId="p-a" onReply={vi.fn()} />)
+    expect(reply()!.value).toBe('reply on A')
+  })
+
+  it('a send in progress on post A does not block or disable post B', async () => {
+    let finish: () => void = () => {}
+    const slow = vi.fn(() => new Promise<void>((res) => { finish = res }))
+    const a = render(<CommentThread comments={[]} postId="p-a" onReply={slow} />)
+    const fast = vi.fn().mockResolvedValue(undefined)
+    const b = render(<CommentThread comments={[]} postId="p-b" onReply={fast} />)
+    fireEvent.input(newField(a.container), { target: { value: 'A' } })
+    fireEvent.keyDown(newField(a.container), { key: 'Enter' })
+    expect(slow).toHaveBeenCalledTimes(1)
+    fireEvent.input(newField(b.container), { target: { value: 'B' } })
+    const post = b.getByText('Post').closest('button')!
+    expect(post.disabled).toBe(false)
+    fireEvent.click(post)
+    expect(fast).toHaveBeenCalledWith(null, 'B')
+    finish()
+    await waitFor(() => expect(newField(a.container).value).toBe(''))
+  })
+
+  it('text typed while a send is on its way is kept', async () => {
+    let finish: () => void = () => {}
+    const slow = vi.fn(() => new Promise<void>((res) => { finish = res }))
+    const a = render(<CommentThread comments={[]} postId="p-a" onReply={slow} />)
+    fireEvent.input(newField(a.container), { target: { value: 'first' } })
+    fireEvent.keyDown(newField(a.container), { key: 'Enter' })
+    fireEvent.input(newField(a.container), { target: { value: 'first and more' } })
+    finish()
+    await waitFor(() => expect(slow).toHaveBeenCalledWith(null, 'first'))
+    await new Promise((res) => setTimeout(res, 0))
+    expect(newField(a.container).value).toBe('first and more')
+  })
+
+  it('a failed send keeps the text; a successful one clears only that post', async () => {
+    const fail = vi.fn().mockRejectedValue(new Error('offline'))
+    const a = render(<CommentThread comments={[]} postId="p-a" onReply={fail} />)
+    const b = render(<CommentThread comments={[]} postId="p-b" onReply={vi.fn().mockResolvedValue(undefined)} />)
+    fireEvent.input(newField(a.container), { target: { value: 'try again' } })
+    fireEvent.input(newField(b.container), { target: { value: 'goes out' } })
+    fireEvent.keyDown(newField(a.container), { key: 'Enter' })
+    await waitFor(() => expect(fail).toHaveBeenCalled())
+    expect(newField(a.container).value).toBe('try again')
+    fireEvent.keyDown(newField(b.container), { key: 'Enter' })
+    await waitFor(() => expect(newField(b.container).value).toBe(''))
+    expect(newField(a.container).value).toBe('try again')
+  })
+})
+
+describe('the emoji button in a comment', () => {
+  it('puts the emoji at the caret and gives the caret back to the field', async () => {
+    const r = render(<CommentThread comments={[]} postId="p-a" onReply={vi.fn()} />)
+    const field = r.container.querySelector<HTMLTextAreaElement>('#sh-comment-new-input')!
+    fireEvent.input(field, { target: { value: 'hello world' } })
+    field.setSelectionRange(5, 5)
+    fireEvent.click(r.container.querySelector('.sh-emoji-pick-btn')!)
+    fireEvent.click(r.container.querySelector('.sh-reaction-frequent .sh-emoji-btn')!)
+    await waitFor(() => expect(field.value).toBe('hello👍 world'))
+    await waitFor(() => expect(document.activeElement).toBe(field))
+    expect(field.selectionStart).toBe('hello👍'.length)
+    expect(field.selectionEnd).toBe('hello👍'.length)
+  })
+
+  it('replaces a selection, like typing would', async () => {
+    const r = render(<CommentThread comments={[]} postId="p-a" onReply={vi.fn()} />)
+    const field = r.container.querySelector<HTMLTextAreaElement>('#sh-comment-new-input')!
+    fireEvent.input(field, { target: { value: 'hello world' } })
+    field.setSelectionRange(6, 11)
+    fireEvent.click(r.container.querySelector('.sh-emoji-pick-btn')!)
+    fireEvent.click(r.container.querySelector('.sh-reaction-frequent .sh-emoji-btn')!)
+    await waitFor(() => expect(field.value).toBe('hello 👍'))
+  })
+})
+
+describe('Escape in a comment field', () => {
+  function withSheet(run: (sheetEscape: ReturnType<typeof vi.fn>) => void) {
+    const sheetEscape = vi.fn()
+    document.addEventListener('keydown', sheetEscape)
+    try { run(sheetEscape) } finally { document.removeEventListener('keydown', sheetEscape) }
+  }
+
+  it('with the :emoji list open closes only the list', () => {
+    withSheet((sheetEscape) => {
+      const r = render(<CommentThread comments={[]} postId="p-a" onReply={vi.fn()} />)
+      const field = r.container.querySelector<HTMLTextAreaElement>('#sh-comment-new-input')!
+      fireEvent.input(field, { target: { value: 'nice :smi' } })
+      expect(r.container.querySelector('.sh-emoji-autocomplete')).not.toBeNull()
+      fireEvent.keyDown(field, { key: 'Escape' })
+      expect(r.container.querySelector('.sh-emoji-autocomplete')).toBeNull()
+      expect(sheetEscape).not.toHaveBeenCalled()
+    })
+  })
+
+  it('with no list open still reaches the sheet, which closes', () => {
+    withSheet((sheetEscape) => {
+      const r = render(<CommentThread comments={[]} postId="p-a" onReply={vi.fn()} />)
+      const field = r.container.querySelector<HTMLTextAreaElement>('#sh-comment-new-input')!
+      fireEvent.keyDown(field, { key: 'Escape' })
+      expect(sheetEscape).toHaveBeenCalledTimes(1)
+    })
   })
 })
