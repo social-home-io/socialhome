@@ -254,7 +254,7 @@ copy cost (n−1) + (n−1)(n−2) + (n−1)(n−2)(n−3) envelopes per moment
 
 ## Reach — how far a person's moments go (v_96, design)
 
-Owner decisions 2026-11-23. Status: **design (P0)** — the sections above
+Owner decisions 2026-11-23. Status: **design, being built** — the sections above
 still describe what ships until the phases below land.
 
 ### Rules
@@ -288,7 +288,7 @@ neither raise it, strip it nor splice it onto another moment:
 
 | Reach | On the wire | Signed bytes | Origin sends to |
 |---|---|---|---|
-| 1 | ``no_relay: true`` (the v_38 mark) | ``moment-origin:v2:`` (unchanged) | ≥ v_38 peers (protected, as today) — see open question B for a chosen 1 |
+| 1 | ``no_relay: true`` (the v_38 mark) | ``moment-origin:v2:`` (unchanged) | ≥ v_38 peers (protected or chosen — both honour the signed mark) |
 | 2, 4, 5 | ``reach: N`` | ``moment-origin:v3:`` = the v1 fields **plus** ``reach`` | 2: ≥ v_96 peers · 4–5: every peer |
 | 3 | nothing new | ``moment-origin:v1:``, byte for byte | every peer (as today) |
 
@@ -386,13 +386,13 @@ Already true for viewers' ``max_hops`` (pure pass-through,
 ### Older peers (< v_96)
 
 * reach 2 ⇒ the moment is not sent to them at all (they would relay it
-  to 3 hops). Protected accounts keep today's v_38 gate (they honour the
-  signed ``no_relay``). The setting's help text says so.
+  to 3 hops). Reach 1 (protected or chosen) keeps the v_38 gate — they
+  honour the signed ``no_relay``. The setting's help text says so.
 * reach 4–5 ⇒ an older household **paired with the author** gets it (a
   direct delivery is bound by its envelope, no origin check) and relays it
   verbatim up to hop 3; an older household **further away** can't verify
   the v3 bytes and drops it — it sees that person's moments again once it
-  updates (open question A). Hops 4–5 beyond an older relay are lost.
+  updates (owner answer A). Hops 4–5 beyond an older relay are lost.
 * No sync stream carries moments, so ``SYNC_RECORD_LINES`` is unchanged.
 * **Outbox** (F5): relayed creates and totals go under a relayed outbox
   key and are evicted first, like relayed deletes, so strangers' moments
@@ -453,43 +453,71 @@ creates/day — at d = 10, reach 5; past that a replayed create younger than
 ≈ 45 min for a peer that is offline at d = 10, reach 5 (≈ 14 h at d = 5) —
 hence relayed rows are evicted first (above).
 
-**Worst case:** d = 10, everyone at reach 5, a large tree-like network:
-≈ 74 000 envelopes per moment, ≈ 590 MB/day upload per household. Today's
-mesh is far smaller (the network saturates long before 74 000 households),
-but this is the shape that grows with adoption.
+Without a bound the worst case is d = 10, everyone at reach 5, a large
+tree-like network: ≈ 74 000 envelopes per moment, ≈ 590 MB/day upload per
+household. Hence decision C.
 
-### Proposed bound (needs owner sign-off — not built)
+### Bound for hops 4–5: only toward who looks (decision C)
 
-Hops 4–5 go only toward households where someone looks that far. A v_96
-household tells its paired peers one number, ``moment_look_hops`` — the
-largest ``max_hops`` among its non-protected people — in
-``INSTANCE_CAPABILITIES_UPDATED`` (sent on change); a relay sends
-a hop ≥ 4 copy only to a peer whose ``moment_look_hops ≥`` that hop. With
-the viewer default at 3, hop 4–5 traffic then exists only toward people
-who opted in, and the d = 10 per-household load drops back to the reach-3
-row plus the opt-ins. Cost of the bound: one integer per peer on a message
-already sent; it tells a paired household "someone here looks N hops", no
-more. Trade-offs: a hop-5 household is reached only through a hop-4
-household that also looks ≥ 4, and a follower whose ``max_hops`` is 3 no
-longer gets a followed author's hop-4–5 moments over the mesh (a GFS
-follow still does). Alternatives: a per-household daily budget for hop ≥ 4
-forwards (a rate limit — a backstop, not a design), or capping reach at 4.
+A v_96 household tells its paired peers one number, ``moment_look_hops``
+— the largest ``max_hops`` among its non-protected people (1–5) — in
+``INSTANCE_CAPABILITIES_UPDATED``, sent when it changes. A relay sends a
+hop-4 or hop-5 copy only to a peer whose ``moment_look_hops`` is at least
+that hop (a peer that sent none — older, or not yet heard from — counts as
+3). Hops 1–3 are unchanged.
 
-### Open questions for the owner
+Trade-offs (accepted by the owner):
 
-* **A — reach 4–5 and older households further away.** With one signed
-  shape, an older household not paired with the author drops a reach-4–5
-  moment until it updates (a reach-3 one it still gets). Keeping them
-  would need a second, strippable signature beside the v1 bytes — and the
-  review showed a relay could then cut a reach-5 moment to 3 for everyone
-  behind it. Recommended: one shape (as written).
-* **B — a chosen reach 1.** Households since v_38 honour the signed
-  ``no_relay`` mark, so a person who picks 1 could reach v_38–v_95 paired
-  households too (as a protected account does). The decision says "below
-  3 ⇒ only v_96". Recommended: v_38 for 1, v_96 for 2; the help text then
-  speaks of 2 hops only.
-* **C — the bound above** (``moment_look_hops``) or another one, before
-  hops 4–5 ship.
+* a paired household learns one number: "someone here looks *N* hops" —
+  not who, not which authors;
+* a hop-5 household is reached only through a hop-4 household that itself
+  looks ≥ 4;
+* a follower whose ``max_hops`` is 3 no longer gets a followed author's
+  hop-4–5 moments over the mesh (a GFS follow still does).
+
+**Cost with the bound.** Let *p* be the share of households whose
+``moment_look_hops ≥ 4`` and *q* the share ≥ 5 (viewer default 3, so both
+are opt-ins; *p* = 10 %, *q* = 5 % below). Per moment, tree bound, reach 5:
+
+| d | reach 3 | reach 5, no bound | reach 5, bound | × vs reach 3 |
+|---|---|---|---|---|
+| 3 | 21 | 93 | 21 + 1.2 + 0.0 ≈ 23 | 1.1 |
+| 5 | 105 | 1 705 | 105 + 32 + 0.8 ≈ 138 | 1.3 |
+| 10 | 910 | 73 810 | 910 + 729 + 33 ≈ 1 672 | 1.8 |
+
+(hop 4: hop-3 households × (d−1) × *p*; hop 5: those lookers × (d−1) × *q*.)
+
+Per household per day, creates, 2–2.5 KB envelopes, everyone at reach 5:
+a household forwards authors within 2 hops to all *d − 1* peers (the
+reach-3 load) and authors 3 hops away only to its looking peers:
+
+| d | reach 3 | reach 5, bound (*p* = 10 %) | reach 5, no bound |
+|---|---|---|---|
+| 3 | 0.15 MB | 0.15 + 0.02 ≈ 0.2 MB | 0.7 MB |
+| 5 | 0.8 MB | 0.8 + 0.3 ≈ 1.1 MB | 14 MB |
+| 10 | 7 MB | 7 + 7 ≈ 14 MB | 590 MB |
+
+A household that itself looks 5 hops additionally receives and stores the
+moments of authors 4–5 hops away through looking peers — the cost lands on
+whoever asked for it. **Worst case with the bound:** every household opts
+in to 5 (*p* = *q* = 100 %) — then it is the unbounded row again, but only
+because everyone asked to see that far; the seen-map overflow and the
+outbox eviction above still hold the per-household memory bounded.
+
+### Owner answers (2026-11-23)
+
+* **A — one signed shape.** An older household not paired with the author
+  drops a reach-4–5 moment until it updates (a reach-3 one it still gets).
+  The reach setting's help text says so.
+* **B — reach 1** uses the signed ``no_relay`` mark and goes to paired
+  households from **v_38** on; only reach 2 needs v_96. The help text says
+  older households don't get moments while the reach is 2.
+* **C — the bound above**, viewer default stays 3.
+* Accepted too: the relay clamp, signed deletes (with the protected-account
+  delete fix), relayed outbox rows evicted first, ``MAX_RETURN_TOKENS = 4``,
+  reply reach = min(own, parent), the ``moments.reach`` column with its
+  audit. Protocol version **v_96** on main (the follower branch
+  ``feat/subscriber-seats`` renumbers to v_97).
 
 ## Per-user max-hops visibility (§Momentum-relay-policy)
 
