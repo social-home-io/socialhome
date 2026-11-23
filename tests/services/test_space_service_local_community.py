@@ -353,20 +353,20 @@ async def test_follow_inside_outside_and_near_the_edge(stack):
     space = await _community(stack, features=SpaceFeatures(allow_subscribers=True))
     _home(stack, own=BERN)
     with pytest.raises(OutsideAreaError):
-        await stack.svc.subscribe_to_space(stack.ben.user_id, space.id)
+        await stack.svc.follow_space(stack.ben.user_id, space.id)
     _home(stack, own=EDGE)
     with pytest.raises(JoinRequestSentError) as exc:
-        await stack.svc.subscribe_to_space(stack.ben.user_id, space.id)
+        await stack.svc.follow_space(stack.ben.user_id, space.id)
     assert exc.value.code == "JOIN_REQUEST_SENT"
     rid = exc.value.params["request_id"]
     assert [r["id"] for r in await _pending(stack, space.id)] == [rid]
     # Asking again answers with the same request — no second row or check.
     with pytest.raises(JoinRequestSentError) as again:
-        await stack.svc.subscribe_to_space(stack.ben.user_id, space.id)
+        await stack.svc.follow_space(stack.ben.user_id, space.id)
     assert again.value.params["request_id"] == rid
     assert len(await _pending(stack, space.id)) == 1
     _home(stack, own=NEAR)
-    await stack.svc.subscribe_to_space(stack.carl.user_id, space.id)
+    await stack.svc.follow_space(stack.carl.user_id, space.id)
     seat = await stack.repo.get_member(space.id, stack.carl.user_id)
     assert seat is not None and seat.role == SpaceRole.SUBSCRIBER
 

@@ -15,6 +15,7 @@ the admin UI sees pending work. Also emits a local
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ...domain.events import (
@@ -23,8 +24,13 @@ from ...domain.events import (
     RemoteSpaceInviteReceived,
 )
 from ...domain.federation import FederationEventType
-from ...domain.local_community import parse_join_location
-from ...domain.space import PUBLIC_SPACE_TIERS, JoinMode, SpacePermissionError
+from ...domain.local_community import Eligibility, parse_join_location
+from ...domain.space import (
+    PUBLIC_SPACE_TIERS,
+    JoinMode,
+    SpacePermissionError,
+    SpaceRole,
+)
 from ...infrastructure.event_bus import EventBus
 from ..local_community import (
     LocalAreaBudget,
@@ -51,12 +57,19 @@ _HOST_ANSWERS = frozenset({"approved", "denied", "expired"})
 #: copy of a request that household filed.
 _APPLICANT_ANSWERS = frozenset({"withdrawn"})
 
+#: The host's automatic approval of a follow (v_96) —
+#: ``SpaceService.approve_remote_follow``: keyword-only ``space_id``,
+#: ``instance_id``, ``user_id``, ``request_id``, ``applicant_pk``,
+#: ``area_verdict``; ``True`` when it approved.
+FollowApprover = Callable[..., Awaitable[bool]]
+
 
 class SpaceInviteInboundHandlers:
     """Register invitation + join-request inbound handlers."""
 
     __slots__ = (
         "_bus",
+        "_follow_approver",
         "_local_area_budget",
         "_own_instance_id",
         "_space_repo",
@@ -77,6 +90,15 @@ class SpaceInviteInboundHandlers:
         #: Set by :meth:`attach_to`; until then no space is "ours", so a
         #: join request is refused (fail closed).
         self._own_instance_id = ""
+        #: Approves a follow (v_96) — :meth:`attach_follow_approver`; until
+        #: then a follow is dropped (fail closed).
+        self._follow_approver: FollowApprover | None = None
+
+    def attach_follow_approver(self, approver: FollowApprover) -> None:
+        """Wire the host's automatic approval of a follow
+        (``SpaceService.approve_remote_follow``). The service is built after
+        these handlers, so it is attached once it exists."""
+        self._follow_approver = approver
 
     def attach_to(self, federation_service: FederationService) -> None:
         self._own_instance_id = federation_service.own_instance_id
@@ -146,11 +168,24 @@ class SpaceInviteInboundHandlers:
     # ─── Join requests ──────────────────────────────────────────────────
 
     async def _on_join_request(self, event: FederationEvent) -> None:
-        """A remote user wants to join a local space."""
+        """A remote user wants to join a local space — or, with
+        ``requested_role = subscriber`` (v_96), to follow it."""
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
         if not space_id or not user_id:
             log.debug("SPACE_JOIN_REQUEST missing required field")
+            return
+        requested_role = event.payload.get("requested_role")
+        if requested_role:
+            if requested_role != SpaceRole.SUBSCRIBER.value:
+                log.warning(
+                    "SPACE_JOIN_REQUEST from %s for space %s refused: "
+                    "unknown requested role",
+                    event.from_instance,
+                    space_id,
+                )
+                return
+            await self._on_follow_request(event, space_id=space_id, user_id=user_id)
             return
         space = await self._space_repo.get(space_id)
         if not self._takes_remote_join_requests(space):
@@ -229,6 +264,110 @@ class SpaceInviteInboundHandlers:
             applicant_pk=str(applicant_pk) if applicant_pk else None,
             message=str(message) if message else None,
             request_id=str(request_id) if request_id else None,
+        )
+
+    async def _on_follow_request(
+        self, event: FederationEvent, *, space_id: str, user_id: str
+    ) -> None:
+        """A remote user wants to follow a local space (v_96): the join path
+        with the read-only role, approved on its own while the space takes
+        followers — whatever its join mode. Banned, already asked or
+        outside a local community: dropped. Near a local community's edge:
+        an ordinary request for the admins, as a local follow near the edge
+        is. Everything else is re-checked by the approver."""
+        space = await self._space_repo.get(space_id)
+        if not self._takes_remote_follows(space):
+            log.warning(
+                "follow from %s for space %s refused: not a public / global "
+                "space this household hosts that takes followers",
+                event.from_instance,
+                space_id,
+            )
+            return
+        assert space is not None
+        if await self._space_repo.is_banned(space_id, user_id):
+            log.info(
+                "follow from %s refused: applicant banned from %s",
+                event.from_instance,
+                space_id,
+            )
+            return
+        if (
+            await pending_join_request_id(
+                self._space_repo,
+                space_id,
+                user_id,
+                household_instance_id=event.from_instance,
+            )
+            is not None
+        ):
+            log.debug(
+                "follow from %s for %s: already pending", event.from_instance, space_id
+            )
+            return
+        try:
+            verdict = await require_local_eligibility(
+                space,
+                household_instance_id=event.from_instance,
+                own_instance_id=self._own_instance_id,
+                join_point=parse_join_location(event.payload.get("join_location")),
+                budget=self._local_area_budget,
+                seeker_user_id=user_id,
+            )
+        except SpacePermissionError, RuntimeError:
+            log.info(
+                "follow from %s refused: not eligible for the local community %s",
+                event.from_instance,
+                space_id,
+            )
+            return
+        applicant_pk = event.payload.get("applicant_pk")
+        request_id = event.payload.get("request_id")
+        if verdict is Eligibility.EDGE:
+            message = event.payload.get("message")
+            await file_remote_join_request(
+                self._space_repo,
+                self._bus,
+                space_id=space_id,
+                household_instance_id=event.from_instance,
+                user_id=user_id,
+                area_verdict=verdict,
+                applicant_pk=str(applicant_pk) if applicant_pk else None,
+                message=str(message) if message else None,
+                request_id=str(request_id) if request_id else None,
+            )
+            return
+        if not request_id:
+            log.debug("follow from %s: no request id", event.from_instance)
+            return
+        if self._follow_approver is None:
+            log.warning(
+                "follow from %s for space %s dropped: no approver wired",
+                event.from_instance,
+                space_id,
+            )
+            return
+        await self._follow_approver(
+            space_id=space_id,
+            instance_id=event.from_instance,
+            user_id=user_id,
+            request_id=str(request_id),
+            applicant_pk=str(applicant_pk) if applicant_pk else None,
+            area_verdict=verdict,
+        )
+
+    def _takes_remote_follows(self, space: Space | None) -> bool:
+        """May another household's user follow ``space``? Only a live
+        ``public`` / ``global`` space THIS household hosts with
+        ``allow_subscribers`` on (the join mode does not matter)."""
+        return (
+            space is not None
+            and not space.dissolved
+            and not space.archived
+            and bool(self._own_instance_id)
+            and space.owner_instance_id == self._own_instance_id
+            and space.space_type in PUBLIC_SPACE_TIERS
+            and space.features.allow_subscribers
         )
 
     def _takes_remote_join_requests(self, space: Space | None) -> bool:

@@ -1513,6 +1513,8 @@ class HostTooOldError(Exception):
       forwarded to the host, which must apply ``set_member_role`` (v_47).
     * ``"invite_link"`` — an invite link minted on a member household is
       forwarded to the host, which must mint it and answer (v_52).
+    * ``"follow"`` — a follow is a join request for the read-only role,
+      which the host must approve on its own (v_96).
     """
 
     def __init__(self, host_instance_id: str, *, feature: str = "moderation") -> None:
@@ -1523,6 +1525,9 @@ class HostTooOldError(Exception):
             else "the space's home household needs an update before its "
             "invite links can be managed from another household"
             if feature == "invite_link"
+            else "the space's home household must be updated before the "
+            "space can be followed"
+            if feature == "follow"
             else "the space's host household must be updated before roles "
             "can be changed from another household"
         )

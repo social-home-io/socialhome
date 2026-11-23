@@ -64,6 +64,7 @@ from ..domain.space import (
     HostNotReachableError,
     JoinMode,
     SpacePermissionError,
+    SpaceRole,
     SpaceType,
 )
 from ..services.local_community import (
@@ -211,9 +212,14 @@ class GfsJoinRequestCoordinator:
         applicant_user_id: str,
         host_instance_id: str,
         message: str | None = None,
+        requested_role: SpaceRole | None = None,
     ) -> str:
         """Seal an "Ask to join" to *host_instance_id* through the GFS.
         Returns the request id, kept locally as a pending request.
+
+        ``requested_role`` — :attr:`SpaceRole.SUBSCRIBER` for a follow
+        (v_96). Not used yet: the GFS follow (a sealed ``kind: "follow"``)
+        lands separately; until then the request is sent unchanged.
 
         Raises :class:`HostNotReachableError` when the listing carries no
         usable contact for that host or the relay refuses the blob. Once the

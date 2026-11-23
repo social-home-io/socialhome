@@ -107,6 +107,7 @@ if TYPE_CHECKING:
     from ..federation.invite_bootstrap import InviteBootstrapHint
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
+    from ..repositories.public_space_repo import AbstractPublicSpaceRepo
     from .gfs_mailbox_service import GfsMailboxService
     from .link_preview_service import LinkPreviewService
     from .peer_unpair_service import InstancePurger
@@ -726,6 +727,7 @@ class SpaceService(
         "_pictures",
         "_post_attachments",
         "_posts",
+        "_public_spaces",
         "_redeem_coordinator",
         "_remote_members",
         "_roster_applied",
@@ -824,6 +826,10 @@ class SpaceService(
         #: "Ask to join" through the GFS (v_84) — both ends; unwired, an
         #: unpaired host answers ``NOT_PAIRED`` as before.
         self._gfs_join: GfsJoinRequestCoordinator | None = None
+        #: The cached directory listings (paired and GFS discovery) — where a
+        #: follow of a space we hold no row for finds its host
+        #: (:meth:`attach_public_space_directory`).
+        self._public_spaces: AbstractPublicSpaceRepo | None = None
         #: v_89 — our GFS mailboxes, released when no seat needs them.
         self._mailboxes: GfsMailboxService | None = None
         self._invite_forwarder = None
@@ -1049,6 +1055,12 @@ class SpaceService(
         (leave, kick, ban, dissolve) drops a mailbox nothing needs any more
         (:meth:`revoke_space_session_if_orphaned`)."""
         self._mailboxes = mailboxes
+
+    def attach_public_space_directory(self, repo: AbstractPublicSpaceRepo) -> None:
+        """Wire the cached directory listings: a follow of a space this
+        household holds no row for reads its host and its ``allow_subscribers``
+        off the listing (:meth:`follow_space`)."""
+        self._public_spaces = repo
 
     def attach_gfs_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
         """Wire "Ask to join" through the GFS (v_84): a request to a global
@@ -3869,11 +3881,11 @@ class SpaceService(
             # sealed to them, so a row left behind is a follower reading the
             # space out of the local DB forever with no way to notice. Drop
             # them (they can subscribe again if the owner turns it back on) —
-            # real members are untouched, since ``unsubscribe_from_space``
-            # refuses to demote anything but a subscriber.
+            # real members are untouched, since ``unfollow_space`` refuses
+            # to end anything but a subscriber seat.
             for member in await self._spaces.list_members(space_id):
                 if member.role == SpaceRole.SUBSCRIBER:
-                    await self.unsubscribe_from_space(member.user_id, space_id)
+                    await self.unfollow_space(member.user_id, space_id)
         if location_mode_changed:
             # §23.8.6: refire latest presence so receivers see the new
             # privacy tier within seconds rather than waiting for the
@@ -4640,10 +4652,32 @@ class SpaceService(
             raise SpacePermissionError(
                 "owner cannot be removed (transfer ownership first)"
             )
-        await self._spaces.delete_member(space_id, user_id)
+        await self._end_local_seat(
+            space, target, actor_user_id=actor.user_id, is_self=is_self
+        )
+        if is_self and target.role == SpaceRole.SUBSCRIBER:
+            # A follower leaving (unfollow) does not rotate at once: the
+            # rotation is owed and batched (v_96).
+            return
+        await self._rotate_and_distribute_space_key(space_id)
+
+    async def _end_local_seat(
+        self,
+        space: Space,
+        target: SpaceMember,
+        *,
+        actor_user_id: str,
+        is_self: bool,
+    ) -> None:
+        """End a LOCAL user's seat — a leave (``is_self``) or a removal:
+        the row, :class:`SpaceMemberLeft`, the v_23 roster tombstone, the
+        §CP audit and, for a leave of a space hosted elsewhere, the host's
+        ``SPACE_INSTANCE_LEFT``. The caller decides on the rotation."""
+        user_id = target.user_id
+        await self._spaces.delete_member(space.id, user_id)
         await self._bus.publish(
             SpaceMemberLeft(
-                space_id=space_id,
+                space_id=space.id,
                 user_id=user_id,
                 role=target.role,
             )
@@ -4662,9 +4696,9 @@ class SpaceService(
         if self._child_protection is not None:
             await self._child_protection.record_membership_change(
                 user_id=user_id,
-                space_id=space_id,
+                space_id=space.id,
                 action="removed",
-                actor_id=actor.user_id,
+                actor_id=actor_user_id,
             )
         if is_self and self._hosted_elsewhere(space):
             # v_49 — tell the host. Without this a member household's leave
@@ -4672,7 +4706,6 @@ class SpaceService(
             # host kept the seat, kept fanning content keys out to us and kept
             # issuing us a write cert.
             await self._notify_host_of_leave(space, user_id)
-        await self._rotate_and_distribute_space_key(space_id)
 
     async def _notify_host_of_leave(self, space: Space, user_id: str) -> None:
         """Send the host ``SPACE_INSTANCE_LEFT`` for one of our users (v_49).
@@ -4763,12 +4796,15 @@ class SpaceService(
         follows = admin_ended and await self._authority_rotation_follows(
             space, instance_id
         )
-        await self.rotate_if_writer_scope_weakened(
-            space_id,
-            instance_id,
-            scope_before,
-            authority_rotation_follows=follows,
-        )
+        if any(r.role != SpaceRole.SUBSCRIBER for r in ending):
+            # Only followers leaving: no rotation at once — it is owed and
+            # batched (v_96). Any other seat ending rotates as before.
+            await self.rotate_if_writer_scope_weakened(
+                space_id,
+                instance_id,
+                scope_before,
+                authority_rotation_follows=follows,
+            )
         if admin_ended:
             await self._publish_admin_revoked(
                 space_id,
@@ -8343,7 +8379,7 @@ class SpaceService(
         )
 
     async def _answer_join_request(
-        self, request_id: str, status: str, *, reviewed_by: str
+        self, request_id: str, status: str, *, reviewed_by: str | None
     ) -> None:
         """Move the request out of ``pending`` — atomically, so of two admins
         answering at once exactly one wins. Every side effect (seat, invite
@@ -8471,57 +8507,12 @@ class SpaceService(
         # carried was never kept. A remote applicant's redeem of the token
         # minted below is seated on this approval
         # (``has_approved_join_request``).
-        if remote_instance and self._federation is None:
-            raise RuntimeError(
-                "space_service: federation not attached; "
-                "cannot approve remote join request",
-            )
-        await self._answer_join_request(
-            request_id, "approved", reviewed_by=actor.user_id
-        )
         if remote_instance:
-            # §D2 — cross-household approval. Mint an invite token and
-            # federate it back; the applicant's household consumes via
-            # the existing POST /api/spaces/join path.
-            assert self._federation is not None
-            # Asked through the GFS (v_84): the answer may wait in the GFS
-            # queue while the applicant is offline, and the applicant then
-            # retries its redeem — so its token lives as long as both.
-            via_gfs = bool(row.get("gfs_relay")) and self._gfs_join is not None
-            ttl = APPROVAL_TOKEN_TTL if via_gfs else timedelta(minutes=5)
-            expires = (datetime.now(UTC) + ttl).isoformat()
-            token = await self._spaces.create_invite_token(
-                row["space_id"],
-                created_by=actor.user_id,
-                uses=1,
-                expires_at=expires,
-                # Redeemable by the approved household and person only — an
-                # approval is not a link to pass on.
-                bound_instance_id=str(remote_instance),
-                bound_user_id=str(row["user_id"]),
+            # §D2 — cross-household approval: a bound single-use token,
+            # federated back; the applicant's household redeems it.
+            await self._approve_remote_join_request(
+                row, request_id, reviewed_by=actor.user_id, role=SpaceRole.MEMBER
             )
-            if via_gfs:
-                assert self._gfs_join is not None
-                await self._gfs_join.send_answer(
-                    row,
-                    answer="approved",
-                    invite_token=token,
-                    token_expires_at=expires,
-                )
-            else:
-                # Direct when paired, else over the mesh (sealed end to end):
-                # an applicant whose request came from a link redeem or an
-                # invite accept may not be paired with us.
-                await self._federation.send_with_mesh_fallback(
-                    to_instance_id=remote_instance,
-                    event_type=FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
-                    payload={
-                        "request_id": request_id,
-                        "space_id": row["space_id"],
-                        "invite_token": token,
-                        "reviewed_by": actor.user_id,
-                    },
-                )
             await self._bus.publish(
                 SpaceJoinApproved(
                     space_id=row["space_id"],
@@ -8531,7 +8522,9 @@ class SpaceService(
                 )
             )
             return None
-
+        await self._answer_join_request(
+            request_id, "approved", reviewed_by=actor.user_id
+        )
         member = SpaceMember(
             space_id=row["space_id"],
             user_id=row["user_id"],
@@ -8555,6 +8548,158 @@ class SpaceService(
             )
         )
         return member
+
+    async def _approve_remote_join_request(
+        self,
+        row: dict,
+        request_id: str,
+        *,
+        reviewed_by: str | None,
+        role: SpaceRole,
+    ) -> str:
+        """Approve a REMOTE applicant's pending request — the one path every
+        remote approval takes (an admin's click, an auto-approved follow).
+
+        Moves the request to ``approved`` (once — a second answer raises
+        :class:`JoinRequestHandledError` before anything is minted), mints a
+        single-use token bound to the applicant household and person with
+        ``role`` as its seat, and answers the applicant: through the GFS
+        when the request came that way (v_84), else directly or over the
+        mesh. ``reviewed_by`` is the admin who decided, ``None`` for an
+        automatic approval (then the answer names nobody). Returns the
+        token. Raises ``RuntimeError`` without federation.
+        """
+        if self._federation is None:
+            raise RuntimeError(
+                "space_service: federation not attached; "
+                "cannot approve remote join request",
+            )
+        remote_instance = str(row["remote_applicant_instance_id"])
+        await self._answer_join_request(request_id, "approved", reviewed_by=reviewed_by)
+        # Asked through the GFS (v_84): the answer may wait in the GFS
+        # queue while the applicant is offline, and the applicant then
+        # retries its redeem — so its token lives as long as both.
+        via_gfs = bool(row.get("gfs_relay")) and self._gfs_join is not None
+        ttl = APPROVAL_TOKEN_TTL if via_gfs else timedelta(minutes=5)
+        expires = (datetime.now(UTC) + ttl).isoformat()
+        token = await self._spaces.create_invite_token(
+            row["space_id"],
+            # An automatic approval has no admin behind it: the token is the
+            # applicant's own (it is bound to them anyway).
+            created_by=reviewed_by or str(row["user_id"]),
+            uses=1,
+            expires_at=expires,
+            role=role.value,
+            # Redeemable by the approved household and person only — an
+            # approval is not a link to pass on.
+            bound_instance_id=remote_instance,
+            bound_user_id=str(row["user_id"]),
+        )
+        if via_gfs:
+            assert self._gfs_join is not None
+            await self._gfs_join.send_answer(
+                row,
+                answer="approved",
+                invite_token=token,
+                token_expires_at=expires,
+            )
+        else:
+            # Direct when paired, else over the mesh (sealed end to end):
+            # an applicant whose request came from a link redeem or an
+            # invite accept may not be paired with us.
+            await self._federation.send_with_mesh_fallback(
+                to_instance_id=remote_instance,
+                event_type=FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+                payload={
+                    "request_id": request_id,
+                    "space_id": row["space_id"],
+                    "invite_token": token,
+                    **({"reviewed_by": reviewed_by} if reviewed_by else {}),
+                },
+            )
+        return token
+
+    async def approve_remote_follow(
+        self,
+        *,
+        space_id: str,
+        instance_id: str,
+        user_id: str,
+        request_id: str,
+        applicant_pk: str | None = None,
+        area_verdict: Eligibility | None = None,
+        gfs_relay: str | None = None,
+    ) -> bool:
+        """Host side of a remote follow (v_96): a join request with
+        ``requested_role = subscriber``, approved automatically while the
+        space takes followers.
+
+        Everything is re-checked here, failing closed (``False``, logged,
+        nothing stored or sent): a live (not dissolved / archived) public or
+        global space this household hosts, ``allow_subscribers`` on, the
+        person not banned, no live seat of theirs from that household already
+        (a member who follows keeps their seat), and ``request_id`` not used
+        before. The join mode does not matter — following is not joining as
+        a member. The request is kept (approved; no admin bell — a follow
+        needs nobody) and answered with a token bound to the household and
+        person for a ``subscriber`` seat, the way an admin's approval answers
+        (:meth:`_approve_remote_join_request`). ``gfs_relay`` — the request
+        came through a GFS (v_84) and is answered the same way.
+        """
+        if self._federation is None or not self._own_instance_id:
+            log.warning("follow from %s: federation not attached", instance_id)
+            return False
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.dissolved
+            or space.archived
+            or space.owner_instance_id != self._own_instance_id
+            or space.space_type not in PUBLIC_SPACE_TIERS
+            or not space.features.allow_subscribers
+        ):
+            log.info(
+                "follow from %s for space %s refused: not a live public / "
+                "global space hosted here that takes followers",
+                instance_id,
+                space_id,
+            )
+            return False
+        if await self._spaces.is_banned(space_id, user_id):
+            log.info("follow from %s refused: banned from %s", instance_id, space_id)
+            return False
+        if self._remote_members is not None and (
+            await self._remote_members.get(space_id, instance_id, user_id) is not None
+        ):
+            log.info(
+                "follow from %s for space %s: already seated — nothing to do",
+                instance_id,
+                space_id,
+            )
+            return False
+        if await self._spaces.get_join_request(request_id) is not None:
+            log.info(
+                "follow from %s for space %s: request id already used",
+                instance_id,
+                space_id,
+            )
+            return False
+        rid = await self._spaces.save_join_request(
+            space_id,
+            user_id,
+            remote_applicant_instance_id=instance_id,
+            remote_applicant_pk=applicant_pk,
+            request_id=request_id,
+            area_verdict=area_verdict.value if area_verdict is not None else None,
+            gfs_relay=gfs_relay,
+        )
+        row = await self._spaces.get_join_request(rid)
+        if row is None:
+            return False
+        await self._approve_remote_join_request(
+            row, rid, reviewed_by=None, role=SpaceRole.SUBSCRIBER
+        )
+        return True
 
     async def deny_join_request(
         self,
@@ -8633,6 +8778,7 @@ class SpaceService(
         host_instance_id: str,
         message: str | None = None,
         share_location: bool = False,
+        requested_role: SpaceRole | None = None,
     ) -> str:
         """§D2 — applicant side: federate a join-request to a remote
         global-space host. The host must be a CONFIRMED peer. Persists
@@ -8644,6 +8790,11 @@ class SpaceService(
         home, rounded to ~1 km, with the request (a local community's host
         decides on it; :func:`join_location_for`). Without it nothing about
         the home leaves this household.
+
+        ``requested_role`` — :attr:`SpaceRole.SUBSCRIBER` makes it a follow
+        (v_96), which the host approves on its own while the space takes
+        followers. A paired host below v_96 raises :class:`HostTooOldError`
+        (it would file it as an ordinary request to join as a member).
         """
         if self._federation is None or self._federation_repo is None:
             raise RuntimeError("federation not attached")
@@ -8668,8 +8819,17 @@ class SpaceService(
                     applicant_user_id=applicant_user_id,
                     host_instance_id=host_instance_id,
                     message=message,
+                    requested_role=requested_role,
                 )
             raise HostNotPairedError()
+        follow = requested_role is SpaceRole.SUBSCRIBER
+        if requested_role is not None and not follow:
+            raise ValueError(f"cannot ask for the {requested_role!r} role")
+        if follow and not await self._federation.peer_supports(
+            host_instance_id,
+            min_version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
+        ):
+            raise HostTooOldError(host_instance_id, feature="follow")
         location = await join_location_for(
             self._federation_repo, share_location=share_location
         )
@@ -8695,6 +8855,8 @@ class SpaceService(
                 # Only with consent, only to the host, inside the envelope's
                 # encrypted payload (§25.8.21) — never stored here.
                 **({"join_location": location} if location is not None else {}),
+                # v_96 — a follow; sealed with the rest of the payload.
+                **({"requested_role": SpaceRole.SUBSCRIBER.value} if follow else {}),
             },
             space_id=space_id,
         )
@@ -9608,111 +9770,135 @@ class SpaceService(
             self._mirror_locks[space_id] = lock
         return lock
 
-    async def subscribe_to_space(self, user_id: str, space_id: str) -> None:
-        async with self._mirror_lock(space_id):
-            await self._subscribe_to_space(user_id, space_id)
+    async def follow_space(
+        self, user_id: str, space_id: str, *, share_location: bool = False
+    ) -> dict:
+        """Follow a public / global space (v_96): a join with the read-only
+        ``subscriber`` role, approved on its own while the space takes
+        followers. Returns ``{"subscribed": bool, "pending": bool}``.
 
-    async def _subscribe_to_space(self, user_id: str, space_id: str) -> None:
-        # GFS on-ramp: a space discovered through a paired GFS has no local
-        # ``spaces`` row yet, so ``_require_space`` below would 404 it. Mirror
-        # the GFS listing onto a local stub FIRST (see
-        # :class:`GfsSpaceMirrorService` for the TOFU trust boundary). A
-        # mirror that returns ``None`` (no GFS knows it / unverifiable pin)
-        # falls through to the unchanged 404.
-        gfs_id: str | None = None
-        if self._gfs_mirror is not None and await self._spaces.get(space_id) is None:
-            mirrored = await self._gfs_mirror.ensure_mirror(space_id)
-            if mirrored is not None:
-                gfs_id = mirrored[1]
-        space = await self._require_space(space_id)
-        if space.space_type not in PUBLIC_SPACE_TIERS:
-            if not self._has_landing(space) and (
-                await self._spaces.get_member(space_id, user_id) is None
-            ):
-                # A space hidden from the caller (private, another
-                # household's household space) answers exactly like an
-                # unknown id — no existence oracle.
-                raise NotFoundError(f"space {space_id!r} not found")
-            raise SubscribeNotAllowedError(
-                "only public / global spaces can be subscribed to",
+        * A space this household hosts: the seat is written here, on the
+          members' path (:meth:`_seat_local_member`), after the same gates as
+          a join — tier, ban, ``allow_subscribers``, §CP.F1 age gate and a
+          local community's edge rule.
+        * Already seated (any role): nothing changes — a member is never
+          demoted.
+        * A space hosted elsewhere: a join request with
+          ``requested_role = subscriber`` to its host — read off our stub,
+          else the cached directory listing, else a GFS listing's join
+          contact (:meth:`request_join_remote`). The host's approval seats
+          the person through the redeem, so the answer is ``pending``.
+          ``share_location`` — the person agreed to send this household's
+          home (~1 km) for a local community's host to decide on.
+        """
+        async with self._mirror_lock(space_id):
+            return await self._follow_space(
+                user_id, space_id, share_location=share_location
             )
-        if await self._spaces.is_banned(space_id, user_id):
-            raise BannedFromSpaceError()
-        existing = await self._spaces.get_member(space_id, user_id)
-        if existing is not None:
-            # Already a member (any role) — no-op. Never demote. Deliberately
+
+    async def _follow_space(
+        self, user_id: str, space_id: str, *, share_location: bool
+    ) -> dict:
+        space = await self._spaces.get(space_id)
+        if space is not None:
+            if space.space_type not in PUBLIC_SPACE_TIERS:
+                if not self._has_landing(space) and (
+                    await self._spaces.get_member(space_id, user_id) is None
+                ):
+                    # A space hidden from the caller (private, another
+                    # household's household space) answers exactly like an
+                    # unknown id — no existence oracle.
+                    raise NotFoundError(f"space {space_id!r} not found")
+                raise SubscribeNotAllowedError(
+                    "only public / global spaces can be subscribed to",
+                )
+            if await self._spaces.is_banned(space_id, user_id):
+                raise BannedFromSpaceError()
+        if await self._spaces.get_member(space_id, user_id) is not None:
+            # Already seated (any role) — no-op. Never demote. Deliberately
             # ahead of the readability gate below: an owner turning followers
-            # off must not turn an existing member's idempotent re-subscribe
-            # into an error (their seat is removed by the GFS purge, not here).
-            return
-        # Readability is the owner's explicit opt-in. With it OFF nothing is
-        # relayed and no content key is ever sealed to a subscriber, so a NEW
-        # seat here would receive nothing forever — refuse it outright (the GFS
-        # refuses the matching ``POST /gfs/subscribe`` with a 403 for the same
-        # reason). Safe on a GFS-discovered stub too: the mirror now carries
-        # the owner's real flag off the directory body
-        # (``GfsSpaceMirrorService._meta_from_gfs_body``), failing closed when
-        # an older GFS reports none.
+            # off must not turn an existing member's idempotent re-follow
+            # into an error.
+            return {"subscribed": True, "pending": False}
+        if space is not None and not self._hosted_elsewhere(space):
+            await self._follow_hosted_space(space, user_id)
+            return {"subscribed": True, "pending": False}
+        host = await self._follow_host(space, space_id)
+        if host is None:
+            raise NotFoundError(f"space {space_id!r} not found")
+        if (
+            await pending_join_request_id(
+                self._spaces, space_id, user_id, household_instance_id=host
+            )
+            is not None
+        ):
+            # Already asked — the host's answer is on its way.
+            return {"subscribed": False, "pending": True}
+        if space is not None and self._child_protection is not None:
+            await self._child_protection.check_space_age_gate(space_id, user_id)
+        await self.request_join_remote(
+            space_id,
+            applicant_user_id=user_id,
+            host_instance_id=host,
+            share_location=share_location,
+            requested_role=SpaceRole.SUBSCRIBER,
+        )
+        return {"subscribed": False, "pending": True}
+
+    async def _follow_hosted_space(self, space: Space, user_id: str) -> None:
+        """A follow of a space this household hosts: a local ``subscriber``
+        seat on the members' path, once every gate passed."""
+        # Readability is the owner's explicit opt-in. With it OFF no content
+        # key is ever sealed to a follower, so a NEW seat here would receive
+        # nothing forever — refuse it outright.
         if not space.features.allow_subscribers:
             raise SubscribeNotAllowedError()
         if self._child_protection is not None:
-            await self._child_protection.check_space_age_gate(space_id, user_id)
+            await self._child_protection.check_space_age_gate(space.id, user_id)
         # A local community: a follower lives inside the area too; near the
         # edge the follow becomes a join request for the admins.
         await self._seat_or_review(space, user_id)
-        # ORDER MATTERS: the GFS-side subscriber registration happens only
-        # AFTER every local refusal (public-tier, ban, §CP.F1 age gate) has
-        # passed. A locally-refused user must never end up on the GFS's
-        # ``space_subscribers`` set — that would fan relayed space content at
-        # this household on their behalf. A failing GFS subscribe propagates:
-        # no local member row is seated for a relay we never registered for.
-        if gfs_id is not None and self._gfs_mirror is not None:
-            await self._gfs_mirror.subscribe_to_gfs(space_id, gfs_id)
-        member = SpaceMember(
-            space_id=space_id,
-            user_id=user_id,
-            role=SpaceRole.SUBSCRIBER,
-            joined_at=datetime.now(UTC).isoformat(),
+        await self._seat_local_member(
+            space, user_id, role=SpaceRole.SUBSCRIBER, actor_user_id=user_id
         )
-        await self._spaces.save_member(member)
-        await self._bus.publish(
-            SpaceMemberJoined(
-                space_id=space_id,
-                user_id=user_id,
-                role=SpaceRole.SUBSCRIBER,
-            )
-        )
-        if self._child_protection is not None:
-            await self._child_protection.record_membership_change(
-                user_id=user_id,
-                space_id=space_id,
-                action="joined",
-                actor_id=user_id,
-            )
 
-    async def unsubscribe_from_space(self, user_id: str, space_id: str) -> None:
-        """Remove a self-subscription. No-op if the user isn't a
-        subscriber — real members must use ``remove_member`` /
-        ``leave_space`` (we refuse to silently demote them by
-        "unsubscribing")."""
+    async def _follow_host(self, space: Space | None, space_id: str) -> str | None:
+        """The household to ask for a follow of a space hosted elsewhere,
+        or ``None`` when nothing names one. Raises
+        :class:`SubscribeNotAllowedError` when what we know of the space
+        says it takes no followers."""
+        if space is not None:
+            if not space.features.allow_subscribers:
+                raise SubscribeNotAllowedError()
+            return space.owner_instance_id or None
+        listing = (
+            await self._public_spaces.get(space_id)
+            if self._public_spaces is not None
+            else None
+        )
+        if listing is not None:
+            if not listing.allow_subscribers:
+                raise SubscribeNotAllowedError()
+            return listing.instance_id or None
+        if self._gfs_join is not None:
+            return await self._gfs_join.host_of_listing(space_id)
+        return None
+
+    async def unfollow_space(self, user_id: str, space_id: str) -> None:
+        """Unfollow = leave the ``subscriber`` seat, the same self-leave a
+        member's leave runs (:meth:`_end_local_seat`: tombstone gossip,
+        §CP audit, the host told when it is elsewhere) — but no rotation at
+        once: a follower's leave is owed and batched (v_96). No-op unless
+        the seat is a subscriber's: a real member must leave
+        (:meth:`remove_member`), never be silently demoted by an
+        unfollow."""
         existing = await self._spaces.get_member(space_id, user_id)
         if existing is None or existing.role != SpaceRole.SUBSCRIBER:
             return
-        await self._spaces.delete_member(space_id, user_id)
-        await self._bus.publish(
-            SpaceMemberLeft(
-                space_id=space_id,
-                user_id=user_id,
-                role=existing.role,
-            )
-        )
-        if self._child_protection is not None:
-            await self._child_protection.record_membership_change(
-                user_id=user_id,
-                space_id=space_id,
-                action="removed",
-                actor_id=user_id,
-            )
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return
+        await self._end_local_seat(space, existing, actor_user_id=user_id, is_self=True)
         await self._maybe_purge_gfs_mirror(space_id)
 
     async def release_gfs_mirror_if_unused(self, space_id: str) -> None:

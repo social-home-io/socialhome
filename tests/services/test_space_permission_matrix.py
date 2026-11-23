@@ -173,10 +173,14 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_pending_local_invites",  # own user — the invitee's inbox
         "request_join",  # any user may request; gate is on approval
         "request_join_remote",  # cross-instance request
-        "subscribe_to_space",  # public-space follow-only
-        "unsubscribe_from_space",  # own subscription only
+        "follow_space",  # public-space follow-only
+        "unfollow_space",  # own subscription only
         # Federation inbound hooks — validated by the §24.11 inbound pipeline.
         "on_remote_join_request_approved",
+        # v_96 host side of SPACE_JOIN_REQUEST for the subscriber role: no
+        # actor — it re-checks the space (hosted here, public, followers
+        # on), the ban and the seat itself, failing closed.
+        "approve_remote_follow",
         # Waits for the approval redeems that hook starts; mutates nothing.
         "wait_join_approvals",
         # §D2b space-session teardown. No actor to gate: both are driven by
@@ -583,7 +587,7 @@ def test_assert_writable_member_allows_non_subscriber(role):
 
 async def test_subscriber_cannot_post(stack):
     """Subscribing then attempting to post raises via _assert_writable_member."""
-    await stack.space_svc.subscribe_to_space(stack.bob.user_id, stack.public_space.id)
+    await stack.space_svc.follow_space(stack.bob.user_id, stack.public_space.id)
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.create_post(
             stack.public_space.id,
@@ -602,7 +606,7 @@ async def test_subscriber_cannot_comment(stack):
         content="anchor",
     )
     assert post is not None
-    await stack.space_svc.subscribe_to_space(stack.bob.user_id, stack.public_space.id)
+    await stack.space_svc.follow_space(stack.bob.user_id, stack.public_space.id)
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.add_comment(
             post.id,
@@ -655,7 +659,7 @@ async def test_subscriber_cannot_react(stack):
         content="anchor",
     )
     assert post is not None
-    await stack.space_svc.subscribe_to_space(stack.bob.user_id, stack.public_space.id)
+    await stack.space_svc.follow_space(stack.bob.user_id, stack.public_space.id)
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.add_reaction(
             post.id,

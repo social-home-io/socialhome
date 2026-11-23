@@ -815,3 +815,204 @@ async def test_a_local_community_fails_closed_without_a_budget(bus, repo):
     h.attach_to(_FakeFederationService())
     await _request(h, "near", NEAR)
     assert repo.join_requests == []
+
+
+# ── follows (v_96): a join for the read-only role ───────────────────────
+
+
+class _Approver:
+    """Stands in for ``SpaceService.approve_remote_follow``."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def __call__(self, **kwargs) -> bool:
+        self.calls.append(kwargs)
+        return True
+
+
+def _follow_space(**kw) -> Space:
+    return replace(_space(**kw), features=SpaceFeatures(allow_subscribers=True))
+
+
+def _follow_handlers(bus, repo, *, approver=None):
+    h = SpaceInviteInboundHandlers(
+        bus=bus, space_repo=repo, local_area_budget=memory_budget()
+    )
+    h.attach_to(_FakeFederationService())
+    if approver is not None:
+        h.attach_follow_approver(approver)
+    return h
+
+
+async def _follow(h, *, from_instance="peer-a", location=None, **extra):
+    payload: dict = {
+        "user_id": "u-1",
+        "request_id": "req-f",
+        "requested_role": "subscriber",
+        **extra,
+    }
+    if location is not None:
+        payload["join_location"] = location
+    await h._on_join_request(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST,
+            payload,
+            from_instance=from_instance,
+            space_id="sp-1",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "join_mode", [JoinMode.INVITE_ONLY, JoinMode.REQUEST, JoinMode.OPEN]
+)
+async def test_a_follow_goes_to_the_approver_whatever_the_join_mode(
+    bus, repo, join_mode
+):
+    """No admin bell, no filed request here: the approver decides (and
+    re-checks everything). An invite-only space still takes followers."""
+    repo.spaces["sp-1"] = _follow_space(join_mode=join_mode)
+    approver = _Approver()
+    seen: list = []
+
+    async def _seen(event):
+        seen.append(event)
+
+    bus.subscribe(SpaceJoinRequested, _seen)
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h, applicant_pk="pk-1")
+    assert approver.calls == [
+        {
+            "space_id": "sp-1",
+            "instance_id": "peer-a",
+            "user_id": "u-1",
+            "request_id": "req-f",
+            "applicant_pk": "pk-1",
+            "area_verdict": None,
+        }
+    ]
+    assert repo.join_requests == []
+    assert seen == []
+
+
+async def test_a_follow_is_dropped_when_the_space_takes_no_followers(bus, repo):
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)  # allow_subscribers off
+    await _follow(h)
+    assert approver.calls == []
+    assert repo.join_requests == []
+
+
+@pytest.mark.parametrize(
+    "space",
+    [
+        _follow_space(space_type=SpaceType.PRIVATE),
+        _follow_space(owner="peer-b"),
+        replace(_follow_space(), dissolved=True),
+        replace(_follow_space(), archived=True),
+    ],
+)
+async def test_a_follow_of_a_space_not_hosted_here_live_and_public_is_dropped(
+    bus, repo, space
+):
+    repo.spaces["sp-1"] = space
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h)
+    assert approver.calls == []
+
+
+async def test_a_banned_follower_is_dropped(bus, repo):
+    repo.spaces["sp-1"] = _follow_space()
+    repo.banned.add(("sp-1", "u-1"))
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h)
+    assert approver.calls == []
+
+
+async def test_a_follow_while_a_request_is_pending_is_dropped(bus, repo):
+    repo.spaces["sp-1"] = _follow_space()
+    repo.pending.append(
+        {
+            "id": "req-old",
+            "space_id": "sp-1",
+            "user_id": "u-1",
+            "remote_applicant_instance_id": "peer-a",
+        }
+    )
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h)
+    assert approver.calls == []
+
+
+async def test_a_follow_without_an_approver_is_dropped(bus, repo):
+    """Fail closed: nothing wired, nothing approved or filed."""
+    repo.spaces["sp-1"] = _follow_space()
+    h = _follow_handlers(bus, repo)
+    await _follow(h)
+    assert repo.join_requests == []
+
+
+async def test_an_unknown_requested_role_is_dropped(bus, repo):
+    repo.spaces["sp-1"] = _follow_space()
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h, requested_role="admin")
+    assert approver.calls == []
+    assert repo.join_requests == []
+
+
+def _local_follow_space() -> Space:
+    return replace(_follow_space(), lat=47.3769, lon=8.5417, radius_km=5.0)
+
+
+async def test_a_follow_from_inside_a_local_community_is_approved(bus, repo):
+    repo.spaces["sp-1"] = _local_follow_space()
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h, location=NEAR)
+    assert [c["area_verdict"].value for c in approver.calls] == ["inside"]
+    assert repo.join_requests == []
+
+
+async def test_a_follow_near_the_edge_becomes_a_request_for_the_admins(bus, repo):
+    """As a local follow near the edge does: an ordinary request (the
+    admins' bell), never an automatic seat."""
+    repo.spaces["sp-1"] = _local_follow_space()
+    approver = _Approver()
+    seen: list = []
+
+    async def _seen(event):
+        seen.append(event)
+
+    bus.subscribe(SpaceJoinRequested, _seen)
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h, location=EDGE)
+    assert approver.calls == []
+    (row,) = repo.pending
+    assert row["area_verdict"] == "edge"
+    assert row["id"] == "req-f"
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("location", [BERN, None])
+async def test_a_follow_from_outside_a_local_community_is_dropped(bus, repo, location):
+    repo.spaces["sp-1"] = _local_follow_space()
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h, location=location)
+    assert approver.calls == []
+    assert repo.join_requests == []
+
+
+async def test_a_join_request_without_a_role_is_unchanged(bus, repo):
+    """No ``requested_role``: today's path — filed for the admins."""
+    repo.spaces["sp-1"] = _follow_space()
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _request(h, "peer-a", None, request_id="req-j")
+    assert approver.calls == []
+    assert [r[4] for r in repo.join_requests] == ["req-j"]
