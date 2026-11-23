@@ -409,12 +409,24 @@ sequenceDiagram
 
 ## Followers (v_96)
 
-Since v_96 (`FederationCapability.MIN_FOR_SUBSCRIBER_SEATS`) a follower is
-**one read-only `subscriber` seat, on every path**. The two kinds below
-(GFS subscriber, follower household) collapse into that seat; the v_30 table
-is kept for history and describes peers below v_96. The owner's privacy
-sign-off is
-[principles.md](../principles.md#sign-off-a-spaces-host-and-its-admins-know-who-follows-v_96).
+Since v_96 (`FederationCapability.MIN_FOR_SUBSCRIBER_SEATS`) **a follower is
+a member with the read-only `subscriber` role, on every path** (owner
+decision 2026-11-23: no separate follower path, fewer compatibility layers
+and test vectors). The two kinds below (GFS subscriber, follower household)
+collapse into that seat; the v_30 table is kept for history and describes
+peers below v_96. The owner's privacy sign-off is
+[principles.md](../principles.md#sign-off-members-know-who-follows-v_96).
+
+What differs from a member is exactly four things, nothing else:
+
+1. **The write gate** — a follower writes only through a `reader` writer
+   cert (below), only comments and reactions, only while the space's
+   switches allow them.
+2. **The role-based content subset** that already exists — no sync pages,
+   no zones, location, chat or proposals (the writer-household checks,
+   `SpaceWriterHouseholds`, unchanged).
+3. **Following is auto-approved** while `allow_subscribers` is on.
+4. **Leaving does not rotate at once** — the rotation is batched.
 
 ### Following is an auto-approved join
 
@@ -427,12 +439,12 @@ near the edge to admin review.
 | Where the follower is | Path |
 |---|---|
 | The host household | A local `space_members` row with role `subscriber`; no federation. |
-| A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role = subscriber` (sealed) → auto-approved → §D1b seating with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), a **members-only** roster snapshot, `follower_count`, the writer cert (`reader: true`, only while comment or react is on) and the channel grant. |
+| A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role = subscriber` (sealed) → auto-approved → §D1b seating with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. |
 | Reached only through a GFS | The v_84 bootstrap: `join_contact` from the polled listing (published while `allow_subscribers` is on, and only to a GFS that proves `subscriber_seats`), `SPACE_JOIN_REQUEST_BOOTSTRAP` with a sealed `kind: "follow"`, the host auto-answers with a bound subscriber token (48 h), the applicant auto-redeems over §D2b and is seated as a `space_session` subscriber, then takes its channel seat. The bootstrap budgets (120/h per space, 10/h per sender, 200 pending) apply unchanged. |
 
 Unfollowing is `leave_space` for the subscriber seat: the seat is
-tombstoned (`removed_at`), the household leaves `space_instances` on the
-host and admin households and gives up its channel seat.
+tombstoned (`removed_at`), gossiped like any member's leave, and the
+household gives up its channel seat.
 
 ### Keys and rotation
 
@@ -444,56 +456,44 @@ host and admin households and gives up its channel seat.
   rotation pays it; otherwise a sweep run by the owner or a seed-holding
   acting host rotates a space whose debt is 24 h old.
 - **At once:** a follower ban, `allow_subscribers` turned off, or the
-  comment / react flag turned off.
-- **Rekey to followers:** one shared reader pass and one multi send per
-  GFS; a per-peer copy only for followers that may comment or react.
-- **Order:** the channel epoch notice first, then the member rekey.
+  comment / react switch turned off.
+- **Rekey to followers:** the ordinary member rekey; GFS-reached
+  households take it in one multi upload per GFS.
+- **Order:** the channel epoch notice first, then the rekey.
 
-### Delivery
+### Delivery: the same as a member
 
+- **Paired and mesh followers** get every space event a member gets, from
+  whichever household wrote it, over `broadcast_to_space_members` —
+  except the member-only data the existing writer-household checks keep
+  from them.
+- **GFS-reached followers** get it the way a GFS-reached member does: the
+  space's opaque channel where there is one, else the mailbox multi upload
+  (`/gfs/envelope/multi`, one upload per GFS).
 - **Global spaces and private spaces with `private_gfs` on use the opaque
-  channel** (see [discovery.md](./discovery.md)). A global space qualifies
-  once at least one server on its signed `gfs_servers` list proves
-  `private_channels` and `subscriber_seats`. Every member and follower
-  household connected to a listed channel server takes a seat; the owner
-  takes none, but may publish into every channel of the space. Each
-  household's grant rides its per-peer payload per epoch: a follower gets
-  the channel pass, plus the writer key only when it may comment or react.
-  An author
-  publishes each item anonymously to every listed server
-  (`/gfs/channels/publish-anon`) and the GFS fans it out to every seat. The
-  host publishes only its own household's items, moderation outcomes, and
-  member items whose author could not reach the channel (the encrypted
-  federation payload says `channel_sent`). A public (not global) space never
+  channel** (see [discovery.md](./discovery.md)) for members and followers
+  alike. A global space qualifies once at least one server on its signed
+  `gfs_servers` list proves `private_channels` and `subscriber_seats`. Every
+  member and follower household connected to a listed channel server takes
+  a seat; the owner takes none, but may publish into every channel of the
+  space. A follower's grant carries the channel pass, plus the writer key
+  only when it may comment or react. A public (not global) space never
   touches a GFS and has no channel.
-- **Members never send to followers.** `broadcast_to_space_members` skips a
-  household whose only live seats in the space are `subscriber` seats.
-  Two opt-ins widen it: `HOST_FORWARD` (the acting host forwards each
-  applied content event to its paired / mesh followers, which accept it
-  under the host-relay rule) and `KEY_AND_CONFIG` (rekey, config, roster
-  snapshot and removals, which a follower needs to keep reading). A
-  household holding any member seat is a member household and gets
-  everything, as before.
-- **No sync pages for followers.** A follower catches up from its acting
-  host only, over the §25.6 subset stream, plus the Phase-1 status.
+- **No sync pages for followers** (the existing role rule): a follower
+  catches up over the §25.6 subset stream from its acting host.
 
 ### Comments and reactions
 
 A follower that may comment or react (`allow_subscriber_comment` /
 `allow_subscriber_react`) uses the same writer cert and writer key as a
 member. Its cert carries the signed field `reader: true`, with scope
-`comment` when either flag is on. A household that holds no seat for the
-author accepts `comment*` / `reaction_*` from a `reader` cert only while the
-matching flag is on in its pinned config; posts and every other family are
-refused for a `reader` cert. Over federation a follower sends a comment or
-reaction to its acting host only; the host applies it, publishes it to the
-channel when the follower did not, and forwards it to members off the
-channel as `SPACE_COMMENT_CREATED` / `SPACE_POST_REACTION`. A member accepts
-such a forward only under `SpaceAuthorship.host_vouched_reader()`: the
-comment and reaction families only, from an acting host, with the matching
-flag on and the author holding no seat on the receiver. The refusal of
-posts and every other family for a `reader` cert holds on every path,
-`SPACE_ROUTED` included.
+`comment` when either switch is on. A receiver accepts `comment*` from a
+`reader` cert only while `allow_subscriber_comment` is on in its pinned
+config, `reaction_*` only while `allow_subscriber_react` is on, an
+`author_profile` while either is; posts and every other family are refused
+for a `reader` cert (`reader_cert_permits`). On the federation path the
+follower's live `subscriber` seat decides it the same way (the Follower
+gate). Both hold on every path, `SPACE_ROUTED` included.
 
 - **One flag per household.** `reader` is set when any user the cert binds
   holds only a follower seat, so a household whose comment set mixes a
@@ -516,35 +516,36 @@ posts and every other family for a `reader` cert holds on every path,
   Turning a switch on rotates nothing; each follower household that can be
   issued a cert gets it at once (credentials only).
 
-Names: before its first comment in an epoch a follower publishes its users'
-v_60 `author_profile` (scope `comment`) on the channel; the host-forwarded
-copy carries `author_name` inside the encrypted payload, stored in
-`space_author_profiles`. The app shows such an author as "{name} ·
-follower".
+Names: a follower that comments publishes its users' v_60 `author_profile`
+(scope `comment`) like any member; members also know its people from the
+roster. The app may group followers as "Followers".
 
 ### Who sees the roster
 
-| Viewer | Members | Followers |
-|---|---|---|
-| Owner and delegated-admin households | yes | **yes** — households, users, seats |
-| Other members (host household non-admins, member households) | yes | **count only** (`follower_count`, counted on the host when read and carried in `space_meta` / the space config), plus the name of a follower who comments |
-| A follower household | yes — snapshot at seat time + `author_profile` items; no live gossip | no |
-| A GFS | — | the channel's seats (identified, without the space id) |
+Everyone in the space sees the same roster, followers included, with their
+role: the owner, admins, members and followers. Roster gossip
+(`SPACE_MEMBER_JOINED` / `_LEFT`), the roster snapshot, the digest and the
+mailbox directory treat a follower seat like any other seat. A GFS sees the
+channel's seats (identified, without the space id).
 
-Roster gossip (`SPACE_MEMBER_JOINED` / `_LEFT`), the roster snapshot, the
-mailbox directory and `GET /api/spaces/{id}/members` carry a follower seat
-only to admin households and admin callers. A member household never stores
-a follower seat of a space it is not an admin of; a follower household gets
-members only, and no mailbox directory beyond the host's card.
+### Cost (v_96)
 
-### Members stay equal on any path
+For a global space with 200 member households and F follower households
+(one channel GFS; a post or comment in the 4 KiB bucket, a roster entry
+≈ 0.5 KiB, a wrap ≈ 0.1 KiB):
 
-Nothing here takes content or a right from a member. A member of a global
-space moves to a channel seat and keeps the federation copy; a member not
-on a channel server catches up from the host. Only followers get a subset,
-and it is written down here: no sync pages, no live roster, no zones,
-presence, chat or proposals, and — for a follower without a channel seat —
-live content only while its acting host is online.
+| Trigger | Cost |
+|---|---|
+| Follow (GFS path) | request 4 KiB + answer 4 KiB + redeem 4 KiB + the ACK with the whole roster snapshot ((200 + F) × ≈ 0.5 KiB, in parts — ≈ 5 MiB at F = 10 000) to the one follower household, then the ordinary roster gossip of one signed entry to every member and follower household: paired ones directly, GFS-reached ones in one multi upload per GFS (≈ 0.5 KiB + (200 + F) × 0.1 KiB). With F = 10 000 that is ≈ 1 MiB of upload and ≈ 5 MiB of GFS egress per follow. |
+| Unfollow | the leave + the same one-entry gossip; no rotation |
+| Member post | one upload of 4 KiB per channel server (+ the federation copy to paired members); GFS egress (200 + F) × 4 KiB ≈ 40 MiB at F = 10 000 |
+| Owed rotation (≤ 1 a day) | the ordinary rekey, one multi upload per GFS for the GFS-reached households |
+| Sync pages | 0 to followers |
+
+The follow gossip grows with the audience: F follows cost O(F²) small
+entries in total (10 000 follows ≈ 50 GiB of GFS egress over the space's
+life). Accepted for one path (owner decision 2026-11-23); batching follow
+gossip is the lever if it shows up.
 
 ## Two kinds of follower (v_30)
 
@@ -913,9 +914,8 @@ member household, not only on the host:
   | 1000 member households + 10 000 follower seats (~11 000 entries ≈ 5.5 MB + ≤ ~500 KB of tombstones, ~65 parts) | ≈ 5.5 GB per tick if every echo is stale | 1000 × ~110 B per 30 min ≈ 110 KB; a lost gossip costs that one household one ~6 MB burst; a restore storm in that one space heals at 2 households a minute (~8 h for 1000), ≤ 12 MB/min |
 
   Seats see a per-space part-count burst only on a digest mismatch.
-  Followers receive the member roster in seat / upgrade snapshots only
-  since v_96 (no live gossip, see [Followers (v_96)](#followers-v_96));
-  live gossip to followers applies to peers below v_96. The v_80 echo path costs what it
+  Followers receive the roster in seat / upgrade snapshots and live
+  gossip like any member (v_96, see [Followers (v_96)](#followers-v_96)). The v_80 echo path costs what it
   did (the whole roster once per roster change per v_80 household, at most
   once per cooldown — few, and paired).
 - **Held writes.** A write naming a user the space has **no record of at

@@ -3717,10 +3717,22 @@ def test_item_merge_stamps_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     label = "Poll votes count the same in every household"
-    assert fc.features_missing_below(93)[0] == label
-    assert label not in fc.features_missing_below(94)
-    assert fc.space_features_missing_below(93)[0] == label
-    assert label not in fc.space_features_missing_below(94)
+    assert fc.features_missing_below(93) == [
+        label,
+        "Space sync status, even without the host",
+        "Follow spaces with one seat on every path",
+    ]
+    assert fc.features_missing_below(94) == [
+        "Space sync status, even without the host",
+        "Follow spaces with one seat on every path",
+    ]
+    assert fc.space_features_missing_below(93) == [
+        label,
+        "Follow spaces with one seat on every path",
+    ]
+    assert fc.space_features_missing_below(94) == [
+        "Follow spaces with one seat on every path"
+    ]
     assert fc.CAPABILITY_FEATURE_KEYS[94] == "poll_vote_stamps"
 
 
@@ -3735,8 +3747,13 @@ def test_sync_pages_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     label = "Space sync status, even without the host"
-    assert fc.features_missing_below(94)[0] == label
-    assert label not in fc.features_missing_below(95)
+    assert fc.features_missing_below(94) == [
+        label,
+        "Follow spaces with one seat on every path",
+    ]
+    assert fc.features_missing_below(95) == [
+        "Follow spaces with one seat on every path"
+    ]
     assert fc.CAPABILITY_FEATURE_KEYS[95] == "sync_pages"
 
 

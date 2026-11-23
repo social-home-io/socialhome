@@ -1611,19 +1611,19 @@ from __future__ import annotations
 #:   rules. Not space-scoped. Labelled "Space sync status, even without the
 #:   host".
 #: * **v_96** (2026-11-23) — **subscriber seats** (``docs/protocol/
-#:   spaces.md`` "Followers (v_96)", principles sign-off "a space's host
-#:   and its admins know who follows"): a follow is an auto-approved join
-#:   with role ``subscriber`` — one read-only seat on every path (paired,
-#:   mesh, invite link, GFS). Subscriber seats go only to the acting host
-#:   and the admin households in roster gossip, the roster snapshot and
-#:   the mailbox directory; members see a ``follower_count``. A writer
-#:   cert gains a signed ``reader`` field. ``broadcast_to_space_members``
-#:   skips follower-only households unless the send is ``HOST_FORWARD`` /
-#:   ``KEY_AND_CONFIG``. Global spaces move to opaque channels. No new
+#:   spaces.md`` "Followers (v_96)", principles sign-off "members know who
+#:   follows"): a follower is a member with the read-only ``subscriber``
+#:   role on every path — the same roster, gossip and delivery as any
+#:   member; a follow is an auto-approved join. A writer cert gains a
+#:   signed ``reader`` field (a follower that may comment or react), and
+#:   the follower switches decide what a reader cert may carry. Global
+#:   spaces use the opaque channel for members and followers alike. No new
 #:   event type. Breaking — no follower back-compat.
-#:   **Fallback**: a peer below v_96 cannot follow and gets no reader cert
-#:   or subscriber grant; a member household below v_96 keeps the
-#:   federation content path. Space-scoped. Labelled "Follow spaces with
+#:   **Fallback**: a peer below v_96 cannot follow and is issued no reader
+#:   cert (it could not verify one: the signature covers ``reader``); a
+#:   follower household below v_96 gets no cert and no writer key. A
+#:   member household below v_96 refuses a follower's relayed comment or
+#:   reaction. Space-scoped. Labelled "Follow spaces with
 #:   one seat on every path".
 OURS: int = 96
 
@@ -2961,9 +2961,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # list instead of merging it — a vote that raced another, or the
         # poll's close, can count differently there.
         FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
-        # A behind member household still sees follower households in its
-        # roster and sends its items to followers itself; its people cannot
-        # follow.
+        # A behind member household cannot verify a follower's reader cert,
+        # so it refuses followers' relayed comments and reactions; its people
+        # cannot follow.
         FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
     }
 )
