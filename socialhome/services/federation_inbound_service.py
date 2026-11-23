@@ -165,7 +165,12 @@ from ..media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     reencode_peer_picture,
 )
-from ..moment_origin import carries_no_relay, check_relayed_moment_origin
+from ..moment_origin import (
+    REACH_FIELD,
+    carries_no_relay,
+    check_relayed_moment_origin,
+    moment_reach_of,
+)
 from ..rate_limiter import RateLimiter
 from ..utils.datetime import parse_iso8601_lenient
 from .dm_audience import local_audience
@@ -4872,6 +4877,9 @@ class FederationInboundService(ProtectionGateMixin):
             return
         if self._moment_id_refused(event, moment_id, author_user_id):
             return
+        reach = self._moment_reach_admitted(event, origin_instance_id)
+        if reach is None:
+            return
         if not await self._moment_authority_matches(
             event.from_instance,
             origin_instance_id,
@@ -4936,6 +4944,7 @@ class FederationInboundService(ProtectionGateMixin):
             ),
             hop_count=hop_count,
             received_via="household",
+            reach=reach,
         )
         # §Momentum-relay-policy pure-pass-through: skip the local
         # persist when no local user can see the row (under their
@@ -4981,6 +4990,7 @@ class FederationInboundService(ProtectionGateMixin):
                     origin_instance_id=moment.origin_instance_id,
                     expires_at=moment.expires_at,
                     hop_count=moment.hop_count,
+                    reach=moment.reach,
                 )
             )
         # 3-hop relay: forward to the rest of *our* paired peers. The
@@ -5025,6 +5035,9 @@ class FederationInboundService(ProtectionGateMixin):
         # A delete for a bound id naming anybody but its author is not
         # remembered — it would otherwise refuse the real moment's create.
         if self._moment_id_refused(event, moment_id, author_user_id):
+            return
+        # v_96: a delete carries its moment's reach, signed like the create.
+        if self._moment_reach_admitted(event, origin_instance_id) is None:
             return
         if not await self._moment_authority_matches(
             event.from_instance,
@@ -5172,6 +5185,48 @@ class FederationInboundService(ProtectionGateMixin):
             owner_user_id=author_user_id,
             context=f"{event.event_type} from {event.from_instance}",
         )
+
+    @staticmethod
+    def _moment_reach_admitted(
+        event: FederationEvent, origin_instance_id: str
+    ) -> int | None:
+        """v_96 — the reach a ``MOMENT_CREATED`` / ``MOMENT_DELETED`` claims
+        (:func:`~socialhome.moment_origin.moment_reach_of`), or ``None`` when
+        it is refused: not a reach at all (``reach`` outside {2, 4, 5}, or
+        with ``no_relay``), or a copy beyond it — its hop, at least 2 for a
+        copy not sent by its origin (``hop_count`` is outside the signature),
+        above the reach. A refused event is neither stored, tombstoned nor
+        relayed. Whether the reach is genuine is the origin signature's
+        job (:meth:`_moment_origin_verified`, the v3 / v2 bytes)."""
+        p = event.payload
+        reach = moment_reach_of(p)
+        if reach is None:
+            log.warning(
+                "%s from %s: invalid reach %r — refusing (moment=%s)",
+                event.event_type,
+                event.from_instance,
+                p.get(REACH_FIELD),
+                p.get("moment_id"),
+            )
+            return None
+        try:
+            hop = int(p.get("hop_count") or 1)
+        except TypeError, ValueError:
+            hop = 1
+        if event.from_instance != origin_instance_id:
+            hop = max(hop, 2)
+        if hop > reach:
+            log.warning(
+                "%s from %s: hop %d beyond the moment's reach %d — refusing"
+                " (moment=%s)",
+                event.event_type,
+                event.from_instance,
+                hop,
+                reach,
+                p.get("moment_id"),
+            )
+            return None
+        return reach
 
     async def _moment_authority_matches(
         self,
