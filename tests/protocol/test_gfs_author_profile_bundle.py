@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -23,6 +24,7 @@ from socialhome.repositories.space_author_profile_repo import (
     SqliteSpaceAuthorProfileRepo,
 )
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 from tests.protocol.test_gfs_author_profile import _profile, _webp
 from tests.protocol.test_gfs_member_publish_items import (
     BOB,
@@ -86,6 +88,55 @@ async def test_a_bundled_profile_needs_a_cert_binding_its_author(env, profiles):
     }
     assert await _bundle(env, no_cert, unbound) == 0
     assert await _held(profiles, BOB.user_id) is None
+
+
+async def _reader_cert(env, signer) -> dict:
+    """A follower's v_96 ``reader`` comment cert binding ``signer``."""
+    epoch = await env["crypto"].get_current_epoch(SPACE)
+    cert = sign_writer_cert(
+        space_seed=env["space_kp"].private_key,
+        space_id=SPACE,
+        epoch=epoch,
+        instance_pk=signer.kp.public_key,
+        scope="comment",
+        reader=True,
+    )
+    return bind_writer_users(
+        cert, space_seed=env["space_kp"].private_key, user_ids=[signer.user_id]
+    ).to_wire()
+
+
+@pytest.mark.parametrize(
+    ("reader", "comment", "react", "stored"),
+    [
+        (True, False, False, 0),
+        (True, False, True, 1),
+        (True, True, False, 1),
+        (False, False, False, 1),
+    ],
+)
+async def test_a_bundled_follower_profile_follows_the_follower_switches(
+    env, profiles, reader, comment, react, stored
+):
+    """v_96: a follower's profile rides a ``reader`` cert, which a receiver
+    takes for an ``author_profile`` only while "followers may comment" or
+    "followers may react" is on in ITS pinned config. A plain (member) cert
+    is never gated by the switches."""
+    space = await env["spaces"].get(SPACE)
+    await env["spaces"].save(
+        replace(
+            space,
+            features=replace(
+                space.features,
+                allow_subscriber_comment=comment,
+                allow_subscriber_react=react,
+            ),
+        )
+    )
+    cert = await _reader_cert(env, BOB) if reader else await _cert(env, BOB, "comment")
+    item = {**_profile(BOB), "writer_cert": cert}
+    assert await _bundle(env, item) == stored
+    assert (await _held(profiles, BOB.user_id) is not None) is bool(stored)
 
 
 async def test_a_bundled_profile_about_someone_else_is_refused(env, profiles):

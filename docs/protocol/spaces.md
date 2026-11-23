@@ -495,6 +495,27 @@ flag on and the author holding no seat on the receiver. The refusal of
 posts and every other family for a `reader` cert holds on every path,
 `SPACE_ROUTED` included.
 
+- **One flag per household.** `reader` is set when any user the cert binds
+  holds only a follower seat, so a household whose comment set mixes a
+  plain commenter (a member of a `MODERATED` space) with a follower holds
+  one `reader` cert for both. Its member keeps every right: a moderated
+  post the host approves is re-stamped with a plain cert issued without
+  follower seats (`issue_for_instance(..., followers=False)`), and a sender
+  never stamps a `reader` cert on a type the switches forbid. The residual:
+  while a switch is off, that member's own relayed comments (or reactions)
+  are refused by a receiver that holds no seat for them, and fall back to
+  the host path.
+- **Below v_96 (D10, accepted, breaking).** A household below v_96 cannot
+  verify a `reader` cert (its signature covers `reader`, which the older
+  parser ignores), so it refuses a follower's relayed comment or reaction.
+- **Turning a switch off rotates.** Either flag turning off rotates the
+  content key at once when a household's comment set bound a follower,
+  even if its entitlement looks unchanged (comment off, react on): a plain
+  comment cert issued to that follower before v_96, or by a v_95 delegated
+  admin, carries no `reader` flag, so only the epoch ending retires it.
+  Turning a switch on rotates nothing; each follower household that can be
+  issued a cert gets it at once (credentials only).
+
 Names: before its first comment in an epoch a follower publishes its users'
 v_60 `author_profile` (scope `comment`) on the channel; the host-forwarded
 copy carries `author_name` inside the encrypted payload, stored in
@@ -1616,8 +1637,9 @@ v1 cert. Because the binding lists users, the cert is re-issued at a new
 epoch whenever a household's set of writer users SHRINKS — a user's seat
 ending while the household keeps others, a demotion, or a `posts` access
 change that stops a role posting directly, or (v_96) a plain cert that
-becomes a `reader` cert at the same scope and users — a member demoted to
-follower (`SpaceService
+becomes a `reader` cert at the same scope over no more users — a member
+demoted to follower; a set that grows by a follower when a switch turns on
+is a gain, delivered without a rekey (`SpaceService
 .rotate_if_writer_scope_weakened` compares scope, users AND `reader`; `update_config`
 rotates when `posts_access` narrows anyone, and re-delivers certs in roster
 snapshots when it widens). A user seated in a household that already holds

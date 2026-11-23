@@ -1624,8 +1624,10 @@ class GfsChannelService:
         channel_id, channel_seed = found
         offset = derive_channel_epoch_offset(seed, space_id, channel_id)
         wire_epoch = int(epoch) + offset
+        # The cert's issuance rules (a follower household below v_96 is
+        # issued no cert, so no writer key either).
         scope = (
-            await self._writer_certs.entitlement_for_instance(space, instance_id)
+            await self._writer_certs.issuable_entitlement(space, instance_id)
         ).scope
         # The channel writer key, to a v_90 writer: the one way to publish —
         # ANONYMOUSLY, to every channel server, including the ones it never

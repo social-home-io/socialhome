@@ -59,7 +59,7 @@ from ..crypto import b64url_decode, derive_instance_id, ed25519_public_key
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import GFS_CHANNEL_FIELD
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatureAccess, SpaceRole
-from ..domain.space_item import reader_cert_permits
+from ..domain.space_item import reader_cert_permits, required_scope
 from ..domain.writer_cert import (
     MAX_WRITER_USERS,
     WRITER_SCOPE_COMMENT,
@@ -145,9 +145,10 @@ def scope_weakened(
     (write→comment, any→none), or — for entitlements — the same scope held
     by fewer users (a user's seat ended, or the access level stopped letting
     them post, while the household keeps other seats), or a plain cert that
-    becomes a follower's ``reader`` cert (v_96: a member demoted to follower
-    keeps the same comment set, but its old plain cert would still let it
-    comment / react whatever the follower switches say)."""
+    becomes a follower's ``reader`` cert over no more users (v_96: a member
+    demoted to follower keeps the same comment set, but its old plain cert
+    would still let it comment / react whatever the follower switches say;
+    a set that GREW by a follower is a gain, not a loss)."""
     b_scope = before.scope if isinstance(before, WriterEntitlement) else before
     a_scope = after.scope if isinstance(after, WriterEntitlement) else after
     if _SCOPE_RANK[a_scope] < _SCOPE_RANK[b_scope]:
@@ -157,8 +158,12 @@ def scope_weakened(
         and isinstance(after, WriterEntitlement)
         and a_scope == b_scope
     ):
+        # Becoming a reader weakens only when nobody joined the set: a
+        # follower switch turning ON grows a member's plain comment set by
+        # its household's follower — nothing is taken, the household just
+        # needs its new cert (no rekey).
         return bool(before.user_ids - after.user_ids) or (
-            after.reader and not before.reader
+            after.reader and not before.reader and after.user_ids <= before.user_ids
         )
     return False
 
@@ -387,17 +392,22 @@ class SpaceWriterCertService:
 
     # ── Issuing ──────────────────────────────────────────────────────────
 
-    async def _issuable_entitlement(
-        self, space: Space, instance_id: str
+    async def issuable_entitlement(
+        self, space: Space, instance_id: str, *, followers: bool = True
     ) -> WriterEntitlement:
-        """What a cert for ``instance_id`` may carry: its entitlement, except
-        that a ``reader`` cert goes only to a household at v_96
-        (``MIN_FOR_SUBSCRIBER_SEATS``; a mesh-only one by its mesh claim, an
-        unknown one never). An older household ignores ``reader`` on parse,
-        so the signature would fail there — it is issued the entitlement
-        without its follower seats instead (none at all for a follower-only
-        household)."""
-        entitlement = await self.entitlement_for_instance(space, instance_id)
+        """What a cert for ``instance_id`` may carry — and so who may hold
+        the credentials that come with one (the writer group key, a channel
+        writer key): its entitlement, except that a ``reader`` cert goes
+        only to a household at v_96 (``MIN_FOR_SUBSCRIBER_SEATS``; a
+        mesh-only one by its mesh claim, an unknown one never). An older
+        household ignores ``reader`` on parse, so the signature would fail
+        there — it is issued the entitlement without its follower seats
+        instead (none at all for a follower-only household).
+        ``followers=False`` leaves follower seats out for everyone (a plain
+        cert binding only seated users)."""
+        entitlement = await self.entitlement_for_instance(
+            space, instance_id, followers=followers
+        )
         if not entitlement.reader or instance_id == self._own_instance_id:
             return entitlement
         if self._federation is not None and (
@@ -416,10 +426,15 @@ class SpaceWriterCertService:
         *,
         epoch: int | None = None,
         instance_pk_hint: bytes | None = None,
+        followers: bool = True,
     ) -> WriterCert | None:
         """Sign a cert for household ``instance_id`` at ``epoch`` (default:
         our current content epoch). ``instance_pk_hint`` is the key a
-        mesh-only household's item names (see :meth:`verified_instance_pk`). ``None`` when we are not a seed holder,
+        mesh-only household's item names (see :meth:`verified_instance_pk`).
+        ``followers=False`` issues a plain cert binding only the household's
+        seated users (never a ``reader`` cert) — the re-stamp of an item a
+        reader cert may not carry, e.g. a member's approved post.
+        ``None`` when we are not a seed holder,
         our seed no longer matches the pin, there is no epoch, the household
         holds no entitled seat, or its identity key is unknown to us."""
         space = await self._spaces.get(space_id)
@@ -436,7 +451,9 @@ class SpaceWriterCertService:
             if latest is None:
                 return None
             epoch = latest.epoch
-        entitlement = await self._issuable_entitlement(space, instance_id)
+        entitlement = await self.issuable_entitlement(
+            space, instance_id, followers=followers
+        )
         if entitlement.scope is None:
             return None
         pk = await self.verified_instance_pk(instance_id, claimed=instance_pk_hint)
@@ -513,7 +530,7 @@ class SpaceWriterCertService:
         latest = await self._keys.get_latest(space_id)
         if latest is None:
             return None
-        entitlement = await self._issuable_entitlement(space, instance_id)
+        entitlement = await self.issuable_entitlement(space, instance_id)
         if entitlement.scope is None:
             return None
         pk = await self.verified_instance_pk(instance_id)
@@ -613,7 +630,9 @@ class SpaceWriterCertService:
             if latest is None:
                 return None
             epoch = latest.epoch
-        if (await self.entitlement_for_instance(space, instance_id)).scope is None:
+        # The cert's issuance rules: a follower household below v_96 gets no
+        # cert, so it gets no key either.
+        if (await self.issuable_entitlement(space, instance_id)).scope is None:
             return None
         return issue_writer_key_grant(
             space_seed=seed, space_id=space_id, epoch=int(epoch)
@@ -859,34 +878,41 @@ class SpaceWriterCertService:
         return True
 
     async def current_item_cert(
-        self, space: Space, item: dict, *, epoch: int, required_scope: str
+        self, space: Space, item: dict, *, epoch: int, item_type: str
     ) -> dict | None:
-        """A cert for a cached, author-signed ``item`` (published at
-        ``epoch``) that verifies against the space's CURRENT pin.
+        """A cert for a cached, author-signed ``item`` of ``item_type``
+        (published at ``epoch``) that verifies against the space's CURRENT
+        pin and that receivers would accept on that type.
 
         The item's own cert while it still verifies; after an authority
         rotation (v_44) it was signed by the old key and no receiver accepts
         it, so a seed holder re-issues one for the item's origin household
         at the same epoch — the re-stamp the relay path does for a remote
-        author's post (the cert sits outside the author signature). ``None``
-        when neither works (not a seed holder, the household no longer holds
-        a seat that permits ``required_scope``, or the author is no longer
-        one of its writers): such an item would be refused anyway."""
+        author's post (the cert sits outside the author signature). A
+        follower's ``reader`` cert (v_96) is held to the space's follower
+        switches here too (:func:`reader_cert_permits`): every receiver
+        would refuse it otherwise. ``None`` when neither works (not a seed
+        holder, the household no longer holds a seat that permits the
+        type, the author is no longer one of its writers, or a follower
+        switch is off): such an item would be refused anyway."""
         try:
             author_pk = bytes.fromhex(str(item.get("author_pk") or ""))
         except ValueError:
             return None
+        scope = required_scope(item_type)
         raw = item.get(WRITER_CERT_FIELD)
         try:
+            held = WriterCert.from_wire(raw)
             verify_writer_cert(
-                WriterCert.from_wire(raw),
+                held,
                 space_pubkey=bytes.fromhex(space.identity_public_key),
                 space_id=space.id,
                 epoch=epoch,
                 author_pk=author_pk,
-                required_scope=required_scope,
+                required_scope=scope,
             )
-            return raw if isinstance(raw, dict) else None
+            if reader_cert_permits(held, item_type, space.features):
+                return raw if isinstance(raw, dict) else None
         except ValueError:
             pass
         origin = str(item.get("origin_instance_id") or "")
@@ -895,8 +921,9 @@ class SpaceWriterCertService:
         )
         if (
             cert is None
-            or not scope_permits(cert.scope, required_scope)
+            or not scope_permits(cert.scope, scope)
             or str(item.get("author_user_id") or "") not in cert.writer_user_ids
+            or not reader_cert_permits(cert, item_type, space.features)
         ):
             return None
         return cert.to_wire()

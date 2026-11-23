@@ -74,6 +74,12 @@ _WIRE_KEYS: frozenset[str] = frozenset(
 )
 
 
+#: The v2 user binding's keys — present only together with ``users_sig``.
+_BINDING_KEYS: frozenset[str] = frozenset(
+    {"writer_user_ids", "users_sig", "users_sig_suite"}
+)
+
+
 def scope_permits(held: str, required: str) -> bool:
     """True iff a cert of scope ``held`` authorizes a ``required`` action."""
     return required in _GRANTS.get(held, frozenset())
@@ -205,7 +211,9 @@ class WriterCert:
             raise ValueError("writer cert: bad epoch")
         if not isinstance(instance_pk, str) or not instance_pk:
             raise ValueError("writer cert: bad instance_pk")
-        if scope not in WRITER_SCOPES:
+        # isinstance first: an unhashable scope (a list / dict) must be a
+        # ValueError like every other malformed field, not a TypeError.
+        if not isinstance(scope, str) or scope not in WRITER_SCOPES:
             raise ValueError("writer cert: bad scope")
         if not _is_int(issued_at):
             raise ValueError("writer cert: bad issued_at")
@@ -216,6 +224,10 @@ class WriterCert:
         users: tuple[str, ...] = ()
         users_sig = raw.get("users_sig", "")
         users_suite = raw.get("users_sig_suite", "")
+        # One canonical encoding: the binding's fields travel together with a
+        # non-empty ``users_sig`` (what :meth:`to_wire` emits) or not at all.
+        if _BINDING_KEYS & set(raw) and not (isinstance(users_sig, str) and users_sig):
+            raise ValueError("writer cert: user binding without users_sig")
         if users_sig:
             raw_users = raw.get("writer_user_ids")
             if (

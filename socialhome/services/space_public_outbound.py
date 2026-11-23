@@ -146,6 +146,7 @@ from ..domain.space_item import (
     AuthorityRemoval,
     compressed_item_plaintexts,
     pad_json_object,
+    reader_cert_permits,
 )
 from ..domain.space_media_ref import post_media_urls
 from ..domain.writer_cert import (
@@ -526,7 +527,9 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         published (:func:`approved_relay_for`); it goes out marked
         ``approved_post`` with the author household's writer cert re-stamped
         for the relay epoch at ``comment`` scope at least — a plain member of
-        a ``MODERATED`` space holds only that. The approver is never named.
+        a ``MODERATED`` space holds only that — issued without follower seats
+        (v_96: never a reader cert, which no receiver takes on a post). The
+        approver is never named.
         No signed copy (an older submitter) → not relayed: a seed holder
         never vouches for authorship on its own."""
         post = event.post
@@ -549,6 +552,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 expect_pk=str(inner.get("author_pk") or ""),
                 required=True,
                 required_scope=WRITER_SCOPE_COMMENT,
+                # A post is never a follower's: re-issue without follower
+                # seats, so a member whose household also holds a follower
+                # (one reader cert for both) still gets a cert receivers
+                # accept on a post — members equal on any path.
+                followers=False,
             )
         except _NoWriterCert:
             log.warning(
@@ -816,13 +824,20 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         expect_pk: str = "",
         required: bool = False,
         required_scope: str = WRITER_SCOPE_WRITE,
+        item_type: str = ITEM_TYPE_POST,
+        followers: bool = True,
     ) -> _Sealed:
-        """Encrypt ``inner`` with ``instance_id``'s writer cert for the epoch
-        it is encrypted under (re-read once if a rotation lands in between).
-        Without a cert service, or with no cert for that household that
-        permits ``required_scope``, the inner goes as is — unless ``required``
-        (a re-stamp), which raises :class:`_NoWriterCert`. ``expect_pk`` pins the cert to the author key
-        the inner names. Raises ``RuntimeError`` when there is no content key.
+        """Encrypt ``inner`` (an ``item_type`` item) with ``instance_id``'s
+        writer cert for the epoch it is encrypted under (re-read once if a
+        rotation lands in between). Without a cert service, or with no cert
+        for that household that permits ``required_scope`` — and, for a
+        follower's ``reader`` cert (v_96), ``item_type`` under the space's
+        follower switches — the inner goes as is, unless ``required`` (a
+        re-stamp), which raises :class:`_NoWriterCert`. ``expect_pk`` pins
+        the cert to the author key the inner names. ``followers=False``
+        re-issues a remote household's cert without its follower seats (a
+        plain cert binding only seated users). Raises ``RuntimeError`` when
+        there is no content key.
         """
         if self._writer_certs is None:
             if required:
@@ -832,7 +847,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             current = await self._crypto.get_current_epoch(space_id)
             if current is None:
                 raise RuntimeError(f"no content key for space {space_id}")
-            if instance_id == self._own_instance_id:
+            if instance_id == self._own_instance_id and followers:
                 cert = await self._writer_certs.own_cert(space_id, current)
             else:
                 hint: bytes | None
@@ -841,7 +856,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 except ValueError:
                     hint = None
                 cert = await self._writer_certs.issue_for_instance(
-                    space_id, instance_id, epoch=current, instance_pk_hint=hint
+                    space_id,
+                    instance_id,
+                    epoch=current,
+                    instance_pk_hint=hint,
+                    followers=followers,
                 )
             if cert is not None and expect_pk:
                 named = SpaceWriterCertService.cert_instance_pk(cert.to_wire())
@@ -851,6 +870,14 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             # cert on a post).
             if cert is not None and not scope_permits(cert.scope, required_scope):
                 cert = None
+            # Nor a follower's reader cert on a type every receiver refuses
+            # it on (a post, or a comment / reaction whose switch is off).
+            if cert is not None and cert.reader:
+                space = await self._spaces.get(space_id)
+                if space is None or not reader_cert_permits(
+                    cert, item_type, space.features
+                ):
+                    cert = None
             if cert is None and required:
                 raise _NoWriterCert(instance_id)
             body = dict(inner)

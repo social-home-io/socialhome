@@ -162,3 +162,28 @@ def test_every_known_field_parses():
     cert = WriterCert.from_wire(wire)
     assert cert.reader is True
     assert cert.writer_user_ids == ("u-1",)
+
+
+@pytest.mark.parametrize("scope", [["comment"], {"write": 1}, {"comment"}])
+def test_an_unhashable_scope_is_a_value_error(scope):
+    """A list / dict scope must be refused as malformed (ValueError), never
+    escape as a TypeError past every ``except ValueError`` receiver."""
+    wire = {**_cert().to_wire(), "scope": scope}
+    with pytest.raises(ValueError):
+        WriterCert.from_wire(wire)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"writer_user_ids": ["u-1"]},
+        {"users_sig_suite": "ed25519"},
+        {"writer_user_ids": ["u-1"], "users_sig": "", "users_sig_suite": "ed25519"},
+        {"users_sig": ""},
+    ],
+)
+def test_a_user_binding_field_without_its_signature_is_refused(extra):
+    """One canonical encoding: the binding's fields travel only with a
+    non-empty ``users_sig`` (exactly what ``to_wire`` emits)."""
+    with pytest.raises(ValueError):
+        WriterCert.from_wire({**_cert().to_wire(), **extra})

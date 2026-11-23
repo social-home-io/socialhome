@@ -1383,7 +1383,8 @@ class _Certs:
         self.answers = answers
         self.asked: list[tuple[str, int]] = []
 
-    async def current_item_cert(self, space, item, *, epoch, required_scope):
+    async def current_item_cert(self, space, item, *, epoch, item_type):
+        assert item_type == "author_profile"
         author = item["author_user_id"]
         self.asked.append((author, epoch))
         answer = self.answers[author]
