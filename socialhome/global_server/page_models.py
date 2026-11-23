@@ -65,6 +65,7 @@ async def load_space_page(app: web.Application, space_id: str) -> dict | None:
         # relay-seat ``subscriber_count``).
         "member_count": space.member_count,
         "follower_count": space.follower_count,
+        "allow_subscribers": space.allow_subscribers,
         "category": space.category,
     }
 
