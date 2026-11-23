@@ -3005,6 +3005,7 @@
   "capability.space_post_reactions": "Reactions on space posts shared with every household",
   "capability.poll_vote_stamps": "Poll votes that count the same in every household",
   "capability.sync_pages": "Space sync status, even without the host",
+  "capability.moment_reach": "Choose how far your moments go",
   "settings.tab.security": "Security",
   "settings.security.signing_in": "Signing in",
   "settings.security.signing_in_hint": "Only you use this. Nobody else sees your sign-in username.",

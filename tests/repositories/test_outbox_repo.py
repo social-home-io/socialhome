@@ -17,8 +17,9 @@ from socialhome.domain.federation_retention import (
     capped_delete_key,
     moment_delete_key,
     relayed_delete_prefix,
+    relayed_moment_key,
 )
-from socialhome.domain.outbox import OutboxPayload
+from socialhome.domain.outbox import OutboxPayload, RelayedRowDropped
 from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS,
@@ -1067,6 +1068,195 @@ async def test_eviction_takes_a_relayed_delete_before_our_own_events(env):
     assert await _pending_ids(env, "peer") == {"ours-old", "our-delete"}
     assert await env.outbox_repo.evict_oldest_droppable("peer") is True
     assert await _pending_ids(env, "peer") == {"our-delete"}
+
+
+async def test_eviction_takes_relayed_creates_and_totals_first_too(env):
+    """v_96 (F5): strangers' moments and totals we only relay go before our
+    own events, like relayed deletes — oldest of them first."""
+    await _seed_pending(
+        env,
+        "ours-old",
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        created_at="2025-12-31T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "our-counts",
+        key="moment-counts:m0",
+        event_type=FederationEventType.MOMENT_REACTIONS_COUNTED,
+        created_at="2025-12-30T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "relayed-create",
+        key=relayed_moment_key("create", "x", "m1"),
+        event_type=FederationEventType.MOMENT_CREATED,
+        created_at="2026-01-03T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "relayed-totals",
+        key=relayed_moment_key("counts", "x", "m1"),
+        event_type=FederationEventType.MOMENT_REACTIONS_COUNTED,
+        created_at="2026-01-04T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "relayed-delete",
+        key=moment_delete_key(
+            FederationEventType.MOMENT_DELETED,
+            {"moment_id": "m2", "origin_instance_id": "x"},
+            own_instance_id="me",
+        ),
+        created_at="2026-01-02T00:00:00+00:00",
+    )
+    for left in (
+        {"ours-old", "our-counts", "relayed-create", "relayed-totals"},
+        {"ours-old", "our-counts", "relayed-totals"},
+        {"ours-old", "our-counts"},
+        {"ours-old"},
+    ):
+        assert await env.outbox_repo.evict_oldest_droppable("peer") is True
+        assert await _pending_ids(env, "peer") == left
+
+
+async def test_a_multi_enqueue_at_the_cap_evicts_a_relayed_moment_first(
+    env, monkeypatch
+):
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    await _seed_pending(
+        env,
+        "ours-old",
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        created_at="2025-12-31T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "relayed-create",
+        key=relayed_moment_key("create", "x", "m1"),
+        event_type=FederationEventType.MOMENT_CREATED,
+        created_at="2026-01-03T00:00:00+00:00",
+    )
+    await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer"],
+        event_type=POST_CREATED,
+        supersede_key=None,
+        payload_ref=OutboxPayload(
+            id="p-new",
+            event_type=POST_CREATED,
+            space_id="sp",
+            payload_enc="x",
+            msg_id="msg-new",
+        ),
+    )
+    assert "relayed-create" not in await _pending_ids(env, "peer")
+    assert "ours-old" in await _pending_ids(env, "peer")
+
+
+async def _two_own_rows(env) -> None:
+    for i in range(2):
+        await _seed_pending(
+            env,
+            f"ours-{i}",
+            instance_id="peer",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            created_at=f"2025-12-3{i}T00:00:00+00:00",
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "key"),
+    [
+        (FederationEventType.MOMENT_CREATED, relayed_moment_key("create", "x", "m1")),
+        (
+            FederationEventType.MOMENT_REACTIONS_COUNTED,
+            relayed_moment_key("counts", "x", "m1"),
+        ),
+    ],
+)
+async def test_a_relayed_row_never_evicts_one_of_our_own(
+    env, monkeypatch, event_type, key
+):
+    """D: at the cap with only our own rows queued, a create or totals row we
+    merely relay is dropped instead (``RelayedRowDropped``) — it may push out
+    other relayed rows, never ours."""
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    await _two_own_rows(env)
+    with pytest.raises(RelayedRowDropped):
+        await env.outbox_repo.enqueue(
+            instance_id="peer",
+            event_type=event_type,
+            payload_json="{}",
+            supersede_key=key,
+        )
+    assert await _pending_ids(env, "peer") == {"ours-0", "ours-1"}
+
+
+async def test_a_relayed_delete_still_makes_room_at_the_cap(env, monkeypatch):
+    """A relayed delete is content-free and already capped per origin
+    (``MAX_LONG_LIVED_RELAYED_PER_ORIGIN``): it is never dropped for good —
+    it still evicts the oldest row, as before."""
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    await _two_own_rows(env)
+    queued = await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload_json="{}",
+        supersede_key=moment_delete_key(
+            FederationEventType.MOMENT_DELETED,
+            {"moment_id": "m1", "origin_instance_id": "x"},
+            own_instance_id="me",
+        ),
+    )
+    assert queued is not None
+    assert await _pending_ids(env, "peer") == {"ours-1", queued}
+
+
+async def test_a_relayed_row_evicts_an_older_relayed_one_at_the_cap(env, monkeypatch):
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    await _seed_pending(
+        env,
+        "ours-0",
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        created_at="2025-12-30T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "relayed-old",
+        key=relayed_moment_key("create", "x", "m0"),
+        event_type=FederationEventType.MOMENT_CREATED,
+        created_at="2026-01-03T00:00:00+00:00",
+    )
+    queued = await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload_json="{}",
+        supersede_key=relayed_moment_key("create", "x", "m1"),
+    )
+    assert queued is not None
+    assert await _pending_ids(env, "peer") == {"ours-0", queued}
+
+
+async def test_a_relayed_multi_row_never_evicts_one_of_our_own(env, monkeypatch):
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    await _two_own_rows(env)
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer", "peer-a"],
+        event_type=POST_CREATED,
+        supersede_key=relayed_moment_key("create", "x", "m1"),
+        payload_ref=OutboxPayload(
+            id="p-relayed",
+            event_type=POST_CREATED,
+            space_id="sp",
+            payload_enc="x",
+            msg_id="msg-relayed",
+        ),
+    )
+    assert set(written) == {"peer-a"}  # not at the cap: queued
+    assert await _pending_ids(env, "peer") == {"ours-0", "ours-1"}
 
 
 async def test_relayed_deletes_past_an_origins_cap_are_queued_ordinary(

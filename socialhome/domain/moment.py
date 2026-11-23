@@ -2,7 +2,8 @@
 
 A *moment* is a one-shot household-broadcast post: ≤ 1 000 chars text
 plus an optional image or short (≤ 15 s) video. Moments fan out to
-every paired peer and their peers, up to 3 hops. They live 24 h by
+every paired peer and their peers, up to :data:`MOMENT_MAX_HOPS`, bounded
+by the author's signed reach (v_96). They live 24 h by
 default; if a local viewer has explicitly followed the author (directly or
 through a GFS) the moment surfaces in their inbox until its ``expires_at``
 — the author's choice, 1–30 days, 7 by default (the same row, just a
@@ -30,9 +31,24 @@ from .errors import CodedError
 MOMENT_MAX_CONTENT_LEN: int = 1_000
 MOMENT_MAX_VIDEO_MS: int = 15_000
 
-#: Federation relay: cap at 3 hops. Origin sends with hop=1; each
-#: receiver bumps and re-fans up to ``MAX_HOPS - 1``.
+#: Federation relay: the wire cap (3 in this phase). Origin sends with
+#: hop=1; each receiver bumps and re-fans while ``hop < min(reach,
+#: MOMENT_MAX_HOPS)`` — the signed reach bounds it further (v_96).
 MOMENT_MAX_HOPS: int = 3
+
+#: v_96 — how far a moment goes when its author chose nothing (hops).
+MOMENT_DEFAULT_REACH: int = 3
+
+#: The most a person may choose (``moments.reach``) and a household allow
+#: (``moments.reach_max``). Relays still stop at :data:`MOMENT_MAX_HOPS`:
+#: a household forwards only while ``hop < min(reach, MOMENT_MAX_HOPS)``.
+MOMENT_MAX_REACH: int = 5
+
+#: v_96 — the hop a delete tombstone records when the delete came through a
+#: GFS: above every mesh hop, so the mesh copy of the same delete arriving
+#: later still counts as closer (``MomentTombstone.CLOSER``) and is relayed
+#: on to the households holding the moment over the mesh.
+GFS_DELETE_HOP: int = MOMENT_MAX_REACH + 1
 
 #: How long people who follow an author keep the author's moments when the
 #: author chose nothing (``moments.follower_retention_days``, decision 6d).
@@ -118,6 +134,9 @@ class MomentTombstone(enum.Enum):
     REMOVED = "removed"
     #: The moment was never held here; a content-free tombstone now is.
     RECORDED = "recorded"
+    #: A tombstone was already held, from further away: this copy came
+    #: closer (v_96), so it reaches households the first could not.
+    CLOSER = "closer"
     #: A tombstone was already held — nothing changed (a replayed delete).
     ALREADY = "already"
 
@@ -168,6 +187,18 @@ class Moment:
     #: tombstone until ``expires_at`` so a replayed or late-arriving create
     #: for the same id is refused. Ordinary reads never return tombstones.
     deleted_at: str | None = None
+    #: v_96 — how many hops the moment goes (1–5), as its origin signed it:
+    #: computed when it is written (``moments.reach``), so a later settings
+    #: change never moves where its delete or totals go. ``None``: written
+    #: before v_96 (NULL) — it went :data:`MOMENT_DEFAULT_REACH` hops, and its
+    #: delete and totals go unmarked, as they did then.
+    reach: int | None = None
+
+    @property
+    def effective_reach(self) -> int:
+        """How many hops the moment goes — :attr:`reach`, or
+        :data:`MOMENT_DEFAULT_REACH` for a row written before v_96."""
+        return MOMENT_DEFAULT_REACH if self.reach is None else self.reach
 
 
 @dataclass(slots=True, frozen=True)

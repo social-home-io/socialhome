@@ -254,8 +254,15 @@ copy cost (n−1) + (n−1)(n−2) + (n−1)(n−2)(n−3) envelopes per moment
 
 ## Reach — how far a person's moments go (v_96, design)
 
-Owner decisions 2026-11-23. Status: **design, being built** — the sections above
-still describe what ships until the phases below land.
+Owner decisions 2026-11-23. Status: **being built**. Phase 1 (v_96) has
+landed: the signed wire shape (creates and deletes), the receiver refusals,
+the relay rules (``hop < min(reach, MOMENT_MAX_HOPS)``, the relay clamp, one
+closer re-relay, reach-carrying copies only to v_96), the totals gate, the
+relayed outbox key, the ``moments.reach`` column and the person / household
+reach (``moments.reach`` / ``moments.reach_max``, no route or UI yet). Still
+to come: ``MOMENT_MAX_HOPS`` 5 with the viewer's ``max_hops`` 1–5,
+``MAX_RETURN_TOKENS``, ``moment_look_hops``, the storage rule, the routes
+and the UI — until then relays still stop at hop 3.
 
 ### Rules
 
@@ -300,6 +307,13 @@ neither raise it, strip it nor splice it onto another moment:
   signed ``no_relay`` delete. The GFS delete certificate (v_66) keeps its
   fixed v1 field set: for a public moment the origin signs the certificate
   separately over the v1 bytes.
+* **GFS delete certificates stay v1** (accepted residual): for a public
+  moment whose reach isn't 3, the separately signed v1 certificate can be
+  replayed by anyone holding it as an *unmarked* mesh delete, which then
+  travels the default 3 hops instead of the moment's reach. Bounded: public
+  moments only (their delete already goes to every GFS), and the delete
+  itself is genuine — it only reaches further than the moment, never a
+  different moment.
 * **Receivers refuse** (neither store nor relay) a relayed create or delete
   whose ``reach`` is not an integer in {2, 4, 5}, that carries both
   ``reach`` and ``no_relay``, or that carries ``reach`` on the legacy
@@ -323,7 +337,17 @@ neither raise it, strip it nor splice it onto another moment:
   holds the plaintext.
 * **One closer re-relay per moment** (F8): a copy arriving closer than the
   one relayed is relayed again at most once, so a relay claiming hops
-  4, 3, 2 … gets one extra wave, not *r − 1*.
+  4, 3, 2 … gets one extra wave, not *r − 1*. The origin's own copy
+  (hop 1, bound by its envelope) is always relayed when closer — a relay
+  can't burn that slot.
+* **A far delete never suppresses the genuine one**: a delete tombstone
+  keeps the lowest (clamped) hop a copy came at; a copy closer than that
+  lowers it and travels on (``MomentTombstone.CLOSER``). The hop only goes
+  down, so one delete is relayed at most ``MOMENT_MAX_HOPS`` − 1 times by a
+  household, and a replay at the same or a higher hop still stops. Wiping a
+  held moment records the delete's hop, not the create's; a delete that came
+  through a GFS records ``GFS_DELETE_HOP`` (above every mesh hop), so the
+  mesh copy arriving later still travels on.
 * **Totals** (``MOMENT_REACTIONS_COUNTED``, payload unchanged — its field
   set is closed) follow the create: the origin sends them under the same
   version gate as the moment (≥ v_96 for reach 2), and a relay passes them

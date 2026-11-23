@@ -71,6 +71,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_RELAY_CHUNK_RESIZE,
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
+    DELIVERY_ERROR_RELAYED_ROW_DROPPED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DELIVERY_ERROR_ROUTED_SEND_FAILED,
     DELIVERY_ERROR_SUPERSEDED,
@@ -100,7 +101,13 @@ from ..domain.media_chunking import (
     routed_media_chunk_bytes,
 )
 from ..domain.media_validator import validate_inbound_media_meta
-from ..domain.outbox import DeliveryOutcome, OutboxEntry, OutboxPayload, RetryAfter
+from ..domain.outbox import (
+    DeliveryOutcome,
+    OutboxEntry,
+    OutboxPayload,
+    RelayedRowDropped,
+    RetryAfter,
+)
 from ..domain.relay_media_frame import relay_event_payload_limit
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
@@ -1046,6 +1053,21 @@ class FederationService:
             event_type, space_id=space_id, payload=payload
         ) or moment_delete_key(
             event_type, payload, own_instance_id=self._own_instance_id
+        )
+
+    @staticmethod
+    def _relayed_row_dropped(
+        instance_id: str, event_type: FederationEventType
+    ) -> DeliveryResult:
+        """v_96 (D): the outbox dropped a relayed moment row rather than
+        evict one of our own events — by design, so DEBUG."""
+        log.debug(
+            "outbox full, relayed row dropped: %s for %s", event_type.value, instance_id
+        )
+        return DeliveryResult(
+            instance_id=instance_id,
+            ok=False,
+            error=DELIVERY_ERROR_RELAYED_ROW_DROPPED,
         )
 
     def _claim_state_send(self, instance_id: str, state_key: str | None) -> int | None:
@@ -2397,14 +2419,17 @@ class FederationService:
         # Migration 0145: the payload is stored ONCE (KEK-wrapped) for every
         # recipient this send fails to reach; the row only references it and
         # is sealed for this peer when it is sent.
-        queued = await self._outbox_repo.enqueue(
-            instance_id=to_instance_id,
-            event_type=event_type,
-            payload_json="",
-            msg_id=msg_id,
-            supersede_key=state_key,
-            payload_ref=self._outbox_payload(event_type, space_id, payload),
-        )
+        try:
+            queued = await self._outbox_repo.enqueue(
+                instance_id=to_instance_id,
+                event_type=event_type,
+                payload_json="",
+                msg_id=msg_id,
+                supersede_key=state_key,
+                payload_ref=self._outbox_payload(event_type, space_id, payload),
+            )
+        except RelayedRowDropped:
+            return self._relayed_row_dropped(to_instance_id, event_type)
         if queued is None:
             # The pairing ended while this send was in flight (an unpair
             # purged the peer between our lookup and here) — nothing was
@@ -2494,13 +2519,16 @@ class FederationService:
             state_key,
             self._claim_state_send(to_instance_id, state_key),
         )
-        row_id = await self._outbox_repo.enqueue(
-            instance_id=to_instance_id,
-            event_type=event_type,
-            payload_json="",
-            supersede_key=state_key,
-            payload_ref=self._outbox_payload(event_type, space_id, payload),
-        )
+        try:
+            row_id = await self._outbox_repo.enqueue(
+                instance_id=to_instance_id,
+                event_type=event_type,
+                payload_json="",
+                supersede_key=state_key,
+                payload_ref=self._outbox_payload(event_type, space_id, payload),
+            )
+        except RelayedRowDropped:
+            return self._relayed_row_dropped(to_instance_id, event_type)
         if row_id is None:
             return DeliveryResult(
                 instance_id=to_instance_id, ok=False, error="unknown_instance"

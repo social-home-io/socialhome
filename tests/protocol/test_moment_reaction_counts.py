@@ -58,6 +58,7 @@ from socialhome.crypto import (
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.federation_retention import relayed_moment_key
 from socialhome.federation.federation_service import FederationService
 from socialhome.global_server import moment_public_registry as registry_mod
 from socialhome.global_server.app_keys import (
@@ -325,19 +326,39 @@ async def test_a_restart_catches_up_recent_moments_once_and_old_ones_never(env):
     assert await counts.tick() == 0
 
 
-async def test_a_protected_authors_totals_are_marked_no_relay(env, monkeypatch):
+async def test_a_protected_authors_totals_are_marked_no_relay(env):
+    """A protected account's moment is written at reach 1 (v_96): its
+    totals, like it, go to paired households only — signed ``no_relay``."""
+    _app, db, sent, own, anna, counts, _client = env
+    start = datetime.now(UTC)
+    await _moment(db, "m-anna", anna, own, "self", created=start)
+    await db.enqueue("UPDATE moments SET reach=1 WHERE id='m-anna'")
+    await _react(db, "m-anna", "u-x", "🔥")
+    counts._clock_ms = lambda: int((start.timestamp() + 11 * 60) * 1000)
+    assert await counts.tick() == 1
+    assert sent and all(s[2].get("no_relay") is True for s in sent)
+
+
+@pytest.mark.parametrize("protected", [True, False])
+async def test_a_legacy_rows_totals_follow_the_authors_protection(
+    env, monkeypatch, protected
+):
+    """A row written before v_96 (NULL reach): a protected author's went
+    ``no_relay`` (one hop), so its totals do too — as on main; anyone
+    else's went 3 hops and its totals go unmarked. (Accepted edge: an
+    author protected only after posting a legacy moment.)"""
     _app, db, sent, own, anna, counts, _client = env
     start = datetime.now(UTC)
     await _moment(db, "m-anna", anna, own, "self", created=start)
     await _react(db, "m-anna", "u-x", "🔥")
 
     async def _protected(_self, _user_id):
-        return True
+        return protected
 
     monkeypatch.setattr(type(counts), "_is_protected", _protected)
     counts._clock_ms = lambda: int((start.timestamp() + 11 * 60) * 1000)
     assert await counts.tick() == 1
-    assert all(s[2].get("no_relay") is True for s in sent)
+    assert sent and all(("no_relay" in s[2]) is protected for s in sent)
 
 
 # ═══ Receiver: only genuine, newer totals for a moment held here ══════════
@@ -353,9 +374,11 @@ async def test_receiver_keeps_genuine_totals_and_relays_them(env):
         "counts": {"🔥": 2, "👏": 1},
         "total": 3,
     }
-    # Relayed one hop on, to the other v_69 peer only.
-    assert [(s[0], s[2]["hop_count"]) for s in sent] == [(OTHER, 2)]
-    assert sent[0][3]["outbox_key"] == "moment-counts:m-noor"
+    # Relayed one hop on, to the other v_69 peer only — from a neighbour
+    # that isn't the origin, so at least hop 2 here (the v_96 relay clamp),
+    # queued under the relayed key (evicted first, v_96).
+    assert [(s[0], s[2]["hop_count"]) for s in sent] == [(OTHER, 3)]
+    assert sent[0][3]["outbox_key"] == relayed_moment_key("counts", ORIGIN, "m-noor")
 
 
 @pytest.fixture
@@ -502,7 +525,7 @@ async def test_a_household_that_relayed_the_create_relays_the_totals(env):
     app, _db, sent, *_ = env
     outbound = app[federation_service_key]  # noqa: F841 — keeps the app alive
     counts = app[moment_reaction_counts_key]
-    counts._outbound._remember_relay(("origin", "m-noor", ORIGIN), 1)
+    counts._outbound._remember_relay(("origin", "m-noor", ORIGIN), 1, reach=3)
     payload = _signed()
     await _dispatch(app, payload)
     assert [s[0] for s in sent] == [OTHER]
@@ -519,7 +542,7 @@ async def test_totals_for_another_origins_moment_are_neither_kept_nor_relayed(en
     m_origin = derive_instance_id(mallory.public_key)
     counts = app[moment_reaction_counts_key]
     # Relayed: we passed on ORIGIN's create, not Mallory's.
-    counts._outbound._remember_relay(("origin", "m-noor", ORIGIN), 1)
+    counts._outbound._remember_relay(("origin", "m-noor", ORIGIN), 1, reach=3)
     await _dispatch(app, _signed(key=mallory, origin=m_origin))
     assert sent == []
     # Held: the moment is ORIGIN's.
@@ -1153,7 +1176,7 @@ async def test_a_mesh_send_that_fails_is_retried_next_tick(env, monkeypatch):
     real = cls.fan_counts
     calls = []
 
-    async def _boom(_self, payload, *, author_user_id):
+    async def _boom(_self, payload, *, author_user_id, **_kw):
         calls.append(payload)
         raise RuntimeError("database is locked")
 

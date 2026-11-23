@@ -504,6 +504,7 @@
   "capability.space_post_reactions": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A reaction (emoji) someone adds to a post in a space is shown to the members in every household of that space, not only in the reactor's own.",
   "capability.poll_vote_stamps": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. When two votes of one person in a space poll (or a vote and the poll's close) cross on the way, every household ends on the same result.",
   "capability.sync_pages": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A member household can tell whether its copy of a space is up to date (or behind) from a page the space's host signed, even while the host is offline.",
+  "capability.moment_reach": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A person can choose how many households away (hops) their moments are passed on, from 1 to 5.",
   "error.reaction_limit": "Shown when someone adds a sixth emoji reaction to one post in a space. \"Reaction\" is the emoji reaction, not a comment.",
   "error.space_name_too_long": "Shown when a space name is longer than allowed. {max} is a number of characters.",
   "error.space_emoji_too_long": "Shown when a space's icon is more than one emoji.",

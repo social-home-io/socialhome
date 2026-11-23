@@ -9,9 +9,9 @@ the code in this file:
    confirmed peer with ``hop_count = 1`` and
    ``origin_instance_id = self``.
 
-2. **Relay fan-out** (up to 3 hops total). When an inbound
-   ``MOMENT_*`` envelope lands on an instance and ``hop_count < 3``,
-   :meth:`relay_inbound` re-fans the same payload to the local paired
+2. **Relay fan-out** (up to ``MOMENT_MAX_HOPS``, bounded by the signed
+   reach). When an inbound ``MOMENT_*`` envelope lands on an instance and
+   ``hop < min(reach, MOMENT_MAX_HOPS)``, :meth:`relay_inbound` re-fans the same payload to the local paired
    peers, excluding the origin instance and the immediate sender — once
    per moment: a later copy (one arrives per relaying neighbour) is
    relayed only when it comes from closer to the origin. Receivers dedupe
@@ -34,6 +34,17 @@ decides when; :meth:`fan_counts` sends). Relays pass them on through
 :meth:`relay_inbound` like a create — once per (moment, ``rev``), only when
 they hold or relayed the moment, only to v_69 peers.
 
+**Reach (v_96).** A moment goes as many hops as its author's household
+signed (:func:`~socialhome.moment_origin.moment_reach_of`): reach 1 is the
+v_38 ``no_relay`` mark, 2 / 4 / 5 a signed ``reach`` field, 3 neither. The
+origin sends reach 1 only to v_38 households, reach 2 only to v_96 ones;
+a delete carries the same mark under the same gate. A relay forwards only
+while ``hop < min(reach, MOMENT_MAX_HOPS)``, counts a copy not sent by its
+origin as at least hop 2 (the relay clamp — ``hop_count`` is outside the
+signature), sends a ``reach``-carrying copy only to v_96 households,
+relays a closer copy at most once more, and queues relayed creates and
+totals under a relayed outbox key the per-peer cap evicts first.
+
 **Reactions further away (v_67).** A reaction is unicast to the author's
 household when it is this one or a paired one. Otherwise the
 :class:`~socialhome.services.moment_reaction_router.MomentReactionRouter`
@@ -44,10 +55,12 @@ token to every create it relays (per peer).
 
 from __future__ import annotations
 
+import enum
 import logging
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -58,7 +71,9 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.federation_retention import relayed_moment_key
 from ..domain.moment import (
+    MOMENT_DEFAULT_REACH,
     MOMENT_MAX_HOPS,
     MOMENT_RELAY_MAX_AGE_HOURS,
     moment_too_old_to_relay,
@@ -67,7 +82,11 @@ from ..infrastructure.event_bus import EventBus
 from ..moment_counts import MAX_COUNTS_REV_AGE_MS
 from ..moment_origin import (
     NO_RELAY_FIELD,
+    REACH_FIELD,
     carries_no_relay,
+    moment_hop_of,
+    moment_reach_of,
+    reach_marks_of,
     sign_moment_origin,
 )
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
@@ -110,13 +129,51 @@ def counts_outbox_key(moment_id: str) -> str:
     return f"moment-counts:{moment_id}"
 
 
+def reach_min_version(reach: int | None) -> int | None:
+    """v_96 — the lowest peer version the origin sends a moment (its delete,
+    its totals' reach part) of *reach* hops to: reach 1 (``no_relay``) →
+    v_38, reach 2 → v_96 (an older household would relay it to hop 3),
+    anything else — 3, 4–5 (a direct delivery needs no origin check), or
+    ``None`` for a row written before v_96 — every peer."""
+    if reach == 1:
+        return FederationCapability.MIN_FOR_MOMENT_NO_RELAY
+    if reach == 2:
+        return FederationCapability.MIN_FOR_MOMENT_REACH
+    return None
+
+
+@dataclass(slots=True, frozen=True)
+class _Relayed:
+    """One relay seen-map entry: the lowest ``hop`` it was relayed at, when
+    (monotonic ``at``), whether a closer copy was relayed again already
+    (``re_relayed``, v_96 F8), and — on a relayed create's ``origin`` entry
+    only — the moment's ``reach``."""
+
+    hop: int
+    at: float
+    re_relayed: bool = False
+    reach: int | None = None
+
+
+class _Copy(enum.Enum):
+    """What a copy arriving at the relay is, against the seen-map."""
+
+    #: Never relayed (or the entry aged out): relay it.
+    FIRST = "first"
+    #: Closer to the origin than the one relayed: relay it once more.
+    CLOSER = "closer"
+    #: Nothing new: drop it.
+    SEEN = "seen"
+
+
 class MomentFederationOutbound(
     VisibilityMixin,
     ConfirmedPeerBroadcaster,
     SingleTargetSender,
     ProtectionGateMixin,
 ):
-    """Publish moment mutations to the 3-hop peer mesh."""
+    """Publish moment mutations to the peer mesh — up to
+    ``MOMENT_MAX_HOPS``, bounded by the signed reach."""
 
     __slots__ = (
         "_bus",
@@ -151,14 +208,16 @@ class MomentFederationOutbound(
         self._visibility_repo = visibility_repo
         self._child_protection = None
         self._reaction_router: MomentReactionRouter | None = None
-        #: (event type, moment id) → (lowest hop we relayed it at,
-        #: monotonic time). In a mesh a household gets one copy of a
-        #: moment per relaying neighbour; only the first — or one from
-        #: closer to the origin, which reaches further — is relayed on.
-        #: Bounded by :data:`RELAY_SEEN_MAX` and :data:`RELAY_SEEN_TTL_S`;
-        #: lost on restart (a copy arriving after one is relayed once more).
-        #: v_69 totals are remembered per (type, moment id, rev).
-        self._relayed: OrderedDict[tuple[str, ...], tuple[int, float]] = OrderedDict()
+        #: (event type, moment id) → :class:`_Relayed`. In a mesh a
+        #: household gets one copy of a moment per relaying neighbour; only
+        #: the first — or, once (v_96, F8; always when the origin itself
+        #: sent it), one from closer to the origin, which reaches further —
+        #: is relayed on. Bounded by :data:`RELAY_SEEN_MAX` and
+        #: :data:`RELAY_SEEN_TTL_S`; lost on restart (a copy arriving after
+        #: one is relayed once more). v_69 totals are remembered per (type,
+        #: moment id, rev); a relayed create's ``("origin", moment id,
+        #: origin)`` entry keeps the moment's reach (v_96).
+        self._relayed: OrderedDict[tuple[str, ...], _Relayed] = OrderedDict()
 
     def attach_reaction_router(self, router: MomentReactionRouter) -> None:
         """Wire the v_67 reaction router (key-wrap key on creates, return
@@ -185,7 +244,7 @@ class MomentFederationOutbound(
             target_id=event.moment_id,
         ):
             return
-        payload = {
+        payload: dict[str, object] = {
             "moment_id": event.moment_id,
             "author_user_id": event.author_user_id,
             "content": event.content,
@@ -198,12 +257,14 @@ class MomentFederationOutbound(
             "occurred_at": event.occurred_at.isoformat(),
             "hop_count": 1,
         }
-        # §CP.R (v_38): a protected account's moments reach our directly
-        # paired households only — signed ``no_relay``, and never sent to a
-        # household too old to honour it (it would relay them onward).
-        no_relay = await self._is_protected(event.author_user_id)
-        if no_relay:
-            payload[NO_RELAY_FIELD] = True
+        # v_96: as far as the moment goes, signed — and never to a household
+        # too old to honour it (it would relay it onward). §CP.R (v_38): the
+        # service already writes a protected account's moment at reach 1;
+        # forcing it here too is defence in depth.
+        reach = 1 if await self._is_protected(event.author_user_id) else event.reach
+        marks = reach_marks_of(reach)
+        payload.update(marks)
+        no_relay = NO_RELAY_FIELD in marks
         signed = self._origin_signed(FederationEventType.MOMENT_CREATED, payload)
         if not no_relay and self._reaction_router is not None:
             # v_67: where a reaction from further away gets sealed to. Outside
@@ -216,9 +277,7 @@ class MomentFederationOutbound(
             origin_instance_id=event.origin_instance_id,
             exclude_instances=set(),
             author_user_id=event.author_user_id,
-            min_version=(
-                FederationCapability.MIN_FOR_MOMENT_NO_RELAY if no_relay else None
-            ),
+            min_version=reach_min_version(reach),
         )
 
     async def _on_deleted(self, event: MomentDeleted) -> None:
@@ -230,6 +289,18 @@ class MomentFederationOutbound(
             target_id=event.moment_id,
         ):
             return
+        # v_96: the delete goes exactly as far as the moment did — its row's
+        # reach, under the same signed mark (reach 1: ``no_relay``, so a
+        # protected account's delete is never relayed) and version gate. A
+        # row written before v_96 (``None``) went as it did then: one hop
+        # (``no_relay``) for a protected author, else 3 hops, unmarked.
+        # Accepted edge: an author protected only after posting a legacy
+        # moment gets a one-hop delete for it.
+        reach = event.reach
+        if reach is None and await self._is_protected(event.author_user_id):
+            reach = 1
+        marks = {} if reach is None else reach_marks_of(reach)
+        min_version = reach_min_version(reach)
         await self._fan_to_peers(
             event_type=FederationEventType.MOMENT_DELETED,
             payload=self._origin_signed(
@@ -240,11 +311,13 @@ class MomentFederationOutbound(
                     "origin_instance_id": event.origin_instance_id,
                     "occurred_at": event.occurred_at.isoformat(),
                     "hop_count": 1,
+                    **marks,
                 },
             ),
             origin_instance_id=event.origin_instance_id,
             exclude_instances=set(),
             author_user_id=event.author_user_id,
+            min_version=min_version,
         )
 
     async def _on_reaction_changed(self, event: MomentReactionChanged) -> None:
@@ -295,12 +368,20 @@ class MomentFederationOutbound(
 
     # ── Reaction totals (v_69) ─────────────────────────────────────────
 
-    async def fan_counts(self, payload: dict, *, author_user_id: str) -> int:
+    async def fan_counts(
+        self,
+        payload: dict,
+        *,
+        author_user_id: str,
+        reach: int | None = None,
+    ) -> int:
         """Send a signed ``MOMENT_REACTIONS_COUNTED`` *payload* (hop 1) for a
         moment *author_user_id* wrote here to every confirmed v_69 peer —
         under the same hide list, guardian blocks and relay policy as the
-        moment itself. Latest-only per (peer, moment) in the outbox. Returns
-        how many peers it was handed to (0 when the policy holds it back)."""
+        moment itself, and (v_96) the moment's *reach* gate: a reach-2
+        moment's totals only to v_96 peers, as the moment went. Latest-only
+        per (peer, moment) in the outbox. Returns how many peers it was
+        handed to (0 when the policy holds it back)."""
         moment_id = str(payload.get("moment_id") or "")
         if not await self._policy_allows(
             source_instance_id=self._federation.own_instance_id,
@@ -314,11 +395,14 @@ class MomentFederationOutbound(
             origin_instance_id=self._federation.own_instance_id,
             exclude_instances=set(),
             author_user_id=author_user_id,
-            min_version=FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS,
+            min_version=max(
+                FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS,
+                reach_min_version(reach) or 0,
+            ),
             outbox_key=counts_outbox_key(moment_id),
         )
 
-    # ── Relay (called by the inbound handler when hop_count < 3) ───────
+    # ── Relay (called by the inbound handler for every taken copy) ─────
 
     async def relay_inbound(
         self,
@@ -326,7 +410,7 @@ class MomentFederationOutbound(
         event_type: FederationEventType,
         payload: dict,
         from_instance: str,
-        holds_moment: bool = False,
+        held_reach: int | None = None,
         now_ms: int | None = None,
     ) -> int:
         """Re-broadcast an inbound moment envelope to *our* paired peers,
@@ -340,9 +424,16 @@ class MomentFederationOutbound(
 
         v_69 — a ``MOMENT_REACTIONS_COUNTED`` (totals) is relayed once per
         (moment, ``rev``) — the seen key carries the rev — only when this
-        household holds the moment from the mesh (*holds_moment*) or relayed
-        its create, only while its ``rev`` is younger than
-        :data:`COUNTS_RELAY_MAX_AGE_MS` (*now_ms*), and only to v_69 peers.
+        household holds the moment from the mesh within its reach (*held_reach*
+        set: the held row's reach) or relayed its create, only while its
+        ``rev`` is younger than :data:`COUNTS_RELAY_MAX_AGE_MS` (*now_ms*),
+        and only to v_69 peers (v_96 when the moment's reach isn't 3 — an
+        older household can't hold it through this relay).
+
+        v_96 — forwards only while ``hop < min(reach, MOMENT_MAX_HOPS)``; a
+        copy not sent by its origin counts as at least hop 2 (the relay
+        clamp); an invalid reach is never relayed; a ``reach``-carrying copy
+        goes only to v_96 peers.
 
         Returns how many peers it was handed to (0: not relayed).
         """
@@ -353,14 +444,26 @@ class MomentFederationOutbound(
         # local DB state on the inbound hot path.
         if str(payload.get("received_via") or "") == "gfs":
             return 0
-        # v_38: a ``no_relay`` moment (a protected account's) goes no further.
+        # v_38: a ``no_relay`` moment (a protected account's, or reach 1)
+        # goes no further.
         if carries_no_relay(payload):
             return 0
-        try:
-            hop = int(payload.get("hop_count") or 0)
-        except TypeError, ValueError:
-            hop = 0
-        if hop <= 0 or hop >= MOMENT_MAX_HOPS:
+        origin = str(payload.get("origin_instance_id") or "")
+        # v_96 relay clamp (F1): a copy not sent by its origin is at least 2
+        # hops away, whatever its unsigned ``hop_count`` says.
+        hop = moment_hop_of(payload, from_instance=from_instance, origin=origin)
+        if hop is None:
+            return 0
+        moment_id = str(payload.get("moment_id") or "")
+        counts = event_type == FederationEventType.MOMENT_REACTIONS_COUNTED
+        # v_96: the signed reach of a create / delete (``None``: refused);
+        # for totals, the reach of the moment held or relayed here.
+        reach = (
+            self._counts_reach(payload, moment_id, held_reach, now_ms)
+            if counts
+            else moment_reach_of(payload)
+        )
+        if reach is None or hop >= min(reach, MOMENT_MAX_HOPS):
             return 0
         # v_65: a moment lives up to 30 days, so an old signed create is a
         # replay worth refusing to spread — kept here, not passed on past
@@ -374,19 +477,32 @@ class MomentFederationOutbound(
                 MOMENT_RELAY_MAX_AGE_HOURS,
             )
             return 0
-        moment_id = str(payload.get("moment_id") or "")
         seen_key: tuple[str, ...] = (event_type.value, moment_id)
-        min_version: int | None = None
+        min_version: int | None
         outbox_key: str | None = None
-        if event_type == FederationEventType.MOMENT_REACTIONS_COUNTED:
-            if not self._counts_relayable(payload, moment_id, holds_moment, now_ms):
-                return 0
+        if counts:
             seen_key = (event_type.value, moment_id, str(payload.get("rev")))
-            min_version = FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS
-            outbox_key = counts_outbox_key(moment_id)
-        if not self._relay_is_new(seen_key, hop):
+            # v_96 (S1): a moment whose reach isn't 3 went to v_96 households
+            # only past us — an older one can't hold it through this relay.
+            min_version = (
+                FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS
+                if reach == MOMENT_DEFAULT_REACH
+                else FederationCapability.MIN_FOR_MOMENT_REACH
+            )
+            outbox_key = relayed_moment_key("counts", origin, moment_id)
+        else:
+            # v_96: a copy carrying a signed ``reach`` only to v_96
+            # households — an older one verifies the v1 bytes only.
+            min_version = (
+                FederationCapability.MIN_FOR_MOMENT_REACH
+                if REACH_FIELD in payload
+                else None
+            )
+            if event_type == FederationEventType.MOMENT_CREATED:
+                outbox_key = relayed_moment_key("create", origin, moment_id)
+        copy = self._classify_copy(seen_key, hop, from_origin=from_instance == origin)
+        if copy is _Copy.SEEN:
             return 0
-        origin = str(payload.get("origin_instance_id") or "")
         # §Momentum-relay-policy: don't relay a moment whose source
         # is on the household ban list, or whose author / moment is
         # under an open report. Layered on top of the no-redistribute
@@ -397,11 +513,12 @@ class MomentFederationOutbound(
             target_id=str(payload.get("moment_id") or "") or None,
         ):
             return 0
-        self._remember_relay(seen_key, hop)
+        self._remember_relay(seen_key, hop, re_relayed=copy is _Copy.CLOSER)
         if event_type == FederationEventType.MOMENT_CREATED and origin:
             # v_69: which origin's create this was — totals for the moment
-            # are passed on only when signed by that same origin.
-            self._remember_relay(("origin", moment_id, origin), hop)
+            # are passed on only when signed by that same origin; v_96: and
+            # how far the moment goes, which bounds them.
+            self._remember_relay(("origin", moment_id, origin), hop, reach=reach)
         next_payload = dict(payload)
         next_payload["hop_count"] = hop + 1
         router = self._reaction_router
@@ -411,7 +528,7 @@ class MomentFederationOutbound(
             def payload_for(peer_id: str) -> dict:
                 return router.stamp_relayed_create(
                     next_payload,
-                    received_hop=hop,
+                    received_hop=hop,  # clamped: tokens must match the hop
                     from_instance=from_instance,
                     to_instance=peer_id,
                 )
@@ -427,54 +544,84 @@ class MomentFederationOutbound(
             outbox_key=outbox_key,
         )
 
-    def _counts_relayable(
+    def _counts_reach(
         self,
         payload: dict,
         moment_id: str,
-        holds_moment: bool,
+        held_reach: int | None,
         now_ms: int | None,
-    ) -> bool:
+    ) -> int | None:
         """v_69: totals go on only from a household that holds the moment
-        from the mesh or relayed its create (a household that never passed
-        the moment on has nobody downstream who holds it), and only while
-        fresh."""
+        from the mesh within its reach (*held_reach* set, v_96) or relayed
+        its create (a household that never passed the moment on has nobody
+        downstream who holds it), and only while fresh. Returns the moment's
+        reach (the held row's, else the relayed create's), or ``None``: not
+        relayed."""
         origin = str(payload.get("origin_instance_id") or "")
-        if not holds_moment and not self.relayed_create(moment_id, origin):
+        reach = (
+            held_reach
+            if held_reach is not None
+            else self.relayed_create_reach(moment_id, origin)
+        )
+        if reach is None:
             log.debug(
                 "moment relay: totals for %s — moment neither held nor relayed",
                 moment_id,
             )
-            return False
+            return None
         rev = payload.get("rev")
         now = int(time.time() * 1000) if now_ms is None else now_ms
         if not isinstance(rev, int) or rev < now - COUNTS_RELAY_MAX_AGE_MS:
             log.debug("moment relay: totals for %s too old — not relayed", moment_id)
-            return False
-        return True
+            return None
+        return reach
 
     def relayed_create(self, moment_id: str, origin: str) -> bool:
         """Whether this household relayed *moment_id*'s create, as *origin*'s
         moment, lately (the seen-map entry still lives)."""
+        return self.relayed_create_reach(moment_id, origin) is not None
+
+    def relayed_create_reach(self, moment_id: str, origin: str) -> int | None:
+        """The reach of *moment_id* when this household relayed its create,
+        as *origin*'s moment, lately — else ``None``."""
         held = self._relayed.get(("origin", moment_id, origin))
-        return held is not None and monotonic() - held[1] <= RELAY_SEEN_TTL_S
+        if held is None or monotonic() - held.at > RELAY_SEEN_TTL_S:
+            return None
+        return held.reach if held.reach is not None else MOMENT_DEFAULT_REACH
 
     # ── Relay seen-map ─────────────────────────────────────────────────
 
-    def _relay_is_new(self, key: tuple[str, ...], hop: int) -> bool:
-        """Whether a copy arriving at ``hop`` is worth relaying: never
-        relayed (or the entry aged out), or relayed only from further
-        away — a closer copy, relayed on, reaches more hops."""
+    def _classify_copy(
+        self, key: tuple[str, ...], hop: int, *, from_origin: bool
+    ) -> _Copy:
+        """What a copy arriving at ``hop`` is: :attr:`_Copy.FIRST` (never
+        relayed, or the entry aged out), :attr:`_Copy.CLOSER` (relayed only
+        from further away — a closer copy, relayed on, reaches more hops),
+        or :attr:`_Copy.SEEN`. v_96 (F8): a closer copy is relayed again at
+        most once — a relay claiming hops 4, 3, 2 … gets one extra wave, not
+        r − 1 — except one the origin itself sent (envelope-authenticated
+        hop 1), which can't be faked and so can't burn the slot."""
         held = self._relayed.get(key)
         if held is None:
-            return True
-        relayed_hop, at = held
-        if monotonic() - at > RELAY_SEEN_TTL_S:
+            return _Copy.FIRST
+        if monotonic() - held.at > RELAY_SEEN_TTL_S:
             del self._relayed[key]
-            return True
-        return hop < relayed_hop
+            return _Copy.FIRST
+        if hop < held.hop and (from_origin or not held.re_relayed):
+            return _Copy.CLOSER
+        return _Copy.SEEN
 
-    def _remember_relay(self, key: tuple[str, ...], hop: int) -> None:
-        self._relayed[key] = (hop, monotonic())
+    def _remember_relay(
+        self,
+        key: tuple[str, ...],
+        hop: int,
+        *,
+        re_relayed: bool = False,
+        reach: int | None = None,
+    ) -> None:
+        self._relayed[key] = _Relayed(
+            hop=hop, at=monotonic(), re_relayed=re_relayed, reach=reach
+        )
         self._relayed.move_to_end(key)
         while len(self._relayed) > RELAY_SEEN_MAX:
             self._relayed.popitem(last=False)
@@ -489,7 +636,7 @@ class MomentFederationOutbound(
         """Attach this household's origin signature (v_35).
 
         Relays forward the payload verbatim, so every household down the
-        3-hop mesh can check the moment against its origin rather than
+        mesh (up to ``MOMENT_MAX_HOPS``, bounded by the signed reach) can check the moment against its origin rather than
         taking the relay's ``origin_instance_id`` on trust. Always signed,
         never gated on the peer's version: the fields are additive (older
         receivers ignore them) and the relay targets are households we

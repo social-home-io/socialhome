@@ -33,6 +33,7 @@ from socialhome.federation.owner_bound_id import (
     check_owner_bound_id,
 )
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
@@ -995,3 +996,138 @@ async def test_rate_limit_error_carries_next_allowed_at(stack):
         await stack.moment_svc.create_moment(author_user_id=a.user_id, content="two")
     expected = datetime.fromisoformat(m.created_at) + timedelta(minutes=15)
     assert datetime.fromisoformat(exc.value.next_allowed_at) == expected
+
+
+# ── v_96 reach ──────────────────────────────────────────────────────────
+
+
+class _Protection:
+    """Stand-in for ChildProtectionService: who is protected."""
+
+    def __init__(self, protected: set[str]) -> None:
+        self.protected = protected
+
+    def register_gate(self, _gate) -> None:
+        pass
+
+    async def is_protected(self, user_id: str) -> bool:
+        return user_id in self.protected
+
+
+def _reach_svc(stack, *, protected: set[str] | None = None) -> MomentService:
+    svc = MomentService(
+        stack.moment_repo,
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id=stack.iid,
+        config_repo=SqliteInstanceConfigRepo(stack.db),
+    )
+    svc.attach_child_protection(_Protection(protected or set()))
+    return svc
+
+
+async def test_a_moment_goes_3_hops_by_default(stack):
+    a = await stack.provision("alice")
+    created: list[MomentCreated] = []
+    stack.bus.subscribe(MomentCreated, created.append)
+    m = await _reach_svc(stack).create_moment(author_user_id=a.user_id, content="hi")
+    assert m.reach == 3
+    assert (await stack.moment_repo.get(m.id)).reach == 3
+    assert created[0].reach == 3
+
+
+@pytest.mark.parametrize(
+    ("person", "household", "reach"),
+    [
+        (2, None, 2),
+        (5, None, 5),
+        (1, None, 1),
+        (5, "2", 2),
+        (4, "5", 4),
+        (3, "1", 1),
+        (5, "not a number", 5),
+        (5, "9", 5),
+        (5, "0", 1),
+    ],
+)
+async def test_the_household_maximum_caps_the_persons_reach(
+    stack, person, household, reach
+):
+    a = await stack.provision("alice")
+    await stack.user_svc.patch_preferences("alice", {"moments": {"reach": person}})
+    if household is not None:
+        await SqliteInstanceConfigRepo(stack.db).set("moments.reach_max", household)
+    created: list[MomentCreated] = []
+    stack.bus.subscribe(MomentCreated, created.append)
+    m = await _reach_svc(stack).create_moment(author_user_id=a.user_id, content="hi")
+    assert m.reach == reach
+    assert (await stack.moment_repo.get(m.id)).reach == reach
+    assert created[0].reach == reach
+
+
+async def test_a_protected_accounts_moments_go_one_hop_whatever_it_chose(stack):
+    kid = await stack.provision("kid")
+    await stack.user_svc.patch_preferences("kid", {"moments": {"reach": 5}})
+    m = await _reach_svc(stack, protected={kid.user_id}).create_moment(
+        author_user_id=kid.user_id, content="hi"
+    )
+    assert m.reach == 1
+
+
+async def test_a_reply_goes_no_further_than_its_parent(stack):
+    a = await stack.provision("alice")
+    b = await stack.provision("bob")
+    await stack.user_svc.patch_preferences("alice", {"moments": {"reach": 2}})
+    await stack.user_svc.patch_preferences("bob", {"moments": {"reach": 5}})
+    svc = _reach_svc(stack)
+    root = await svc.create_moment(author_user_id=a.user_id, content="q")
+    reply = await svc.create_moment(
+        author_user_id=b.user_id, content="a", parent_moment_id=root.id
+    )
+    assert root.reach == 2
+    assert reply.reach == 2
+    # …and never further than the replier chose either.
+    await stack.user_svc.patch_preferences("bob", {"moments": {"reach": 1}})
+    short = await svc.create_moment(
+        author_user_id=b.user_id, content="b", parent_moment_id=root.id
+    )
+    assert short.reach == 1
+
+
+async def test_a_reply_to_a_remote_moment_follows_the_held_rows_reach(stack):
+    b = await stack.provision("bob")
+    await stack.user_svc.patch_preferences("bob", {"moments": {"reach": 5}})
+    await stack.moment_repo.save(
+        Moment(
+            id="m-remote",
+            author_user_id="u-far",
+            content="q",
+            media_url=None,
+            media_type=None,
+            duration_ms=None,
+            parent_moment_id=None,
+            origin_instance_id="inst-far",
+            created_at=datetime.now(UTC).isoformat(),
+            expires_at=(datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            received_via="household",
+            reach=4,
+        )
+    )
+    reply = await _reach_svc(stack).create_moment(
+        author_user_id=b.user_id, content="a", parent_moment_id="m-remote"
+    )
+    assert reply.reach == 4
+
+
+async def test_a_delete_carries_the_rows_reach(stack):
+    """The delete goes as far as the moment did — the row's reach, not the
+    person's setting now."""
+    a = await stack.provision("alice")
+    await stack.user_svc.patch_preferences("alice", {"moments": {"reach": 2}})
+    svc = _reach_svc(stack)
+    m = await svc.create_moment(author_user_id=a.user_id, content="hi")
+    await stack.user_svc.patch_preferences("alice", {"moments": {"reach": 5}})
+    deleted: list[MomentDeleted] = []
+    stack.bus.subscribe(MomentDeleted, deleted.append)
+    await svc.delete_moment(m.id, actor_user_id=a.user_id)
+    assert [d.reach for d in deleted] == [2]

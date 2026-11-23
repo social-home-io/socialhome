@@ -4271,7 +4271,11 @@ def create_app(config: Config | None = None) -> web.Application:
         media_refs=repos.media_reference,
         federation_repo=repos.federation,
         gfs_delete_log=gfs_connection_service,
+        # v_96: the household's maximum reach (``moments.reach_max``).
+        config_repo=repos.instance_config,
     )
+    # §CP.R (v_96): a protected account's moments go one hop.
+    moment_service.attach_child_protection(child_protection_service)
     # Your own moments stay in your archive (decision 6a); the household's
     # per-person media cap is enforced on the same hourly retention tick.
     moment_archive_service = MomentArchiveService(

@@ -12,6 +12,7 @@ from socialhome.domain.gallery import (
 )
 from socialhome.domain.highlight import HighlightAudience
 from socialhome.domain.notification_kinds import NotifDelivery, NotifKind
+from socialhome.services import user_preferences as user_preferences_mod
 from socialhome.services.user_preferences import (
     DEFAULT_HIGHLIGHTS_MAX_COUNT,
     DEFAULT_HIGHLIGHTS_RETENTION_DAYS,
@@ -135,13 +136,44 @@ def test_moment_follower_retention_days(blob, days):
     assert prefs.max_hops == 3
 
 
+def test_moment_max_hops_is_capped_at_the_wire_cap(monkeypatch):
+    """``max_hops`` clamps to ``MOMENT_MAX_HOPS`` (the constant, not a
+    literal — P2 raises it)."""
+    monkeypatch.setattr(user_preferences_mod, "MOMENT_MAX_HOPS", 5)
+    prefs = parse_moment_preferences('{"moments": {"max_hops": 9}}')
+    assert prefs.max_hops == 5
+
+
 def test_moment_preferences_keep_max_hops_beside_retention():
     blob = orjson.dumps({"moments": {"max_hops": 1, "follower_retention_days": 14}})
     prefs = parse_moment_preferences(blob.decode())
     assert (prefs.max_hops, prefs.follower_retention_days) == (1, 14)
 
 
-# ─── Home Assistant automation opt-in (D14) ──────────────────────────────
+@pytest.mark.parametrize(
+    ("blob", "reach"),
+    [
+        (None, 3),
+        ("{not json", 3),
+        ('{"moments": {}}', 3),
+        ('{"moments": {"reach": 1}}', 1),
+        ('{"moments": {"reach": 2}}', 2),
+        ('{"moments": {"reach": 5}}', 5),
+        ('{"moments": {"reach": 9}}', 5),
+        ('{"moments": {"reach": 0}}', 1),
+        ('{"moments": {"reach": -4}}', 1),
+        ('{"moments": {"reach": "far"}}', 3),
+        ('{"moments": {"reach": null}}', 3),
+    ],
+)
+def test_moment_reach(blob, reach):
+    """v_96: how far the person's moments go — 1–5 hops, 3 by default."""
+    prefs = parse_moment_preferences(blob)
+    assert prefs.reach == reach
+    assert prefs.max_hops == 3
+
+
+# ─── Home Assistant automation opt-in (D14)──────────────────────────────
 
 
 def test_ha_automation_events_off_by_default():

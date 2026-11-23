@@ -2697,6 +2697,7 @@
   "capability.space_post_reactions": "Reacties op space-berichten voor elk huishouden",
   "capability.poll_vote_stamps": "Stemmen in peilingen tellen in elk huishouden gelijk",
   "capability.sync_pages": "Sync-status van spaces, ook zonder de gastheer",
+  "capability.moment_reach": "Kies hoe ver je momenten gaan",
   "settings.tab.security": "Beveiliging",
   "settings.security.signing_in": "Inloggen",
   "settings.security.signing_in_hint": "Alleen jij gebruikt dit. Niemand anders ziet je inlognaam.",

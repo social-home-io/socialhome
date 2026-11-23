@@ -1610,7 +1610,28 @@ from __future__ import annotations
 #:   requester's status keeps the v_94
 #:   rules. Not space-scoped. Labelled "Space sync status, even without the
 #:   host".
-OURS: int = 95
+#: * **v_96** (2026-11-23) — **moment reach** (``docs/protocol/momentum.md``,
+#:   "Reach"): a person chooses how far their moments go (1–5 hops, default
+#:   3, capped by the household's ``moments.reach_max``; a protected account
+#:   stays at 1). The reach rides inside the encrypted ``MOMENT_CREATED`` /
+#:   ``MOMENT_DELETED`` payload under the origin signature: reach 1 is the
+#:   v_38 ``no_relay`` mark (``moment-origin:v2:``), reach 2 / 4 / 5 a
+#:   ``reach: N`` field (``moment-origin:v3:`` = the v1 fields plus
+#:   ``reach``), reach 3 nothing new (v1, byte for byte). Deletes carry the
+#:   same mark (a protected account's delete is now ``no_relay``, never
+#:   relayed). Relays forward only while ``hop < reach`` (still at most
+#:   ``MOMENT_MAX_HOPS``), clamp a relayed copy's hop to ≥ 2, relay a closer
+#:   copy at most once more, pass totals on only for a moment they relayed
+#:   or hold within its reach, and queue relayed creates / totals under an
+#:   outbox key evicted first. No new event type, no record change, no
+#:   ``SYNC_RECORD_LINES`` entry (no sync stream carries moments).
+#:   **Fallback**: a household below v_96 is never sent a reach-2 moment,
+#:   its delete or its totals, nor a relayed copy carrying ``reach``; reach
+#:   1 keeps the v_38 ``no_relay`` gate; reach 4–5 goes to every paired
+#:   household (an older one relays it verbatim up to hop 3; an older one
+#:   further away can't verify the v3 bytes and drops it). Not
+#:   space-scoped. Labelled "Choose how far your moments go".
+OURS: int = 96
 
 
 class FederationCapability:
@@ -2338,6 +2359,11 @@ class FederationCapability:
     #: ``page`` is older, and sends that ``page`` itself only to a provider
     #: at or above it. Below it: today's sentinel, Phase-1 status rules.
     MIN_FOR_SYNC_PAGES = 95
+    #: v_96 — moment reach: a reach-2 moment (its delete, its totals) and a
+    #: relayed copy carrying a signed ``reach`` go only to a household at or
+    #: above it. Reach 1 keeps :attr:`MIN_FOR_MOMENT_NO_RELAY`; reach 4–5
+    #: from the origin goes to every peer.
+    MIN_FOR_MOMENT_REACH = 96
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2700,6 +2726,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SYNC_PAGES,
         "Space sync status, even without the host",
     ),
+    (
+        FederationCapability.MIN_FOR_MOMENT_REACH,
+        "Choose how far your moments go",
+    ),
 ]
 
 
@@ -2805,6 +2835,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
     FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
     FederationCapability.MIN_FOR_SYNC_PAGES: "sync_pages",
+    FederationCapability.MIN_FOR_MOMENT_REACH: "moment_reach",
 }
 
 
@@ -2853,6 +2884,9 @@ def feature_keys_missing_below(version: int) -> list[str]:
 #:   spaces; a behind household only keeps its own people out of groups.
 #: * ``MIN_FOR_MOMENT_NO_RELAY`` — moments are household-broadcast posts;
 #:   a behind household only misses a protected account's moments.
+#: * ``MIN_FOR_MOMENT_REACH`` — moments are household-broadcast posts; a
+#:   behind household only misses reach-2 moments (and relays reach-4–5
+#:   ones no further than hop 3).
 #: * ``MIN_FOR_REMOTE_REPORT_ANSWER`` — a host → reporter's-household note;
 #:   a behind household only keeps its own reporters from hearing back, the
 #:   space works the same for everyone else.

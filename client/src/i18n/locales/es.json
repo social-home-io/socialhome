@@ -2724,6 +2724,7 @@
   "capability.space_post_reactions": "Reacciones a publicaciones de espacios para todos los hogares",
   "capability.poll_vote_stamps": "Votos de encuestas que cuentan igual en todos los hogares",
   "capability.sync_pages": "Estado de sincronización de espacios, aun sin el anfitrión",
+  "capability.moment_reach": "Elige hasta dónde llegan tus momentos",
   "settings.tab.security": "Seguridad",
   "settings.security.signing_in": "Inicio de sesión",
   "settings.security.signing_in_hint": "Solo lo usas tú. Nadie más ve tu usuario de acceso.",

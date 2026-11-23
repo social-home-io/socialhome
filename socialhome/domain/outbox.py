@@ -62,6 +62,13 @@ class OutboxPayload:
     msg_id: str | None = None
 
 
+class RelayedRowDropped(Exception):
+    """v_96 (D): a moment create or totals row this household only relays
+    was not queued — the peer is at its pending cap with none but our own
+    rows (and NEVER_DROP ones) to make room from, and a relayed row never
+    evicts one of ours."""
+
+
 class DeliveryOutcome(enum.Enum):
     """Result of a single outbound delivery attempt.
 

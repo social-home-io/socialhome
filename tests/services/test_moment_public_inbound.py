@@ -14,12 +14,19 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from socialhome.crypto import b64url_encode, derive_instance_id, sign_ed25519
 from socialhome.domain.events import MomentCreated
-from socialhome.domain.moment import MOMENT_MAX_LIFETIME_DAYS, Moment
+from socialhome.domain.moment import (
+    GFS_DELETE_HOP,
+    MOMENT_MAX_LIFETIME_DAYS,
+    MOMENT_MAX_REACH,
+    Moment,
+    MomentTombstone,
+)
 from socialhome.global_server.envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.moment_public_seal import item_key, seal_body, sign_wire
@@ -707,6 +714,29 @@ async def test_a_public_delete_for_an_unseen_moment_is_held_thirty_days(db):
     held = datetime.fromisoformat(tomb.expires_at)
     want = datetime.now(UTC) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
     assert abs((held - want).total_seconds()) < 60
+
+
+@pytest.mark.parametrize("held", [True, False])
+async def test_a_gfs_delete_never_suppresses_the_mesh_copy(db, held):
+    """v_96: a delete that came through a GFS sits above every mesh hop, so
+    the mesh copy of the same delete arriving later is ``CLOSER`` — it is
+    relayed on to the households that hold the moment over the mesh."""
+    inbound, _ = await _env(db)
+    if held:
+        await _create(inbound, _moment("m-both", sent_at=int(time.time())))
+    await _deliver_delete(inbound, _delete("m-both", sent_at=int(time.time())))
+    repo = SqliteMomentRepo(db)
+    tomb = await repo.get("m-both", include_deleted=True)
+    assert tomb is not None and tomb.deleted_at is not None
+    assert tomb.hop_count == GFS_DELETE_HOP > MOMENT_MAX_REACH
+    mesh = await repo.tombstone(
+        "m-both",
+        author_user_id=tomb.author_user_id,
+        origin_instance_id=tomb.origin_instance_id,
+        expires_at=tomb.expires_at,
+        hop_count=MOMENT_MAX_REACH,
+    )
+    assert mesh is MomentTombstone.CLOSER
 
 
 # ── Delete certificates (v_66) ─────────────────────────────────────────

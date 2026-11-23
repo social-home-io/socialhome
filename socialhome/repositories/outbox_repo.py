@@ -37,11 +37,12 @@ from ..domain.federation import (
     PairingStatus,
 )
 from ..domain.federation_retention import (
-    ANY_RELAYED_DELETE_KEY_PREFIX,
+    EVICT_FIRST_KEY_PREFIXES,
     MAX_ATTEMPTS,
     MAX_PENDING_PER_PEER,
     NEVER_DROP,
     RELAYED_DELETE_KEY_PREFIX,
+    RELAYED_MOMENT_KEY_PREFIX,
     RETENTION_DAYS,
     capped_delete_key,
     retention_expires_at,
@@ -49,10 +50,33 @@ from ..domain.federation_retention import (
 
 # Domain dataclasses live in ``socialhome/domain/outbox.py``; re-exported
 # here so existing repo-level imports keep working.
-from ..domain.outbox import OutboxEntry, OutboxPayload
+from ..domain.outbox import OutboxEntry, OutboxPayload, RelayedRowDropped
 from .base import rows_to_dicts
 
 log = logging.getLogger(__name__)
+
+#: The ORDER BY head that puts the rows evicted first ahead of every other
+#: (:data:`~socialhome.domain.federation_retention.EVICT_FIRST_KEY_PREFIXES`:
+#: relayed deletes, and v_96 relayed creates and totals), with its params.
+_EVICT_FIRST_MATCH = (
+    "("
+    + " OR ".join("substr(supersede_key, 1, ?) = ?" for _ in EVICT_FIRST_KEY_PREFIXES)
+    + ")"
+)
+_EVICT_FIRST_SQL = f"COALESCE({_EVICT_FIRST_MATCH}, 0) DESC"
+_EVICT_FIRST_PARAMS: tuple[object, ...] = tuple(
+    v for prefix in EVICT_FIRST_KEY_PREFIXES for v in (len(prefix), prefix)
+)
+
+
+def is_droppable_relay_key(key: str | None) -> bool:
+    """Whether a row keyed *key* is a moment create or totals update this
+    household only relays (v_96): it may evict only another relayed row, and
+    is dropped rather than evict one of our own. A relayed *delete* is not —
+    it is content-free and already capped per origin
+    (``MAX_LONG_LIVED_RELAYED_PER_ORIGIN``), so it makes room as any row."""
+    return key is not None and key.startswith(RELAYED_MOMENT_KEY_PREFIX)
+
 
 #: Default batch size for :meth:`SqliteOutboxRepo.purge_terminal`. Exported so
 #: the OutboxProcessor's batch-drain loop compares against the SAME value its
@@ -194,7 +218,9 @@ class AbstractOutboxRepo(Protocol):
     async def count_pending_with_key_prefix(
         self, instance_id: str, prefix: str
     ) -> int: ...
-    async def evict_oldest_droppable(self, instance_id: str) -> bool: ...
+    async def evict_oldest_droppable(
+        self, instance_id: str, *, relayed_only: bool = False
+    ) -> bool: ...
     async def delete_for_instance(self, instance_id: str) -> None: ...
     async def delete_pending_of_types(
         self,
@@ -252,9 +278,16 @@ class SqliteOutboxRepo:
         reached here can no longer strand a row behind the purge.
         """
         entry_id = msg_id or uuid.uuid4().hex
-        supersede_key, expires_at = await self._make_room(
-            instance_id, event_type, supersede_key, expires_at
-        )
+        room = await self._make_room(instance_id, event_type, supersede_key, expires_at)
+        if room is None:
+            log.debug(
+                "outbox full, relayed row dropped: %s %s for %s",
+                event_type.value,
+                supersede_key,
+                instance_id,
+            )
+            raise RelayedRowDropped(f"{instance_id}: {supersede_key}")
+        supersede_key, expires_at = room
         params = _row_params(
             entry_id,
             instance_id,
@@ -312,8 +345,10 @@ class SqliteOutboxRepo:
         ]
 
         def _write(conn: sqlite3.Connection) -> list[tuple]:
-            _make_room_for(conn, instance_ids, supersede_key)
-            return _insert_refs(conn, payload_ref, rows)
+            refused = _make_room_for(conn, instance_ids, supersede_key)
+            return _insert_refs(
+                conn, payload_ref, [r for r in rows if r[1] not in refused]
+            )
 
         written = await self._db.transact(_write)
         return {params[1]: params[0] for params in written}
@@ -324,10 +359,13 @@ class SqliteOutboxRepo:
         event_type: FederationEventType,
         supersede_key: str | None,
         expires_at: str | None,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None] | None:
         """Before a row for *instance_id* goes in: its retention class and
         deadline, the pending row it supersedes dropped, and room made under
-        the per-peer cap. Returns the row's ``(supersede_key, expires_at)``."""
+        the per-peer cap. Returns the row's ``(supersede_key, expires_at)``
+        — or ``None`` when it must not go in: a create or totals row we only
+        relay (:func:`is_droppable_relay_key`) at the cap with no other
+        relayed row to evict (v_96, D: it never evicts one of our own)."""
         if (
             supersede_key is not None
             and supersede_key.startswith(RELAYED_DELETE_KEY_PREFIX)
@@ -354,7 +392,12 @@ class SqliteOutboxRepo:
         # backlog is entirely NEVER_DROP (nothing droppable) we let it through
         # rather than drop a security/structural event.
         if await self.count_pending_for(instance_id) >= MAX_PENDING_PER_PEER:
-            evicted = await self.evict_oldest_droppable(instance_id)
+            relayed = is_droppable_relay_key(supersede_key)
+            evicted = await self.evict_oldest_droppable(
+                instance_id, relayed_only=relayed
+            )
+            if not evicted and relayed:
+                return None
             if not evicted:
                 log.warning(
                     "outbox: peer %s at pending cap with no droppable rows "
@@ -699,14 +742,19 @@ class SqliteOutboxRepo:
             )
         )
 
-    async def evict_oldest_droppable(self, instance_id: str) -> bool:
-        """Delete the oldest PENDING non-NEVER_DROP row for ``instance_id``.
+    async def evict_oldest_droppable(
+        self, instance_id: str, *, relayed_only: bool = False
+    ) -> bool:
+        """Delete the oldest PENDING non-NEVER_DROP row for ``instance_id``
+        (*relayed_only*: only a row we relay — a relayed delete, create or
+        totals update).
 
         Returns True iff a row was evicted. NEVER_DROP rows (security /
         structural state) are excluded — they are never dropped to make room.
         A moment's delete we only relay for another household goes first
         (adversarial review F2): a household flooding deletes can crowd out
-        other relayed ones, never our own events.
+        other relayed ones, never our own events. So do a moment create and
+        totals update we only relay (v_96, F5).
         """
         never = sorted(e.value for e in NEVER_DROP)
         placeholders = ",".join("?" * len(never))
@@ -715,15 +763,16 @@ class SqliteOutboxRepo:
             SELECT id FROM federation_outbox
              WHERE instance_id=? AND status='pending'
                AND event_type NOT IN ({placeholders})
-             ORDER BY COALESCE(substr(supersede_key, 1, ?) = ?, 0) DESC,
+               {"AND " + _EVICT_FIRST_MATCH if relayed_only else ""}
+             ORDER BY {_EVICT_FIRST_SQL},
                       datetime(created_at) ASC, id ASC
              LIMIT 1
             """,
             (
                 instance_id,
                 *never,
-                len(ANY_RELAYED_DELETE_KEY_PREFIX),
-                ANY_RELAYED_DELETE_KEY_PREFIX,
+                *(_EVICT_FIRST_PARAMS if relayed_only else ()),
+                *_EVICT_FIRST_PARAMS,
             ),
         )
         if row is None:
@@ -883,13 +932,16 @@ def _row_params(
 
 def _make_room_for(
     conn: sqlite3.Connection, instance_ids: list[str], supersede_key: str | None
-) -> None:
+) -> frozenset[str]:
     """Inside the caller's transaction, before one row each for
     *instance_ids* goes in: their pending rows with *supersede_key* dropped,
-    then the oldest droppable pending row (relayed deletes first, as
+    then the oldest droppable pending row (relayed rows first, as
     :meth:`SqliteOutboxRepo.evict_oldest_droppable`) of each one at or over
     :data:`MAX_PENDING_PER_PEER` evicted — one statement each, whatever the
-    number of households."""
+    number of households. Returns the households that must get no row: for
+    a create or totals row we only relay (:func:`is_droppable_relay_key`),
+    those at the cap with no relayed row to evict (v_96, D: never one of our
+    own)."""
     ids = orjson.dumps(instance_ids).decode()
     if supersede_key is not None:
         conn.execute(
@@ -907,7 +959,23 @@ def _make_room_for(
         )
     ]
     if not full:
-        return
+        return frozenset()
+    relayed = is_droppable_relay_key(supersede_key)
+    refused: frozenset[str] = frozenset()
+    if relayed:
+        refused = frozenset(full) - {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT instance_id FROM federation_outbox"
+                " WHERE status='pending'"
+                " AND instance_id IN (SELECT value FROM json_each(?))"
+                f" AND {_EVICT_FIRST_MATCH}",
+                (orjson.dumps(full).decode(), *_EVICT_FIRST_PARAMS),
+            )
+        }
+        full = [iid for iid in full if iid not in refused]
+        if not full:
+            return refused
     never = sorted(e.value for e in NEVER_DROP)
     evicted = conn.execute(
         f"""
@@ -915,7 +983,7 @@ def _make_room_for(
             SELECT id FROM (
                 SELECT id, ROW_NUMBER() OVER (
                     PARTITION BY instance_id
-                    ORDER BY COALESCE(substr(supersede_key, 1, ?) = ?, 0) DESC,
+                    ORDER BY {_EVICT_FIRST_SQL},
                              datetime(created_at) ASC, id ASC
                 ) AS rn
                   FROM federation_outbox
@@ -925,12 +993,7 @@ def _make_room_for(
             ) WHERE rn = 1
         )
         """,
-        (
-            len(ANY_RELAYED_DELETE_KEY_PREFIX),
-            ANY_RELAYED_DELETE_KEY_PREFIX,
-            orjson.dumps(full).decode(),
-            *never,
-        ),
+        (*_EVICT_FIRST_PARAMS, orjson.dumps(full).decode(), *never),
     ).rowcount
     if evicted < len(full):
         log.warning(
@@ -938,6 +1001,7 @@ def _make_room_for(
             "(all NEVER_DROP) — inserting over cap",
             len(full) - evicted,
         )
+    return refused
 
 
 def _insert_refs(
