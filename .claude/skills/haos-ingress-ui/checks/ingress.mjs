@@ -1443,6 +1443,57 @@ await check('app-group-lobby', async () => {
   return { problems, joined }
 })
 
+// 6b. A rate-limited cold start: the first two /api/me probes answer 429
+//     (Retry-After: 3). The SPA must say "Too many requests" with a
+//     countdown — never a blank page, IngressAuthFailed, a password form
+//     or a toast — and boot into the app on its own once answered.
+await check('ingress-429-rate-limited', async () => {
+  const problems = []
+  const states = {}
+  for (const vp of ['desktop', 'mobile']) {
+    const { ctx, page: p } = await newPage(vp)
+    let limited = 0
+    await p.setRequestInterception(true)
+    p.on('request', r => {
+      if (r.isInterceptResolutionHandled()) return
+      const u = new URL(r.url())
+      if (r.method() === 'GET' && u.pathname === `${PREFIX}/api/me` && limited < 2) {
+        limited += 1
+        return r.respond({
+          status: 429,
+          headers: { 'Retry-After': '3' },
+          contentType: 'application/json',
+          body: JSON.stringify({ error: { code: 'RATE_LIMITED', detail: 'Too many requests — wait a moment.', retry_after: 3 } }),
+        })
+      }
+      return r.continue()
+    })
+    await p.goto(APP, { waitUntil: 'load' })
+    await step(`${vp}: the "Too many requests" screen`, p.waitForFunction(t => document.body.innerText.includes(t), {}, T('boot_rate_limited.title')))
+    const state = await p.evaluate(() => ({
+      text: document.body.innerText,
+      passwordField: !!document.querySelector('input[type=password]'),
+      toasts: [...document.querySelectorAll('.sh-toast-message')].map(e => e.textContent),
+      scrollsSideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    }))
+    await p.screenshot({ path: path.join(SHOTS, `ingress-429-rate-limited-${vp}.png`) })
+    if (!/\d+\s?s…/.test(state.text)) problems.push(`${vp}: no countdown on the rate-limited screen`)
+    if (state.text.includes(T('ingress_failed.title'))) problems.push(`${vp}: IngressAuthFailed shown for a 429`)
+    if (state.passwordField) problems.push(`${vp}: a password field is shown for a 429`)
+    if (state.toasts.length) problems.push(`${vp}: toast(s) shown for a 429: ${state.toasts.join(' | ')}`)
+    if (state.scrollsSideways) problems.push(`${vp}: the rate-limited screen scrolls sideways`)
+    // It retries on its own (Retry-After 3 s, twice) and lands in the app.
+    await step(`${vp}: the app after the automatic retry`, p.waitForSelector('#main', { timeout: 20_000 }))
+    if (limited !== 2) problems.push(`${vp}: expected 2 rate-limited probes, saw ${limited}`)
+    const after = await p.evaluate(() => [...document.querySelectorAll('.sh-toast-message')].map(e => e.textContent))
+    if (after.length) problems.push(`${vp}: toast(s) after the retry: ${after.join(' | ')}`)
+    states[vp] = { limited, toasts: state.toasts }
+    await ctx.close()
+  }
+  activePage = page
+  return { problems, states }
+})
+
 // 7. No ingress user (Supervisor sent no X-Remote-User-*): the cold-start
 //    /api/me 401s → IngressAuthFailed, never a password form or a
 //    "Session expired" toast (there was no token to expire).

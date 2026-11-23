@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { api, ApiError, _resetApiLoggedOut, dispositionName, setUnauthorizedHandler } from './api'
+import { api, ApiError, _resetApiLoggedOut, dispositionName, setUnauthorizedHandler, rateLimitedUntil } from './api'
 import { token } from '@/store/token'
 
 describe('api — surface', () => {
@@ -573,5 +573,60 @@ describe('ApiClient — identical concurrent GETs share one request', () => {
     } finally {
       token.value = prev
     }
+  })
+})
+
+describe('ApiClient.getPatiently — a read the app cannot start without', () => {
+  function res(status: number, body: unknown, retryAfter: string | null = null) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (k: string) => (k.toLowerCase() === 'retry-after' ? retryAfter : null) },
+      json: vi.fn().mockResolvedValue(body),
+    } as unknown as Response
+  }
+  const limited = { error: { code: 'RATE_LIMITED', detail: 'Too many requests — wait a moment.' } }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    rateLimitedUntil.value = null
+  })
+
+  it('shows the wait at once and keeps honouring Retry-After until it is answered', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(429, limited, '5'))
+      .mockResolvedValueOnce(res(429, limited, '3'))
+      .mockResolvedValueOnce(res(200, { user_id: 'u1' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const p = api.getPatiently('/api/me')
+    await vi.advanceTimersByTimeAsync(0)
+    // The first 429 is visible right away — no silent wait first.
+    expect(rateLimitedUntil.value).toBe(1_005_000)
+    await vi.advanceTimersByTimeAsync(4_900)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(rateLimitedUntil.value).toBe(1_008_000)
+    await vi.advanceTimersByTimeAsync(3_000)
+    await expect(p).resolves.toEqual({ user_id: 'u1' })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(rateLimitedUntil.value).toBeNull()
+  })
+
+  it('a 401 still throws (and clears the wait) — a 429 is the only thing it waits out', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(429, limited, '1'))
+      .mockResolvedValueOnce(res(401, { error: { code: 'UNAUTHORIZED', detail: 'x' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const p = api.getPatiently('/api/me').catch(e => e)
+    await vi.advanceTimersByTimeAsync(1_000)
+    const err = await p
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(401)
+    expect(rateLimitedUntil.value).toBeNull()
   })
 })

@@ -5,6 +5,7 @@ import { HaPanelRoute } from '@/router/haPanelRoute'
 import { useComputed, signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { basePath } from '@/baseUrl'
+import { rateLimitedUntil } from '@/api'
 import { t } from '@/i18n/i18n'
 import { isAuthed, currentUser, loadCurrentUser, token } from '@/store/auth'
 import { noteRoute } from '@/store/momentumSeen'
@@ -57,6 +58,7 @@ import { RemoteInviteDialog } from '@/components/RemoteInviteDialog'
 import { SpaceJoinByCodeDialog } from '@/features/spaces/SpaceJoinByCodeDialog'
 import IncomingCallDialog from '@/features/calls/IncomingCallDialog'
 import { Wordmark } from '@/components/Wordmark'
+import { RateLimitedScreen } from '@/components/RateLimitedScreen'
 import { SideNav } from '@/components/SideNav'
 import { MobileNav } from '@/components/MobileNav'
 
@@ -257,6 +259,14 @@ export function App() {
     if (!authed.value || showOnboarding.value) return
     return installKeyboardShortcuts()
   }, [authed.value, showOnboarding.value])
+
+  // A cold-start read (the instance config, the ``/api/me`` probe) was
+  // answered 429 and is waiting out ``Retry-After``: say so, with the
+  // countdown. A 429 is not "signed out" — never the login form or
+  // IngressAuthFailed — and never the blank page the gates below paint
+  // while a read is in flight.
+  const retryAt = rateLimitedUntil.value
+  if (retryAt !== null && !authed.value) return <RateLimitedScreen until={retryAt} />
 
   // While the config is loading, render nothing (avoids a flash of
   // login form before we know whether to redirect to /setup).

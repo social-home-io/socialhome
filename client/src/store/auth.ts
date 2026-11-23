@@ -38,6 +38,10 @@ export const isAuthed    = computed(() => currentUser.value !== null)
  * caller decides whether to attempt the probe based on the current
  * instance ``mode`` — :func:`App` is the only caller that does so.
  *
+ * A 429 is not a failure: the probe waits out ``Retry-After`` and asks
+ * again (:meth:`ApiClient.getPatiently`), while the App shell shows
+ * "Too many requests, trying again in N s".
+ *
  * Returns the loaded User (or null on failure). Failures are silent
  * here; :mod:`api` already calls :func:`logout` on 401 *when a token
  * was attached*, so a bearer-mode session-expiry still toast-and-
@@ -47,7 +51,9 @@ export const isAuthed    = computed(() => currentUser.value !== null)
  */
 export async function loadCurrentUser(): Promise<User | null> {
   try {
-    const me = await api.get('/api/me') as User
+    // Patiently: a 429 is waited out (the shell shows the countdown),
+    // never taken for "signed out".
+    const me = await api.getPatiently('/api/me') as User
     currentUser.value = me
     void _autoSetUserTzIfMissing(me)
     return me

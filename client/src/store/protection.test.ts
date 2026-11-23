@@ -21,7 +21,12 @@ vi.mock('@/ws', () => ({
 const { apiMock } = vi.hoisted(() => ({
   apiMock: { get: vi.fn(), patch: vi.fn() },
 }))
-vi.mock('@/api', () => ({ api: apiMock, _resetApiLoggedOut: vi.fn() }))
+// ``loadCurrentUser`` reads ``/api/me`` patiently (it waits out a 429);
+// route it through the same ``get`` mock so the URL assertions hold.
+vi.mock('@/api', () => ({
+  api: { ...apiMock, getPatiently: (url: string) => apiMock.get(url) },
+  _resetApiLoggedOut: vi.fn(),
+}))
 
 import { currentUser } from './auth'
 import {
