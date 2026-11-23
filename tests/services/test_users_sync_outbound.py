@@ -23,11 +23,16 @@ from socialhome.crypto import (
     generate_identity_keypair,
     verify_user_identity_assertion,
 )
-from socialhome.domain.events import PairingConfirmed
+from socialhome.domain.events import (
+    PairingConfirmed,
+    PeerCapabilitiesAdvertised,
+    PeerUnpaired,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import UserIdentityAssertion, UserStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.users_sync_outbound import UsersSyncOutbound
+from socialhome.services.users_sync_outbound import snapshot_digest as users_sync_digest
 
 
 class _FakeFederationService:
@@ -60,7 +65,7 @@ class _FakeFederationService:
             return False
         return self._supports_v25
 
-    async def send_event(self, *, to_instance_id, event_type, payload):
+    async def send_event(self, *, to_instance_id, event_type, payload, **kw):
         self.sent.append((to_instance_id, event_type, payload))
 
 
@@ -556,3 +561,210 @@ async def test_protected_profile_is_name_only_to_a_blocked_household(peer):
     assert mom["bio"] == "Mom"
     assert mom["picture_hash"] == "h-mom"
     assert mom["picture_webp_base64"] == base64.b64encode(b"MOM").decode()
+
+
+# ─── Snapshot on every fresh connect ──────────────────────────────────────
+
+
+class _Peer:
+    def __init__(self, instance_id: str) -> None:
+        self.id = instance_id
+
+
+class _FakeFedRepo:
+    """The paired (social) households — what profile updates go to."""
+
+    def __init__(self, peers: list[str]) -> None:
+        self._peers = peers
+
+    async def list_social_instances(self):
+        return [_Peer(p) for p in self._peers]
+
+
+class _Result:
+    def __init__(self, ok: bool, via: str | None = None) -> None:
+        self.ok = ok
+        self.via = via
+
+
+class _ResultFederation(_FakeFederationService):
+    """``send_event`` answers like the real one: a ``DeliveryResult``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ok = True
+        self.via: str | None = "rtc"
+        self.kwargs: list[dict] = []
+
+    async def send_event(self, *, to_instance_id, event_type, payload, **kw):
+        self.sent.append((to_instance_id, event_type, payload))
+        self.kwargs.append(kw)
+        return _Result(self.ok, self.via)
+
+
+def _connecting(peers=("peer-1", "peer-2")):
+    bus = EventBus()
+    fed = _ResultFederation()
+    users = [
+        _FakeUser("u-alice", "alice", "Alice"),
+        _FakeUser("u-maria", "maria", "Maria"),
+    ]
+    vis = _FakeVisibilityRepo()
+    vis.hide("peer-2", "u-maria")
+    out = UsersSyncOutbound(
+        bus=bus,
+        federation_service=fed,
+        user_repo=_FakeUserRepo(users),
+        visibility_repo=vis,
+        federation_repo=_FakeFedRepo([*peers, "own-inst"]),
+    )
+    out.wire()
+    return bus, fed, users, out
+
+
+async def _back(bus, out, peer: str) -> None:
+    """``peer`` connects fresh; wait for the background snapshot."""
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id=peer))
+    await out.drain()
+
+
+async def test_snapshot_is_complete_dated_and_queued_latest_only():
+    bus, fed, _users, _out = _connecting()
+    await bus.publish(PairingConfirmed(instance_id="peer-1"))
+    payload = fed.sent[0][2]
+    assert payload["complete"] is True
+    assert datetime.fromisoformat(payload["as_of"]).tzinfo is not None
+    # At most one snapshot waits for a household that is away.
+    assert fed.kwargs[0] == {"outbox_key": "users_sync"}
+
+
+async def test_a_snapshot_only_accepted_by_a_gfs_relay_goes_again():
+    """A relay's ``ok`` means queued there (it may expire), not received."""
+    bus, fed, _users, out = _connecting()
+    fed.via = "gfs_relay"
+    await _back(bus, out, "peer-1")
+    await _back(bus, out, "peer-1")
+    assert len(fed.sent) == 2
+
+
+class _BrokenVisibilityRepo:
+    async def hidden_user_ids_for_peer(self, peer: str) -> frozenset[str]:
+        raise RuntimeError("db is busy")
+
+
+async def test_an_unreadable_hide_list_sends_no_snapshot():
+    """Fail closed: a snapshot without the hide list would carry hidden
+    members back to the household."""
+    fed = _ResultFederation()
+    out = UsersSyncOutbound(
+        bus=EventBus(),
+        federation_service=fed,
+        user_repo=_FakeUserRepo([_FakeUser("u-alice", "alice", "Alice")]),
+        visibility_repo=_BrokenVisibilityRepo(),
+    )
+    await out.send_snapshot("peer-1")
+    assert fed.sent == []
+
+
+async def test_a_paired_household_connecting_fresh_gets_the_snapshot():
+    """A household that was away (a child added meanwhile) gets everyone
+    it may see on its next connect — same filters as at pairing."""
+    bus, fed, _users, out = _connecting()
+    await _back(bus, out, "peer-2")
+    assert len(fed.sent) == 1
+    to, ev, payload = fed.sent[0]
+    assert (to, ev) == ("peer-2", FederationEventType.USERS_SYNC)
+    assert [u["user_id"] for u in payload["users"]] == ["u-alice"]  # hide list
+
+
+async def test_a_household_that_is_not_a_paired_one_gets_nothing():
+    """Capabilities also arrive from households met through an invite link
+    (and our own row): never a roster for them."""
+    bus, fed, _users, out = _connecting()
+    await _back(bus, out, "link-household")
+    await _back(bus, out, "own-inst")
+    assert fed.sent == []
+
+
+async def test_a_flapping_reconnect_does_not_resend_the_same_snapshot():
+    bus, fed, _users, out = _connecting()
+    for _ in range(5):
+        await _back(bus, out, "peer-1")
+    assert len(fed.sent) == 1
+
+
+async def test_a_reconnect_after_a_member_changed_sends_again():
+    bus, fed, users, out = _connecting()
+    await _back(bus, out, "peer-1")
+    users.append(_FakeUser("u-kid", "kid", "Kid"))
+    await _back(bus, out, "peer-1")
+    assert len(fed.sent) == 2
+    assert "u-kid" in [u["user_id"] for u in fed.sent[1][2]["users"]]
+
+
+async def test_pair_confirm_counts_as_the_household_having_the_snapshot():
+    bus, fed, _users, out = _connecting()
+    await bus.publish(PairingConfirmed(instance_id="peer-1"))
+    await _back(bus, out, "peer-1")
+    assert len(fed.sent) == 1
+
+
+async def test_a_snapshot_not_accepted_goes_again_on_the_next_connect():
+    """Left in the outbox (or refused): the next connect sends it again."""
+    bus, fed, _users, out = _connecting()
+    fed.ok = False
+    await _back(bus, out, "peer-1")
+    fed.ok = True
+    await _back(bus, out, "peer-1")
+    await _back(bus, out, "peer-1")
+    assert len(fed.sent) == 2
+
+
+async def test_unpair_forgets_what_the_household_had():
+    bus, fed, _users, out = _connecting()
+    await _back(bus, out, "peer-1")
+    await bus.publish(PeerUnpaired(instance_id="peer-1"))
+    await _back(bus, out, "peer-1")
+    assert len(fed.sent) == 2
+
+
+async def test_a_reconnect_while_a_snapshot_is_in_flight_adds_nothing():
+    bus, fed, _users, out = _connecting()
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id="peer-1"))
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id="peer-1"))
+    await out.drain()
+    assert len(fed.sent) == 1
+
+
+async def test_the_fresh_connect_send_does_not_hold_the_event():
+    """Raised inside the inbound capabilities handler, before it records
+    the household's version: the send must not block it."""
+    bus, fed, _users, out = _connecting()
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id="peer-1"))
+    assert fed.sent == []  # not yet: it runs in the background
+    await out.drain()
+    assert len(fed.sent) == 1
+
+
+def test_digest_ignores_re_signing_and_picture_bytes():
+    """The instance assertion is re-signed with a fresh ``issued_at`` on
+    every build; the bytes are covered by ``picture_hash``."""
+    a = [
+        {
+            "user_id": "u",
+            "picture_hash": "h",
+            "picture_webp_base64": "AAA",
+            "user_assertion_signature": "s1",
+            "user_assertion_issued_at": "t1",
+        }
+    ]
+    b = [
+        {
+            "user_id": "u",
+            "picture_hash": "h",
+            "user_assertion_signature": "s2",
+            "user_assertion_issued_at": "t2",
+        }
+    ]
+    assert users_sync_digest(a) == users_sync_digest(b)
+    assert users_sync_digest(a) != users_sync_digest([{**b[0], "picture_hash": "h2"}])

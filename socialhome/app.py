@@ -2279,18 +2279,24 @@ def _wire_federation_stack(
     # USERS_SYNC envelope carrying every (visible) local user so their
     # remote_users mirror is populated immediately. Without this the
     # peer only sees household members who happen to edit their profile
-    # after pairing — which usually means only the admin shows up.
+    # after pairing — which usually means only the admin shows up. The same
+    # snapshot goes again when a paired household connects fresh (its
+    # startup capabilities), unless it already has it.
     users_sync_outbound = UsersSyncOutbound(
         bus=bus,
         federation_service=federation_service,
         user_repo=user_repo,
         profile_picture_repo=profile_picture_repo,
         visibility_repo=peer_user_visibility_repo,
+        # A fresh connect (PeerCapabilitiesAdvertised) is answered with the
+        # snapshot only for a paired (social) household.
+        federation_repo=federation_repo,
     )
     # §CP.F2: a protected account's name only (no picture, bio or status) to
     # a blocked person's household.
     users_sync_outbound.attach_child_protection(app[K.child_protection_service_key])
     users_sync_outbound.wire()
+    app[K.users_sync_outbound_key] = users_sync_outbound
     # §CP.F2: what a block drops from the outbox is replaced by one snapshot.
     profile_federation_outbound.attach_snapshot_sender(
         users_sync_outbound.send_snapshot
@@ -6715,6 +6721,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await app[K.highlight_service_key].stop()
         # Background sync-page seals and root checks (they read the DB).
         await app[K.sync_page_service_key].close()
+        # Fresh-connect roster snapshots still being sent.
+        await app[K.users_sync_outbound_key].drain()
         # Upload batches still open become their "new photos" rows first.
         await gallery_upload_batcher.stop()
         # Deliver the notifications still queued while the database, the

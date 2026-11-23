@@ -723,6 +723,96 @@ When every local user is hidden from the peer (or there are no
 local users at all), the envelope is suppressed entirely — no
 empty-roster sync.
 
+### Keeping the roster current
+
+The snapshot above is not the only time a household's members travel.
+A paired household sees the current members — new, changed and removed —
+on every path, each sent only to the paired (social) households the
+member is visible to (never a household met through an invite link,
+never a GFS), through the same builders, so the per-pair hide list and
+the §CP.F2 guardian-block rule always apply:
+
+| Change on the sending household | Sent | By |
+|---|---|---|
+| Member created (`UserProvisioned`, e.g. a child account) | `USER_UPDATED` | `ProfileFederationOutbound` |
+| Profile edit, rename, reactivation (`UserProfileUpdated`) | `USER_UPDATED` | `ProfileFederationOutbound` |
+| Member removed (`UserDeprovisioned`) | `USER_REMOVED` | `ProfileFederationOutbound` |
+| Hidden / shown again for one pair | `USER_REMOVED` / `USER_UPDATED` | `PATCH …/visible-users` |
+| Protected, guardian block added / lifted | name only / full profile | §CP.F2 hooks ([presence.md](./presence.md)) |
+| The paired household connects fresh | `USERS_SYNC` (if changed) | `UsersSyncOutbound` |
+
+**On a fresh connect.** A household sends `INSTANCE_CAPABILITIES_UPDATED`
+to every paired household on each startup; the receiver raises
+`PeerCapabilitiesAdvertised` (the "that household is back" edge the GFS
+fallback and the private-space catch-up use too) and `UsersSyncOutbound`
+answers a paired household with the snapshot. That is the moment it may
+have missed something: a member added while it was offline, a
+`USER_REMOVED` that aged out of the outbox. It is once per startup of
+that household, not per message or per transport flap — a DataChannel
+that drops and reopens, or a send that fails and then succeeds, does not
+raise it. A household that restarts over and over still gets the
+snapshot once: we keep, per household and in memory, a digest of the
+last snapshot it accepted from us (the entries without the per-send
+signature fields and picture bytes — `picture_hash` covers those) and
+skip a reconnect whose snapshot is the same. A snapshot the household
+did not take (left in the outbox, refused, or only accepted by a GFS
+relay, whose queue may expire) goes again on the next connect; after our
+own restart the first reconnect sends once; an unpair forgets it. The
+snapshot is queued latest-only (`outbox_key` `users_sync`), so at most
+one, the newest, waits for a household that is away. A snapshot whose
+hide list cannot be read is not sent (fail closed — it would carry hidden
+members back).
+
+**The receiver reconciles.** The snapshot carries `complete: true` and
+`as_of` (when it was taken, the sender's clock): it names every member
+the receiver may see. A receiver that holds a member of the sender that
+a complete snapshot leaves out takes it as `USER_REMOVED` (deprovisioned,
+content purged) — removed, or hidden from this household, both mean
+exactly that — unless that row was written from an envelope the sender
+sent after `as_of`: `remote_users.synced_at` keeps the envelope timestamp
+of the `USER_UPDATED` / `USERS_SYNC` that wrote it (the sender's clock,
+the same clock as `as_of`), so a snapshot that waited in a queue never
+undoes a newer `USER_UPDATED` (a member created, reactivated or shown
+again meanwhile). Only rows homed on the sender are touched, a member who
+moved out (a move redirect on the row) is left alone, and a snapshot
+without both fields (an older sender) removes nobody. No capability bump:
+an older receiver ignores the fields, and every receiver already takes
+`USERS_SYNC` from a paired household.
+
+A removed member's DMs, moments and highlights are purged at the paired
+household at once (the `USER_REMOVED` cascade, as for hiding), even
+though the removal is a soft delete here with a 30-day grace period:
+reactivating the person brings their profile back there, not that
+content.
+
+```mermaid
+sequenceDiagram
+    participant A as Household A (sender)
+    participant B as Household B (paired)
+    Note over A,B: B is offline
+    A->>A: parent creates child account (UserProvisioned)
+    A--xB: USER_UPDATED (undelivered / ages out)
+    A->>A: member removed (UserDeprovisioned)
+    A--xB: USER_REMOVED (undelivered / ages out)
+    Note over B: B starts again
+    B->>A: INSTANCE_CAPABILITIES_UPDATED
+    A->>A: PeerCapabilitiesAdvertised, paired? snapshot changed?
+    A->>B: USERS_SYNC {users, complete: true, as_of}
+    B->>B: upsert named members, remove the ones not named<br/>(unless written after as_of)
+    B->>A: INSTANCE_CAPABILITIES_UPDATED (B restarts again)
+    A->>A: same snapshot already accepted — nothing sent
+```
+
+**Cost.** Per change: one `USER_UPDATED` (~1 KB, plus the ≤ 24 KB
+picture only when the picture itself changed) or `USER_REMOVED` (~100 B)
+per paired household the member is visible to. Per fresh connect of a
+paired household: nothing when it already has this snapshot; otherwise
+one `USERS_SYNC` of every member visible to it — ~1 KB per member plus up
+to ~32 KB (base64) per member with a picture. Worst realistic case: 8
+members, all with pictures (~270 KB), and 10 paired households that each
+restart once after our own restart: ~2.7 MB, once; a household that
+restarts every few seconds costs one snapshot, not one per restart.
+
 ## Per-pair user visibility
 
 The admin Connection-Detail modal toggles which **local** users
