@@ -910,7 +910,7 @@ def parse_page_ref(raw: object) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     try:
-        return {
+        out: dict[str, Any] = {
             "signer": _str(raw.get("signer"), "signer"),
             "epoch": _int(raw.get("epoch"), "epoch"),
             "seq": _int(raw.get("seq"), "seq"),
@@ -919,6 +919,38 @@ def parse_page_ref(raw: object) -> dict[str, Any] | None:
         }
     except PageRefused:
         return None
+    signers = raw.get("signers")
+    if signers is not None:
+        out["signers"] = _parse_signers(signers)
+    return out
+
+
+#: A BEGIN ``page`` names at most this many signers' newest pages.
+MAX_PAGE_REF_SIGNERS: int = 8
+
+
+def _parse_signers(raw: object) -> list[list[Any]]:
+    """``signers`` of a BEGIN's ``page``: ``[[signer, epoch, issued_at,
+    seq], …]`` — per signer, the newest page the requester holds. Bounded;
+    a malformed one reads as "none held" (the requester then gets pages it
+    may already hold — never fewer)."""
+    if not isinstance(raw, list):
+        return []
+    out: list[list[Any]] = []
+    for entry in raw[:MAX_PAGE_REF_SIGNERS]:
+        if not (
+            isinstance(entry, list)
+            and len(entry) == 4
+            and isinstance(entry[0], str)
+            and 0 < len(entry[0]) <= 128
+            and all(
+                isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                for v in entry[1:]
+            )
+        ):
+            return []
+        out.append(list(entry))
+    return out
 
 
 # ─── Bucket listings (Phase 2 mismatch, reused by Phase 3) ───────────────
@@ -1239,6 +1271,7 @@ __all__ = [
     "MAX_LISTING_BUCKETS",
     "MAX_LISTING_ROWS",
     "MAX_PAGE_FUTURE_SKEW_MS",
+    "MAX_PAGE_REF_SIGNERS",
     "PAGE_MIN_INTERVAL_S",
     "PAGE_SEAL_SUITE_AESGCM_256",
     "PAGE_SUITE_SHA256_B256",

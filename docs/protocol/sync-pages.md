@@ -334,20 +334,25 @@ sequenceDiagram
     participant G as GFS (send to many)
     participant R as Member (GFS-reached)
     participant H as Host (signer)
-    M->>H: SPACE_SYNC_BEGIN (incremental, have_seq,<br/>page = {signer, epoch, seq, issued_at, root} held,<br/>buckets = the last compare's unexplained ones, ≤ 8)
-    Note over H: space changed since the stored page<br/>and page ≥ 15 min old → seal in the background
+    M->>H: SPACE_SYNC_BEGIN (incremental, have_seq,<br/>page = {signer, epoch, seq, issued_at, root} newest held<br/>+ signers = [[signer, epoch, issued_at, seq], …] per signer,<br/>buckets = the last compare's unexplained ones, ≤ 8)
+    Note over H: space changed since OUR stored page<br/>and it is ≥ 15 min old → seal in the background
     H->>M: chunks, __listing__ chunks (asked buckets), sentinel (no page)
     Note over H: sealed → push now, or at the next hour mark<br/>(≤ 1 push / h per space, the newest page only)
     H->>M: SPACE_SYNC_PAGE {page_sealed} (direct, or SPACE_ROUTED)
     H->>G: ONE POST /gfs/envelope/multi (every GFS-reached member's mailbox)
     G->>R: SPACE_SYNC_PAGE (sealed, from its mailbox)
     Note over M,R: verify page → vector hashes to root → store (only if newer)<br/>→ compare (≤ 1 / 15 min) → status
-    M->>H: later BEGIN naming an older page than the last pushed one
+    M->>H: later BEGIN whose signers entry for H is older than H's last pushed page
     H->>M: SPACE_SYNC_PAGE to M alone (the same event)
 ```
 
-- **`page` in BEGIN**: `{signer, epoch, seq, issued_at, root}`, about
-  170 B, inside the encrypted payload.
+- **`page` in BEGIN**: `{signer, epoch, seq, issued_at, root}` of the
+  newest page held, plus `signers`: per signer, the newest page the
+  requester holds from it, `[[signer, epoch, issued_at, seq], …]` (≤ 8
+  entries, `MAX_PAGE_REF_SIGNERS`; k ≤ 1 + delegated admins in practice).
+  About 170 B + ≈ 60 B per signer, inside the encrypted payload. A ref
+  without `signers` (none shipped: v_95 is unreleased) reads as its own
+  signer's entry only.
 - **`SPACE_SYNC_PAGE`**: `{page_sealed: {epoch, payload}}`, the page and
   its vector sealed with `encrypt_chunk` under the space content key (AAD
   `space_id:epoch:page:push` — a `:` no session id may hold, so a chunk sealed for a requester-chosen `sync_id` never opens as a page), inside the envelope's own encrypted
@@ -366,21 +371,24 @@ sequenceDiagram
     hourly per space**: a seal within the hour after the last push marks
     the space due; the scheduler's tick (every 30 min) pushes the newest
     page held then, once — never a queue of pages.
-  - **A stale BEGIN ref.** After a stream's sentinel ships, a **signer**
-    (the household whose held page is its own) compares the requester's
-    `page` with the page it LAST PUSHED and, when the ref is older (or
-    absent), sends THAT page — never a newer one waiting for its hour
-    mark, so BEGINs never undo the coalescing — to that one household
-    (`send_with_mesh_fallback`). A plain member never answers an ordinary
-    BEGIN's ref: a tick sends one BEGIN to every peer, so every member
-    holding the newer page answering would make ≈ N²/2 copies of each page
-    (security check 2, M1). It relays its page only in a verified-fetch
-    session (Phase 3: the requester's hosts are silent, no signer answers
-    it). A ref the requester signed itself is never answered: a delegated
-    admin keeps its own page and never stores another signer's, so its ref
-    would look stale forever (M2) — only the owner takes an admin's page.
-    "Sync now" is a BEGIN like any other: a member that missed a push gets
-    the page from each signer it asks, once.
+  - **A stale BEGIN ref, judged per signer.** After a stream's sentinel
+    ships, a **signer** (the owner, or a household holding a page it
+    sealed itself) reads the requester's `signers` entry FOR ITSELF and,
+    when it is older than the page it LAST PUSHED (or absent), sends THAT
+    page — never a newer one waiting for its hour mark, so BEGINs never
+    undo the coalescing — to that one household (`send_with_mesh_fallback`).
+    Per signer, because every household keeps one page per signer
+    (*Phase 2 as built*): an owner that sealed its own page after its
+    admin's still names the admin's older page (or none) under the
+    admin's entry, so the admin answers (security re-check H-2), and an
+    admin's own newer page never hides that it lacks the owner's. A plain
+    member never answers an ordinary BEGIN's ref: a tick sends one BEGIN
+    to every peer, so every member holding the newer page answering would
+    make ≈ N²/2 copies of each page (security check 2, M1). It relays its
+    newest page only in a verified-fetch session (Phase 3: the requester's
+    hosts are silent, no signer answers it). "Sync now" is a BEGIN like
+    any other: a member that missed a push gets the page from each signer
+    it asks, once.
 - **Offline members get only the newest page**: the outbox keeps one row
   per (space, peer) for this event (`supersede_key` `sync-page:<space>`;
   a newer page replaces a queued older one, the multi path included). A
@@ -394,11 +402,13 @@ sequenceDiagram
   L5). A non-member on a mesh path sees `SPACE_ROUTED` ciphertext;
   a GFS sees the sealed multi body.
 - **Lazy seal.** When the provider is a signer and a stream to a member
-  ends, it seals a page if all of these hold:
-  - the space changed since `page.seq` (the `is_quiet` probe with
+  ends, it seals a page if all of these hold — judged on ITS OWN stored
+  page only, never another signer's:
+  - the space changed since its own `page.seq` (the `is_quiet` probe with
     `since = page.seq`);
-  - the stored page is ≥ `PAGE_MIN_INTERVAL_S` (900 s) old, or belongs to
-    an older epoch, cutoff day or suite.
+  - its own stored page is ≥ `PAGE_MIN_INTERVAL_S` (900 s) old by its
+    signed `issued_at` (persisted: a restart changes nothing — security
+    re-check L-3), or belongs to an older epoch, cutoff day or suite.
 
   The seal runs as a background task, one per space under a lock. The
   export is read in keyset pages (async DB) and the hashing runs through
@@ -485,8 +495,8 @@ one ≈ 15.8 KB body + one key wrap per mailbox (≈ 100 B × 50 ≈ 5 KB).
 | Trigger | Recipients × items × bytes | Busy space, per day | Small space (2 000 rows, 50 changes, 5 paired households) |
 |---|---|---|---|
 | Push on seal, ≤ 1 / h per space | per push: 100 direct × 15.8 KB ≈ 1.58 MB + 2 multi uploads × ≈ 21 KB ≈ 42 KB ≈ **1.62 MB host upload**; changes every ~45 s keep the space changed, so ≤ 24 pushes | ≈ **39 MB** host upload; the 2 GFSs hand each of their 50 mailboxes the 15.8 KB body (≈ 38 MB/day of GFS egress, not the host's) | ≤ 24 × 5 × 15.8 KB ≈ 1.9 MB, far less in practice (a quiet space is neither resealed nor pushed) |
-| A stale BEGIN ref (a member that missed a push) | 1 × 15.8 KB to that household from each signer it syncs with (k ≤ 1 + delegated admins), never from a plain member | a returning member: once per signer; ≈ 0 otherwise (a member holding a signer's last pushed page gets nothing from it) | ≈ 0 |
-| `page` ref in every BEGIN | 200 members × 48 BEGINs × ≈ 0.2 KB (170 B JSON, encrypted) | ≈ **2 MB** | ≈ 0.05 MB |
+| A stale BEGIN ref (a member that missed a push) | 1 × 15.8 KB to that household from each signer whose entry it lacks or holds older (k ≤ 1 + delegated admins), never from a plain member | a returning member: once per signer; ≈ 0 otherwise (a member holding a signer's last pushed page gets nothing from it) | ≈ 0 |
+| `page` ref in every BEGIN | 200 members × 48 BEGINs × ≈ 0.23 KB (170 B JSON + ≈ 60 B per signer entry, k = 1; ≈ 0.29 KB at k = 2, encrypted) | ≈ **2.2 MB** (k = 2: ≈ 2.8 MB) | ≈ 0.06 MB |
 | Seal | 1 export + hash, ≤ 1 / 15 min, only when a BEGIN finds the space changed (the "changed?" probe is memoised on the change counter) | ≤ 96 × 6 s on x86 (2–4× on a Pi) | ≤ 96 × 0.1 s |
 | Member compare | 1 recompute per newer page, ≤ 1 / 15 min, `to_thread` | ≤ 24 × 6 s per member (one per pushed page) | trivial |
 | Phase 3, catch-up while the host is silent | 1 requester → 1 member per ask, ≤ 3 asks per round | see *Phase 3 as built*, Cost | |
@@ -514,10 +524,12 @@ one ≈ 15.8 KB body + one key wrap per mailbox (≈ 100 B × 50 ≈ 5 KB).
   seed-holding delegated admin acting as host seal and push their own
   pages, each at most hourly, so the push budget is **k × ≈ 39 MB/day** in
   the busy space (k = 2, an owner and one admin: ≈ 78 MB/day). Not
-  bounded further: a delegated admin keeps only its own page, so it cannot
-  tell whether it is the newest signer; an admin seals only on BEGINs it
-  receives (members BEGIN to every acting host), and while the owner is
-  away (the case delegation is for) only the admin seals.
+  bounded further: every signer keeps its own chain (one stored page per
+  signer), an admin seals only on BEGINs it receives (members BEGIN to
+  every acting host), and while the owner is away (the case delegation is
+  for) only the admin seals. Storage: one ≈ 9 KB row per signer per
+  space (k rows; ≈ 18 KB at k = 2). Judging: each signer compares once
+  per other signer's newer page (≤ k − 1 compares per push round).
 - **The 30-min quiet BEGIN stays.** It is the host-liveness probe
   (`HostContact`) and the watermark exchange, and it catches a member that
   missed a push. Phase 3's `page_match` is what would make the daily full
@@ -530,7 +542,7 @@ one ≈ 15.8 KB body + one key wrap per mailbox (≈ 100 B × 50 ≈ 5 KB).
 | Forged row from a deliverer | Its leaf is not in a listing that hashes to the signed vector, so the row is refused and logged. The test is a demo step. |
 | Stale row version | An old version's leaf is not in the current listing, so it is refused. A version that is valid but older than one held is resolved by the existing merge rules (last writer wins on `edited_at`, stamps), so a newer local copy stays. |
 | Withheld page | A relay can only drop the page. The signer pushes it to every member household, any member-seated provider sends it to a stale BEGIN ref, and status shows the page's age ("as of 2 h ago"). |
-| Replayed old page | It is older by `(epoch, issued_at, seq)`, so it is ignored. Rows proven by it are refused once a newer page is stored. |
+| Replayed old page | It is older by `(epoch, issued_at, seq)` than the page stored FROM ITS SIGNER, so it is neither stored nor judged (security re-check M-1). Rows proven by it are refused once a newer page is stored. |
 | Removed admin (epoch rotation) | The old-epoch page is refused after the member applies the rotation; the residual window is unchanged (§3). |
 | Equivocation | Detected per `(epoch, signer, seq)` and through the `prev_root` chain, then reported (§3). |
 | Withholding rows | A listing names every leaf, so R knows what is still missing and asks the next member. |
@@ -551,9 +563,9 @@ protocol v_95, with adversarial review).
      a broken chain flagged as a conflict.
 2. Additive migration with the audit:
    - `space_instances` gains nothing;
-   - one table `space_sync_pages(space_id PK, page_json, vector BLOB,
-     …)` holds the newest page per space, the same row on host
-     and member;
+   - one table `space_sync_pages(space_id, signer, page_json, vector
+     BLOB)`, PK `(space_id, signer)`, holds the newest page per signer
+     (as built, security re-check 2026-11-23);
    - the PR shows why no existing column fits.
 3. Lazy seal in `provider.py`, plus `page` in BEGIN (`scheduler.py`) and
    the page's delivery (as built: the `SPACE_SYNC_PAGE` push).
@@ -702,47 +714,63 @@ What shipped, where it is more exact than the design above:
   minor 6): in one statement, only while the space still pins the key and
   epoch the page was verified against, and only over an older page by
   `(epoch, issued_at, seq)` — a slower writer, or a re-pin between the
-  verify and the write, never replaces a newer page. A household that
-  signs the space itself never stores another signer's page over its own
-  (the owner excepted, Phase 3). A page that does not open (wrong key,
-  tag) is a one-line WARNING.
+  verify and the write, never replaces a newer page. **One row per
+  signer** (security re-check 2026-11-23): the newest verified page of
+  each signer is kept, PK `(space_id, signer)`; a page replaces only the
+  stored page of ITS signer, so no signer's page is ever dropped for
+  another's, and every signer's own chain stays. "The held page" — the
+  status, the stale ref, a plain member's compare — is the newest across
+  signers. A page that does not open (wrong key, tag) is a one-line
+  WARNING.
 - **Equivocation** is flagged for two pages of one signer and epoch with
   the same `seq` and different roots, or two different pages with the same
   non-null `prev_root`. The flag is kept in memory (WARNING log with both
   page hashes is the durable evidence).
-- **Rotation.** A trigger on `spaces` drops the page in the same statement
+- **Rotation.** A trigger on `spaces` drops every signer's page in the same statement
   that moves `authority_key_epoch` or `identity_public_key` (every path:
   rotate, adopt, re-pin). A held page of another epoch is ignored anyway.
-- **Lazy seal.** As in §4, plus (both signers kept — owner decision
-  2026-11-22; security re-check: one condition, no holds): a delegated
-  admin that holds the owner's page younger than 15 min does not seal on
-  top of it; the OWNER seals by its own lazy interval (≥ 15 min after its
-  own last seal) whatever page it holds — never held back by an admin's
-  cadence or by a catch-up. There are no seal holds and no timers: an
-  incomplete owner page is only temporary, because the owner's catch-up
-  runs against the admin's page whatever it seals (below), and its next
-  page includes what it fetched. (Earlier holds — an unjudged-page hold, a
-  catch-up hold with `CATCH_UP_HOLD_S`, a returning-signer grace with
-  `RETURN_GRACE_S` — were removed: each was a timer an admin's cadence or
-  an outage could defeat.)
-- **The owner judges every verified foreign page once, whatever its age.**
-  A valid page of another signer of the pinned epoch whose root the owner
-  has not judged (`_judged_roots`, the last 4 per space) is compared and
-  caught up against even when it is NOT newer than the page the owner
-  holds: "not newer" decides only what is STORED as held, never what is
-  caught up. It is kept in memory beside the held page (`_subjects`) —
-  the page compares, fetch asks (their BEGIN names it: `ref_for(space,
-  to)`), listings and the status position use — until nothing it commits
-  is missing or unresolved. So a returning, partitioned or restored owner
-  (its own page sealed meanwhile, or none at all, or a new epoch) always
-  fetches the rows an admin page proves it lacks. A restart forgets it;
-  the admin's next push, or its answer to the owner's stale ref (the
-  owner is exempt from the self-signed-ref rule), brings it back. Only the
-  owner does this: it takes only rows it lacks, never another version of
-  its own; a member catching up against an older page could roll its
-  newer copy back. Members comparing with the owner's temporarily
-  incomplete page see its extra rows as ahead — nothing reads missing that
-  is not; the rows reach everyone through the streams and later pages.
+- **Lazy seal.** As in §4 (both signers kept — owner decision
+  2026-11-22): every signer seals by its own stored page and its own
+  interval (≥ 15 min after its own last seal, by the persisted
+  `issued_at`), whatever other signers' pages it holds — never held back
+  by another signer's cadence or by a catch-up; its next page chains on
+  its own (`prev_root` = its own last root). There are no seal holds and
+  no timers: an incomplete page is only temporary, because the catch-up
+  runs against the other signer's stored page whatever it seals (below),
+  and its next page includes what it fetched. (Earlier holds — an
+  unjudged-page hold, a catch-up hold with `CATCH_UP_HOLD_S`, a
+  returning-signer grace with `RETURN_GRACE_S`, an admin deferring to the
+  owner's fresh page — were removed: each was a timer or special case an
+  admin's cadence or an outage could defeat.)
+- **Every signer judges each other signer's stored page once** (security
+  re-check 2026-11-23: H-1, M-2, M-3). The verdict is driven from the
+  stored rows, not from memory: a signer (the owner, or a seed-holding
+  admin with a page of its own) compares its copy with each other
+  signer's stored newest page — one unmatched page at a time, newest
+  first — and catches up against it (Phase 3) until nothing it commits
+  is missing or unresolved; then the next. A page is stored, and so
+  judged, only if it is newer than the stored page OF THAT SIGNER: an
+  old page of a signer, relayed by anyone, never parks a catch-up (M-1).
+  Because the rows are persisted, a restart loses nothing: the stored row
+  with no verdict yet restarts the compare (H-1); two admins' pages are
+  two rows and both land, in either order (M-2); a returning admin judges
+  the owner's page like the owner judges its (M-3). Fetch asks name the
+  judged page (`ref_for(space, to)`); listings and the status position
+  use it. A signer takes only rows it LACKS, never another version of one
+  it holds. A plain member compares only with the newest page overall: an
+  older page's versions could roll its newer copy back. Members comparing
+  with a signer's temporarily incomplete page see its extra rows as
+  ahead — nothing reads missing that is not; the rows reach everyone
+  through the streams and later pages.
+- **Known limit: "ahead" against an ageing page** (security re-check
+  L-2). A row we changed after a page's signed `issued_at` counts as
+  ahead in a compare. The older the judged page, the more of our rows
+  are newer than it, so more buckets are explained as ahead without a
+  listing — a row the page commits in a bucket we since changed is not
+  asked for against THAT page. Kept: the row still reaches us through the
+  streams and the signer's next page (which replaces this one), and
+  judging only the newest page per signer keeps the age bounded by that
+  signer's last seal.
   The "changed
   since the page?" probe is memoised on the change
   counter (`current_seq`): a "changed" holds for that page, a "quiet" while
@@ -1131,9 +1159,9 @@ between asks, and a stale memo would prove nothing.
 **The owner back from a long absence is a requester too.** While the owner
 household was offline a seed-holding delegated admin may have sealed newer
 pages (§3). The owner takes such a page over its own older one — same
-epoch, verified, newer by `(epoch, issued_at, seq)`; a delegated admin
-still never stores another signer's page over its own — compares its copy
-with it and, having no host above it, goes straight to member households
+epoch, verified, newer by `(epoch, issued_at, seq)` than the admin's
+stored page, kept in the admin's own row beside the owner's — compares
+its copy with it and, having no host above it, goes straight to member households
 (the admin's included; never itself as "the host") for what the page proves
 it lacks, content whose author household is offline now included. It takes
 only rows it LACKS — an identity it holds no version of, tombstones
@@ -1157,10 +1185,10 @@ again, **up to date**. **Every tick** the scheduler starts the owner's next
 round for each space it owns (`_tick_owner_catch_up`): no host above the
 owner ever goes silent, so without it the catch-up would get one round
 only. The owner may seal meanwhile (no holds): its catch-up runs against
-the admin's page whatever it seals, and **every** verified admin page is
-judged once even when it is older than the owner's own (*Lazy seal* above,
-security re-check H1). Its next own page starts a new chain (`prev_root`
-null, the full vector), which is no conflict. Limits: the owner is the wiki
+the admin's stored page whatever it seals, and **every** admin page newer
+than that admin's stored one is judged once even when it is older than
+the owner's own (*Every signer judges…* above). Its next own page
+chains on its own last page. Limits: the owner is the wiki
 pages' sequencer (v_48), so it never takes a page *version* from a stream —
 a verified wiki page row is ignored there and the admin's page edits reach
 it the existing way (proposals). **Boundary:** content created while **no**
@@ -1187,14 +1215,15 @@ page answers `held: false` for it; one that holds another page (or none)
 answers with no listing at all. Either way the round asks the next member
 for what is left.
 
-**Residuals (security re-check).** A restart forgets the owner's
-catch-up page and the judged roots; the admin's next delivery restores
-them. A signer restart also forgets a push waiting for its hour mark
-(`_push_pending`, L-5, older than this rework): that page goes out with
-the next seal's push; meanwhile a stale BEGIN ref still gets it (nothing
-pushed is remembered, so the held page is sent). A delegated admin keeps only its own page, so two signers push k ×
-the budget and members may flip between their pages (see §5 and the
-threat table). The 2 h freshness of a match (`PAGE_MATCH_FRESH_S`) is the
+**Residuals (security re-check).** No memory-only state decides
+correctness any more: the pages being judged are the stored rows, the
+seal interval is the stored own page's `issued_at`; a restart re-judges
+each other signer's stored page once (one compare each). A signer
+restart still forgets a push waiting for its hour mark (`_push_pending`,
+L-5): that page goes out with the next seal's push; meanwhile a stale
+BEGIN ref still gets it (nothing pushed is remembered, so its own stored
+page is sent). Two signers push k × the budget and members may flip
+between their pages for "newest" (see §5 and the threat table). The 2 h freshness of a match (`PAGE_MATCH_FRESH_S`) is the
 hourly push plus one tick, the seal lag and slack.
 
 **Older households degrade.** A household below v_95 is never picked (no
@@ -1290,8 +1319,12 @@ requester asks one member at a time):
 | A row of another space / bucket, a non-committed resource | refused at parse (`parse_fetched_row`) |
 | Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked. A bucket is paused (dry) only once **every** member household on the page answered `held: false`, and only for 1 h; it stays unresolved meanwhile (never "up to date"; the owner reads "catching up"). The one residual: when a single member household can be asked at all, that household alone can keep a bucket unresolved — withholding by the only source, which no proof can overcome |
 | A deliverer on another page (or forging that it is) | no listing at all — no nay, the next member is asked (HIGH-1) |
-| An admin page that arrives after the owner sealed (back, partitioned, restored, rotated) | judged and caught up against anyway — "not newer" decides only what is stored; the owner reads "catching up" until it holds every row the page commits (security re-check H1) |
-| A seed-holding admin sealing often (every 14 min, or dated up to the 5-min skew ahead) | cannot stop the owner's seals — the owner seals by its own interval (M-1/M-2). **Design limit with two signers:** a seed holder is trusted like the owner for pages (it signs config and roster too); it can make members flip between two signers' pages and cost the push budget twice, never forge a row |
+| An admin page that arrives after the owner sealed (back, partitioned, restored, rotated) | stored in that admin's own row (one page per signer), judged and caught up against; the owner reads "catching up" until it holds every row the page commits — across a restart too, the row is persisted (security re-check H-1) |
+| The owner sealed before its BEGIN to the admin | its BEGIN names per signer the newest page it holds: none (or an older one) of the admin's, so the admin answers with its last pushed page (H-2) |
+| An old page of a signer, relayed by anyone (90 days old, say) | older than the page stored from that signer: neither stored nor judged, never parks a catch-up (M-1) |
+| Two delegated admins' pages, in either order | two rows; each judged once and caught up against, one at a time; both admins' rows land (M-2) |
+| A returning admin, the owner's page newer | stored in the owner's row beside the admin's own; the admin judges it like any signer and reads "catching up" until it holds what it commits (M-3) |
+| A seed-holding admin sealing often (every 14 min, or dated up to the 5-min skew ahead) | cannot stop the owner's seals — every signer seals by its own stored page and interval. **Design limit with two signers:** a seed holder is trusted like the owner for pages (it signs config and roster too); it can make members flip between two signers' pages for "newest" and cost the push budget twice, never forge a row |
 | `fetch` on a BEGIN (the requester asks a plain member to relay its page) | requester-controlled and accepted (security re-check L-3): it makes one member send ONE page to that one requester — no amplification, and the page is authority-signed |
 | Unasked answer, or one from another household | dropped |
 | A follower asking | the deliverer's member gate sends nothing; a follower is never asked |

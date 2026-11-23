@@ -1,9 +1,12 @@
--- 0151 — sync pages: the newest signed page a household holds per space.
+-- 0151 — sync pages: the newest signed page a household holds per space
+-- and SIGNER.
 --
--- ``docs/protocol/sync-pages.md`` (Phase 2). One row per space, the same
--- shape on the signer (the host or a seed-holding delegated admin) and on a
--- member household:
+-- ``docs/protocol/sync-pages.md`` (Phase 2). One row per (space, signer) —
+-- the owner and every seed-holding delegated admin seal their own pages —
+-- the same shape on a signer and on a member household:
 --
+-- * ``signer`` — the instance id that signed the page (``page_json``'s
+--   ``signer``).
 -- * ``page_json`` — the signed page header (canonical JSON, ≤ 1 KiB):
 --   ``{space_id, epoch, signer, seq, issued_at, cutoff, rows, root,
 --   prev_root, page_suite, authority_sig, authority_sig_suite}``.
@@ -19,12 +22,19 @@
 -- owner confirmed nothing from ``feat/sync-pages`` runs anywhere), so no
 -- database has the old shape and no follow-up migration is needed.
 --
--- No per-row data and no history: ≈ 9 KB per space, on a signer and on a
--- member alike (owner decision 2026-11-21: "use as little storage as
--- possible"). The row is replaced only by a newer page, sealed or verified
+-- Edited in place again (security re-check, 2026-11-23): keyed by
+-- (space_id, signer) instead of space_id. With two signers one slot made
+-- each household drop one signer's page for the other's (an owner that
+-- sealed after its delegated admin never caught up the admin's page, two
+-- admins replaced each other). Still never on ``main`` nor released.
+--
+-- No per-row data and no history: ≈ 9 KB per space and signer — k rows, k
+-- = 1 + the seed-holding delegated admins, usually 1–3 (owner decision
+-- 2026-11-21: "use as little storage as possible"). A row is replaced only
+-- by a newer page OF THAT SIGNER, sealed or verified
 -- (``space_sync_page_repo.put`` checks the order key in the same
--- statement), and deleted on a space-authority rotation (an old-epoch page
--- is stale).
+-- statement), and every row of the space is deleted on a space-authority
+-- rotation (an old-epoch page is stale).
 --
 -- CLAUDE.md "audit before a migration":
 --
@@ -54,13 +64,15 @@
 --       * A per-row leaf table (option C) — 56 B × rows (2.8 MB at 50 000
 --         rows); the owner chose no leaf cache (decision 4).
 --   (3) Smallest possible change: one new table, two data columns, keyed by
---       the space (``WITHOUT ROWID``), dropped with the space. No backfill:
+--       (space, signer) (``WITHOUT ROWID``), dropped with the space. No backfill:
 --       the first BEGIN after the upgrade seals or carries the first page.
 
 CREATE TABLE IF NOT EXISTS space_sync_pages (
-    space_id   TEXT PRIMARY KEY REFERENCES spaces(id) ON DELETE CASCADE,
+    space_id   TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    signer     TEXT NOT NULL,
     page_json  TEXT NOT NULL,
-    vector     BLOB NOT NULL CHECK (length(vector) = 8192)
+    vector     BLOB NOT NULL CHECK (length(vector) = 8192),
+    PRIMARY KEY (space_id, signer)
 ) WITHOUT ROWID;
 
 -- A space-authority rotation retires the key every held page was signed

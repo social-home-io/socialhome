@@ -286,11 +286,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
             # (security check HIGH-1). The read also starts the compare
             # after a restart.
             owned = await self._page_of(space, read_page=read_page)
-            catching_up = (
-                owned is not None
-                and owned.signer_role != "owner"
-                and owned.match is not True
-            )
+            catching_up = owned is not None and owned.catching_up
             state = (
                 SpaceSyncState.CATCHING_UP if catching_up else SpaceSyncState.UP_TO_DATE
             )
@@ -305,6 +301,9 @@ class SpaceSyncStatusService(BusPublisherMixin):
         state, last_ok = sync_state(outcomes, receiving=receiving, now=self._clock())
         page = await self._page_of(space, read_page=read_page)
         state = state_with_page(state, page, now=self._clock())
+        if page is not None and page.catching_up:
+            # A seed-holding admin catching up against the owner's page.
+            state = SpaceSyncState.CATCHING_UP
         proven = page is not None and page.match is False and (page.missing or 0) > 0
         return (
             state,

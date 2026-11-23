@@ -21,11 +21,14 @@ VECTOR = b"\x01" * 8192
 KEY = "ab"
 
 
-def _row(seq: int, *, issued_at: int = 1_000, epoch: int = 0, vector=VECTOR):
+def _row(
+    seq: int, *, issued_at: int = 1_000, epoch: int = 0, vector=VECTOR, signer="host"
+):
     """A stored row whose header carries the order key ``(epoch, issued_at,
-    seq)`` the repo compares (the rest of a header plays no part here)."""
+    seq)`` the repo compares and its ``signer`` (the rest of a header plays
+    no part here)."""
     page_json = orjson.dumps(
-        {"epoch": epoch, "issued_at": issued_at, "seq": seq}
+        {"epoch": epoch, "issued_at": issued_at, "seq": seq, "signer": signer}
     ).decode()
     return StoredSyncPage("sp", page_json, vector)
 
@@ -149,4 +152,31 @@ async def test_the_schema_refuses_a_wrong_sized_vector_and_has_no_delta(env):
             (b"\x00" * 100,),
         )
     cols = {r["name"] for r in await db.fetchall("PRAGMA table_info(space_sync_pages)")}
-    assert cols == {"space_id", "page_json", "vector"}
+    assert cols == {"space_id", "signer", "page_json", "vector"}
+
+
+async def test_each_signer_keeps_its_own_newest_page(env):
+    """Security re-check: one row per (space, signer). The owner's page and
+    a delegated admin's never replace each other; ``get`` is the newest
+    across signers, ``list_all`` every signer's newest, newest first; a
+    rotation drops them all; a page naming no signer is never stored."""
+    db, repo = env
+    owner = _row(5, issued_at=3_000, signer="host")
+    admin = _row(9, issued_at=2_000, signer="admin-1")
+    assert await repo.put(owner, key=KEY)
+    assert await repo.put(admin, key=KEY)
+    assert await repo.get("sp") == owner
+    assert await repo.list_all("sp") == [owner, admin]
+    older_admin = _row(8, issued_at=1_500, signer="admin-1")
+    assert not await repo.put(older_admin, key=KEY)  # not newer FOR THAT SIGNER
+    newer_admin = _row(10, issued_at=4_000, signer="admin-1")
+    assert await repo.put(newer_admin, key=KEY)
+    assert await repo.list_all("sp") == [newer_admin, owner]
+    nameless = StoredSyncPage(
+        "sp", orjson.dumps({"epoch": 0, "issued_at": 9, "seq": 1}).decode(), VECTOR
+    )
+    assert not await repo.put(nameless, key=KEY)
+    await db.enqueue(
+        "UPDATE spaces SET authority_key_epoch=authority_key_epoch+1 WHERE id='sp'"
+    )
+    assert await repo.list_all("sp") == []

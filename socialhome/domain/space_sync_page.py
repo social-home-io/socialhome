@@ -59,6 +59,10 @@ class SyncPagePosition:
     missing: int | None
     differing_buckets: int | None
     conflict: bool = False
+    #: A signing household (owner or seed-holding admin) still catching up
+    #: against another signer's stored page that has no match — its status
+    #: reads "catching up" (not on the wire).
+    catching_up: bool = False
 
     def to_wire(self) -> dict:
         return {

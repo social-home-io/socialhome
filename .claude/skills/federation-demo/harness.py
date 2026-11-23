@@ -20114,7 +20114,9 @@ def cmd_members_page_catchup() -> None:
     def _held_page(label: str) -> dict | None:
         rows = _rows(
             label,
-            "SELECT page_json FROM space_sync_pages WHERE space_id=?",
+            "SELECT page_json FROM space_sync_pages WHERE space_id=? ORDER BY json_extract(page_json, '$.epoch') DESC,"
+            " json_extract(page_json, '$.issued_at') DESC,"
+            " json_extract(page_json, '$.seq') DESC LIMIT 1",
             (space_id,),
         )
         return json.loads(rows[0][0]) if rows else None
@@ -20414,7 +20416,9 @@ def _verify_sync_page(state: dict, *, want_match: bool = False) -> list[str]:
     def _held() -> tuple | None:
         rows = _rows(
             "a",
-            "SELECT page_json, vector FROM space_sync_pages WHERE space_id=?",
+            "SELECT page_json, vector FROM space_sync_pages WHERE space_id=? ORDER BY json_extract(page_json, '$.epoch') DESC,"
+            " json_extract(page_json, '$.issued_at') DESC,"
+            " json_extract(page_json, '$.seq') DESC LIMIT 1",
             (space_id,),
         )
         return rows[0] if rows else None

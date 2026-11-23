@@ -38,32 +38,15 @@ ALLOWED: dict[tuple[str, str], str] = {
         "a label, not a host check: the status says whether the sync page "
         "was signed by the owner or by a delegated admin"
     ),
+    ("federation/sync/space/pages.py", "_signs"): (
+        "are WE the owner: the owner is always a signer (it judges every "
+        "other signer's stored page and takes only rows it lacks); any other "
+        "household signs only once it holds a page it sealed itself"
+    ),
     ("federation/sync/space/pages.py", "_no_host_answers"): (
         "are WE the owner: only the owner has no host above it, so it asks "
         "member households for a newer page's rows at once (sync pages "
         "Phase 3); a delegated admin waits for its owner like any member"
-    ),
-    ("federation/sync/space/pages.py", "_fetch_next"): (
-        "are WE the owner: only the owner applies rows it lacks and never "
-        "another version of its own (a delegated admin's page may predate "
-        "the owner's edits; what it applies it spreads as the host)"
-    ),
-    ("federation/sync/space/pages.py", "_seal_if_due"): (
-        "are WE the owner: the owner seals by its own lazy interval whatever "
-        "page it holds; a delegated admin defers to the owner's fresh page"
-    ),
-    ("federation/sync/space/pages.py", "compare"): (
-        "are WE the owner: only the owner keeps the page it catches up "
-        "against beside its own (it takes only rows it lacks)"
-    ),
-    ("federation/sync/space/pages.py", "_receive"): (
-        "are WE the owner: only the owner takes a newer page its delegated "
-        "admin signed over its own; a delegated admin keeps its own chain"
-    ),
-    ("federation/sync/space/pages.py", "offer_page"): (
-        "is the REQUESTER the owner: only the owner takes a page another "
-        "signer sealed over its own; a delegated admin's self-signed ref is "
-        "never stale (it keeps its own page), the owner's may be"
     ),
     ("federation/sync/space/scheduler.py", "_tick_owner_catch_up"): (
         "are WE the owner: only the owner has no host above it whose silence "

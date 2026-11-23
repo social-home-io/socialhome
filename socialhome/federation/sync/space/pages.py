@@ -85,6 +85,7 @@ from ....sync_page import (
     MAX_LISTING_BUCKETS,
     MAX_LISTING_ROWS,
     MAX_PAGE_FUTURE_SKEW_MS,
+    MAX_PAGE_REF_SIGNERS,
     PAGE_MIN_INTERVAL_S,
     PAGE_SEAL_SUITE_AESGCM_256,
     PAGE_SUITE_SHA256_B256,
@@ -154,10 +155,6 @@ MAX_PUSHED_PAYLOADS: int = 256
 
 #: Spaces whose compare result / conflict flag is remembered.
 MAX_TRACKED: int = 4096
-
-#: Per space, the roots of the other signers' pages already judged here (a
-#: page delivered again is not compared again); a restart forgets them.
-MAX_JUDGED_ROOTS: int = 4
 
 #: A bucket every member household we can ask answered ``held: false`` for
 #: (dry) is not asked again for this long — then once more (security check
@@ -791,6 +788,31 @@ def _moved_since(differing: list[int], scan: BucketRows, vector: bytes) -> set[i
     return out
 
 
+def _ref_key(ref: Mapping[str, Any]) -> tuple[int, int, int]:
+    return (
+        int(ref.get("epoch", 0)),
+        int(ref.get("issued_at", 0)),
+        int(ref.get("seq", 0)),
+    )
+
+
+def _signer_entry(
+    ref: Mapping[str, Any] | None, signer: str
+) -> tuple[int, int, int] | None:
+    """The order key of the newest page of *signer* a requester's BEGIN says
+    it holds (its ``page``'s ``signers``; a ref without them names only its
+    own page), or ``None`` when it holds none of that signer."""
+    if ref is None:
+        return None
+    entries = ref.get("signers")
+    if isinstance(entries, list):
+        for entry in entries:
+            if entry[0] == signer:
+                return (int(entry[1]), int(entry[2]), int(entry[3]))
+        return None
+    return _ref_key(ref) if ref.get("signer") == signer else None
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -831,13 +853,12 @@ class SyncPageService:
         "_exporters",
         "_fetching",
         "_hosts",
-        "_judged_roots",
         "_judging",
         "_locks",
+        "_matched",
         "_monotonic",
         "_on_change",
         "_own_instance_id",
-        "_own_sealed_at",
         "_probes",
         "_push_pending",
         "_pushed",
@@ -854,7 +875,6 @@ class SyncPageService:
         "_spaces",
         "_state",
         "_stuck",
-        "_subjects",
         "_tasks",
         "_versions",
         "_wanted",
@@ -943,35 +963,64 @@ class SyncPageService:
         #: gets THAT page, never a newer one waiting for its hour mark —
         #: security check 2, M1); bounded, dropped oldest first.
         self._pushed_payload: OrderedDict[str, dict] = OrderedDict()
-        #: The OWNER's catch-up page per space (security re-check, H1): the
-        #: newest page another signer sealed, verified and kept here in
-        #: memory even when it is not newer than the page we hold — it is
-        #: what we compare and fetch against until nothing it commits is
-        #: missing. Held pages decide what we STORE; this decides what we
-        #: catch up. A restart forgets it; the next delivery brings it back.
-        self._subjects: OrderedDict[str, _Held] = OrderedDict()
-        #: space → the roots of other signers' pages judged here (bounded).
-        self._judged_roots: dict[str, list[bytes]] = {}
-        #: space → when we last sealed it (clock ms): a signer holding
-        #: another signer's page seals at most every PAGE_MIN_INTERVAL_S.
-        self._own_sealed_at: dict[str, int] = {}
+        #: A signer household: space → the roots of the other signers'
+        #: stored pages whose verdict is a match (nothing missing). The next
+        #: unmatched one is what we catch up against (:meth:`_subject`).
+        #: Derived again after a restart: the stored rows plus "no verdict
+        #: yet" restart each compare.
+        self._matched: OrderedDict[str, set[bytes]] = OrderedDict()
 
     # ─── The page held here ───────────────────────────────────────────
 
+    async def _held_all(self, space: Space) -> list[_Held]:
+        """The newest stored page of each signer of *space* (security
+        re-check: one row per signer), of the epoch we pin now, newest
+        first. A malformed row (never written by us) is skipped."""
+        out: list[_Held] = []
+        epoch = int(space.authority_key_epoch or 0)
+        for row in await self._repo.list_all(space.id):
+            try:
+                page = parse_page(orjson.loads(row.page_json))
+            except ValueError, orjson.JSONDecodeError:
+                log.warning("sync page: a stored page of %s is unreadable", space.id)
+                continue
+            if page.epoch == epoch:
+                out.append(_Held(page=page, row=row))
+        return out
+
     async def _held(self, space: Space) -> _Held | None:
-        """The stored page of *space* when it is of the epoch we pin now.
-        A malformed row (never written by us) is treated as none."""
-        row = await self._repo.get(space.id)
-        if row is None:
+        """The newest stored page of *space* across its signers — what a
+        member compares with and what the status reads."""
+        rows = await self._held_all(space)
+        return rows[0] if rows else None
+
+    async def _held_with_root(
+        self, space: Space, page_ref: Mapping[str, Any] | None
+    ) -> _Held | None:
+        """The stored page (of any signer) a requester's ``page`` names by
+        its root — a deliverer serves any signer's page it holds."""
+        if not page_ref:
             return None
-        try:
-            page = parse_page(orjson.loads(row.page_json))
-        except ValueError, orjson.JSONDecodeError:
-            log.warning("sync page: the stored page of %s is unreadable", space.id)
-            return None
-        if page.epoch != int(space.authority_key_epoch or 0):
-            return None
-        return _Held(page=page, row=row)
+        for held in await self._held_all(space):
+            if held.page.root == page_ref.get("root"):
+                return held
+        return None
+
+    async def _own(self, space: Space) -> _Held | None:
+        """The newest page WE signed, if we did."""
+        for held in await self._held_all(space):
+            if held.page.signer == self._own_instance_id:
+                return held
+        return None
+
+    async def _signs(self, space: Space) -> bool:
+        """Whether we are one of the space's signers: its owner, or a
+        household holding a page it signed itself (a seed-holding delegated
+        admin). A signer judges every other signer's page and catches up
+        against it, taking only rows it lacks."""
+        if space.owner_instance_id == self._own_instance_id:
+            return True
+        return await self._own(space) is not None
 
     async def ref_for(
         self, space_id: str, to_instance_id: str | None = None
@@ -988,56 +1037,59 @@ class SyncPageService:
             and to_instance_id is not None
             and wanted.host == to_instance_id
         ):
-            # The page our ask to that household is about (the owner's
-            # catch-up page may be older than the page it holds).
-            return dict(wanted.ref)
+            # The page our ask to that household is about (a signer's
+            # catch-up page may be older than the newest it holds).
+            return {**wanted.ref, "signers": await self._signer_entries(space)}
         held = await self._held(space)
-        return None if held is None else held.page.ref()
+        if held is None:
+            return None
+        return {**held.page.ref(), "signers": await self._signer_entries(space)}
+
+    async def _signer_entries(self, space: Space) -> list[list[Any]]:
+        """``signers`` of a BEGIN's ``page``: per signer, the newest page we
+        hold from it — ``[signer, epoch, issued_at, seq]`` — so each signer
+        tells whether we missed ITS page (security re-check, stale ref per
+        signer)."""
+        return [
+            [h.page.signer, h.page.epoch, h.page.issued_at, h.page.seq]
+            for h in (await self._held_all(space))[:MAX_PAGE_REF_SIGNERS]
+        ]
 
     async def _subject(self, space: Space) -> _Held | None:
-        """The page we compare our copy with and catch up against: another
-        signer's page, never our own. The held page when it is foreign;
-        for the owner, the newest other signer's page judged here when it
-        is not newer than the page we hold (``_subjects``)."""
-        held = await self._held(space)
-        sub = self._subjects.get(space.id)
-        if (
-            sub is not None
-            and sub.page.epoch == int(space.authority_key_epoch or 0)
-            and (
-                held is None
-                or held.page.signer == self._own_instance_id
-                or not held.page.is_newer_than(sub.page)
-            )
-        ):
-            return sub
-        if held is None or held.page.signer == self._own_instance_id:
+        """The page we compare our copy with and catch up against — never
+        our own. A plain member: the newest stored page when another signed
+        it. A SIGNER (owner or seed-holding admin): the newest stored page
+        of another signer whose verdict is not a match yet — one at a time,
+        each judged once per root (security re-check: an owner that sealed
+        after its admin, two admins, a returning admin)."""
+        rows = await self._held_all(space)
+        if await self._signs(space):
+            matched = self._matched.get(space.id, set())
+            for held in rows:
+                if held.page.signer != self._own_instance_id and (
+                    held.page.root not in matched
+                ):
+                    return held
             return None
-        return held
+        newest = rows[0] if rows else None
+        if newest is None or newest.page.signer == self._own_instance_id:
+            return None
+        return newest
 
-    def _judged_root(self, space_id: str, root: bytes) -> bool:
-        return root in self._judged_roots.get(space_id, [])
-
-    def _note_judged(self, space_id: str, root: bytes) -> None:
-        roots = self._judged_roots.setdefault(space_id, [])
+    def _note_matched(
+        self, space_id: str, root: bytes, complete: bool, signer: bool
+    ) -> None:
+        """A signer's catch-up page *root* has nothing missing or unresolved
+        any more: the next other signer's page, if any, is judged."""
+        if not complete or not signer:
+            return
+        roots = self._matched.setdefault(space_id, set())
         if root not in roots:
-            roots.append(root)
-            del roots[:-MAX_JUDGED_ROOTS]
-        while len(self._judged_roots) > MAX_TRACKED:
-            self._judged_roots.pop(next(iter(self._judged_roots)))
-
-    def _keep_subject(self, space_id: str, held: _Held) -> None:
-        self._subjects[space_id] = held
-        self._subjects.move_to_end(space_id)
-        while len(self._subjects) > MAX_TRACKED:
-            self._subjects.popitem(last=False)
-
-    def _settle_subject(self, space_id: str, root: bytes, complete: bool) -> None:
-        """The owner's catch-up page *root* has nothing missing or
-        unresolved any more: it is done — the status reads our own page."""
-        sub = self._subjects.get(space_id)
-        if complete and sub is not None and sub.page.root == root:
-            del self._subjects[space_id]
+            roots.add(root)
+            self.compare_soon(space_id)  # the next unmatched page, if any
+        self._matched.move_to_end(space_id)
+        while len(self._matched) > MAX_TRACKED:
+            self._matched.popitem(last=False)
 
     async def _held_root(self, space_id: str) -> bytes | None:
         """The root of the page we compare with now (:meth:`_subject`), or
@@ -1101,37 +1153,23 @@ class SyncPageService:
         if seed is None:
             return None
         epoch = int(space.authority_key_epoch or 0)
-        held = await self._held(space)
+        mine = await self._own(space)
         own = (
-            held
-            if held is not None
-            and held.page.signer == self._own_instance_id
-            and held.page.page_suite == PAGE_SUITE_SHA256_B256
+            mine
+            if mine is not None and mine.page.page_suite == PAGE_SUITE_SHA256_B256
             else None
         )
         cutoff = await self._state.cutoff(space_id)
         if own is not None:
+            # Our own stored row decides (no memory-only state): changed
+            # since it, and ≥ 15 min after it — whatever pages other signers
+            # seal (security re-check M-1/M-2, L-3). Our catch-up against
+            # theirs runs whatever we seal, so an incomplete page of ours is
+            # temporary: the rows it lacks follow in a later page.
             if not await self._changed_since(space_id, own.page.seq):
                 return None
             young = self._clock_ms() - own.page.issued_at < PAGE_MIN_INTERVAL_S * 1000
             if young and _cutoff_day(own.page.cutoff) == _cutoff_day(cutoff):
-                return None
-        elif held is not None and space.owner_instance_id != self._own_instance_id:
-            if self._clock_ms() - held.page.issued_at < PAGE_MIN_INTERVAL_S * 1000:
-                # A delegated admin holding the owner's fresh page (it syncs
-                # as a member too) does not add a page on top of every one.
-                return None
-        elif held is not None:
-            # The OWNER holding a page another signer sealed seals by its own
-            # lazy interval — never held back by that signer's cadence
-            # (security re-check M-1/M-2). Its catch-up runs against that
-            # page whatever we seal (``_subjects``), so an incomplete page of
-            # ours is temporary: the rows it lacks follow in a later page.
-            last = self._own_sealed_at.get(space_id)
-            if (
-                last is not None
-                and self._clock_ms() - last < PAGE_MIN_INTERVAL_S * 1000
-            ):
                 return None
         # Read before the export (as a stream's snapshot): a row changed while
         # we hash is stamped above it, so the next seal sees it as changed.
@@ -1159,9 +1197,6 @@ class SyncPageService:
             key=str(space.identity_public_key),
         ):
             return None  # re-pinned or a newer page stored meanwhile
-        self._own_sealed_at[space_id] = page.issued_at
-        while len(self._own_sealed_at) > MAX_TRACKED:
-            self._own_sealed_at.pop(next(iter(self._own_sealed_at)))
         log.info(
             "sync page: sealed page %d of space %s (%d rows, %.2f s)",
             seq,
@@ -1263,9 +1298,9 @@ class SyncPageService:
             return
         try:
             space = await self._spaces.get(space_id)
-            held = await self._held(space) if space is not None else None
-            if held is None or held.page.signer != self._own_instance_id:
-                return  # only the signer pushes, only its own page
+            held = await self._own(space) if space is not None else None
+            if held is None:
+                return  # only a signer pushes, only its own page
             payload = await self._page_event(space_id, held)
             self._pushed[space_id] = (self._monotonic(), held.page.order_key())
             self._pushed.move_to_end(space_id)
@@ -1300,52 +1335,53 @@ class SyncPageService:
         requester_ref: Mapping[str, Any] | None,
     ) -> dict | None:
         """The ``SPACE_SYNC_PAGE`` payload for a requester whose BEGIN names
-        *requester_ref*, or ``None``: none held, an older requester, or it
-        holds the page last pushed (or this household's page), or a newer
-        one — a page sealed since the last push waits for its hourly push,
-        so a BEGIN never undoes the coalescing. Also starts a background
-        seal when one is due here (the lazy seal rides every BEGIN)."""
+        *requester_ref*, or ``None``. Also starts a background seal when one
+        is due here (the lazy seal rides every BEGIN).
+
+        A signer offers ITS page — the one it last pushed (a page sealed
+        since waits for its hourly push, so BEGINs never undo the
+        coalescing) — when the requester's entry for this signer
+        (``signers`` in its ref; absent: none held) is older (security
+        re-check: stale ref per signer — an owner that sealed after its
+        admin still gets the admin's page). A plain member (relaying in a
+        fetch session) offers the newest page it holds when the ref's page
+        is older."""
         if requester_version < FederationCapability.MIN_FOR_SYNC_PAGES:
             return None
         self.seal_soon(space_id)
         try:
             space = await self._spaces.get(space_id)
-            held = await self._held(space) if space is not None else None
-            if held is None:
+            if space is None:
                 return None
-            page = held.page
-            threshold = page.order_key()
+            mine = await self._own(space)
+            ref = requester_ref or None
+            if mine is None:
+                held = await self._held(space)
+                if held is None:
+                    return None
+                if ref is not None and (
+                    ref.get("root") == held.page.root
+                    or _ref_key(ref) >= held.page.order_key()
+                ):
+                    return None
+                return await self._page_event(space_id, held)
+            threshold = mine.page.order_key()
             pushed = self._pushed.get(space_id)
-            if pushed is not None and pushed[1][0] != page.epoch:
+            if pushed is not None and pushed[1][0] != mine.page.epoch:
                 # The key or epoch moved since that push: its page is stale.
                 self._pushed.pop(space_id, None)
                 self._pushed_payload.pop(space_id, None)
                 pushed = None
-            stored = self._pushed_payload.get(space_id)
-            last_pushed = (
-                page.signer == self._own_instance_id
-                and pushed is not None
-                and pushed[1] < threshold
-            )
+            last_pushed = pushed is not None and pushed[1] < threshold
             if last_pushed and pushed is not None:
-                # A page sealed since the last push waits for its hour mark:
-                # a stale ref gets the LAST PUSHED page, so BEGINs never undo
-                # the coalescing (security check 2, M1).
                 threshold = pushed[1]
-            ref = requester_ref or None
-            if ref is not None:
-                if ref.get("root") == page.root:
-                    return None
-                ref_key = (
-                    int(ref.get("epoch", 0)),
-                    int(ref.get("issued_at", 0)),
-                    int(ref.get("seq", 0)),
-                )
-                if ref_key >= threshold:
-                    return None
+            entry = _signer_entry(ref, self._own_instance_id)
+            if entry is not None and entry >= threshold:
+                return None
             if last_pushed:
-                return stored  # None when no longer kept: the next push
-            return await self._page_event(space_id, held)
+                # None when no longer kept: the next push covers it.
+                return self._pushed_payload.get(space_id)
+            return await self._page_event(space_id, mine)
         except Exception:
             log.exception("sync page: the page of %s for a BEGIN failed", space_id)
             return None
@@ -1368,23 +1404,16 @@ class SyncPageService:
         a tick sends one BEGIN to every peer, and every member holding the
         newer page answering would make ≈ N²/2 copies — except in a verified
         fetch session (*fetch*: the requester's hosts are silent, so no
-        signer answers it). A ref the requester signed itself is never
-        stale: a delegated admin keeps its own page and never stores
-        another signer's (M2) — only the owner takes an admin's page."""
+        signer answers it). Each signer judges the requester's entry for
+        ITSELF (``signers``), so a signer's own entry for its own page never
+        makes another signer resend."""
         if self._sender is None or self._writers is None:
             self.seal_soon(space_id)
             return
         try:
-            ref = requester_ref or None
-            if ref is not None and ref.get("signer") == requester:
-                space = await self._spaces.get(space_id)
-                if space is None or space.owner_instance_id != requester:
-                    self.seal_soon(space_id)
-                    return
             if not fetch:
                 space = await self._spaces.get(space_id)
-                held = await self._held(space) if space is not None else None
-                if held is None or held.page.signer != self._own_instance_id:
+                if space is None or await self._own(space) is None:
                     self.seal_soon(space_id)
                     return
             payload = await self.page_for(
@@ -1514,48 +1543,15 @@ class SyncPageService:
             pinned_epoch=int(space.authority_key_epoch or 0),
             now_ms=self._clock_ms(),
         )
-        held = await self._held(space)
-        if held is not None and is_conflict(held.page, page):
-            self._note_conflict(space_id, held.page, page, provider)
-        owner = space.owner_instance_id == self._own_instance_id
-        if owner and page.signer != self._own_instance_id:
-            # The OWNER judges every verified page another signer sealed,
-            # once, whatever its age (security re-check H1): "not newer"
-            # decides only what we store as held, never whether we catch up
-            # what it proves we lack — a returning, partitioned or restored
-            # owner (its own page sealed meanwhile) still fetches the rows
-            # its delegated admin's page commits.
-            vector = self._page_vector(body, page)
-            kept = _Held(
-                page=page,
-                row=StoredSyncPage(
-                    space_id=space_id,
-                    page_json=canonical_str(page.to_wire()),
-                    vector=vector,
-                ),
-            )
-            current = self._subjects.get(space_id)
-            if not self._judged_root(space_id, page.root) and (
-                current is None or page.is_newer_than(current.page)
-            ):
-                self._keep_subject(space_id, kept)
-                self.compare_soon(space_id)
-        if held is not None and not page.is_newer_than(held.page):
-            return False
-        if (
-            held is not None
-            and held.page.signer == self._own_instance_id
-            and page.signer != self._own_instance_id
-            and space.owner_instance_id != self._own_instance_id
-        ):
-            # A delegated admin signs this space too: its own page and its
-            # prev_root chain stay; another signer's page is never stored over it
-            # (it would break its chain and make its next page look like
-            # equivocation to the members). The OWNER does take a newer page
-            # its delegated admin signed (same epoch — verified above) while
-            # the owner was offline: it then compares and catches up from
-            # members (Phase 3). Its next page starts a chain of its own
-            # (``prev_root`` null, the full vector), which is no conflict.
+        same = next(
+            (h for h in await self._held_all(space) if h.page.signer == page.signer),
+            None,
+        )
+        if same is not None and is_conflict(same.page, page):
+            self._note_conflict(space_id, same.page, page, provider)
+        if same is not None and not page.is_newer_than(same.page):
+            # Not newer than what we hold FROM THAT SIGNER: ignored — an old
+            # relayed page never parks a catch-up (security re-check M-1).
             return False
         vector = self._page_vector(body, page)
         if not await self._repo.put(
@@ -1575,7 +1571,8 @@ class SyncPageService:
             page.signer,
         )
         await self._changed(space_id)
-        self.compare_soon(space_id)
+        if page.signer != self._own_instance_id:
+            self.compare_soon(space_id)
         return True
 
     @staticmethod
@@ -1714,9 +1711,6 @@ class SyncPageService:
             if self._judging.get(space_id) == page.root:
                 return None  # a compare of this very page is running
             self._judging[space_id] = mine = page.root
-            self._note_judged(space_id, page.root)
-            if space.owner_instance_id == self._own_instance_id:
-                self._keep_subject(space_id, held)  # survives our own seals
             self._compared_at[space_id] = self._monotonic()
             while len(self._compared_at) > MAX_TRACKED:
                 self._compared_at.pop(next(iter(self._compared_at)))
@@ -1786,7 +1780,12 @@ class SyncPageService:
                 todo=todo,
             )
             self._remember(space_id, result)
-            self._settle_subject(space_id, page.root, not todo and not result.missing)
+            self._note_matched(
+                space_id,
+                page.root,
+                not todo and not result.missing,
+                await self._signs(space),
+            )
             log.info(
                 "sync page: space %s against page %d: %d bucket(s) differ, %d "
                 "unexplained (%.2f s)%s",
@@ -2213,7 +2212,7 @@ class SyncPageService:
                 ref=held.page.ref(),
                 have=hint_to_wire(leaves),
                 page_at=page_time(held.page),
-                owner=space.owner_instance_id == self._own_instance_id,
+                owner=await self._signs(space),
             )
             while len(self._wanted) > MAX_TRACKED:
                 self._wanted.pop(next(iter(self._wanted)))
@@ -2403,10 +2402,11 @@ class SyncPageService:
                 ),
             )
             await self._changed(space_id)
-            self._settle_subject(
+            self._note_matched(
                 space_id,
                 wanted.root,
                 not todo and not sum(still.values()) + stuck_before,
+                wanted.owner,
             )
             if todo - self._paused(space_id, wanted.root):
                 self._spawn(self._fetch_next(space_id), f"sync-page-fetch-{space_id}")
@@ -2486,9 +2486,9 @@ class SyncPageService:
         space = await self._spaces.get(space_id)
         if space is None:
             return []
-        held = await self._held(space)
+        held = await self._held_with_root(space, page_ref)
         asked = buckets[:MAX_LISTING_BUCKETS]
-        if held is None or not page_ref or page_ref.get("root") != held.page.root:
+        if held is None:
             return [listing_to_wire(i, None) for i in asked]
         scan = await self._state.rows_in(space_id, asked, cutoff=held.page.cutoff)
         hosting = await serves_as_host(
@@ -2533,10 +2533,10 @@ class SyncPageService:
         space = await self._spaces.get(space_id)
         if space is None:
             return [], []
-        held = await self._held(space)
+        held = await self._held_with_root(space, page_ref)
         asked = buckets[:MAX_LISTING_BUCKETS]
-        if held is None or not page_ref or page_ref.get("root") != held.page.root:
-            # Not this page (none, older, newer): no listing at all — an
+        if held is None:
+            # Not a page we hold (none, older, newer): no listing at all — an
             # answer that says nothing about any bucket, so the requester
             # asks the next member (security check HIGH-1: a page mismatch
             # is no "changed here").
@@ -2574,9 +2574,11 @@ class SyncPageService:
         a bucket stayed unresolved. The owner reads the page it catches up
         against (another signer's) until nothing it commits is missing, then
         its own."""
-        held = await self._subject(space) or await self._held(space)
+        subject = await self._subject(space)
+        held = subject or await self._held(space)
         if held is None:
             return None
+        signer = await self._signs(space)
         page = held.page
         check = self._checks.get(space.id)
         if (
@@ -2608,6 +2610,9 @@ class SyncPageService:
             missing=missing,
             differing_buckets=differing,
             conflict=conflict,
+            # A signer catching up against another signer's page that has no
+            # match yet (security re-check: status per signer).
+            catching_up=signer and subject is not None and match is not True,
         )
 
     async def wait_idle(self) -> None:

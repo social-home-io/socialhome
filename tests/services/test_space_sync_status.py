@@ -677,7 +677,7 @@ async def test_a_space_hosted_here_never_warns_but_shows_its_catch_up(env):
     match (rows missing, or buckets unresolved) the owner reads **catching
     up** — never "up to date" — but a space hosted here never shows the
     "may be missing" warning or its dot. Its own page: up to date."""
-    current = [_position(match=False, missing=3, signer_role="admin")]
+    current = [_position(match=False, missing=3, signer_role="admin", catching_up=True)]
 
     async def position(space):
         return current[0]
@@ -688,7 +688,9 @@ async def test_a_space_hosted_here_never_warns_but_shows_its_catch_up(env):
     assert status.to_wire()["may_be_missing"] is False
     assert status.to_wire()["page"]["missing"] == 3
     assert await env.svc.may_be_missing("mine") is False
-    current[0] = _position(match=None, missing=None, signer_role="admin")
+    current[0] = _position(
+        match=None, missing=None, signer_role="admin", catching_up=True
+    )
     assert (await env.svc.status("mine")).state is SpaceSyncState.CATCHING_UP
     current[0] = _position(match=True, missing=0, signer_role="admin")
     assert (await env.svc.status("mine")).state is SpaceSyncState.UP_TO_DATE

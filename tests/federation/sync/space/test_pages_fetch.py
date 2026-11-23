@@ -1632,7 +1632,7 @@ async def test_the_owners_catch_up_is_not_cut_short_by_its_own_seal(trio):
     lacks. A member's BEGIN mid catch-up asks the owner's sentinel, which
     would seal over the admin's page. The owner may seal (security
     re-check: no seal holds) — its catch-up runs against the admin's page
-    whatever it seals (``_subjects``), round by round (its per-tick round:
+    whatever it seals (its stored row), round by round (its per-tick round:
     no host above it ever goes silent), until it holds all 30; its next
     page then commits them."""
     host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
@@ -1706,7 +1706,7 @@ async def test_the_owners_catch_up_is_not_cut_short_by_its_own_seal(trio):
     ref = await host_pages.ref_for(SPACE)
     assert ref is not None and ref["signer"] == HOST
     assert parse_page_ref(ref)["root"] == admin_page.root
-    assert SPACE not in host_pages._subjects
+    assert await host_pages._subject(await host.repos.space.get(SPACE)) is None
 
 
 async def test_a_delete_never_hides_a_missing_row_in_its_bucket(trio):
@@ -1866,6 +1866,7 @@ async def test_poc_c_the_owner_never_seals_an_incomplete_page_on_a_nay(trio):
     await wire.settle()
     await _silent_ticks(host_pages, wire, 4)
     host_pages._clock_ms.ms += 2 * PAGE_MIN_INTERVAL_S * 1000  # a seal is due
+    await _post(host, "post-owner", content="the owner writes on")
     assert await host_pages.seal_if_due(SPACE) is not None  # no hold
     pos = await _position(host, host_pages)
     assert pos is not None and pos.signer_role == "admin" and pos.match is not True
@@ -1878,7 +1879,8 @@ async def test_poc_c_the_owner_never_seals_an_incomplete_page_on_a_nay(trio):
         )
         == 0
     )
-    assert SPACE in host_pages._subjects  # the catch-up is still on
+    space = await host.repos.space.get(SPACE)
+    assert await host_pages._subject(space) is not None  # the catch-up is on
 
 
 # ── Security re-check H1: the owner judges every admin page, whatever ────
@@ -1945,10 +1947,10 @@ async def _owner_settles(host, host_pages, wire, rounds: int = 4) -> None:
 
 
 async def _owner_status(host, host_pages) -> SpaceSyncState:
-    """The status service's owner rule: catching up while the page it
-    catches up against has no match."""
+    """The status service's owner rule: catching up while another signer's
+    stored page has no match yet."""
     pos = await _position(host, host_pages)
-    if pos is not None and pos.signer_role != "owner" and pos.match is not True:
+    if pos is not None and pos.catching_up:
         return SpaceSyncState.CATCHING_UP
     return SpaceSyncState.UP_TO_DATE
 
@@ -2080,3 +2082,226 @@ async def test_h1_c_after_an_authority_rotation_the_owner_catches_up(trio):
     await _owner_settles(host, host_pages, wire)
     assert await host.repos.space_post.get("post-carl") is not None
     assert await _owner_status(host, host_pages) is SpaceSyncState.UP_TO_DATE
+
+
+# ── Security re-check 2: the newest page per SIGNER, persisted ──────────
+
+
+async def test_h1_restart_after_an_interim_seal_still_lands_the_admins_rows(trio):
+    """H-1: the owner sealed an interim page O after its admin's A, took A
+    (its own row now — persisted, not memory) and restarted before the
+    catch-up ran. The stored row plus "no verdict yet" restart the compare:
+    the rows land."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    clock = host_pages._clock_ms
+    admin_page = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms + 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    clock.ms += 90 * 60_000
+    await _post(host, "post-owner", content="queued while away")
+    assert await host_pages.seal_if_due(SPACE) is not None  # interim O
+    await _deliver_admin_page(member_pages, host_pages, admin_page)
+    await host_pages.close()  # a restart before the catch-up ran
+    restarted = _service(host, HOST, SEED, clock)
+    wire = await _owner_wired(host, member, restarted, member_pages, versions)
+    await _owner_settles(host, restarted, wire)
+    got = await host.repos.space_post.get("post-carl")
+    assert got is not None and got[1].content == "written while away"
+    assert await _owner_status(host, restarted) is SpaceSyncState.UP_TO_DATE
+
+
+async def test_h2_the_admin_answers_an_owner_that_sealed_first(trio):
+    """H-2 (ordering): the owner seals O before its BEGIN to the admin. Its
+    BEGIN's ``page`` names, per signer, the newest page it holds — none of
+    the admin's — so the admin (a signer) answers with ITS page; the rows
+    land."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    clock = host_pages._clock_ms
+    await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms + 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    clock.ms += 90 * 60_000
+    await _post(host, "post-owner", content="queued while away")
+    assert await host_pages.seal_if_due(SPACE) is not None  # O, sealed first
+    wire = await _owner_wired(host, member, host_pages, member_pages, versions)
+    # The owner's BEGIN to the admin; the admin's stale-ref answer.
+    event = await member_pages.page_for(
+        space_id=SPACE,
+        requester_version=95,
+        requester_ref=parse_page_ref(await host_pages.ref_for(SPACE, MEMBER)),
+    )
+    assert event is not None
+    assert await host_pages.take_pushed(space_id=SPACE, provider=MEMBER, payload=event)
+    await _owner_settles(host, host_pages, wire)
+    assert await host.repos.space_post.get("post-carl") is not None
+    assert await _owner_status(host, host_pages) is SpaceSyncState.UP_TO_DATE
+
+
+@pytest.mark.parametrize("first", ["a", "b"])
+async def test_m2_two_admins_pages_both_land_in_either_order(trio, first):
+    """M-2: two delegated admin households sealed pages committing different
+    rows. The owner keeps both (one row per signer), judges each, one at a
+    time, catches each up from the household holding it, and ends up with
+    the rows of both — in either order of arrival — reading up to date."""
+    host, member, requester, host_pages, member_pages, r_pages, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    await _stream(host, requester)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    clock = host_pages._clock_ms
+    await _post(member, "post-carl", author=CARL, content="admin A's")
+    page_a = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms + 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    await _post(requester, "post-dora", author=CARL, content="admin B's")
+    space = await requester.repos.space.get(SPACE)
+    vector, rows = await r_pages._state.vector(SPACE, cutoff=own.cutoff)
+    page_b = sign_page(
+        space_id=SPACE,
+        epoch=int(space.authority_key_epoch or 0),
+        signer=REQUESTER,
+        seq=own.seq + 9,
+        issued_at=clock.ms + 120_000,
+        cutoff=own.cutoff,
+        rows=rows,
+        vector=vector,
+        prev_root=None,
+        space_seed=SEED,
+    )
+    assert await requester.repos.space_sync_page.put(
+        StoredSyncPage(SPACE, canonical_str(page_b.to_wire()), vector), key=PK_HEX
+    )
+    wire = await _owner_wired(host, member, host_pages, member_pages, versions)
+    wire.deliverers[REQUESTER] = r_pages
+    await _seat(host, REQUESTER, CARL, "admin")
+    sealed_a = await _event_of(member_pages, page_a)
+    sealed_b = await _event_of(r_pages, page_b)
+    for which in [sealed_a, sealed_b] if first == "a" else [sealed_b, sealed_a]:
+        assert await host_pages.take_pushed(
+            space_id=SPACE, provider=MEMBER, payload=which
+        )
+    await _owner_settles(host, host_pages, wire, rounds=8)
+    assert await host.repos.space_post.get("post-carl") is not None
+    assert await host.repos.space_post.get("post-dora") is not None
+    assert await _owner_status(host, host_pages) is SpaceSyncState.UP_TO_DATE
+
+
+async def test_m1_a_90_day_old_relayed_page_is_ignored(trio):
+    """M-1: the owner holds its admin's current page; a 90-day-old page of
+    the same admin, relayed by anyone, is older than the page stored FROM
+    THAT SIGNER — neither stored nor judged, so it never parks the owner's
+    catch-up."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    clock = host_pages._clock_ms
+    # The old page commits a row nobody holds any more: catching up
+    # against it could never finish.
+    await _post(member, "post-gone", author=CARL, content="long gone")
+    old = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms - 90 * 86_400_000,
+        seq=3,
+        cutoff=own.cutoff,
+    )
+    stale = await _event_of(member_pages, old)
+    await member.db.enqueue("DELETE FROM space_posts WHERE id='post-gone'")
+    await _post(member, "post-carl", author=CARL, content="admin's")
+    current = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms + 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    wire = await _owner_wired(host, member, host_pages, member_pages, versions)
+    await _deliver_admin_page(member_pages, host_pages, current)
+    await _owner_settles(host, host_pages, wire)
+    assert await host.repos.space_post.get("post-carl") is not None
+    clock.ms += 90 * 60_000
+    await _post(host, "post-owner", content="the owner's own, later")
+    assert await host_pages.seal_if_due(SPACE) is not None  # newest held: ours
+    await host_pages.close()  # a restart: nothing judged in memory
+    restarted = _service(host, HOST, SEED, clock)
+    wire = await _owner_wired(host, member, restarted, member_pages, versions)
+    assert not await restarted.take_pushed(
+        space_id=SPACE, provider=FOLLOWER, payload=stale
+    )
+    await _owner_settles(host, restarted, wire)
+    check = restarted._checks.get(SPACE)
+    assert check is None or check.root == current.root
+    assert await _owner_status(host, restarted) is SpaceSyncState.UP_TO_DATE
+
+
+async def test_m3_a_returning_admin_judges_the_owners_page(trio):
+    """M-3: a seed-holding delegated admin keeps its own page AND, as a
+    signer, judges the owner's newer page: it reads catching up until the
+    owner's rows it lacks have streamed in — it never seals or reads up to
+    date over the owner's content it has not caught up."""
+    host, member, _requester, host_pages, member_pages, _r, _w, _versions = trio
+    await _post(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    clock = host_pages._clock_ms
+    await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms + 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    clock.ms += 90 * 60_000
+    await _post(host, "post-owner", content="while the admin was away")
+    owners = await host_pages.seal_if_due(SPACE)
+    assert owners is not None
+    assert await member_pages.take_pushed(
+        space_id=SPACE, provider=HOST, payload=await _event_of(host_pages, owners)
+    )
+    await member_pages.wait_idle()
+    check = member_pages._checks.get(SPACE)
+    assert check is not None and check.root == owners.root  # judged
+    pos = await _position(member, member_pages)
+    assert pos is not None and pos.catching_up
+    await _stream(host, member)
+    await member_pages.compare(SPACE)
+    await member_pages.wait_idle()
+    assert await member.repos.space_post.get("post-owner") is not None
+    pos = await _position(member, member_pages)
+    assert pos is not None and not pos.catching_up
+
+
+async def _event_of(pages, page):
+    """The ``SPACE_SYNC_PAGE`` payload of *page*, from a household that
+    stores it (in its signer's row)."""
+    held = await pages._held_with_root(
+        await pages._spaces.get(SPACE), {"root": page.root}
+    )
+    assert held is not None
+    return await pages._page_event(SPACE, held)
