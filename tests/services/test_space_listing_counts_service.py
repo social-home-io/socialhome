@@ -181,12 +181,61 @@ async def test_a_republish_nobody_took_is_tried_on_the_next_change(env):
         _space("x", SpaceType.GLOBAL, owner="someone-else"),
     ],
 )
-async def test_only_a_listed_space_hosted_here_is_marked(env, space):
-    bus, spaces, *_rest, svc = env
+async def test_only_a_listed_space_hosted_here_is_reshared(env, space):
+    bus, spaces, _public, _peers, gfs, peer_dir, svc = env
     spaces.spaces["x"] = space
     spaces.counts["x"] = SpaceListingCounts(member_count=1, follower_count=0)
     await bus.publish(SpaceMemberJoined(space_id="x", user_id="u1"))
+    await _settle(svc)
+    assert (gfs.calls, peer_dir.refreshes, svc._last) == ([], 0, {})
+
+
+async def test_concurrent_events_are_one_timer_and_one_republish(env):
+    """REGRESSION (review I1): the slot is taken before any await, so events
+    racing in through a slow repo read still make one timer, one publish."""
+    _bus, spaces, _public, _peers, gfs, _peer_dir, svc = env
+    spaces.spaces["g"] = _space("g", SpaceType.GLOBAL)
+    spaces.counts["g"] = SpaceListingCounts(member_count=3, follower_count=1)
+    real_get = spaces.get
+
+    async def _slow_get(space_id: str):
+        await asyncio.sleep(0.01)
+        return await real_get(space_id)
+
+    spaces.get = _slow_get  # type: ignore[method-assign]
+    await asyncio.gather(
+        *(
+            svc._on_seat_changed(SpaceMemberJoined(space_id="g", user_id=f"u{i}"))
+            for i in range(20)
+        )
+    )
+    assert len(svc._tasks) == 1
+    await _settle(svc)
+    assert gfs.calls == [("g", False)]
+
+
+async def test_two_flushes_never_send_side_by_side(env):
+    _bus, spaces, _public, _peers, gfs, _peer_dir, svc = env
+    spaces.spaces["g"] = _space("g", SpaceType.GLOBAL)
+    spaces.counts["g"] = SpaceListingCounts(member_count=3, follower_count=1)
+    await asyncio.gather(svc.flush("g"), svc.flush("g"))
+    assert len(gfs.calls) == 1
+
+
+async def test_nothing_is_marked_after_stop(env):
+    bus, spaces, *_rest, svc = env
+    spaces.spaces["g"] = _space("g", SpaceType.GLOBAL)
+    await svc.stop()
+    await bus.publish(SpaceMemberJoined(space_id="g", user_id="u1"))
     assert svc._tasks == {}
+
+
+async def test_the_host_shows_its_roster_counts_without_a_member_seat(env):
+    """REGRESSION (review M4): the host holds the roster even when none of
+    its people holds a member seat."""
+    _bus, spaces, *_rest, svc = env
+    spaces.counts["g"] = SpaceListingCounts(member_count=2, follower_count=7)
+    assert await svc.shown_counts(_space("g", SpaceType.GLOBAL)) == (2, 7)
 
 
 async def test_nothing_is_marked_before_federation_is_up(env):

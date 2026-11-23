@@ -1152,8 +1152,12 @@ them on its public pages and directory, so anyone reading the directory
 learns them too. The owner decided this (2026-11-23): a count is listing
 metadata, like the space's name, and a directory showing 0 for every space
 was the bug. The counts name nobody, are bounded (`0..10 000 000`, re-checked
-by every receiver) and change at most once per 5 minutes per space. A GFS
-cannot inflate them (the owner's signature covers them). A follower reached
+by every receiver) and a count change is re-published at most once per
+5 minutes per space. The owner's signature covers them on the way **to** the
+GFS, so a relay or another registered household cannot alter them; it is
+not served onward, so a GFS **can misreport** them to its readers — exactly
+as it could misreport the space's name. Readers treat them as the GFS's
+word. A follower reached
 only through a GFS is no roster seat yet, so it is not counted until the
 subscriber-seats work makes it one. Paired households get the same two
 numbers in the `SPACE_DIRECTORY_SYNC` snapshot.

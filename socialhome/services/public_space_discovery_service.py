@@ -172,6 +172,11 @@ class PublicSpaceDiscoveryService:
 
         total = 0
         complete = True
+        #: space id → the counts a directory declared for it this tick: a
+        #: space several GFSs list keeps a number even when a later one (an
+        #: older server) declares none — the row must not flap with the
+        #: connection order.
+        declared: dict[str, tuple[int | None, int | None]] = {}
         for conn in active_connections:
             listings = await self._fetch_directory(conn.inbox_url)
             if listings is None:
@@ -187,10 +192,21 @@ class PublicSpaceDiscoveryService:
                 pin = merge_pin(held, listing.join_contact, space_id=listing.space_id)
                 if pin is not None and pin != held:
                     await self._repo.set_pin(listing.space_id, pin)
+                counts = (listing.member_count, listing.follower_count)
+                if counts == (None, None):
+                    counts = declared.get(listing.space_id, counts)
+                else:
+                    declared[listing.space_id] = counts
                 # Stamped with the tick's start: exactly the snapshot cutoff
                 # below (kept), whatever the wall clock does meanwhile.
                 await self._repo.upsert(
-                    replace(listing, join_contact=None, cached_at=tick_started)
+                    replace(
+                        listing,
+                        join_contact=None,
+                        cached_at=tick_started,
+                        member_count=counts[0],
+                        follower_count=counts[1],
+                    )
                 )
             total += len(listings)
 

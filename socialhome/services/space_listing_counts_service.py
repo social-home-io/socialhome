@@ -75,11 +75,13 @@ class SpaceListingCountsService:
         "_debounce_s",
         "_gfs",
         "_last",
+        "_locks",
         "_own_instance_id",
         "_peer_directory",
         "_peer_directory_repo",
         "_public_space_repo",
         "_space_repo",
+        "_stopped",
         "_tasks",
     )
 
@@ -106,8 +108,13 @@ class SpaceListingCountsService:
         #: space id → the counts it last shared (RAM: after a restart the
         #: next change shares once). Bounded by the spaces hosted here.
         self._last: dict[str, SpaceListingCounts] = {}
-        #: space id → its pending trailing timer.
+        #: space id → its pending trailing timer — at most one per space,
+        #: reserved before any await so concurrent events cannot add more.
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        #: space id → serialises its flushes (a slow publish and the next
+        #: window's timer never send side by side).
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._stopped = False
 
     def attach(
         self, *, peer_directory: PeerDirectoryRefresher, own_instance_id: str
@@ -128,6 +135,7 @@ class SpaceListingCountsService:
 
     async def stop(self) -> None:
         """Drop every pending timer (the next change re-shares)."""
+        self._stopped = True
         tasks = list(self._tasks.values())
         self._tasks.clear()
         for task in tasks:
@@ -141,11 +149,17 @@ class SpaceListingCountsService:
     async def shown_counts(self, space: Space) -> tuple[int | None, int | None]:
         """``(members, followers)`` for the space page; ``None`` = no number.
 
-        The roster's own counts when this household holds it, else what the
-        host shared with this household (an older host shares fewer — those
-        stay ``None``)."""
-        if space.space_type not in _LISTED_TIERS or await self._space_repo.holds_roster(
-            space.id
+        The roster's own counts when this household holds it (it hosts the
+        space, or one of its people holds a member seat), else what the host
+        shared with this household (an older host shares fewer — those stay
+        ``None``)."""
+        if (
+            space.space_type not in _LISTED_TIERS
+            or (
+                self._own_instance_id
+                and space.owner_instance_id == self._own_instance_id
+            )
+            or await self._space_repo.holds_roster(space.id)
         ):
             counts = await self._space_repo.listing_counts(space.id)
             if counts is None:
@@ -171,8 +185,10 @@ class SpaceListingCountsService:
         | SpaceRemoteSeatLive
         | SpaceRemoteSeatEnded,
     ) -> None:
+        # Synchronous up to the task: the slot is taken before any await, so
+        # a burst of concurrent events is exactly one timer.
         space_id = event.space_id
-        if space_id in self._tasks or not await self._hosted_listing(space_id):
+        if self._stopped or self._peer_directory is None or space_id in self._tasks:
             return
         self._tasks[space_id] = asyncio.create_task(
             self._flush_later(space_id), name=f"listing-counts-{space_id}"
@@ -197,7 +213,8 @@ class SpaceListingCountsService:
             return
         self._tasks.pop(space_id, None)
         try:
-            await self.flush(space_id)
+            if await self._hosted_listing(space_id):
+                await self.flush(space_id)
         except Exception:  # never kill the loop: the next change retries
             log.warning(
                 "space %s: re-sharing its listing counts failed",
@@ -207,6 +224,11 @@ class SpaceListingCountsService:
 
     async def flush(self, space_id: str) -> None:
         """Re-share *space_id*'s counts now if they changed since last time."""
+        lock = self._locks.setdefault(space_id, asyncio.Lock())
+        async with lock:
+            await self._flush_locked(space_id)
+
+    async def _flush_locked(self, space_id: str) -> None:
         space = await self._space_repo.get(space_id)
         counts = await self._space_repo.listing_counts(space_id)
         if space is None or counts is None or self._last.get(space_id) == counts:

@@ -2127,11 +2127,13 @@ class ClusterService:
             stored_cert=existing.authority_cert if existing else None,
         )
         # A peer's ``subscriber_count`` is its own relay-seat bookkeeping:
-        # ``upsert_space`` never overwrites ours with it. An OLDER node
-        # gossips no counts at all — keep ours rather than clearing them;
-        # otherwise the counts are last-writer-wins on ``counts_ts`` (in the
-        # upsert).
-        if existing is not None and "counts_ts" not in global_space:
+        # ``upsert_space`` never overwrites ours with it. A peer's counts are
+        # taken only with a stamp (an OLDER node gossips none, a node that
+        # never got counts gossips ``null``) that is not in the future (a
+        # far-future stamp would pin them against every later owner
+        # publish); otherwise ours stay. Among stamped ones the upsert keeps
+        # the newer (last-writer-wins on ``counts_ts``).
+        if existing is not None and not _gossiped_counts_usable(space.counts_ts):
             space = replace(
                 space,
                 member_count=existing.member_count,
@@ -2937,6 +2939,23 @@ def _wire_to_client(d: dict) -> ClientInstance:
         auto_accept=bool(d.get("auto_accept") or False),
         connected_at=str(d.get("connected_at") or ""),
     )
+
+
+#: How far ahead of this node's clock a gossiped ``counts_ts`` may be — the
+#: same skew a publish's own ``ts`` is allowed (±300 s).
+_COUNTS_TS_MAX_SKEW = timedelta(seconds=300)
+
+
+def _gossiped_counts_usable(counts_ts: str | None) -> bool:
+    """Whether a peer's gossiped counts may replace ours: stamped, and the
+    stamp not past this node's clock plus the allowed skew."""
+    if counts_ts is None:
+        return False
+    try:
+        stamp = datetime.fromisoformat(counts_ts)
+    except ValueError:
+        return False
+    return stamp <= datetime.now(UTC) + _COUNTS_TS_MAX_SKEW
 
 
 def _space_to_wire(s: GlobalSpace) -> dict:

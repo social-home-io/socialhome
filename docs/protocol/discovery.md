@@ -194,20 +194,28 @@ The Social Home ↔ GFS link is split by direction:
     live remote seats, never a follower; `space_repo.MEMBER_COUNT_SQL`) and
     `follower_count` (live follower seats, local plus remote non-tombstoned;
     `FOLLOWER_COUNT_SQL`), both from one builder,
-    `space_repo.listing_counts`. They ride inside the signed body, so neither
-    the GFS nor a relay can change them, and go only to a server whose
+    `space_repo.listing_counts`. They ride inside the signed body, so no
+    relay or other household can change them on the way to the GFS (the
+    signature is not served onward: a GFS can misreport them to its readers,
+    as it could the name), and go only to a server whose
     **signed** `/gfs/info` block proves `listing_counts` (read from the
     cache each connect warms — no probe per publish): an older GFS folds
     only the fields it knows into the bytes it verifies, so the fields
     would 403 the whole publish. The GFS re-checks each count
     (`parse_listing_count`: an `int`, `0..10 000 000`; anything else is
     stored as no number), stores it with the publish's signed `ts`
-    (last writer wins) and serves it as `member_count` / `follower_count` on
+    (last writer wins; only a publish with a signed `ts` that declares
+    counts changes them — a publish without counts, e.g. one sent before the
+    household had seen this server's `/gfs/info`, or a replayable no-`ts`
+    body, leaves them as they are) and serves it as `member_count` / `follower_count` on
     `GET /gfs/spaces`, `GET /gfs/spaces/{id}`, its HTML pages and the viewer
     JSON. It no longer serves its own `subscriber_count` (its relay seats,
     which it showed as members — almost always 0); that stays operator
-    bookkeeping. A publish without counts (an older household) shows **no
-    number**, never 0. A follower reached only through a GFS is not a
+    bookkeeping. A space whose owner never declared counts (an older
+    household) shows **no number**, never 0. A household that polls
+    several GFSs keeps a declared number when another, older, GFS lists the
+    same space without one. Cluster gossip takes a peer node's counts only
+    with a stamp no more than 300 s ahead of the node's clock. A follower reached only through a GFS is not a
     roster seat yet, so it is not counted (the subscriber-seats work makes
     it one). The paired-household `SPACE_DIRECTORY_SYNC` snapshot carries
     the same two numbers from the same builder (`member_count` always did;
@@ -222,7 +230,7 @@ The Social Home ↔ GFS link is split by direction:
     and, only if they differ from what was last shared, the GFS listing is
     re-published to the servers already listing it (`republish_space`,
     without re-announcing the members' GFS list) or the paired directory is
-    refreshed (per peer, only if that peer's copy changed). A quiet space
+    refreshed (per peer, only if that peer's copy changed; a config change still re-sends the paired snapshot at once, as before, with the counts of that moment). A quiet space
     sends nothing. **Cost per trigger:** G listing servers × one publish
     body (metadata plus the embedded cover and icon — typically tens to a
     few hundred KB, at most ~2 × 2 MiB base64) for a global space; P paired

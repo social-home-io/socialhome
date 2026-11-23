@@ -185,9 +185,10 @@ async def test_a_newer_publish_replaces_the_counts(gfs_client):
     assert (stored.member_count, stored.follower_count) == (3, 0)
 
 
-async def test_a_publish_without_counts_clears_them(gfs_client):
-    """A downgraded household declares nothing: show no number, not a stale
-    one."""
+async def test_a_publish_without_counts_keeps_them(gfs_client):
+    """REGRESSION (review I2): a publish that declares no counts — one sent
+    before the household learned this server takes them, or a replayable
+    no-``ts`` body — never wipes the counts the owner last declared."""
     seed, _ = await _register_owner(gfs_client.server.app)
     await _publish(
         gfs_client,
@@ -195,18 +196,25 @@ async def test_a_publish_without_counts_clears_them(gfs_client):
         {"member_count": 2, "follower_count": 1},
         ts=_ts(seconds=-60),
     )
+    before = await _stored(gfs_client)
     assert (await _publish(gfs_client, seed, ts=_ts())).status == 200
-    stored = await _stored(gfs_client)
-    assert (stored.member_count, stored.follower_count) == (None, None)
-    # …and so does an older body with no ``ts`` at all.
-    await _publish(gfs_client, seed, {"member_count": 2, "follower_count": 1}, ts=_ts())
     assert (await _publish(gfs_client, seed)).status == 200
     stored = await _stored(gfs_client)
     assert (stored.member_count, stored.follower_count, stored.counts_ts) == (
-        None,
-        None,
-        None,
+        2,
+        1,
+        before.counts_ts,
     )
+
+
+async def test_counts_in_a_body_without_ts_are_not_taken(gfs_client):
+    """A no-``ts`` body is replayable forever: counts in it never land."""
+    seed, _ = await _register_owner(gfs_client.server.app)
+    assert (
+        await _publish(gfs_client, seed, {"member_count": 9, "follower_count": 9})
+    ).status == 200
+    stored = await _stored(gfs_client)
+    assert (stored.member_count, stored.follower_count) == (None, None)
 
 
 async def test_a_pin_only_withdrawn_publish_keeps_the_counts(gfs_client):
@@ -454,6 +462,12 @@ async def test_apply_sync_space_from_an_older_node_keeps_the_counts(gfs_client):
     [
         ("2026-11-23T10:05:00.000000+00:00", (11, 6)),  # newer wins
         ("2026-11-23T09:55:00.000000+00:00", (5, 3)),  # older loses
+        # REGRESSION (review M1): a node that never got counts gossips a
+        # ``null`` stamp — it must not clear ours…
+        (None, (5, 3)),
+        # …nor may a far-future stamp pin its counts against every later
+        # owner publish.
+        ("2099-01-01T00:00:00.000000+00:00", (5, 3)),
     ],
 )
 async def test_apply_sync_space_counts_are_last_writer_wins(

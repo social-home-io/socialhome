@@ -2226,6 +2226,14 @@ class GfsFederationService:
                     space_id,
                     field,
                 )
+        fresh_counts = has_ts and (
+            member_count is not None or follower_count is not None
+        )
+        kept_counts = (
+            (existing.member_count, existing.follower_count, existing.counts_ts)
+            if existing is not None
+            else (None, None, None)
+        )
         # The contact is judged against the key this publish leaves pinned:
         # a re-pinning publish carries one signed with the NEW key (the old
         # seed is retired). Judged against the key pinned BEFORE the re-pin
@@ -2272,11 +2280,14 @@ class GfsFederationService:
             # The hint is inside the same signed ``place`` object.
             place_radius_km=pin.radius_km if pin is not None else None,
             join_contact=contact,
-            member_count=members,
-            follower_count=followers,
-            # The signed, freshness-checked ``ts`` stamps the counts for
-            # last-writer-wins; none (an older household) clears the stamp.
-            counts_ts=normalize_counts_ts(ts) if has_ts else None,
+            # Counts change only on a FRESH publish that declares them: the
+            # signed, freshness-checked ``ts`` stamps them for last-writer-
+            # wins. A publish without counts (an older household, or one
+            # sent before this server's ``listing_counts`` was known) and a
+            # replayable no-``ts`` body leave the stored counts as they are.
+            member_count=members if fresh_counts else kept_counts[0],
+            follower_count=followers if fresh_counts else kept_counts[1],
+            counts_ts=normalize_counts_ts(ts) if fresh_counts else kept_counts[2],
         )
         if existing is not None and existing.withdrawn and not has_ts:
             log.info(

@@ -3012,7 +3012,9 @@ class GfsConnectionService:
         # 2026-11-23: listing metadata, like its name) go only to a server
         # that proved it folds them into the signed bytes — an older one
         # would 403 the whole publish. Read from the cache every connect's
-        # ``/gfs/info`` fetch warms: no extra round-trip per publish.
+        # ``/gfs/info`` fetch warms: no extra round-trip per publish. A
+        # publish sent before that (no counts) leaves the counts the server
+        # holds as they are; the next one after the connect carries them.
         with_counts = self._listing_counts.get(conn.id) is True
         body = await self._build_publish_body(
             space_id,
@@ -3231,8 +3233,9 @@ class GfsConnectionService:
         if contact is not None:
             body["join_contact"] = contact
         # The space's member and follower counts (the shared listing
-        # builder), inside the signed body, so a GFS or a relay cannot
-        # inflate them. Only for a server that proved ``listing_counts``.
+        # builder), inside the signed body, so a relay or another household
+        # cannot alter them on the way to the GFS. Only for a server that
+        # proved ``listing_counts``.
         counts = (
             await self._space_repo.listing_counts(space.id) if with_counts else None
         )

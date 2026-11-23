@@ -1020,3 +1020,27 @@ async def test_poll_once_shows_no_number_for_a_missing_or_bad_count(env, bad):
     assert await svc.poll_once() == 1
     got = (await repo.list_active())[0]
     assert (got.member_count, got.follower_count) == (None, None)
+
+
+async def test_a_space_on_two_gfss_keeps_its_number_whatever_the_order(env):
+    """REGRESSION (review I4): one GFS declares the counts, an older one
+    lists the same space without — the row keeps the number either way."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://one.example"))
+    await gfs_repo.save(_gfs_conn("gfs-2", inbox_url="https://two.example"))
+    counted = _global_space_item(member_count=12, follower_count=40)
+    bare = _global_space_item()
+    for first, second in ((counted, bare), (bare, counted)):
+        svc = PublicSpaceDiscoveryService(
+            repo,
+            gfs_connection_repo=gfs_repo,
+            http_client=_PerUrlSession(
+                {
+                    "https://one.example": {"spaces": [first]},
+                    "https://two.example": {"spaces": [second]},
+                }
+            ),
+        )
+        await svc.poll_once()
+        got = (await repo.list_active())[0]
+        assert (got.member_count, got.follower_count) == (12, 40)

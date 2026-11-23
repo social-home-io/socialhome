@@ -65,11 +65,6 @@ _ADMIN_LOGIN_ATTEMPT_RETENTION_SECONDS = 86400
 #: INTEGER range, the same bound a cert's ``key_epoch`` carries.
 _MAX_ROTATION_SEQ = MAX_AUTHORITY_KEY_EPOCH
 
-# Retention for ``gfs_pair_tokens``. Tokens are single-use with a 10-min TTL
-# and only LIVE ones (unexpired, unconsumed) are counted against the mint
-# caps, so a row past the TTL is dead weight. The server-wide live count
-# scans the table, so keep it short: an hour comfortably exceeds the TTL, and
-# the (hourly) GFS maintenance loop prunes anything older.
 #: ``upsert_space``'s last-writer-wins test for the owner-declared counts:
 #: both the stored and the incoming row carry a ``counts_ts`` and the
 #: incoming one is older.
@@ -78,6 +73,11 @@ _COUNTS_OLDER_SQL = (
     " AND excluded.counts_ts < global_spaces.counts_ts)"
 )
 
+# Retention for ``gfs_pair_tokens``. Tokens are single-use with a 10-min TTL
+# and only LIVE ones (unexpired, unconsumed) are counted against the mint
+# caps, so a row past the TTL is dead weight. The server-wide live count
+# scans the table, so keep it short: an hour comfortably exceeds the TTL, and
+# the (hourly) GFS maintenance loop prunes anything older.
 PAIR_TOKEN_RETENTION_SECONDS = 3600
 
 # A pairing token is valid for this many seconds after it was minted
