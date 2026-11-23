@@ -3071,9 +3071,11 @@ from a private channel:
   items** below.
 - **Authority items.** A removal, an approved post, and a member's post the
   author did not put on the channel travel as `{"item_type": "authority",
-  "inner": …}` inside the channel ciphertext, the space authority signing
-  the INNER (`authority_sig` / `authority_sig_suite`, event type
-  `space_channel_authority`, `space_public_authority.channel_authority_plaintext`):
+  "epoch": E, "inner": …}` inside the channel ciphertext, the space
+  authority signing `{"epoch": E, "inner": …}` (E = the content epoch it is
+  sealed under, checked against the frame's; `authority_sig` /
+  `authority_sig_suite` in the inner, event type `space_channel_authority`,
+  `space_public_authority.channel_authority_plaintext`):
   the channel frame has no authority signature of its own, and every
   writer holds the channel writer key the server checks. The receiver
   (`SpacePublicInbound.handle_channel_item`) verifies it against the pinned
@@ -3118,7 +3120,14 @@ v_91 multi upload next to its channel frame — a GFS-reached FOLLOWER has no
 card and is reached only through its seat; and a household that held a
 space-keyed seat before the space got a channel keeps it (and still applies
 a space-keyed item from a member below v_96) until P6/P7 remove that path.
-The `channel_sent` mark is set when the author's publisher plans the send,
+A third: the host's OWN items also reach a GFS-reached follower over
+federation (it holds the follower's space-session row) — one multi upload
+per GFS per host item; the same deferred lever. A non-host household does
+not try a GFS-reached follower at all in a space with a channel
+(`FederationService.channel_reached_followers`: no peer row, no mesh claim,
+no writer seat — never for the content key or the roster), nor queues it
+pictures it did not ask for. Rekeys to such a follower from a delegated
+admin's rotation are P5. The `channel_sent` mark is set when the author's publisher plans the send,
 not when a server confirmed it: a permanently refused publish leaves
 channel-only readers to the host's catch-up.
 

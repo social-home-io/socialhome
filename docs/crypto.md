@@ -816,12 +816,16 @@ inside the AEAD, outside every author signature's fixed field list). See
 **Authority items on a channel (v_96)** — on a space's opaque channel the
 same three kinds (a removal, an approved post, the host's copy of a member's
 post) travel as `{"item_type": "authority", "inner": …}` inside the channel
-ciphertext. The channel frame carries no authority signature (the server
-checks only the channel writer key, which every writer holds), so the space
-authority signs the INNER: `sign_authority_event` with its own event type
-`space_channel_authority` (domain-separated from `space_post_public`), the
-inner without its signature fields and padding, the usual `authority_sig` +
-`authority_sig_suite` (unknown suite refused, no default). Receivers verify
+ciphertext, as `{"item_type": "authority", "epoch": E, "inner": …}`. The
+channel frame carries no authority signature (the server checks only the
+channel writer key, which every writer holds), so the space authority signs
+`{"epoch": E, "inner": <inner without its signature fields and padding>}` —
+E the content epoch the item is sealed under — with `sign_authority_event`
+under its own event type `space_channel_authority` (domain-separated from
+`space_post_public`), the usual `authority_sig` + `authority_sig_suite` in
+the inner (unknown suite refused, no default). The receiver requires E to
+equal the epoch the frame decrypted under, so a key holder cannot re-seal an
+old item under a later epoch. Receivers verify
 it against the pinned key of the space the channel id maps to; the shape is
 refused off the channel. Code: `channel_authority_plaintext` /
 `open_channel_authority` in `services/space_public_authority.py`.

@@ -1059,3 +1059,34 @@ async def test_held_files_names_only_the_files_that_are_here(tmp_path):
     assert await svc.held_files(
         ["api/media/here.webp", "/api/media/gone.webp", "here.webp?exp=1", "../x", ""]
     ) == ["api/media/here.webp", "here.webp?exp=1"]
+
+
+class _ChannelFed:
+    """The federation service as the media queue sees it (v_96)."""
+
+    async def channel_reached_followers(self, space_id, instance_ids):
+        return frozenset({"peer-b"}) & set(instance_ids)
+
+
+@pytest.mark.parametrize("push", [False, True])
+async def test_a_gfs_reached_follower_is_queued_no_pushed_media(
+    db, outbox, tmp_path, push
+):
+    """v_96 — a follower reached only through its channel seat gets no
+    per-file mesh push (it reads from its GFS cache) — unless it asked."""
+    await _seed_space(db)
+    svc = SpaceMediaSyncService(
+        outbox=outbox,
+        federation=_ChannelFed(),  # type: ignore[arg-type]
+        media_dir=tmp_path,
+    )
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b"],
+        media_urls=["api/media/img-1.webp"],
+        push=push,
+    )
+    rows = await outbox.list_for_correlation("p-1")
+    want = {"peer-a", "peer-b"} if push else {"peer-a"}
+    assert {r.target_instance_id for r in rows} == want

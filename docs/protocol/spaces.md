@@ -506,8 +506,9 @@ within seconds).
   turned off: this household's own followers' seats end (their own leave,
   no rotation). Remote follower seats are ended and the key rotated by
   the owed-rotation phase (P5), not yet built.
-- **Rekey to followers:** the ordinary member rekey; GFS-reached
-  households take it in one multi upload per GFS.
+- **Rekey to followers:** the ordinary member rekey (P5: GFS-reached
+  households in one multi upload per GFS — not yet: per-peer certs and
+  per-household passes make every copy unique).
 - **Order:** the channel epoch notice first, then the rekey.
 
 ### Delivery: the same as a member
@@ -540,10 +541,14 @@ within seconds).
   gets the others' items over federation and the §25.6 catch-up when the
   host is back. A GFS-reached follower is reached only through its own
   channel seat (it has no mailbox card in the directory), or by the host,
-  which holds its space-session row: `broadcast_to_space_members` skips a
-  follower-only household it holds no peer row and no mesh claim for,
-  instead of a mesh route discovery per event (N × M at 10 000 followers).
-  A member household is never skipped this way.
+  which holds its space-session row: in a space with a channel,
+  `broadcast_to_space_members` and the picture queue skip a follower-only
+  household they hold no peer row and no mesh claim for, instead of a mesh
+  route discovery per event (N × M at 10 000 followers) — never for the
+  content key or the roster events, and a member household never. Still
+  open (P5): the mesh-announce sweep keeps retrying such followers at a
+  bounded rate, and a delegated admin's rekey cannot reach them (only the
+  owner's does).
 - **No sync pages for followers** (the existing role rule): a follower
   catches up over the §25.6 subset stream. The sync scheduler BEGINs and
   announces to the host of a space one of our people holds any seat in, a

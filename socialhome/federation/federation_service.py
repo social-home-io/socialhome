@@ -243,6 +243,18 @@ log = logging.getLogger(__name__)
 #: A writer seat's role values (a household holding none only follows).
 _WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
+#: Events a fan-out always tries every household with (no channel carries
+#: them): the content key and the roster.
+_NEVER_CHANNEL_REACHED: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_MEMBER_JOINED,
+        FederationEventType.SPACE_MEMBER_LEFT,
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
+        FederationEventType.SPACE_INSTANCE_LEFT,
+    }
+)
+
 #: ``begin_mesh_catchup_sync`` failures that are a window, not a fault: no
 #: route yet, and the route-discovery negative cooldown after one. The
 #: scheduler retries both (they never count against its attempt cap).
@@ -1860,21 +1872,41 @@ class FederationService:
             return False
         return await self.space_member_version(instance_id) >= min_version
 
-    async def _unaddressable_follower(self, space_id: str, instance_id: str) -> bool:
-        """Whether *instance_id* holds no writer seat in *space_id* and we
-        hold neither a peer row nor a mesh claim for it (see the fan-out).
-        A member household is never skipped this way."""
-        if self._space_remote_member_repo is None:
-            return False
-        if await self._federation_repo.get_instance(instance_id) is not None:
-            return False
-        claim = await self._federation_repo.get_space_member_version(instance_id)
-        if claim is not None and claim[0] > 0:
-            return False  # it claimed a version over the mesh: reachable
-        held = await self._space_remote_member_repo.list_instances_with_roles(
-            space_id, _WRITER_ROLE_VALUES
-        )
-        return instance_id not in held
+    async def channel_reached_followers(
+        self, space_id: str, instance_ids: Collection[str]
+    ) -> frozenset[str]:
+        """The households of *instance_ids* a fan-out from here does not try
+        to reach (v_96): in a space that runs an opaque channel here, those
+        holding no writer seat (followers) for which we hold neither a peer
+        row nor a mesh claim — a follower that came through a GFS. We have
+        no path to one but a mesh route discovery per event (N × M at a
+        global space's scale); it is reached through its channel seat, or
+        by the host, which holds its space-session row. A member household
+        is never in it; nor is anyone in a space without a channel. The
+        writer set is read once, only when a candidate needs it."""
+        if self._space_remote_member_repo is None or self._space_repo is None:
+            return frozenset()
+        if await self._space_repo.get_gfs_channel(space_id) is None:
+            return frozenset()
+        writers: frozenset[str] | None = None
+        out: set[str] = set()
+        for iid in instance_ids:
+            if iid == self._own_instance_id:
+                continue
+            if await self._federation_repo.get_instance(iid) is not None:
+                continue
+            claim = await self._federation_repo.get_space_member_version(iid)
+            if claim is not None and claim[0] > 0:
+                continue  # it claimed a version over the mesh: reachable
+            if writers is None:
+                writers = frozenset(
+                    await self._space_remote_member_repo.list_instances_with_roles(
+                        space_id, _WRITER_ROLE_VALUES
+                    )
+                )
+            if iid not in writers:
+                out.add(iid)
+        return frozenset(out)
 
     async def space_member_version(self, instance_id: str) -> int:
         """The protocol version of a space member household, which may be
@@ -4082,6 +4114,13 @@ class FederationService:
         instance_ids = await self._federation_repo.list_member_instance_ids(
             space_id,
         )
+        # v_96 — see :meth:`channel_reached_followers`. Never for the key and
+        # roster events: no channel carries those.
+        unreached = (
+            frozenset()
+            if event_type in _NEVER_CHANNEL_REACHED
+            else await self.channel_reached_followers(space_id, instance_ids)
+        )
         results: list[DeliveryResult] = []
         #: ``(instance_id, final payload)`` per target, in member order.
         planned: list[tuple[str, dict]] = []
@@ -4099,13 +4138,9 @@ class FederationService:
                 # Not in the caller's audience (e.g. a follower-only
                 # household for the space chat) — skip, like a non-member.
                 continue
-            if await self._unaddressable_follower(space_id, iid):
-                # v_96 — a follower household we hold no row for and that
-                # never claimed a version over the mesh (one that followed
-                # through a GFS): we have no path to it but a mesh route
-                # discovery per event — N × M at a global space's scale. It
-                # is reached through its own channel seat, or by the host
-                # (which holds its space-session row) and its catch-up.
+            if iid in unreached:
+                # v_96 — a follower that came through a GFS: reached through
+                # its own channel seat, or by the host and its catch-up.
                 continue
             if min_proto_version is not None and not await self.space_member_supports(
                 iid,

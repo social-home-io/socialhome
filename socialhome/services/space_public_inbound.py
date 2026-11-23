@@ -833,7 +833,7 @@ class SpacePublicInbound:
         if inner is None:
             log.warning(
                 "space_public.inbound: channel authority item for space %s "
-                "failed its authority signature — dropped",
+                "failed its authority signature or epoch — dropped",
                 space.id,
             )
             return

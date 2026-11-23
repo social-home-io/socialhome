@@ -2493,11 +2493,13 @@ Part of ``all`` (right after ``gfs-space-follow``). Prereqs: ``pair`` (a↔b),
 followers on; b (paired with a, made a GFS client) joins it as a member with
 an internal link; e (paired with nobody) follows it through the GFS. a
 registers the space's opaque channel (the GFS proves ``private_channels`` +
-``subscriber_seats``); b (writer key) and e (pass only) hold grants and seats,
+``subscriber_seats``); b and e hold grants and seats,
 a never a seat. a is killed; b posts; e receives the post over the channel —
 exactly one channel frame, no space-keyed relay frame for the space — and
 the GFS log and database never hold its text. a restarts and catches b's post
-up.
+up — and adds no channel copy of it (b marked it ``channel_sent``; e still saw
+one frame), b never tried to reach e directly; then a's own post reaches e
+over the channel (the owner publishes into it, holding no seat).
 
 Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-global-channel, verify, down``.
 

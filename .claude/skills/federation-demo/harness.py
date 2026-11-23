@@ -4487,11 +4487,57 @@ def cmd_gfs_global_channel() -> None:
         lambda r: bool(r) and r[0][0] == content,
         what=f"a (host) never caught b's post {post_id} up after restarting",
     )
+    # The host now holds b's post: b marked it ``channel_sent``, so a adds
+    # no copy on the channel — e still saw exactly one frame for it.
+    time.sleep(10.0)
+    frames = _log_lines_matching(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    )
+    if len(frames) != 1:
+        raise SystemExit(
+            f"gfs-global-channel: after a's catch-up e saw {len(frames)} channel "
+            "frames for b's one post — the host re-published a marked post"
+        )
+    unreached = _log_lines_matching(
+        "b", f"did not reach member household {e['instance_id']}", offset=0
+    )
+    if unreached:
+        raise SystemExit(
+            "gfs-global-channel: b tried to reach the GFS-reached follower e "
+            f"directly: {unreached[:1]}"
+        )
+    print("  a's catch-up added no channel copy; b never tried to reach e ✓")
+
+    # 6. The owner's own post reaches e over the channel (Q4: it publishes
+    #    into its own channel, holding no seat).
+    _wait_for_gfs_ws(a["instance_id"], timeout=120.0)
+    e_off = _log_size("e")
+    own = f"The owner posts into its own channel — {time.time_ns()}"
+    st, apost = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": own},
+    )
+    apost_id = _must("gfs-global-channel: a posts", st, apost, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (apost_id,),
+        lambda r: bool(r) and r[0][0] == own,
+        what=f"e never received a's post {apost_id}",
+    )
+    if not _await_log_lines(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    ):
+        raise SystemExit("gfs-global-channel: a's own post never came over the channel")
+    print("  a's own post reached e over the channel (a holds no seat) ✓")
     state.setdefault("gfs", {})["global_channel_space_id"] = space_id
     _save(state)
     print(
-        "gfs-global-channel: ok (members and followers of a global space read "
-        "each other over its opaque channel with the host offline)"
+        "gfs-global-channel: ok (a member's and the owner's posts reach a "
+        "GFS follower over the global space's opaque channel, once, host "
+        "offline or online)"
     )
 
 

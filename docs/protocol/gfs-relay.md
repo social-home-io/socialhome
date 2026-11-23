@@ -1972,7 +1972,7 @@ household migration 0145.
 ## Channel limits at scale (v_51 channels for global spaces)
 
 Since the subscriber-seats work a **global** space uses the opaque channel
-too ([`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51)),
+too ([`discovery.md`](./discovery.md#opaque-channels-private-and-global)),
 for members and followers alike: a big one puts ~200 author households and
 ~10 000 followers on ONE channel. Every cap on the way, checked by
 `tests/global_server/test_channels.py` (10 000 seats, one channel):

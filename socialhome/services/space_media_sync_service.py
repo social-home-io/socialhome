@@ -209,7 +209,20 @@ class SpaceMediaSyncService:
         referenced by multiple posts / items dedups at the
         ``(blob_id, target_instance_id)`` primary key — a re-shared
         image doesn't ship twice.
+
+        v_96 — a follower that came through a GFS in a space with a channel
+        (:meth:`FederationService.channel_reached_followers`) is queued
+        nothing unless it asked (``push``): no path but a mesh route
+        discovery per row; it reads the pictures from its GFS cache.
         """
+        if self._federation is not None and not push:
+            unreached = await self._federation.channel_reached_followers(
+                space_id, target_instance_ids
+            )
+            if unreached:
+                target_instance_ids = [
+                    t for t in target_instance_ids if t not in unreached
+                ]
         for url in media_urls:
             filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
             if not filename:
