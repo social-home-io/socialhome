@@ -12193,28 +12193,98 @@ async def test_comment_rights_off_rotates_only_if_a_household_loses_a_right(
     assert rekeys == []
 
 
-async def test_the_react_switch_changes_no_cert_and_sends_only_the_config(
-    stack, monkeypatch
-):
-    """The react right has no cert of its own (a ``comment`` cert carries
-    reactions, for members and followers alike): toggling it rotates
-    nothing and sends no credentials — the config event is all."""
-    space, fed, remote, _pks = await _cert_space(stack, version=94)
-    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
-    rekeys = await _rekeys(stack, monkeypatch)
-    fed.send_with_mesh_fallback.reset_mock()
-    for on in (True, False):
-        await stack.space_svc.update_config(
-            space.id,
-            actor_username="hosty",
-            features=SpaceFeatures(allow_subscriber_react=on),
-        )
-    assert rekeys == []
-    assert [
+def _snapshot_kwargs(fed):
+    return [
         c.kwargs
         for c in fed.send_with_mesh_fallback.await_args_list
         if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
-    ] == []
+    ]
+
+
+async def test_the_react_switch_on_sends_a_follower_its_reader_cert(stack, monkeypatch):
+    """I2 (v_96): "followers may react" alone puts a follower seat in the
+    comment set — turning it on hands the follower household its reader
+    cert at once (credentials only, no rekey)."""
+    space, fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_react=True),
+    )
+    assert rekeys == []
+    sent = _snapshot_kwargs(fed)
+    assert [k["to_instance_id"] for k in sent] == ["peer-a"]
+    cert = _cert_of(sent[0]["payload"])
+    assert cert.scope == "comment" and cert.reader is True
+
+
+async def test_the_react_switch_off_rotates_for_a_follower_household(
+    stack, monkeypatch
+):
+    """I2 (owner design, spaces.md "Followers (v_96)"): a follower switch
+    turning OFF rotates the content key at once, the react switch too."""
+    space, _fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_react=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_react=False),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_comment_off_with_react_on_still_rotates(stack, monkeypatch):
+    """I1: comment OFF while react stays ON leaves a follower's entitlement
+    unchanged (still in the comment set, still reader) — but a plain comment
+    cert issued before v_96 (or by a v_95 delegated admin) would keep
+    commenting. Any follower switch turning off rotates."""
+    space, _fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(
+            allow_subscriber_comment=True, allow_subscriber_react=True
+        ),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(
+            allow_subscriber_comment=False, allow_subscriber_react=True
+        ),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_the_react_switch_on_sends_nothing_to_a_follower_below_v96(stack):
+    """A follower household that cannot verify a reader cert is issued
+    none, so switching a follower right on sends it no credentials."""
+    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_react=True),
+    )
+    assert _snapshot_kwargs(fed) == []
 
 
 # ─── v_49: a member household's leave reaches the host ────────────────────
