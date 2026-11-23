@@ -1241,7 +1241,16 @@ restart still forgets a push waiting for its hour mark (`_push_pending`,
 L-5): that page goes out with the next seal's push; meanwhile a stale
 BEGIN ref still gets it (nothing pushed is remembered, so its own stored
 page is sent). Two signers push k × the budget and members may flip
-between their pages for "newest" (see §5 and the threat table). The 2 h freshness of a match (`PAGE_MATCH_FRESH_S`) is the
+between their pages for "newest" (see §5 and the threat table). Two
+bounded leftovers (security re-check 3): **L-2** — the BEGIN's `signers`
+names at most the newest 8 signers (`MAX_PAGE_REF_SIGNERS`), so a ninth
+signer would find no entry for itself and resend its page on every BEGIN;
+not reachable with honest spaces (a page is kept only for the owner and
+live admin households, M-1). **L-3** — verdicts (`_matched`, the parked
+roots) live in memory: a restart re-judges each other signer's stored page
+once, spaced 15 min, plus fetch rounds while it is unmatched — bounded by
+the number of signers, so a restart loop never costs more than one compare
+per 15 min per space. The 2 h freshness of a match (`PAGE_MATCH_FRESH_S`) is the
 hourly push plus one tick, the seal lag and slack.
 
 **Older households degrade.** A household below v_95 is never picked (no
@@ -1346,6 +1355,9 @@ requester asks one member at a time):
 | A forged page under the receiver's OWN id (a plain member made to look like a signer; the owner's row replaced by a huge `seq` dated a minute ahead, stopping its seals) | never taken from the wire — our row is written only by our seal; "signer" means owning the space or holding the seed (M-2) |
 | The first unmatched page can never complete (its rows are gone everywhere: dry or stuck) | parked for 1 h; the next signer's page is judged meanwhile; the status stays "catching up" (M-3) |
 | A plain member relaying in a fetch session to a signer catching up against an older page | reads the requester's `signers` entry for the held page's signer: no resend of a page it holds (L-1) |
+| A seed holder signing under ANOTHER real signer's id (another admin household, or the owner) toward third parties | within seed-holder trust (a seed holder can sign anything the space key signs): it lands in that signer's row on third parties; the real signer's next page replaces it, and a forged `issued_at` can be at most the 5-min future skew ahead — so its effect lasts at most that long past the real signer's next seal. Never on the impersonated household itself: its own id is never taken from the wire (M-2) (confirm-check L-A) |
+| Head-of-line with nothing going dry: no member household can be asked, or a member keeps answering without the rows | the page is never parked (only dry or stuck buckets park it), so a later signer's page waits behind it; the status stays "catching up" meanwhile — never "up to date" — and every round asks again (confirm-check L-B, accepted) |
+| A signer whose host answers its compare by listing, not by a member fetch | records the match from the listing too (`listing_done` → `_note_verdict`), so a third signer's page is judged next (confirm-check L-C, fixed) |
 | A seed-holding admin sealing often (every 14 min, or dated up to the 5-min skew ahead) | cannot stop the owner's seals — every signer seals by its own stored page and interval. **Design limit with two signers:** a seed holder is trusted like the owner for pages (it signs config and roster too); it can make members flip between two signers' pages for "newest" and cost the push budget twice, never forge a row |
 | `fetch` on a BEGIN (the requester asks a plain member to relay its page) | requester-controlled and accepted (security re-check L-3): it makes one member send ONE page to that one requester — no amplification, and the page is authority-signed |
 | Unasked answer, or one from another household | dropped |

@@ -2122,6 +2122,16 @@ class SyncPageService:
                 todo=check.todo - settled,
             ),
         )
+        # A signer's verdict from its host's listing counts like one from a
+        # member fetch: matched → the next signer's page is judged (L-C).
+        space = await self._spaces.get(space_id)
+        self._note_verdict(
+            space_id,
+            check.root,
+            complete=not missing and not check.unresolved + unresolved,
+            blocked=False,
+            signer=space is not None and await self._signs(space),
+        )
         await self._changed(space_id)
 
     # ─── Verified fetch from any member (requester, Phase 3) ──────────

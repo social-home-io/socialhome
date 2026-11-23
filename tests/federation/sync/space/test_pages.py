@@ -867,8 +867,10 @@ def _ids_in_distinct_buckets(n: int, prefix: str) -> list[str]:
 class _Listed:
     """A member env whose own rows and the host's page are real rows."""
 
-    def __init__(self, host_rows, member_rows, *, gone=(), signer=HOST) -> None:
-        self.env = _Env(own=ME, seed=None)
+    def __init__(
+        self, host_rows, member_rows, *, gone=(), signer=HOST, env=None
+    ) -> None:
+        self.env = env if env is not None else _Env(own=ME, seed=None)
         if signer != HOST:
             _delegating(self.env)
         self.host_rows = list(host_rows)
@@ -2121,3 +2123,21 @@ async def test_a_member_never_resends_a_page_the_requester_holds():
         )
         is not None
     )
+
+
+async def test_a_signer_matched_by_its_hosts_listing_records_the_verdict():
+    """L-C (confirm-check of 9d74c3a93): a delegated admin (a signer) whose
+    owner answers its compare by LISTING — not by a verified member fetch —
+    records the match too, so a third signer's page is judged next instead
+    of waiting behind the owner's."""
+    rows = [_row(f"p{k}") for k in range(5)]
+    t = _Listed(rows, rows + [_row("mine")], env=_admin_env())
+    await t.take_page()
+    await t.env.svc.wait_idle()
+    assert t.asks  # the extra row's bucket is asked of the owner
+    await t.deliver()
+    await t.env.svc.wait_idle()
+    pos = await t.position()
+    assert pos is not None and pos.match is True
+    assert t.env.held().root in t.env.svc._matched.get(SPACE, set())
+    assert await t.env.svc._subject(t.env.spaces.space) is None
