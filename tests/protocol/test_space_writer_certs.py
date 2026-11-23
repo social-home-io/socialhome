@@ -419,6 +419,7 @@ async def _cert_item_ok(env, cert: dict, epoch: int) -> bool:
         epoch=epoch,
         author_pk=env.author_kp.public_key,
         required_scope="write",
+        item_type="post",
     )
 
 

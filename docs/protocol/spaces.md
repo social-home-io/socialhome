@@ -1615,8 +1615,10 @@ binding and its author must be in it; the host-relay path keeps accepting a
 v1 cert. Because the binding lists users, the cert is re-issued at a new
 epoch whenever a household's set of writer users SHRINKS — a user's seat
 ending while the household keeps others, a demotion, or a `posts` access
-change that stops a role posting directly (`SpaceService
-.rotate_if_writer_scope_weakened` compares scope AND users; `update_config`
+change that stops a role posting directly, or (v_96) a plain cert that
+becomes a `reader` cert at the same scope and users — a member demoted to
+follower (`SpaceService
+.rotate_if_writer_scope_weakened` compares scope, users AND `reader`; `update_config`
 rotates when `posts_access` narrows anyone, and re-delivers certs in roster
 snapshots when it widens). A user seated in a household that already holds
 a seat gets the household a roster snapshot carrying its re-issued cert at

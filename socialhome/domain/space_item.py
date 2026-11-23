@@ -45,8 +45,9 @@ import orjson
 
 from .errors import CodedError
 from .item_zdict import ZDICT_V1
+from .space import SpaceFeatures
 from .user import looks_like_emoji
-from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
+from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 
 ITEM_TYPE_POST: str = "post"
 #: The author's own edit of their post (full signed snapshot + ``edited_at``).
@@ -126,6 +127,42 @@ def required_scope(item_type: str) -> str:
         return _REQUIRED_SCOPE[item_type]
     except KeyError:
         raise ValueError(f"unsupported space item type {item_type!r}") from None
+
+
+#: v_96 — what a follower's ``reader`` cert may carry, by the follower switch
+#: that must be on in the RECEIVER's pinned space config.
+_READER_COMMENT_TYPES: frozenset[str] = frozenset(
+    {ITEM_TYPE_COMMENT, ITEM_TYPE_COMMENT_EDIT, ITEM_TYPE_COMMENT_DELETE}
+)
+_READER_REACTION_TYPES: frozenset[str] = frozenset(
+    {ITEM_TYPE_REACTION_ADD, ITEM_TYPE_REACTION_REMOVE}
+)
+
+
+def reader_cert_permits(
+    cert: WriterCert, item_type: str, features: SpaceFeatures
+) -> bool:
+    """Whether ``cert`` may authorize an ``item_type`` item under the
+    receiver's pinned ``features`` (v_96), on top of its scope.
+
+    A non-reader cert → ``True`` (its scope decides). A follower's
+    ``reader`` cert carries comments (and their edits / deletes) only while
+    ``allow_subscriber_comment`` is on, reactions only while
+    ``allow_subscriber_react`` is on, the author's ``author_profile`` while
+    either is; anything else — posts and their edits / deletes, any type
+    this build does not know — is refused. Fail closed: the flags are read
+    from the receiver's own copy, never from the item."""
+    if not cert.reader:
+        return True
+    if item_type in _READER_COMMENT_TYPES:
+        return bool(features.allow_subscriber_comment)
+    if item_type in _READER_REACTION_TYPES:
+        return bool(features.allow_subscriber_react)
+    if item_type == ITEM_TYPE_AUTHOR_PROFILE:
+        return bool(
+            features.allow_subscriber_comment or features.allow_subscriber_react
+        )
+    return False
 
 
 def item_stamp(raw: object, *, now: datetime | None = None) -> datetime | None:

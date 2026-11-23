@@ -101,6 +101,7 @@ from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
     ITEM_TYPE_AUTHOR_PROFILE,
+    ITEM_TYPE_POST,
     ITEM_TYPE_POST_EDIT,
     PAYLOAD_SUITE_FIELD,
     POST_SHAPED_ITEM_TYPES,
@@ -524,6 +525,9 @@ class SpacePublicInbound:
             epoch=epoch,
             pinned_pk_hex=pinned_pk_hex,
             required_scope=WRITER_SCOPE_COMMENT if approved else WRITER_SCOPE_WRITE,
+            # A post — never carried by a follower's reader cert (v_96), not
+            # even an approved one.
+            item_type=ITEM_TYPE_POST,
         ):
             log.warning(
                 "space_public.inbound: writer cert failed for space %s post %s "
@@ -842,6 +846,7 @@ class SpacePublicInbound:
                 epoch=epoch,
                 author_pk=author_pk,
                 required_scope=required_scope(item_type),
+                item_type=item_type,
             )
             if fresh_epoch
             else self._writer_certs.check_item_cert(
@@ -850,6 +855,7 @@ class SpacePublicInbound:
                 epoch=epoch,
                 author_pk=author_pk,
                 required_scope=required_scope(item_type),
+                item_type=item_type,
             )
         )
         if not cert_ok:
@@ -1230,6 +1236,7 @@ class SpacePublicInbound:
         *,
         epoch: int,
         pinned_pk_hex: str,
+        item_type: str,
         required_scope: str = WRITER_SCOPE_WRITE,
     ) -> bool:
         try:
@@ -1249,6 +1256,7 @@ class SpacePublicInbound:
             epoch=epoch,
             author_pk=author_pk,
             required_scope=required_scope,
+            item_type=item_type,
             space_pubkey_hex=pinned_pk_hex,
         )
 

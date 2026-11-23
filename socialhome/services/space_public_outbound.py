@@ -139,6 +139,7 @@ from ..domain.events import CommentDeleted, PostDeleted, SpacePostCreated
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
+    ITEM_TYPE_POST,
     PAYLOAD_SUITE_FIELD,
     REMOVAL_TARGET_COMMENT,
     REMOVAL_TARGET_POST,
@@ -769,6 +770,9 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             epoch=epoch,
             author_pk=author_pk,
             required_scope=WRITER_SCOPE_WRITE,
+            # A remote author's post: never carried by a follower's reader
+            # cert (v_96), whatever its scope says.
+            item_type=ITEM_TYPE_POST,
         )
 
     async def _legacy_hint_ok(self, origin: str | None, relay: dict) -> bool:

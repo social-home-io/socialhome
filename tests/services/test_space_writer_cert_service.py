@@ -216,7 +216,8 @@ def _svc(
             if versions is not None
             else {
                 "peer": FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH,
-                "fol": FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH,
+                # A follower household needs v_96 for its reader cert.
+                "fol": FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
                 "old": FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH - 1,
             },
             {"peer": PEER_PK, "fol": FOLLOWER_PK, "old": PEER_PK},
@@ -551,13 +552,28 @@ async def test_check_item_cert_round_trip_and_failures():
     space = _space()
     wire = _issued(pk=PEER_PK)
     assert svc.check_item_cert(
-        space, wire, epoch=2, author_pk=PEER_PK, required_scope=WRITER_SCOPE_WRITE
+        space,
+        wire,
+        epoch=2,
+        author_pk=PEER_PK,
+        required_scope=WRITER_SCOPE_WRITE,
+        item_type="post",
     )
     assert not svc.check_item_cert(
-        space, wire, epoch=3, author_pk=PEER_PK, required_scope=WRITER_SCOPE_WRITE
+        space,
+        wire,
+        epoch=3,
+        author_pk=PEER_PK,
+        required_scope=WRITER_SCOPE_WRITE,
+        item_type="post",
     )
     assert not svc.check_item_cert(
-        space, "junk", epoch=2, author_pk=PEER_PK, required_scope=WRITER_SCOPE_WRITE
+        space,
+        "junk",
+        epoch=2,
+        author_pk=PEER_PK,
+        required_scope=WRITER_SCOPE_WRITE,
+        item_type="post",
     )
     assert not svc.check_item_cert(
         replace(space, identity_public_key="zz"),
@@ -565,6 +581,7 @@ async def test_check_item_cert_round_trip_and_failures():
         epoch=2,
         author_pk=PEER_PK,
         required_scope=WRITER_SCOPE_WRITE,
+        item_type="post",
     )
     assert not svc.check_item_cert(
         space,
@@ -572,6 +589,7 @@ async def test_check_item_cert_round_trip_and_failures():
         epoch=2,
         author_pk=PEER_PK,
         required_scope=WRITER_SCOPE_WRITE,
+        item_type="post",
     )
 
 
@@ -660,14 +678,29 @@ async def test_check_item_adds_freshness():
     space = _space()
     fresh = _issued(pk=PEER_PK, epoch=5)
     assert await svc.check_item(
-        space, fresh, epoch=5, author_pk=PEER_PK, required_scope="write"
+        space,
+        fresh,
+        epoch=5,
+        author_pk=PEER_PK,
+        required_scope="write",
+        item_type="post",
     )
     stale = _issued(pk=PEER_PK, epoch=4)
     assert not await svc.check_item(
-        space, stale, epoch=4, author_pk=PEER_PK, required_scope="write"
+        space,
+        stale,
+        epoch=4,
+        author_pk=PEER_PK,
+        required_scope="write",
+        item_type="post",
     )
     assert not await svc.check_item(
-        space, "junk", epoch=5, author_pk=PEER_PK, required_scope="write"
+        space,
+        "junk",
+        epoch=5,
+        author_pk=PEER_PK,
+        required_scope="write",
+        item_type="post",
     )
 
 
@@ -1174,3 +1207,183 @@ async def test_no_current_cert_for_an_author_who_left_or_without_the_seed():
         )
         is None
     )
+
+
+# ── v_96: followers get a reader cert ────────────────────────────────────
+
+_SUB = SpaceRole.SUBSCRIBER.value
+
+
+@pytest.mark.parametrize(
+    ("comment", "react"), [(True, False), (False, True), (True, True)]
+)
+async def test_a_follower_gets_a_reader_comment_cert_when_either_flag_is_on(
+    comment, react
+):
+    space = _space(allow_subscriber_comment=comment, allow_subscriber_react=react)
+    svc, _ = _svc(space=space, remote_rows=[_remote("fol", _SUB)])
+    ent = await svc.entitlement_for_instance(space, "fol")
+    assert ent == WriterEntitlement(
+        WRITER_SCOPE_COMMENT, frozenset({"u@fol"}), reader=True
+    )
+    cert = await svc.issue_for_instance("sp-1", "fol")
+    assert cert is not None
+    assert cert.scope == WRITER_SCOPE_COMMENT and cert.reader is True
+    assert cert.writer_user_ids == ("u@fol",)
+    _check(WriterCert.from_wire(cert.to_wire()), FOLLOWER_PK, WRITER_SCOPE_COMMENT)
+    wire = await svc.cert_for_peer("sp-1", "fol")
+    assert wire is not None and wire["reader"] is True
+    assert await svc.cert_epoch_for_peer("sp-1", "fol") == 2
+
+
+async def test_a_follower_gets_nothing_when_both_flags_are_off():
+    space = _space()
+    svc, _ = _svc(space=space, remote_rows=[_remote("fol", _SUB)])
+    assert (await svc.entitlement_for_instance(space, "fol")).scope is None
+    assert await svc.issue_for_instance("sp-1", "fol") is None
+    assert await svc.cert_for_peer("sp-1", "fol") is None
+
+
+async def test_a_member_and_follower_household_writes_and_is_no_reader():
+    space = _space(allow_subscriber_comment=True, allow_subscriber_react=True)
+    svc, _ = _svc(
+        space=space,
+        remote_rows=[_remote("peer", _SUB, "a"), _remote("peer", "member", "b")],
+        versions={"peer": FederationCapability.MIN_FOR_SUBSCRIBER_SEATS},
+    )
+    ent = await svc.entitlement_for_instance(space, "peer")
+    assert ent == WriterEntitlement(WRITER_SCOPE_WRITE, frozenset({"b@peer"}))
+    cert = await svc.issue_for_instance("sp-1", "peer")
+    assert cert is not None and cert.scope == WRITER_SCOPE_WRITE
+    assert cert.reader is False and "reader" not in cert.to_wire()
+    # The follower is not bound into the write cert.
+    assert cert.writer_user_ids == ("b@peer",)
+
+
+async def test_a_comment_household_binding_a_follower_is_a_reader_as_a_whole():
+    """A MODERATED space: the plain member comments, the follower too — one
+    comment cert, flag-gated at the receivers as a whole."""
+    space = _space(
+        allow_subscriber_comment=True,
+        posts_access=SpaceFeatureAccess.MODERATED,
+    )
+    svc, _ = _svc(
+        space=space,
+        remote_rows=[_remote("fol", _SUB, "a"), _remote("fol", "member", "b")],
+    )
+    ent = await svc.entitlement_for_instance(space, "fol")
+    assert ent == WriterEntitlement(
+        WRITER_SCOPE_COMMENT, frozenset({"a@fol", "b@fol"}), reader=True
+    )
+    # Without a follower in the binding, the same household is no reader.
+    only_member, _ = _svc(space=space, remote_rows=[_remote("fol", "member", "b")])
+    ent = await only_member.entitlement_for_instance(space, "fol")
+    assert ent == WriterEntitlement(WRITER_SCOPE_COMMENT, frozenset({"b@fol"}))
+
+
+async def test_a_household_below_v96_gets_no_reader_cert():
+    space = _space(allow_subscriber_comment=True, allow_subscriber_react=True)
+    old = FederationCapability.MIN_FOR_SUBSCRIBER_SEATS - 1
+    svc, _ = _svc(
+        space=space,
+        remote_rows=[_remote("fol", _SUB)],
+        versions={"fol": old},
+    )
+    assert await svc.issue_for_instance("sp-1", "fol") is None
+    assert await svc.cert_for_peer("sp-1", "fol") is None
+    assert await svc.cert_epoch_for_peer("sp-1", "fol") is None
+    # A mesh-only follower household below v_96: nothing either.
+    mesh, _ = _svc(
+        space=space,
+        remote_rows=[_remote("m", _SUB)],
+        versions={},
+        mesh={"m": (old, PEER_PK)},
+    )
+    assert await mesh.issue_for_instance("sp-1", "m") is None
+
+
+async def test_an_older_mixed_household_keeps_a_non_reader_cert_for_its_members():
+    """Below v_96 a follower is left out of the binding; the household's
+    commenting members keep their plain comment cert."""
+    space = _space(
+        allow_subscriber_comment=True,
+        posts_access=SpaceFeatureAccess.MODERATED,
+    )
+    svc, _ = _svc(
+        space=space,
+        remote_rows=[_remote("peer", _SUB, "a"), _remote("peer", "member", "b")],
+        versions={"peer": FederationCapability.MIN_FOR_SUBSCRIBER_SEATS - 1},
+    )
+    cert = await svc.issue_for_instance("sp-1", "peer")
+    assert cert is not None
+    assert cert.scope == WRITER_SCOPE_COMMENT and cert.reader is False
+    assert cert.writer_user_ids == ("b@peer",)
+
+
+def test_becoming_a_reader_counts_as_weakened():
+    users = frozenset({"a"})
+    plain = WriterEntitlement(WRITER_SCOPE_COMMENT, users)
+    reader = WriterEntitlement(WRITER_SCOPE_COMMENT, users, reader=True)
+    assert scope_weakened(plain, reader)
+    assert not scope_weakened(reader, plain)
+    assert not scope_weakened(reader, reader)
+    # Any change of reader is a change of entitlement (re-delivery).
+    assert plain != reader
+
+
+async def test_a_member_demoted_to_follower_weakens_the_entitlement():
+    space = _space(
+        allow_subscriber_comment=True,
+        posts_access=SpaceFeatureAccess.MODERATED,
+    )
+    before, _ = _svc(space=space, remote_rows=[_remote("fol", "member")])
+    after, _ = _svc(space=space, remote_rows=[_remote("fol", _SUB)])
+    was = await before.entitlement_for_instance(space, "fol")
+    now = await after.entitlement_for_instance(space, "fol")
+    assert was.user_ids == now.user_ids and was.scope == now.scope
+    assert scope_weakened(was, now)
+
+
+async def test_accept_prefers_a_non_reader_cert_on_a_tie():
+    svc, _ = _svc(seed=None)
+    comment = WRITER_SCOPE_COMMENT
+    assert await svc.accept("sp-1", _issued(issued_at=200, scope=comment))
+    # Same age, reader → kept out (weaker).
+    assert not await svc.accept(
+        "sp-1", _issued(issued_at=200, scope=comment, reader=True)
+    )
+    # Newer reader → in.
+    assert await svc.accept("sp-1", _issued(issued_at=300, scope=comment, reader=True))
+    assert (await svc.own_cert("sp-1", 2)).reader is True  # type: ignore[union-attr]
+    # Same age, non-reader → in.
+    assert await svc.accept("sp-1", _issued(issued_at=300, scope=comment))
+    assert (await svc.own_cert("sp-1", 2)).reader is False  # type: ignore[union-attr]
+
+
+_BOTH = {"allow_subscriber_comment": True, "allow_subscriber_react": True}
+
+
+@pytest.mark.parametrize(
+    ("item_type", "flags", "ok"),
+    [
+        ("comment", {"allow_subscriber_comment": True}, True),
+        ("comment", {"allow_subscriber_react": True}, False),
+        ("reaction_add", {"allow_subscriber_react": True}, True),
+        ("reaction_add", {"allow_subscriber_comment": True}, False),
+        ("post", _BOTH, False),
+    ],
+)
+async def test_check_item_cert_applies_the_follower_switches_to_a_reader_cert(
+    item_type, flags, ok
+):
+    svc, _ = _svc()
+    space = _space(**flags)
+    wire = _issued(pk=FOLLOWER_PK, scope=WRITER_SCOPE_COMMENT, reader=True)
+    kw = {
+        "epoch": 2,
+        "author_pk": FOLLOWER_PK,
+        "required_scope": WRITER_SCOPE_COMMENT,
+        "item_type": item_type,
+    }
+    assert svc.check_item_cert(space, wire, **kw) is ok
+    assert await svc.check_item(space, wire, **kw) is ok

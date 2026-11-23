@@ -12069,7 +12069,9 @@ async def test_comment_rights_off_without_followers_does_not_rotate(stack, monke
 
 
 async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
     await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
     await _seat(remote, space.id, "peer-b", "u-b", role="member")
     fed.send_with_mesh_fallback.reset_mock()
@@ -12084,17 +12086,41 @@ async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
         if "writer_cert" in c.kwargs.get("payload", {})
     ]
     assert [k["to_instance_id"] for k in sent] == ["peer-a"]
-    assert _cert_of(sent[0]["payload"]).scope == "comment"
+    cert = _cert_of(sent[0]["payload"])
+    assert cert.scope == "comment" and cert.reader is True
+
+
+async def test_comment_rights_on_gives_a_follower_below_v96_no_cert(stack):
+    """v_96 (D10): a follower household that cannot verify a reader cert
+    gets no cert at all — never the old plain comment cert."""
+    space, fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS - 1
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if "writer_cert" in c.kwargs.get("payload", {})
+    ]
+    assert sent == []
 
 
 async def test_comment_rights_on_sends_followers_their_credentials_alone(stack):
     """Owner decision 2026-11-17 — followers are members with a read-only
     role: turning "followers may comment" on gives each follower household
-    the SAME ``comment`` cert a comment-only member holds, in a snapshot
+    a ``comment`` cert (since v_96 marked ``reader``), in a snapshot
     with NO roster entry (it used to be the whole roster to every follower
     household — ~5.5 MB each at 11 000 seats). It never drops a roster
     snapshot still queued for that household."""
-    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    space, fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
     await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
     await _seat(remote, space.id, "peer-b", "u-b", role="member")
     fed.send_with_mesh_fallback.reset_mock()
