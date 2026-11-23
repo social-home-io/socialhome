@@ -12,7 +12,7 @@ import type { VNode } from 'preact'
 import { t } from '@/i18n/i18n'
 import type { Connection } from '@/store/connections'
 import { ConnAvatar, type AvatarStatus } from './ConnAvatar'
-import { initialOf, isSpaceOnly, tintFor } from './model'
+import { initialOf, tintFor } from './model'
 import { householdLabel } from '@/utils/names'
 
 /** Pin box: the avatar is 44 px; the icon is anchored at its centre and
@@ -22,8 +22,7 @@ export const SELF_SIZE = 48
 
 /** Status a pin shows when the page doesn't say otherwise. Version data
  *  is admin-only, so ``warn`` only ever comes from the page. */
-export function defaultPinStatus(peer: Connection): AvatarStatus | undefined {
-  if (isSpaceOnly(peer)) return undefined
+export function defaultPinStatus(peer: Connection): AvatarStatus {
   if (peer.status && peer.status !== 'confirmed') return 'pending'
   return peer.reachable === false ? 'down' : 'ok'
 }

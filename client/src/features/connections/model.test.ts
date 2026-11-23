@@ -4,7 +4,7 @@ import type { CompatPeer } from '@/store/federationCompat'
 import type { GfsConnection } from '@/types'
 import {
   TINTS, buildHouseholds, formatSince, gfsLiveState, hashString, heroVariant, hostOf, householdStatus,
-  initialOf, isHousehold, isSpaceOnly, originOf, pendingRows, spaceOnlyRows, tintFor,
+  initialOf, isHousehold, originOf, pendingRows, tintFor,
   versionsBehind,
 } from './model'
 
@@ -49,14 +49,12 @@ describe('grouping', () => {
   const rows = [
     conn({ instance_id: 'a' }),
     conn({ instance_id: 'p', status: 'pending_sent' }),
-    conn({ instance_id: 's', source: 'space_session' }),
+    conn({ instance_id: 'r', status: 'pending_received' }),
   ]
 
-  it('splits households, pending pairings and space-only peers', () => {
+  it('splits confirmed households from pending pairings', () => {
     expect(rows.filter(isHousehold).map((c) => c.instance_id)).toEqual(['a'])
-    expect(pendingRows(rows).map((c) => c.instance_id)).toEqual(['p'])
-    expect(spaceOnlyRows(rows).map((c) => c.instance_id)).toEqual(['s'])
-    expect(isSpaceOnly(rows[2])).toBe(true)
+    expect(pendingRows(rows).map((c) => c.instance_id)).toEqual(['p', 'r'])
   })
 })
 
@@ -96,7 +94,6 @@ describe('buildHouseholds', () => {
     conn({ instance_id: 'ok-new', last_reachable_at: '2026-06-01 00:00:00' }),
     conn({ instance_id: 'behind' }),
     conn({ instance_id: 'down', reachable: false }),
-    conn({ instance_id: 'space', source: 'space_session' }),
   ]
   const compat = new Map([['behind', peer({ instance_id: 'behind', proto_version: 50 })]])
 

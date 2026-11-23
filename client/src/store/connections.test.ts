@@ -106,18 +106,35 @@ describe('wireConnectionsWs', () => {
     expect(connections.value.map(c => c.instance_id)).toEqual(['peer-2'])
   })
 
-  it('connection.removed refetches: a household we still share a space with is back as space-only', async () => {
+  it('connection.removed of a pending pairing over a shared space: the household is gone from the list', async () => {
     connections.value = [
       { instance_id: 'peer-1', display_name: 'Bob', reachable: true, status: 'pending_received', shares_space: true },
+      { instance_id: 'peer-2', display_name: 'Carol', reachable: true, status: 'confirmed' },
     ]
+    // The server lists paired households only: the shared space is no
+    // connection, so Bob is not in the answer.
     apiGet.mockResolvedValueOnce([
-      { instance_id: 'peer-1', display_name: 'Bob', reachable: true, status: 'confirmed', source: 'space_session' },
+      { instance_id: 'peer-2', display_name: 'Carol', reachable: true, status: 'confirmed' },
     ])
     handlers['connection.removed']({ data: { type: 'connection.removed', instance_id: 'peer-1' } })
-    expect(connections.value).toEqual([])
-    await vi.waitFor(() => expect(connections.value).toHaveLength(1))
-    expect(apiGet).toHaveBeenCalledWith('/api/connections')
-    expect(connections.value[0].source).toBe('space_session')
+    expect(connections.value.map(c => c.instance_id)).toEqual(['peer-2'])
+    await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/connections'))
+    expect(connections.value.map(c => c.instance_id)).toEqual(['peer-2'])
+  })
+
+  it('a reachability frame for a household not in the list adds no row (a shared-space household is no connection)', () => {
+    connections.value = [{ instance_id: 'peer-1', display_name: 'Bob', reachable: false }]
+    handlers['connection.reachable']({ data: { instance_id: 'seat-1', last_seen_at: '2026-11-23T10:00:00Z' } })
+    handlers['connection.unreachable']({ data: { instance_id: 'seat-1' } })
+    expect(connections.value.map(c => c.instance_id)).toEqual(['peer-1'])
+  })
+
+  it('a reachability frame patches a listed household in place', () => {
+    connections.value = [{ instance_id: 'peer-1', display_name: 'Bob', reachable: false }]
+    handlers['connection.reachable']({ data: { instance_id: 'peer-1', last_seen_at: '2026-11-23T10:00:00Z' } })
+    expect(connections.value[0]).toMatchObject({ reachable: true, last_seen_at: '2026-11-23T10:00:00Z' })
+    handlers['connection.unreachable']({ data: { instance_id: 'peer-1' } })
+    expect(connections.value[0].reachable).toBe(false)
   })
 
   it('connection.removed keeps the row dropped when the refetch fails', async () => {

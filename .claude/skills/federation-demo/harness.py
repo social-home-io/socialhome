@@ -3980,14 +3980,21 @@ def cmd_gfs_join_request() -> None:
     print("  e reads a's post in the space ✓")
 
     # e holds a space-scoped seat for a (``source: space_session``, the same
-    # row an invite-link join makes) — never a pairing.
-    s, conns = _request(f"{e_url}/api/connections", token=e["token"])
-    rows = [c for c in conns or [] if c.get("instance_id") == a["instance_id"]]
-    if s != 200 or [c.get("source") for c in rows] != ["space_session"]:
+    # row an invite-link join makes) — never a pairing, so e's Connections
+    # never list a.
+    seat = _instance_row("e", a["instance_id"]) or {}
+    if seat.get("source") != "space_session":
         raise SystemExit(
-            f"gfs-join-request: e's row for a is not a space seat: {rows!r}"
+            f"gfs-join-request: e's row for a is not a space seat: {seat!r}"
         )
-    print("  e and a are not paired — e holds only a space-session seat ✓")
+    s, conns = _request(f"{e_url}/api/connections", token=e["token"])
+    if s != 200 or any(c.get("instance_id") == a["instance_id"] for c in conns or []):
+        raise SystemExit(
+            f"gfs-join-request: e's /api/connections lists the seat: {conns!r}"
+        )
+    print(
+        "  e and a are not paired — e holds only a space-session seat, not a connection ✓"
+    )
     print("gfs-join-request: ok (unpaired household asked, was approved, reads)")
 
 
@@ -4268,10 +4275,9 @@ def cmd_gfs_space_follow() -> None:
     print("  e's own post is refused (403) ✓")
 
     s, conns = _request(f"{e_url}/api/connections", token=e["token"])
-    rows = [c for c in conns or [] if c.get("instance_id") == a["instance_id"]]
-    if s != 200 or [c.get("source") for c in rows] != ["space_session"]:
+    if s != 200 or any(c.get("instance_id") == a["instance_id"] for c in conns or []):
         raise SystemExit(
-            f"gfs-space-follow: e's row for a is not a space seat: {rows!r}"
+            f"gfs-space-follow: e's /api/connections lists the seat: {conns!r}"
         )
     print("  e and a are not paired — e holds only a space-session seat ✓")
     print("gfs-space-follow: ok (unpaired household followed, auto-approved, reads)")
@@ -8048,10 +8054,9 @@ def cmd_gfs_invite_link_content() -> None:
        ``gfs-space-rotate`` does) and posts again. e must decrypt the
        NEW epoch — the re-key has to reach a link-joined member like any
        other, or e goes dark at the first roster change.
-    5. ``GET /api/connections`` on e labels a ``source=space_session``
-       with transport ``gfs_relay``. Anything else (``https`` in
-       particular) points an operator at an inbox URL that will never
-       exist.
+    5. e's seat for a is ``source=space_session`` and ``GET
+       /api/connections`` on e does not list a: a household met through
+       an invite link is no connection.
     """
     state = _load()
     if not state or not _gfs_alive(state):
@@ -8206,27 +8211,21 @@ def cmd_gfs_invite_link_content() -> None:
         )
     print("  e decrypts the post-rotation post — the re-key rode the relay ✓")
 
-    # 5. The operator-facing label.
+    # 5. A seat, not a connection.
+    seat = _instance_row("e", a["instance_id"]) or {}
+    if seat.get("source") != "space_session":
+        raise SystemExit(
+            f"gfs-invite-link-content: e's row for a is {seat!r}, "
+            "expected a 'space_session' seat",
+        )
     s, conns = _request(f"{e_base}/api/connections", token=e["token"])
     _must("e: GET /api/connections", s, conns)
-    row = next((c for c in conns if c.get("instance_id") == a["instance_id"]), None)
-    if row is None:
+    if any(c.get("instance_id") == a["instance_id"] for c in conns):
         raise SystemExit(
-            f"gfs-invite-link-content: e's /api/connections does not list a — "
-            f"got {conns!r}",
+            "gfs-invite-link-content: e's /api/connections lists a — a "
+            f"household met through an invite link is no connection: {conns!r}",
         )
-    if row.get("source") != "space_session":
-        raise SystemExit(
-            f"gfs-invite-link-content: e labels a source={row.get('source')!r}, "
-            "expected 'space_session'",
-        )
-    if row.get("transport") != "gfs_relay":
-        raise SystemExit(
-            f"gfs-invite-link-content: e labels a transport="
-            f"{row.get('transport')!r}, expected 'gfs_relay'. 'https' in "
-            "particular is a lie — there is no inbox URL to fall back to.",
-        )
-    print("  e's /api/connections labels a: space_session over gfs_relay ✓")
+    print("  e holds a space_session seat for a, not listed on Connections ✓")
 
     # 6. A cover change AFTER the join reaches the link-joined member. It
     #    used to ride SPACE_CONFIG_CHANGED as a cover_hash only, so e kept
@@ -14033,11 +14032,8 @@ def cmd_verify() -> None:
     for row in _conns.get("a", []):
         if (
             row.get("status") == "confirmed"
+            # (Never a link-joined seat: /api/connections does not list one.)
             and int(row.get("proto_version") or 1) >= _OURS
-            # Never a link-joined seat: ``INSTANCE_RESYNC_REQUEST`` is
-            # outside ``SPACE_SESSION_ALLOWED_EVENT_TYPES``, so aiming the
-            # probe at e would assert a refusal we deliberately built.
-            and row.get("source") != "space_session"
         ):
             resync_target = str(row.get("instance_id") or "")
             break
@@ -15003,12 +14999,6 @@ def cmd_verify() -> None:
                 # only paired with b in the demo, so the channel may
                 # or may not have flipped to RTC by verify time.
                 if row["instance_id"] == d_iid:
-                    continue
-                # A link-joined seat can NEVER be ``rtc``: RTC signalling
-                # travels over the peer relationship this pair does not
-                # have, which is why the row reads ``gfs_relay``. Warning
-                # about it would report the design as a failure to settle.
-                if row.get("source") == "space_session":
                     continue
                 transport = row.get("transport") or "https"
                 if transport == "rtc":

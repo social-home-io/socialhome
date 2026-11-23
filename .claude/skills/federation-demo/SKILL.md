@@ -2048,9 +2048,9 @@ relay the redeem used (``GfsRelayTransport``, selected in
 4. a removes a member, rotating the per-space content key, and posts
    again — e must decrypt the NEW epoch. A re-key that skips
    link-joined members leaves them dark at the first roster change.
-5. ``GET /api/connections`` on e labels a ``source=space_session``
-   with transport ``gfs_relay``. ``https`` in particular would be a
-   lie: there is no inbox URL to fall back to.
+5. e's row for a is a ``source=space_session`` seat and ``GET
+   /api/connections`` on e does not list a: a household met through an
+   invite link is no connection.
 6. a changes the space cover after the join (a ~350 KiB one). e's
    ``space_covers`` row must pick up the new ``cover_hash`` within 30 s,
    hold a WebP ≤ 64 KiB (the relay-bounded variant of the

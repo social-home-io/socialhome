@@ -489,22 +489,38 @@ describe('SpaceSettingsPage — "Is everything here?" on a space hosted elsewher
     page: { seq: 41, at: new Date().toISOString(), signer_role: 'owner', match: true,
       missing: 0, differing_buckets: 0, conflict: false },
   }
-  // Earlier blocks reset the module registry: take the stores the page
+  // Earlier blocks reset the module registry: take the store the page
   // will import now.
-  let stores: { instance: typeof import('@/store/instance'); conns: typeof import('@/store/connections') }
+  let instance: typeof import('@/store/instance')
   beforeEach(async () => {
-    stores = { instance: await import('@/store/instance'), conns: await import('@/store/connections') }
-    stores.instance.instanceConfig.value = { instance_id: 'me' } as InstanceConfig
-    stores.conns.connections.value = []
+    instance = await import('@/store/instance')
+    instance.instanceConfig.value = { instance_id: 'me' } as InstanceConfig
     detail = { ...detail, owner_instance_id: 'host-x', sync: SYNC }
+    // The host household is named by the space's member list — a host
+    // met through an invite link is no connection of ours.
     const base = apiGet.getMockImplementation()!
-    apiGet.mockImplementation(async (url: string) => (url === '/api/connections'
-      ? [{ instance_id: 'host-x', display_name: 'The Müllers' }]
-      : base(url)))
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/sp-1/members') {
+        return [
+          { user_id: 'u1', role, display_name: 'Anna' },
+          { user_id: 'h1', role: 'owner', instance_id: 'host-x', household_name: 'Lindqvist' },
+        ]
+      }
+      if (url === '/api/connections') throw new Error('the host name never comes from Connections')
+      return base(url)
+    })
   })
   afterEach(() => {
-    stores.instance.instanceConfig.value = null
-    stores.conns.connections.value = []
+    instance.instanceConfig.value = null
+  })
+
+  it('names the host household from the member list', async () => {
+    role = 'member'
+    detail = { ...detail, sync: { ...SYNC, state: 'catching_up' } }
+    const view = await mount()
+    const section = await view.findByTestId('space-sync-section')
+    await waitFor(() => expect(section.textContent).toContain('Lindqvist'))
+    expect(apiGet).not.toHaveBeenCalledWith('/api/connections')
   })
 
   it('a match with the signed page names no host; the Details for a space admin', async () => {
@@ -512,7 +528,7 @@ describe('SpaceSettingsPage — "Is everything here?" on a space hosted elsewher
     const view = await mount()
     const section = await view.findByTestId('space-sync-section')
     await waitFor(() => expect(section.textContent).toContain('nothing is missing'))
-    expect(section.textContent).not.toContain('The Müllers')
+    expect(section.textContent).not.toContain('Lindqvist')
     expect(view.getByTestId('space-sync-now')).toBeTruthy()
     expect(view.getByTestId('space-sync-details').textContent).toContain('Matches page 41')
   })

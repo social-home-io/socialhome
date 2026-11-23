@@ -5,10 +5,9 @@ import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
-import { ensureConnections } from '@/store/connections'
 import { instanceConfig } from '@/store/instance'
 import { loadHouseholdUsers } from '@/store/householdUsers'
-import { loadSpaceMembers, setSpaceHereAllowed } from '@/store/spaceMembers'
+import { loadSpaceMembers, setSpaceHereAllowed, spaceMembers } from '@/store/spaceMembers'
 import { useTitle, useTitleGlyph } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
 import type { FeedPost, Space, SpaceGfsServer } from '@/types'
@@ -604,12 +603,9 @@ export default function SpaceFeedPage() {
   const ownerId = spaceDetail.value?.owner_instance_id ?? null
   const syncLive = useSpaceSync(spaceId, spaceDetail.value?.sync)
   const hostedHere = !!ownerId && ownerId === instanceConfig.value?.instance_id
-  useEffect(() => {
-    if (ownerId && !hostedHere && syncLive?.unsent_posts.length) void ensureConnections()
-  }, [ownerId, hostedHere, syncLive?.unsent_posts.length])
   const notSent = (author: string, postId: string) =>
     author === currentUser.value?.user_id && !!syncLive?.unsent_posts.includes(postId)
-      ? <NotSentMark hostName={syncHostName(ownerId)} hostedHere={hostedHere} />
+      ? <NotSentMark hostName={syncHostName(spaceMembers.value[spaceId]?.values(), ownerId)} hostedHere={hostedHere} />
       : undefined
 
   if (loading.value) return <Spinner />

@@ -16,10 +16,14 @@
  *   none, and how many follower households can't read them yet.
  * * Copy profile link — your public page on that GFS.
  *
+ * When the composer put a new moment aside to come here, "Back to your
+ * moment" leads to ``/momentum/new``, which opens it again as it was.
+ *
  * Instant save, like the panels beside it. A protected account can't share
  * publicly and sees why instead of rows.
  */
 import { useEffect, useId } from 'preact/hooks'
+import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { confirmDialog } from '@/components/confirm'
 import { LoadErrorState } from '@/components/LoadErrorState'
@@ -34,6 +38,7 @@ import {
   gfsConnectionsFailed,
   loadGfsConnections,
   loadRegistrations,
+  parkedMoment,
   registerOnGfs,
   registrations,
   setDefaultShare,
@@ -104,6 +109,11 @@ export function PublicSharingPanel() {
     <div id="public-sharing" class="sh-settings-subcard sh-public-sharing">
       <h3>{t('moment.sharing.title')}</h3>
       {body}
+      {parkedMoment.value && !restricted && (
+        <a class="sh-btn sh-btn--secondary sh-public-sharing-back" href={addBase('/momentum/new')}>
+          {t('moment.sharing.back_to_moment')}
+        </a>
+      )}
     </div>
   )
 }
