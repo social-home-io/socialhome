@@ -239,3 +239,132 @@ async def test_the_sql_and_the_parser_read_max_hops_the_same_way(db, repo, raw):
     blob = '{"moments":{"max_hops":' + raw + "}}"
     await _prefs(db, "u-self", blob)
     assert await repo.moment_look_hops() == parse_moment_preferences(blob).max_hops
+
+
+# ── Followers (the storage rule, v_96) ───────────────────────────────────
+#
+# A household keeps a moment when someone here looks that far OR follows its
+# author (and has not blocked them); a follower then *sees* that author's
+# moments whatever their ``max_hops`` — "stored" and "seen" stay one rule.
+
+
+async def _follow(db, follower: str, followed: str = "u-author") -> None:
+    await db.enqueue(
+        "INSERT INTO user_follows(follower_user_id, followed_user_id) VALUES(?,?)",
+        (follower, followed),
+    )
+
+
+async def _follow_via_gfs(db, follower: str, followed: str = "u-author") -> None:
+    await db.enqueue(
+        "INSERT OR IGNORE INTO gfs_connections(id, gfs_instance_id, display_name,"
+        " public_key, inbox_url, status, paired_at) VALUES('g1', 'gfs-1',"
+        " 'GFS One', ?, 'https://gfs1.example', 'active', datetime('now'))",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO moment_public_follows(follower_user_id, followed_user_id,"
+        " gfs_id, followed_instance_pk, followed_username, followed_display_name)"
+        " VALUES(?, ?, 'g1', ?, 'noor', 'Noor')",
+        (follower, followed, "bb" * 32),
+    )
+
+
+async def _stored(repo, hop: int) -> bool:
+    return await repo.has_visible_recipient(author_user_id="u-author", hop_count=hop)
+
+
+@pytest.mark.parametrize("follow", [_follow, _follow_via_gfs])
+async def test_a_follower_keeps_the_authors_moments_beyond_their_max_hops(
+    db, repo, follow
+):
+    await _prefs(db, "u-self", '{"moments":{"max_hops":1}}')
+    assert not await _stored(repo, 3)
+    await follow(db, "u-self")
+    for hop in range(1, 6):
+        assert await _stored(repo, hop)
+    # Someone else's moment is still not kept.
+    assert not await repo.has_visible_recipient(author_user_id="u-x", hop_count=3)
+
+
+async def test_a_follower_who_blocked_the_author_keeps_nothing(db, repo):
+    await _prefs(db, "u-self", '{"moments":{"max_hops":1}}')
+    await _follow(db, "u-self")
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id)"
+        " VALUES('u-self', 'u-author')"
+    )
+    assert not await _stored(repo, 3)
+
+
+async def test_a_guardian_block_keeps_nothing_for_that_person(db, repo):
+    """A protected person whose guardian blocked the author keeps nothing,
+    not even at hop 1 (where its ``max_hops`` alone would count)."""
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await _follow(db, "u-self")
+    assert await _stored(repo, 1)
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES('u-self', 'u-author', 'u-parent')"
+    )
+    assert not await _stored(repo, 1)
+
+
+async def test_a_protected_follower_never_keeps_a_far_moment(db, repo):
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await _follow(db, "u-self")
+    assert await _stored(repo, 1)
+    for hop in (2, 3, 4, 5):
+        assert not await _stored(repo, hop)
+
+
+async def test_a_follower_sees_the_authors_far_moments_everywhere(db, repo):
+    """The read side of the same rule: the list, a tag, a single read, a
+    thread and its count, the Saved list and trending tags."""
+    await _add_user(db, "u-other")
+    await _follow(db, "u-self")
+    await repo.save(_moment(moment_id="root", hop_count=1, author_id="u-x"))
+    for author, mid in (("u-author", "far"), ("u-x", "far-x")):
+        m = _moment(moment_id=mid, hop_count=5, author_id=author)
+        await repo.save(
+            Moment(
+                **{
+                    **{f: getattr(m, f) for f in m.__slots__},
+                    "content": "#far",
+                    "parent_moment_id": "root",
+                }
+            )
+        )
+        await db.enqueue(
+            "INSERT INTO moment_saves(user_id, moment_id, saved_at)"
+            " VALUES('u-self', ?, datetime('now'))",
+            (mid,),
+        )
+    for viewer, seen in (("u-self", {"far"}), ("u-other", set())):
+        listed = await repo.list_visible_to(viewer, max_hops=1)
+        assert {m.id for m in listed} - {"root"} == seen
+        tagged = await repo.list_visible_to(viewer, max_hops=1, tag="far")
+        assert {m.id for m in tagged} == seen
+        for mid in ("far", "far-x"):
+            got = await repo.get_readable(mid, viewer, max_hops=1)
+            assert (got is not None) is (mid in seen)
+        replies = await repo.list_replies("root", viewer_user_id=viewer, max_hops=1)
+        assert {m.id for m in replies} == seen
+        counts = await repo.count_engagement_for(
+            ["root"], viewer_user_id=viewer, max_hops=1
+        )
+        assert counts["root"]["reply_count"] == len(seen)
+    saved = await repo.list_saved("u-self", max_hops=1)
+    assert {s.moment.id for s in saved} == {"far"}
+    # Trending counts top-level moments only: make "far" a root.
+    await db.enqueue("UPDATE moments SET parent_moment_id=NULL WHERE id='far'")
+    assert dict(await repo.list_top_hashtags("u-self", max_hops=1)) == {"far": 1}
+    assert dict(await repo.list_top_hashtags("u-other", max_hops=1)) == {}
+
+
+async def test_a_protected_follower_still_sees_only_its_circle(db, repo):
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await _follow(db, "u-self")
+    await repo.save(_moment(moment_id="far", hop_count=2))
+    assert await repo.list_visible_to("u-self", max_hops=5) == []
+    assert await repo.get_readable("far", "u-self", max_hops=5) is None

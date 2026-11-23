@@ -275,9 +275,10 @@ reach (``moments.reach`` / ``moments.reach_max``, no route or UI yet).
 Phase 2 (still v_96) has landed too: ``MOMENT_MAX_HOPS`` 5 with the
 viewer's ``max_hops`` 1–5 (default 3), ``MAX_RETURN_TOKENS`` 4 with the
 per-source rate on four-token reactions, ``moment_look_hops`` (decision C,
-no migration) and hop ≥ 4 copies only to v_96. Still to come: the
-storage rule, the routes and the UI (the settings screen still offers
-``max_hops`` 1–3).
+no migration) and hop ≥ 4 copies only to v_96. Phase 3 (still v_96, no
+new wire field) has landed the storage rule's follower branch and the
+forward-only guarantees below. Still to come: the routes and the UI (the
+settings screen still offers ``max_hops`` 1–3).
 
 ### Rules
 
@@ -398,8 +399,8 @@ neither raise it, strip it nor splice it onto another moment:
 
 ### Storage: a household keeps a moment only if someone here will see it
 
-Already true for viewers' ``max_hops`` (pure pass-through,
-``has_visible_recipient``, below). v_96 completes it:
+Built (``SqliteMomentRepo.has_visible_recipient``, pure pass-through
+below):
 
 * store when a local non-protected person's ``max_hops ≥ hop``, **or** a
   local person follows the author (``user_follows`` /
@@ -417,7 +418,22 @@ Already true for viewers' ``max_hops`` (pure pass-through,
   tombstone-gated; totals as above;
 * media: mesh moments carry only a media *reference*; no household fetches
   mesh moment bytes (only the GFS public path does, and only for a stored
-  row) — nothing to skip.
+  row) — nothing to skip;
+* **the look stays ``max_hops``-only.** A follow keeps the followed
+  author's moments that *reach* this household, but does not raise
+  ``moment_look_hops`` (decision C): a follower whose ``max_hops`` is 3
+  gets no hop-4–5 copy of the author from relays, since nobody sends one
+  toward a household that does not look that far. Owner-accepted
+  trade-off — following someone far away and seeing all of them means
+  raising "Show moments up to".
+
+Release-blocker tests: ``tests/protocol/test_moment_forward_only.py``
+(forward within reach and keep nothing — no row, route, hashtag or media
+file; a follower keeps and alone sees; reactions from behind pass on
+return tokens; a reply like a create; a delete passes as a content-free
+tombstone and a replay stops; one relay per create from any neighbour,
+and no relay of a replay past 48 h after a restart; totals pass while the
+seen-map remembers the create; no media fetch).
 
 ### Per-moment row: ``moments.reach`` (migration audit)
 
@@ -637,8 +653,18 @@ user sees** is a separate, per-user knob: ``moments.max_hops`` in
   advertises ``moment_look_hops`` so relays send it hop-4–5 copies).
 
 The recipient instance writes the inbound ``hop_count`` onto the
-``moments`` row; ``list_visible_to`` adds ``AND m.hop_count <= ?``
-against the viewer's preference so the inbox respects it.
+``moments`` row; every read applies ``(viewer follows the author OR
+m.hop_count <= ?)`` against the viewer's preference
+(``moment_repo._WITHIN_HOPS_SQL``) — the inbox and ``?tag=``, trending
+tags, the detail read, a thread's replies and ``reply_count``, and the
+Saved list. **A follower sees the followed author's moments whatever their
+``max_hops``** (a follow through ``user_follows`` or a GFS
+``moment_public_follows``) — the same rule the household stores by
+(§ Storage above), so "stored" and "seen" stay one rule. The ``max_hops``
+cap still holds for every author the viewer does not follow, and child
+protection (below) still applies on top: a protected follower sees no
+moment from beyond hop 1. A follow does not make the household look
+further (``moment_look_hops`` stays ``max_hops``-only, § Storage).
 
 ``hop_count`` is outside the origin signature (each relay bumps it), so the
 receiver never trusts a low one from a relay: a copy whose sender is not its
@@ -669,9 +695,11 @@ lifting protection takes effect on the next read.
 
 ### Pure pass-through
 
-If **no local user** can see an inbound moment under their
-``max_hops``, per-viewer ``user_blocks`` and child protection (a protected
-account counts only for a hop-1 moment), the recipient instance
+If **no local user** will see an inbound moment — nobody whose
+``max_hops`` covers its hop and nobody who follows its author, after
+personal ``user_blocks`` and guardian blocks (§CP.F2) and child protection
+(a protected account counts only for a hop-1 moment) — the recipient
+instance
 **skips the local persist** but **still relays** onward. This
 keeps the household acting as a transparent forwarder when no one
 locally subscribes — saves disk + retention work without breaking
