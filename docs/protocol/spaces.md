@@ -1593,8 +1593,18 @@ the level lets that role post directly — `OPEN`: owner / admin / moderator /
 member; `MODERATED`: owner / admin / moderator (a plain member's post keeps
 going through the host's review queue); `ADMIN_ONLY`: owner / admin. Other
 writer seats get `comment`; a follower seat gets `comment` only while
-`allow_subscriber_comment` is on; a household with several seats → one cert
-at its strongest scope; no live seat → no cert.
+`allow_subscriber_comment` (or, since v_96, `allow_subscriber_react`) is on;
+a household with several seats → one cert at its strongest scope; no live
+seat → no cert.
+
+**Wire shape.** `{cert_suite, space_id, epoch, instance_pk, scope,
+issued_at, cert_sig}`, plus the v2 binding `{writer_user_ids, users_sig,
+users_sig_suite}`, plus — v_96 — `reader: true` on a `comment` cert that
+binds a follower. `reader` is signed by `cert_sig`, absent (never `false`)
+on every other cert, and refused on a `write` cert; any other key is
+refused. A receiver applies the space's follower switches to a `reader` cert
+(see [Comments and reactions](#comments-and-reactions)). A household below
+v_96 cannot verify a `reader` cert, so it is never issued one.
 
 **User binding (v2).** The cert also names the household's users that hold
 its scope — `writer_user_ids`, signed by the space authority in a SECOND

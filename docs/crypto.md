@@ -934,11 +934,25 @@ item can be authorized without a host signature on every post. Issued by a
 seed holder (owner or delegated admin, and only while its seed still matches
 the pinned space key) once per writer household per content epoch: `scope:
 "write"` for owner / admin / moderator / member seats, `"comment"` for a
-follower seat while `allow_subscriber_comment` is on; a household with
+follower seat while `allow_subscriber_comment` or (v_96)
+`allow_subscriber_react` is on; a household with
 several seats gets one cert at its strongest scope. Wire shape (every field
 always present) `{cert_suite, space_id, epoch, instance_pk, scope,
 issued_at, cert_sig}` — `instance_pk` is the household's Ed25519 identity
-public key (b64url), `issued_at` unix seconds. Signing bytes
+public key (b64url), `issued_at` unix seconds. Since v_96 a follower's cert
+also carries `"reader": true` (scope `comment` only; the key is ABSENT on
+every other cert — never `false` — so a non-reader cert signs exactly the
+v_49 bytes). `reader` is a signed field: stripping it, or adding it to a
+non-reader cert, breaks `cert_sig`. Receivers apply the space's follower
+switches to a reader cert (`reader_cert_permits` in
+`domain/space_item.py`: comments only with `allow_subscriber_comment`,
+reactions only with `allow_subscriber_react`, `author_profile` with either,
+anything else refused). `WriterCert.from_wire` refuses any key outside
+`{cert_suite, space_id, epoch, instance_pk, scope, issued_at, cert_sig,
+writer_user_ids, users_sig, users_sig_suite, reader}`, a `reader` that is
+not exactly `true`, and `reader` on a `write` cert. A pre-v_96 receiver
+ignores `reader`, so the signature fails there: a reader cert is issued only
+to a v_96 household. Signing bytes
 `b"space-writer-cert:v1:"` + canonical JSON (sorted keys, compact) of the
 cert minus `cert_sig`, so the suite tag is signed; the prefix is distinct
 from `space-authority:v1:` so neither signature can be lifted onto the
