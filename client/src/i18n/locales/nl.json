@@ -3540,7 +3540,7 @@
   "error.space_archived": "Deze space is gearchiveerd en alleen-lezen. Een beheerder kan hem dearchiveren om wijzigingen toe te staan.",
   "error.reaction_limit": "Je kunt maximaal vijf reacties per bericht plaatsen. Verwijder er een om een andere toe te voegen.",
   "error.invalid_link": "Gebruik een volledig webadres dat begint met https://.",
-  "error.not_paired": "Je huishouden is nog niet verbonden met het gastheer-huishouden van deze space. Verbind eerst de twee huishoudens.",
+  "error.not_paired": "Je huishouden is nog niet gekoppeld aan het gastheer-huishouden van deze space. Koppel eerst de twee huishoudens.",
   "error.host_not_reachable": "Het huishouden van deze space is via de GFS nu niet bereikbaar. Probeer het later opnieuw.",
   "error.age_restricted": "Deze space is voor mensen van {min_age} jaar en ouder.",
   "error.dm_self": "Je kunt geen gesprek met jezelf beginnen. Kies iemand anders.",
