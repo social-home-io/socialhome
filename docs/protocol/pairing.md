@@ -527,7 +527,9 @@ approval has no expiry, as its row never had — it ends with the
 requester's first envelope or our admin's cancel. At most 64 halves are
 kept. They are in memory only, and no key of an unconfirmed handshake is
 written to disk. The connections list shows a staged half as the pending
-pairing it is, in the seat's place (`shares_space: true`).
+pairing it is (`shares_space: true`); the seat itself is never listed
+there — a household we only share a space with is no connection, and the
+space's member list names it.
 
 **Each handshake confirms its own half.** A half is replaced when another
 handshake with the same household starts, so every confirmation checks the

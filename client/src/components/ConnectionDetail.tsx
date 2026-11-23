@@ -71,11 +71,11 @@ interface Connection {
    *  into the queued count. */
   dropped_envelopes?: number
   /** Active federation transport for this peer. */
-  transport?: 'rtc' | 'https' | 'gfs_relay' | null
+  transport?: 'rtc' | 'https' | null
   /** Protocol version the peer last advertised. */
   proto_version?: number
-  /** ``manual`` (paired directly) or ``space_session`` (invite link).
-   *  Only a direct pair gets the GFS fallback switch. */
+  /** ``manual``: how the pairing came about (the connections list holds
+   *  pairings only). Only a direct pair gets the GFS fallback switch. */
   source?: string
   /** GFS fallback (v_54): our own opt-in for this household. */
   gfs_relay?: boolean
@@ -100,10 +100,9 @@ interface RelayDetail {
   ts: string
 }
 
-const TRANSPORT: Record<'rtc' | 'https' | 'gfs_relay', { icon: ConnIconName; key: string; hint: string }> = {
+const TRANSPORT: Record<'rtc' | 'https', { icon: ConnIconName; key: string; hint: string }> = {
   rtc: { icon: 'bolt', key: 'connections.transport.direct', hint: 'connections.detail.direct_hint' },
   https: { icon: 'globe', key: 'connections.transport.internet', hint: 'connections.detail.internet_hint' },
-  gfs_relay: { icon: 'cloud', key: 'connections.transport.gfs', hint: 'connections.detail.gfs_hint' },
 }
 
 function capitalise(s: string): string {
@@ -444,7 +443,7 @@ export function ConnectionDetail({ conn, compat, ours = 0, relayGfs = false, onC
       hint: conn.relay_only ? t('connections.detail.gfs_only_hint') : undefined,
     })
   }
-  if (conn.transport === 'https' || conn.transport === 'gfs_relay') {
+  if (conn.transport === 'https') {
     notes.push({ tone: 'info', icon: TRANSPORT[conn.transport].icon, label: t('connections.detail.connection'), text: t(TRANSPORT[conn.transport].hint) })
   }
 

@@ -10,14 +10,15 @@ The pairing flow:
 
 Paired-instance management:
 
-* ``GET /api/pairing/connections`` — list every remote instance (any status).
+* ``GET /api/pairing/connections`` — list the paired households (any
+  status); a space seat (§D2b) is never listed.
 * ``DELETE /api/pairing/connections/{instance_id}`` — unpair (a still
   pending pairing is cancelled instead).
 * ``DELETE /api/pairing/pending/{instance_id}`` — cancel a pairing that was
   never confirmed; never touches a confirmed one (409).
 
 ``GET /api/connections`` is a read-only alias for the list endpoint that the
-frontend NetworkMap component consumes.
+Connections page and the dashboard's NetworkMap consume.
 """
 
 from __future__ import annotations
@@ -69,7 +70,7 @@ log = logging.getLogger(__name__)
 def _instance_dict(
     inst,
     *,
-    transport_state: Literal["rtc", "https", "gfs_relay"] | None = None,
+    transport_state: Literal["rtc", "https"] | None = None,
     queued_envelopes: int,
     dropped_envelopes: int,
     last_relay_accepted_at: str | None,
@@ -84,9 +85,7 @@ def _instance_dict(
 
     ``transport_state`` is the current federation transport for this
     peer: ``"rtc"`` (WebRTC DataChannel open), ``"https"`` (HTTPS
-    inbox fallback), ``"gfs_relay"`` (a household seated from an invite
-    link, reachable only through the connection server that introduced
-    the pair), or ``None`` (unreachable / pending — caller
+    inbox fallback), or ``None`` (unreachable / pending — caller
     short-circuits when reachability is False or status is not
     confirmed).
 
@@ -421,11 +420,19 @@ class PairingIntroduceView(BaseView):
 
 
 class PairingConnectionCollectionView(BaseView):
-    """``GET /api/pairing/connections`` — list paired instances.
+    """``GET /api/pairing/connections`` — list the households we're paired
+    with: confirmed pairings, pairings still pending, and trust-relay pairs.
 
-    Also mounted on ``GET /api/connections`` for the NetworkMap frontend.
-    Readable by every signed-in member (the dashboard map shows the
-    paired households read-only); every mutation is admin-only.
+    Also mounted on ``GET /api/connections`` for the Connections page and
+    the dashboard's network map. Readable by every signed-in member (the
+    dashboard map shows the paired households read-only); every mutation
+    is admin-only.
+
+    A space seat (:func:`~socialhome.domain.federation.is_space_seat`: a
+    household met through an invite link or a GFS join, §D2b) is never
+    listed. It is no relationship of ours — we reach its people only
+    through the space we share, whose member list is where that household
+    shows. The row stays stored: the space's relay delivery runs on it.
     """
 
     async def get(self) -> web.Response:
@@ -440,23 +447,15 @@ class PairingConnectionCollectionView(BaseView):
         instances = [staged.pop(inst.id, inst) for inst in listed]
         # (A half whose seat ended meanwhile still waits: listed too.)
         instances.extend(staged.values())
+        # A seat with no pending pairing in its place is not a connection.
+        instances = [inst for inst in instances if not is_space_seat(inst)]
         transport = self.request.app.get(federation_transport_key)
         outbox = self.svc(outbox_repo_key)
         rows = []
         for inst in instances:
-            ts: Literal["rtc", "https", "gfs_relay"] | None = None
+            ts: Literal["rtc", "https"] | None = None
             if inst.status is PairingStatus.CONFIRMED and inst.is_reachable():
-                if inst.source is InstanceSource.SPACE_SESSION:
-                    # A household met through an invite link has no
-                    # address at all (``remote_inbox_url`` is empty by
-                    # design) and no RTC path — signalling itself would
-                    # need a relationship this pair does not have. Its
-                    # envelopes ride the connection-server relay, so
-                    # "https" was not a fallback, it was a transport that
-                    # cannot be used, and it pointed an operator at an
-                    # inbox that will never exist.
-                    ts = "gfs_relay"
-                elif transport is not None and transport.is_ready(inst.id):
+                if transport is not None and transport.is_ready(inst.id):
                     ts = "rtc"
                 else:
                     ts = "https"

@@ -2,8 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/preact'
 vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
 
-import { connections } from '@/store/connections'
-import type { Connection } from '@/store/connections'
 import {
   CATCHING_UP_CHIP_DELAY_MS, parseSpaceSync, syncBody, syncChipKind, syncChipLabel,
   syncDetailLines, syncHeading, syncHostName, syncView, useHeldFor,
@@ -18,8 +16,6 @@ function sync(over: Partial<SpaceSync> = {}): SpaceSync {
     may_be_missing: false, unsent_posts: [], ...over,
   }
 }
-
-beforeEach(() => { connections.value = [] })
 
 describe('syncView — one plain state per status', () => {
   it.each([
@@ -146,11 +142,20 @@ describe('the settings wording', () => {
       .toBe('This household hosts the space, so it always has everything.')
   })
 
-  it('the host household is named from the paired households', () => {
-    expect(syncHostName('h1')).toBeNull()
-    connections.value = [{ instance_id: 'h1', display_name: 'The Müllers' } as Connection]
-    expect(syncHostName('h1')).toBe('The Müllers')
-    expect(syncHostName(null)).toBeNull()
+  it('the host household is named from the space\'s member list — paired with it or not', () => {
+    // A host met through an invite link is no connection of ours: its
+    // name comes from the space, like every other member household.
+    const members = [
+      { instance_id: null, household_name: null },
+      { instance_id: 'h1', household_name: 'The Müllers' },
+      { instance_id: 'h2', household_name: 'Lindqvist' },
+    ]
+    expect(syncHostName(undefined, 'h1')).toBeNull()
+    expect(syncHostName([], 'h1')).toBeNull()
+    expect(syncHostName(members, 'h1')).toBe('The Müllers')
+    expect(syncHostName(members, 'h2')).toBe('Lindqvist')
+    expect(syncHostName(members, 'h3')).toBeNull()
+    expect(syncHostName(members, null)).toBeNull()
   })
 })
 

@@ -369,10 +369,10 @@ describe('ConnectionsPage — admin, problem state', () => {
     const { container } = await renderPage({ conns: [alpha] })
     expect(container.querySelector('[data-transport="rtc"]')).not.toBeNull()
     for (const h of wsHandlers.get('peer.transport_changed') ?? []) {
-      h({ type: 'peer.transport_changed', data: { instance_id: 'alpha', transport: 'gfs_relay' } })
+      h({ type: 'peer.transport_changed', data: { instance_id: 'alpha', transport: 'https' } })
     }
     await waitFor(() => {
-      expect(container.querySelector('[data-transport="gfs_relay"]')!.textContent).toContain('connections.transport.gfs')
+      expect(container.querySelector('[data-transport="https"]')!.textContent).toContain('connections.transport.internet')
     })
   })
 })
@@ -732,20 +732,25 @@ describe('ConnectionsPage — approving a pair request', () => {
   })
 })
 
-describe('ConnectionsPage — space-only households', () => {
-  const space = makeConnection({ instance_id: 'sp', display_name: 'Lindqvist', source: 'space_session', transport: 'gfs_relay' })
+describe('ConnectionsPage — only households we are paired with', () => {
+  // ``GET /api/connections`` never lists a household we only share a
+  // space with (§D2b seat): the page shows the paired ones and the
+  // pairings still pending, and nothing else.
+  const pending = makeConnection({ instance_id: 'pd', display_name: 'Pending House', status: 'pending_sent' })
 
-  it('labels the row "Space only", explains it, and offers no Manage', async () => {
-    const { container, getByTestId } = await renderPage({ conns: [makeConnection(), space] })
-    expect(getByTestId('space-only-note-sp').textContent).toBe('connections.meta.shares_space')
-    const row = getByTestId('space-only-note-sp').closest('.sh-conn-card')!
-    expect(row.tagName).toBe('DIV')
-    expect(row.textContent).toContain('connections.type.space_only')
-    expect(container.querySelector('#sh-conn-card-sp')).toBeNull()
+  it('lists the paired household, the pending one waits apart, no shared-space group', async () => {
+    const { container } = await renderPage({ conns: [makeConnection(), pending] })
+    expect(container.querySelector('#sh-conn-card-inst-1')).not.toBeNull()
+    // The Households count is the paired household alone.
+    expect(container.querySelector('#sh-conn-hh-title')!.parentElement!.querySelector('.sh-conn-count')!.textContent)
+      .toBe('1')
+    expect(container.textContent).toContain('connections.sub.waiting')
+    expect(container.textContent).not.toContain('connections.sub.space')
+    expect(container.textContent).not.toContain('connections.type.space_only')
   })
 
-  it('is never offered as a pairing voucher', async () => {
-    const { getByText } = await renderPage({ conns: [makeConnection(), space] })
+  it('offers only paired households as a pairing voucher', async () => {
+    const { getByText } = await renderPage({ conns: [makeConnection(), pending] })
     fireEvent.click(getByText('connections.hero.via_long'))
     expect(openAutoPair).toHaveBeenCalledWith([{ instance_id: 'inst-1', display_name: 'Household Alpha' }])
   })
@@ -775,7 +780,6 @@ describe('ConnectionsPage — map view', () => {
     await waitFor(() => expect(mapProps.length).toBeGreaterThan(0))
     const props = mapProps[mapProps.length - 1]
     expect(props.canManage!(makeConnection())).toBe(true)
-    expect(props.canManage!(makeConnection({ source: 'space_session' }))).toBe(false)
     expect(props.canManage!(makeConnection({ status: 'pending_sent' }))).toBe(false)
   })
 
