@@ -1,5 +1,12 @@
 """Mirror a GFS-discovered space onto a local ``spaces`` stub row.
 
+**Legacy since v_96:** a follow is a join for the read-only role
+(``SpaceService.follow_space`` asks the host); nothing calls
+:meth:`GfsSpaceMirrorService.ensure_mirror` on a follow any more. This module
+stays only for stubs made by earlier follows (``unfollow_space`` purges
+them) and goes with the GFS subscriber fan-out in a later phase. The text
+below describes the pre-v_96 on-ramp.
+
 This is the on-ramp between GFS *discovery* (``PublicSpaceDiscoveryService``
 fills ``public_space_cache`` from ``GET /gfs/spaces``) and GFS *content*
 (``SpacePublicInbound`` / ``SpaceSubscriberKeyInbound`` consume relayed

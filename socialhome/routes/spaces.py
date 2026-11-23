@@ -3324,32 +3324,43 @@ class SpacePostCommentDetailView(BaseView):
 
 
 class SpaceSubscribeView(BaseView):
-    """``POST /api/spaces/{id}/subscribe`` — subscribe to a public or
-    global space as a read-only member (idempotent — double-subscribe
-    is a no-op).
+    """``POST /api/spaces/{id}/subscribe`` — follow a public or global
+    space: a join with the read-only ``subscriber`` role (v_96),
+    idempotent (an existing seat of any role is kept). Optional body
+    ``{"share_location": true}`` — the person agreed to send this
+    household's home (~1 km) to a local community's host. A space hosted
+    here seats at once (``{"subscribed": true, "pending": false}``); one
+    hosted elsewhere sends its host a follow request, which it approves on
+    its own (``{"subscribed": false, "pending": true}``).
 
-    ``DELETE /api/spaces/{id}/subscribe`` — unsubscribe. No-op for
-    users who aren't subscribers (so this can't silently leave a real
-    member's space). Both return ``{"subscribed": bool}``.
-
-    Note on naming: "subscribe" is used here rather than "follow"
-    because the product already uses "follow" for a different concept
-    (the dashboard pin list, see ``corner_service``).
+    ``DELETE /api/spaces/{id}/subscribe`` — unfollow: leave the subscriber
+    seat. No-op for a seat of any other role (so this can't silently leave
+    a real member's space). Returns ``{"subscribed": false, "pending":
+    false}``.
     """
 
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
+        body = await self.body() if self.request.can_read_body else {}
+        share_location = isinstance(body, dict) and body.get("share_location") is True
         svc = self.svc(space_service_key)
-        await svc.subscribe_to_space(ctx.user_id, space_id)
-        return web.json_response({"subscribed": True})
+        result = await svc.follow_space(
+            ctx.user_id, space_id, share_location=share_location
+        )
+        return web.json_response(
+            {
+                "subscribed": bool(result["subscribed"]),
+                "pending": bool(result["pending"]),
+            }
+        )
 
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
         svc = self.svc(space_service_key)
-        await svc.unsubscribe_from_space(ctx.user_id, space_id)
-        return web.json_response({"subscribed": False})
+        await svc.unfollow_space(ctx.user_id, space_id)
+        return web.json_response({"subscribed": False, "pending": False})
 
 
 class MySubscriptionsView(BaseView):

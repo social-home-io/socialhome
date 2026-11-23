@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
@@ -23,9 +24,14 @@ from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 from socialhome.csp import MEDIA_CSP
 from socialhome.domain.federation import GfsConnection
-from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
+from socialhome.domain.space import (
+    HostTooOldError,
+    SpaceFeatureAccess,
+    SpaceFeatures,
+)
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.routes.spaces import _features_from_body
+from socialhome.services.space_service import SpaceService
 
 #: The space icon "Home Assistant" as the SPA stores it in ``emoji``
 #: (client/src/features/spaces/spaceGlyph.ts ``HA_SPACE_SYMBOL``).
@@ -2663,7 +2669,8 @@ async def test_subscribe_and_unsubscribe_space(client):
         headers=_auth(client._bob_token),
     )
     assert r.status == 200
-    assert (await r.json())["subscribed"] is True
+    # A space hosted here seats at once — nothing waits on a host.
+    assert await r.json() == {"subscribed": True, "pending": False}
 
     r = await client.get("/api/me/subscriptions", headers=_auth(client._bob_token))
     assert r.status == 200
@@ -2675,10 +2682,50 @@ async def test_subscribe_and_unsubscribe_space(client):
         headers=_auth(client._bob_token),
     )
     assert r.status == 200
-    assert (await r.json())["subscribed"] is False
+    assert await r.json() == {"subscribed": False, "pending": False}
 
     r = await client.get("/api/me/subscriptions", headers=_auth(client._bob_token))
     assert (await r.json())["subscriptions"] == []
+
+
+@pytest.mark.parametrize(
+    "body,share_location",
+    [
+        (None, False),
+        ({"share_location": True}, True),
+        ({"share_location": "yes"}, False),
+    ],
+)
+async def test_following_a_space_hosted_elsewhere_answers_pending(
+    client, body, share_location
+):
+    """v_96 — a follow of a space hosted elsewhere is a request its host
+    approves on its own: ``pending`` until the seat is redeemed. Only a
+    literal ``share_location: true`` sends the home (~1 km)."""
+    follow = AsyncMock(return_value={"subscribed": False, "pending": True})
+    with patch.object(SpaceService, "follow_space", follow):
+        r = await client.post(
+            "/api/spaces/sp-elsewhere/subscribe",
+            headers=_auth(client._bob_token),
+            **({"json": body} if body is not None else {}),
+        )
+    assert r.status == 200, await r.text()
+    assert await r.json() == {"subscribed": False, "pending": True}
+    assert follow.await_args.args[1:] == ("sp-elsewhere",)
+    assert follow.await_args.kwargs == {"share_location": share_location}
+
+
+async def test_following_a_space_of_a_host_below_v96_is_409(client):
+    follow = AsyncMock(side_effect=HostTooOldError("host", feature="follow"))
+    with patch.object(SpaceService, "follow_space", follow):
+        r = await client.post(
+            "/api/spaces/sp-elsewhere/subscribe",
+            headers=_auth(client._bob_token),
+        )
+    assert r.status == 409
+    body = await r.json()
+    assert body["error"]["code"] == "HOST_TOO_OLD"
+    assert body["error"]["feature"] == "follow"
 
 
 async def test_subscribe_is_idempotent(client):
@@ -2876,69 +2923,6 @@ async def test_my_join_requests_say_which_hosts_were_busy(client):
     body = await r.json()
     assert body["busy_space_ids"] == ["sp-busy"]
     assert body["pending_space_ids"] == ["sp-asked-again"]
-
-
-async def test_subscribe_maps_gfs_outage_to_502(client):
-    """A GFS-discovered space whose GFS is unreachable is a 502, not a 500.
-
-    ``GfsConnectionError`` escapes ``subscribe_to_space`` when the paired
-    global server refuses or times out. It is a domain exception, so
-    ``BaseView._iter`` maps it centrally — a handler-level try/except would
-    violate the routing convention. 502 + GFS_UNAVAILABLE matches the
-    HighlightPublicationError mapping: an upstream we depend on failed, not
-    a bad request from the caller.
-    """
-    from socialhome.app_keys import space_service_key
-    from socialhome.services.gfs_connection_service import GfsConnectionError
-    from socialhome.services.space_service import stub_space_from_metadata
-
-    svc = client.server.app[space_service_key]
-    # An id with NO local row — that is what makes subscribe consult the
-    # mirror at all (an already-local space skips it).
-    sid = "f" * 32
-
-    class _OutageMirror:
-        """Seats the local mirror, then the GFS subscribe fails."""
-
-        def __init__(self, space_service) -> None:
-            self._svc = space_service
-
-        async def ensure_mirror(self, space_id: str):
-            space = stub_space_from_metadata(
-                space_id,
-                host_instance_id="inst-remote",
-                meta={
-                    "name": "Outage Space",
-                    "space_type": "global",
-                    "join_mode": "invite_only",
-                    # Invite-only AND readable — the broadcast shape a GFS
-                    # directory really does list; the mirror carries the
-                    # owner's flag through so the local gate agrees.
-                    "features": {"allow_subscribers": True},
-                    "identity_public_key": "ab" * 32,
-                    "owner_username": "",
-                },
-            )
-            await self._svc._spaces.save(space)
-            return (space, "gfs-1")
-
-        async def subscribe_to_gfs(self, space_id: str, gfs_id: str) -> None:
-            raise GfsConnectionError("global server unreachable")
-
-        async def seat_in_grace(self, space_id):
-            return False
-
-        async def unsubscribe(self, space_id: str) -> None:
-            return None
-
-    svc.attach_gfs_space_mirror(_OutageMirror(svc))
-
-    r = await client.post(
-        f"/api/spaces/{sid}/subscribe",
-        headers=_auth(client._bob_token),
-    )
-    assert r.status == 502, await r.text()
-    assert (await r.json())["error"]["code"] == "GFS_UNAVAILABLE"
 
 
 # ── Invite-token TTL ───────────────────────────────────────────────────────

@@ -1296,6 +1296,25 @@ async def test_invite_token_role_round_trips(env):
         assert row["role"] == role
 
 
+async def test_consume_reports_the_household_a_token_is_bound_to(env):
+    """An approval's token (bound) says so on consume; a link does not."""
+    await env.repo.save(_space("sp-bound"))
+    bound = await env.repo.create_invite_token(
+        "sp-bound",
+        "uid-alice",
+        role="subscriber",
+        bound_instance_id="peer-1",
+        bound_user_id="uid-bob",
+    )
+    row = await env.repo.consume_invite_token(
+        bound, redeemer_user_id="uid-bob", redeemer_instance_id="peer-1"
+    )
+    assert row is not None and row["bound_instance_id"] == "peer-1"
+    link = await env.repo.create_invite_token("sp-bound", "uid-alice")
+    row = await env.repo.consume_invite_token(link)
+    assert row is not None and row["bound_instance_id"] is None
+
+
 async def test_invite_token_rejects_an_unknown_role(env):
     """The CHECK is the on-disk authority — ``owner`` is not in it, and
     neither is anything invented."""
@@ -1402,6 +1421,51 @@ async def test_list_live_invite_tokens_excludes_spent_links(env):
     )
     rows = await env.repo.list_live_invite_tokens("sp-live-list")
     assert [r["token"] for r in rows] == [live]
+
+
+async def test_list_live_invite_tokens_leaves_out_bound_approval_tokens(env):
+    """A token bound to one household and person is an approval's answer
+    (an admin's or a follow's, v_96), not a link the admins share."""
+    await env.repo.save(_space("sp-bound"))
+    link = await env.repo.create_invite_token("sp-bound", "uid-alice")
+    await env.repo.create_invite_token(
+        "sp-bound",
+        "uid-alice",
+        role="subscriber",
+        bound_instance_id="peer",
+        bound_user_id="uid-bob",
+    )
+    rows = await env.repo.list_live_invite_tokens("sp-bound")
+    assert [r["token"] for r in rows] == [link]
+
+
+async def test_has_live_pending_join_request_ignores_an_expired_row(env):
+    """An applicant's own request past its ``expires_at`` is not "already
+    asked" even before the sweep marks it expired (v_96 follow retry)."""
+    kw = {"remote_applicant_instance_id": "host"}
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    rid = await env.repo.save_join_request(
+        "sp-x", "uid-bob", ttl_days=15 / (24 * 60), **kw
+    )
+    assert await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # Another household, another person: no.
+    assert not await env.repo.has_live_pending_join_request(
+        "sp-x", "uid-bob", remote_applicant_instance_id="other"
+    )
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-x", **kw)
+    await env.db.enqueue(
+        "UPDATE space_join_requests SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), rid),
+    )
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # An answered one is not pending either.
+    rid2 = await env.repo.save_join_request("sp-x", "uid-bob", **kw)
+    assert await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    await env.repo.update_join_request_status(rid2, "denied")
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # A pending admin elevation is not a join request.
+    await env.repo.save_join_request("sp-x", "uid-bob", requested_role="admin", **kw)
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
 
 
 async def test_list_live_invite_tokens_never_leaks_another_space(env):
@@ -2528,6 +2592,20 @@ async def test_has_approved_join_request(env):
     )
     await env.repo.update_join_request_status(elev, "approved")
     assert not await env.repo.has_approved_join_request("sp-ap", "uid-bob", **kw)
+
+
+async def test_an_auto_approved_follow_counts_as_an_approval(env):
+    """v_96: a follow is approved automatically (``reviewed_by`` NULL) only
+    after the local-community check said inside, so its redeem (which
+    carries no location) is seated on it like on an admin's approval."""
+    await env.repo.save(_space("sp-fo"))
+    rid = await env.repo.save_join_request(
+        "sp-fo", "uid-bob", remote_applicant_instance_id="peer"
+    )
+    assert await env.repo.answer_join_request(rid, "approved", reviewed_by=None)
+    assert await env.repo.has_approved_join_request(
+        "sp-fo", "uid-bob", remote_applicant_instance_id="peer", within_days=7
+    )
 
 
 async def test_answer_join_request_moves_a_pending_request_once(env):

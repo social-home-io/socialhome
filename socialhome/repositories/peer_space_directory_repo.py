@@ -58,6 +58,8 @@ class AbstractPeerSpaceDirectoryRepo(Protocol):
         instance_id: str,
     ) -> list[PeerSpaceDirectoryEntry]: ...
 
+    async def get(self, space_id: str) -> PeerSpaceDirectoryEntry | None: ...
+
     async def clear_instance(self, instance_id: str) -> None: ...
 
 
@@ -143,6 +145,16 @@ class SqlitePeerSpaceDirectoryRepo:
             (instance_id,),
         )
         return [_row(r) for r in rows_to_dicts(rows)]
+
+    async def get(self, space_id: str) -> PeerSpaceDirectoryEntry | None:
+        """The entry a paired household lists ``space_id`` under (the
+        freshest when several do), or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT * FROM peer_space_directory WHERE space_id=?"
+            " ORDER BY cached_at DESC LIMIT 1",
+            (space_id,),
+        )
+        return _row(dict(row)) if row is not None else None
 
     async def clear_instance(self, instance_id: str) -> None:
         await self._db.enqueue(

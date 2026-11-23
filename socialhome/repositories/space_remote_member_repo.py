@@ -149,6 +149,8 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
         user_id: str,
     ) -> SpaceRemoteMember | None: ...
 
+    async def list_instances_of_user(self, space_id: str, user_id: str) -> set[str]: ...
+
     async def latest_display_name(self, user_id: str) -> str | None: ...
 
 
@@ -574,6 +576,18 @@ class SqliteSpaceRemoteMemberRepo:
         )
         dicts = rows_to_dicts(rows)
         return _row(dicts[0]) if dicts else None
+
+    async def list_instances_of_user(self, space_id: str, user_id: str) -> set[str]:
+        """Every household ``user_id`` holds or held a seat of in
+        ``space_id`` under — tombstones included. A user id belongs to one
+        household, so more than one (or one other than a claimant's) is a
+        sign the id is being reused by someone else."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT instance_id FROM space_remote_members"
+            " WHERE space_id=? AND user_id=?",
+            (space_id, user_id),
+        )
+        return {str(r["instance_id"]) for r in rows}
 
     async def latest_display_name(self, user_id: str) -> str | None:
         """The name the newest seat of *user_id* in any space carries

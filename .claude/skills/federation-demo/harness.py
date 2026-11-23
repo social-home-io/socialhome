@@ -3972,6 +3972,290 @@ def cmd_gfs_join_request() -> None:
     print("gfs-join-request: ok (unpaired household asked, was approved, reads)")
 
 
+def cmd_space_follow_paired() -> None:
+    """v_96 — a paired household follows a public space: an auto-approved join.
+
+    a creates a ``public`` space, ``invite_only`` (join mode is irrelevant
+    to a follow) with ``allow_subscribers`` on. b finds it in its paired
+    directory and ``POST /subscribe`` → ``{pending: true}`` (a follow
+    request for the read-only role, auto-approved by the host, no admin
+    step). Then b is a ``subscriber`` in its own ``space_members`` and a
+    holds it in ``space_remote_members``; a's post reaches b; b's own post
+    is refused. ``DELETE /subscribe`` is b's own leave: a tombstones the
+    seat and does NOT rotate the content key.
+
+    Prereq: ``up`` + ``pair``.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    b = state["instances"]["b"]
+    nonce = secrets.token_hex(3)
+
+    s, sp = _as(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Follow paired {nonce}",
+            "description": "public, invite only, followers allowed",
+            "space_type": "public",
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must("space-follow-paired: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _as(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True}},
+    )
+    _must("space-follow-paired: a enables followers", s, patched, ok=(200,))
+    print(f"  a: public invite-only space {space_id[:8]}…, followers on")
+
+    # b learns a's public spaces through the PAIRED directory (§D1a,
+    # SPACE_DIRECTORY_SYNC on a's config change) — never the GFS. Poll it
+    # before following: the follow finds its host there.
+    entry: dict | None = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and entry is None:
+        s, rows = _as(state, "b", "GET", "/api/peer_spaces")
+        if s == 200 and isinstance(rows, list):
+            entry = next((r for r in rows if r.get("space_id") == space_id), None)
+        if entry is None:
+            time.sleep(1.0)
+    if entry is None:
+        raise SystemExit(
+            "space-follow-paired: b never listed a's public space in its "
+            "paired directory (/api/peer_spaces) within 30 s"
+        )
+    if entry.get("host_instance_id") != state["instances"]["a"]["instance_id"]:
+        raise SystemExit(f"space-follow-paired: directory names {entry!r}")
+    print("  b lists it in its paired directory ✓")
+
+    def seat_on_b() -> list[tuple]:
+        return _rows(
+            "b",
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, b["user_id"]),
+        )
+
+    def seat_on_a(tombstoned: int) -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id=?"
+            " AND user_id=? AND tombstoned=?",
+            (space_id, b["user_id"], tombstoned),
+        )
+
+    s, body = _as(state, "b", "POST", f"/api/spaces/{space_id}/subscribe", {})
+    body = _must("space-follow-paired: b follows", s, body, ok=(200,))
+    # A host elsewhere: a follow request, seated only by the host's answer.
+    if body.get("pending") is not True or body.get("subscribed") is not False:
+        raise SystemExit(f"space-follow-paired: follow answered {body!r}")
+    print(f"  b followed → {body!r} (no admin step on a)")
+
+    _poll(
+        "b to hold a subscriber seat",
+        lambda: [r for r in seat_on_b() if r[0] == "subscriber"],
+        timeout=45.0,
+    )
+    _poll(
+        "a to hold b's subscriber seat",
+        lambda: [r for r in seat_on_a(0) if r[0] == "subscriber"],
+        timeout=45.0,
+    )
+    print("  b is a subscriber on b and on a ✓")
+
+    content = f"follow paired hello {nonce}"
+    s, post = _as(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": content},
+    )
+    post_id = _must("space-follow-paired: a posts", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "b", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(f"space-follow-paired: b read {seen.get('content')!r}")
+    print("  b reads a's post ✓")
+
+    s, refused = _as(
+        state,
+        "b",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": "a follower must not post"},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"space-follow-paired: b's post answered {s} {refused!r}, wanted 403"
+        )
+    print("  b's own post is refused (403) ✓")
+
+    epoch_sql = "SELECT MAX(epoch) FROM space_keys WHERE space_id=?"
+    epoch_before = _rows("a", epoch_sql, (space_id,))[0][0]
+    s, left = _as(state, "b", "DELETE", f"/api/spaces/{space_id}/subscribe")
+    left = _must("space-follow-paired: b unfollows", s, left, ok=(200,))
+    if left.get("subscribed") or left.get("pending"):
+        raise SystemExit(f"space-follow-paired: unfollow answered {left!r}")
+    _poll(
+        "a to tombstone b's subscriber seat",
+        lambda: seat_on_a(1) and not seat_on_a(0),
+        timeout=45.0,
+    )
+    time.sleep(3.0)
+    epoch_after = _rows("a", epoch_sql, (space_id,))[0][0]
+    if epoch_after != epoch_before:
+        raise SystemExit(
+            f"space-follow-paired: the unfollow rotated the content key "
+            f"(epoch {epoch_before} → {epoch_after})"
+        )
+    print(f"  unfollow → seat tombstoned on a, key epoch unchanged ({epoch_after}) ✓")
+    print("space-follow-paired: ok (follow is an auto-approved join, leave is own)")
+
+
+def cmd_gfs_space_follow() -> None:
+    """v_96 — e follows a's global invite-only space through the GFS, unpaired.
+
+    a creates a global ``invite_only`` space with ``allow_subscribers`` on,
+    listed on the GFS (the listing carries a ``join_contact`` because our
+    GFS proves ``subscriber_seats``). e (paired with nobody) lists it
+    ``gfs_followable`` and ``POST /subscribe`` → ``{pending: true}``; a
+    auto-approves — NO admin step — and e is seated as a ``subscriber``
+    (e's ``space_members``, a's ``space_remote_members``). e holds only a
+    ``space_session`` row for a, reads a's post and cannot post.
+
+    Prereq: ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    a_url, e_url = f"http://127.0.0.1:{a['port']}", f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+
+    s, sp = _request(
+        f"{a_url}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": "Follow through the GFS",
+            "description": "global, invite only, followers allowed",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must("gfs-space-follow: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _request(
+        f"{a_url}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": {"allow_subscribers": True}},
+    )
+    _must("gfs-space-follow: a enables followers", s, patched, ok=(200,))
+    state.setdefault("gfs", {})["space_follow_space_id"] = space_id
+    _save(state)
+    print(f"  a: global invite-only space {space_id[:8]}…, followers on")
+
+    entry: dict | None = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and entry is None:
+        _request(f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST")
+        time.sleep(1.0)
+        s, rows = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and isinstance(rows, list):
+            entry = next(
+                (
+                    r
+                    for r in rows
+                    if r.get("space_id") == space_id and r.get("gfs_followable")
+                ),
+                None,
+            )
+    if entry is None:
+        raise SystemExit(
+            "gfs-space-follow: e never listed the space with a usable join contact"
+        )
+    print("  e lists it under Global (verified join contact) ✓")
+
+    s, body = _request(
+        f"{e_url}/api/spaces/{space_id}/subscribe",
+        token=e["token"],
+        method="POST",
+        body={},
+        timeout=30.0,
+    )
+    body = _must("gfs-space-follow: e follows", s, body, ok=(200,))
+    if body.get("pending") is not True or body.get("subscribed") is not False:
+        raise SystemExit(f"gfs-space-follow: follow answered {body!r}")
+    print(f"  e followed → {body!r} (no approval by a)")
+
+    def e_seat() -> list[tuple]:
+        return _rows(
+            "e",
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, e["user_id"]),
+        )
+
+    def a_seat() -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id=?"
+            " AND user_id=? AND tombstoned=0",
+            (space_id, e["user_id"]),
+        )
+
+    _poll(
+        "e to hold a subscriber seat",
+        lambda: [r for r in e_seat() if r[0] == "subscriber"],
+        timeout=60.0,
+    )
+    _poll(
+        "a to hold e's subscriber seat",
+        lambda: [r for r in a_seat() if r[0] == "subscriber"],
+        timeout=60.0,
+    )
+    print("  e is a subscriber on e and on a ✓")
+
+    content = f"Follow over the GFS {time.time_ns()}"
+    s, post = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("gfs-space-follow: a posts", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "e", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(f"gfs-space-follow: e read {seen.get('content')!r}")
+    print("  e reads a's post ✓")
+
+    s, refused = _request(
+        f"{e_url}/api/spaces/{space_id}/posts",
+        token=e["token"],
+        method="POST",
+        body={"type": "text", "content": "a follower must not post"},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"gfs-space-follow: e's post answered {s} {refused!r}, wanted 403"
+        )
+    print("  e's own post is refused (403) ✓")
+
+    s, conns = _request(f"{e_url}/api/connections", token=e["token"])
+    rows = [c for c in conns or [] if c.get("instance_id") == a["instance_id"]]
+    if s != 200 or [c.get("source") for c in rows] != ["space_session"]:
+        raise SystemExit(f"gfs-space-follow: e's row for a is not a space seat: {rows!r}")
+    print("  e and a are not paired — e holds only a space-session seat ✓")
+    print("gfs-space-follow: ok (unpaired household followed, auto-approved, reads)")
+
+
 #: How long a household stays down in ``gfs-join-request-offline`` — past
 #: the ±300 s live window, so a body judged against it would be dropped.
 JOIN_OFFLINE_WAIT_S = 330
@@ -28196,6 +28480,10 @@ def main() -> None:
         # d holds nothing. Late in the chain: it seats d as a follower in
         # the space the earlier steps assert member counts on.
         cmd_space_chat()
+        # ``space-follow-paired`` (v_96): b follows a's public invite-only
+        # space — an auto-approved join for the read-only role; leaving
+        # tombstones the seat without rotating the content key.
+        cmd_space_follow_paired()
         # ``space-reaction`` (v_93): in the same space a and c react to a
         # post of a's and a takes its reaction back — a, b and c show the
         # same reactions after each change.
@@ -28272,6 +28560,9 @@ def main() -> None:
         # GFS, a approves, e reads. Last: it gives e a space-session seat
         # with a, which the bootstrap-only steps above must not see.
         cmd_gfs_join_request()
+        # ``gfs-space-follow`` (v_96): e follows a's global invite-only
+        # space through the GFS — auto-approved, no admin step, subscriber seat.
+        cmd_gfs_space_follow()
         # ``members-page-catchup`` (v_95, sync pages Phase 3): host c down,
         # b catches up c's posts and page from the plain member a, every row
         # verified against c's signed page. Restarts b and c.

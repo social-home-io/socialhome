@@ -515,6 +515,28 @@ def _replaces_of(caps: dict) -> frozenset[str]:
     return frozenset(r for r in raw if isinstance(r, str) and r)
 
 
+#: The signed GFS capabilities a listing's join contact needs (v_84, v_96):
+#: a space that takes requests needs a GFS that serves contacts; one that
+#: takes follows only (invite-only, followers on) also one that serves the
+#: contact of an invite-only listing (an older GFS drops it).
+_CONTACT_FOR_REQUESTS: tuple[str, ...] = ("join_contact",)
+_CONTACT_FOR_FOLLOWS: tuple[str, ...] = ("join_contact", "subscriber_seats")
+
+
+def _contact_capabilities(space: Space | None) -> tuple[str, ...]:
+    """What a listing of *space* needs from its GFS to carry the owner's
+    join contact — ``()`` for a space that takes neither requests nor
+    follows (or none at all). The one rule for both the publish gate and
+    the contact signer."""
+    if space is None:
+        return ()
+    if normalize_join_mode(getattr(space, "join_mode", None)) != "invite_only":
+        return _CONTACT_FOR_REQUESTS
+    if space.features.allow_subscribers:
+        return _CONTACT_FOR_FOLLOWS
+    return ()
+
+
 class GfsConnectionService:
     """Service for managing GFS connections and space publications."""
 
@@ -578,6 +600,7 @@ class GfsConnectionService:
         "_space_key_pull",
         "_space_media",
         "_space_repo",
+        "_subscriber_seats",
         "_suite_refused_at",
         "_suspended_since",
         "_target_warned",
@@ -711,6 +734,10 @@ class GfsConnectionService:
         # …and ``join_contact`` (v_84): the GFS serves a listing's
         # authority-signed join contact. Sent only to a server that proved it.
         self._join_contact: dict[str, bool] = {}
+        # …and ``subscriber_seats`` (v_96): the GFS serves the join contact
+        # of a space that takes follows but no requests (invite-only with
+        # followers on). Such a contact goes only to a server that proved it.
+        self._subscriber_seats: dict[str, bool] = {}
         #: Our own published key-wrap key (hex) + its self-signature, for the
         #: join contact a global space's listing carries
         #: (:meth:`attach_join_contact_keys`). Empty: no contact is sent.
@@ -983,6 +1010,7 @@ class GfsConnectionService:
             self._moment_counts,
             self._space_key_pull,
             self._join_contact,
+            self._subscriber_seats,
             self._space_item_followers,
             self._payload_zlib1,
             self._payload_zlib1_dict1,
@@ -2983,13 +3011,13 @@ class GfsConnectionService:
             conn, "place_pin", self._place_pin
         )
         # v_84 — the owner's join contact goes only to a server that proved
-        # it folds the field into the signed bytes and serves it. Probed only
-        # for a space that would carry one, so an invite-only publish costs no
+        # it folds the field into the signed bytes and serves it; for a space
+        # that takes follows but no requests (v_96) only to one that also
+        # serves such a space's contact. Probed only for a space that would
+        # carry one, so a publish of a space that takes neither costs no
         # extra ``/gfs/info`` round-trip.
-        with_contact = await self._wants_join_contact(
-            space_id
-        ) and await self._signed_capability_supported(
-            conn, "join_contact", self._join_contact
+        with_contact = await self._gfs_proves_all(
+            conn, await self._join_contact_needs(space_id)
         )
         # The server this listing is for, inside the signed bytes: without
         # it the server that received the body could replay it, within the
@@ -3220,26 +3248,41 @@ class GfsConnectionService:
         )
         return body
 
-    async def _wants_join_contact(self, space_id: str) -> bool:
-        """Would *space_id*'s listing carry a join contact? (Keys wired, a
-        space that takes requests.)"""
+    async def _join_contact_needs(self, space_id: str) -> tuple[str, ...]:
+        """The signed GFS capabilities *space_id*'s listing needs to carry a
+        join contact — ``()`` when it carries none (keys not wired, or a
+        space that takes neither requests nor follows)."""
         if not all(self._join_contact_keys) or self._space_repo is None:
+            return ()
+        return _contact_capabilities(await self._space_repo.get(space_id))
+
+    async def _gfs_proves_all(
+        self, conn: GfsConnection, names: tuple[str, ...]
+    ) -> bool:
+        """Whether *conn*'s GFS proved every join-contact capability in
+        *names* under a valid signature (``False`` for none), probing in
+        order and stopping at the first it lacks."""
+        if not names:
             return False
-        space = await self._space_repo.get(space_id)
-        return (
-            space is not None
-            and normalize_join_mode(getattr(space, "join_mode", None)) != "invite_only"
-        )
+        caches = {
+            "join_contact": self._join_contact,
+            "subscriber_seats": self._subscriber_seats,
+        }
+        for name in names:
+            if not await self._signed_capability_supported(conn, name, caches[name]):
+                return False
+        return True
 
     async def _join_contact_for(self, space) -> dict | None:
-        """The authority-signed join contact for *space*, or ``None`` (an
-        invite-only space, no key-wrap key wired, no space seed here)."""
+        """The authority-signed join contact for *space*, or ``None`` (a
+        space that takes neither requests nor follows, no key-wrap key
+        wired, no space seed here)."""
         keywrap_pk, keywrap_sig = self._join_contact_keys
         if (
             not keywrap_pk
             or not keywrap_sig
             or self._space_repo is None
-            or normalize_join_mode(getattr(space, "join_mode", None)) == "invite_only"
+            or not _contact_capabilities(space)
         ):
             return None
         seed = await self._space_repo.get_space_seed(space.id)

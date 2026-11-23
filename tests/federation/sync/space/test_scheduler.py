@@ -1724,28 +1724,24 @@ async def test_startup_sweep_retries_an_undelivered_announcement(
     assert calls == ["host-x", "host-x"]
 
 
-# ── Followed-only spaces stay invisible to their host ─────────────────────
+# ── v_96: a follower syncs like a member; a bare mirror stays quiet ───────
 
 
 @pytest.mark.parametrize(
-    ("roles", "mirrored"),
+    "mirrored",
     [
-        # we only follow it (GFS subscriber seat)
-        ([SpaceRole.SUBSCRIBER.value], []),
-        ([], []),  # a bare GFS mirror / directory stub, no seat at all
+        [],  # a bare GFS mirror / directory stub, no seat at all
         # Only the host's people, left mirrored by an earlier members sync
         # in ``space_members``: none of them is a seat of ours.
-        ([SpaceRole.SUBSCRIBER.value], [SpaceRole.OWNER.value]),
-        ([], [SpaceRole.OWNER.value, SpaceRole.MEMBER.value]),
+        [SpaceRole.OWNER.value, SpaceRole.MEMBER.value],
     ],
 )
-async def test_a_followed_only_space_host_gets_no_announce_and_no_catchup(
-    bus, queue, sync_manager, roles, mirrored
+async def test_a_seatless_space_host_gets_no_announce_and_no_catchup(
+    bus, queue, sync_manager, mirrored
 ):
-    """The GFS shields followers from hosts: a PUBLIC space we only follow
-    (or merely mirror) must never make us route-discover its host, announce
-    our version to it or ask it for a catch-up — that would tell the host
-    we exist and are interested."""
+    """A space none of our people holds a seat in (a bare mirror) never
+    makes us route-discover its host, announce our version to it or ask it
+    for a catch-up."""
     fed = _FakeFederation(confirmed=set())
     sched = _mesh_sched(
         bus,
@@ -1754,7 +1750,7 @@ async def test_a_followed_only_space_host_gets_no_announce_and_no_catchup(
         fed,
         [_space("sp-followed", owner_instance_id="host-f")],
     )
-    sched._space_repo.local_roles["sp-followed"] = roles
+    sched._space_repo.local_roles["sp-followed"] = []
     sched._space_repo.mirrored_roles["sp-followed"] = mirrored
     sched._space_repo._members["sp-followed"] = ["host-f", "member-f"]
     announced: list[str] = []
@@ -1769,6 +1765,33 @@ async def test_a_followed_only_space_host_gets_no_announce_and_no_catchup(
     assert await sched._tick_mesh_announce() == 0
     assert announced == []
     assert fed.mesh_catchups == []
+
+
+async def test_a_follow_only_space_host_gets_announce_and_catchup_like_a_member(
+    bus, queue, sync_manager
+):
+    """v_96: a follower is a member with the read-only role on every path —
+    a space we only follow BEGINs its host exactly as a member's does (the
+    provider serves the follower subset)."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [_space("sp-followed", owner_instance_id="host-f")],
+    )
+    sched._space_repo.local_roles["sp-followed"] = [SpaceRole.SUBSCRIBER.value]
+    announced: list[str] = []
+
+    async def _announce(host: str) -> bool:
+        announced.append(host)
+        return True
+
+    sched.attach_mesh_announce(_announce)
+    await sched._tick_once()
+    assert announced == ["host-f"]
+    assert fed.mesh_catchups == [("sp-followed", "host-f")]
 
 
 async def test_a_member_space_host_still_gets_announce_and_catchup(
@@ -2147,19 +2170,21 @@ async def test_a_global_spaces_member_syncs_and_falls_back_to_a_helper(
     assert [r["instance_id"] for r in resume.requests] == ["mod-d"]
 
 
-async def test_a_followed_global_space_never_reaches_its_host(
+async def test_a_followed_global_space_begins_its_host_like_a_member(
     bus, queue, sync_manager, quick_answer_wait
 ):
-    """The GFS shields followers from hosts: a GLOBAL space we only follow
-    gets no BEGIN to its host (even a paired one) and no helper resume."""
+    """v_96: a GLOBAL space we only follow BEGINs its host like a member's;
+    a silent host sends a helper the resume, which the helper answers only
+    for a writer household (``member_gate``) — the follower subset comes
+    from the roster authority."""
     sched, _contact, resume = _helper_sched(
         bus, queue, sync_manager, helpers=["mod-d"], space_type=SpaceType.GLOBAL
     )
     sched._space_repo.local_roles["sp-1"] = [SpaceRole.SUBSCRIBER.value]
     await _round(sched)
     await _wait_checks(sched)
-    assert sched._federation.sent == []
-    assert resume.requests == []
+    assert [s["to"] for s in sched._federation.sent] == ["host"]
+    assert [r["instance_id"] for r in resume.requests] == ["mod-d"]
 
 
 async def test_a_host_that_answered_gets_no_fallback(
@@ -3079,16 +3104,13 @@ async def test_sync_now_for_a_space_hosted_here_asks_its_paired_members(
     assert fed.mesh_catchups == []
 
 
-async def test_sync_now_for_an_unknown_or_followed_space_asks_nobody(
-    bus, queue, sync_manager
-):
-    fed = _FakeFederation(confirmed={"host"})
+def _sync_now_sched(bus, queue, sync_manager, fed, roles):
     repo = _FakeSpaceRepo(
         spaces_by_type={SpaceType.PUBLIC: [_space("sp-1", owner_instance_id="host")]},
         members_by_space={"sp-1": ["host"]},
-        local_roles={"sp-1": [SpaceRole.SUBSCRIBER.value]},
+        local_roles={"sp-1": roles},
     )
-    sched = SpaceSyncScheduler(
+    return SpaceSyncScheduler(
         bus=bus,
         federation=fed,
         federation_repo=_FakeFedRepo([_peer("host")]),
@@ -3097,8 +3119,24 @@ async def test_sync_now_for_an_unknown_or_followed_space_asks_nobody(
         own_instance_id="self",
         sync_manager=sync_manager,
     )
+
+
+async def test_sync_now_for_an_unknown_or_seatless_space_asks_nobody(
+    bus, queue, sync_manager
+):
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _sync_now_sched(bus, queue, sync_manager, fed, [])
     assert await sched.sync_now("nope") == []
     assert await sched.sync_now("sp-1") == []
+
+
+async def test_sync_now_for_a_followed_space_asks_its_host_like_a_member(
+    bus, queue, sync_manager
+):
+    """v_96: a follower's Sync now BEGINs the host exactly as a member's."""
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _sync_now_sched(bus, queue, sync_manager, fed, [SpaceRole.SUBSCRIBER.value])
+    assert await sched.sync_now("sp-1") == ["host"]
 
 
 async def test_begin_carries_our_sync_page_only_to_a_v95_provider(

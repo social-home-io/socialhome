@@ -1935,12 +1935,14 @@ def _wire_federation_stack(
     )
     space_membership_handlers.attach_to(federation_service)
     app[K.space_membership_handlers_key] = space_membership_handlers
-    SpaceInviteInboundHandlers(
+    space_invite_handlers = SpaceInviteInboundHandlers(
         bus=bus,
         space_repo=space_repo,
         # A local community: the applicant's daily check budget.
         local_area_budget=local_area_budget,
-    ).attach_to(federation_service)
+    )
+    space_invite_handlers.attach_to(federation_service)
+    app[K.space_invite_handlers_key] = space_invite_handlers
     PeerDirectoryHandler(peer_space_directory_repo).attach_to(federation_service)
     private_invite_handler = PrivateSpaceInviteHandler(
         bus=bus,
@@ -5018,6 +5020,11 @@ def create_app(config: Config | None = None) -> web.Application:
         # §CP.F1 age gate on add_member + §CP.R public-tier gate.
         real_space_service.attach_child_protection(child_protection_service)
         real_space_service.attach_local_area_budget(local_area_budget)
+        # A follow of a space we hold no row for finds its host in a paired
+        # household's directory or the cached GFS listing (v_96).
+        real_space_service.attach_public_space_directory(
+            repos.public_space, peer_directory=repos.peer_space_directory
+        )
         # A new local user becomes a member of every household space we host.
         # Only this service knows our real instance id — the placeholder
         # built at wiring time is never subscribed.
@@ -5468,6 +5475,11 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         # v_49 — a member household's SPACE_INSTANCE_LEFT ends its seats here.
         app[K.space_membership_handlers_key].attach_space_service(real_space_service)
+        # v_96 — a remote follow (SPACE_JOIN_REQUEST for the subscriber
+        # role) is approved by the host on its own.
+        app[K.space_invite_handlers_key].attach_follow_approver(
+            real_space_service.approve_remote_follow
+        )
         # v_44 — rotate the space authority key when an admin household is
         # revoked (owner side), and apply the owner's rotation bundle
         # (member side).

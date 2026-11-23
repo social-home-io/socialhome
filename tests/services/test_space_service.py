@@ -1081,7 +1081,7 @@ async def test_transfer_ownership_refuses_follower(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(OwnerTransferFollowerError):
         await stack.space_svc.transfer_ownership(
             space.id, actor_username="anna", to_user_id=fan.user_id
@@ -1195,7 +1195,7 @@ async def test_reassign_keeps_the_transfer_rules(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     remote = SqliteSpaceRemoteMemberRepo(stack.db)
     stack.space_svc._remote_members = remote
     await remote.add(
@@ -2750,7 +2750,7 @@ async def test_subscribe_public_space_adds_subscriber_member(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
 
     assert await stack.space_svc.is_subscribed(fan.user_id, space.id) is True
     member = await stack.space_repo.get_member(space.id, fan.user_id)
@@ -2772,11 +2772,11 @@ async def test_subscribe_private_space_rejected(stack):
         owner_username="owner2", name="Priv", space_type=SpaceType.PRIVATE
     )
     with pytest.raises(KeyError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+        await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(KeyError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, "0" * 32)
+        await stack.space_svc.follow_space(fan.user_id, "0" * 32)
     with pytest.raises(SpacePermissionError, match="public / global"):
-        await stack.space_svc.subscribe_to_space(owner.user_id, space.id)
+        await stack.space_svc.follow_space(owner.user_id, space.id)
 
 
 async def test_subscribe_is_idempotent(stack):
@@ -2789,8 +2789,8 @@ async def test_subscribe_is_idempotent(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     follows = await stack.space_svc.list_subscriptions(fan.user_id)
     assert len(follows) == 1
 
@@ -2809,7 +2809,7 @@ async def test_subscribe_does_not_demote_existing_member(stack):
     await stack.space_svc.add_member(
         space.id, actor_username="owner4", user_id=real.user_id
     )
-    await stack.space_svc.subscribe_to_space(real.user_id, space.id)
+    await stack.space_svc.follow_space(real.user_id, space.id)
     member = await stack.space_repo.get_member(space.id, real.user_id)
     assert member.role == "member"
     # Not listed as a subscriber.
@@ -2828,15 +2828,15 @@ async def test_unsubscribe_removes_subscriber_only(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     await stack.space_svc.add_member(
         space.id, actor_username="owner5", user_id=real.user_id
     )
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, space.id)
+    await stack.space_svc.unfollow_space(fan.user_id, space.id)
     assert await stack.space_repo.get_member(space.id, fan.user_id) is None
 
-    await stack.space_svc.unsubscribe_from_space(real.user_id, space.id)
+    await stack.space_svc.unfollow_space(real.user_id, space.id)
     still = await stack.space_repo.get_member(space.id, real.user_id)
     assert still is not None
     assert still.role == "member"
@@ -2859,7 +2859,7 @@ async def test_turning_followers_off_drops_local_subscriber_rows(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     await stack.space_svc.add_member(
         space.id, actor_username="owner_off", user_id=real.user_id
     )
@@ -2890,7 +2890,7 @@ async def test_turning_followers_on_leaves_members_alone(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     await stack.space_svc.update_config(
         space.id,
         actor_username="owner_on",
@@ -2916,7 +2916,7 @@ async def test_list_subscriptions_only_returns_subscribers(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(u.user_id, pub.id)
+    await stack.space_svc.follow_space(u.user_id, pub.id)
     await stack.space_svc.add_member(
         mem_space.id, actor_username="owner6", user_id=u.user_id
     )
@@ -2934,7 +2934,7 @@ async def test_subscriber_cannot_create_post(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(SpacePermissionError, match="subscribers can only read"):
         await stack.space_svc.create_post(
             space.id,
@@ -2959,7 +2959,7 @@ async def test_subscriber_cannot_comment(stack):
         type=PostType.TEXT,
         content="hi",
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(SpacePermissionError, match="subscribers can only read"):
         await stack.space_svc.add_comment(
             post.id, author_user_id=fan.user_id, content="reply"
@@ -2981,7 +2981,7 @@ async def test_subscriber_cannot_react(stack):
         type=PostType.TEXT,
         content="hi",
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(SpacePermissionError, match="subscribers can only read"):
         await stack.space_svc.add_reaction(
             post.id, space_id=space.id, user_id=fan.user_id, emoji="👍"
@@ -3003,20 +3003,20 @@ async def test_subscribe_no_ops_for_an_existing_member_after_followers_off(stack
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     await stack.space_repo.save(
         replace(space, features=SpaceFeatures(allow_subscribers=False))
     )
 
     # No raise, and the existing subscriber row is untouched.
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     member = await stack.space_repo.get_member(space.id, fan.user_id)
     assert member is not None and member.role == "subscriber"
 
     # …but a NEW follower is refused.
     newcomer = await stack.provision_user("newcomer")
     with pytest.raises(SpacePermissionError, match="does not allow subscribers"):
-        await stack.space_svc.subscribe_to_space(newcomer.user_id, space.id)
+        await stack.space_svc.follow_space(newcomer.user_id, space.id)
 
 
 async def test_subscribe_banned_user_rejected(stack):
@@ -3033,7 +3033,7 @@ async def test_subscribe_banned_user_rejected(stack):
         space.id, fan.user_id, banned_by="owner10-uid", reason="test"
     )
     with pytest.raises(SpacePermissionError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+        await stack.space_svc.follow_space(fan.user_id, space.id)
 
 
 async def test_update_config_publishes_location_mode_changed(stack):
@@ -5378,7 +5378,7 @@ async def test_subscriber_roster_gossip_is_gated_on_v30(stack):
     fed = _roster_gossip_fed()
     stack.space_svc._federation = fed
 
-    await stack.space_svc.subscribe_to_space(bob.user_id, space.id)
+    await stack.space_svc.follow_space(bob.user_id, space.id)
     # Subscribing does not gossip; removing the follower does — and that
     # LEFT is the event carrying role='subscriber' on the wire.
     await stack.space_svc.remove_member(
@@ -6713,41 +6713,35 @@ class _FakeGfsMirror:
         self.unsubscribes.append(space_id)
 
 
-async def test_subscribe_mirrors_gfs_space_then_subscribes(stack):
-    """A space with no local row is mirrored from the GFS, the subscriber is
-    seated, and the GFS-side registration fires exactly once."""
+async def _seat_legacy_follower(stack, mirror, user_id: str, space_id: str) -> None:
+    """A follower row of a GFS-mirrored stub, as the legacy mirror on-ramp
+    left it (``ensure_mirror`` + a local ``subscriber`` seat). Follow no
+    longer mirrors; the teardown on unfollow still runs for such rows."""
+    if await stack.space_repo.get(space_id) is None:
+        await mirror.ensure_mirror(space_id)
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space_id,
+            user_id=user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-10-10T00:00:00+00:00",
+        )
+    )
+
+
+async def test_follow_of_an_unknown_space_is_not_found(stack):
+    """No row, no listing, no GFS listing → 404 — and the legacy GFS
+    mirror is never asked (v_96: a follow is a join request)."""
     fan = await stack.provision_user("fan")
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-
-    assert mirror.ensure_calls == ["remote-sp"]
-    assert mirror.subscribes == [("remote-sp", "gfs-1")]
-    member = await stack.space_repo.get_member("remote-sp", fan.user_id)
-    assert member is not None and member.role == "subscriber"
-    stored = await stack.space_repo.get("remote-sp")
-    assert stored is not None
-    assert stored.identity_public_key == _MIRROR_PIN
-
-
-async def test_subscribe_without_mirror_keeps_legacy_404(stack):
-    """No mirror attached (no GFS paired) → unchanged behaviour."""
-    fan = await stack.provision_user("fan")
     with pytest.raises(KeyError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-
-
-async def test_subscribe_when_mirror_finds_nothing_still_404s(stack):
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo, found=False)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    with pytest.raises(KeyError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+        await stack.space_svc.follow_space(fan.user_id, "remote-sp")
+    assert mirror.ensure_calls == []
     assert mirror.subscribes == []
 
 
-async def test_subscribe_to_local_space_skips_the_mirror(stack):
+async def test_follow_of_a_local_space_skips_the_mirror(stack):
     """An already-local space never triggers a GFS round-trip."""
     await stack.provision_user("owner_m")
     fan = await stack.provision_user("fan")
@@ -6760,41 +6754,9 @@ async def test_subscribe_to_local_space_skips_the_mirror(stack):
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
 
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     assert mirror.ensure_calls == []
     assert mirror.subscribes == []
-
-
-async def test_banned_user_never_reaches_the_gfs(stack):
-    """Ordering regression: the local ban refusal runs BEFORE the GFS-side
-    subscribe, so a banned user is never registered on the relay."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo, ban_user_id=fan.user_id)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-
-    with pytest.raises(SpacePermissionError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    assert mirror.subscribes == []
-    assert await stack.space_repo.get_member("remote-sp", fan.user_id) is None
-
-
-async def test_age_gated_user_never_reaches_the_gfs(stack):
-    """Same ordering regression for the §CP.F1 age gate."""
-    anna = await stack.provision_user("anna", is_admin=True)
-    kid = await stack.provision_user("kid")
-    cp = await _attach_cp(stack)
-    await cp.enable_protection(
-        minor_username="kid",
-        declared_age=8,
-        actor_user_id=anna.user_id,
-    )
-    mirror = _FakeGfsMirror(stack.space_repo, min_age=18)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-
-    with pytest.raises(SpacePermissionError, match="18"):
-        await stack.space_svc.subscribe_to_space(kid.user_id, "remote-sp")
-    assert mirror.subscribes == []
-    assert await stack.space_repo.get_member("remote-sp", kid.user_id) is None
 
 
 async def _seed_space_key(stack, space_id: str) -> None:
@@ -6814,10 +6776,10 @@ async def test_unsubscribe_last_subscriber_purges_the_mirror(stack):
     fan = await stack.provision_user("fan")
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
     await _seed_space_key(stack, "remote-sp")
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
     assert mirror.unsubscribes == ["remote-sp"]
     assert await stack.space_repo.get("remote-sp") is None
@@ -6832,7 +6794,7 @@ async def test_unsubscribe_purges_the_mirror_though_the_hosts_people_stay(stack)
     fan = await stack.provision_user("fan")
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
     await stack.db.enqueue(
         "INSERT INTO space_members(space_id, user_id, role)"
         " VALUES('remote-sp', 'u-host-owner', 'owner')"
@@ -6840,7 +6802,7 @@ async def test_unsubscribe_purges_the_mirror_though_the_hosts_people_stay(stack)
     # Ours only: the household-wide subscription list skips the host's.
     assert await stack.space_repo.list_subscribed_space_ids() == ["remote-sp"]
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
     assert mirror.unsubscribes == ["remote-sp"]
 
@@ -6864,10 +6826,10 @@ async def test_unsubscribe_keeps_mirror_while_a_subscribe_is_in_flight(stack):
     fan = await stack.provision_user("fan")
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
     mirror.in_grace = True
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
     assert mirror.unsubscribes == []
     assert await stack.space_repo.get("remote-sp") is not None
@@ -6880,7 +6842,7 @@ async def test_the_mirrors_post_grace_recheck_runs_the_same_teardown(stack):
     fan = await stack.provision_user("fan")
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
     await stack.space_repo.delete_member("remote-sp", fan.user_id)
 
     await stack.space_svc.release_gfs_mirror_if_unused("remote-sp")
@@ -6897,12 +6859,12 @@ async def test_the_mirror_teardown_waits_for_a_subscribe_in_progress(stack):
     other = await stack.provision_user("other")
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
 
     lock = stack.space_svc._mirror_lock("remote-sp")
     await lock.acquire()  # a subscribe of `other` is in progress
     leave = asyncio.create_task(
-        stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+        stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
     )
     await asyncio.sleep(0.3)  # ample time to finish, were it not waiting
     assert not leave.done()
@@ -6925,11 +6887,11 @@ async def test_unsubscribe_keeps_mirror_while_another_member_remains(stack):
     other = await stack.provision_user("other")
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    await stack.space_svc.subscribe_to_space(other.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, other.user_id, "remote-sp")
     await _seed_space_key(stack, "remote-sp")
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
     assert mirror.unsubscribes == []
     assert await stack.space_repo.get("remote-sp") is not None
@@ -6950,9 +6912,9 @@ async def test_unsubscribe_never_purges_an_owned_space(stack):
     )
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, space.id)
+    await stack.space_svc.unfollow_space(fan.user_id, space.id)
 
     assert mirror.unsubscribes == []
     assert await stack.space_repo.get(space.id) is not None
@@ -6974,9 +6936,9 @@ async def test_unsubscribe_leaves_a_peer_discovered_stub_alone(stack):
     # No ``public_space_cache`` row → no GFS directory ever listed this id.
     mirror = _FakeGfsMirror(stack.space_repo, gfs_listed=False)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "peer-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "peer-sp")
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "peer-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "peer-sp")
 
     assert mirror.unsubscribes == []
     assert await stack.space_repo.get("peer-sp") is not None
@@ -7005,9 +6967,9 @@ async def test_unsubscribe_leaves_a_non_global_remote_stub_alone(stack):
     )
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "public-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "public-sp")
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "public-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "public-sp")
 
     assert mirror.unsubscribes == []
     assert await stack.space_repo.get("public-sp") is not None
@@ -7019,9 +6981,9 @@ async def test_unsubscribe_purges_a_proven_gfs_mirror(stack):
     fan = await stack.provision_user("fan")
     mirror = _FakeGfsMirror(stack.space_repo, gfs_listed=True)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
     assert mirror.unsubscribes == ["remote-sp"]
     assert await stack.space_repo.get("remote-sp") is None
@@ -7034,14 +6996,14 @@ async def test_unsubscribe_skips_the_purge_when_the_seed_is_unreadable(stack):
     fan = await stack.provision_user("fan")
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
 
     async def _boom(space_id):
         raise RuntimeError("space seed access requires a key_manager")
 
     stack.space_repo.get_space_seed = _boom
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
     assert mirror.unsubscribes == []
     assert await stack.space_repo.get("remote-sp") is not None
@@ -7112,7 +7074,7 @@ async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
     # Seat the stub the way ensure_mirror would, then subscribe locally.
     seeder = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(seeder)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seat_legacy_follower(stack, seeder, fan.user_id, "remote-sp")
     # What ``take_seat`` records for the GFS subscribe the fake stood in for.
     await seats.record(
         GfsSpaceSeat(
@@ -7125,7 +7087,7 @@ async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
     )
     stack.space_svc.attach_gfs_space_mirror(real_mirror)
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
     assert down.calls == [("remote-sp", "gfs-1")]
     assert await stack.space_repo.get("remote-sp") is None

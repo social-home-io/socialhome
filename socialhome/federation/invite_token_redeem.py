@@ -63,6 +63,7 @@ from ..domain.member_card import MemberCard
 from ..domain.space import (
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
+    PUBLIC_SPACE_TIERS,
     JoinOwner,
     JoinRequestSentError,
     LocalAreaRateLimitedError,
@@ -1548,6 +1549,26 @@ class SpaceInviteTokenRedeemCoordinator:
                 "— refusing (a use was spent)",
                 seat,
             )
+            return None, REDEEM_DENY_REASON, None
+        if (
+            seat == SpaceRole.SUBSCRIBER
+            and row.get("bound_instance_id")
+            and space is not None
+            and space.space_type in PUBLIC_SPACE_TIERS
+            and not space.features.allow_subscribers
+        ):
+            # A follow's seat (the approval's token, bound to the
+            # household) of a public / global space is written only while
+            # the space takes followers (v_96): the switch may have gone off
+            # between the approval and this redeem. The use is handed back.
+            # An explicit follower link (unbound) is the owner's own grant
+            # and works whatever the switch (invites.md).
+            log.info(
+                "invite redeem: refused a follower seat for space %s — it "
+                "takes no followers",
+                space_id,
+            )
+            await self._release_token_use(token, space_id)
             return None, REDEEM_DENY_REASON, None
 
         # An admin/mod link does NOT grant admin straight through (owner

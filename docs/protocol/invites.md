@@ -1249,6 +1249,19 @@ space setting: that setting governs people who walked up on their own,
 while an explicit invite is the owner deciding otherwise for one named
 link.
 
+A **follow** (v_96) is the walk-up case that setting governs. It is no
+link: the host approves the follow request on its own while
+`allow_subscribers` is on and mints a single-use `subscriber` token **bound
+to the applicant household and person** (`bound_instance_id` /
+`bound_user_id`, the same binding an admin's approval of a join request
+uses), which the applicant redeems automatically — over §D2 when paired or
+mesh-reachable, over the §D2b bootstrap leg when the follow came through a
+GFS. Because the seat is written by that redeem, `allow_subscribers` is
+re-checked there for a bound `subscriber` token only (`consume_invite_token`
+reports `bound_instance_id`): switched off between the approval and the
+redeem → `REDEEM_DENY_REASON`, the use handed back. See
+[spaces.md › Followers](./spaces.md#followers-v_96).
+
 #### An `admin`/mod link is approved, never granted straight through (2026-09-19)
 
 An `admin` link does **not** seat an admin. A link can be forwarded or
