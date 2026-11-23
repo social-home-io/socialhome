@@ -539,6 +539,7 @@ class GfsConnectionService:
         "_invite_links",
         "_join_contact",
         "_join_contact_keys",
+        "_listing_counts",
         "_listing_failed_at",
         "_listing_proven_at",
         "_listing_seen",
@@ -711,6 +712,9 @@ class GfsConnectionService:
         # …and ``join_contact`` (v_84): the GFS serves a listing's
         # authority-signed join contact. Sent only to a server that proved it.
         self._join_contact: dict[str, bool] = {}
+        #: GFS id → proved ``listing_counts`` (folds a listing's signed
+        #: ``member_count`` / ``follower_count`` into the bytes it verifies).
+        self._listing_counts: dict[str, bool] = {}
         #: Our own published key-wrap key (hex) + its self-signature, for the
         #: join contact a global space's listing carries
         #: (:meth:`attach_join_contact_keys`). Empty: no contact is sent.
@@ -983,6 +987,7 @@ class GfsConnectionService:
             self._moment_counts,
             self._space_key_pull,
             self._join_contact,
+            self._listing_counts,
             self._space_item_followers,
             self._payload_zlib1,
             self._payload_zlib1_dict1,
@@ -1105,7 +1110,9 @@ class GfsConnectionService:
         re-publish never re-lists on a GFS the owner is removing."""
         self._change_lock = factory
 
-    async def _relist(self, space_id: str, gfs_id: str) -> bool:
+    async def _relist(
+        self, space_id: str, gfs_id: str, *, announce: bool = True
+    ) -> bool:
         """Re-publish *space_id* to *gfs_id* under the space's change lock,
         and only while this household still holds that listing — a refresh
         that raced a withdrawal must not undo it. ``False`` when the row is
@@ -1117,7 +1124,7 @@ class GfsConnectionService:
             }
             if gfs_id not in listed:
                 return False
-            await self.publish_space(space_id, gfs_id)
+            await self.publish_space(space_id, gfs_id, announce=announce)
             return True
 
     async def _listings_changed(self, space_id: str) -> None:
@@ -2365,6 +2372,8 @@ class GfsConnectionService:
             self._addressee_key[conn.id] = True
         if caps is not None and caps.get("withdrawn_repin") is True:
             self._withdrawn_repin[conn.id] = True
+        if caps is not None and caps.get("listing_counts") is True:
+            self._listing_counts[conn.id] = True
         if caps is not None:
             self._proof_offered[conn.id] = caps.get(PROOF_CAPABILITY) is True
             limit = _space_media_limit(caps)
@@ -2999,10 +3008,17 @@ class GfsConnectionService:
         # signature) — that one gets today's body. Read from the cache each
         # connect's ``/gfs/info`` fetch warms: no extra round-trip.
         gfs_key = self._listing_addressee_key(conn)
+        # The space's member and follower counts (owner decision
+        # 2026-11-23: listing metadata, like its name) go only to a server
+        # that proved it folds them into the signed bytes — an older one
+        # would 403 the whole publish. Read from the cache every connect's
+        # ``/gfs/info`` fetch warms: no extra round-trip per publish.
+        with_counts = self._listing_counts.get(conn.id) is True
         body = await self._build_publish_body(
             space_id,
             with_place=with_place,
             with_contact=with_contact,
+            with_counts=with_counts,
             gfs_key=gfs_key,
         )
         if "authority_cert" in body and not await self._signed_capability_supported(
@@ -3018,6 +3034,7 @@ class GfsConnectionService:
                 with_cert=False,
                 with_place=with_place,
                 with_contact=with_contact,
+                with_counts=with_counts,
                 gfs_key=gfs_key,
             )
         client = self._client()
@@ -3106,6 +3123,7 @@ class GfsConnectionService:
         with_cert: bool = True,
         with_place: bool = False,
         with_contact: bool = False,
+        with_counts: bool = False,
         gfs_key: str | None = None,
     ) -> dict:
         """Compose + sign the publish body.
@@ -3212,6 +3230,15 @@ class GfsConnectionService:
         contact = await self._join_contact_for(space) if with_contact else None
         if contact is not None:
             body["join_contact"] = contact
+        # The space's member and follower counts (the shared listing
+        # builder), inside the signed body, so a GFS or a relay cannot
+        # inflate them. Only for a server that proved ``listing_counts``.
+        counts = (
+            await self._space_repo.listing_counts(space.id) if with_counts else None
+        )
+        if counts is not None:
+            body["member_count"] = counts.member_count
+            body["follower_count"] = counts.follower_count
         if gfs_key is not None:
             body["gfs_key"] = gfs_key
         canonical = canonical_bytes(body)
@@ -4132,7 +4159,7 @@ class GfsConnectionService:
             return "gone"
         return "confirmed" if self._pin_answered(space.id, conn, body, data) else "owed"
 
-    async def republish_space(self, space_id: str) -> int:
+    async def republish_space(self, space_id: str, *, announce: bool = True) -> int:
         """Re-publish ``space_id`` to every GFS it is ALREADY published to.
 
         The v_44 authority rotation calls this so each GFS that lists the
@@ -4141,7 +4168,8 @@ class GfsConnectionService:
         Never a server that doesn't list it: a key rotation or a settings
         edit must never be how a connection server first learns that a
         space exists. Fail-soft per GFS; returns how many accepted the
-        publish.
+        publish. ``announce=False`` — a change that cannot move the members'
+        GFS list (a member or follower count) — skips that refresh.
         """
         if not await self._owns(space_id):
             return 0
@@ -4150,7 +4178,7 @@ class GfsConnectionService:
             if conn.status != "active":
                 continue
             try:
-                if await self._relist(space_id, conn.id):
+                if await self._relist(space_id, conn.id, announce=announce):
                     done += 1
             except (GfsConnectionError, SpaceNotPublishableError) as exc:
                 log.warning(

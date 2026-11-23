@@ -3985,6 +3985,7 @@ async def _repin_svc(env, monkeypatch, *, with_cert: bool):
         with_cert=True,
         with_place=False,
         with_contact=False,
+        with_counts=False,
         gfs_key=None,
     ):
         return {"name": "S", **({"authority_cert": {"k": 1}} if with_cert else {})}
@@ -4011,6 +4012,7 @@ async def _repin_svc(env, monkeypatch, *, with_cert: bool):
             with_cert=True,
             with_place=False,
             with_contact=False,
+            with_counts=False,
             gfs_key=None,
         ):
             return {"name": "S"}

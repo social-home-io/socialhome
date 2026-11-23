@@ -461,6 +461,7 @@ from .services.space_crypto_service import (
     SpaceContentEncryption,
 )
 from .services.space_gfs_needed_service import SpaceGfsNeededService
+from .services.space_listing_counts_service import SpaceListingCountsService
 from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
@@ -3881,6 +3882,18 @@ def create_app(config: Config | None = None) -> web.Application:
         public_space_discovery.on_connections_changed
     )
 
+    # ── A space's member + follower counts (owner decision 2026-11-23) ───
+    # Shown on the space page from the roster or the host's shared listing;
+    # re-shared (coalesced) when they change, once federation is up.
+    space_listing_counts = SpaceListingCountsService(
+        bus=bus,
+        space_repo=repos.space,
+        public_space_repo=repos.public_space,
+        peer_space_directory_repo=repos.peer_space_directory,
+        gfs=gfs_connection_service,
+    )
+    space_listing_counts.wire()
+
     # ── Map tile proxy ───────────────────────────────────────────────────
     # OSM returns 403 to browser-issued tile requests (a browser cannot set
     # ``User-Agent``/``Referer``), so the backend fetches tiles instead with
@@ -4620,6 +4633,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.public_space_discovery_key] = public_space_discovery
     app[K.map_tile_service_key] = map_tile_service
     app[K.peer_space_directory_repo_key] = repos.peer_space_directory
+    app[K.space_listing_counts_service_key] = space_listing_counts
     app[K.gallery_service_key] = gallery_service
     app[K.gallery_trash_purge_scheduler_key] = gallery_trash_purge_scheduler
     app[K.gallery_repo_key] = gallery_repo
@@ -5311,6 +5325,11 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
+        # Counts re-share to the GFS listings and the paired directory.
+        space_listing_counts.attach(
+            peer_directory=app[K.peer_directory_service_key],
+            own_instance_id=identity.instance_id,
+        )
         if boot_row_marks is not None:
             app[K.space_sync_scheduler_key].set_row_marks(boot_row_marks)
         # v_67: ``reactions_reach`` on every moment the API returns; seal /
@@ -6773,6 +6792,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await reaction_router.stop()
         await moment_reaction_gfs.stop()
         await moment_public_media_inbound.stop()
+        # A count re-share waiting for its window rides the publish session.
+        await space_listing_counts.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()
         # Background seat releases ride the HTTP session too.

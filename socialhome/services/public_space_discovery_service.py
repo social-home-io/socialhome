@@ -32,6 +32,7 @@ from ..domain.space import (
     normalize_join_mode,
     normalize_min_age,
 )
+from ..domain.space_listing_counts import parse_listing_count
 from ..domain.space_place import parse_place_pin_wire
 from ..federation.join_contact_pin import candidate_from_listing, merge_pin
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
@@ -342,11 +343,13 @@ class PublicSpaceDiscoveryService:
                         lat=pin.lat if pin is not None else None,
                         lon=pin.lon if pin is not None else None,
                         radius_km=pin.radius_km if pin is not None else None,
-                        member_count=int(
-                            item.get("subscriber_count")
-                            or item.get("member_count", 0)
-                            or 0,
-                        ),
+                        # The counts the host declared in its signed
+                        # listing (re-validated). Never the GFS's own
+                        # ``subscriber_count`` — its relay seats, not the
+                        # space's members. Absent (an older host or GFS) ⇒
+                        # no number, never 0.
+                        member_count=parse_listing_count(item.get("member_count")),
+                        follower_count=parse_listing_count(item.get("follower_count")),
                         # Clamped: the GFS's ``min_age`` is an unconstrained
                         # int, and the ``public_space_cache`` CHECK would
                         # raise on e.g. 15 — aborting the whole poll tick.

@@ -58,6 +58,8 @@ class PeerSpaceCollectionView(BaseView):
                     "description": e.description,
                     "emoji": e.emoji,
                     "member_count": e.member_count,
+                    # null = an older host that shares no follower count.
+                    "follower_count": e.follower_count,
                     "join_mode": e.join_mode,
                     "min_age": e.min_age,
                     "category": normalize_category(e.category),

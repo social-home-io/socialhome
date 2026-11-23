@@ -88,6 +88,7 @@ def _listing_view(row: HostedSpaceListing) -> dict:
             "allow_subscribers": space.features.allow_subscribers,
             "min_age": space.min_age,
             "member_count": row.member_count,
+            "follower_count": row.follower_count,
             "role": row.caller_role,
             # A local community's area (4 dp centre + radius), else null —
             # the SPA shows it and checks it against this household's home.
