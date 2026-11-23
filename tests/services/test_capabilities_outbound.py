@@ -15,10 +15,20 @@ from __future__ import annotations
 
 import dataclasses
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from socialhome.domain.events import (
+    CpProtectionDisabled,
+    CpProtectionEnabled,
+    PairingConfirmed,
+    PeerProtoVersionRaised,
+    UserDeprovisioned,
+    UserPreferencesPatched,
+    UserProfileUpdated,
+    UserProvisioned,
+)
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -391,3 +401,123 @@ async def test_no_keywrap_key_when_none_is_configured():
 
     assert "keywrap_pk" not in fed.send_event.await_args.kwargs["payload"]
     repo.get_instance.assert_not_awaited()
+
+
+# ── v_96 decision C: moment_look_hops ────────────────────────────────────
+
+
+def _look_outbound(peers: list[RemoteInstance], looks: list[int]):
+    """An outbound whose household looks ``looks[0]``, then ``looks[1]`` …"""
+    by_id = {p.id: p for p in peers}
+    repo = SimpleNamespace(
+        list_instances=AsyncMock(return_value=peers),
+        get_instance=AsyncMock(side_effect=lambda iid: by_id.get(iid)),
+        get_local_identity=AsyncMock(return_value=None),
+    )
+    moments = SimpleNamespace(moment_look_hops=AsyncMock(side_effect=looks))
+    fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
+    bus = SimpleNamespace(subscribe=MagicMock())
+    out = CapabilitiesOutbound(
+        federation_service=fed, federation_repo=repo, bus=bus, moment_repo=moments
+    )
+    return out, fed, bus, moments
+
+
+def _looks_sent(fed) -> dict[str, object]:
+    return {
+        c.kwargs["to_instance_id"]: c.kwargs["payload"].get("moment_look_hops")
+        for c in fed.send_event.await_args_list
+    }
+
+
+_V96 = _peer("inst-96", proto_version=96)
+_V95 = _peer("inst-95", proto_version=95)
+_SEAT = dataclasses.replace(
+    _peer("inst-seat", proto_version=96),
+    source=InstanceSource.SPACE_SESSION,
+    relay_via="https://gfs.example.org",
+)
+
+
+@pytest.mark.asyncio
+async def test_publish_carries_the_look_to_paired_households_only():
+    out, fed, _bus, moments = _look_outbound([_V96, _V95, _SEAT], [4])
+    assert await out.publish() == 3
+    assert _looks_sent(fed) == {"inst-96": 4, "inst-95": 4, "inst-seat": None}
+    seat = fed.send_event.await_args_list[2].kwargs["payload"]
+    assert "moment_look_hops" not in seat
+    assert moments.moment_look_hops.await_count == 1  # read once per fan-out
+
+
+@pytest.mark.asyncio
+async def test_a_changed_look_is_re_sent_to_v96_paired_households_only():
+    out, fed, _bus, _moments = _look_outbound([_V96, _V95, _SEAT], [3, 3, 5, 5])
+    await out.publish()
+    fed.send_event.reset_mock()
+    assert await out.refresh_moment_look() == 0  # 3 → 3: nothing sent
+    assert await out.refresh_moment_look() == 1  # 3 → 5
+    assert _looks_sent(fed) == {"inst-96": 5}
+    fed.send_event.reset_mock()
+    assert await out.refresh_moment_look() == 0  # 5 → 5
+    fed.send_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_a_moments_patch_recomputes_the_look():
+    out, _fed, _bus, moments = _look_outbound([_V96], [3, 3])
+    await out._on_look_input(
+        UserPreferencesPatched(user_id="u", keys=frozenset({"locale"}))
+    )
+    moments.moment_look_hops.assert_not_awaited()
+    await out._on_look_input(
+        UserPreferencesPatched(user_id="u", keys=frozenset({"moments"}))
+    )
+    await out._on_look_input(UserProvisioned(user_id="u", username="u", is_admin=False))
+    assert moments.moment_look_hops.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_wire_listens_to_whatever_may_change_the_look():
+    out, _fed, bus, _moments = _look_outbound([], [3])
+    out.wire()
+    kinds = {c.args[0] for c in bus.subscribe.call_args_list}
+    assert {
+        PairingConfirmed,
+        UserPreferencesPatched,
+        UserProvisioned,
+        UserProfileUpdated,
+        UserDeprovisioned,
+        CpProtectionEnabled,
+        CpProtectionDisabled,
+        PeerProtoVersionRaised,
+    } <= kinds
+
+
+@pytest.mark.asyncio
+async def test_without_a_moment_repo_no_look_is_sent_or_listened_for():
+    repo = SimpleNamespace(
+        list_instances=AsyncMock(return_value=[_V96]),
+        get_instance=AsyncMock(return_value=_V96),
+        get_local_identity=AsyncMock(return_value=None),
+    )
+    fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
+    bus = SimpleNamespace(subscribe=MagicMock())
+    out = CapabilitiesOutbound(federation_service=fed, federation_repo=repo, bus=bus)
+    out.wire()
+    await out.publish()
+    assert "moment_look_hops" not in fed.send_event.await_args.kwargs["payload"]
+    assert await out.refresh_moment_look() == 0
+    assert {c.args[0] for c in bus.subscribe.call_args_list} == {PairingConfirmed}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("old", "new", "told"),
+    [(95, 96, True), (94, 97, True), (96, 97, False), (90, 95, False)],
+)
+async def test_a_peer_reaching_v96_is_told_our_look_once(old, new, told):
+    out, fed, _bus, _moments = _look_outbound([_V96], [2])
+    await out._on_peer_raised(
+        PeerProtoVersionRaised(instance_id="inst-96", old_version=old, new_version=new)
+    )
+    assert _looks_sent(fed) == ({"inst-96": 2} if told else {})

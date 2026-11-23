@@ -67,6 +67,10 @@ class _FakeFederationService:
         self._event_registry = _FakeRegistry()
         self.mesh_claims: list[FederationEvent] = []
         self.pending_pairings = _StagedHalves()
+        self.moment_looks: dict[str, int] = {}
+
+    def set_peer_moment_look_hops(self, instance_id: str, look: int) -> None:
+        self.moment_looks[instance_id] = look
 
     async def record_mesh_member_claim(self, event, *, notify=True):
         self.mesh_claims.append(event)
@@ -679,6 +683,37 @@ async def test_capabilities_updated_same_version_still_stamps_seen(repo, handler
     )
     assert repo.capabilities_seen == ["peer-a"]
     assert repo.instances["peer-a"].capabilities_seen_at is not None
+
+
+@pytest.mark.parametrize(
+    ("sent", "kept"),
+    [
+        ({"moment_look_hops": 5}, 5),
+        ({"moment_look_hops": 1}, 1),
+        ({}, 4),  # missing: the old value stays
+        ({"moment_look_hops": 0}, 4),
+        ({"moment_look_hops": 6}, 4),
+        ({"moment_look_hops": True}, 4),
+        ({"moment_look_hops": "5"}, 4),
+        ({"moment_look_hops": 4.5}, 4),
+        ({"moment_look_hops": None}, 4),
+    ],
+)
+async def test_capabilities_updated_keeps_a_valid_moment_look(
+    repo, handlers, sent, kept
+):
+    """v_96 decision C: an integer 1–5, applied even at the same version (a
+    look change re-sends the same version), kept in memory; anything else is
+    ignored."""
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    handlers._federation.moment_looks["peer-a"] = 4
+    await handlers._on_capabilities_updated(
+        _event(
+            FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+            {"proto_version": 1, **sent},
+        )
+    )
+    assert handlers._federation.moment_looks == {"peer-a": kept}
 
 
 async def test_capabilities_updated_unknown_instance_is_noop(repo, handlers):

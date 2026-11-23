@@ -36,6 +36,7 @@ from ...domain.federation import (
     PairingKeywrapInvalidError,
     PairingStatus,
 )
+from ...domain.moment import MOMENT_MAX_HOPS
 from ...federation.pairing_gfs_reach import verified_peer_keywrap
 from ...infrastructure.event_bus import EventBus
 from ...peer_url import InvalidPeerUrlError, validate_peer_url
@@ -321,6 +322,10 @@ class PairingInboundHandlers:
         # key-wrap key. Applied before the version short-circuit below (a
         # same-version re-announcement may carry it for the first time).
         keywrap_learned = await self._apply_peer_keywrap(instance, event.payload)
+        # v_96 decision C — how far the peer's people look for moments. Also
+        # before the short-circuit: it is re-sent at the same version when a
+        # person there changes how far they look.
+        self._apply_moment_look(instance, event.payload)
         # Sent on every startup of that household: the "it is back" edge.
         await self._bus.publish(
             PeerCapabilitiesAdvertised(
@@ -380,6 +385,29 @@ class PairingInboundHandlers:
             event.from_instance,
             proto_version,
         )
+
+    def _apply_moment_look(self, instance: RemoteInstance, payload: dict) -> None:
+        """Keep how far *instance*'s people look for moments (v_96,
+        decision C): ``moment_look_hops``, an integer 1–5 (never a bool), in
+        :class:`FederationService` memory. Missing or anything else leaves
+        the kept value as it was — a malformed field never widens (or
+        narrows) what we relay to it."""
+        if "moment_look_hops" not in payload or self._federation is None:
+            return
+        look = payload["moment_look_hops"]
+        if (
+            not isinstance(look, int)
+            or isinstance(look, bool)
+            or not 1 <= look <= MOMENT_MAX_HOPS
+        ):
+            log.warning(
+                "INSTANCE_CAPABILITIES_UPDATED from %s: invalid moment_look_hops"
+                " %r — ignored",
+                instance.id,
+                look,
+            )
+            return
+        self._federation.set_peer_moment_look_hops(instance.id, look)
 
     async def _apply_peer_keywrap(
         self,

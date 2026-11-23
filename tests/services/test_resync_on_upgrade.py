@@ -1,8 +1,8 @@
 """Tests for socialhome.services.resync_on_upgrade.
 
-The capability-resync upgrade trigger fires at most once per OURS bump,
+The capability resync asks every peer with the handler once per OURS bump,
 asks only confirmed peers that support v_19+ to re-advertise capabilities,
-and persists OURS so an unchanged restart never re-fires (storm guard).
+persists OURS, and on any other restart asks only v_96 peers (their moment look).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from socialhome.domain.federation_capabilities import (
     FederationCapability,
 )
 from socialhome.services.resync_on_upgrade import (
-    request_capability_resync_if_upgraded,
+    request_capability_resync,
 )
 
 MIN_FOR_INSTANCE_RESYNC = FederationCapability.MIN_FOR_INSTANCE_RESYNC
@@ -51,13 +51,19 @@ class FakeFederationRepo:
 
 
 class FakeFederation:
-    def __init__(self, supports: dict[str, bool]) -> None:
-        self._supports = supports
+    def __init__(self, supports: dict[str, bool | int]) -> None:
+        """*supports*: per peer its version, or ``True`` (v_95: has the
+        resync handler, no moment look) / ``False`` (v_18)."""
+        self._versions = {
+            k: (95 if v is True else 18 if v is False else v)
+            for k, v in supports.items()
+        }
+        self.asked: list[int] = []
         self.sends: list[dict] = []
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
-        assert min_version == MIN_FOR_INSTANCE_RESYNC
-        return self._supports.get(instance_id, False)
+        self.asked.append(min_version)
+        return self._versions.get(instance_id, 0) >= min_version
 
     async def send_event(self, *, to_instance_id, event_type, payload):
         self.sends.append(
@@ -69,29 +75,32 @@ class FakeFederation:
         )
 
 
-async def test_no_upgrade_when_last_equals_ours_sends_nothing():
-    """last == OURS → returns 0, no sends, last unchanged (the storm guard)."""
+async def test_no_upgrade_when_last_equals_ours_asks_only_v96_peers():
+    """last == OURS → an older peer is not asked (the storm guard), last
+    unchanged; a v_96 peer is asked so we re-learn its moment look, which we
+    keep only in memory (decision C)."""
     ident = FakeIdentityRepo(last=OURS)
-    fed_repo = FakeFederationRepo([FakePeer("p1")])
-    fed = FakeFederation({"p1": True})
+    fed_repo = FakeFederationRepo([FakePeer("p1"), FakePeer("p96")])
+    fed = FakeFederation({"p1": True, "p96": 96})
 
-    sent = await request_capability_resync_if_upgraded(
+    sent = await request_capability_resync(
         federation=fed, federation_repo=fed_repo, identity_repo=ident
     )
 
-    assert sent == 0
-    assert fed.sends == []
+    assert sent == 1
+    assert [s["to"] for s in fed.sends] == ["p96"]
+    assert fed.sends[0]["payload"] == {"scope": "capabilities"}
+    assert set(fed.asked) == {FederationCapability.MIN_FOR_MOMENT_REACH}
     assert ident.set_calls == []  # last untouched
-    assert fed_repo.list_kwargs is None  # never even enumerated peers
 
 
-async def test_last_greater_than_ours_sends_nothing():
-    """A downgrade (last > OURS) is also not an upgrade — no sends."""
+async def test_last_greater_than_ours_asks_no_older_peer():
+    """A downgrade (last > OURS) is also not an upgrade — no older peer."""
     ident = FakeIdentityRepo(last=OURS + 5)
     fed_repo = FakeFederationRepo([FakePeer("p1")])
     fed = FakeFederation({"p1": True})
 
-    sent = await request_capability_resync_if_upgraded(
+    sent = await request_capability_resync(
         federation=fed, federation_repo=fed_repo, identity_repo=ident
     )
 
@@ -100,13 +109,27 @@ async def test_last_greater_than_ours_sends_nothing():
     assert ident.set_calls == []
 
 
+async def test_an_upgrade_asks_every_peer_with_the_handler():
+    ident = FakeIdentityRepo(last=OURS - 1)
+    fed_repo = FakeFederationRepo([FakePeer("p1"), FakePeer("p96")])
+    fed = FakeFederation({"p1": True, "p96": 96})
+
+    assert (
+        await request_capability_resync(
+            federation=fed, federation_repo=fed_repo, identity_repo=ident
+        )
+        == 2
+    )
+    assert set(fed.asked) == {MIN_FOR_INSTANCE_RESYNC}
+
+
 async def test_first_boot_none_sends_and_persists():
     """last is None (first boot post-migration) → sends, persists OURS."""
     ident = FakeIdentityRepo(last=None)
     fed_repo = FakeFederationRepo([FakePeer("p1"), FakePeer("p2")])
     fed = FakeFederation({"p1": True, "p2": True})
 
-    sent = await request_capability_resync_if_upgraded(
+    sent = await request_capability_resync(
         federation=fed, federation_repo=fed_repo, identity_repo=ident
     )
 
@@ -124,7 +147,7 @@ async def test_upgrade_sends_and_persists():
     fed_repo = FakeFederationRepo([FakePeer("p1")])
     fed = FakeFederation({"p1": True})
 
-    sent = await request_capability_resync_if_upgraded(
+    sent = await request_capability_resync(
         federation=fed, federation_repo=fed_repo, identity_repo=ident
     )
 
@@ -138,7 +161,7 @@ async def test_old_peer_skipped_but_ours_still_persisted():
     fed_repo = FakeFederationRepo([FakePeer("old"), FakePeer("new")])
     fed = FakeFederation({"old": False, "new": True})
 
-    sent = await request_capability_resync_if_upgraded(
+    sent = await request_capability_resync(
         federation=fed, federation_repo=fed_repo, identity_repo=ident
     )
 
@@ -153,7 +176,7 @@ async def test_payload_is_capabilities_scope_only():
     fed_repo = FakeFederationRepo([FakePeer("p1")])
     fed = FakeFederation({"p1": True})
 
-    await request_capability_resync_if_upgraded(
+    await request_capability_resync(
         federation=fed, federation_repo=fed_repo, identity_repo=ident
     )
 
@@ -169,9 +192,24 @@ async def test_no_peers_persists_ours_and_returns_zero():
     fed_repo = FakeFederationRepo([])
     fed = FakeFederation({})
 
-    sent = await request_capability_resync_if_upgraded(
+    sent = await request_capability_resync(
         federation=fed, federation_repo=fed_repo, identity_repo=ident
     )
 
     assert sent == 0
     assert ident.last == OURS
+
+
+async def test_an_unchanged_restart_without_v96_peers_sends_nothing():
+    """No v_96 peer (only older ones, or none) → nothing to re-learn."""
+    for peers in ([FakePeer("p1"), FakePeer("p18")], []):
+        ident = FakeIdentityRepo(last=OURS)
+        fed = FakeFederation({"p1": True, "p18": False})
+        sent = await request_capability_resync(
+            federation=fed,
+            federation_repo=FakeFederationRepo(peers),
+            identity_repo=ident,
+        )
+        assert sent == 0
+        assert fed.sends == []
+        assert ident.set_calls == []

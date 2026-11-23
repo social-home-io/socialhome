@@ -60,6 +60,7 @@ from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.moment_reaction_route import (
+    MAX_RETURN_TOKENS,
     RETURN_TOKEN_SUITE_AESGCM_256,
     build_reaction,
     open_reaction,
@@ -943,19 +944,27 @@ async def test_the_origin_still_bounds_junk_from_one_neighbour(env):
     )
 
 
-def _source_payload(router, moment_id: str = "m-far") -> dict:
-    """A two-token envelope whose last token is ours — what a reactor three
-    hops from the origin hands its first relay."""
+def _source_payload(
+    router, moment_id: str = "m-far", tokens: int = MAX_RETURN_TOKENS
+) -> dict:
+    """An envelope of *tokens* tokens whose last is ours — with
+    :data:`MAX_RETURN_TOKENS` (4), what a reactor five hops from the origin
+    hands its first relay."""
     return {
         **_relay_payload("x", origin="peer-elsewhere", moment_id=moment_id),
-        "rt": ["tok-near-origin", _token(router, moment_id=moment_id)],
+        "rt": [
+            *(f"tok-{i}" for i in range(tokens - 1)),
+            _token(router, moment_id=moment_id),
+        ],
     }
 
 
 async def test_a_relay_holds_one_households_own_reactions_to_the_source_rate(env):
-    """F14: an envelope with two tokens can only come from the reactor's own
-    household (no relay sits beyond two), so a relay holds it to the source
-    rate — ≤ 10 a minute on one moment, ≤ 60 in all."""
+    """F14: an envelope with the most tokens a moment carries
+    (:data:`MAX_RETURN_TOKENS`) can only come from the reactor's own
+    household (nobody sits beyond the last hop to relay one), so a relay
+    holds it to the source rate — ≤ 10 a minute on one moment, ≤ 60 in
+    all."""
     app, _db, sent, _own, _anna, router, _c = env
     payload = _source_payload(router)
     for _ in range(RELAY_SOURCE_PER_MOMENT_PER_MIN + 5):
@@ -967,6 +976,29 @@ async def test_a_relay_holds_one_households_own_reactions_to_the_source_rate(env
         )
     # The 10 forwarded on m-far counted towards the 60; the 5 refused did not.
     assert len(sent) == RELAY_SOURCE_PER_MIN
+
+
+@pytest.mark.parametrize("tokens", range(2, MAX_RETURN_TOKENS))
+async def test_fewer_tokens_may_be_relayed_from_further_out(env, tokens):
+    """v_96: with five hops, an envelope with fewer than
+    :data:`MAX_RETURN_TOKENS` tokens may carry several households' reactions
+    from further out (a relay drops one token per hop, and the reactor's own
+    count is its hop − 1, the same as what a relay one hop further passes
+    on), so it takes the wider mixed budget — ≤ 30 a minute on one moment.
+    Two tokens took the source rate while the cap was 3. (One token: the
+    one-token tests above.)"""
+    app, _db, sent, _own, _anna, router, _c = env
+    payload = _source_payload(router, tokens=tokens)
+    for _ in range(RELAY_PER_MOMENT_PER_MIN + 5):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
+    assert len(sent) == RELAY_PER_MOMENT_PER_MIN
+
+
+async def test_more_than_max_return_tokens_is_refused(env):
+    app, _db, sent, _own, _anna, router, _c = env
+    payload = _source_payload(router, tokens=MAX_RETURN_TOKENS + 1)
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
+    assert sent == []
 
 
 async def test_junk_behind_a_downstream_relay_does_not_starve_it(env):

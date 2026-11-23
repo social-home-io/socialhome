@@ -26,6 +26,7 @@ from ..domain.gallery import (
 )
 from ..domain.highlight import HighlightAudience
 from ..domain.moment import (
+    MOMENT_DEFAULT_MAX_HOPS,
     MOMENT_DEFAULT_REACH,
     MOMENT_DEFAULT_RETENTION_DAYS,
     MOMENT_MAX_HOPS,
@@ -130,9 +131,9 @@ def _coerce_int(value: Any, default: int, lo: int, hi: int) -> int:
 # ─── Momentum visibility prefs (§Momentum-relay-policy) ─────────────────────
 
 
-#: Default per-user max-hops visibility — matches the global wire cap so
-#: new accounts see every moment that reached this instance.
-DEFAULT_MOMENT_MAX_HOPS: int = 3
+#: Default per-user max-hops visibility (3; the wire cap is 5 since v_96 —
+#: looking further is an opt-in, ``docs/protocol/momentum.md`` § Reach).
+DEFAULT_MOMENT_MAX_HOPS: int = MOMENT_DEFAULT_MAX_HOPS
 
 
 @dataclass(slots=True, frozen=True)

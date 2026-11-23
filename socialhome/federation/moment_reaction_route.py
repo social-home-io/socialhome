@@ -1,6 +1,6 @@
 """Routed moment reactions (v_67) — the wire shapes and their crypto.
 
-A moment travels up to three hops (author → paired household → its paired
+A moment travels up to five hops (v_96; three before — author → paired household → its paired
 household → …), but a reaction used to travel only one: back to the author's
 household, and only from a household paired with it. A reactor two or three
 hops away had no way back. v_67 carries the reaction back along the path the

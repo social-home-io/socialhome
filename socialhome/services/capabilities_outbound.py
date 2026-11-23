@@ -50,9 +50,24 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ..domain.events import PairingConfirmed
-from ..domain.federation import FederationEventType, InstanceSource, PairingStatus
+from ..domain.events import (
+    CpProtectionDisabled,
+    CpProtectionEnabled,
+    PairingConfirmed,
+    PeerProtoVersionRaised,
+    UserDeprovisioned,
+    UserPreferencesPatched,
+    UserProfileUpdated,
+    UserProvisioned,
+)
+from ..domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
 from ..domain.federation_capabilities import OURS as OUR_PROTO_VERSION
+from ..domain.federation_capabilities import FederationCapability
 from ..federation.keywrap_seal import keywrap_wire_fields
 from ..federation.mesh_member_claim import mesh_member_claim
 from .peer_outbound import ConfirmedPeerBroadcaster
@@ -61,6 +76,7 @@ if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
     from ..infrastructure.event_bus import EventBus
     from ..repositories.federation_repo import AbstractFederationRepo
+    from ..repositories.moment_repo import AbstractMomentRepo
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +90,8 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         "_federation_repo",
         "_keywrap_public_key",
         "_keywrap_sig",
+        "_look",
+        "_moment_repo",
     )
 
     # Narrow the broadcaster's optional ``_federation`` / ``_federation_repo``
@@ -90,10 +108,17 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         bus: EventBus | None = None,
         keywrap_public_key: bytes = b"",
         keywrap_sig: str = "",
+        moment_repo: AbstractMomentRepo | None = None,
     ) -> None:
         self._federation = federation_service
         self._federation_repo = federation_repo
         self._bus = bus
+        #: v_96 decision C — where how far our people look is read
+        #: (``moment_look_hops``). ``None``: the field is never sent.
+        self._moment_repo = moment_repo
+        #: The look we last advertised (``None``: not computed yet). Kept in
+        #: memory: the startup publish always carries the current one.
+        self._look: int | None = None
         #: Our static key-wrap key + its identity binding signature, sent
         #: only to peers we opted into the GFS relay with (v_54). Empty
         #: means "not configured": the field is then never sent.
@@ -156,6 +181,20 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         if self._bus is None:
             return
         self._bus.subscribe(PairingConfirmed, self._on_pairing_confirmed)
+        if self._moment_repo is None:
+            return
+        # v_96 decision C: what may change how far our people look — a
+        # reactivated account comes back as ``UserProfileUpdated``.
+        for look_input in (
+            UserPreferencesPatched,
+            UserProvisioned,
+            UserProfileUpdated,
+            UserDeprovisioned,
+            CpProtectionEnabled,
+            CpProtectionDisabled,
+        ):
+            self._bus.subscribe(look_input, self._on_look_input)
+        self._bus.subscribe(PeerProtoVersionRaised, self._on_peer_raised)
 
     async def _on_pairing_confirmed(self, event: PairingConfirmed) -> None:
         """A new peer just became CONFIRMED — send our version to them.
@@ -187,7 +226,9 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         """
         return await self._send_to(instance_id)
 
-    async def _send_to(self, instance_id: str) -> bool:
+    async def _send_to(self, instance_id: str, *, look: int | None = None) -> bool:
+        """Send our capabilities to one peer. *look*: how far our people
+        look for moments, when the caller (a fan-out) already read it."""
         own = getattr(self._federation, "_own_instance_id", "")
         if not instance_id or instance_id == own:
             return False
@@ -200,7 +241,16 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         name = (local or {}).get("display_name")
         if isinstance(name, str) and name.strip():
             payload["display_name"] = name.strip()
-        payload.update(await self._relay_fields_for(instance_id))
+        # The peer's row, read once for the fields only a directly paired
+        # peer gets (none configured: never read).
+        peer = (
+            await self._federation_repo.get_instance(instance_id)
+            if (self._keywrap_public_key and self._keywrap_sig)
+            or self._moment_repo is not None
+            else None
+        )
+        payload.update(self._relay_fields_for(peer))
+        payload.update(await self._moment_look_fields_for(peer, look))
         await self._federation.send_event(
             to_instance_id=instance_id,
             event_type=FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
@@ -213,8 +263,89 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         )
         return True
 
-    async def _relay_fields_for(self, instance_id: str) -> dict[str, object]:
-        """Our GFS-relay fields for *instance_id*, or ``{}`` (v_54).
+    async def _moment_look_fields_for(
+        self, peer: RemoteInstance | None, look: int | None
+    ) -> dict[str, object]:
+        """``{"moment_look_hops": N}`` for a directly paired peer (v_96,
+        decision C) — how far our people look for moments (*look*, else read
+        now), so its relays send us a hop-4 or hop-5 copy only when someone
+        here looks that far. One number, to paired households only: never to
+        a household we only share a space with (``space_session``), never
+        over the mesh or to a GFS. Additive: an older receiver ignores it."""
+        if (
+            self._moment_repo is None
+            or peer is None
+            or peer.source is not InstanceSource.MANUAL
+        ):
+            return {}
+        if look is None:
+            look = await self._moment_repo.moment_look_hops()
+        return {"moment_look_hops": look}
+
+    async def refresh_moment_look(self) -> int:
+        """Recompute how far our people look for moments and, when the
+        number changed since we last advertised it, re-send our capabilities
+        to every paired v_96 household (an older one ignores the field; it
+        is told again when it reaches v_96, :meth:`_on_peer_raised`).
+        Returns how many households were told (0: nothing changed)."""
+        if self._moment_repo is None:
+            return 0
+        look = await self._moment_repo.moment_look_hops()
+        if look == self._look:
+            return 0
+        self._look = look
+        sent = 0
+        for peer in await self.confirmed_peers():
+            if (
+                peer.source is not InstanceSource.MANUAL
+                or peer.proto_version < FederationCapability.MIN_FOR_MOMENT_REACH
+            ):
+                continue
+            try:
+                if await self._send_to(peer.id, look=look):
+                    sent += 1
+            except Exception as exc:  # pragma: no cover — defensive
+                log.debug(
+                    "capabilities-outbound: look send to %s failed: %s",
+                    peer.id,
+                    exc,
+                    exc_info=True,
+                )
+        log.info(
+            "capabilities-outbound: moment_look_hops -> %d, told %d peer(s)",
+            look,
+            sent,
+        )
+        return sent
+
+    async def _on_look_input(self, event: object) -> None:
+        """A person here was added or removed, protected or no longer, or
+        patched their preferences: how far we look may have changed."""
+        if isinstance(event, UserPreferencesPatched) and "moments" not in event.keys:
+            return
+        await self.refresh_moment_look()
+
+    async def _on_peer_raised(self, event: PeerProtoVersionRaised) -> None:
+        """A paired household just reached v_96: the look we sent while it
+        was older was ignored there — tell it once, now (one envelope)."""
+        if (
+            self._moment_repo is None
+            or event.old_version >= FederationCapability.MIN_FOR_MOMENT_REACH
+            or event.new_version < FederationCapability.MIN_FOR_MOMENT_REACH
+        ):
+            return
+        try:
+            await self._send_to(event.instance_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.debug(
+                "capabilities-outbound: send to upgraded %s failed: %s",
+                event.instance_id,
+                exc,
+                exc_info=True,
+            )
+
+    def _relay_fields_for(self, peer: RemoteInstance | None) -> dict[str, object]:
+        """Our GFS-relay fields for *peer*, or ``{}`` (v_54).
 
         Directly paired peers only (a link-joined household got our key
         from the invite bootstrap and rides the relay by construction):
@@ -228,7 +359,6 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         """
         if not self._keywrap_public_key or not self._keywrap_sig:
             return {}
-        peer = await self._federation_repo.get_instance(instance_id)
         if peer is None or peer.source is not InstanceSource.MANUAL:
             return {}
         if not peer.gfs_relay:
@@ -292,9 +422,12 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         queue).
         """
         sent = 0
+        if self._moment_repo is not None:
+            # v_96: the startup announcement carries how far we look now.
+            self._look = await self._moment_repo.moment_look_hops()
         for instance_id in await self.list_confirmed_peer_ids():
             try:
-                if await self._send_to(instance_id):
+                if await self._send_to(instance_id, look=self._look):
                     sent += 1
             except Exception as exc:  # pragma: no cover — defensive
                 log.debug(

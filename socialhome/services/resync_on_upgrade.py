@@ -1,18 +1,29 @@
-"""One-shot capability-resync after a protocol-version upgrade (#319 ¶6).
+"""Capability re-sync at startup (#319 ¶6, v_96).
 
-When this build's :data:`OURS` protocol version has increased since the last
-boot (the operator upgraded Social Home), we proactively ask every confirmed
-peer to *re-advertise its capabilities* — scope ``"capabilities"`` only. That
-refreshes our cached ``proto_version`` for each peer so feature-gating
-(:meth:`FederationService.peer_supports`) reflects reality soon after an
-upgrade instead of waiting for the next organic announcement.
+We ask confirmed peers to *re-advertise their capabilities* — scope
+``"capabilities"`` only — in two cases, one path:
+
+* **After an upgrade** (this build's :data:`OURS` increased since the last
+  boot): every peer that has the handler (``MIN_FOR_INSTANCE_RESYNC``), so
+  our cached ``proto_version`` for each peer — and with it
+  :meth:`FederationService.peer_supports` — reflects reality soon after an
+  upgrade instead of waiting for the next organic announcement. At most once
+  per upgrade, guarded by a persisted "last OURS" on the singleton
+  ``instance_identity`` self-row.
+* **On every other restart** (v_96): only peers at
+  ``MIN_FOR_MOMENT_REACH``. Their capabilities carry ``moment_look_hops``
+  (how far their people look for moments, decision C), which we keep in
+  memory only (``FederationService.peer_moment_look_hops``) — lost on our
+  restart, and a peer re-sends it on its own only when *it* restarts or the
+  value changes. Until it answers, no hop-4–5 moment copy goes to it. Older
+  peers are not asked: they never send the field.
 
 This is deliberately the lightweight scope: one tiny
-:data:`FederationEventType.INSTANCE_RESYNC_REQUEST` per peer, with **no**
+:data:`FederationEventType.INSTANCE_RESYNC_REQUEST` per peer, answered by one
+``INSTANCE_CAPABILITIES_UPDATED`` (a few hundred bytes each way), with **no**
 space/calendar content replay — so it can never trigger a content-resync
-storm. It fires at most once per upgrade, guarded by a persisted "last OURS"
-on the singleton ``instance_identity`` self-row, and never on an unchanged
-restart.
+storm. A peer that is offline at our startup answers once it is back (the
+request rides the outbox).
 """
 
 from __future__ import annotations
@@ -33,22 +44,28 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-async def request_capability_resync_if_upgraded(
+async def request_capability_resync(
     *,
     federation: FederationService,
     federation_repo: AbstractFederationRepo,
     identity_repo: AbstractFederationRepo,
 ) -> int:
-    """If ``OURS`` increased since last boot, ask each confirmed peer to
-    re-advertise capabilities (scope ``"capabilities"``). Returns the number
-    of resync requests sent (0 when not an upgrade). Capabilities-only —
-    no content replay — so it can't cause a resync storm. Persists ``OURS``
-    as the new last-seen on success.
+    """Ask confirmed social peers to re-advertise capabilities (scope
+    ``"capabilities"``): every peer with the handler if ``OURS`` increased
+    since last boot, else only v_96 peers (to re-learn their
+    ``moment_look_hops``). Returns the number of resync requests sent.
+    Capabilities-only — no content replay — so it can't cause a resync
+    storm. Persists ``OURS`` as the new last-seen after an upgrade.
     """
     last = await identity_repo.get_last_proto_version()
-    if last is not None and last >= OURS:
-        # Not an upgrade (unchanged restart, or a downgrade) — the storm guard.
-        return 0
+    # A downgrade or an unchanged restart is not an upgrade (the storm guard
+    # for older peers); v_96 peers are still asked for their moment look.
+    upgraded = last is None or last < OURS
+    min_version = (
+        FederationCapability.MIN_FOR_INSTANCE_RESYNC
+        if upgraded
+        else FederationCapability.MIN_FOR_MOMENT_REACH
+    )
 
     sent = 0
     # Social peers only — and here that is genuinely enough. This asks a
@@ -59,12 +76,11 @@ async def request_capability_resync_if_upgraded(
     # our own startup ``INSTANCE_CAPABILITIES_UPDATED`` fan-out DOES
     # include space-session peers (see
     # ``CapabilitiesOutbound.confirmed_peers``), and their announcement
-    # to us rides their fan-out in the same way.
+    # to us rides their fan-out in the same way. Nor does such a household
+    # get moments (no ``moment_look_hops`` to re-learn).
     peers = await federation_repo.list_social_instances()
     for peer in peers:
-        if not await federation.peer_supports(
-            peer.id, min_version=FederationCapability.MIN_FOR_INSTANCE_RESYNC
-        ):
+        if not await federation.peer_supports(peer.id, min_version=min_version):
             continue
         # send_event is fail-soft (never raises) — per-peer failures land in
         # the outbox retry queue, so one unreachable peer can't abort the run.
@@ -75,13 +91,15 @@ async def request_capability_resync_if_upgraded(
         )
         sent += 1
 
-    # Persist regardless of how many we reached so a first-boot-post-migration
-    # (last is None) records OURS and doesn't re-fire on the next restart.
-    await identity_repo.set_last_proto_version(OURS)
+    if upgraded:
+        # Persist regardless of how many we reached so a first boot post
+        # migration (last is None) records OURS and doesn't re-fire.
+        await identity_repo.set_last_proto_version(OURS)
     log.info(
-        "capability-resync: OURS %d > last %r — asked %d peer(s) to re-advertise",
+        "capability-resync: OURS %d, last %r (%s) — asked %d peer(s) to re-advertise",
         OURS,
         last,
+        "upgrade" if upgraded else "v_96 moment look",
         sent,
     )
     return sent

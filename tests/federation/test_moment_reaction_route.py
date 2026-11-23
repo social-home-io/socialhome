@@ -214,6 +214,11 @@ def test_return_tokens_of_bounds_and_suite():
     assert return_tokens_of({"rt": "a"}) is None
     assert return_tokens_of({"rt": [1]}) is None
     assert return_tokens_of({"rt": ["a"] * (MAX_RETURN_TOKENS + 1)}) is None
+    # v_96: one per relay of a hop-5 copy — four accepted, five refused.
+    assert MAX_RETURN_TOKENS == 4
+    four = {"rt": ["a"] * 4, "rt_suite": "aesgcm-256"}
+    assert return_tokens_of(four) == ["a"] * 4
+    assert return_tokens_of({**four, "rt": ["a"] * 5}) is None
     with pytest.raises(UnsupportedReturnTokenSuite):
         return_tokens_of({"rt": ["a"], "rt_suite": "chacha"})
     with pytest.raises(UnsupportedReturnTokenSuite):

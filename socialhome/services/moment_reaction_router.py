@@ -1,6 +1,6 @@
 """Reactions reach authors further away (v_67, owner decision 9, sign-off 2).
 
-A moment reaches households up to three hops from its author; before v_67 a
+A moment reaches households up to five hops (v_96) from its author; before v_67 a
 reaction went back only to an author's household *paired* with the
 reactor's. This service carries a reaction from further away back along the
 path the moment came — the wire shapes and crypto are in
@@ -81,6 +81,7 @@ from ..domain.moment import (
 from ..federation.keywrap_seal import SUPPORTED_KEM_SUITES, UnsupportedKemSuite
 from ..federation.moment_reaction_route import (
     MAX_ID_CHARS,
+    MAX_RETURN_TOKENS,
     RETURN_TOKEN_SUITE_AESGCM_256,
     RETURN_TOKEN_SUITE_FIELD,
     RETURN_TOKENS_FIELD,
@@ -150,9 +151,18 @@ MAX_KEPT_ROUTES: int = 3
 #: a one-token envelope may come from a relay carrying several households'
 #: reactions, so one household behind it sending junk at the full source
 #: rate leaves room for the others. Inside that budget, envelopes carrying
-#: **two tokens** — no relay sits beyond two, so they are the neighbour's
-#: own reactions (the *source* rate) — are held to 60 a minute and 10 a
-#: minute on one moment. An envelope the relay refuses is not charged.
+#: **:data:`MAX_RETURN_TOKENS` tokens** (4 since v_96: one per relay of a
+#: hop-5 copy) are the neighbour's own reactions (the *source* rate) — a
+#: relay drops a token per hop and nobody sits beyond the last hop, so no
+#: relay can hand on that many — and are held to 60 a minute and 10 a
+#: minute on one moment. A shorter envelope may be the neighbour's own or
+#: relayed from further out (a reactor at hop *k* sends *k* − 1 tokens, the
+#: same count a relay at hop *k* passes on from beyond it): the mixed budget.
+#: Until v_96 (cap 3) two tokens were the most. Older-relay degradation: an
+#: older relay at hop 2 still applies its own source bucket to two-token
+#: envelopes, so a v_96 neighbour at hop 3 that aggregates reactions from
+#: hops 3–5 behind it is held to the source rate there. An envelope the
+#: relay refuses is not charged.
 RELAY_SOURCE_PER_MIN: int = 60
 RELAY_SOURCE_PER_MOMENT_PER_MIN: int = 10
 RELAY_PER_NEIGHBOUR_PER_MIN: int = 3 * RELAY_SOURCE_PER_MIN
@@ -222,7 +232,7 @@ def _reacted_at(ms: int) -> str:
 
 
 class MomentReactionRouter(ProtectionGateMixin):
-    """Carry moment reactions back to an author two or three hops away."""
+    """Carry moment reactions back to an author two to five hops away."""
 
     __slots__ = (
         "_ban_repo",
@@ -515,7 +525,7 @@ class MomentReactionRouter(ProtectionGateMixin):
     def _route_usable(self, moment: Moment, route: MomentReactionRoute) -> bool:
         if route.token_suite not in SUPPORTED_RETURN_TOKEN_SUITES:
             return False
-        if not 1 <= len(route.tokens) <= MOMENT_MAX_HOPS - 1:
+        if not 1 <= len(route.tokens) <= MAX_RETURN_TOKENS:
             return False
         try:
             if len(bytes.fromhex(route.keywrap_pk)) != 32:
@@ -798,14 +808,15 @@ class MomentReactionRouter(ProtectionGateMixin):
                 return
             await self._accept_at_origin(event, moment_id, p["sealed"])
             return
-        # One budget per neighbour; two tokens (the neighbour's own
-        # reactions) also hold to the source rate inside it (#1178 F14,
-        # #1197). Checked in full before anything is charged.
+        # One budget per neighbour; the most tokens a moment carries (the
+        # neighbour's own reactions — nobody sits beyond the last hop) also
+        # hold to the source rate inside it (#1178 F14, #1197, v_96).
+        # Checked in full before anything is charged.
         buckets = [
             (f"rn:{neighbour}", RELAY_PER_NEIGHBOUR_PER_MIN, "routed-reaction"),
             (f"rm:{neighbour}:{moment_id}", RELAY_PER_MOMENT_PER_MIN, "per-moment"),
         ]
-        if len(tokens) >= 2:
+        if len(tokens) == MAX_RETURN_TOKENS:
             buckets += [
                 (f"rs:{neighbour}", RELAY_SOURCE_PER_MIN, "routed-reaction"),
                 (

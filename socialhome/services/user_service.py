@@ -28,6 +28,7 @@ from ..domain.events import (
     UserBlocked,
     UserDeprovisioned,
     UserFollowed,
+    UserPreferencesPatched,
     UserProfileUpdated,
     UserProvisioned,
     UserStatusChanged,
@@ -636,6 +637,10 @@ class UserService(ProtectionGateMixin):
             preferences_json=orjson.dumps(prefs, option=orjson.OPT_SORT_KEYS).decode(),
         )
         await self._repo.save(new_user)
+        if patch:
+            await self._bus.publish(
+                UserPreferencesPatched(user_id=user.user_id, keys=frozenset(patch))
+            )
         return new_user
 
     async def set_status(

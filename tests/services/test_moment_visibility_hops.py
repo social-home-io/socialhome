@@ -62,12 +62,121 @@ async def test_max_hops_two_shows_one_and_two(repo):
     assert {m.id for m in rows} == {"m-1", "m-2"}
 
 
-async def test_max_hops_clamped_above_three(repo):
-    """Out-of-range values are clamped to the wire cap (3)."""
-    for i, h in enumerate((1, 2, 3), start=1):
-        await repo.save(_moment(moment_id=f"m-{i}", hop_count=h))
+async def test_max_hops_clamped_to_the_wire_cap(repo):
+    """Out-of-range values are clamped to the wire cap (5)."""
+    for h in range(1, 6):
+        await repo.save(_moment(moment_id=f"m-{h}", hop_count=h))
     rows = await repo.list_visible_to("u-self", max_hops=99)
-    assert len(rows) == 3
+    assert len(rows) == 5
+    rows = await repo.list_visible_to("u-self", max_hops=0)
+    assert {m.id for m in rows} == {"m-1"}
+
+
+@pytest.mark.parametrize(("max_hops", "seen"), [(3, 3), (4, 4), (5, 5)])
+async def test_a_viewer_sees_up_to_their_max_hops_everywhere(repo, max_hops, seen):
+    """v_96: hops 4–5 are seen only by a viewer who looks that far — in the
+    list, a thread, the hashtag counts and a single read alike."""
+    for h in range(1, 6):
+        m = _moment(moment_id=f"m-{h}", hop_count=h)
+        await repo.save(
+            Moment(
+                **{
+                    **{f: getattr(m, f) for f in m.__slots__},
+                    "content": "#far",
+                }
+            )
+        )
+    listed = await repo.list_visible_to("u-self", max_hops=max_hops)
+    assert {m.id for m in listed} == {f"m-{h}" for h in range(1, seen + 1)}
+    tags = dict(await repo.list_top_hashtags("u-self", max_hops=max_hops))
+    assert tags == {"far": seen}
+    for h in range(1, 6):
+        got = await repo.get_readable(f"m-{h}", "u-self", max_hops=max_hops)
+        assert (got is not None) is (h <= seen)
+
+
+@pytest.mark.parametrize(("max_hops", "seen"), [(3, {"r-3"}), (5, {"r-3", "r-5"})])
+async def test_a_thread_shows_replies_up_to_the_viewers_max_hops(repo, max_hops, seen):
+    await repo.save(_moment(moment_id="root", hop_count=1))
+    for h in (3, 5):
+        m = _moment(moment_id=f"r-{h}", hop_count=h)
+        await repo.save(
+            Moment(
+                **{
+                    **{f: getattr(m, f) for f in m.__slots__},
+                    "parent_moment_id": "root",
+                }
+            )
+        )
+    replies = await repo.list_replies(
+        "root", viewer_user_id="u-self", max_hops=max_hops
+    )
+    assert {m.id for m in replies} == seen
+
+
+# ── moment_look_hops (v_96, decision C) ──────────────────────────────────
+
+
+async def _prefs(db, user_id: str, blob: str) -> None:
+    await db.enqueue(
+        "UPDATE users SET preferences_json=? WHERE user_id=?", (blob, user_id)
+    )
+
+
+async def _add_user(db, user_id: str, *, protected: bool = False) -> None:
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name, state,"
+        " child_protection_enabled) VALUES(?,?,?,'active',?)",
+        (user_id, user_id, user_id, int(protected)),
+    )
+
+
+async def test_look_hops_defaults_to_3(repo):
+    assert await repo.moment_look_hops() == 3
+
+
+async def test_look_hops_is_the_widest_non_protected_person(db, repo):
+    await _add_user(db, "u-far")
+    await _add_user(db, "u-kid", protected=True)
+    await _prefs(db, "u-self", '{"moments":{"max_hops":1}}')
+    await _prefs(db, "u-far", '{"moments":{"max_hops":4}}')
+    await _prefs(db, "u-kid", '{"moments":{"max_hops":5}}')
+    assert await repo.moment_look_hops() == 4
+
+
+async def test_look_hops_is_1_for_a_household_of_protected_people(db, repo):
+    """A protected account sees hop 1 only, whatever its ``max_hops``."""
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    assert await repo.moment_look_hops() == 1
+
+
+@pytest.mark.parametrize(
+    "gone",
+    ["deleted_at=datetime('now'), state='inactive'", "state='inactive'"],
+)
+async def test_look_hops_skips_removed_people(db, repo, gone):
+    await _add_user(db, "u-gone")
+    await _prefs(db, "u-gone", '{"moments":{"max_hops":5}}')
+    assert await repo.moment_look_hops() == 5
+    await db.enqueue(f"UPDATE users SET {gone} WHERE user_id='u-gone'")
+    assert await repo.moment_look_hops() == 3
+
+
+@pytest.mark.parametrize(
+    ("blob", "look"),
+    [
+        ('{"moments":{"max_hops":9}}', 5),
+        ('{"moments":{"max_hops":0}}', 1),
+        ('{"moments":{"max_hops":"far"}}', 3),
+        ('{"moments":{"max_hops":true}}', 3),
+        ('{"moments":{"max_hops":null}}', 3),
+        ('{"moments":"x"}', 3),
+        ("not json", 3),
+    ],
+)
+async def test_look_hops_reads_a_bad_preference_safely(db, repo, blob, look):
+    await _prefs(db, "u-self", blob)
+    assert await repo.moment_look_hops() == look
 
 
 # ── has_visible_recipient ─────────────────────────────────────────────────

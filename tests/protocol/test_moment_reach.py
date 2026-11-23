@@ -30,10 +30,15 @@ import pytest
 
 from socialhome.app import create_app
 from socialhome.app_keys import (
+    capabilities_outbound_key,
+    child_protection_service_key,
     db_key,
+    federation_repo_key,
     federation_service_key,
     instance_config_repo_key,
     moment_service_key,
+    peer_unpair_service_key,
+    user_service_key,
 )
 from socialhome.config import Config
 from socialhome.crypto import generate_identity_keypair
@@ -42,6 +47,7 @@ from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.moment import MOMENT_MAX_HOPS
 from socialhome.federation.federation_service import FederationService
 from socialhome.moment_origin import NO_RELAY_FIELD, REACH_FIELD, sign_moment_origin
+from socialhome.services.resync_on_upgrade import request_capability_resync
 
 pytestmark = pytest.mark.security
 
@@ -106,6 +112,8 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
     await _seed_peer(db, OLD38, generate_identity_keypair().public_key, 38)
     await _seed_peer(db, OLD95, generate_identity_keypair().public_key, 95)
     await _seed_peer(db, NEW, generate_identity_keypair().public_key, 96)
+    # NEW said its people look 5 hops (decision C); the others said nothing.
+    app[federation_service_key].set_peer_moment_look_hops(NEW, 5)
     await db.enqueue(
         "INSERT INTO remote_users(user_id, instance_id, remote_username,"
         " display_name) VALUES('u-mia', ?, 'mia', 'Mia')",
@@ -185,7 +193,7 @@ def _relayed(sent, moment_id: str) -> list[tuple[str, int]]:
 def test_reach_is_gated_on_v96():
     assert FederationCapability.MIN_FOR_MOMENT_REACH == 96
     assert OURS >= 96
-    assert MOMENT_MAX_HOPS == 3  # raised to 5 in a later phase
+    assert MOMENT_MAX_HOPS == 5
 
 
 # ═══ Origin: signs the effective reach, gates who gets it ════════════════
@@ -253,8 +261,8 @@ async def test_a_protected_accounts_create_and_delete_are_no_relay(env):
 # ═══ Receiver + relay: reach honoured at each hop ════════════════════════
 
 # (reach, hop claimed, sent by the origin) → (stored at hop, forwarded at hop)
-# Relays stop at ``min(reach, MOMENT_MAX_HOPS)`` — the cap is 3 in this
-# phase, so reach 4 and 5 stop there too; P2 raises it and extends this.
+# Relays stop at ``min(reach, MOMENT_MAX_HOPS)`` (the cap is 5); hops 4–5 go
+# only to a household that looks that far — here NEW (decision C).
 _HOPS = [
     (1, 1, True, 1, None),
     (2, 1, True, 1, 2),
@@ -264,10 +272,13 @@ _HOPS = [
     (3, 3, False, 3, None),
     (4, 1, True, 1, 2),
     (4, 2, False, 2, 3),
-    (4, 3, False, 3, None),
+    (4, 3, False, 3, 4),
+    (4, 4, False, 4, None),
     (5, 1, True, 1, 2),
     (5, 2, False, 2, 3),
-    (5, 3, False, 3, None),
+    (5, 3, False, 3, 4),
+    (5, 4, False, 4, 5),
+    (5, 5, False, 5, None),
 ]
 
 
@@ -276,6 +287,10 @@ async def test_reach_is_honoured_at_each_hop(
     env, reach, hop, direct, stored, forwarded
 ):
     app, db, sent = env
+    # Anna looks 5 hops, so this household keeps a hop-4–5 copy too.
+    await db.enqueue(
+        'UPDATE users SET preferences_json=\'{"moments": {"max_hops": 5}}\''
+    )
     await _deliver(
         app,
         FET.MOMENT_CREATED,
@@ -287,6 +302,9 @@ async def test_reach_is_honoured_at_each_hop(
     assert row["reach"] == reach
     hops = {h for _to, h in _relayed(sent, "m-hop")}
     assert hops == (set() if forwarded is None else {forwarded})
+    if forwarded is not None and forwarded > 3:
+        # Only toward who looks that far (decision C).
+        assert {to for to, _h in _relayed(sent, "m-hop")} == {NEW}
 
 
 async def test_the_relay_clamp(env):
@@ -522,3 +540,185 @@ async def test_a_moment_posted_before_protection_is_deleted_as_far_as_it_went(en
     ]
     assert {to for to, _p in deletes} == {ORIGIN, RELAY, OLD38, OLD95, NEW}
     assert all(NO_RELAY_FIELD not in p and REACH_FIELD not in p for _to, p in deletes)
+
+
+# ═══ C: hops 4–5 only toward who looks (``moment_look_hops``) ═════════════
+
+
+def _caps(**extra) -> dict:
+    return {"proto_version": OURS, **extra}
+
+
+def _look_of(app, instance_id: str) -> int | None:
+    return app[federation_service_key].peer_moment_look_hops(instance_id)
+
+
+async def test_a_peers_look_is_kept_and_bounds_hops_4_and_5(env):
+    """A paired household says how far its people look; a hop-4 copy then
+    goes to it — and to nobody who has not said."""
+    app, _db, sent = env
+    await _deliver(
+        app,
+        FET.INSTANCE_CAPABILITIES_UPDATED,
+        _caps(moment_look_hops=4),
+        from_instance=RELAY,
+    )
+    assert _look_of(app, RELAY) == 4
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _signed(FET.MOMENT_CREATED, "m-look", hop=3, reach=5),
+        from_instance=NEW,
+    )
+    assert _relayed(sent, "m-look") == [(RELAY, 4)]
+    # Hop 5: RELAY looks only 4 — nobody (NEW sent it).
+    sent.clear()
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _signed(FET.MOMENT_CREATED, "m-look5", hop=4, reach=5),
+        from_instance=NEW,
+    )
+    assert _relayed(sent, "m-look5") == []
+
+
+@pytest.mark.parametrize("bad", [0, 6, True, "4", 4.0, None, [4]])
+async def test_an_invalid_look_is_ignored_and_the_old_one_kept(env, bad):
+    app, _db, _sent = env
+    await _deliver(
+        app,
+        FET.INSTANCE_CAPABILITIES_UPDATED,
+        _caps(moment_look_hops=bad),
+        from_instance=NEW,
+    )
+    assert _look_of(app, NEW) == 5
+    await _deliver(app, FET.INSTANCE_CAPABILITIES_UPDATED, _caps(), from_instance=NEW)
+    assert _look_of(app, NEW) == 5
+
+
+def _look_sends(sent) -> dict[str, int | None]:
+    return {
+        to: p.get("moment_look_hops")
+        for to, et, p in sent
+        if et is FET.INSTANCE_CAPABILITIES_UPDATED
+    }
+
+
+async def test_this_household_advertises_its_look_and_re_sends_it_on_change(env):
+    """Startup carries the look to every paired household; a change (here a
+    person looking further) goes to the v_96 ones only, and only when the
+    number changes — a protected account never counts."""
+    app, db, sent = env
+    await app[capabilities_outbound_key].publish()
+    looks = _look_sends(sent)
+    assert set(looks) == {ORIGIN, RELAY, OLD38, OLD95, NEW}
+    assert set(looks.values()) == {3}
+    sent.clear()
+    users = app[user_service_key]
+    await users.patch_preferences("anna", {"moments": {"max_hops": 5}})
+    assert _look_sends(sent) == {ORIGIN: 5, RELAY: 5, NEW: 5}
+    sent.clear()
+    await users.patch_preferences("anna", {"moments": {"max_hops": 5}, "x": 1})
+    await users.patch_preferences("anna", {"locale": "de"})
+    assert _look_sends(sent) == {}
+    # Anna protected: nobody here looks past hop 1 — an admin counts (3).
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin)"
+        " VALUES('pa', 'u-pa', 'Pa', 1)"
+    )
+    await app[child_protection_service_key].enable_protection(
+        minor_username="anna", declared_age=10, actor_user_id="u-pa"
+    )
+    assert _look_sends(sent) == {ORIGIN: 3, RELAY: 3, NEW: 3}
+
+
+async def test_the_look_never_goes_to_a_household_seated_from_an_invite_link(env):
+    """One number, to paired households only — never to a household we only
+    share a space with (nor to a GFS: the field rides only this event)."""
+    app, db, sent = env
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source, proto_version, relay_via)"
+        " VALUES('seat', 'Seat', ?, 'k1', 'k2', '', 'wh-seat', 'confirmed',"
+        " 'space_session', 96, 'https://gfs.example')",
+        (generate_identity_keypair().public_key.hex(),),
+    )
+    await app[capabilities_outbound_key].publish()
+    caps = {to: p for to, et, p in sent if et is FET.INSTANCE_CAPABILITIES_UPDATED}
+    assert "seat" in caps and "moment_look_hops" not in caps["seat"]
+    assert caps[NEW]["moment_look_hops"] == 3
+
+
+async def test_an_upgraded_peer_is_told_how_far_we_look(env):
+    """A household that just reached v_96 never kept the look we sent while
+    it was older — it is told again, once, right away."""
+    app, _db, sent = env
+    await _deliver(app, FET.INSTANCE_CAPABILITIES_UPDATED, _caps(), from_instance=OLD95)
+    assert _look_sends(sent) == {OLD95: 3}
+
+
+async def test_after_our_restart_the_look_is_re_learned_and_hops_4_5_resume(env):
+    """The look is kept in memory only. After our restart (memory empty) no
+    hop-4 copy goes out; the startup capabilities resync asks every v_96
+    peer — not the older ones — and its answer brings hop-4 copies back."""
+    app, _db, sent = env
+    fed = app[federation_service_key]
+    fed._moment_looks.clear()  # our restart
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _signed(FET.MOMENT_CREATED, "m-before", hop=3, reach=5),
+        from_instance=RELAY,
+    )
+    assert _relayed(sent, "m-before") == []
+    sent.clear()
+    await request_capability_resync(
+        federation=fed,
+        federation_repo=app[federation_repo_key],
+        identity_repo=app[federation_repo_key],
+    )
+    asked = {
+        to
+        for to, et, p in sent
+        if et is FET.INSTANCE_RESYNC_REQUEST and p == {"scope": "capabilities"}
+    }
+    assert asked == {ORIGIN, RELAY, NEW}
+    # NEW answers with its capabilities, which carry its look.
+    await _deliver(
+        app,
+        FET.INSTANCE_CAPABILITIES_UPDATED,
+        _caps(moment_look_hops=5),
+        from_instance=NEW,
+    )
+    sent.clear()
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _signed(FET.MOMENT_CREATED, "m-after", hop=3, reach=5),
+        from_instance=RELAY,
+    )
+    assert _relayed(sent, "m-after") == [(NEW, 4)]
+
+
+async def test_a_capabilities_resync_request_is_answered_with_our_look(env):
+    """The answer to the startup resync (``INSTANCE_RESYNC_REQUEST`` scope
+    ``capabilities``) is our capabilities — carrying how far we look, so the
+    asking household re-learns it."""
+    app, _db, sent = env
+    await _deliver(
+        app,
+        FET.INSTANCE_RESYNC_REQUEST,
+        {"scope": "capabilities"},
+        from_instance=NEW,
+    )
+    assert _look_sends(sent) == {NEW: 3}
+
+
+async def test_an_unpaired_household_is_forgotten_with_its_look(env):
+    """An unpair drops the kept look with the pairing."""
+    app, _db, _sent = env
+    fed = app[federation_service_key]
+    assert fed.peer_moment_look_hops(NEW) == 5
+    await app[peer_unpair_service_key].purge(NEW)
+    assert fed.peer_moment_look_hops(NEW) is None

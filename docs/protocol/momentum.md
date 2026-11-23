@@ -2,14 +2,15 @@
 
 Household-broadcast posts pillar — a *moment* is a one-shot post
 (text + optional image / ≤ 15-second video) that fans out to every
-paired peer **and their paired peers, up to 3 hops**. Replies are
-themselves moments and carry a ``parent_moment_id`` that pins them
+paired peer **and their paired peers, up to 3 hops** by default (1–5,
+the author's reach, v_96). Replies are themselves moments and carry a ``parent_moment_id`` that pins them
 to a thread root.
 
 ## Scope
 
 - **HFS**: full participant. Authors post moments, peers receive and
-  re-broadcast through a hop-counted relay (max 3 hops).
+  re-broadcast through a hop-counted relay (at most ``MOMENT_MAX_HOPS`` = 5,
+  bounded by the signed reach).
 - **GFS**: uninvolved. Moments are personal-scope.
 
 ## Event types
@@ -196,7 +197,7 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
   ``origin_instance_id`` and the immediate ``from_instance``.
 * **Once per moment.** The relay remembers, per (event type,
   ``moment_id``), the lowest hop it relayed at (in memory, 48 h,
-  at most 20 000 entries). A later copy is relayed only when it arrives
+  at most 50 000 entries). A later copy is relayed only when it arrives
   at a lower hop — relayed on, that one reaches further. Creates and
   deletes are tracked apart.
 * **Creates relay for 48 h** (v_65). A ``MOMENT_CREATED`` whose signed
@@ -259,10 +260,13 @@ landed: the signed wire shape (creates and deletes), the receiver refusals,
 the relay rules (``hop < min(reach, MOMENT_MAX_HOPS)``, the relay clamp, one
 closer re-relay, reach-carrying copies only to v_96), the totals gate, the
 relayed outbox key, the ``moments.reach`` column and the person / household
-reach (``moments.reach`` / ``moments.reach_max``, no route or UI yet). Still
-to come: ``MOMENT_MAX_HOPS`` 5 with the viewer's ``max_hops`` 1–5,
-``MAX_RETURN_TOKENS``, ``moment_look_hops``, the storage rule, the routes
-and the UI — until then relays still stop at hop 3.
+reach (``moments.reach`` / ``moments.reach_max``, no route or UI yet).
+Phase 2 (still v_96) has landed too: ``MOMENT_MAX_HOPS`` 5 with the
+viewer's ``max_hops`` 1–5 (default 3), ``MAX_RETURN_TOKENS`` 4 with the
+per-source rate on four-token reactions, ``moment_look_hops`` (decision C,
+no migration) and hop ≥ 4 copies only to v_96. Still to come: the
+storage rule, the routes and the UI (the settings screen still offers
+``max_hops`` 1–3).
 
 ### Rules
 
@@ -357,10 +361,13 @@ neither raise it, strip it nor splice it onto another moment:
   Deletes never depend on the seen-map — they stay tombstone-gated.
 * **Return tokens** follow the cap: ``MAX_RETURN_TOKENS = MOMENT_MAX_HOPS − 1
   = 4``. A routed reaction drops a token at every relay on its way back,
-  so an older relay on the path only parses ≤ 2. Its per-source rate limit
-  (applied today at ``len(tokens) ≥ 2``, ``moment_reaction_router``) moves
-  to ``len(tokens) == MAX_RETURN_TOKENS``; shorter envelopes take the mixed
-  bucket. An older relay at hop 1–2 still applies its own source bucket to
+  so an older relay on the path only parses ≤ 2. A reactor at hop *k*
+  sends *k* − 1 tokens — the same count a relay at hop *k* passes on from
+  beyond it — so only ``len(tokens) == MAX_RETURN_TOKENS`` proves the
+  neighbour's own reactions (nobody sits beyond hop 5): the per-source
+  rate limit (``moment_reaction_router``; ``≥ 2`` while the cap was 3)
+  applies there, shorter envelopes take the mixed bucket. An older relay
+  at hop 2 still applies its own source bucket to two-token envelopes from
   a v_96 hop-3 relay that aggregates hops 3–5 behind it — reactions from
   hops 4–5 past an older relay may be throttled (documented degradation).
 * **Replies** go ``min(own reach, parent's reach)`` when the parent is held
@@ -487,8 +494,42 @@ A v_96 household tells its paired peers one number, ``moment_look_hops``
 — the largest ``max_hops`` among its non-protected people (1–5) — in
 ``INSTANCE_CAPABILITIES_UPDATED``, sent when it changes. A relay sends a
 hop-4 or hop-5 copy only to a peer whose ``moment_look_hops`` is at least
-that hop (a peer that sent none — older, or not yet heard from — counts as
-3). Hops 1–3 are unchanged.
+that hop (as built: a peer not heard from since our start — older, or its
+answer still on the way — gets none). Hops 1–3 are unchanged.
+
+As built:
+
+* **Computed** by ``SqliteMomentRepo.moment_look_hops``: the widest
+  ``moments.max_hops`` among active, non-protected people (a missing or
+  non-numeric value counts as 3, a number is clamped to 1–5); a household
+  of only protected people says 1 (they see hop 1 only).
+* **Sent** in every startup announcement to directly paired households
+  (``source = manual``) — never to a household seated from an invite link,
+  never over the mesh or to a GFS — and re-sent to every paired v_96
+  household when it changes (a ``moments`` preferences patch, a person
+  added, removed or reactivated, child protection on or off; the last
+  advertised value is kept in memory), and once to a household that just
+  reached v_96 (it ignored the field while older).
+* **Kept** by the receiver in memory (``FederationService``, one int per
+  peer — no table, no migration) only when it is an integer 1–5 (not a
+  bool); anything else, or a missing field, leaves the kept value. An
+  unpair forgets it (a new pairing sends our capabilities again).
+* **Re-learned after our restart** with the existing resync primitive:
+  at every startup we send ``INSTANCE_RESYNC_REQUEST`` ``{scope:
+  "capabilities"}`` to every confirmed social peer at v_96
+  (``request_capability_resync``; after an upgrade, to every peer with
+  the handler, as before). Each answers with its capabilities, which
+  carry the value; the outbox retries the request, so a peer offline at
+  our start answers once it is back. Older peers are not asked (they
+  never send the field). Until a peer answers it gets no hop-4–5 copy.
+  Cost: one request (≈ 0.3 KB) plus one reply (≈ 0.5 KB) per v_96 peer
+  per restart — d = 10: ≈ 8 KB per restart.
+* **Applied** to every relayed copy at hop 4 or 5 — create, delete and
+  totals alike, read from that in-memory value — together
+  with the v_96 version gate (an older household refuses a hop above 3).
+  Accepted edge: a household that looked further when a moment reached it
+  and looks less now may miss that moment's delete or totals; its people
+  can no longer see the row anyway (their ``max_hops``), and it expires.
 
 Trade-offs (accepted by the owner):
 
@@ -546,13 +587,16 @@ outbox eviction above still hold the per-household memory bounded.
 
 ## Per-user max-hops visibility (§Momentum-relay-policy)
 
-The wire cap (3) governs how far a moment is *relayed*. **What each
+The wire cap (5 since v_96, 3 before) and the signed reach govern how far a
+moment is *relayed*. **What each
 user sees** is a separate, per-user knob: ``moments.max_hops`` in
-``users.preferences_json`` (default 3, clamped to 1..3).
+``users.preferences_json`` (default 3, clamped to 1..5 since v_96).
 
 * ``max_hops = 1`` — only moments authored by direct paired peers.
 * ``max_hops = 2`` — direct peers plus their peers.
-* ``max_hops = 3`` — every relayed moment (default).
+* ``max_hops = 3`` — up to three hops (default).
+* ``max_hops = 4`` / ``5`` — further (v_96, an opt-in: the household then
+  advertises ``moment_look_hops`` so relays send it hop-4–5 copies).
 
 The recipient instance writes the inbound ``hop_count`` onto the
 ``moments`` row; ``list_visible_to`` adds ``AND m.hop_count <= ?``

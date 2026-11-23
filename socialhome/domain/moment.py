@@ -31,18 +31,26 @@ from .errors import CodedError
 MOMENT_MAX_CONTENT_LEN: int = 1_000
 MOMENT_MAX_VIDEO_MS: int = 15_000
 
-#: Federation relay: the wire cap (3 in this phase). Origin sends with
-#: hop=1; each receiver bumps and re-fans while ``hop < min(reach,
-#: MOMENT_MAX_HOPS)`` — the signed reach bounds it further (v_96).
-MOMENT_MAX_HOPS: int = 3
+#: Federation relay: the wire cap (5 since v_96; 3 before). Origin sends
+#: with hop=1; each receiver bumps and re-fans while ``hop < min(reach,
+#: MOMENT_MAX_HOPS)`` — the signed reach bounds it further (v_96). Also the
+#: furthest a viewer may look (``moments.max_hops``, 1…5).
+MOMENT_MAX_HOPS: int = 5
 
 #: v_96 — how far a moment goes when its author chose nothing (hops).
 MOMENT_DEFAULT_REACH: int = 3
 
+#: How far a viewer looks when they chose nothing (``moments.max_hops``).
+#: Also the hops every paired household gets a relayed copy at: a hop-4 or
+#: hop-5 copy goes only to a household that said it looks that far
+#: (``moment_look_hops``, decision C).
+MOMENT_DEFAULT_MAX_HOPS: int = 3
+
 #: The most a person may choose (``moments.reach``) and a household allow
-#: (``moments.reach_max``). Relays still stop at :data:`MOMENT_MAX_HOPS`:
-#: a household forwards only while ``hop < min(reach, MOMENT_MAX_HOPS)``.
-MOMENT_MAX_REACH: int = 5
+#: (``moments.reach_max``) — the wire cap itself: one global cap for reach
+#: and for how far a viewer looks (owner decision 2026-11-23). A separate
+#: name because it bounds a different setting.
+MOMENT_MAX_REACH: int = MOMENT_MAX_HOPS
 
 #: v_96 — the hop a delete tombstone records when the delete came through a
 #: GFS: above every mesh hop, so the mesh copy of the same delete arriving
