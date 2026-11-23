@@ -20,8 +20,8 @@
  */
 import { currentUser } from '@/store/auth'
 import { householdDisplayName, loadHouseholdUsers } from '@/store/householdUsers'
-import { loadSpaceMembers } from '@/store/spaceMembers'
-import { connections, ensureConnections } from '@/store/connections'
+import { loadSpaceMembers, spaceMembers } from '@/store/spaceMembers'
+import { syncHostName } from '@/features/spaces/spaceSync'
 import { t } from '@/i18n/i18n'
 import { spacePeople, personName } from '@/features/tasks/scope'
 import { canModerate, type SpaceRole } from '@/features/spaces/spaceRoles'
@@ -104,15 +104,10 @@ export function spacePageScope({
     reviewedCreate: reviewing,
     nameOf: uid => personName(spacePeople(spaceId, { subscribers: true }), uid),
     loadPeople: () => {
+      // Also names the host for the "waiting for …" pill.
       void loadSpaceMembers(spaceId)
-      // The host's name for the "waiting for …" pill.
-      if (hostInstanceId) void ensureConnections()
     },
-    hostName: () => {
-      const host = hostInstanceId
-        ? connections.value.find(c => c.instance_id === hostInstanceId)
-        : undefined
-      return host?.display_name || t('pages.pending.host_fallback')
-    },
+    hostName: () => syncHostName(spaceMembers.value[spaceId]?.values(), hostInstanceId)
+      || t('pages.pending.host_fallback'),
   }
 }

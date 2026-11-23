@@ -8,8 +8,10 @@
  * the frame carries only the instance id and the row needs the full
  * REST shape; `connection.removed` (a pairing was torn down, by our
  * admin or by the peer, or a pending one was cancelled) drops the row in
- * place and then refetches too: a household we still share a space with
- * is back in the list as a space-only row.
+ * place and then refetches too. The list holds only households we're
+ * paired with: one we merely share a space with is never in it, and the
+ * reachability frames only patch rows already listed (they also fire for
+ * such a household, which must not appear here through them).
  *
  * Also holds the local household's home coords (updated via
  * `local.home_changed` WS frames) and patches peer coords on
@@ -21,13 +23,9 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 
-/** Active federation transport for a peer.
- *
- *  ``gfs_relay`` marks a household that is only reachable through the
- *  connection server relay (e.g. a peer seated from an invite link) — it
- *  has no direct HTTPS inbox of ours to post to, so labelling it
- *  ``https`` would be a lie. */
-export type TransportState = 'rtc' | 'https' | 'gfs_relay' | null
+/** Active federation transport for a paired household: the WebRTC
+ *  DataChannel or its HTTPS inbox. */
+export type TransportState = 'rtc' | 'https' | null
 
 export interface Connection {
   instance_id:   string
@@ -48,7 +46,8 @@ export interface Connection {
   pending_kind?: 'code' | 'request' | 'approval' | null
   /** A pending pairing with a household we already share a space with:
    *  the space keeps working while it waits, and when it is cancelled the
-   *  household is a space-only row again. Absent on older servers. */
+   *  household leaves this list again (the space carries on). Absent on
+   *  older servers. */
   shares_space?: boolean
   paired_at?: string | null
   source?: string
@@ -107,18 +106,14 @@ export const selfLat = signal<number | null>(null)
 /** Own household's home coordinates (updated live via local.home_changed). */
 export const selfLon = signal<number | null>(null)
 
-function upsert(patch: Partial<Connection> & { instance_id: string }): void {
-  const existing = connections.value.find((c) => c.instance_id === patch.instance_id)
-  if (existing) {
-    connections.value = connections.value.map((c) =>
-      c.instance_id === patch.instance_id ? { ...c, ...patch } : c,
-    )
-  } else {
-    connections.value = [
-      ...connections.value,
-      { reachable: true, ...patch } as Connection,
-    ]
-  }
+/** Patch a listed row. A frame for a household not in the list changes
+ *  nothing: rows only come from ``GET /api/connections`` (a new pairing
+ *  refetches on ``pairing.confirmed``). */
+function patchRow(patch: Partial<Connection> & { instance_id: string }): void {
+  if (!connections.value.some((c) => c.instance_id === patch.instance_id)) return
+  connections.value = connections.value.map((c) =>
+    c.instance_id === patch.instance_id ? { ...c, ...patch } : c,
+  )
 }
 
 /** True while the Connections page's own load is in flight. */
@@ -178,7 +173,7 @@ export function wireConnectionsWs(): void {
   ws.on('connection.reachable', (e) => {
     const d = e.data as unknown as { instance_id: string, last_seen_at?: string }
     if (!d?.instance_id) return
-    upsert({
+    patchRow({
       instance_id:  d.instance_id,
       reachable:    true,
       last_seen_at: d.last_seen_at ?? null,
@@ -187,7 +182,7 @@ export function wireConnectionsWs(): void {
   ws.on('connection.unreachable', (e) => {
     const d = e.data as unknown as { instance_id: string }
     if (!d?.instance_id) return
-    upsert({ instance_id: d.instance_id, reachable: false })
+    patchRow({ instance_id: d.instance_id, reachable: false })
   })
   ws.on('pairing.confirmed', () => {
     void refreshConnections()
@@ -196,8 +191,7 @@ export function wireConnectionsWs(): void {
     const d = e.data as unknown as { instance_id: string }
     if (!d?.instance_id) return
     connections.value = connections.value.filter((c) => c.instance_id !== d.instance_id)
-    // The pairing is gone at once; what is left of the household (a
-    // space-only row, when we still share a space) comes from the server.
+    // The pairing is gone at once; the server's list is the truth.
     void refreshConnections()
   })
   ws.on('local.home_changed', (e) => {

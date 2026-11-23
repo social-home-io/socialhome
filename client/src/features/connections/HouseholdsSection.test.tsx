@@ -39,7 +39,6 @@ const props = {
   isAdmin: false,
   households: [household],
   pending: [],
-  spaceOnly: [],
   compat: new Map(),
   onCancelPending: () => {},
   onRestartPending: () => {},

@@ -6,10 +6,10 @@
  * health (reachable / unreachable / pending). The visualisation is
  * SVG so it stays accessible and copy-pastable.
  *
- * Data lives at GET /api/connections (federation_repo lists all
- * RemoteInstance rows). When the backend exposes /api/connections
- * the component renders live data; otherwise it falls back to a
- * placeholder explaining what would appear here.
+ * Data lives at GET /api/connections: the households we're paired with
+ * (confirmed or pending). A household we only share a space with is never
+ * in it, so it is never on this map or in its counts. On a failed load the
+ * component falls back to a placeholder explaining what would appear here.
  */
 import { useEffect } from 'preact/hooks'
 import { signal, computed } from '@preact/signals'
@@ -22,7 +22,7 @@ import { householdLabel } from '@/utils/names'
 interface Connection extends StoreConnection {
   status?: 'confirmed' | 'pending_sent' | 'pending_received' | 'unpairing'
   paired_at?: string | null
-  source?: 'manual' | 'space_session'
+  source?: 'manual'
 }
 
 const loading = signal(true)

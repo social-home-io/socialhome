@@ -47,15 +47,11 @@ export function initialOf(name: string | null | undefined): string {
 
 // ── Row grouping + status ───────────────────────────────────────────────
 
-/** A household seated purely by an invite-link redeem (§D2b). It is a
- *  confirmed peer for the shared space and nothing else. */
-export function isSpaceOnly(c: Connection): boolean {
-  return c.source === 'space_session'
-}
-
-/** A real, confirmed household relationship (the only rows Manage opens). */
+/** A confirmed pairing (the only rows Manage opens). The server lists
+ *  only households we're paired with: one we merely share a space with
+ *  (§D2b) is never a connection. */
 export function isHousehold(c: Connection): boolean {
-  return c.status === 'confirmed' && !isSpaceOnly(c)
+  return c.status === 'confirmed'
 }
 
 export type PeerStatus = 'ok' | 'warn' | 'down'
@@ -115,10 +111,10 @@ export function buildHouseholds(
     .sort((a, b) => RANK[a.status] - RANK[b.status] || recency(b.conn) - recency(a.conn))
 }
 
-/** Rows that are neither confirmed households nor space-only: outbound or
- *  inbound QR pairings still in progress. */
+/** Rows that are not confirmed yet: outbound or inbound pairings still
+ *  in progress. */
 export function pendingRows(conns: Connection[]): Connection[] {
-  return conns.filter((c) => c.status !== 'confirmed' && !isSpaceOnly(c))
+  return conns.filter((c) => c.status !== 'confirmed')
 }
 
 export type PendingKind = 'code' | 'request' | 'approval'
@@ -127,10 +123,6 @@ export type PendingKind = 'code' | 'request' | 'approval'
  *  a pairing code is the neutral reading (it never claims who scanned). */
 export function pendingKind(c: Connection): PendingKind {
   return c.pending_kind ?? 'code'
-}
-
-export function spaceOnlyRows(conns: Connection[]): Connection[] {
-  return conns.filter(isSpaceOnly)
 }
 
 // ── Hero variant ────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 /**
- * ConnCard — the shared row shell for households, pending pairings,
- * space-only peers and GFS connections.
+ * ConnCard — the shared row shell for households, pending pairings and
+ * GFS connections.
  *
  * A row that opens something (Manage, admin only) is a ``<button>`` with
  * a chevron, a full-status ``aria-label`` and a hover lift; every other
@@ -19,7 +19,7 @@ export function cardDomId(instanceId: string): string {
 interface Props {
   avatar: ComponentChildren
   name: string
-  /** Chips after the name (e.g. "2 updates behind", "Space only"). */
+  /** Chips after the name (e.g. "2 updates behind"). */
   chips?: ComponentChildren
   /** ConnMeta items, separated by middots on wide screens. */
   meta: ComponentChildren[]

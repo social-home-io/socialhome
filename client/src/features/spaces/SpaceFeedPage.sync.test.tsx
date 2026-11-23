@@ -72,9 +72,14 @@ beforeEach(() => {
     if (url === '/api/spaces/s1') {
       return { id: 's1', name: 'Family', features: {}, my_role: 'member', owner_instance_id: 'host-x', sync: SYNC }
     }
-    if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role: 'member' }, { user_id: 'u2', role: 'member' }]
+    // The host is named by the member list — paired with us or not.
+    if (url === '/api/spaces/s1/members') {
+      return [
+        { user_id: 'u1', role: 'member' }, { user_id: 'u2', role: 'member' },
+        { user_id: 'h1', role: 'owner', instance_id: 'host-x', household_name: 'The Müllers' },
+      ]
+    }
     if (url === '/api/spaces/s1/feed') return [post('mine', 'u1'), post('theirs', 'u2'), post('sent', 'u1')]
-    if (url === '/api/connections') return [{ instance_id: 'host-x', display_name: 'The Müllers' }]
     if (url.endsWith('/links')) return { links: [] }
     return []
   })

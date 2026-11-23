@@ -88,10 +88,6 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "transport",
             "the outbox never POSTs to a seat (no inbox address)",
         ),
-        "socialhome/routes/pairing.py": (
-            "transport",
-            "the connections list labels a seat's transport gfs_relay",
-        ),
         "socialhome/routes/public_spaces.py": (
             "non-space exclusion",
             "a host's name comes from a pairing, never a seat",
@@ -343,7 +339,6 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/federation/sync/space/scheduler.py": 1,
         "socialhome/federation/transport.py": 6,
         "socialhome/repositories/federation_repo.py": 2,
-        "socialhome/routes/pairing.py": 1,
         "socialhome/routes/public_spaces.py": 1,
         "socialhome/services/bazaar_thread_service.py": 1,
         "socialhome/services/capabilities_outbound.py": 1,

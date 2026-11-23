@@ -40,8 +40,8 @@ describe('ConnMeta', () => {
 
   it('no transport → no transport item', () => {
     expect(transportItem(null)).toBeNull()
-    const { container } = render(<div>{transportItem('gfs_relay')}</div>)
-    expect(container.textContent).toBe('Through the GFS')
+    const { container } = render(<div>{transportItem('https')}</div>)
+    expect(container.textContent).toBe('Over the internet')
   })
 })
 

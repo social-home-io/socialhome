@@ -288,15 +288,9 @@ describe('FederationMap', () => {
     expect(popup.querySelector('.sh-fed-popup__status')!.textContent).toBe('Needs an update')
   })
 
-  test('a space-only household gets no status ring', () => {
-    const { pin } = pinFor({ instance_id: 'p', display_name: 'P', status: 'confirmed', source: 'space_session' })
-    expect(pin.querySelector('.sh-conn-av')!.hasAttribute('data-s')).toBe(false)
-  })
-
   test.each([
     ['rtc', 'Direct'],
     ['https', 'Over the internet'],
-    ['gfs_relay', 'Through the GFS'],
   ] as const)('a %s peer names its transport in the popup, in words', (transport, words) => {
     const { popup } = pinFor({ instance_id: 'p', display_name: 'P', status: 'confirmed', transport })
     expect(popup.textContent).toContain(words)

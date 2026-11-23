@@ -316,17 +316,21 @@ describe('PagesView — waiting for the host (v_48)', () => {
       .toBe('Saved here · waiting for the host household')
   })
 
-  it('the pill names the host household when it is a known connection', async () => {
-    const { connections } = await import('@/store/connections')
-    connections.value = [
-      { instance_id: 'host-1', display_name: 'The Millers', reachable: true } as never,
-    ]
+  it('the pill names the host household from the space\'s member list', async () => {
+    // Paired with us or not: a host met through an invite link is no
+    // connection, and the space knows every household in it.
+    const { spaceMembers } = await import('@/store/spaceMembers')
+    spaceMembers.value = {
+      s1: new Map([['h1', {
+        user_id: 'h1', role: 'owner', instance_id: 'host-1', household_name: 'The Millers',
+      } as never]]),
+    }
     wire(() => page({ pending: true }))
     const r = render(<PagesView scope={space({ hostInstanceId: 'host-1' })} />)
     await openPage(r)
     expect(r.getByTestId('page-pending-host').textContent)
       .toBe('Saved here · waiting for The Millers')
-    connections.value = []
+    spaceMembers.value = {}
   })
 
   it('a save on a member household shows the pill in the editor', async () => {
