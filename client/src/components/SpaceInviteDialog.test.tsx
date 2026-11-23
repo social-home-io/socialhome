@@ -294,6 +294,30 @@ describe('SpaceInviteDialog — publishing to a GFS', () => {
     },
   )
 
+  it('a published invite shows a QR of the short /join/ link, not the long code', async () => {
+    mockReads({
+      servers: [{ id: 'gfs-1', display_name: 'Relay One', status: 'active' }],
+    })
+    const result = await openDialog()
+    await waitFor(() => {
+      expect(result.container.querySelector('[data-testid="invite-publish-toggle"]'))
+        .not.toBeNull()
+    })
+    await act(async () => {
+      fireEvent.click(result.container
+        .querySelector('[data-testid="invite-publish-toggle"]')!)
+    })
+    await generate(result, makeRow({
+      gfs: { gfs_id: 'gfs-1', gfs_token: 'gt1', url: 'https://relay.example.org/join/gt1' },
+    }))
+    // The mocked encoder echoes its input into the data: URI.
+    await waitFor(() => {
+      const srcs = [...result.container.querySelectorAll('img')].map(i => i.getAttribute('src'))
+      expect(srcs).toContain('data:fake;https://relay.example.org/join/gt1')
+      expect(srcs.some(s => s?.includes('socialhome://invite#'))).toBe(false)
+    })
+  })
+
   it('skips servers that are not active', async () => {
     mockReads({
       servers: [{ id: 'gfs-1', display_name: 'Pending One', status: 'pending' }],

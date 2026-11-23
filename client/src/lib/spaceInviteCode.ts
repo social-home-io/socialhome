@@ -176,7 +176,8 @@ const LINK_TOKEN_RE = /^(?!\.+$)[A-Za-z0-9._~-]{1,256}$/
  *      link carry (``http://`` too: a household's own LAN GFS; the
  *      household decides what it will follow).
  *   2. The pinned viewer's address, ``…#v=join&g=<gfs>&t=<token>`` — what
- *      the browser's address bar shows once the link opened.
+ *      the browser's address bar shows once the link opened (``g`` must
+ *      pass the viewer's own ``gfsBaseUrl``: https, or http on localhost).
  *
  * The SPA never fetches the link itself: the household resolves it to the
  * code (``POST /api/spaces/invite-link``), which is then redeemed like a

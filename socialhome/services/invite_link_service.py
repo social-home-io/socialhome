@@ -15,25 +15,29 @@ or scanned, so the request is guarded like any user-supplied URL:
 * **Shape.** ``http(s)://host[:port][/base]/join/<token>`` — no user-info,
   query or fragment; a URL-safe token of at most
   :data:`MAX_INVITE_TOKEN_CHARS`. Host and port come from the link.
-* **Who it may reach.** A GFS this household is connected to (its stored
-  base URL, compared exactly) is asked over the household's own anonymous
-  GFS session — that address was chosen by an admin, so a LAN or plain-http
-  GFS works. Anything else must be ``https://`` and is asked over
+* **Who it may reach.** A GFS this household has an ACTIVE connection to
+  (same scheme, host, port and path as the stored base URL) is asked at
+  that stored URL over the household's own anonymous GFS session — the
+  address was chosen by an admin, so a LAN or plain-http GFS works.
+  Anything else must be ``https://`` and is asked over
   :func:`~socialhome.outbound_fetch.open_pinned_session`: the host is
   resolved here and refused unless every address is public (no loopback,
   private, link-local, CGNAT …), and the connection is pinned to the vetted
-  address, so DNS rebinding can't swap it.
+  address, so DNS rebinding can't swap it. Any port on a public host is
+  allowed (a GFS may listen on its own), as for the v_57 listing targets.
 * **Budget.** No redirects followed, one :data:`RESOLVE_TIMEOUT_S` deadline
   for the whole exchange, an answer of at most :data:`MAX_ANSWER_BYTES`.
 * **Answer.** Only an ``invite_code`` that is a ``socialhome://invite#…``
   string of at most :data:`MAX_INVITE_CODE_CHARS` is passed on; the SPA
   decodes it exactly like a pasted code.
 
-**Privacy.** The GFS sees this household's IP and the token once — the
-same request the household's redeem would make through that GFS anyway,
-and the same the viewer makes from the visitor's browser. The request is
-anonymous (no cookie, no household id, a neutral ``User-Agent``), and logs
-here name the host only, never the token.
+**Privacy.** The link's host sees this household's IP and the token once,
+in an anonymous request (no cookie, no household id, the neutral
+``User-Agent: SocialHome``). For a genuine GFS that is no more than a
+redeem through it shows; a crafted link can make the household reveal its
+IP to any public host the person scans — the same a pasted code naming
+that host as its GFS already does. Logs here name the host only, never
+the token.
 """
 
 from __future__ import annotations
@@ -42,14 +46,16 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import urlsplit
 
 import aiohttp
 import orjson
 
 from ..domain.errors import CodedError, NotFoundError
 from ..domain.federation import GfsConnection
+from ..gfs_proof import normalize_gfs_base_url
 from ..outbound_fetch import (
+    PINNED_SESSION_USER_AGENT,
     OutboundFetchRefused,
     open_pinned_session,
     read_capped,
@@ -106,10 +112,6 @@ class InviteLinkExpiredError(NotFoundError):
 
     code = "INVITE_LINK_EXPIRED"
     detail = "This invite has expired or was revoked."
-
-
-def _normalised(parts: SplitResult) -> tuple[str, str, str]:
-    return (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"))
 
 
 def parse_invite_link(link: object) -> tuple[str, str]:
@@ -185,7 +187,8 @@ class InviteLinkService:
             async with self._gfs.anon_session(conn) as session:
                 if session is None:
                     raise InviteLinkUnreachableError()
-                return await self._ask(session, base, token)
+                # The stored address, never the user's spelling of it.
+                return await self._ask(session, conn.inbox_url.rstrip("/"), token)
         if urlsplit(base).scheme != "https":
             raise OutboundFetchRefused("scheme", "http")
         session = await self._open_session(base)
@@ -195,14 +198,19 @@ class InviteLinkService:
             await session.close()
 
     async def _connection_for(self, base: str) -> GfsConnection | None:
-        """This household's GFS connection at exactly ``base``, if any."""
-        want = _normalised(urlsplit(base))
+        """This household's ACTIVE GFS connection at ``base`` (same scheme,
+        host, port and path — :func:`normalize_gfs_base_url`), if any. A
+        pending or suspended one (e.g. it failed its key proof) gets no
+        exemption: it takes the public-only pinned path like any link."""
+        want = normalize_gfs_base_url(base)
+        if not want:
+            return None
         for conn in await self._gfs.list_connections():
-            try:
-                if _normalised(urlsplit(conn.inbox_url)) == want:
-                    return conn
-            except ValueError:
-                continue
+            if (
+                conn.status == "active"
+                and normalize_gfs_base_url(conn.inbox_url) == want
+            ):
+                return conn
         return None
 
     @staticmethod
@@ -210,7 +218,14 @@ class InviteLinkService:
         async with session.post(
             f"{base}/gfs/pages/invite",
             data=orjson.dumps({"token": token}),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                # Neutral on every path (the shared GFS session's default
+                # names the aiohttp version), and no compression, so the
+                # byte cap counts what is actually received.
+                "User-Agent": PINNED_SESSION_USER_AGENT,
+                "Accept-Encoding": "identity",
+            },
             allow_redirects=False,
         ) as resp:
             if resp.status == 404:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 import orjson
 import pytest
@@ -253,6 +254,27 @@ async def test_connection_match_is_exact_not_a_prefix():
     with pytest.raises(InviteLinkRefusedError):
         await svc.resolve("http://192.168.1.5:8766/join/tok")
     assert opened == []
+
+
+@pytest.mark.parametrize("status", ["pending", "suspended"])
+async def test_only_an_active_connection_is_exempt(status):
+    conn = replace(_conn("http://192.168.1.5:8765"), status=status)
+    shared = _Session()
+    svc, opened = _svc(_Session(), gfs=_Gfs([conn], shared))
+    with pytest.raises(InviteLinkRefusedError):  # plain http, not exempt
+        await svc.resolve("http://192.168.1.5:8765/join/tok")
+    assert shared.calls == [] and opened == []
+
+
+async def test_connected_match_asks_the_stored_url_not_the_users_spelling():
+    shared = _Session()
+    svc, opened = _svc(gfs=_Gfs([_conn("https://gfs.example.org")], shared))
+    assert await svc.resolve("https://GFS.example.org:443/join/tok") == CODE
+    assert opened == []
+    url, kw = shared.calls[0]
+    assert url == "https://gfs.example.org/gfs/pages/invite"
+    assert kw["headers"]["User-Agent"] == "SocialHome"
+    assert kw["headers"]["Accept-Encoding"] == "identity"
 
 
 async def test_connected_gfs_without_a_session_is_unreachable():

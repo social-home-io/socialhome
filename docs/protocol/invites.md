@@ -429,15 +429,18 @@ before.
   user-info / query / fragment, host and port from the link, every
   resolved address public (no loopback, private, link-local, CGNAT…) and
   pinned for the connection; no redirects, one 8 s deadline, at most
-  64 KiB of answer. The one exception is a GFS this household is
-  connected to (its stored base URL, exactly): that one is asked over the
+  64 KiB of answer. The one exception is a GFS this household has an
+  **active** connection to (same scheme, host, port and path as its
+  stored base URL): that one is asked at the stored URL over the
   household's own anonymous GFS session, so a LAN or plain-http GFS works.
   10 / min / user.
 - **Privacy:** the browser never contacts the GFS (no third-party
   fetches). The household's IP and the token reach that GFS once, in an
-  anonymous request — the GFS learns nothing a redeem through it
-  (`POST /gfs/envelope`) would not show it anyway. Nothing new is stored
-  on either side.
+  anonymous request (`User-Agent: SocialHome`). A genuine GFS learns
+  nothing a redeem through it (`POST /gfs/envelope`) would not show it
+  anyway; a crafted link can make the household reveal its IP to any
+  public host the person scans — as a pasted code naming that host as
+  its GFS already does. Nothing new is stored on either side.
 
 **Nor may the blob carry an address.** The page is served to anyone with
 the link, so the payload holds public keys and ids only — the redeem
