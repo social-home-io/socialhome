@@ -978,9 +978,10 @@ async def test_a_follow_from_inside_a_local_community_is_approved(bus, repo):
     assert repo.join_requests == []
 
 
-async def test_a_follow_near_the_edge_becomes_a_request_for_the_admins(bus, repo):
-    """As a local follow near the edge does: an ordinary request (the
-    admins' bell), never an automatic seat."""
+async def test_a_follow_near_the_edge_is_refused(bus, repo):
+    """Owner 2026-11-23: following a local community is inside only — near
+    the edge the follow is dropped like one from outside: no automatic
+    seat, no request for the admins, no bell."""
     repo.spaces["sp-1"] = _local_follow_space()
     approver = _Approver()
     seen: list = []
@@ -992,10 +993,8 @@ async def test_a_follow_near_the_edge_becomes_a_request_for_the_admins(bus, repo
     h = _follow_handlers(bus, repo, approver=approver)
     await _follow(h, location=EDGE)
     assert approver.calls == []
-    (row,) = repo.pending
-    assert row["area_verdict"] == "edge"
-    assert row["id"] == "req-f"
-    assert len(seen) == 1
+    assert repo.join_requests == []
+    assert seen == []
 
 
 @pytest.mark.parametrize("location", [BERN, None])

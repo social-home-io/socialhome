@@ -238,6 +238,7 @@ from ..domain.space import (
     LocalAreaPublicOnlyError,
     LocalAreaUnavailableError,
     LocationRequiredError,
+    OutsideAreaError,
     OwnerStillActiveError,
     OwnerTransferFollowerError,
     OwnerTransferNotLocalError,
@@ -9856,9 +9857,14 @@ class SpaceService(
             raise SubscribeNotAllowedError()
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space.id, user_id)
-        # A local community: a follower lives inside the area too; near the
-        # edge the follow becomes a join request for the admins.
-        await self._seat_or_review(space, user_id)
+        # A local community: following is inside only (owner 2026-11-23).
+        # Outside raises here; near the edge is refused the same way — no
+        # admin review for a follow (a member's join keeps it).
+        if (
+            await self.require_local_seat(space, seeker_user_id=user_id)
+            is Eligibility.EDGE
+        ):
+            raise OutsideAreaError()
         await self._seat_local_member(
             space, user_id, role=SpaceRole.SUBSCRIBER, actor_user_id=user_id
         )

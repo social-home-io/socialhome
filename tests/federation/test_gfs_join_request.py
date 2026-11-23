@@ -1454,6 +1454,34 @@ async def test_a_follow_of_a_public_or_unknown_space_is_dropped(households, gfs)
     approve.assert_not_awaited()
 
 
+@pytest.mark.parametrize("join_mode", [JoinMode.OPEN, JoinMode.INVITE_ONLY])
+async def test_a_follow_of_a_local_community_through_the_gfs_is_refused(
+    households, gfs, join_mode
+):
+    """Owner 2026-11-23: following a local community is inside only, and a
+    GFS follow carries no location — it never reaches one (only a public
+    space is a local community, and only a global space is asked through a
+    GFS). Refused whatever the join mode: no approval, nothing filed."""
+    a, b = households
+    approve = _approver(b)
+    community = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Quartier",
+        space_type=SpaceType.PUBLIC,
+        join_mode=join_mode,
+        lat=47.3769,
+        lon=8.5417,
+        radius_km=5,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    out = await b.gfsjoin.join.handle_body(
+        _follow(a, space_id=community.id, user_id="u", request_id="r-lc")
+    )
+    assert out == {"ok": True, "filed": False}
+    approve.assert_not_awaited()
+    assert await b.space_repo.list_pending_join_requests(community.id) == []
+
+
 async def test_a_member_request_to_a_follows_only_space_is_still_dropped(
     households, gfs
 ):

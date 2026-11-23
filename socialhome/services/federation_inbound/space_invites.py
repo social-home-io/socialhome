@@ -324,17 +324,13 @@ class SpaceInviteInboundHandlers:
         applicant_pk = event.payload.get("applicant_pk")
         request_id = event.payload.get("request_id")
         if verdict is Eligibility.EDGE:
-            message = event.payload.get("message")
-            await file_remote_join_request(
-                self._space_repo,
-                self._bus,
-                space_id=space_id,
-                household_instance_id=event.from_instance,
-                user_id=user_id,
-                area_verdict=verdict,
-                applicant_pk=str(applicant_pk) if applicant_pk else None,
-                message=str(message) if message else None,
-                request_id=str(request_id) if request_id else None,
+            # Following a local community is inside only (owner
+            # 2026-11-23): near the edge is dropped like outside — no admin
+            # review for a follow (a member's join request keeps it).
+            log.info(
+                "follow from %s refused: near the edge of the local community %s",
+                event.from_instance,
+                space_id,
             )
             return
         if not request_id:
