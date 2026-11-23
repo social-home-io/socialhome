@@ -380,8 +380,13 @@ neither raise it, strip it nor splice it onto another moment:
   the per-source rate (``moment_reaction_router``) when it sits on the
   moment's last hop (our hop + 1 ≥ ``min(reach, MOMENT_MAX_HOPS)`` — nobody
   beyond it relays); otherwise the mixed bucket. A token minted before
-  (no hop inside, ≤ 48 h) falls back to ``len(tokens) ==
-  MAX_RETURN_TOKENS``. An older relay
+  (no hop inside; it lives until the moment expires, ≤ 30 days) falls
+  back to the rule it was minted under: ``len(tokens) == 2``
+  (``PRE_V96_SOURCE_RETURN_TOKENS``, the cap was 3). An envelope refused at
+  the relay (bad token, wrong count, a chain that doesn't lead back) is
+  never charged to the neighbour's budget; it counts against a failure
+  bucket (``RELAY_FAILURES_PER_NEIGHBOUR_PER_MIN``, 180 a minute), past
+  which refusals are logged at DEBUG only. An older relay
   at hop 2 still applies its own source bucket to two-token envelopes from
   a v_96 hop-3 relay that aggregates hops 3–5 behind it — reactions from
   hops 4–5 past an older relay may be throttled (documented degradation).
@@ -914,8 +919,8 @@ reaction goes back along the path the moment came.
   minute however its envelopes mix, and an envelope the relay refuses is
   not charged (#1197 review). The mixed budget is one size whatever the
   levels beyond the neighbour (not scaled); a token minted before (no hop
-  inside, ≤ 48 h) falls back to counting tokens (source rate for
-  `MAX_RETURN_TOKENS`).
+  inside; it lives until the moment expires, ≤ 30 days) keeps the rule it
+  was minted under (two tokens = source rate, the cap was 3).
 
   The origin keeps four budgets. Before any crypto, per neighbour handing
   reactions over: a copy of a reaction it already took (the expected second

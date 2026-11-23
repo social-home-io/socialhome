@@ -161,8 +161,13 @@ MAX_KEPT_ROUTES: int = 3
 #: tokens the envelope carries (exactly that hop), so a truncated chain
 #: dies at the first relay. Not scaled by how many levels lie beyond the
 #: neighbour — the mixed budget is one size for all. A token minted before
-#: (no hop inside, ≤ 48 h old) falls back to counting tokens: the source
-#: rate for :data:`MAX_RETURN_TOKENS`. Older-relay degradation: an older
+#: (no hop inside; it lives until the moment expires, ≤ 30 days) falls
+#: back to the rule it was minted under — the cap was 3, so
+#: :data:`PRE_V96_SOURCE_RETURN_TOKENS` (2) tokens take the source rate.
+#: An envelope whose token doesn't open here, carries the wrong count or
+#: doesn't lead back is refused before anything is charged, and counts
+#: against :data:`RELAY_FAILURES_PER_NEIGHBOUR_PER_MIN`: past it, refusals
+#: are logged at DEBUG only. Older-relay degradation: an older
 #: relay at hop 2 still applies its own source bucket to two-token
 #: envelopes, so a v_96 neighbour at hop 3 that aggregates reactions from
 #: hops 3–5 behind it is held to the source rate there. An envelope the
@@ -171,6 +176,14 @@ RELAY_SOURCE_PER_MIN: int = 60
 RELAY_SOURCE_PER_MOMENT_PER_MIN: int = 10
 RELAY_PER_NEIGHBOUR_PER_MIN: int = 3 * RELAY_SOURCE_PER_MIN
 RELAY_PER_MOMENT_PER_MIN: int = 3 * RELAY_SOURCE_PER_MOMENT_PER_MIN
+#: Refused envelopes from one neighbour a minute that are logged at WARNING
+#: (a bad token, the wrong count, a chain that doesn't lead back); past it,
+#: at DEBUG — one noisy neighbour can't flood the log.
+RELAY_FAILURES_PER_NEIGHBOUR_PER_MIN: int = RELAY_PER_NEIGHBOUR_PER_MIN
+#: The token count of a last-hop household's own reactions under the
+#: pre-v_96 cap of 3 hops — the rule for a token minted before the relay
+#: kept its hop in it.
+PRE_V96_SOURCE_RETURN_TOKENS: int = 2
 #: The origin takes this many reactions a minute per reactor household —
 #: charged only for a reaction that passed every check and changed
 #: something (#1178 F2).
@@ -831,7 +844,9 @@ class MomentReactionRouter(ProtectionGateMixin):
         if opened.hop is not None and len(tokens) != opened.hop:
             # A reactor at hop k + 1 holds exactly k tokens, and every relay
             # in between drops one: a truncated chain dies here (v_96).
-            self._refuse(event, "return tokens do not match this relay's hop")
+            self._refuse_relay(event, "return tokens do not match this relay's hop")
+            return
+        if not await self._leads_back(event, origin, tokens, opened.prev_hop):
             return
         if self._from_last_hop(opened, len(tokens)):
             # Nobody beyond the neighbour relays this moment: everything it
@@ -848,7 +863,17 @@ class MomentReactionRouter(ProtectionGateMixin):
                 return
         for key, limit, _what in buckets:
             self._limiter.is_allowed(key, limit=limit, window_s=_WINDOW_S)
-        await self._forward(event, moment_id, origin, tokens, opened.prev_hop)
+        await self._federation.send_event(
+            to_instance_id=opened.prev_hop,
+            event_type=FET.MOMENT_REACTION_ROUTED,
+            payload={
+                "moment_id": moment_id,
+                "origin_instance_id": origin,
+                RETURN_TOKENS_FIELD: tokens[:-1],
+                RETURN_TOKEN_SUITE_FIELD: RETURN_TOKEN_SUITE_AESGCM_256,
+                "sealed": event.payload["sealed"],
+            },
+        )
 
     def _buckets_have_room(
         self, event: FederationEvent, buckets: list[tuple[str, int, str]]
@@ -865,11 +890,11 @@ class MomentReactionRouter(ProtectionGateMixin):
         last hop — nobody beyond it relays, so it hands over only its own
         household's reactions. From our token (v_96): it got the moment at
         our hop + 1, the last one when that reaches ``min(reach,
-        MOMENT_MAX_HOPS)``. A token minted before carries no hop: then only
-        the most tokens a moment carries (:data:`MAX_RETURN_TOKENS`) — as
-        before, until those tokens expire (≤ 48 h)."""
+        MOMENT_MAX_HOPS)``. A token minted before carries no hop: then the
+        rule it was minted under (cap 3: :data:`PRE_V96_SOURCE_RETURN_TOKENS`
+        tokens), until it expires with its moment (≤ 30 days)."""
         if opened.hop is None or opened.reach is None:
-            return tokens == MAX_RETURN_TOKENS
+            return tokens == PRE_V96_SOURCE_RETURN_TOKENS
         return opened.hop + 1 >= min(opened.reach, MOMENT_MAX_HOPS)
 
     def _open_own_token(
@@ -877,7 +902,7 @@ class MomentReactionRouter(ProtectionGateMixin):
     ) -> OpenedReturnToken | None:
         """Our token (the last), opened — or ``None``, refused."""
         if self._token_key is None or not tokens:
-            self._refuse(event, "no return token for this household")
+            self._refuse_relay(event, "no return token for this household")
             return None
         try:
             return open_return_token(
@@ -888,34 +913,38 @@ class MomentReactionRouter(ProtectionGateMixin):
                 now_s=self._clock_ms() // 1000,
             )
         except ReturnTokenRefused as exc:
-            self._refuse(event, str(exc))
+            self._refuse_relay(event, str(exc))
             return None
 
-    async def _forward(
-        self,
-        event: FederationEvent,
-        moment_id: str,
-        origin: str,
-        tokens: list[str],
-        prev: str,
-    ) -> None:
-        remaining = tokens[:-1]
-        if (prev == origin) != (not remaining):
-            self._refuse(event, "return tokens do not lead to the origin")
-            return
+    async def _leads_back(
+        self, event: FederationEvent, origin: str, tokens: list[str], prev: str
+    ) -> bool:
+        """Whether our token's previous hop carries the reaction on toward
+        *origin* — checked before anything is charged."""
+        if (prev == origin) != (len(tokens) == 1):
+            self._refuse_relay(event, "return tokens do not lead to the origin")
+            return False
         if prev == event.from_instance or not await self._routable_via(prev):
-            self._refuse(event, "previous hop is not a v_67 paired household")
+            self._refuse_relay(event, "previous hop is not a v_67 paired household")
+            return False
+        return True
+
+    def _refuse_relay(self, event: FederationEvent, reason: str) -> None:
+        """Refuse an envelope at the relay, charged to the neighbour's
+        failure bucket: a WARNING while it has room, DEBUG past it."""
+        if self._limiter.is_allowed(
+            f"rf:{event.from_instance}",
+            limit=RELAY_FAILURES_PER_NEIGHBOUR_PER_MIN,
+            window_s=_WINDOW_S,
+        ):
+            self._refuse(event, reason)
             return
-        await self._federation.send_event(
-            to_instance_id=prev,
-            event_type=FET.MOMENT_REACTION_ROUTED,
-            payload={
-                "moment_id": moment_id,
-                "origin_instance_id": origin,
-                RETURN_TOKENS_FIELD: remaining,
-                RETURN_TOKEN_SUITE_FIELD: RETURN_TOKEN_SUITE_AESGCM_256,
-                "sealed": event.payload["sealed"],
-            },
+        log.debug(
+            "%s from %s: %s — refusing (moment=%s; over the failure rate)",
+            event.event_type,
+            event.from_instance,
+            reason,
+            event.payload.get("moment_id"),
         )
 
     async def _accept_at_origin(
@@ -1184,6 +1213,8 @@ __all__ = [
     "ORIGIN_PER_NEIGHBOUR_PER_MIN",
     "ORIGIN_PER_REACTOR_PER_MIN",
     "ORIGIN_REPLAYS_PER_NEIGHBOUR_PER_MIN",
+    "PRE_V96_SOURCE_RETURN_TOKENS",
+    "RELAY_FAILURES_PER_NEIGHBOUR_PER_MIN",
     "RELAY_PER_MOMENT_PER_MIN",
     "RELAY_PER_NEIGHBOUR_PER_MIN",
     "RELAY_SOURCE_PER_MIN",

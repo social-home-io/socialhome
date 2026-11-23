@@ -78,6 +78,8 @@ from socialhome.services.moment_reaction_router import (
     MAX_ROUTES,
     ORIGIN_FAILURES_PER_NEIGHBOUR_PER_MIN,
     ORIGIN_PER_NEIGHBOUR_PER_MIN,
+    PRE_V96_SOURCE_RETURN_TOKENS,
+    RELAY_FAILURES_PER_NEIGHBOUR_PER_MIN,
     RELAY_PER_MOMENT_PER_MIN,
     RELAY_PER_NEIGHBOUR_PER_MIN,
     RELAY_SOURCE_PER_MIN,
@@ -1046,19 +1048,60 @@ async def test_a_last_hop_reactor_on_a_reach_3_moment_takes_the_source_rate(env)
     assert len(sent) == RELAY_SOURCE_PER_MOMENT_PER_MIN
 
 
-async def test_a_token_minted_before_falls_back_to_counting_tokens(env):
-    """A token minted before the hop was kept in it (≤ 48 h old) is still
-    honoured: the most tokens a moment carries take the source rate, as
-    before."""
+@pytest.mark.parametrize(
+    ("tokens", "forwarded"),
+    [
+        (PRE_V96_SOURCE_RETURN_TOKENS, RELAY_SOURCE_PER_MOMENT_PER_MIN),
+        (MAX_RETURN_TOKENS, RELAY_PER_MOMENT_PER_MIN),
+    ],
+)
+async def test_a_token_minted_before_falls_back_to_counting_tokens(
+    env, tokens, forwarded
+):
+    """A token minted before the hop was kept in it (it lives until the
+    moment expires, ≤ 30 days) is still honoured with the rule it was minted
+    under: the cap was 3, so two tokens were a last-hop household's own
+    reactions — the source rate; anything else the mixed one."""
     app, _db, sent, _own, _anna, router, _c = env
     legacy = _legacy_token(router)
     payload = {
         **_relay_payload("x", origin="peer-elsewhere"),
-        "rt": [*(f"tok-{i}" for i in range(MAX_RETURN_TOKENS - 1)), legacy],
+        "rt": [*(f"tok-{i}" for i in range(tokens - 1)), legacy],
     }
-    for _ in range(RELAY_PER_MOMENT_PER_MIN):
+    for _ in range(RELAY_PER_MOMENT_PER_MIN + 5):
         await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
-    assert len(sent) == RELAY_SOURCE_PER_MOMENT_PER_MIN
+    assert len(sent) == forwarded
+    assert PRE_V96_SOURCE_RETURN_TOKENS == 2
+
+
+async def test_bad_tokens_from_one_neighbour_warn_up_to_a_bucket(env, caplog):
+    """A neighbour handing over envelopes whose token doesn't open here is
+    charged to a failure bucket of its own: a WARNING each up to it, then
+    DEBUG — one noisy neighbour can't flood the log."""
+    app, _db, sent, _own, _anna, router, _c = env
+    bad = _relay_payload("AAAA" + _token(router)[4:])
+    with caplog.at_level("DEBUG", logger="socialhome.services.moment_reaction_router"):
+        for _ in range(RELAY_FAILURES_PER_NEIGHBOUR_PER_MIN + 5):
+            await _dispatch(app, FET.MOMENT_REACTION_ROUTED, bad)
+    refusals = [r for r in caplog.records if "refusing" in r.getMessage()]
+    assert [r.levelname for r in refusals].count(
+        "WARNING"
+    ) == RELAY_FAILURES_PER_NEIGHBOUR_PER_MIN
+    assert [r.levelname for r in refusals].count("DEBUG") == 5
+    assert sent == []
+
+
+async def test_a_reaction_that_does_not_lead_back_is_not_charged(env):
+    """A token that opens but doesn't lead to the origin is refused before
+    the neighbour's budget is charged — its honest reactions keep their
+    room."""
+    app, _db, sent, _own, _anna, router, _c = env
+    stray = _relay_payload(_token(router), origin="peer-elsewhere")
+    for _ in range(RELAY_PER_MOMENT_PER_MIN + 5):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, stray)
+    assert sent == []
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _relay_payload(_token(router)))
+    assert len(sent) == 1
 
 
 def _legacy_token(router, *, to=NEIGHBOUR, prev=OTHER, moment_id="m-far") -> str:
