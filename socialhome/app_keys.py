@@ -16,6 +16,7 @@ from .db import AsyncDatabase
 
 if TYPE_CHECKING:  # circular at runtime: services → … → auth → app_keys
     from .repositories.instance_config_repo import AbstractInstanceConfigRepo
+    from .services.invite_link_service import InviteLinkService
     from .services.link_preview_service import LinkPreviewService
     from .services.map_tile_service import MapTileService
 
@@ -158,6 +159,8 @@ map_tile_service_key: AppKey[MapTileService] = AppKey("map_tile_service")
 #: Author-side link preview builder behind the SSRF-guarded fetcher
 #: (``POST /api/link-preview`` + post create).
 link_preview_service_key: AppKey[LinkPreviewService] = AppKey("link_preview_service")
+#: Resolves a GFS invite link to its code (``POST /api/spaces/invite-link``).
+invite_link_service_key: AppKey[InviteLinkService] = AppKey("invite_link_service")
 ha_bridge_service_key: AppKey = AppKey("ha_bridge_service")
 url_update_outbound_key: AppKey = AppKey("url_update_outbound")
 capabilities_outbound_key: AppKey = AppKey("capabilities_outbound")

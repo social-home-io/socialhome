@@ -386,6 +386,7 @@ from .services.household_chat_service import HouseholdChatService
 from .services.household_dashboard_service import HouseholdDashboardService
 from .services.household_zone_service import HouseholdZoneService
 from .services.household_zone_sync import HouseholdZoneSync
+from .services.invite_link_service import InviteLinkService
 from .services.legacy_album_deletes import LegacyAlbumDeletes
 from .services.link_preview_service import LinkPreviewService
 from .services.local_community import LocalAreaBudget
@@ -3458,6 +3459,9 @@ def _build_middleware(
             # fetch a page (the service adds its own per-member and
             # household fetch budget on top).
             "/api/link-preview": (30, 60),
+            # Resolving a scanned / pasted GFS invite link: each call makes
+            # the household ask that GFS once (an anonymous request).
+            "POST /api/spaces/invite-link": (10, 60),
             # App messages (moves) get their own bucket (C#31): a game's
             # move is a store write plus a send, and every app call shared
             # the 60/min ``/api/apps`` default, so a quick game 429'd. Each
@@ -4631,6 +4635,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.household_chat_service_key] = household_chat_service
     app[K.space_chat_service_key] = space_chat_service
     app[K.link_preview_service_key] = link_preview_service
+    app[K.invite_link_service_key] = InviteLinkService(gfs_connection_service)
     app[K.app_service_key] = app_service
     app[K.alias_service_key] = alias_service
     app[K.alias_resolver_key] = alias_resolver

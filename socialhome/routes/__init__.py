@@ -422,6 +422,7 @@ from .spaces import (
     SpaceFeedView,
     SpaceGfsJoinRequestsDeclineView,
     SpaceIconView,
+    SpaceInviteLinkView,
     SpaceInviteTokenItemView,
     SpaceInviteTokenView,
     SpaceJoinRequestCollectionView,
@@ -666,6 +667,7 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/admin/spaces/{id}/ownership", AdminSpaceOwnershipView)
     app.router.add_view("/api/spaces", SpaceCollectionView)
     app.router.add_view("/api/spaces/join", SpaceJoinView)
+    app.router.add_view("/api/spaces/invite-link", SpaceInviteLinkView)
     app.router.add_view("/api/spaces/chat-unread", SpaceChatUnreadView)
     app.router.add_view("/api/spaces/{id}", SpaceDetailView)
     app.router.add_view("/api/spaces/{id}/proposals", SpaceProposalsView)
