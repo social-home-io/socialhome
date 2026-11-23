@@ -4429,9 +4429,10 @@ reaches the host only through a GFS follows over the same sealed leg as
 1. **The contact.** The owner's listing carries the `join_contact` while the
    space takes requests **or** followers. A space that takes only followers
    (invite-only, `allow_subscribers` on) lists it only on a GFS whose signed
-   capabilities prove `subscriber_seats` (v_96; a GFS that relays the
-   follow bootstrap and is ready for follower seats); elsewhere it lists
-   without one, as before.
+   capabilities prove `subscriber_seats` (v_96; until the channel phase it
+   means only "relays the v_96 follow bootstrap and serves the contact on
+   an invite-only listing with followers on"; channel seats for followers
+   come later); elsewhere it lists without one, as before.
 2. **The request.** `POST /api/spaces/{id}/subscribe` on a space only a GFS
    lists seals `SPACE_JOIN_REQUEST_BOOTSTRAP` exactly as step 3 above, with
    one more field **inside the sealed body**: `requested_role:

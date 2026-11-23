@@ -456,19 +456,19 @@ The age gate runs on the applicant household when it opens the ACK
 |---|---|
 | The host household | The local gates (ban, age gate, `allow_subscribers`, the local-community check) and then the members' seating path (`_seat_local_member`) with role `subscriber`: the row, the roster gossip, the audit. No federation beyond the gossip. |
 | A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role: "subscriber"` inside the encrypted payload (needs a host at v_96, else `409 HOST_TOO_OLD`, `feature: "follow"`) → auto-approved → `SPACE_JOIN_REQUEST_APPROVED` with the bound token → §D2 redeem, seated with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. |
-| Reached only through a GFS | The v_84 bootstrap: `join_contact` from the polled listing (published while the space takes requests or followers; for a space that takes only followers, only to a GFS that proves `subscriber_seats`), `SPACE_JOIN_REQUEST_BOOTSTRAP` with `requested_role: "subscriber"` in the sealed body, the host auto-answers with a bound subscriber token (48 h), the applicant auto-redeems over §D2b and is seated as a `space_session` subscriber. The bootstrap budgets (120/h per space, 10/h per sender, 200 pending → "busy") apply unchanged and before the approval. |
+| Reached only through a GFS | The v_84 bootstrap: `join_contact` from the polled listing (published while the space takes requests or followers — the GFS now serves the contact on an invite-only listing with followers on; for such a follow-only space, only to a GFS that proves `subscriber_seats`, which until the channel phase means "relays the v_96 follow bootstrap"), `SPACE_JOIN_REQUEST_BOOTSTRAP` with `requested_role: "subscriber"` in the sealed body, the host auto-answers with a bound subscriber token (48 h), the applicant auto-redeems over §D2b and is seated as a `space_session` subscriber. The bootstrap budgets (120/h per space, 10/h per sender, 200 pending → "busy") apply unchanged and before the approval. |
 
-**A local community's edge.** On the host household and on the paired /
-mesh path a follow runs the same ~1 km area check as a join: outside is
-refused, inside is auto-approved, and **near the edge the follow becomes an
-ordinary join request for the admins** (as the host household's own
-`_seat_or_review` always did). `space_join_requests.requested_role` holds
-only `admin`, so such a request does not say it was a follow, and an
-admin's approval seats a **member** (the admins decided). A GFS follow
-never meets this: only a `public` space is a local community, and the GFS
-lists only `global` ones. An auto-approved follow counts as an approval for
-`has_approved_join_request` (it was decided inside the area), so its
-location-less redeem is seated on it.
+**A local community: following is inside only** (owner decision
+2026-11-23). On the host household and on the paired / mesh path a follow
+runs the same ~1 km area check as a join: inside is auto-approved; near the
+edge **and** outside are refused — `403 OUTSIDE_AREA` on the host household,
+dropped on the paired / mesh path — with no admin review and no request
+filed. A member's join keeps its rule (near the edge → admin review). A GFS
+follow never reaches a local community: only a `public` space is one, the
+GFS lists only `global` ones, and the host refuses a follow through the GFS
+for anything but a global space it hosts. An auto-approved follow counts as
+an approval for `has_approved_join_request` (it was decided inside the
+area), so its location-less redeem is seated on it.
 
 Unfollowing (`DELETE /api/spaces/{id}/subscribe`, `unfollow_space`) is the
 member's own leave for the subscriber seat — the same code as
