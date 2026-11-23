@@ -1296,6 +1296,25 @@ async def test_invite_token_role_round_trips(env):
         assert row["role"] == role
 
 
+async def test_consume_reports_the_household_a_token_is_bound_to(env):
+    """An approval's token (bound) says so on consume; a link does not."""
+    await env.repo.save(_space("sp-bound"))
+    bound = await env.repo.create_invite_token(
+        "sp-bound",
+        "uid-alice",
+        role="subscriber",
+        bound_instance_id="peer-1",
+        bound_user_id="uid-bob",
+    )
+    row = await env.repo.consume_invite_token(
+        bound, redeemer_user_id="uid-bob", redeemer_instance_id="peer-1"
+    )
+    assert row is not None and row["bound_instance_id"] == "peer-1"
+    link = await env.repo.create_invite_token("sp-bound", "uid-alice")
+    row = await env.repo.consume_invite_token(link)
+    assert row is not None and row["bound_instance_id"] is None
+
+
 async def test_invite_token_rejects_an_unknown_role(env):
     """The CHECK is the on-disk authority — ``owner`` is not in it, and
     neither is anything invented."""

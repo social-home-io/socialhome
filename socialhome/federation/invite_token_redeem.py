@@ -1552,15 +1552,17 @@ class SpaceInviteTokenRedeemCoordinator:
             return None, REDEEM_DENY_REASON, None
         if (
             seat == SpaceRole.SUBSCRIBER
+            and row.get("bound_instance_id")
             and space is not None
             and space.space_type in PUBLIC_SPACE_TIERS
             and not space.features.allow_subscribers
         ):
-            # A follower seat of a public / global space is written only
-            # while the space takes followers (v_96): the switch may have
-            # gone off between the approval and this redeem. The use is
-            # handed back. A private space's follower link is the owner's
-            # own grant and is not gated here.
+            # A follow's seat (the approval's token, bound to the
+            # household) of a public / global space is written only while
+            # the space takes followers (v_96): the switch may have gone off
+            # between the approval and this redeem. The use is handed back.
+            # An explicit follower link (unbound) is the owner's own grant
+            # and works whatever the switch (invites.md).
             log.info(
                 "invite redeem: refused a follower seat for space %s — it "
                 "takes no followers",

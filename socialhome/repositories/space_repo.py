@@ -2589,7 +2589,7 @@ class SqliteSpaceRepo:
             row = conn.execute(
                 """
                 SELECT space_id, created_by, uses_remaining, expires_at, role,
-                       via, gfs_id
+                       via, gfs_id, bound_instance_id
                   FROM space_invite_tokens WHERE token=?
                 """,
                 (token,),
@@ -2613,6 +2613,9 @@ class SqliteSpaceRepo:
                 # grandfathered link that unlocks ``private_gfs`` makes it
                 # the space's channel server.
                 "gfs_id": row[6],
+                # Migration 0143 — the household an approval's token is
+                # bound to (``None`` for an ordinary link).
+                "bound_instance_id": row[7],
             }
 
         return await self._db.transact(_run)

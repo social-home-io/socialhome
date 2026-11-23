@@ -230,6 +230,8 @@ class _FakeSpaceRepo:
             "via": row.get("via", "gfs"),
             # The GFS connection the link was parked on, if any.
             "gfs_id": row.get("gfs_id"),
+            # Migration 0143 — the household an approval's token is bound to.
+            "bound_instance_id": row.get("bound_instance_id"),
         }
 
     async def release_invite_token_use(self, token):
@@ -2373,13 +2375,16 @@ def _public_space(space_id: str, *, allow_subscribers: bool) -> Space:
 async def test_a_follow_redeem_is_refused_once_the_space_takes_no_followers():
     """v_96 — the follower seat of a public / global space is re-checked
     when it is written: ``allow_subscribers`` went off between the
-    approval and the redeem → denied, the use handed back, nobody seated."""
+    approval and the redeem → denied, the use handed back, nobody seated.
+    Only the follow's own token (bound to the household, minted by the
+    approval) is gated — see the explicit-link test below."""
     sender, _issuer, _sf, _if, repo, issuer_members = _wire_pair(
         {
             "space_id": "sp-pub",
             "created_by": "owner",
             "uses_remaining": 1,
             "role": SpaceRole.SUBSCRIBER.value,
+            "bound_instance_id": "sender-1",
         },
     )
     repo.space_rows_for_get["sp-pub"] = _public_space("sp-pub", allow_subscribers=False)
@@ -2401,9 +2406,32 @@ async def test_a_follow_redeem_seats_while_the_space_takes_followers():
             "created_by": "owner",
             "uses_remaining": 1,
             "role": SpaceRole.SUBSCRIBER.value,
+            "bound_instance_id": "sender-1",
         },
     )
     repo.space_rows_for_get["sp-pub"] = _public_space("sp-pub", allow_subscribers=True)
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.SUBSCRIBER.value
+    assert issuer_members.added[0]["role"] == SpaceRole.SUBSCRIBER.value
+
+
+async def test_an_explicit_follower_link_seats_whatever_the_switch():
+    """invites.md: a ``subscriber`` link works regardless of
+    ``allow_subscribers`` — that switch governs walk-up follows; an explicit
+    (unbound) link is the owner's decision for one link."""
+    sender, _issuer, _sf, _if, repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-pub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    repo.space_rows_for_get["sp-pub"] = _public_space("sp-pub", allow_subscribers=False)
     result = await sender.request_redeem(
         "good-token",
         viewer_user_id="u-local",
