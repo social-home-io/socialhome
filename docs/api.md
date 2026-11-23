@@ -1897,7 +1897,7 @@ this channel"}`; a malformed body (exact key sets — e.g. a `space_id` or, on
 identified `POST /gfs/channels/publish` (household-signed, with a channel
 cert) is gone since v_90 (a 404).
 Wire shapes: `socialhome/domain/gfs_channel.py`; rationale:
-[`protocol/discovery.md`](./protocol/discovery.md#private-spaces-opaque-channels-v_51).
+[`protocol/discovery.md`](./protocol/discovery.md#opaque-channels-private-and-global).
 
 | Method | Path | Description |
 |---|---|---|

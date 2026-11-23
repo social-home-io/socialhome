@@ -1039,7 +1039,7 @@ when it is back. Receivers map the channel id to the space locally and run
 the strict-frame checks. Turning the option off (refused while link-joined
 members remain) or the last remote member leaving retires the channel.
 Full design, wire and residuals:
-[`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).
+[`discovery.md`](./discovery.md#opaque-channels-private-and-global).
 
 ```mermaid
 sequenceDiagram

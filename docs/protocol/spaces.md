@@ -458,7 +458,7 @@ The age gate runs on the applicant household when it opens the ACK
 |---|---|
 | The host household | The local gates (ban, age gate, `allow_subscribers`, the local-community check) and then the members' seating path (`_seat_local_member`) with role `subscriber`: the row, the roster gossip, the audit. No federation beyond the gossip. |
 | A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role: "subscriber"` inside the encrypted payload (needs a host at v_96, else `409 HOST_TOO_OLD`, `feature: "follow"`) → auto-approved → `SPACE_JOIN_REQUEST_APPROVED` with the bound token → §D2 redeem, seated with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. The host is read off this household's stub, else the paired households' directory (§D1a, `peer_space_directory`), else the GFS directory cache. The applicant's row waits 15 minutes (`FOLLOW_REQUEST_TTL`): the host answers at once or drops the follow without a word, so after that a new follow asks again. |
-| Reached only through a GFS | The v_84 bootstrap: `join_contact` from the polled listing (published while the space takes requests or followers — the GFS now serves the contact on an invite-only listing with followers on; for such a follow-only space, only to a GFS that proves `subscriber_seats`, which until the channel phase means "relays the v_96 follow bootstrap"), `SPACE_JOIN_REQUEST_BOOTSTRAP` with `requested_role: "subscriber"` in the sealed body, the host auto-answers with a bound subscriber token (48 h), the applicant auto-redeems over §D2b and is seated as a `space_session` subscriber. The bootstrap budgets (120/h per space, 10/h per sender, 200 pending → "busy") apply unchanged and before the approval. |
+| Reached only through a GFS | The v_84 bootstrap: `join_contact` from the polled listing (published while the space takes requests or followers — the GFS now serves the contact on an invite-only listing with followers on; for such a follow-only space, only to a GFS that proves `subscriber_seats`: it relays the v_96 follow bootstrap and seats a global space's members and followers on its channel), `SPACE_JOIN_REQUEST_BOOTSTRAP` with `requested_role: "subscriber"` in the sealed body, the host auto-answers with a bound subscriber token (48 h), the applicant auto-redeems over §D2b and is seated as a `space_session` subscriber. The bootstrap budgets (120/h per space, 10/h per sender, 200 pending → "busy") apply unchanged and before the approval. |
 
 **A local community: following is inside only** (owner decision
 2026-11-23). On the host household and on the paired / mesh path a follow
@@ -527,7 +527,19 @@ within seconds).
   a seat; the owner takes none, but may publish into every channel of the
   space. A follower's grant carries the channel pass, plus the writer key
   only when it may comment or react. A public (not global) space never
-  touches a GFS and has no channel.
+  touches a GFS and has no channel. Built (P3): an author's item goes to
+  `POST /gfs/channels/publish-anon` on every listed channel server, and
+  once a space runs a channel nothing of it goes on the space-keyed relay
+  any more; the owner's own items and the authority items (removals,
+  approved posts, a member's post its author did not put on the channel —
+  the `channel_sent` mark in the author's hint) go into the channel, signed
+  by the space authority inside the ciphertext. Details and cost:
+  [discovery.md](./discovery.md#opaque-channels-private-and-global).
+- **Members without a usable seat catch up from the host** (as for private
+  channels): a household not connected to a channel server, or below v_96,
+  gets the others' items over federation and the §25.6 catch-up when the
+  host is back. A GFS-reached follower is reached only through its own
+  channel seat (it has no mailbox card in the directory).
 - **No sync pages for followers** (the existing role rule): a follower
   catches up over the §25.6 subset stream. The sync scheduler BEGINs and
   announces to the host of a space one of our people holds any seat in, a
@@ -603,7 +615,8 @@ For a global space with 200 member households and F follower households
 |---|---|
 | Follow (GFS path) | request 4 KiB + answer 4 KiB + redeem 4 KiB + the ACK with the whole roster snapshot ((200 + F) × ≈ 0.5 KiB, in parts — ≈ 5 MiB at F = 10 000) to the one follower household, then the ordinary roster gossip of one signed entry to every member and follower household: paired ones directly, GFS-reached ones in one multi upload per GFS (≈ 0.5 KiB + (200 + F) × 0.1 KiB). With F = 10 000 that is ≈ 1 MiB of upload and ≈ 5 MiB of GFS egress per follow. |
 | Unfollow | the leave + the same one-entry gossip; no rotation |
-| Member post | one upload of 4 KiB per channel server (+ the federation copy to paired members); GFS egress (200 + F) × 4 KiB ≈ 40 MiB at F = 10 000 |
+| Member post | one upload of 4 KiB per channel server (+ the federation copy to paired members); GFS egress (200 + F) × 4 KiB ≈ 40 MiB at F = 10 000; the host adds nothing for a post its author put on the channel (`channel_sent`), one 4 KiB authority item per server otherwise |
+| Channel created / server list changed | one credentials-only snapshot (own grant, cert, key ≈ 2 KiB) per member and follower household ≈ 20 MiB at F = 10 000, rare |
 | Owed rotation (≤ 1 a day) | the ordinary rekey, one multi upload per GFS for the GFS-reached households |
 | Sync pages | 0 to followers |
 
@@ -1956,7 +1969,7 @@ since v_90). It is bound
 to the space by the authority key, verified against the pinned space key and
 kept KEK-wrapped on `space_keys.gfs_channel`; a snapshot's grant is taken
 only from the host. See
-[`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).
+[`discovery.md`](./discovery.md#opaque-channels-private-and-global).
 
 ## Flow — rekey
 

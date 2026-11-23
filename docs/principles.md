@@ -597,7 +597,7 @@ every item: a link-joined member reaches the host only over the connection
 server's `/gfs/envelope`, so nobody else saw its posts while the host was
 offline. Since v_51 such a space gets member publishing through an **opaque
 channel** (`/gfs/channels/*`, see
-[`protocol/discovery.md`](./protocol/discovery.md#private-spaces-opaque-channels-v_51)):
+[`protocol/discovery.md`](./protocol/discovery.md#opaque-channels-private-and-global)):
 a random 128-bit id plus a channel key derived from the space seed. **Since
 the owner decision of 2026-10-04 the channel exists only by the owner's
 explicit, per-space opt-in** (`SpaceFeatures.private_gfs`, "use the

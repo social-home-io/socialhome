@@ -813,6 +813,19 @@ host-relay plaintext is padded to the member relay's size buckets (`_pad`,
 inside the AEAD, outside every author signature's fixed field list). See
 [`protocol/discovery.md`](protocol/discovery.md#moderation-outcomes-on-the-host-relay).
 
+**Authority items on a channel (v_96)** — on a space's opaque channel the
+same three kinds (a removal, an approved post, the host's copy of a member's
+post) travel as `{"item_type": "authority", "inner": …}` inside the channel
+ciphertext. The channel frame carries no authority signature (the server
+checks only the channel writer key, which every writer holds), so the space
+authority signs the INNER: `sign_authority_event` with its own event type
+`space_channel_authority` (domain-separated from `space_post_public`), the
+inner without its signature fields and padding, the usual `authority_sig` +
+`authority_sig_suite` (unknown suite refused, no default). Receivers verify
+it against the pinned key of the space the channel id maps to; the shape is
+refused off the channel. Code: `channel_authority_plaintext` /
+`open_channel_authority` in `services/space_public_authority.py`.
+
 The key-wrap pubkey is **self-signed by the identity** so the seal path
 never trusts the GFS-served value. At identity setup each household
 produces `keywrap_sig = b64url(sign_ed25519(identity_seed,

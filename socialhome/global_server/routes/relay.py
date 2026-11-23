@@ -275,8 +275,10 @@ class GfsInfoView(GfsBaseView):
             # too, so a household that never paired with the owner can seal a
             # follow (a join for the read-only role) to it; the relay leg is
             # the same sealed bootstrap, unread here. An owner sends such a
-            # space's contact only to a server that proved this. Channel seats
-            # for followers come with the channel phase.
+            # space's contact only to a server that proved this. Since P3 it
+            # also means: a global space's members AND followers take seats
+            # on one opaque channel here (the owner registers a global
+            # space's channel only on a server proving this).
             "subscriber_seats": True,
             # The owner's listing publish may carry ``member_count`` and
             # ``follower_count``; this server folds them into the signed

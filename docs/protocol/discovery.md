@@ -2968,7 +2968,7 @@ sequenceDiagram
     Note over M,G: a household below v_90 holds no key → nothing to the GFS (host path)
 ```
 
-### Private spaces: opaque channels (v_51)
+### Opaque channels (private and global)
 
 Everything above keys the connection server's state by the `space_id` of a
 PUBLIC/GLOBAL space it lists. A **private** space is never listed — yet a
@@ -3030,6 +3030,83 @@ remote member left (a leave or kick rotates the key, and the rotation
 reconciles), or it is no longer private — has its channel unregistered at
 every server and forgotten; members get no grant for the next epoch, which
 ends their use of it.
+
+**Global spaces (v_96).** A GLOBAL space gets the same channel, for its
+members **and followers alike** (a follower is a member with the read-only
+role, [spaces.md](./spaces.md#followers-v_96)). It needs no option: it
+qualifies when its owner household holds the seed, it has at least one live
+remote member or follower household, and at least one server on its signed
+`gfs_servers` list (its listings) proves **both** `private_channels` and
+`subscriber_seats` (`GfsChannelService.reconcile`; checked on the same
+triggers as above, and on every change of the listing list —
+`GfsServerSelectionService.sync_snapshot` runs the channel hook for a global
+space too, and a server the list drops is recorded for withdrawal first). A
+global space that leaves the tier (to public or household) has its channel
+unregistered and forgotten; a private space that becomes global keeps its
+channel, re-registered on the global list's capable servers. What differs
+from a private channel:
+
+- **Grants** go to every member and follower household at v_96
+  (`FederationCapability.MIN_FOR_SUBSCRIBER_SEATS`), paired, mesh-only and
+  link-joined alike, through the same per-peer payloads: always a seat
+  pass, plus the channel writer key for a household with a writer scope (a
+  follower only while it may comment or react). A household below v_96 gets
+  none and keeps the federation path. The pass stays per household (bound
+  to its key, as for every seat): a shared reader pass would need a new
+  server-side pass type, so Q2's shared pass is not built. A grant that is
+  not part of a rekey (a new channel, a changed server list, a seated
+  card) goes in a **credentials-only** roster snapshot — the household's
+  own grant, cert and key, never the whole roster again.
+- **One path, no double delivery.** Once a global space stores a channel on
+  a household (the owner's registration, or a member's grant), that
+  household sends the space's items ONLY into the channel: no
+  `/gfs/member-publish-anon`, no space-keyed `/gfs/publish`, no space-keyed
+  member subscribe, no space-keyed epoch notice. A global space without a
+  channel (no server proving `subscriber_seats` yet) keeps the space-keyed
+  path unchanged until P6/P7 remove it.
+- **The owner publishes into its own channel** (it takes no seat): its own
+  items with a publish-only grant derived from the seed
+  (`GfsChannelService._publisher_grant` — the channel writer key and the
+  registered servers, never stored, never a pass), and the **authority
+  items** below.
+- **Authority items.** A removal, an approved post, and a member's post the
+  author did not put on the channel travel as `{"item_type": "authority",
+  "inner": …}` inside the channel ciphertext, the space authority signing
+  the INNER (`authority_sig` / `authority_sig_suite`, event type
+  `space_channel_authority`, `space_public_authority.channel_authority_plaintext`):
+  the channel frame has no authority signature of its own, and every
+  writer holds the channel writer key the server checks. The receiver
+  (`SpacePublicInbound.handle_channel_item`) verifies it against the pinned
+  key of the space the channel id maps to and then runs exactly the checks
+  of the space-keyed host relay (removal, approved post with its required
+  cert, a member's post with its re-stamped cert). An authority item on
+  the space-keyed relay is refused.
+- **The host's copy of a member's post.** The author's federated post hint
+  (`public_relay`, inside the encrypted member payload, outside the author
+  signature) carries `channel_sent: true` when the author's own member
+  publisher puts the post on the channel. The host then adds no copy; it
+  adds one (an authority item) for an unmarked post — an author below
+  v_96, without a grant, or whose cert does not let it publish there. The
+  mark can only ever stop the copy of the author's OWN post (it lives in
+  that author's own hint). The hint is built for every global space now,
+  whatever `allow_subscribers` says, because the channel carries the
+  members' content too.
+
+**Exactly once over the channel.** A seat gets one frame per publish per
+server; the author publishes once to each listed server, the host adds a
+copy only for an unmarked post, and receivers dedupe by item id (a post by
+its id, comments and reactions by theirs), so a household seated on two
+servers or also reached over federation still applies an item once.
+
+**Cost (global, 200 author households, 10 000 follower households, one
+channel server; item 4 KiB bucket, wrap 0.1 KiB).** A member post: one
+4 KiB upload per listed server + the unchanged federation copy (paired and
+mesh members directly, GFS-reached members' mailbox cards in one v_91 multi
+≈ 4 KiB + n × 0.1 KiB); GFS egress (200 + 10 000) × 4 KiB ≈ 40 MiB; the
+host adds nothing for a marked post (today it re-sent the post on the
+space-keyed relay: another ≈ 40 MiB). Channel creation or a list change:
+one credentials-only snapshot per household (≈ 2 KiB × 10 200 ≈ 20 MiB,
+rare). The household's own grant also rides every rekey as before.
 
 **The channel** (keys and statements: [`crypto.md`](../crypto.md)):
 
@@ -3151,11 +3228,13 @@ can hand it a channel of its choosing. It rides inside the per-peer payloads
 of the four writer-cert channels (rekey `per_peer`, roster snapshot, redeem
 ACK `space_meta`, v_44 rotation bundle), only to v_51 households — the
 first link-joined member's arrives in the roster snapshots the owner sends
-right after creating the channel. The owner itself holds no grant: it never
-subscribes or publishes to its own channel (it receives everything over
-federation), so channel traffic never names it — no seed holder issues
-the owner household a grant (a delegated admin's rekey reaches the owner
-too), and an owner refuses to hold one.
+right after creating the channel. The owner itself holds no grant and
+never subscribes (it receives everything over federation), so no seat
+names it — no seed holder issues the owner household a grant (a delegated
+admin's rekey reaches the owner too), and an owner refuses to hold one.
+Since v_96 it does **publish** into its own channel (owner decision Q4, one
+rule for every channel): anonymously, with a publish-only grant it derives
+from the seed and never stores (see "Global spaces (v_96)" above).
 
 **Squatting.** A grant names only the servers that confirmed the owner's
 registration. Should a server answer `409` for the owner's own channel id
@@ -3311,7 +3390,8 @@ under the server-wide cap).
 4. **No space id in any channel request** — the space writer cert stays
    inside the ciphertext in both modes, and every request has an exact key
    set (a `space_id` field is a 400).
-5. **The owner never subscribes to or publishes into its own channel**, and
+5. **The owner never subscribes to its own channel** (since v_96 it may
+   publish into it, anonymously — principles sign-off, item 3), and
    no private space whose owner left `private_gfs` OFF ever gets a channel,
    a grant, a seat or a `gfs`-type invite link.
 6. **The owner replaces a channel another key holder moved past it**
@@ -4482,10 +4562,11 @@ reaches the host only through a GFS follows over the same sealed leg as
 1. **The contact.** The owner's listing carries the `join_contact` while the
    space takes requests **or** followers. A space that takes only followers
    (invite-only, `allow_subscribers` on) lists it only on a GFS whose signed
-   capabilities prove `subscriber_seats` (v_96; until the channel phase it
-   means only "relays the v_96 follow bootstrap and serves the contact on
-   an invite-only listing with followers on"; channel seats for followers
-   come later); elsewhere it lists without one, as before.
+   capabilities prove `subscriber_seats` (v_96: it relays the v_96 follow
+   bootstrap, serves the contact on an invite-only listing with followers
+   on, and seats a global space's members and followers on one channel —
+   see [Opaque channels](#opaque-channels-private-and-global)); elsewhere it
+   lists without one, as before.
 2. **The request.** `POST /api/spaces/{id}/subscribe` on a space only a GFS
    lists seals `SPACE_JOIN_REQUEST_BOOTSTRAP` exactly as step 3 above, with
    one more field **inside the sealed body**: `requested_role:
