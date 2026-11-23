@@ -42,9 +42,10 @@ the reason at DEBUG, never logged with anything but the channel id:
   grace.
 * **publish-anon** (no identity — the only channel publish since v_90) —
   signed with the channel writer key pinned for that epoch;
-  per-(channel, address), per-channel and per-writer-key limits; exact
-  replays refused. The real item type is inside the ciphertext; receivers
-  enforce the real scope.
+  per-(channel, address), per-channel and per-writer-key limits, each
+  cluster-wide (every node admits its :func:`~.public.node_share` over the
+  live nodes); exact replays refused. The real item type is inside the
+  ciphertext; receivers enforce the real scope.
 
 Fan-out reuses the member-publish workers and the offline relay queue
 unchanged: ``{type: "relay", channel_id, event_type: "space_item", epoch,
@@ -88,14 +89,18 @@ from .domain import CHANNEL_EPOCH_GRACE_S, GfsChannel
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import MAX_SUBSCRIPTIONS_PER_INSTANCE, SeenPayloadCache
 from .member_publish import (
-    MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP,
     MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP,
     MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE,
     MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
     MemberPublishBusy,
     MemberPublishRateLimited,
 )
-from .public import ClientIpResolver, SlidingWindowCounter, build_window_limiter
+from .public import (
+    ClientIpResolver,
+    SlidingWindowCounter,
+    build_window_limiter,
+    node_share,
+)
 
 if TYPE_CHECKING:
     from .federation import GfsFederationService
@@ -122,6 +127,20 @@ MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE: int = MAX_SUBSCRIPTIONS_PER_INSTANCE
 #: secret 40-bit offset (they are not wall-clock bound like a space owner's),
 #: so the bound only keeps ``epoch + 1`` arithmetic far from overflow.
 MAX_FIRST_CHANNEL_EPOCH: int = 2**62
+
+
+#: Accepted anonymous publishes per (channel, client address) per minute,
+#: cluster-wide. The writer key is shared by every writer of an epoch and
+#: the publish names nobody, so the address is the only thing that tells one
+#: key holder apart from the others: an eighth of the channel's
+#: :data:`~.member_publish.MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE` (120), so
+#: one holder needs EIGHT addresses (IPv6 counted per /64) to spend the whole
+#: channel budget, where 30 a minute let four do it. Honest use is far below
+#: it — a household's posts, comments and reactions, one every 4 s sustained;
+#: a burst past it gets ``429`` and the household's retry queue lands it.
+CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS: int = (
+    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE // 8
+)
 
 
 #: Live channel rows this server keeps at most — anonymous registration's
@@ -168,6 +187,7 @@ class GfsChannelService:
         "_federation",
         "_max_channels",
         "_member_publish",
+        "_nodes",
         "_register_limiter",
         "_writer_key_limiter",
     )
@@ -183,6 +203,7 @@ class GfsChannelService:
         clock: Callable[[], float] = time.time,
         register_limiter: SlidingWindowCounter | None = None,
         max_channels: int = MAX_CHANNELS,
+        nodes: Callable[[], int] | None = None,
     ) -> None:
         self._federation = federation
         self._channels = channel_repo
@@ -192,6 +213,10 @@ class GfsChannelService:
         self._addressee = addressee or GfsAddressee(gfs_instance_id)
         self._clock = clock
         self._max_channels = max_channels
+        #: The cluster's live node count (``ClusterService.live_node_count``):
+        #: each node admits its share of every publish limit, so the limits
+        #: hold for the whole cluster behind the round-robin balancer.
+        self._nodes = nodes
         self._register_limiter = register_limiter or SlidingWindowCounter(
             CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP
         )
@@ -202,7 +227,7 @@ class GfsChannelService:
             MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
         )
         self._anon_ip_limiter = SlidingWindowCounter(
-            MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
+            CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
         )
         self._anon_seen = SeenPayloadCache(ttl_s=float(2 * CHANNEL_TS_SKEW_S))
 
@@ -210,6 +235,19 @@ class GfsChannelService:
 
     def _now(self) -> int:
         return int(self._clock())
+
+    def _allow(self, counter: SlidingWindowCounter, key: str) -> bool:
+        """One hit on *counter* under this node's share of its limit.
+
+        The counters live in this process; behind the round-robin balancer a
+        channel's publishes spread over every node, so a per-node limit of L
+        would let an N-node cluster admit N × L (480 items a minute into one
+        channel on four nodes — 4.8 million queued or pushed frames a minute
+        at 10 000 seats). Each node admitting ``ceil(L / N)`` keeps the
+        cluster at about L; a balancer that pins a client to one node makes
+        it stricter, never looser (:func:`~.public.node_share`)."""
+        nodes = self._nodes() if self._nodes is not None else 1
+        return counter.allow(key, limit=node_share(counter.limit, nodes))
 
     def _addressed(self, gfs_instance_id: str, gfs_key: str | None = None) -> None:
         if not self._addressee.accepts(gfs_instance_id, gfs_key):
@@ -523,11 +561,13 @@ class GfsChannelService:
             UnsupportedWriterKeySuite,
         ) as exc:
             raise PermissionError(f"writer signature refused: {exc}") from exc
-        if not self._anon_ip_limiter.allow(f"{req.channel_id}\x00{client_ip}"):
+        if not self._allow(self._anon_ip_limiter, f"{req.channel_id}\x00{client_ip}"):
             raise MemberPublishRateLimited()
-        if not self._channel_limiter.allow(req.channel_id):
+        if not self._allow(self._channel_limiter, req.channel_id):
             raise MemberPublishRateLimited()
-        if not self._writer_key_limiter.allow(f"{req.channel_id}\x00{req.epoch}"):
+        if not self._allow(
+            self._writer_key_limiter, f"{req.channel_id}\x00{req.epoch}"
+        ):
             raise MemberPublishRateLimited()
         now = self._now()
         if not ch.admits(req.epoch, now=now):

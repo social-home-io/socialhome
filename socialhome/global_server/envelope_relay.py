@@ -411,6 +411,12 @@ QUEUED_REACTION_MAX_BYTES: int = MAX_REACT_BODY_BYTES
 #: and starve the rest. Live pushes are unaffected.
 RELAY_QUEUE_MAX_TOTAL_BYTES: int = 256 * 1024 * 1024
 
+#: Offline copies of one item written per transaction
+#: (``enqueue_relay_many``). The server-wide total is summed once per batch,
+#: so 10 000 offline seats cost 20 index scans instead of 10 000, while one
+#: batch holds the shared write lock for only tens of milliseconds.
+RELAY_QUEUE_BATCH: int = 500
+
 #: How long a ``/gfs/ws`` session must last before the household counts as
 #: "seen" for offline relay queueing (``client_instances.relay_seen_at``). A
 #: bare hello is free, so it must not earn a household queued copies of
@@ -1273,11 +1279,34 @@ class GfsEnvelopeRelay:
             # ``type`` first, so the row starts with QUEUED_REACTION_PREFIX.
             frame = {"type": FRAME_MOMENT_REACTION, **frame}
         blob = orjson.dumps(frame).decode()  # once, however many targets
-        queued = 0
-        for target in targets:
-            if await self._queue_relay_blob(target, blob, reaction=reaction):
-                queued += 1
-        return queued
+        if reaction:
+            queued = 0
+            for target in targets:
+                if await self._queue_relay_blob(target, blob, reaction=True):
+                    queued += 1
+            return queued
+        # One transaction per RELAY_QUEUE_BATCH targets, not one per target:
+        # a channel item to 10 000 offline seats was quadratic (T3.6).
+        written: list[str] = []
+        for i in range(0, len(targets), RELAY_QUEUE_BATCH):
+            now = int(time.time())
+            written += await self._queue_repo.enqueue_relay_many(
+                targets[i : i + RELAY_QUEUE_BATCH],
+                blob,
+                created_at=now,
+                expires_at=now + self._ttl,
+                max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
+                max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
+                max_total_bytes=RELAY_QUEUE_MAX_TOTAL_BYTES,
+            )
+        if not written:
+            log.warning(
+                "gfs.envelope: a relay frame exceeds the relay queue caps on "
+                "its own — not queued"
+            )
+        for target in written:
+            await self._after_enqueue(target)
+        return len(written)
 
     async def queue_relay(self, target: str, frame: dict) -> bool:
         """Queue one relay *frame* (``{space_id, event_type, payload}`` — the
