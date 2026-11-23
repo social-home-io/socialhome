@@ -371,6 +371,11 @@ class SlidingWindowCounter:
         self._evict()
         return True
 
+    @property
+    def limit(self) -> int:
+        """Hits per window this counter allows unless a call overrides it."""
+        return self._limit
+
     def exhausted(self, key: str, *, now: float | None = None) -> bool:
         """Whether the next :meth:`allow` for *key* would be refused.
 
@@ -798,6 +803,25 @@ def _category_label(value: str | None) -> str:
     return _CATEGORY_LABEL_MAP.get(value or "", "General")
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def _counts_label(member_count: object, follower_count: object) -> str:
+    """``"3 members · 1 follower"`` from the owner-declared counts.
+
+    Each part is left out when the owner declared no number (``None``), so
+    an older household's listing shows no count at all — never "0 members".
+    Only real ints are shown (the stored values are validated already).
+    """
+    parts = [
+        _plural(n, word)
+        for n, word in ((member_count, "member"), (follower_count, "follower"))
+        if type(n) is int
+    ]
+    return " · ".join(parts)
+
+
 def _render_landing(
     *,
     server_name: str,
@@ -830,14 +854,21 @@ def _render_landing(
             f"    .card.accent-{i} {{ border-left: 6px solid {accent}; }}"
         )
         cat_label = _escape(_category_label(sp.get("category")))
+        meta = " · ".join(
+            part
+            for part in (
+                _counts_label(sp.get("member_count"), sp.get("follower_count")),
+                f"{sp.get('posts_per_week', 0):.1f} posts/week",
+                cat_label,
+            )
+            if part
+        )
         rows.append(f"""
           <li class="card accent-{i}">
             <a href="/spaces/{_escape(sp["space_id"])}">
               <strong>{_escape(sp.get("name") or "—")}</strong>
             </a>
-            <div class="muted">{sp.get("subscriber_count", 0)} members
-              · {sp.get("posts_per_week", 0):.1f} posts/week
-              · {cat_label}</div>
+            <div class="muted">{meta}</div>
             <p>{_escape((sp.get("description") or "")[:120])}</p>
           </li>
         """)
@@ -1102,6 +1133,16 @@ def _render_space_page(
     cover_uri = _escape(space.get("cover_url") or "")
     og_image = cover_uri or icon_url
     og_title = _escape(f"{space.get('name') or ''} — {server_name}")
+    # "3 members · 1 follower · Category"; no count part at all when the
+    # owner declared none.
+    space_meta = " · ".join(
+        part
+        for part in (
+            _counts_label(space.get("member_count"), space.get("follower_count")),
+            _escape(_category_label(space.get("category"))),
+        )
+        if part
+    )
     og_desc = _escape(space.get("description") or "")
     css = f"""
     /* GFS per-space public page — same SH design tokens as the
@@ -1208,8 +1249,7 @@ def _render_space_page(
     <div class="accent-bar"></div>
     <a href="/" class="secondary">← {_escape(server_name)}</a>
     <h1>{_escape(space.get("name") or "—")}</h1>
-    <p class="muted">{space.get("subscriber_count", 0)} members
-      · {_escape(_category_label(space.get("category")))}</p>
+    <p class="muted">{space_meta}</p>
 
     <section class="cta-section">
       <a class="cta" href="/">Connect your Social Home</a>
@@ -1464,7 +1504,8 @@ async def handle_landing(request: web.Request) -> web.Response:
                 "name": sp.name,
                 "description": sp.description or "",
                 "accent_color": sp.accent_color,
-                "subscriber_count": sp.subscriber_count,
+                "member_count": sp.member_count,
+                "follower_count": sp.follower_count,
                 "posts_per_week": sp.posts_per_week,
                 "category": sp.category,
             }

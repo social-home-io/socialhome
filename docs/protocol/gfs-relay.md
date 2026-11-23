@@ -1969,6 +1969,64 @@ targets, `_listed_connection`), `multi_caps_key`,
 `socialhome/global_server/envelope_relay.py`, GFS migration 0031,
 household migration 0145.
 
+## Channel limits at scale (v_51 channels for global spaces)
+
+Since the subscriber-seats work a **global** space uses the opaque channel
+too ([`discovery.md`](./discovery.md#opaque-channels-private-and-global)),
+for members and followers alike: a big one puts ~200 author households and
+~10 000 followers on ONE channel. Every cap on the way, checked by
+`tests/global_server/test_channels.py` (10 000 seats, one channel):
+
+| Cap | Value | At 10 000 seats |
+|---|---|---|
+| Seats per channel | none | every seat is a fan-out target; a seat costs one row |
+| Channel seats per household (`MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE`) | 500 | per household, not per channel — unaffected |
+| Seat lookup (`list_targets` / `list_recently_seen`) | — | a range of the `(channel_id, instance_id)` primary key joined on `client_instances`' key; no scan |
+| Items per channel (`MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE`) | 120 / min, **cluster-wide** | ≤ 1.2 M pushed or queued frames a minute (≈ 4.6 GiB at 4 KiB) — the GFS's real ceiling for one channel |
+| Items per channel writer key and epoch | 120 / min, cluster-wide | the same bound, per epoch |
+| Items per (channel, client address) | **15 / min** (was 30), cluster-wide | see below |
+| Fan-out backlog (`FAN_OUT_BACKLOG` / `_PER_SPACE`) | 128 per worker, 16 per channel | one item to 10 000 seats takes ~0.1–0.2 s here (5 000 live pushes + 5 000 queued copies), so 120 a minute (one per 0.5 s) never fills the channel's 16 |
+| Live pushes in flight per item (`RELAY_FAN_OUT_CONCURRENCY`) | 8 | unchanged |
+| Offline copies per transaction (`RELAY_QUEUE_BATCH`) | **500** (new) | 20 transactions per item |
+| Queued relay rows per recipient | 250 / 4 MiB | unchanged |
+| Queued relay bytes, server-wide (`RELAY_QUEUE_MAX_TOTAL_BYTES`) | 256 MiB | 65 000 copies of a 4 KiB item; past it fair-share eviction (the largest holder's oldest row), now one ranking per batch |
+| Cluster forward: offline candidates pending (`RELAY_FORWARD_MAX_PENDING_TARGETS`) | 200 000 | on 4 nodes an item leaves ≤ 7 500 candidates on the origin: ≥ 26 items per flush |
+| Cluster `held` ids read per audience (`RELAY_HELD_MAX_IDS`) | 100 000 | 10× a 10 000-seat channel |
+
+**Offline copies were quadratic.** Each offline seat used to be its own
+transaction that summed every live relay row for the server-wide cap: one
+item to 10 000 offline seats took ~5 s and every further item 5 s more —
+the channel's worker fell behind after a dozen items and the route
+answered `503`. `enqueue_relay_many` writes a batch in one transaction with
+the same caps and eviction order (the total read once and tracked, the
+holders ranked once and kept in a heap): now ~0.1 s for 10 000 copies,
+flat in the number already queued.
+
+**Cluster-wide limits.** The counters live in each node's memory, and the
+production balancer is round-robin over four nodes, so a per-node 120 a
+minute was 480 into one channel — 4.8 M frames a minute at 10 000 seats.
+Each node now admits its `node_share` (`ceil(L / N)` over the live nodes,
+the same rule as every anonymous per-address limit): 30 per channel and 4
+per address on four nodes, about 120 and 16 for the cluster. A balancer
+that pins a client to one node makes it stricter, never looser.
+
+**One key holder over many addresses.** The publish names nobody and the
+writer key is shared by every writer of the epoch, so the client address
+(IPv6 per /64) is the only thing that tells writers apart. At 30 per
+address four addresses spent the whole 120; at 15 it takes eight, and with
+seven an honest writer still gets its full 15. Fair sharing past that would
+need a writer identity, which the anonymous publish deliberately lacks: K
+addresses look like K writers. An honest household posts far below 15 a
+minute (one item every 4 s, sustained); a burst past it gets `429` and its
+retry queue lands it. **On a cluster the per-address share is per node**
+(`ceil(15 / N)`: 4 a minute on each of 4 nodes): round-robin does not spread
+one household's requests evenly, so it typically meets a `429` after about
+6–10 items in a minute, and behind an IP-hash balancer at 4 a minute (30
+before). Comments and reactions are publishes too. Accepted for P3 (the
+retry queue lands them); a floor on the per-node share would loosen the
+one-holder bound and is an owner decision. The route-level per-IP limiter
+(120 a minute) and the publish replay cache stay per node.
+
 ## Inbound budgets on the household
 
 Every household that reaches us through a GFS — members seated from an
@@ -1985,6 +2043,19 @@ verified it:
 | One mailbox (v_89) | 600 — past it a flood: dropped, counted toward a rotation | mailbox |
 | Binary media frames (v_87) | 1 200 | household |
 | §24.11 step 5a, after the signature | 600 envelopes, 600 media chunks | verified sender |
+| Channel frames, before decrypt / verify | 960 per channel (120 × 8 servers), 3 000 in all — over it: dropped | channel id / household |
+
+**Channel frames** (`dispatch_gfs_relay_frame`) spend the federation
+inbound limiter under `gfs_channel:<channel_id>` and `gfs_channel:*` before
+the channel service maps, decrypts or verifies anything. A GFS admits at
+most 120 items a minute into a channel and a household is seated on it at
+up to 8 servers (`MAX_GFS_SERVERS`), each pushing its own copy, so 960 is
+the honest ceiling; a returning household's backlog adds at most 250 rows
+per server across all channels. Over budget a frame is dropped (one
+WARNING a minute) — not held: space sync heals it. The household-wide
+ceiling is charged first, so a GFS inventing channel ids mints at most
+3 000 per-channel keys a minute, and idle ones are swept once the limiter
+holds 8 192 keys.
 
 Step 4a is the pipeline's per-household budget
 (`make_check_instance_rate`), the same bucket the sender's HTTPS inbox

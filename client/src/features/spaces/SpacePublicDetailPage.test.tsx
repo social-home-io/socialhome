@@ -309,6 +309,49 @@ describe('SpacePublicDetailPage cold link (no directory entry)', () => {
     expect(api.get).not.toHaveBeenCalledWith('/api/spaces/sp-1/members')
   })
 
+  it('shows the members and followers the space declares', async () => {
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/sp-1') {
+        return {
+          id: 'sp-1', name: 'Chess club', description: '', emoji: '',
+          space_type: 'global', join_mode: 'request', category: 'general',
+          features: { allow_subscribers: true }, member_count: 7, follower_count: 1,
+        }
+      }
+      throw Object.assign(new Error('Not a space member.'), { status: 403 })
+    })
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Chess club'))
+    expect(container.querySelector('.sh-space-public__title p')?.textContent)
+      .toBe('7 members · 1 follower')
+  })
+
+  it('shows no number when the space declares none — never "0 members"', async () => {
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/sp-1') {
+        return {
+          id: 'sp-1', name: 'Chess club', description: '', emoji: '',
+          space_type: 'global', join_mode: 'request', category: 'general',
+          features: { allow_subscribers: true }, member_count: null, follower_count: null,
+        }
+      }
+      throw Object.assign(new Error('Not a space member.'), { status: 403 })
+    })
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Chess club'))
+    expect(container.textContent).not.toMatch(/\d+ members?/)
+    expect(container.textContent).not.toMatch(/\d+ followers?/)
+  })
+
+  it('a directory row with no declared number shows none; followers of a space that takes none stay out', async () => {
+    cacheDirectoryEntries([entry({ member_count: null, follower_count: 0, allow_subscribers: false, host_display_name: 'Keller household', host_instance_id: 'iid-k', scope: 'public' })])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Space One'))
+    expect(container.textContent).not.toMatch(/\d+ members?/)
+    expect(container.textContent).not.toMatch(/\d+ followers?/)
+    expect(container.querySelector('.sh-space-public__title p')?.textContent).toBe('Hosted by Keller household')
+  })
+
   it('a household space you are not in: landing, then Join seats you', async () => {
     // Household scope is discoverable to every local user: the server
     // answers a neighbour with the landing fields, and Join on an open

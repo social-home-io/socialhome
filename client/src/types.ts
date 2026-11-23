@@ -499,8 +499,11 @@ export interface Space {
   sync?: SpaceSyncWire | null
   /** ``GET /api/spaces`` rows: the caller's seat (``subscriber`` = follows). */
   my_role?: string
-  /** ``GET /api/spaces`` rows: members (local + remote, never followers). */
-  member_count?: number
+  /** Members (local + remote, never followers). ``GET /api/spaces/{id}``
+   *  sends ``null`` when nobody declared a number: show none. */
+  member_count?: number | null
+  /** ``GET /api/spaces/{id}``: followers; ``null`` when not known. */
+  follower_count?: number | null
   /** ``GET /api/spaces`` rows: newest feed post, else when the space was
    *  created here (naive UTC). */
   last_activity_at?: string | null
@@ -1068,6 +1071,8 @@ export interface HouseholdSpaceRow {
   min_age: number
   /** Seats in the space (followers included). */
   member_count: number
+  /** Followers of the space. Absent from an older backend. */
+  follower_count?: number
   /** The caller's role, `null` when they hold no seat. */
   role: string | null
   /** A local community's area, `null` otherwise. */
@@ -1091,7 +1096,12 @@ export interface DirectoryEntry {
    *  household carries it (the About page builds the entry from
    *  ``GET /api/spaces/{id}``); a directory row has none. */
   icon_url?: string | null
-  member_count: number
+  /** Members, as the host household declares them — ``null`` when it
+   *  declared none (an older host or GFS): show no number, never 0. */
+  member_count: number | null
+  /** Followers, as the host declares them — ``null``/absent when unknown
+   *  (an older host). Shown only with ``followersShown``. */
+  follower_count?: number | null
   /** Local/household spaces use the same shape — scope tells us which
    *  browser tab / chip to surface the card in. ``'private'`` never comes
    *  from a directory (private spaces are not listed); only the landing

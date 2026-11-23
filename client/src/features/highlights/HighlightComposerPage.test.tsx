@@ -287,6 +287,19 @@ describe('the frame strip', () => {
       .toEqual(['Kürbisfeld!', null])
   })
 
+  it('a picked emoji goes in at the caption caret, and the caret comes back after it', async () => {
+    const view = render(<HighlightComposerPage />)
+    stage(view, [photo('a.webp')])
+    const caption = await view.findByLabelText('Caption for frame 1') as HTMLTextAreaElement
+    fireEvent.input(caption, { target: { value: 'pumpkin field' } })
+    caption.setSelectionRange(7, 7)
+    fireEvent.click(view.container.querySelector('.sh-emoji-pick-btn')!)
+    fireEvent.click(view.container.querySelector('.sh-reaction-frequent .sh-emoji-btn')!)
+    await waitFor(() => expect(caption.value).toBe('pumpkin👍 field'))
+    await waitFor(() => expect(document.activeElement).toBe(caption))
+    expect(caption.selectionStart).toBe('pumpkin👍'.length)
+  })
+
   it('a video still transcoding says "Preparing video…" instead of a broken preview', async () => {
     upload.status = 'processing'
     const view = render(<HighlightComposerPage />)

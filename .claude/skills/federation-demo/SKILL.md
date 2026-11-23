@@ -2048,9 +2048,9 @@ relay the redeem used (``GfsRelayTransport``, selected in
 4. a removes a member, rotating the per-space content key, and posts
    again — e must decrypt the NEW epoch. A re-key that skips
    link-joined members leaves them dark at the first roster change.
-5. ``GET /api/connections`` on e labels a ``source=space_session``
-   with transport ``gfs_relay``. ``https`` in particular would be a
-   lie: there is no inbox URL to fall back to.
+5. e's row for a is a ``source=space_session`` seat and ``GET
+   /api/connections`` on e does not list a: a household met through an
+   invite link is no connection.
 6. a changes the space cover after the join (a ~350 KiB one). e's
    ``space_covers`` row must pick up the new ``cover_hash`` within 30 s,
    hold a WebP ≤ 64 KiB (the relay-bounded variant of the
@@ -2485,6 +2485,23 @@ a ``join_contact``). e (paired with nobody) sees it ``gfs_followable``,
 
 Mini-chain: ``up, pair, space-follow-paired, gfs-up, gfs-pair,
 gfs-space-follow, verify, down``.
+
+### ``gfs-global-channel`` — a global space's members and followers on one channel (v_96, P3)
+
+Part of ``all`` (right after ``gfs-space-follow``). Prereqs: ``pair`` (a↔b),
+``gfs-up`` + ``gfs-pair``. a creates a global ``invite_only`` space with
+followers on; b (paired with a, made a GFS client) joins it as a member with
+an internal link; e (paired with nobody) follows it through the GFS. a
+registers the space's opaque channel (the GFS proves ``private_channels`` +
+``subscriber_seats``); b and e hold grants and seats,
+a never a seat. a is killed; b posts; e receives the post over the channel —
+exactly one channel frame, no space-keyed relay frame for the space — and
+the GFS log and database never hold its text. a restarts and catches b's post
+up — and adds no channel copy of it (b marked it ``channel_sent``; e still saw
+one frame), b never tried to reach e directly; then a's own post reaches e
+over the channel (the owner publishes into it, holding no seat).
+
+Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-global-channel, verify, down``.
 
 ### ``gfs-join-request-offline`` — the same ask with each side down > 5 min (v_84)
 

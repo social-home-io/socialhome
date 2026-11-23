@@ -16,6 +16,7 @@ from socialhome.domain.space import (
     SpaceMember,
     SpaceType,
 )
+from socialhome.domain.space_listing_counts import SpaceListingCounts
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.key_manager import KeyManagerError
 from socialhome.repositories.space_repo import SqliteSpaceRepo
@@ -2705,3 +2706,38 @@ async def test_a_purged_item_is_revived_and_open_items_are_listed(env):
         ("m3", "rejected"),
     ]
     assert len(await env.repo.list_moderation_open("sp-1", now, limit=1)) == 1
+
+
+async def test_listing_counts_members_and_live_followers(env):
+    """The shared listing builder: members as :data:`MEMBER_COUNT_SQL`,
+    followers as live follower seats — local plus remote non-tombstoned."""
+    await env.repo.save(_space("a", "Alpha", SpaceType.GLOBAL))
+    await env.repo.save_member(_member("a", "uid-alice", "owner"))
+    await env.repo.save_member(_member("a", "uid-bob"))
+    await env.repo.save_member(_member("a", "uid-carol", "subscriber"))
+    await env.db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role,"
+        " tombstoned) VALUES('a', 'p', 'r1', 'member', 0),"
+        " ('a', 'p', 'r2', 'member', 1), ('a', 'p', 'r3', 'subscriber', 0),"
+        " ('a', 'q', 'r4', 'subscriber', 0), ('a', 'q', 'r5', 'subscriber', 1)"
+    )
+
+    counts = await env.repo.listing_counts("a")
+
+    assert counts == SpaceListingCounts(member_count=3, follower_count=3)
+    assert counts.member_count == await env.repo.count_members("a")
+    assert await env.repo.listing_counts("nope") is None
+
+
+async def test_holds_roster_only_with_a_local_member_seat(env):
+    """A household holds a space's roster when one of its people holds a
+    member seat there (the host's owner always does); a follower-only
+    household does not."""
+    await env.repo.save(_space("a", "Alpha", SpaceType.GLOBAL))
+    await env.repo.save(_space("f", "Followed", SpaceType.GLOBAL))
+    await env.repo.save_member(_member("a", "uid-alice", "owner"))
+    await env.repo.save_member(_member("f", "uid-alice", "subscriber"))
+
+    assert await env.repo.holds_roster("a") is True
+    assert await env.repo.holds_roster("f") is False
+    assert await env.repo.holds_roster("nope") is False

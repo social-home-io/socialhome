@@ -47,6 +47,7 @@ from socialhome.domain.space import (
 from socialhome.domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
+    CHANNEL_SENT_FIELD,
     ITEM_SIZE_BUCKETS,
     PAD_FIELD,
     open_item_plaintext,
@@ -70,7 +71,10 @@ from socialhome.services.space_public_author import (
     verified_file_hashes,
     verify_signed_author_inner,
 )
-from socialhome.services.space_public_authority import is_approved
+from socialhome.services.space_public_authority import (
+    is_approved,
+    open_channel_authority,
+)
 from socialhome.services.space_public_outbound import SpacePublicOutbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import sign_writer_cert, verify_writer_cert
@@ -1301,12 +1305,12 @@ async def test_a_removal_without_a_content_key_is_dropped(env, caplog):
 # ─── Approved moderated posts: relayed under the author's signature ─────
 
 
-async def _approved_env(env, *, seats=("member",), owner=None):
+async def _approved_env(env, *, seats=("member",), owner=None, stype=SpaceType.PUBLIC):
     """A remote author household whose instance id is its key fingerprint,
     a MODERATED public space, and the post the host just published from the
     queue with the submitter's signed copy."""
     skp = await env["make_space"](
-        "sp-pub", SpaceType.PUBLIC, with_seed=True, owner=owner or env["own_iid"]
+        "sp-pub", stype, with_seed=True, owner=owner or env["own_iid"]
     )
     space = await env["space_repo"].get("sp-pub")
     await env["space_repo"].save(_with_posts_level(space, "moderated"))
@@ -1842,3 +1846,168 @@ async def test_a_removal_without_an_identity_warns(env, caplog):
     )
     assert env["gfs"].calls == []
     assert "identity not attached" in caplog.text
+
+
+# ── v_96: a global space with a channel ─────────────────────────────────
+
+
+class _Channels:
+    """The channel service as the outbound sees it: which spaces run a
+    channel here, and what went into it."""
+
+    def __init__(self, spaces: set[str]) -> None:
+        self.spaces = spaces
+        self.published: list[tuple[str, int, str]] = []
+
+    async def has_channel(self, space_id):
+        return space_id in self.spaces
+
+    async def publish_current(self, space_id, epoch, ciphertext):
+        self.published.append((space_id, epoch, ciphertext))
+        return 1
+
+
+async def _channel_env(env, *, allow_subscribers=True):
+    skp = await env["make_space"](
+        "sp-pub",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        allow_subscribers=allow_subscribers,
+    )
+    channels = _Channels({"sp-pub"})
+    env["sub"].attach_channels(channels)
+    return skp, channels
+
+
+async def _channel_inner(env, skp, channels) -> dict:
+    space_id, epoch, ct = channels.published[-1]
+    opened = await env["crypto"].decrypt(space_id, epoch, ct)
+    assert len(opened) in ITEM_SIZE_BUCKETS
+    inner = open_channel_authority(
+        opened, space_id=space_id, epoch=epoch, space_pubkey_hex=skp.public_key.hex()
+    )
+    assert inner is not None
+    return inner
+
+
+async def test_the_owners_own_post_gets_no_authority_copy_on_a_channel(env):
+    """Q4: the owner's own post goes into its channel as its household's
+    own item (the member publisher) — no authority copy, nothing
+    space-keyed."""
+    await _channel_env(env)
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    assert env["gfs"].calls == []
+    assert env["sub"]._channels.published == []
+
+
+@pytest.mark.security
+async def test_a_member_post_its_author_did_not_put_on_the_channel_goes_there(env):
+    skp, channels = await _channel_env(env)
+    _author_kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    # Into the channel only — never ALSO the space-keyed relay.
+    assert env["gfs"].calls == []
+    assert len(channels.published) == 1
+    inner = await _channel_inner(env, skp, channels)
+    assert _unpadded(inner) == relay
+
+
+@pytest.mark.security
+async def test_a_member_post_marked_channel_sent_gets_no_host_copy(env):
+    _skp, channels = await _channel_env(env)
+    _author_kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay={**relay, CHANNEL_SENT_FIELD: True},
+        )
+    )
+    assert channels.published == []
+    assert env["gfs"].calls == []
+
+
+async def test_the_channel_sent_mark_is_never_relayed_on(env):
+    """Without a channel the mark means nothing: the space-keyed relay runs
+    as before and the mark does not travel."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    _author_kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay={**relay, CHANNEL_SENT_FIELD: True},
+        )
+    )
+    envelope = env["gfs"].calls[0]["payload"]
+    pt = await env["crypto"].decrypt(
+        "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
+    )
+    assert CHANNEL_SENT_FIELD not in json.loads(pt)
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("allow_subscribers", [True, False])
+async def test_a_removal_goes_into_the_channel_signed_inside(env, allow_subscribers):
+    """A removal rides the channel as an authority item — the space
+    authority signs the inner inside the ciphertext — whatever
+    ``allow_subscribers`` says (the channel carries the members' content)."""
+    skp, channels = await _channel_env(env, allow_subscribers=allow_subscribers)
+    await env["bus"].publish(
+        PostDeleted(
+            post_id="post-9",
+            space_id="sp-pub",
+            actor_user_id="moderator-user",
+            author_user_id="author-user",
+        )
+    )
+    assert env["gfs"].calls == []
+    inner = await _channel_inner(env, skp, channels)
+    assert inner[AUTHORITY_KIND_FIELD] == AUTHORITY_KIND_REMOVAL
+    assert inner["item_id"] == "post-9"
+
+
+async def test_a_global_space_without_a_channel_keeps_the_space_keyed_relay(env):
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    channels = _Channels(set())
+    env["sub"].attach_channels(channels)
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    assert len(env["gfs"].calls) == 1
+    assert channels.published == []
+
+
+@pytest.mark.security
+async def test_an_approved_post_goes_into_the_channel_with_its_cert(env):
+    skp, author_kp, _iid, post, relay = await _approved_env(env, stype=SpaceType.GLOBAL)
+    channels = _Channels({"sp-pub"})
+    env["sub"].attach_channels(channels)
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=post, space_id="sp-pub", approved_by="mod", public_relay=relay
+        )
+    )
+    assert env["gfs"].calls == []
+    inner = await _channel_inner(env, skp, channels)
+    assert is_approved(inner) and verify_signed_author_inner(inner)
+    _sid, epoch, _ct = channels.published[-1]
+    verify_writer_cert(
+        WriterCert.from_wire(inner["writer_cert"]),
+        space_pubkey=skp.public_key,
+        space_id="sp-pub",
+        epoch=epoch,
+        author_pk=author_kp.public_key,
+        required_scope="comment",
+    )

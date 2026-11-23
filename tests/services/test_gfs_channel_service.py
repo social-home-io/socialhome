@@ -205,6 +205,10 @@ class _Gfs:
     async def private_channels_supported(self, conn):
         return self.capable and conn.id not in getattr(self, "incapable", set())
 
+    async def subscriber_seats_supported(self, conn):
+        # v_96 — the second capability a GLOBAL space's channel needs.
+        return getattr(self, "seats", True)
+
     def known_instance_ids(self, conn):
         return frozenset({conn.gfs_instance_id, *self.previous.get(conn.id, ())})
 
@@ -309,7 +313,11 @@ class _SpaceService:
     def __init__(self) -> None:
         self.snapshots: list[tuple[str, str]] = []
 
-    async def send_roster_snapshot(self, space_id, *, to_instance_id):
+    async def send_roster_snapshot(
+        self, space_id, *, to_instance_id, credentials_only=False
+    ):
+        # Grants go credentials-only: never the whole roster again (v_96).
+        assert credentials_only
         self.snapshots.append((space_id, to_instance_id))
         return True
 
@@ -747,8 +755,10 @@ async def test_every_member_household_takes_a_seat_with_the_option_on(env):
 async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member, env.other)
-    # The owner holds no grant: it never publishes to (or reads) the channel.
-    assert await env.owner.svc.plan(SPACE_ID) == []
+    # The owner holds no grant and takes no seat, but publishes into its own
+    # channel (v_96, Q4) with a publish-only grant derived from its seed.
+    assert [t.id for t in await env.owner.svc.plan(SPACE_ID)] == ["conn-1"]
+    assert await env.owner.svc.current_grant(SPACE_ID) is None
     targets = await env.other.svc.plan(SPACE_ID)
     assert [t.id for t in targets] == ["conn-1"]
     accepted = await env.other.svc.publish_sealed(SPACE_ID, 3, "Y2lwaGVy", targets)
@@ -1817,9 +1827,10 @@ async def test_no_list_means_no_channel_server(env):
 
 
 @pytest.mark.security
-@pytest.mark.parametrize("tier", [SpaceType.GLOBAL, SpaceType.HOUSEHOLD])
+@pytest.mark.parametrize("tier", [SpaceType.PUBLIC, SpaceType.HOUSEHOLD])
 async def test_leaving_the_private_tier_retires_without_reading_the_new_list(env, tier):
-    """PRIVATE → GLOBAL / HOUSEHOLD: the channel comes down from the servers
+    """PRIVATE → PUBLIC / HOUSEHOLD (no channel tier — a GLOBAL space keeps
+    its channel since v_96): the channel comes down from the servers
     it lived on (pending rows + this process's registrations) and is
     forgotten — the new tier's list is never read as channel servers, so a
     GFS that never had the channel never hears its id."""
@@ -1840,12 +1851,12 @@ async def test_leaving_the_private_tier_retires_without_reading_the_new_list(env
     assert await env.app[gfs_channel_repo_key].get(channel_id) is None
 
 
-async def test_retire_of_a_non_private_space_ignores_its_list(env, monkeypatch):
+async def test_retire_of_a_non_channel_tier_space_ignores_its_list(env, monkeypatch):
     _choose(env, env.owner, _own(env, env.owner))
     channel_id = await _channel_ready(env)
     env.owner.svc._registered.clear()
     env.owner.spaces.spaces[SPACE_ID] = replace(
-        env.owner.spaces.spaces[SPACE_ID], space_type=SpaceType.GLOBAL
+        env.owner.spaces.spaces[SPACE_ID], space_type=SpaceType.PUBLIC
     )
     asked: list[str] = []
     real = GfsChannelService._unregister_one
@@ -1856,7 +1867,7 @@ async def test_retire_of_a_non_private_space_ignores_its_list(env, monkeypatch):
 
     monkeypatch.setattr(GfsChannelService, "_unregister_one", spy)
     assert await env.owner.svc.retire(SPACE_ID) is True
-    # The list still names conn-1, but a global space's list is no channel
+    # The list still names conn-1, but a public space's list is no channel
     # list: nothing to unregister on beyond the (empty) registrations.
     assert asked == []
     assert env.owner.svc._conn_repo.withdrawals == []
@@ -2242,3 +2253,172 @@ async def test_a_retire_records_no_seed_that_is_not_the_channels(env):
     env.owner.spaces.channels[SPACE_ID] = (channel_id, "00" * 32)
     assert await env.owner.svc.retire(SPACE_ID)
     assert conns.seeds == {}
+
+
+# ── v_96: global spaces use the channel for members and followers ────────
+
+
+def _go_global(env) -> None:
+    """Turn the fixture space into a GLOBAL one (no ``private_gfs``: a
+    global space's channel needs no option) on every household, and lift
+    every household to v_96."""
+    space = replace(env.space, space_type=SpaceType.GLOBAL, features=SpaceFeatures())
+    env.space = space
+    for node in (env.owner, env.member, env.other):
+        node.spaces.spaces[SPACE_ID] = space
+        node.federation.versions.update(
+            {n.h.instance_id: 96 for n in (env.owner, env.member, env.other)}
+        )
+
+
+@pytest.mark.security
+async def test_a_global_space_gets_a_channel_only_where_subscriber_seats_is_proved(
+    env,
+):
+    _go_global(env)
+    env.owner.gfs.seats = False
+    assert await env.owner.svc.reconcile(SPACE_ID) == "none"
+    assert SPACE_ID not in env.owner.spaces.channels
+    env.owner.gfs.seats = True
+    assert await env.owner.svc.reconcile(SPACE_ID) == "created"
+
+
+async def test_a_global_space_needs_no_private_gfs_option(env):
+    _go_global(env)
+    assert not env.space.features.private_gfs
+    assert await env.owner.svc.eligible(env.space)
+
+
+@pytest.mark.security
+async def test_a_global_space_leaving_the_tier_unregisters_its_channel(env):
+    _go_global(env)
+    channel_id = await _channel_ready(env)
+    for node in (env.owner, env.member, env.other):
+        node.spaces.spaces[SPACE_ID] = replace(env.space, space_type=SpaceType.PUBLIC)
+    assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
+    assert SPACE_ID not in env.owner.spaces.channels
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+@pytest.mark.security
+async def test_global_grants_go_to_members_and_followers_alike(env):
+    """A writer gets the pass and the channel writer key; a follower that
+    may not comment or react (no cert) the pass only — per household (its
+    pass is bound to its own key, Q2: no shared reader pass)."""
+    _go_global(env)
+    await _channel_ready(env)
+    writer = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
+    assert "channel_pass" in writer and "writer_key" in writer
+    env.owner.certs.scopes[env.member.h.instance_id] = None  # a plain follower
+    follower = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert "channel_pass" in follower and "writer_key" not in follower
+    # Not only link-joined households: a paired one is seated too.
+    env.owner.fed_repo.rows[env.member.h.instance_id] = SimpleNamespace(
+        source=InstanceSource.MANUAL
+    )
+    again = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert "channel_pass" in again
+
+
+@pytest.mark.security
+async def test_no_global_grant_below_v96(env):
+    """An older household maps no channel frame to a global space: it gets
+    no grant and keeps the federation path (the v_51 fallback)."""
+    _go_global(env)
+    await _channel_ready(env)
+    env.owner.federation.versions[env.other.h.instance_id] = 95
+    assert await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id) is None
+
+
+@pytest.mark.security
+async def test_a_global_item_reaches_every_seat_once_and_never_the_owner(env):
+    _go_global(env)
+    channel_id = await _channel_ready(env)
+    env.owner.certs.scopes[env.member.h.instance_id] = None  # the follower
+    await _hand_grants(env, env.member, env.other)
+    repo = env.app[gfs_channel_repo_key]
+    assert await repo.has_subscription(channel_id, env.member.h.instance_id)
+    assert not await repo.has_subscription(channel_id, env.owner.h.instance_id)
+    # The follower holds no writer key: it publishes nothing.
+    assert await env.member.svc.plan(SPACE_ID) == []
+    targets = await env.other.svc.plan(SPACE_ID)
+    accepted = await env.other.svc.publish_sealed(SPACE_ID, 3, "Y2lwaGVy", targets)
+    assert len(accepted) == 1
+    queued = await _queued(env, env.member)
+    assert len(queued) == 1
+    await env.member.svc.handle_frame({"type": "relay", **queued[0].sealed})
+    assert env.member.inbound.items == [(SPACE_ID, 3, "Y2lwaGVy")]
+    assert await _queued(env, env.owner) == []
+
+
+@pytest.mark.security
+async def test_the_owner_publishes_into_its_own_global_channel(env):
+    """Q4: the owner takes no seat but publishes its own items and the
+    authority items into its channel, with a publish-only grant it derives
+    from the seed — never stored, never a pass."""
+    _go_global(env)
+    await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    assert await env.owner.svc.current_grant(SPACE_ID) is None
+    assert await env.owner.svc.publish_current(SPACE_ID, 3, "b3duZXI") == 1
+    queued = await _queued(env, env.member)
+    assert [q.sealed["payload"] for q in queued] == ["b3duZXI"]
+    assert await env.owner.svc.subscribe(SPACE_ID) == 0
+
+
+async def test_a_member_drops_its_channel_when_the_space_leaves_global(env):
+    _go_global(env)
+    await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    assert SPACE_ID in env.member.spaces.channels
+    env.member.spaces.spaces[SPACE_ID] = replace(env.space, space_type=SpaceType.PUBLIC)
+    bus = EventBus()
+    env.member.svc.wire(bus)
+    await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
+    await env.member.svc.wait_idle()
+    assert SPACE_ID not in env.member.spaces.channels
+
+
+@pytest.mark.security
+async def test_the_owner_still_publishes_after_a_restart_before_heal(env):
+    """The owner's publish-only grant names the chosen capable servers when
+    this process has not re-registered the channel yet — its items are not
+    dropped in that window."""
+    _go_global(env)
+    await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    env.owner.svc._registered.clear()  # a fresh process
+    assert [t.id for t in await env.owner.svc.plan(SPACE_ID)] == ["conn-1"]
+    assert await env.owner.svc.publish_current(SPACE_ID, 3, "cmVzdGFydA") == 1
+
+
+async def test_a_global_grant_takes_its_seat_once_the_config_says_global(env):
+    """A grant that arrived before the tier change seats us when the
+    config is applied (no wait for the next reconnect)."""
+    _go_global(env)
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    repo = env.app[gfs_channel_repo_key]
+    await repo.remove_subscriber(channel_id, env.member.h.instance_id)
+    env.member.svc._seated.clear()  # the seat came with a grant, not taken yet
+    bus = EventBus()
+    env.member.svc.wire(bus)
+    await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
+    await env.member.svc.wait_idle()
+    assert await repo.has_subscription(channel_id, env.member.h.instance_id)
+
+
+@pytest.mark.security
+async def test_a_global_config_change_does_not_resubscribe_a_seated_household(env):
+    """Every applied config change of a global space reaches every follower
+    household: one that already took its seat sends nothing."""
+    _go_global(env)
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    repo = env.app[gfs_channel_repo_key]
+    await repo.remove_subscriber(channel_id, env.member.h.instance_id)
+    bus = EventBus()
+    env.member.svc.wire(bus)
+    await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
+    await env.member.svc.wait_idle()
+    assert not await repo.has_subscription(channel_id, env.member.h.instance_id)

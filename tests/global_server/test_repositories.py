@@ -1443,6 +1443,97 @@ async def test_relay_insert_cost_stays_flat_at_a_full_cap(gfs_db):
     assert sorted(at_cap)[10] < max(5 * sorted(early)[10], 0.02)
 
 
+async def _relay_many(queue, tos, body, *, now=0, rows=10, per=10**6, total=10**6):
+    return await queue.enqueue_relay_many(
+        tos,
+        body,
+        created_at=now,
+        expires_at=now + 100,
+        max_per_recipient=rows,
+        max_bytes_per_recipient=per,
+        max_total_bytes=total,
+    )
+
+
+async def test_enqueue_relay_many_queues_once_per_recipient(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    tos = ["a" * 32, "b" * 32, "a" * 32]
+    assert await _relay_many(queue, tos, '{"n":1}') == ["a" * 32, "b" * 32]
+    for to in ("a" * 32, "b" * 32):
+        assert [r.sealed for r in await _relay_rows(queue, to)] == [{"n": 1}]
+    assert await _relay_many(queue, [], '{"n":2}') == []
+
+
+async def test_enqueue_relay_many_evicts_each_recipients_own_oldest(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    tos = ["a" * 32, "b" * 32]
+    for i in range(3):
+        assert await _relay_many(queue, tos, f'{{"n":{i}}}', rows=2) == tos
+    for to in tos:
+        assert [r.sealed["n"] for r in await _relay_rows(queue, to)] == [1, 2]
+
+
+async def test_enqueue_relay_many_makes_room_from_the_largest_holder(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    blob = '{"x":"' + "h" * 90 + '"}'
+    for _ in range(3):
+        assert await _relay(queue, "h" * 32, blob, total=400)
+    # Two new recipients at a full cap: both land, each evicting one of the
+    # largest holder's rows — never one another's.
+    tos = ["l" * 32, "m" * 32]
+    assert await _relay_many(queue, tos, blob, total=400) == tos
+    assert len(await _relay_rows(queue, "h" * 32)) == 2
+    for to in tos:
+        assert len(await _relay_rows(queue, to)) == 1
+    assert await queue.relay_bytes(0) <= 400
+
+
+@pytest.mark.parametrize("batched", [True, False])
+async def test_enqueue_relay_many_matches_one_at_a_time(gfs_db, batched):
+    """Same caps, same eviction order (ties included) as :meth:`enqueue_relay`
+    called once per recipient — the scenario runs both ways."""
+    batch = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    seed = [("p" * 32, 3), ("q" * 32, 2), ("r" * 32, 1)]
+    blob = '{"x":"' + "s" * 40 + '"}'
+    for to, n in seed:
+        for _ in range(n):
+            assert await _relay(batch, to, blob)
+    cap = await batch.relay_bytes(0)
+    tos = ["t" * 32, "q" * 32, "u" * 32]
+    if batched:
+        assert await _relay_many(batch, tos, blob, total=cap) == tos
+    else:
+        for to in tos:
+            assert await _relay(batch, to, blob, total=cap)
+    got = {to: len(await _relay_rows(batch, to)) for to in ("p" * 32, *tos)}
+    # t evicts from p (3 → 2); q then ties with p at 2 and is the recipient,
+    # so p goes again (→ 1) while q grows to 3; u evicts from q (→ 2).
+    assert got == {"p" * 32: 1, "t" * 32: 1, "q" * 32: 2, "u" * 32: 1}
+    assert await batch.relay_bytes(0) <= cap
+
+
+async def test_enqueue_relay_many_never_touches_envelope_rows(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    await queue.enqueue(
+        "a" * 32,
+        '{"e":"' + "e" * 44 + '"}',
+        created_at=0,
+        expires_at=100,
+        max_per_recipient=10,
+        max_bytes_per_recipient=10**6,
+    )
+    assert await _relay_many(queue, ["a" * 32], '{"r":"' + "r" * 44 + '"}', total=60)
+    rows = await queue.list_for("a" * 32, now=0)
+    assert sorted(r.frame_type for r in rows) == ["envelope", "relay"]
+
+
+async def test_enqueue_relay_many_refuses_an_item_bigger_than_a_cap(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    assert await _relay_many(queue, ["a" * 32], "r" * 50, per=10) == []
+    assert await _relay_many(queue, ["a" * 32], "r" * 50, total=10) == []
+    assert await _relay_many(queue, ["a" * 32], "r" * 5, rows=0) == []
+
+
 async def test_size_bytes_is_written_for_every_row(gfs_db):
     queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
     await _relay(queue, "a" * 32, '{"r":1}')

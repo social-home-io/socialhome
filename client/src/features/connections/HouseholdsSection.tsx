@@ -1,8 +1,9 @@
 /**
  * HouseholdsSection — section C: header (h2 + count + List/Map toggle),
- * then the household cards, the "waiting for the other household" and
- * "met through a shared space" subgroups — or the map, the skeleton, the
- * LoadError, or (no households yet) PairingSteps.
+ * then the household cards and the "waiting for the other household"
+ * subgroup — or the map, the skeleton, the LoadError, or (no households
+ * yet) PairingSteps. Only households we're paired with are listed: one we
+ * merely share a space with shows in that space's members, never here.
  */
 import type { ComponentProps } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
@@ -16,7 +17,6 @@ import { MapFoot } from './MapFoot'
 import { PairingSteps } from './PairingSteps'
 import { PendingCard } from './PendingCard'
 import { SectionHeader, SubgroupDivider } from './SectionHeader'
-import { SpaceOnlyCard } from './SpaceOnlyCard'
 import { ViewToggle, type ConnView } from './ViewToggle'
 import { isHousehold, type Household } from './model'
 import { defaultPinStatus } from './MapPin'
@@ -64,7 +64,6 @@ interface Props {
   households: Household[]
   /** Admin only — members never get pending rows. */
   pending: Connection[]
-  spaceOnly: Connection[]
   compat: Map<string, CompatPeer>
   onManage?: (c: Connection) => void
   onCancelPending: (c: Connection) => void
@@ -108,30 +107,16 @@ export function HouseholdsSection(p: Props) {
   }
   if (p.loading) return wrap(<SkeletonCards widths={[['38%', '62%'], ['30%', '54%'], ['44%', '48%']]} />, true)
 
-  const subgroups = (
+  const subgroups = p.pending.length > 0 && (
     <>
-      {p.pending.length > 0 && (
-        <>
-          <SubgroupDivider>{t('connections.sub.waiting')}</SubgroupDivider>
-          <ul class="sh-conn-list">
-            {p.pending.map((c) => (
-              <li key={c.instance_id}>
-                <PendingCard conn={c} onCancel={() => p.onCancelPending(c)} onRestart={p.onRestartPending} />
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-      {p.spaceOnly.length > 0 && (
-        <>
-          <SubgroupDivider>{t('connections.sub.space')}</SubgroupDivider>
-          <ul class="sh-conn-list">
-            {p.spaceOnly.map((c) => (
-              <li key={c.instance_id}><SpaceOnlyCard conn={c} /></li>
-            ))}
-          </ul>
-        </>
-      )}
+      <SubgroupDivider>{t('connections.sub.waiting')}</SubgroupDivider>
+      <ul class="sh-conn-list">
+        {p.pending.map((c) => (
+          <li key={c.instance_id}>
+            <PendingCard conn={c} onCancel={() => p.onCancelPending(c)} onRestart={p.onRestartPending} />
+          </li>
+        ))}
+      </ul>
     </>
   )
 
@@ -145,7 +130,7 @@ export function HouseholdsSection(p: Props) {
   }
 
   if (p.view === 'map') {
-    const rows: Connection[] = [...p.households.map((h) => h.conn), ...p.pending, ...p.spaceOnly]
+    const rows: Connection[] = [...p.households.map((h) => h.conn), ...p.pending]
     const hidden = rows.filter((c) => c.home_lat == null || c.home_lon == null).map((c) => c.display_name)
     return wrap(
       <>

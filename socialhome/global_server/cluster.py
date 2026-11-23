@@ -44,6 +44,7 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.space import normalize_category, normalize_join_mode
+from ..domain.space_listing_counts import parse_listing_count
 from ..domain.space_place import PlacePin, parse_place_pin_wire, place_pin_wire
 from ..domain.subscriber_accepts import parse_accepts
 from ..gfs_client_status import StatusRequest, sign_client_status
@@ -60,7 +61,13 @@ from .cluster_relay import (
     held_from_replies,
     wire_size,
 )
-from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
+from .domain import (
+    ClientInstance,
+    ClusterNode,
+    GfsFraudReport,
+    GlobalSpace,
+    normalize_counts_ts,
+)
 from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
 from .federation import certified_authority_repin
 from .peer_url import normalized_peer_url
@@ -2119,6 +2126,18 @@ class ClusterService:
             cert=space.authority_cert,
             stored_cert=existing.authority_cert if existing else None,
         )
+        # A peer's ``subscriber_count`` is its own relay-seat bookkeeping:
+        # ``upsert_space`` never overwrites ours with it. A peer's counts are
+        # taken only with a stamp (an OLDER node gossips none, a node that
+        # never got counts gossips ``null``) that is not in the future (a
+        # far-future stamp would pin them against every later owner
+        # publish); otherwise ours stay. Among stamped ones the upsert keeps
+        # the newer (last-writer-wins on ``counts_ts``).
+        if not _gossiped_counts_usable(space.counts_ts):
+            # No stamp: the upsert keeps ours (or stores none for a new row).
+            space = replace(
+                space, member_count=None, follower_count=None, counts_ts=None
+            )
         wire_cert = space.authority_cert
         space = replace(
             space, authority_cert=existing.authority_cert if existing else None
@@ -2920,6 +2939,23 @@ def _wire_to_client(d: dict) -> ClientInstance:
     )
 
 
+#: How far ahead of this node's clock a gossiped ``counts_ts`` may be — the
+#: same skew a publish's own ``ts`` is allowed (±300 s).
+_COUNTS_TS_MAX_SKEW = timedelta(seconds=300)
+
+
+def _gossiped_counts_usable(counts_ts: str | None) -> bool:
+    """Whether a peer's gossiped counts may replace ours: stamped, and the
+    stamp not past this node's clock plus the allowed skew."""
+    if counts_ts is None:
+        return False
+    try:
+        stamp = datetime.fromisoformat(counts_ts)
+    except ValueError:
+        return False
+    return stamp <= datetime.now(UTC) + _COUNTS_TS_MAX_SKEW
+
+
 def _space_to_wire(s: GlobalSpace) -> dict:
     return {
         "space_id": s.space_id,
@@ -2967,6 +3003,13 @@ def _space_to_wire(s: GlobalSpace) -> dict:
         # …and its join contact (v_84), authority-signed by the owner; a
         # reader verifies it, this server only carries it.
         "join_contact": s.join_contact,
+        # The owner-declared counts with their last-writer-wins stamp, so a
+        # node that missed the publish serves them too and a stale peer row
+        # never overwrites newer ones. (``subscriber_count`` above stays on
+        # the wire for older nodes; a receiving node never adopts it.)
+        "member_count": s.member_count,
+        "follower_count": s.follower_count,
+        "counts_ts": s.counts_ts,
     }
 
 
@@ -3000,6 +3043,10 @@ def _wire_to_space(d: dict) -> GlobalSpace:
         place_lon=_wire_place(d)[1],
         place_radius_km=_wire_place(d)[2],
         join_contact=parse_join_contact(d.get("join_contact")),
+        # Re-validated like any wire count; a malformed one is no number.
+        member_count=parse_listing_count(d.get("member_count")),
+        follower_count=parse_listing_count(d.get("follower_count")),
+        counts_ts=normalize_counts_ts(d.get("counts_ts")),
     )
 
 

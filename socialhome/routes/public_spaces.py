@@ -87,7 +87,10 @@ class PublicSpaceCollectionView(BaseView):
                     "lat": lst.lat,
                     "lon": lst.lon,
                     "radius_km": lst.radius_km,
+                    # The host's declared counts (signed in its GFS
+                    # listing); null = it declared none — no number.
                     "member_count": lst.member_count,
+                    "follower_count": lst.follower_count,
                     "min_age": lst.min_age,
                     "category": normalize_category(lst.category),
                     # The host's real join mode — how someone becomes a

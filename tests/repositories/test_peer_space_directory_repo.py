@@ -41,10 +41,10 @@ async def test_get_names_the_peer_that_lists_a_space(repo):
         "peer-a",
         [PeerSpaceDirectoryEntry(instance_id="peer-a", space_id="s1", name="One")],
     )
-    entry = await repo.get("s1")
+    entry = await repo.get_any("s1")
     assert entry is not None
     assert entry.instance_id == "peer-a" and entry.name == "One"
-    assert await repo.get("s-none") is None
+    assert await repo.get_any("s-none") is None
 
 
 async def test_clear_instance_drops_its_rows(repo):
@@ -53,5 +53,5 @@ async def test_clear_instance_drops_its_rows(repo):
         [PeerSpaceDirectoryEntry(instance_id="peer-a", space_id="s1", name="One")],
     )
     await repo.clear_instance("peer-a")
-    assert await repo.get("s1") is None
+    assert await repo.get_any("s1") is None
     assert await repo.list_all() == []

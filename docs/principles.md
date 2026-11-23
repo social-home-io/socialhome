@@ -597,7 +597,7 @@ every item: a link-joined member reaches the host only over the connection
 server's `/gfs/envelope`, so nobody else saw its posts while the host was
 offline. Since v_51 such a space gets member publishing through an **opaque
 channel** (`/gfs/channels/*`, see
-[`protocol/discovery.md`](./protocol/discovery.md#private-spaces-opaque-channels-v_51)):
+[`protocol/discovery.md`](./protocol/discovery.md#opaque-channels-private-and-global)):
 a random 128-bit id plus a channel key derived from the space seed. **Since
 the owner decision of 2026-10-04 the channel exists only by the owner's
 explicit, per-space opt-in** (`SpaceFeatures.private_gfs`, "use the
@@ -1219,6 +1219,25 @@ met through a GFS still never talk directly; non-member households on the
 mesh still see only `SPACE_ROUTED` ciphertext. Anything that lets a
 follower write more, or read member-only data, is a §2-principle change
 needing a new sign-off.
+### Sign-off: a GFS learns a listed space's member and follower counts (signed off 2026-11-23)
+
+A global space's listing carries `member_count` (members — never followers)
+and `follower_count` (live follower seats) inside the owner-signed publish
+body, sent only to a GFS that proved the signed `listing_counts` capability.
+Each GFS listing the space therefore learns the **exact** counts, and serves
+them on its public pages and directory, so anyone reading the directory
+learns them too. The owner decided this (2026-11-23): a count is listing
+metadata, like the space's name, and a directory showing 0 for every space
+was the bug. The counts name nobody, are bounded (`0..10 000 000`, re-checked
+by every receiver) and a count change is re-published at most once per
+5 minutes per space. The owner's signature covers them on the way **to** the
+GFS, so a relay or another registered household cannot alter them; it is
+not served onward, so a GFS **can misreport** them to its readers — exactly
+as it could misreport the space's name. Readers treat them as the GFS's
+word. A follower reached
+only through a GFS is no roster seat yet, so it is not counted until the
+subscriber-seats work makes it one. Paired households get the same two
+numbers in the `SPACE_DIRECTORY_SYNC` snapshot.
 
 ### Mailbox tickets hide a household among its epoch's households
 

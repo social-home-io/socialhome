@@ -159,6 +159,47 @@ async def test_one_member_count_on_every_surface(seeded):  # noqa: F811
     assert listed["member_count"] == 4
 
 
+async def test_one_follower_count_beside_it(seeded):  # noqa: F811
+    """The same surfaces carry the follower count — this household holds
+    the roster, so it is the roster's own count: one follower."""
+    client, hdr, sid = seeded
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["follower"])
+    assert (await r.json())["follower_count"] == 1
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["guest"])
+    assert (await r.json())["follower_count"] == 1
+    r = await client.get("/api/household/spaces", headers=hdr["member"])
+    (listed,) = [x for x in await r.json() if x["space_id"] == sid]
+    assert listed["follower_count"] == 1
+
+
+async def test_a_follower_only_household_shows_the_hosts_shared_counts(
+    seeded,  # noqa: F811
+):
+    """A household that only follows a space holds no roster: its page shows
+    what the host shared in the paired directory — and no number (null,
+    never 0) before the host shared any."""
+    client, hdr, sid = seeded
+    await client._db.enqueue(
+        "UPDATE spaces SET owner_instance_id='remote-host' WHERE id=?", (sid,)
+    )
+    await client._db.enqueue(
+        "DELETE FROM space_members WHERE space_id=? AND role != 'subscriber'",
+        (sid,),
+    )
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["follower"])
+    assert r.status == 200, await r.text()
+    body = await r.json()
+    assert (body["member_count"], body["follower_count"]) == (None, None)
+    await client._db.enqueue(
+        "INSERT INTO peer_space_directory(instance_id, space_id, name,"
+        " member_count, follower_count) VALUES('remote-host', ?, 'G', 17, 42)",
+        (sid,),
+    )
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["follower"])
+    body = await r.json()
+    assert (body["member_count"], body["follower_count"]) == (17, 42)
+
+
 async def _post_at(client, sid, pid, author, at, **extra):
     cols = ", ".join(
         ["id", "space_id", "author", "type", "content", "created_at", *extra]

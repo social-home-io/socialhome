@@ -83,6 +83,9 @@ from socialhome.services.space_public_author import (
     link_preview_signing_bytes,
     media_refs_signing_bytes,
 )
+from socialhome.services.space_public_authority import (
+    channel_authority_plaintext,
+)
 from socialhome.services.space_public_inbound import (
     SpacePublicInbound,
     _only_described_files,
@@ -2624,3 +2627,94 @@ async def test_relayed_file_hashes_another_key_signed_are_never_taken(env):
     )
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     assert sink.hashes == [{}]
+
+
+# ── v_96: authority items on a space's opaque channel ────────────────────
+
+
+async def _channel_authority(env, inner: dict, *, space_seed: bytes | None = None):
+    """The ``(epoch, payload)`` of an authority item on the channel: the
+    inner signed by the space authority inside the ciphertext."""
+    plain = channel_authority_plaintext(
+        inner,
+        space_id="sp-1",
+        epoch=await env["crypto"].get_current_epoch("sp-1"),
+        space_seed=space_seed
+        if space_seed is not None
+        else env["space_kp"].private_key,
+    )
+    return await env["crypto"].encrypt("sp-1", plain)
+
+
+@pytest.mark.security
+async def test_a_channel_removal_soft_deletes_a_held_post(item_env):
+    await _held_post(item_env)
+    epoch, ct = await _channel_authority(
+        item_env, _removal("post", "post-held", "post-held")
+    )
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    _space, row = await item_env["post_repo"].get("post-held")
+    assert row.deleted
+
+
+@pytest.mark.security
+async def test_a_channel_authority_item_with_a_forged_signature_is_dropped(item_env):
+    await _held_post(item_env)
+    epoch, ct = await _channel_authority(
+        item_env,
+        _removal("post", "post-held", "post-held"),
+        space_seed=generate_space_keypair().private_key,
+    )
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    _space, row = await item_env["post_repo"].get("post-held")
+    assert not row.deleted
+
+
+@pytest.mark.security
+async def test_an_authority_item_off_the_channel_is_never_applied(item_env):
+    """A space-keyed ``space_item`` frame carrying an authority item (signed
+    or not) is refused: authority items exist only on the channel."""
+    await _held_post(item_env)
+    epoch, ct = await _channel_authority(
+        item_env, _removal("post", "post-held", "post-held")
+    )
+    await item_env["inbound"].handle(
+        {
+            "type": "relay",
+            "space_id": "sp-1",
+            "event_type": "space_item",
+            "epoch": epoch,
+            "payload": ct,
+        }
+    )
+    _space, row = await item_env["post_repo"].get("post-held")
+    assert not row.deleted
+
+
+@pytest.mark.security
+async def test_a_channel_authority_item_mapped_to_another_space_is_dropped(item_env):
+    await _held_post(item_env)
+    epoch, ct = await _channel_authority(
+        item_env, _removal("post", "post-held", "post-held")
+    )
+    await item_env["inbound"].handle_channel_item("sp-other", epoch=epoch, payload=ct)
+    _space, row = await item_env["post_repo"].get("post-held")
+    assert not row.deleted
+
+
+async def test_a_member_post_the_host_put_on_the_channel_lands_once(item_env):
+    """The host's authority copy of a member's post and the author's own
+    channel item (or its federation copy) dedupe by post id: one row, one
+    event."""
+    inner = _signed_inner(item_env)
+    inner["writer_cert"] = await _cert(item_env)
+    epoch, ct = await _channel_authority(item_env, inner)
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "member-published content"
+    frame = _strict(await _item_frame(item_env))
+    await item_env["inbound"].handle_channel_item(
+        "sp-1", epoch=frame["epoch"], payload=frame["payload"]
+    )
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    assert len(item_env["events"]) == 1

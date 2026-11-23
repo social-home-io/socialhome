@@ -1201,42 +1201,38 @@ async def test_connections_response_carries_transport_rtc(make_client):
     assert row["transport"] == "rtc"
 
 
-async def test_connections_response_reports_the_relay_for_a_link_joined_peer(
-    make_client,
+async def test_connections_never_list_a_household_met_only_through_a_space(
+    client,
 ):
-    """A household seated from an invite link has NO address and no RTC
-    path — its envelopes ride the connection-server relay. Reporting it
-    as ``"https"`` named a transport that literally cannot be used (its
-    ``remote_inbox_url`` is the empty string by design), so the
-    Connections page told an operator to debug an HTTPS inbox that was
-    never going to exist."""
-    kp = generate_identity_keypair()
-    peer = RemoteInstance(
-        id=derive_instance_id(kp.public_key),
-        display_name="peer-relay",
-        remote_identity_pk=kp.public_key.hex(),
-        key_self_to_remote="k",
-        key_remote_to_self="k",
-        remote_inbox_url="",
-        local_inbox_id="wh-relay",
-        status=PairingStatus.CONFIRMED,
-        source=InstanceSource.SPACE_SESSION,
-        relay_via="https://gfs.example.org",
-        remote_keywrap_pk="cc" * 32,
+    """A household seated from an invite link or a GFS join (§D2b,
+    ``source = space_session``) is no relationship of ours: we reach its
+    people only through the space they share with us. The Connections page
+    lists the households we're paired with — so neither list endpoint
+    returns the seat, while the row itself stays (the relay needs it)."""
+    fed_repo = client.app[federation_repo_key]
+    seat = _link_joined_peer("seat-only")
+    await fed_repo.save_instance(seat)
+    await fed_repo.save_instance(_fake_instance("peer-paired"))
+    await fed_repo.save_instance(
+        dataclasses.replace(
+            _fake_instance("peer-pending"),
+            status=PairingStatus.PENDING_SENT,
+            local_inbox_id="wh-pending",
+        )
     )
 
-    class _NeverOpenTransport:
-        def is_ready(self, instance_id):
-            return False
-
-    client = await make_client({federation_transport_key: _NeverOpenTransport()})
-    fed_repo = client.app[federation_repo_key]
-    await fed_repo.save_instance(peer)
-
-    r = await client.get("/api/connections", headers=_auth(client._tok))
-    rows = await r.json()
-    row = next(x for x in rows if x["instance_id"] == peer.id)
-    assert row["transport"] == "gfs_relay"
+    for path in ("/api/connections", "/api/pairing/connections"):
+        r = await client.get(path, headers=_auth(client._tok))
+        assert r.status == 200
+        rows = await r.json()
+        assert sorted(row["instance_id"] for row in rows) == [
+            "peer-paired",
+            "peer-pending",
+        ], path
+        assert all(row["source"] != "space_session" for row in rows)
+    # The seat is still stored: the space's relay delivery runs on it.
+    stored = await fed_repo.get_instance(seat.id)
+    assert stored is not None and stored.source is InstanceSource.SPACE_SESSION
 
 
 def _link_joined_peer(suffix: str) -> RemoteInstance:
@@ -1261,7 +1257,7 @@ async def test_connections_show_a_peer_only_the_relay_has_accepted_for(client):
     whose recent traffic has only been handed to the relay reports
     ``relay_only`` plus the last acceptance time, so the operator can tell
     it apart from one that is actually receiving."""
-    peer = _link_joined_peer("relay-only")
+    peer = _fake_instance("peer-relay-only")
     await client.app[federation_repo_key].save_instance(peer)
     client.app[federation_service_key].note_relay_accepted(peer.id)
 
@@ -1273,7 +1269,7 @@ async def test_connections_show_a_peer_only_the_relay_has_accepted_for(client):
 
 
 async def test_connections_relay_only_clears_once_delivery_is_proven(client):
-    peer = _link_joined_peer("relay-proven")
+    peer = _fake_instance("peer-relay-proven")
     fed_repo = client.app[federation_repo_key]
     await fed_repo.save_instance(peer)
     client.app[federation_service_key].note_relay_accepted(peer.id)
@@ -2685,7 +2681,8 @@ async def test_a_pending_pairing_over_a_seat_is_listed_as_pending(client):
     r = await client.get("/api/connections", headers=_auth(client._tok))
     rows = {row["instance_id"]: row for row in await r.json()}
 
-    assert len(rows) == 3
+    # The seat-only household is not listed; the pending pairing is.
+    assert sorted(rows) == ["peer-paired", "peer-seat"]
     staged = rows["peer-seat"]
     assert staged["status"] == "pending_received"
     assert staged["pending_kind"] == "code"
@@ -2693,11 +2690,6 @@ async def test_a_pending_pairing_over_a_seat_is_listed_as_pending(client):
     assert staged["shares_space"] is True
     assert staged["display_name"] == "Delta House"
     assert staged["transport"] is None
-    # Everybody else is as before.
-    assert rows["peer-only-seat"]["status"] == "confirmed"
-    assert rows["peer-only-seat"]["source"] == "space_session"
-    assert rows["peer-only-seat"]["shares_space"] is False
-    assert rows["peer-only-seat"]["pending_kind"] is None
     assert rows["peer-paired"]["shares_space"] is False
     # No key of the unconfirmed handshake, and no inbox id, is in the row.
     assert not {
@@ -2725,9 +2717,9 @@ async def test_cancelling_a_pending_pairing_over_a_seat_keeps_the_seat(client):
     assert seat.source is InstanceSource.SPACE_SESSION
     assert seat.status is PairingStatus.CONFIRMED
     assert [e.instance_id for e in events] == ["peer-seat"]
+    # Back to a household we only share a space with: not a connection.
     r = await client.get("/api/connections", headers=_auth(client._tok))
-    [row] = await r.json()
-    assert (row["status"], row["source"]) == ("confirmed", "space_session")
+    assert await r.json() == []
     # A second cancel: nothing pending — and still never the seat.
     r = await client.delete(
         "/api/pairing/pending/peer-seat", headers=_auth(client._tok)

@@ -71,7 +71,7 @@ import {
   type AutoPairRequest,
 } from './connectionsData'
 import {
-  buildHouseholds, heroVariant, isHousehold, originOf, pendingKind, pendingRows, spaceOnlyRows,
+  buildHouseholds, heroVariant, isHousehold, originOf, pendingKind, pendingRows,
 } from './model'
 
 function errorText(err: unknown): string {
@@ -208,7 +208,6 @@ export default function ConnectionsPage() {
   const ours = isAdmin ? compatOurs.value : 0
   const households = buildHouseholds(connections.value, compatById, ours, isAdmin)
   const pending = isAdmin ? pendingRows(connections.value) : []
-  const spaceOnly = spaceOnlyRows(connections.value)
   // Skeleton only before the first load ever finished; a refetch keeps
   // whatever is on screen (an empty list included).
   const firstLoad = !connectionsLoadedOnce.value && connections.value.length === 0
@@ -334,7 +333,6 @@ export default function ConnectionsPage() {
         isAdmin={isAdmin}
         households={households}
         pending={pending}
-        spaceOnly={spaceOnly}
         compat={compatById}
         onManage={isAdmin ? setDetail : undefined}
         onCancelPending={setCancelTarget}

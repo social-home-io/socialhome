@@ -7151,3 +7151,68 @@ async def test_the_files_hash_map_reaches_only_v85_households(monkeypatch):
         new.id: {"id": "p", "files": files, "files_suite": "sha256"},
         old.id: {"id": "p"},
     }
+
+
+class _Seats:
+    """The roster mirror as the fan-out sees it: who holds a writer seat."""
+
+    def __init__(self, writers: set[str]) -> None:
+        self.writers = writers
+
+    async def list_instances_with_roles(self, space_id, roles):
+        return sorted(self.writers)
+
+
+class _ChannelSpaces:
+    def __init__(self, channel: bool) -> None:
+        self.channel = channel
+
+    async def get_gfs_channel(self, space_id):
+        return ("c" * 32, "pk") if self.channel else None
+
+
+async def _fan_out(monkeypatch, *, channel: bool, event_type) -> list[str]:
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.mesh_claims = {"follower-mesh": 96}
+    for iid in ("follower-gfs", "follower-mesh", "member-mesh"):
+        fed_repo.add_space_member("sp", iid)
+    svc, _ = _make_service(federation_repo=fed_repo)
+    svc.attach_space_write_gate(_ChannelSpaces(channel), _Seats({"member-mesh"}))
+    tried: list[str] = []
+
+    async def _send(self, *, to_instance_id, **_kw):
+        tried.append(to_instance_id)
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    monkeypatch.setattr(type(svc), "send_with_mesh_fallback", _send)
+    await svc.broadcast_to_space_members("sp", event_type, {"space_id": "sp"})
+    return sorted(tried)
+
+
+async def test_fan_out_skips_a_follower_it_cannot_address(monkeypatch):
+    """v_96 — in a space with a channel, a follower household we hold no
+    row for and that never claimed a version over the mesh (it followed
+    through a GFS) gets no per-event mesh route discovery: it is reached
+    through its channel seat or by the host. A member household in the same
+    position is still tried, and a follower we can address is too."""
+    tried = await _fan_out(
+        monkeypatch, channel=True, event_type=FederationEventType.SPACE_POST_CREATED
+    )
+    assert tried == ["follower-mesh", "member-mesh"]
+
+
+@pytest.mark.parametrize(
+    ("channel", "event_type"),
+    [
+        (False, FederationEventType.SPACE_POST_CREATED),
+        (True, FederationEventType.SPACE_KEY_EXCHANGE_REKEY),
+        (True, FederationEventType.SPACE_MEMBER_JOINED),
+    ],
+)
+async def test_fan_out_tries_every_follower_without_a_channel_or_for_keys(
+    monkeypatch, channel, event_type
+):
+    """No channel → no skip (there is no other path); the key and roster
+    events are never skipped (no channel carries them)."""
+    tried = await _fan_out(monkeypatch, channel=channel, event_type=event_type)
+    assert tried == ["follower-gfs", "follower-mesh", "member-mesh"]

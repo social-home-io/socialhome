@@ -102,6 +102,38 @@ describe('the hero', () => {
     await tl.waitFor(() => expect(hero.querySelector('a.sh-space-hero-members')?.textContent).toContain('12 members'))
   })
 
+  it("shows the server's follower count beside the members", async () => {
+    wire('member', {
+      member_count: 12, follower_count: 5, features: { todo: true, allow_subscribers: true },
+    })
+    const { tl, r } = await open()
+    const hero = await tl.waitFor(() => present<HTMLElement>(r.container, '.sh-space-hero'))
+    await tl.waitFor(() => expect(hero.querySelector('a.sh-space-hero-members')?.textContent).toContain('12 members'))
+    expect(hero.querySelector('.sh-space-hero-followers')?.textContent).toBe('· 5 followers')
+  })
+
+  it('a space that takes no followers never says "0 followers"', async () => {
+    wire('member', {
+      member_count: 3, follower_count: 0, features: { todo: true, allow_subscribers: false },
+    })
+    const { tl, r } = await open()
+    const hero = await tl.waitFor(() => present<HTMLElement>(r.container, '.sh-space-hero'))
+    await tl.waitFor(() => expect(hero.querySelector('a.sh-space-hero-members')?.textContent).toContain('3 members'))
+    expect(hero.querySelector('.sh-space-hero-followers')).toBeNull()
+  })
+
+  it('no number when the server knows none — not the roster length, not 0', async () => {
+    wire('member', { member_count: null, follower_count: null })
+    const { tl, r } = await open()
+    const hero = await tl.waitFor(() => present<HTMLElement>(r.container, '.sh-space-hero'))
+    // Let the roster load: its length must not stand in for the count.
+    await tl.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/members'))
+    await new Promise((res) => setTimeout(res, 50))
+    expect(hero.querySelector('.sh-space-hero-members')).toBeNull()
+    expect(hero.textContent).not.toMatch(/\d+ members?/)
+    expect(hero.querySelector('.sh-space-hero-followers')).toBeNull()
+  })
+
   it('opens the feed: name, facepile link with the member count (no followers), tier, quick links', async () => {
     wire('member')
     const { tl, r } = await open()

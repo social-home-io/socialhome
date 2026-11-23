@@ -17,6 +17,7 @@ business logic.
 
 from __future__ import annotations
 
+import heapq
 import time
 from typing import Any, Protocol, runtime_checkable
 
@@ -64,6 +65,14 @@ _ADMIN_LOGIN_ATTEMPT_RETENTION_SECONDS = 86400
 #: Ceiling for ``global_spaces.authority_rotation_seq`` (v_44): SQLite's
 #: INTEGER range, the same bound a cert's ``key_epoch`` carries.
 _MAX_ROTATION_SEQ = MAX_AUTHORITY_KEY_EPOCH
+
+#: ``upsert_space``'s test for KEEPING the stored owner-declared counts: the
+#: incoming row declares none (no ``counts_ts``), or both carry one and the
+#: incoming one is older (last-writer-wins).
+_COUNTS_KEEP_SQL = (
+    "(excluded.counts_ts IS NULL OR (global_spaces.counts_ts IS NOT NULL"
+    " AND excluded.counts_ts < global_spaces.counts_ts))"
+)
 
 # Retention for ``gfs_pair_tokens``. Tokens are single-use with a 10-min TTL
 # and only LIVE ones (unexpired, unconsumed) are counted against the mint
@@ -342,7 +351,7 @@ class SqliteGfsFederationRepo:
 
     async def upsert_space(self, space: GlobalSpace) -> None:
         await self._db.enqueue(
-            """
+            f"""
             INSERT INTO global_spaces(
                 space_id, owning_instance, name, description, about_markdown,
                 cover_url, icon_url, min_age, category, join_mode,
@@ -350,9 +359,11 @@ class SqliteGfsFederationRepo:
                 accent_color,
                 primary_color, status, subscriber_count, posts_per_week,
                 published_at, identity_public_key, withdrawn, authority_cert,
-                place_lat, place_lon, place_radius_km, join_contact
+                place_lat, place_lon, place_radius_km, join_contact,
+                member_count, follower_count, counts_ts
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?)
+                     COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?,
+                     ?, ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -366,7 +377,13 @@ class SqliteGfsFederationRepo:
                 accent_color = excluded.accent_color,
                 primary_color = excluded.primary_color,
                 status = excluded.status,
-                subscriber_count = excluded.subscriber_count,
+                -- ``subscriber_count`` is NOT updated here: it counts relay
+                -- seats and only the subscribe / unsubscribe recount and
+                -- ``purge_subscribers`` set it. A publish builds its row
+                -- from a read taken before the upsert, so carrying the old
+                -- value over would undo a subscribe that landed in between;
+                -- a cluster peer's count is its own bookkeeping, never ours.
+                -- A NEW row still inserts the given value.
                 posts_per_week = excluded.posts_per_week,
                 -- The pinned space authority key never moves on an upsert
                 -- (see the pin comment in ``federation.publish_space``): an
@@ -383,7 +400,22 @@ class SqliteGfsFederationRepo:
                 place_lat = excluded.place_lat,
                 place_lon = excluded.place_lon,
                 place_radius_km = excluded.place_radius_km,
-                join_contact = excluded.join_contact
+                join_contact = excluded.join_contact,
+                -- The owner-declared counts are last-writer-wins on the
+                -- declaring publish's signed ``ts``: a delayed OLDER publish
+                -- (or a peer node's stale row) keeps the stored counts, and
+                -- so does a row that declares none (no stamp: a count-less
+                -- or replayable publish, a peer that never got counts) — in
+                -- one statement, so a racing publish cannot wipe them. ISO
+                -- strings in UTC at fixed microsecond width compare in time
+                -- order.
+                member_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
+                    global_spaces.member_count ELSE excluded.member_count END,
+                follower_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
+                    global_spaces.follower_count ELSE excluded.follower_count
+                    END,
+                counts_ts = CASE WHEN {_COUNTS_KEEP_SQL} THEN
+                    global_spaces.counts_ts ELSE excluded.counts_ts END
             """,
             (
                 space.space_id,
@@ -414,6 +446,9 @@ class SqliteGfsFederationRepo:
                     else None
                 ),
                 _dump_cert(space.join_contact),
+                space.member_count,
+                space.follower_count,
+                space.counts_ts,
             ),
         )
 
@@ -1650,7 +1685,15 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         place_lon=row.get("place_lon"),
         place_radius_km=row.get("place_radius_km"),
         join_contact=_load_cert(row.get("join_contact")),
+        member_count=_opt_int(row.get("member_count")),
+        follower_count=_opt_int(row.get("follower_count")),
+        counts_ts=row.get("counts_ts") or None,
     )
+
+
+def _opt_int(value: object) -> int | None:
+    """A stored nullable count: NULL stays ``None`` ("no number")."""
+    return int(value) if isinstance(value, int) else None
 
 
 def _dump_cert(cert: dict | None) -> str | None:
@@ -3301,6 +3344,18 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         max_kind_row_bytes: int = 0,
     ) -> bool: ...
 
+    async def enqueue_relay_many(
+        self,
+        to_instances: list[str],
+        frame_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> list[str]: ...
+
     async def count_for(self, to_instance: str) -> int: ...
 
     async def enqueue_media(
@@ -3945,6 +4000,150 @@ class SqliteGfsEnvelopeQueueRepo:
                 (to_instance, frame_json, created_at, expires_at, size),
             )
             return True
+
+        return await self._db.transact(_run)
+
+    async def enqueue_relay_many(
+        self,
+        to_instances: list[str],
+        frame_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> list[str]:
+        """:meth:`enqueue_relay` (no capped kind) for each of *to_instances*
+        in ONE transaction — the same caps and the same eviction order: the
+        recipient's own oldest rows down to its caps, then the oldest row of
+        the largest holder while the server-wide total is over.
+
+        A channel item fanned out to 10 000 offline seats used to run 10 000
+        transactions, each summing EVERY live relay row for the server-wide
+        cap — quadratic, ~5 s per item and growing with every item queued
+        (T3.6). Here the server-wide total is read once and then tracked,
+        and the holders are ranked once (only when the cap is reached) and
+        kept in a heap, so a batch costs one index scan plus per-recipient
+        index lookups. Callers keep batches bounded
+        (``RELAY_QUEUE_BATCH``) so the write lock is not held long. Returns
+        the recipients that got a row; duplicates are queued once."""
+        size = len(frame_json)
+        if (
+            max_per_recipient <= 0
+            or size > max_bytes_per_recipient
+            or size > max_total_bytes
+        ):
+            return []
+
+        def _run(conn) -> list[str]:
+            live = "frame_type='relay' AND expires_at > ?"
+            total = int(
+                conn.execute(
+                    f"SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+                    f" WHERE {live}",
+                    (created_at,),
+                ).fetchone()[0]
+            )
+            # Bytes per holder and a max-heap of them, built on the first
+            # eviction the server-wide cap needs (most batches never do).
+            holders: dict[str, int] = {}
+            heap: list[tuple[int, str]] = []
+            ranked = False
+
+            def _evict_oldest(holder: str) -> int | None:
+                row = conn.execute(
+                    "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
+                    f" gfs_envelope_queue WHERE to_instance=? AND {live}"
+                    " ORDER BY created_at ASC, id ASC LIMIT 1) RETURNING size_bytes",
+                    (holder, created_at),
+                ).fetchone()
+                if row is None:
+                    return None
+                freed = int(row[0])
+                if ranked:
+                    holders[holder] = holders.get(holder, 0) - freed
+                    if holders[holder] > 0:
+                        heapq.heappush(heap, (-holders[holder], holder))
+                return freed
+
+            def _pop_valid() -> str | None:
+                while heap:
+                    neg, holder = heapq.heappop(heap)
+                    held = holders.get(holder, 0)
+                    if held > 0 and held == -neg:  # else a stale entry
+                        return holder
+                return None
+
+            def _largest(recipient: str) -> str | None:
+                # On a tie, someone other than the recipient being written
+                # to (it must not evict itself while an equal holder exists).
+                first = _pop_valid()
+                if first != recipient or first is None:
+                    return first
+                second = _pop_valid()
+                while second == first:  # a second live entry for the same holder
+                    second = _pop_valid()
+                if second is not None and holders[second] == holders[first]:
+                    heapq.heappush(heap, (-holders[first], first))
+                    return second
+                if second is not None:
+                    heapq.heappush(heap, (-holders[second], second))
+                return first
+
+            queued: list[str] = []
+            for to in dict.fromkeys(to_instances):
+                fits = True
+                while True:
+                    count, held = conn.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)"
+                        f" FROM gfs_envelope_queue WHERE {live} AND to_instance=?",
+                        (created_at, to),
+                    ).fetchone()
+                    if (
+                        int(count) < max_per_recipient
+                        and int(held) + size <= max_bytes_per_recipient
+                    ):
+                        break
+                    freed = _evict_oldest(to)
+                    if freed is None:
+                        fits = False
+                        break
+                    total -= freed
+                while fits and total + size > max_total_bytes:
+                    if not ranked:
+                        ranked = True
+                        holders = {
+                            str(r[0]): int(r[1])
+                            for r in conn.execute(
+                                "SELECT to_instance, SUM(size_bytes) FROM"
+                                f" gfs_envelope_queue WHERE {live}"
+                                " GROUP BY to_instance",
+                                (created_at,),
+                            )
+                        }
+                        heap = [(-b, h) for h, b in holders.items() if b > 0]
+                        heapq.heapify(heap)
+                    victim = _largest(to)
+                    freed = _evict_oldest(victim) if victim is not None else None
+                    if freed is None:
+                        fits = False
+                        break
+                    total -= freed
+                if not fits:
+                    continue
+                conn.execute(
+                    "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
+                    " created_at, expires_at, frame_type, size_bytes)"
+                    " VALUES(?,?,?,?, 'relay', ?)",
+                    (to, frame_json, created_at, expires_at, size),
+                )
+                total += size
+                if ranked:
+                    holders[to] = holders.get(to, 0) + size
+                    heapq.heappush(heap, (-holders[to], to))
+                queued.append(to)
+            return queued
 
         return await self._db.transact(_run)
 

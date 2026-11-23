@@ -24,6 +24,14 @@ signature inside proves who wrote it. Two moderation outcomes ride it too:
   holds. A seed holder never relays a member's own inner that already names
   an authority kind, so only the authority sets the mark.
 
+**On a space's opaque channel (v_96)** the same three authority items — a
+removal, an approved post, and a member's post the host puts there for an
+author that could not — travel as ``{"item_type": "authority", "inner":
+…}`` inside the channel ciphertext, the space authority signing the INNER
+(:func:`channel_authority_plaintext` / :func:`open_channel_authority`):
+the channel frame has no authority signature of its own, and every writer
+holds the channel writer key the GFS checks.
+
 Pure module — no I/O.
 """
 
@@ -31,11 +39,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import orjson
+
+from ..authority_sig import (
+    AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
+    UnsupportedAuthoritySuite,
+    sign_authority_event,
+    strip_authority_sig_fields,
+    verify_authority_event,
+)
 from ..crypto import derive_instance_id
 from ..domain.space_item import (
     AUTHORITY_KIND_APPROVED_POST,
     AUTHORITY_KIND_FIELD,
+    CHANNEL_AUTHORITY_ITEM_TYPE,
+    CHANNEL_SENT_FIELD,
     PAD_FIELD,
+    pad_json_object,
 )
 from .space_media_names import same_file
 from .space_public_author import verify_signed_author_inner
@@ -55,6 +75,7 @@ _DROPPED_FIELDS: frozenset[str] = frozenset(
         "link_preview_sig_suite",
         PAD_FIELD,
         WRITER_CERT_FIELD,
+        CHANNEL_SENT_FIELD,
     }
 )
 
@@ -141,3 +162,92 @@ def approved_relay_for(relay: object, *, post: Post, space_id: str) -> dict | No
     out = {k: v for k, v in relay.items() if k not in _DROPPED_FIELDS}
     out[AUTHORITY_KIND_FIELD] = AUTHORITY_KIND_APPROVED_POST
     return out
+
+
+def _signed_payload(bare: dict, epoch: int) -> dict:
+    """What the authority signs for a channel authority item: the inner and
+    the content epoch it is sealed under — so a key holder cannot re-seal an
+    old item under a later epoch (the space-keyed envelope signed its epoch
+    too)."""
+    return {"epoch": epoch, "inner": bare}
+
+
+def channel_authority_plaintext(
+    inner: dict, *, space_id: str, epoch: int, space_seed: bytes
+) -> bytes:
+    """The channel plaintext of an authority item (v_96): *inner* (without
+    its signature fields and padding) and the content *epoch* it is sealed
+    under, signed by the space authority (event ``space_channel_authority``)
+    and wrapped as ``{"item_type": "authority", "epoch": …, "inner": …}``,
+    padded to the item size buckets like any channel item (JSON: a channel
+    carries JSON only)."""
+    bare = {
+        k: v for k, v in strip_authority_sig_fields(inner).items() if k != PAD_FIELD
+    }
+    signed = {
+        **bare,
+        **sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
+            space_id=space_id,
+            payload=_signed_payload(bare, epoch),
+            space_seed=space_seed,
+        ),
+    }
+    return pad_json_object(
+        {"item_type": CHANNEL_AUTHORITY_ITEM_TYPE, "epoch": epoch, "inner": signed}
+    )
+
+
+def open_channel_authority(
+    opened: bytes, *, space_id: str, epoch: int, space_pubkey_hex: str
+) -> dict | None:
+    """The authority inner of an opened channel plaintext, or ``None``: not
+    an authority item (``item_type`` other than ``authority`` — an ordinary
+    channel item), one signed for another content epoch than the *epoch*
+    the frame was sealed under, or one whose space-authority signature does
+    not verify against the pinned key for *space_id* (an unknown suite
+    included — no default). The returned inner has its signature fields
+    removed."""
+    try:
+        body = orjson.loads(opened)
+    except ValueError:
+        return None
+    if (
+        not isinstance(body, dict)
+        or body.get("item_type") != CHANNEL_AUTHORITY_ITEM_TYPE
+    ):
+        return None
+    inner = body.get("inner")
+    signed_epoch = body.get("epoch")
+    if (
+        not isinstance(inner, dict)
+        or not isinstance(signed_epoch, int)
+        or isinstance(signed_epoch, bool)
+        or signed_epoch != epoch
+    ):
+        return None
+    bare = strip_authority_sig_fields(inner)
+    try:
+        ok = verify_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
+            space_id=space_id,
+            payload=_signed_payload(bare, epoch),
+            authority_sig=str(inner.get("authority_sig") or ""),
+            authority_sig_suite=str(inner.get("authority_sig_suite") or ""),
+            space_public_key=bytes.fromhex(space_pubkey_hex),
+        )
+    except UnsupportedAuthoritySuite, ValueError:
+        return None
+    return bare if ok else None
+
+
+def is_channel_authority(opened: bytes) -> bool:
+    """Whether an opened channel plaintext claims to be an authority item
+    (signature not checked — :func:`open_channel_authority` does)."""
+    try:
+        body = orjson.loads(opened)
+    except ValueError:
+        return False
+    return (
+        isinstance(body, dict) and body.get("item_type") == CHANNEL_AUTHORITY_ITEM_TYPE
+    )

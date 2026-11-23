@@ -54,6 +54,7 @@ from ..domain.space import (
     SpaceType,
     normalize_retention_exempt_types,
 )
+from ..domain.space_listing_counts import SpaceListingCounts
 from ..domain.space_place import PlacePin
 from ..infrastructure.hlc import HLC
 from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
@@ -68,6 +69,19 @@ MEMBER_COUNT_SQL = """(
     + (SELECT COUNT(*) FROM space_remote_members rc
         WHERE rc.space_id = s.id AND rc.tombstoned = 0
           AND COALESCE(rc.role, 'member') != 'subscriber')
+)"""
+
+#: A space's follower count: live follower seats, local plus remote
+#: non-tombstoned — the other half of its listing counts
+#: (:class:`~socialhome.domain.space_listing_counts.SpaceListingCounts`).
+#: A follower reached only through a GFS is no roster seat (yet), so it is
+#: not counted. ``s`` is the ``spaces`` row.
+FOLLOWER_COUNT_SQL = """(
+    (SELECT COUNT(*) FROM space_members fc
+      WHERE fc.space_id = s.id AND fc.role = 'subscriber')
+    + (SELECT COUNT(*) FROM space_remote_members rf
+        WHERE rf.space_id = s.id AND rf.tombstoned = 0
+          AND rf.role = 'subscriber')
 )"""
 
 
@@ -179,6 +193,8 @@ class AbstractSpaceRepo(Protocol):
     async def list_for_user(self, user_id: str) -> list[Space]: ...
     async def list_member_listings(self, user_id: str) -> list[MemberSpaceListing]: ...
     async def count_members(self, space_id: str) -> int: ...
+    async def listing_counts(self, space_id: str) -> SpaceListingCounts | None: ...
+    async def holds_roster(self, space_id: str) -> bool: ...
     async def mark_feed_read(self, space_id: str, user_id: str) -> None: ...
     async def list_location_shared_spaces_for_user(
         self, user_id: str
@@ -1381,6 +1397,7 @@ class SqliteSpaceRepo:
             f"""
             SELECT s.*,
                    {MEMBER_COUNT_SQL} AS listing_member_count,
+                   {FOLLOWER_COUNT_SQL} AS listing_follower_count,
                    (SELECT m.role FROM space_members m
                      WHERE m.space_id = s.id AND m.user_id = ?)
                        AS listing_caller_role,
@@ -1404,6 +1421,7 @@ class SqliteSpaceRepo:
                 HostedSpaceListing(
                     space=space,
                     member_count=int(d["listing_member_count"] or 0),
+                    follower_count=int(d["listing_follower_count"] or 0),
                     caller_role=d["listing_caller_role"],
                     caller_banned=bool(d["listing_caller_banned"]),
                 )
@@ -1446,6 +1464,34 @@ class SqliteSpaceRepo:
             (space_id,),
         )
         return int(row["n"]) if row is not None else 0
+
+    async def listing_counts(self, space_id: str) -> SpaceListingCounts | None:
+        """The space's listing counts — members (:data:`MEMBER_COUNT_SQL`)
+        and followers (:data:`FOLLOWER_COUNT_SQL`) in one query; ``None`` for
+        an unknown id. The one builder every listing path shares (the GFS
+        publish, the paired-household directory, the space page)."""
+        row = await self._db.fetchone(
+            f"SELECT {MEMBER_COUNT_SQL} AS members, {FOLLOWER_COUNT_SQL} AS followers"
+            " FROM spaces s WHERE s.id = ?",
+            (space_id,),
+        )
+        if row is None:
+            return None
+        return SpaceListingCounts(
+            member_count=int(row["members"]), follower_count=int(row["followers"])
+        )
+
+    async def holds_roster(self, space_id: str) -> bool:
+        """Whether this household holds *space_id*'s roster: one of its
+        people holds a member seat there (the host's owner always does). A
+        household that only follows a space holds no roster, so its counts
+        come from the space's shared listing instead."""
+        row = await self._db.fetchone(
+            "SELECT EXISTS (SELECT 1 FROM space_members"
+            " WHERE space_id = ? AND role != 'subscriber') AS held",
+            (space_id,),
+        )
+        return bool(row["held"]) if row is not None else False
 
     async def list_member_listings(self, user_id: str) -> list[MemberSpaceListing]:
         """Every active space *user_id* holds a seat in (as

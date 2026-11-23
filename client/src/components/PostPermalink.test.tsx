@@ -10,7 +10,7 @@ vi.mock('preact-iso', () => ({
   useRoute: () => ({ params: {}, query: {} }),
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
-vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
+vi.mock('@/ws', () => ({ ws: { on: () => () => undefined, send: () => {} } }))
 const markSeen = vi.hoisted(() => vi.fn())
 vi.mock('@/store/notifications', async (orig) => ({
   ...(await orig<typeof import('@/store/notifications')>()),
@@ -67,6 +67,24 @@ describe('postApiPath', () => {
 })
 
 describe('PostPermalink', () => {
+  it('a comment that fails to send stays in the field', async () => {
+    serve({
+      '/api/feed/posts/p1': post('p1'),
+      '/api/feed/posts/p1/comments': [comment('c1')],
+    })
+    vi.mocked(api.post).mockRejectedValue(status(503))
+    const { findByText, container } = render(
+      <PostPermalink postId="p1" spaceId={null} backPath="/feed" />,
+    )
+    await findByText('comment c1')
+    const field = container.querySelector<HTMLTextAreaElement>('#sh-comment-new-input')!
+    fireEvent.input(field, { target: { value: 'still here' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => expect(api.post).toHaveBeenCalled())
+    await new Promise(r => setTimeout(r, 0))
+    expect(field.value).toBe('still here')
+  })
+
   it('shows the household post with its comments open', async () => {
     serve({
       '/api/feed/posts/p1': post('p1'),

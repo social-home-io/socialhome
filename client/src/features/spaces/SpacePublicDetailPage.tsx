@@ -34,6 +34,7 @@ import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import { SpaceGlyph } from './SpaceGlyph'
+import { followersLabel, followersShown } from './SpaceListRow'
 import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
 import {
   approvalSeatsUs, contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
@@ -87,7 +88,8 @@ const error = signal<string | null>(null)
  *  it into the DirectoryEntry shape this page renders. A seated caller's
  *  answer carries ``my_role`` (a ``subscriber`` follows); a caller with no
  *  seat gets a discoverable space's landing fields. Both carry the one
- *  ``member_count`` (members, never followers). */
+ *  ``member_count`` (members, never followers) and ``follower_count`` —
+ *  ``null`` (or absent, an older server) when not known: no number shows. */
 async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
   try {
     const space = await api.get(`/api/spaces/${spaceId}`) as Space
@@ -102,7 +104,8 @@ async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
       description:        space.description,
       emoji:              space.emoji,
       icon_url:           space.icon_url ?? null,
-      member_count:       space.member_count ?? 0,
+      member_count:       space.member_count ?? null,
+      follower_count:     space.follower_count ?? null,
       scope:              space.space_type,
       join_mode:          space.join_mode,
       allow_subscribers:  !!space.features?.allow_subscribers,
@@ -119,6 +122,24 @@ async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
   } catch {
     return null
   }
+}
+
+/** "7 members · 12 followers · hosted by …" under the name — a count
+ *  nobody declared is left out (never "0 members"), and so are the
+ *  followers of a space that takes none. */
+function headerMeta(entry: DirectoryEntry, host: string | null): string {
+  const parts: string[] = []
+  if (entry.member_count !== null) {
+    parts.push(t(isOne(entry.member_count) ? 'space.header.members_one' : 'space.header.members',
+      { count: String(entry.member_count) }))
+  }
+  if (followersShown(entry.follower_count, entry.allow_subscribers)) {
+    parts.push(followersLabel(entry.follower_count))
+  }
+  if (host) parts.push(t('space.public.hosted_by', { host }))
+  const line = parts.join(' · ')
+  // "hosted by …" is lowercase after a count; leading the line, it starts it.
+  return line.charAt(0).toLocaleUpperCase() + line.slice(1)
 }
 
 /** The scope chip in the hero: which audience the space is for. */
@@ -311,6 +332,7 @@ export default function SpacePublicDetailPage() {
   // A global space's place pin: "about 3 km away" from our home, worked
   // out here. Sorting / a hint only — joining never checks it.
   const pinKm = entry.scope === 'global' ? pinDistanceKm(entry, householdHome.value) : null
+  const meta = headerMeta(entry, host)
   // …and the owner's radius hint, compared with our home here too.
   const place = entry.scope === 'global' && entry.lat != null && entry.lon != null
     ? { lat: entry.lat, lon: entry.lon, radius_km: entry.radius_km ?? null }
@@ -334,13 +356,9 @@ export default function SpacePublicDetailPage() {
         <div class="sh-space-public__title">
           <h1>{entry.name}</h1>
           <p class="sh-muted">
-            {t(isOne(entry.member_count) ? 'space.header.members_one' : 'space.header.members',
-              { count: String(entry.member_count) })}
-            {host && (
-              <> · {t('space.public.hosted_by', { host })}</>
-            )}
+            {meta}
             {pinKm !== null && (
-              <span data-testid="place-distance"> · 📍 {distanceLabel(pinKm)}</span>
+              <span data-testid="place-distance">{meta && ' · '}📍 {distanceLabel(pinKm)}</span>
             )}
           </p>
         </div>

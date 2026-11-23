@@ -977,9 +977,11 @@ sequenceDiagram
 ordinary transport failure: `send_event` queues the envelope in
 `federation_outbox`, and redelivery re-uses the same selection point
 rather than POSTing at the empty inbox URL. A relay `202` is recorded
-only as a local, in-memory relay-acceptance time (`relay_only` on
-`/api/connections`) — never as reachability, and nothing about it goes
-back to the connection server.
+only as a local, in-memory relay-acceptance time — never as
+reachability, and nothing about it goes back to the connection server.
+The seat is never listed on `/api/connections`: a household met through
+an invite link is no pairing, and its people are reached through the
+space (whose member list names the household).
 
 **Media through the GFS cache (v_80).** `SPACE_MEDIA_BLOB` chunks do not fit
 the relay: its envelope cap (`RELAY_MAX_ENVELOPE_BYTES`, ~191 KiB) is far below
@@ -1039,7 +1041,7 @@ when it is back. Receivers map the channel id to the space locally and run
 the strict-frame checks. Turning the option off (refused while link-joined
 members remain) or the last remote member leaving retires the channel.
 Full design, wire and residuals:
-[`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).
+[`discovery.md`](./discovery.md#opaque-channels-private-and-global).
 
 ```mermaid
 sequenceDiagram

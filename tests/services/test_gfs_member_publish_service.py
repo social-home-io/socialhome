@@ -1601,6 +1601,11 @@ async def test_private_epoch_notices_and_heal_go_to_the_channel(world):
 
 
 async def test_a_public_space_never_touches_the_channel(world):
+    """A PUBLIC (not global) space never touches a GFS channel; a GLOBAL
+    one does since v_96 (see the global-channel tests)."""
+    world["spaces"].spaces[SPACE_ID] = replace(
+        world["spaces"].spaces[SPACE_ID], space_type=SpaceType.PUBLIC
+    )
     channels = _Channels(world["conn"])
     world["svc"].attach_channels(channels)
     assert not await world["svc"].channel_space(SPACE_ID)
@@ -2048,3 +2053,65 @@ def test_a_reader_cert_publishes_only_what_the_follower_switches_allow(
     )
     assert _cert_lets(cert, AUTHOR, item_type, features) is ok
     assert not _cert_lets({"scope": "comment"}, AUTHOR, "comment", features)
+
+
+# ── v_96: a global space with a channel ─────────────────────────────────
+
+
+def _global_channel(world, *, owner: str = "host.home") -> _Channels:
+    world["spaces"].spaces[SPACE_ID] = _space(owner=owner)
+    channels = _Channels(world["conn"])
+    world["svc"].attach_channels(channels)
+    return channels
+
+
+@pytest.mark.security
+async def test_a_global_space_with_a_channel_publishes_only_there(world):
+    """Members and followers read a global space with a channel through
+    the channel: an item goes there and never ALSO to the space-keyed
+    member relay (no double delivery)."""
+    channels = _global_channel(world)
+    svc = world["svc"]
+    assert await svc.channel_space(SPACE_ID)
+    targets = await svc.plan_item(SPACE_ID, AUTHOR, "post")
+    assert [t.id for t in targets] == ["conn-1"]
+    assert await svc.publish_item(SPACE_ID, "post", _inner(), targets) == targets
+    assert len(channels.sealed) == 1
+    assert await _queued(world) == []
+
+
+async def test_a_global_space_without_a_channel_keeps_the_space_keyed_relay(world):
+    channels = _global_channel(world)
+    channels.channel = False
+    svc = world["svc"]
+    assert not await svc.channel_space(SPACE_ID)
+    targets = await svc.plan_item(SPACE_ID, AUTHOR, "post")
+    await svc.publish_item(SPACE_ID, "post", _inner(), targets)
+    assert channels.sealed == []
+    assert len(await _queued(world)) == 1
+
+
+async def test_the_owner_publishes_its_own_global_post_into_the_channel(world):
+    """Q4 — with a channel the owner's own post is its household's item
+    there (no authority relay of it)."""
+    channels = _global_channel(world, owner=world["me"].instance_id)
+    targets = await world["svc"].plan_post(SPACE_ID, AUTHOR)
+    assert targets == [channels.conn]
+
+
+@pytest.mark.security
+async def test_a_global_channel_member_takes_no_space_keyed_seat(world):
+    _global_channel(world)
+    spaces = world["spaces"]
+    spaces.local[SPACE_ID] = ["u1"]
+    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
+    assert await world["svc"].ensure_subscribed(SPACE_ID) == 0
+    assert await world["svc"].member_subscription_ids("conn-1") == []
+    assert world["gfs"].subscribed == []
+
+
+async def test_a_global_channel_announces_only_on_the_channel(world):
+    channels = _global_channel(world)
+    assert await world["svc"].announce_epoch(SPACE_ID) == 1
+    assert channels.rotations == [SPACE_ID]
+    assert await _queued(world) == []

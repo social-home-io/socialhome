@@ -19,7 +19,6 @@ import { formatSince, type Household } from './model'
 const TRANSPORT: Record<Exclude<TransportState, null>, { icon: ConnIconName; key: string }> = {
   rtc: { icon: 'bolt', key: 'connections.transport.direct' },
   https: { icon: 'globe', key: 'connections.transport.internet' },
-  gfs_relay: { icon: 'cloud', key: 'connections.transport.gfs' },
 }
 
 export function transportItem(transport: TransportState | undefined): ComponentChildren {

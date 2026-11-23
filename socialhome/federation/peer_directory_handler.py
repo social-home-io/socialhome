@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from ..domain.federation import FederationEventType
 from ..domain.local_community import parse_local_community_wire
 from ..domain.space import normalize_category
+from ..domain.space_listing_counts import parse_listing_count
 from ..repositories.peer_space_directory_repo import (
     AbstractPeerSpaceDirectoryRepo,
     PeerSpaceDirectoryEntry,
@@ -63,7 +64,12 @@ class PeerDirectoryHandler:
                         name=str(item.get("name") or ""),
                         description=item.get("description"),
                         emoji=item.get("emoji"),
-                        member_count=int(item.get("member_count") or 0),
+                        # The host's listing counts, re-validated. A
+                        # paired host has always sent its members; its
+                        # followers only since 2026-11 (``None`` = an older
+                        # host: no number, never 0).
+                        member_count=parse_listing_count(item.get("member_count")) or 0,
+                        follower_count=parse_listing_count(item.get("follower_count")),
                         join_mode=str(item.get("join_mode") or "request"),
                         min_age=int(item.get("min_age") or 0),
                         category=normalize_category(item.get("category")),

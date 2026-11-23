@@ -734,6 +734,9 @@ async def test_wire_helpers_roundtrip_client_space_report():
         authority_cert={"key_epoch": 2, "space_id": "s"},
         authority_rotation_seq=7,
         withdrawn=True,
+        member_count=4,
+        follower_count=9,
+        counts_ts="2026-11-23T10:00:00.000000+00:00",
     )
     # Every field round-trips. ``identity_public_key`` in particular: it used
     # to fall off the wire, so an inbound NODE_SYNC_SPACE rebuilt the row with
@@ -1394,6 +1397,14 @@ async def test_a_member_item_reaches_every_node_and_queues_only_the_offline(
         return await real_enqueue(self, target, *args, **kwargs)
 
     monkeypatch.setattr(type(queue), "enqueue_relay", _recording_enqueue)
+    real_enqueue_many = type(queue).enqueue_relay_many
+
+    async def _recording_enqueue_many(self, targets, *args, **kwargs):
+        queued = await real_enqueue_many(self, targets, *args, **kwargs)
+        rows_for.extend(queued)
+        return queued
+
+    monkeypatch.setattr(type(queue), "enqueue_relay_many", _recording_enqueue_many)
     frame = {
         "space_id": _SPACE_ID,
         "event_type": "space_item",
@@ -1560,6 +1571,14 @@ async def test_a_moment_on_one_node_reaches_followers_on_every_node_once(
         return await real_enqueue(self, target, *args, **kwargs)
 
     monkeypatch.setattr(type(queue), "enqueue_relay", _recording_enqueue)
+    real_enqueue_many = type(queue).enqueue_relay_many
+
+    async def _recording_enqueue_many(self, targets, *args, **kwargs):
+        queued = await real_enqueue_many(self, targets, *args, **kwargs)
+        rows_for.extend(queued)
+        return queued
+
+    monkeypatch.setattr(type(queue), "enqueue_relay_many", _recording_enqueue_many)
     envelope = _moment_envelope(seeds[_PUBLISHER_ID])
     want = {"type": "incoming_public_moment", "payload": envelope}
     async with aiohttp.ClientSession() as http:

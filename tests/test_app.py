@@ -18,6 +18,9 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from socialhome import __version__
 from socialhome import app_keys as K
 from socialhome.app import (
+    GFS_CHANNEL_BUDGET_SWEEP_AT,
+    GFS_CHANNEL_FRAMES_PER_MINUTE,
+    GFS_CHANNEL_FRAMES_PER_MINUTE_ALL,
     MAP_TILE_USER_AGENT,
     SIGNED_MEDIA_GET_LIMIT,
     SIGNED_MEDIA_GET_RULES,
@@ -50,6 +53,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.file_hashes import space_content_media_name
+from socialhome.domain.gfs_server import MAX_GFS_SERVERS
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -610,6 +614,97 @@ async def test_gfs_relay_routes_a_private_channel_frame_to_the_channel_service()
         frame, space_public_inbound=posts, space_subscriber_key_inbound=None
     )
     assert posts.frames == []
+
+
+def _channel_frame(channel_id: str = "a" * 32) -> dict:
+    return {
+        "type": "relay",
+        "channel_id": channel_id,
+        "event_type": "space_item",
+        "epoch": 3,
+        "payload": "ct",
+    }
+
+
+async def test_gfs_channel_frames_over_the_per_channel_budget_are_dropped(caplog):
+    """F5-c: before any decrypt / verify, a channel spends a budget on the
+    federation inbound limiter keyed by its id — past it the frame is
+    dropped (one WARNING a minute) and other channels are unaffected."""
+    caplog.set_level(logging.WARNING, logger="socialhome")
+    channels, limiter = _RecordingChannels(), RateLimiter()
+    for _ in range(GFS_CHANNEL_FRAMES_PER_MINUTE + 5):
+        await dispatch_gfs_relay_frame(
+            _channel_frame(),
+            space_public_inbound=None,
+            space_subscriber_key_inbound=None,
+            gfs_channels=channels,  # type: ignore[arg-type]
+            inbound_limiter=limiter,
+        )
+    assert len(channels.frames) == GFS_CHANNEL_FRAMES_PER_MINUTE
+    assert GFS_CHANNEL_FRAMES_PER_MINUTE == 120 * MAX_GFS_SERVERS
+    warned = [r for r in caplog.records if "over budget" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+    await dispatch_gfs_relay_frame(
+        _channel_frame("b" * 32),
+        space_public_inbound=None,
+        space_subscriber_key_inbound=None,
+        gfs_channels=channels,  # type: ignore[arg-type]
+        inbound_limiter=limiter,
+    )
+    assert channels.frames[-1]["channel_id"] == "b" * 32
+
+
+async def test_gfs_channel_frames_share_a_household_wide_budget():
+    """Invented channel ids each get a fresh per-channel budget, so the
+    household-wide one bounds them all — and the per-channel keys they mint."""
+    channels, limiter = _RecordingChannels(), RateLimiter()
+    for i in range(GFS_CHANNEL_FRAMES_PER_MINUTE_ALL + 10):
+        await dispatch_gfs_relay_frame(
+            _channel_frame(f"{i:032x}"),
+            space_public_inbound=None,
+            space_subscriber_key_inbound=None,
+            gfs_channels=channels,  # type: ignore[arg-type]
+            inbound_limiter=limiter,
+        )
+    assert len(channels.frames) == GFS_CHANNEL_FRAMES_PER_MINUTE_ALL
+    assert limiter.key_count <= GFS_CHANNEL_FRAMES_PER_MINUTE_ALL + 2
+
+
+async def test_a_malformed_channel_id_makes_no_budget_key():
+    """A channel id that is not 32 lowercase hex never becomes a limiter key
+    (a hostile GFS could otherwise pin arbitrarily large keys) and is not
+    handed on."""
+    channels, limiter = _RecordingChannels(), RateLimiter()
+    for bad in ("*", "x" * 100_000, "A" * 32):
+        await dispatch_gfs_relay_frame(
+            _channel_frame(bad),
+            space_public_inbound=None,
+            space_subscriber_key_inbound=None,
+            gfs_channels=channels,  # type: ignore[arg-type]
+            inbound_limiter=limiter,
+        )
+    assert channels.frames == []
+    assert limiter.key_count == 0
+
+
+async def test_gfs_channel_budget_sweeps_idle_channel_keys():
+    clock = [0.0]
+    limiter = RateLimiter(monotonic=lambda: clock[0])
+    channels = _RecordingChannels()
+    for i in range(GFS_CHANNEL_BUDGET_SWEEP_AT + 1):
+        limiter.is_allowed(f"gfs_channel:{i:032x}", limit=1, window_s=60)
+    limiter.is_allowed("peer:keep", limit=1, window_s=3600)
+    clock[0] = 120.0
+    await dispatch_gfs_relay_frame(
+        _channel_frame(),
+        space_public_inbound=None,
+        space_subscriber_key_inbound=None,
+        gfs_channels=channels,  # type: ignore[arg-type]
+        inbound_limiter=limiter,
+    )
+    assert len(channels.frames) == 1
+    # Only the idle channel keys went; the fresh ones and other keys stay.
+    assert limiter.key_count <= 4
 
 
 async def test_gfs_relay_never_logs_an_outer_from_instance(caplog):

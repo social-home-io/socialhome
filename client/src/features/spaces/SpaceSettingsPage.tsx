@@ -37,7 +37,6 @@ import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
 import { isOne, t } from '@/i18n/i18n'
 import { setNavigationGuard, useBeforeUnload } from '@/router/navigationGuard'
 import { currentUser } from '@/store/auth'
-import { ensureConnections } from '@/store/connections'
 import { instanceConfig } from '@/store/instance'
 import { setSpaceHereAllowed } from '@/store/spaceMembers'
 import type { Space } from '@/types'
@@ -78,6 +77,10 @@ interface SpaceDetail extends Space {
 interface RosterRow extends MySeat {
   user_id: string
   role: string
+  /** Set for a member from another household. */
+  instance_id?: string | null
+  /** That household's name (remote rows). */
+  household_name?: string | null
 }
 
 /** The kind of viewer, from their seat and where the space is hosted. */
@@ -175,8 +178,6 @@ export default function SpaceSettingsPage() {
   const viewer = space ? settingsViewer(myRole, isRemoteSpace) : null
   const isOwner = myRole === 'owner'
   const admin = viewer === 'admin' || viewer === 'remote-admin'
-  // "Is everything here?" names the host household.
-  useEffect(() => { if (isRemoteSpace) void ensureConnections() }, [isRemoteSpace])
   // The owner, admins and moderators choose the space's games (D9) —
   // never in a global space.
   const extras = {
@@ -378,7 +379,7 @@ export default function SpaceSettingsPage() {
         return <YouSection space={space} seat={me} locationAllowed={sharing.allowed} sharing={sharing.on} />
       case 'sync':
         return <SyncSection spaceId={space.id} sync={space.sync} hostedHere={!isRemoteSpace}
-                            hostName={syncHostName(space.owner_instance_id)} isAdmin={admin} />
+                            hostName={syncHostName(roster, space.owner_instance_id)} isAdmin={admin} />
       case 'leave':
         return <LeaveSection space={space} />
       case 'unfollow':

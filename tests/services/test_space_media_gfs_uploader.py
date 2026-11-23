@@ -1345,3 +1345,12 @@ async def test_stored_plan_for_reader_seals_nothing(tmp_path):
     assert set(plan.wire()) == {"a.webp"}
     assert len(u._described) == sealed  # b.webp still not sealed
     assert await u.stored_plan_for_reader(SPACE, urls, "b", item_id=ITEM) is None
+
+
+async def test_a_global_space_with_a_channel_uses_the_channel_scope(tmp_path):
+    """v_96 — a global space running a channel uploads under it: its
+    space-keyed writer-key pin is no longer announced once it does."""
+    on = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces(channel=(CHANNEL_ID, "pk")))
+    assert await on.scope_of(SPACE) == ("channel", CHANNEL_ID)
+    off = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces())
+    assert await off.scope_of(SPACE) == ("space", SPACE)

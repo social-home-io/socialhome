@@ -45,3 +45,24 @@ async def test_rows_from_an_unpaired_or_unknown_host_are_not_listed(client):
     r = await client.get("/api/peer_spaces", headers=_auth(client._tok))
     assert r.status == 200
     assert await r.json() == []
+
+
+async def test_rows_carry_the_hosts_member_and_follower_counts(client):
+    """Both counts the paired host shared; an older host shares no follower
+    count — ``null`` (no number), never 0."""
+    await _peer(client, "hh-keller", "Keller household")
+    await client._db.enqueue(
+        "INSERT INTO peer_space_directory(instance_id, space_id, name,"
+        " member_count, follower_count) VALUES('hh-keller', 'sp-new', 'N', 6, 4),"
+        " ('hh-keller', 'sp-old', 'O', 3, NULL)"
+    )
+    r = await client.get("/api/peer_spaces", headers=_auth(client._tok))
+    rows = {row["space_id"]: row for row in await r.json()}
+    assert (rows["sp-new"]["member_count"], rows["sp-new"]["follower_count"]) == (
+        6,
+        4,
+    )
+    assert (rows["sp-old"]["member_count"], rows["sp-old"]["follower_count"]) == (
+        3,
+        None,
+    )

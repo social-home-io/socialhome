@@ -12,6 +12,7 @@ vi.mock('@/ws', () => {
   const handlers: Record<string, (e: { data: Record<string, unknown> }) => void> = {}
   return {
     ws: {
+      send: () => {},
       on: (type: string, h: (e: { data: Record<string, unknown> }) => void) => {
         handlers[type] = h
         return () => { delete handlers[type] }
@@ -27,6 +28,10 @@ vi.mock('@/utils/avatar', () => ({
 }))
 
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
+
+vi.mock('@/store/auth', () => ({
+  currentUser: { value: { user_id: 'u-me', display_name: 'Me', is_admin: false, picture_url: null } },
+}))
 
 const openPersonSpy = vi.hoisted(() => vi.fn())
 vi.mock('@/components/PersonSheet', () => ({
@@ -180,5 +185,46 @@ describe('CommentOverlay', () => {
     await waitFor(() => {
       expect(container.querySelector('.sh-comment-overlay')).toBeNull()
     })
+  })
+
+  it('a comment that fails to send stays in the field to try again', async () => {
+    apiMock.get.mockResolvedValue([])
+    apiMock.post.mockRejectedValue(new Error('offline'))
+    openCommentOverlay(fakePost(), null)
+    const { container } = render(<CommentOverlay />)
+    const field = await waitFor(() => {
+      const f = container.querySelector<HTMLTextAreaElement>('#sh-comment-new-input')
+      expect(f).not.toBeNull()
+      return f!
+    })
+    fireEvent.input(field, { target: { value: 'my long thought' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalled())
+    await new Promise(r => setTimeout(r, 0))
+    expect(field.value).toBe('my long thought')
+    // Sent fine on the next try → cleared.
+    apiMock.post.mockResolvedValue({})
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => expect(field.value).toBe(''))
+  })
+
+  it('an edit that fails to save keeps the editor open with the text', async () => {
+    apiMock.get.mockResolvedValue([{
+      id: 'c-1', post_id: 'p-1', author: 'u-me', type: 'text', content: 'old',
+      created_at: '2026-05-02T10:00:00Z', parent_id: null,
+    }])
+    apiMock.patch.mockRejectedValue(new Error('offline'))
+    openCommentOverlay(fakePost(), null)
+    const { container, getByText } = render(<CommentOverlay />)
+    await waitFor(() => expect(container.querySelector('.sh-comment-overflow')).not.toBeNull())
+    fireEvent.click(container.querySelector('.sh-comment-overflow')!)
+    fireEvent.click(getByText('Edit'))
+    const field = container.querySelector<HTMLTextAreaElement>('.sh-comment-bubble--editing textarea')!
+    fireEvent.input(field, { target: { value: 'new text' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
+    await new Promise(r => setTimeout(r, 0))
+    const still = container.querySelector<HTMLTextAreaElement>('.sh-comment-bubble--editing textarea')
+    expect(still?.value).toBe('new text')
   })
 })

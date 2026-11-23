@@ -167,15 +167,16 @@ describe('MentionAutocomplete in the space comment input', () => {
     expect(spans.map(s => s.textContent)).toEqual(['@anna', '@pascal'])
     expect(spans[1].classList.contains('sh-mention--self')).toBe(true)
 
-    const input = getByLabelText('New comment') as HTMLInputElement
-    // A single-line input is a real ARIA 1.2 combobox.
-    expect(input.getAttribute('role')).toBe('combobox')
-    expect(input.getAttribute('aria-expanded')).toBe('false')
+    const input = getByLabelText('New comment') as HTMLTextAreaElement
+    // The comment field grows (a textarea): no combobox role, the popup
+    // is announced with ``aria-haspopup``.
+    expect(input.tagName).toBe('TEXTAREA')
+    expect(input.getAttribute('role')).toBeNull()
+    expect(input.getAttribute('aria-haspopup')).toBe('listbox')
     input.value = '@bo'
     input.setSelectionRange(3, 3)
     fireEvent.input(input)
     await waitFor(() => expect(listbox()).toBeTruthy())
-    expect(input.getAttribute('aria-expanded')).toBe('true')
     expect(input.getAttribute('aria-controls')).toBe('sh-mention-listbox')
     expect(input.getAttribute('aria-activedescendant')).toBe('sh-mention-opt-0')
     fireEvent.keyDown(input, { key: 'Enter' })

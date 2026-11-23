@@ -46,7 +46,7 @@ export interface MembershipSets {
  * Map ``GET /api/household/spaces`` rows onto directory entries. The
  * server decides what is listed — every space this household hosts that
  * the caller may find, never a private one; each row carries the real
- * member count and the caller's ``role`` (``null`` = no seat; a
+ * member and follower counts and the caller's ``role`` (``null`` = no seat; a
  * ``subscriber`` follows it).
  */
 export function buildHouseholdEntries(
@@ -62,6 +62,7 @@ export function buildHouseholdEntries(
     description:        r.description,
     emoji:              r.emoji,
     member_count:       r.member_count,
+    follower_count:     r.follower_count ?? null,
     scope:              r.space_type,
     join_mode:          r.join_mode,
     allow_subscribers:  r.allow_subscribers,

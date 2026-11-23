@@ -48,7 +48,7 @@ import {
   joinCarriesLocation, joinModeWord, matchesTerm, withMembership, DISCOVER_SOURCES, type DiscoverAction,
   type DiscoverSource,
 } from './discover'
-import { SpaceListRow, membersLabel } from './SpaceListRow'
+import { SpaceListRow, followersLabel, followersShown, membersLabel } from './SpaceListRow'
 
 interface Props {
   /** Ids of the spaces the caller holds a seat in (members and followers). */
@@ -121,7 +121,9 @@ function actionLabel(a: Exclude<DiscoverAction, null>): string {
   }
 }
 
-/** "Sara's household · 6 members · ask to join" — and, for a pinned
+/** "Sara's household · 6 members · 12 followers · ask to join" — a count
+ *  the host declared none of is left out (never "0 members"), and so are
+ *  the followers of a space that takes none. For a pinned
  *  global space without a radius hint, "about 3 km away" from our home
  *  (with a hint the distance is in the row's hint chip). A host whose
  *  name we don't know (GFS-listed) is left out. */
@@ -132,7 +134,8 @@ function entryMeta(e: DirectoryEntry, source: DiscoverSource, home: Home | null 
   const host = source !== 'household' ? hostLabel(e) : null
   if (host) parts.push(host)
   // Discover lists spaces the viewer isn't in — never "Just you".
-  parts.push(membersLabel(e.member_count, false))
+  if (e.member_count !== null) parts.push(membersLabel(e.member_count, false))
+  if (followersShown(e.follower_count, e.allow_subscribers)) parts.push(followersLabel(e.follower_count))
   const mode = joinModeWord(e)
   if (mode) parts.push(mode)
   return parts.join(' · ')

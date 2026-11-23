@@ -145,7 +145,12 @@ from .space_public_author import (
     verified_link_preview,
     verify_signed_author_inner,
 )
-from .space_public_authority import is_approved, is_authority_inner
+from .space_public_authority import (
+    is_approved,
+    is_authority_inner,
+    is_channel_authority,
+    open_channel_authority,
+)
 from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
@@ -334,7 +339,8 @@ class SpacePublicInbound:
                 "event_type": SPACE_ITEM_EVENT_TYPE,
                 "epoch": epoch,
                 "payload": payload,
-            }
+            },
+            channel=True,
         )
 
     async def _on_relay(self, envelope: dict) -> None:
@@ -437,6 +443,32 @@ class SpacePublicInbound:
             return
         if not isinstance(inner, dict):
             return
+        await self._apply_authority_relayed(
+            space,
+            epoch=epoch,
+            inner=inner,
+            pinned_pk_hex=pinned_pk_hex,
+            token=_digest("relay", ciphertext),
+            size=_retained_bytes(envelope),
+            replay=functools.partial(self._on_relay, envelope),
+        )
+
+    async def _apply_authority_relayed(
+        self,
+        space: Space,
+        *,
+        epoch: int,
+        inner: dict,
+        pinned_pk_hex: str,
+        token: str,
+        size: int,
+        replay: Callable[[], Awaitable[None]],
+    ) -> None:
+        """An inner a seed holder vouched for (its authority signature
+        already verified by the caller): the space-keyed relay envelope, or
+        an authority item on the space's opaque channel (v_96). Everything
+        after the decrypt is the same for both."""
+        space_id = space.id
         # No author signature → an authority removal notice, authorized by
         # the envelope's authority signature verified above. An inner WITH an
         # author signature is always a post, whatever else it claims.
@@ -447,12 +479,12 @@ class SpacePublicInbound:
                 self._hold_for_parent(
                     wait,
                     space_id=space_id,
-                    token=_digest("relay", ciphertext),
+                    token=token,
                     # The relay frame names no household: the notice is
                     # charged to the space's host, its only signer.
                     sender=space.owner_instance_id or space_id,
-                    size=_retained_bytes(envelope),
-                    replay=functools.partial(self._on_relay, envelope),
+                    size=size,
+                    replay=replay,
                     label=f"space_public removal in space {space_id}",
                 )
             return
@@ -622,7 +654,9 @@ class SpacePublicInbound:
 
     # ── Member-published items (v_49) ────────────────────────────────────
 
-    async def _on_space_item(self, frame: dict[str, Any]) -> None:
+    async def _on_space_item(
+        self, frame: dict[str, Any], *, channel: bool = False
+    ) -> None:
         """A ``space_item`` a member household published itself over the GFS.
 
         No authority signature — the authorizer is the author household's
@@ -669,7 +703,7 @@ class SpacePublicInbound:
             await self._await_key(
                 item.space_id,
                 item.epoch,
-                functools.partial(self._on_space_item, frame),
+                functools.partial(self._on_space_item, frame, channel=channel),
             )
             return
         except (RuntimeError, ValueError, InvalidTag) as exc:
@@ -681,7 +715,27 @@ class SpacePublicInbound:
             )
             return
         try:
-            parsed = parse_item_plaintext(open_item_plaintext(pt, item.suite))
+            opened = open_item_plaintext(pt, item.suite)
+        except ValueError as exc:
+            log.warning(
+                "space_public.inbound: undecodable %s space_item for space %s "
+                "(%s) — dropped",
+                item.suite,
+                item.space_id,
+                exc,
+            )
+            return
+        if channel and is_channel_authority(opened):
+            # v_96 — an authority item on the space's opaque channel: the
+            # inner carries the space authority signature (the frame has
+            # none). Verified against the pin, then the very checks of the
+            # space-keyed host relay. Never accepted off the channel.
+            await self._on_channel_authority(
+                space, epoch=item.epoch, opened=opened, frame=frame
+            )
+            return
+        try:
+            parsed = parse_item_plaintext(opened)
         except ValueError as exc:
             log.warning(
                 "space_public.inbound: undecodable %s space_item for space %s "
@@ -729,7 +783,9 @@ class SpacePublicInbound:
                     token=_digest("item", item.payload),
                     sender=origin_instance_id,
                     size=_retained_bytes(frame),
-                    replay=functools.partial(self._on_space_item, frame),
+                    replay=functools.partial(
+                        self._on_space_item, frame, channel=channel
+                    ),
                     label=f"space_item {item_type} {item_id} from {origin_instance_id}",
                 )
             return
@@ -759,6 +815,36 @@ class SpacePublicInbound:
             return
         await self._persist(
             item.space_id, item_id, author_user_id, origin_instance_id, inner
+        )
+
+    async def _on_channel_authority(
+        self, space: Space, *, epoch: int, opened: bytes, frame: dict[str, Any]
+    ) -> None:
+        """An authority item from the space's channel (v_96): the inner's
+        space-authority signature must verify against the pinned key for
+        THIS space (the channel id was mapped to it locally); then the
+        host-relay checks apply (:meth:`_apply_authority_relayed`)."""
+        inner = open_channel_authority(
+            opened,
+            space_id=space.id,
+            epoch=epoch,
+            space_pubkey_hex=space.identity_public_key,
+        )
+        if inner is None:
+            log.warning(
+                "space_public.inbound: channel authority item for space %s "
+                "failed its authority signature or epoch — dropped",
+                space.id,
+            )
+            return
+        await self._apply_authority_relayed(
+            space,
+            epoch=epoch,
+            inner=inner,
+            pinned_pk_hex=space.identity_public_key,
+            token=_digest("channel-authority", str(frame.get("payload") or "")),
+            size=_retained_bytes(frame),
+            replay=functools.partial(self._on_space_item, frame, channel=True),
         )
 
     async def _verified_item(

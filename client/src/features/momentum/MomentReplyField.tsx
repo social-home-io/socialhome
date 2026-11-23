@@ -26,6 +26,7 @@ import { UploadProgressBar } from '@/components/UploadProgress'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import { registrations } from '@/store/momentPublic'
+import { clearTextDraft, textDraft } from '@/store/textDrafts'
 import type { Moment } from '@/types'
 import { publicOnLabel } from './gfsNames'
 import { prepareMomentMedia, type MomentMedia } from './momentMedia'
@@ -41,9 +42,11 @@ interface Props {
 }
 
 export function MomentReplyField({ parent, inputRef, onPosted }: Props) {
-  const text = useSignal('')
+  // The unsent reply belongs to this moment (``textDraft``): it never
+  // follows the field to another moment.
+  const draftKey = `moment:${parent.id}:reply`
+  const { text, sending: busy } = textDraft(draftKey)
   const isPublic = useSignal(false)
-  const busy = useSignal(false)
   const media = useSignal<MomentMedia | null>(null)
   /** A picked file is being checked or uploaded — Reply waits. */
   const mediaBusy = useSignal(false)
@@ -71,7 +74,8 @@ export function MomentReplyField({ parent, inputRef, onPosted }: Props) {
 
   const submit = async (ev: Event) => {
     ev.preventDefault()
-    const content = text.value.trim()
+    const typed = text.value
+    const content = typed.trim()
     const m0 = media.value
     if ((!content && !m0) || busy.value || mediaBusy.value) return
     busy.value = true
@@ -84,7 +88,7 @@ export function MomentReplyField({ parent, inputRef, onPosted }: Props) {
     if (registered) body.is_public = showPublic && isPublic.value
     try {
       const m = await api.post('/api/moments', body) as Moment
-      text.value = ''
+      clearTextDraft(draftKey, typed)
       media.value = null
       isPublic.value = false
       onPosted(m)

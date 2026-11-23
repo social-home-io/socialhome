@@ -29,7 +29,6 @@ import { householdLabel } from '@/utils/names'
 const TRANSPORT_KEY: Record<Exclude<TransportState, null>, string> = {
   rtc: 'connections.transport.direct',
   https: 'connections.transport.internet',
-  gfs_relay: 'connections.transport.gfs',
 }
 
 const STATUS_KEY: Record<AvatarStatus, string> = {
@@ -41,8 +40,7 @@ const STATUS_KEY: Record<AvatarStatus, string> = {
 
 /** One-line status for a pin's tooltip and popup. */
 export function pinStatusText(peer: Connection, status: AvatarStatus | undefined): string {
-  if (status) return t(STATUS_KEY[status])
-  return peer.source === 'space_session' ? t('connections.type.space_only') : ''
+  return status ? t(STATUS_KEY[status]) : ''
 }
 
 function _line(text: string, cls?: string): HTMLElement {

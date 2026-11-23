@@ -90,6 +90,7 @@ def _received_name(space_id: str, sender: dict, filename: str) -> str:
         return space_content_media_name(space_id, digest, filename)
     return space_direct_media_name(space_id, sender["instance_id"], filename)
 
+
 #: Upper bound for :func:`cmd_replay`'s poll. The outbox schedule is
 #: ``(5, 10, 20, 40, …)`` s with ±30 % jitter and nothing flushes early on a
 #: peer's return, so the first retry that finds Carol alive lands within
@@ -686,7 +687,9 @@ def _content_addressed_failures(
     want = space_content_media_name(space_id, digest, sent_name)
     got = shown.rsplit("/", 1)[-1].split("?", 1)[0]
     if got != want:
-        return [f"{label}: stores {sent_name} as {got!r}, not its content name {want!r}"]
+        return [
+            f"{label}: stores {sent_name} as {got!r}, not its content name {want!r}"
+        ]
     path = _instance_dir(label) / "media" / got
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
         return [f"{label}: {got} on disk does not hash to {digest[:12]}…"]
@@ -754,9 +757,9 @@ def _all_log_lines_matching(label: str, needle: str) -> list[str]:
     d = _instance_dir(label)
     rotated = sorted(
         d.glob("log.*.txt"),
-        key=lambda p: int(p.stem.split(".", 1)[1])
-        if p.stem.split(".", 1)[1].isdigit()
-        else -1,
+        key=lambda p: (
+            int(p.stem.split(".", 1)[1]) if p.stem.split(".", 1)[1].isdigit() else -1
+        ),
     )
     lines: list[str] = []
     for path in [*rotated, d / "log.txt"]:
@@ -803,9 +806,7 @@ def _spawn(label: str, port: int, *, extra_env: dict | None = None) -> int:
     # checks that need evidence from before a respawn
     # (:func:`_all_log_lines_matching`).
     if (d / "log.txt").exists():
-        (d / "log.txt").rename(
-            d / f"log.{_log_generations().get(label, 0)}.txt"
-        )
+        (d / "log.txt").rename(d / f"log.{_log_generations().get(label, 0)}.txt")
     _bump_log_generation(label)
     log = open(d / "log.txt", "wb")
     env = {
@@ -1519,7 +1520,8 @@ def _gfs_cluster_mailbox_tickets(urls: list[str]) -> None:
     leaked = _gfs_cluster_log_matches(spent[0][:43])
     if leaked:
         raise SystemExit(
-            "gfs-cluster: a GFS log line carries a ticket:\n  " + "\n  ".join(leaked[:5])
+            "gfs-cluster: a GFS log line carries a ticket:\n  "
+            + "\n  ".join(leaked[:5])
         )
     print("  no ticket appears in any GFS log line ✓")
 
@@ -1577,7 +1579,9 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
             await register_mailbox(http, urls[0], keys, gfs_id, tickets=tickets)
             print(f"  mailbox registered via node 0 (gfs {gfs_id}) ✓")
             async with MailboxClaim(http, urls[1], keys, gfs_id) as claim:
-                await _post(http, json={"to_instance": keys.mailbox_id, "sealed": sealed})
+                await _post(
+                    http, json={"to_instance": keys.mailbox_id, "sealed": sealed}
+                )
                 got = await _next(claim, "JSON envelope")
                 if got != {"type": "envelope", "sealed": sealed}:
                     raise SystemExit(f"gfs-cluster: mailbox envelope changed: {got!r}")
@@ -1696,9 +1700,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
 
         async def _run() -> None:
             async with aiohttp.ClientSession() as http:
-                tickets = await _gfs_cluster_ticket_cache(
-                    http, all_urls[0], household
-                )
+                tickets = await _gfs_cluster_ticket_cache(http, all_urls[0], household)
                 await tickets.refill()
                 await register_mailbox(http, all_urls[0], keys, id_0, tickets=tickets)
                 async with contextlib.aclosing(await _claim_when_known(http)) as claim:
@@ -2639,7 +2641,9 @@ def _gfs_cluster_publish_media_space(
     }
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
     body["signature"] = b64url_encode(sign_ed25519(seed, canonical))
-    code, resp = _request(f"{url}/gfs/spaces/{space_id}/publish", method="POST", body=body)
+    code, resp = _request(
+        f"{url}/gfs/spaces/{space_id}/publish", method="POST", body=body
+    )
     if code not in (200, 201):
         raise SystemExit(f"gfs-cluster: media space publish → {code} {resp!r}")
     return space_id, authority_seed
@@ -2708,16 +2712,16 @@ def _gfs_cluster_space_media(
 
     def _get(url: str, bid: str) -> tuple[int, bytes, dict[str, str]]:
         try:
-            with urllib.request.urlopen(
-                f"{url}/gfs/media/{bid}", timeout=15
-            ) as r:
+            with urllib.request.urlopen(f"{url}/gfs/media/{bid}", timeout=15) as r:
                 return r.status, r.read(), dict(r.headers)
         except urllib.error.HTTPError as exc:
             return exc.code, b"", dict(exc.headers)
 
     code, resp = _put(urls[0])
     if code != 201:
-        raise SystemExit(f"gfs-cluster: space media upload via node 0 → {code} {resp!r}")
+        raise SystemExit(
+            f"gfs-cluster: space media upload via node 0 → {code} {resp!r}"
+        )
     code, got, headers = _get(urls[1], blob_id)
     if code != 200 or got != blob:
         raise SystemExit(
@@ -2864,6 +2868,7 @@ def _gfs_cluster_channel_media(
     )
     if code not in (200, 201):
         raise SystemExit(f"gfs-cluster: channel epoch notice → {code} {resp!r}")
+
     def _seat(member: tuple[str, bytes]) -> None:
         member_iid, member_seed = member
         sub_req = ChannelSubscribeRequest(
@@ -2900,7 +2905,9 @@ def _gfs_cluster_channel_media(
 
     code, resp = _channel_put(urls[0], blob)
     if code != 201:
-        raise SystemExit(f"gfs-cluster: channel media upload via node 0 → {code} {resp!r}")
+        raise SystemExit(
+            f"gfs-cluster: channel media upload via node 0 → {code} {resp!r}"
+        )
     code, got = _get(urls[1], blob_id)
     if code != 200 or got != blob:
         raise SystemExit(
@@ -2952,7 +2959,9 @@ def _gfs_cluster_channel_media(
         )
     code, still = _get(urls[1], space_addr)
     if code != 200 or still != shared_blob:
-        raise SystemExit(f"gfs-cluster: the space's blob after the channel's try → {code}")
+        raise SystemExit(
+            f"gfs-cluster: the space's blob after the channel's try → {code}"
+        )
     signed = sign_authority_event(
         event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
         space_id=space_id,
@@ -2971,13 +2980,19 @@ def _gfs_cluster_channel_media(
         },
     )
     if code != 200 or (resp or {}).get("deleted") is not True:
-        raise SystemExit(f"gfs-cluster: the space's delete via node 1 → {code} {resp!r}")
+        raise SystemExit(
+            f"gfs-cluster: the space's delete via node 1 → {code} {resp!r}"
+        )
     code, _gone = _get(urls[0], space_addr)
     if code != 404:
-        raise SystemExit(f"gfs-cluster: after the space's delete node 0 still serves it ({code})")
+        raise SystemExit(
+            f"gfs-cluster: after the space's delete node 0 still serves it ({code})"
+        )
     code, kept = _get(urls[0], channel_addr)
     if code != 200 or kept != shared_blob:
-        raise SystemExit(f"gfs-cluster: the channel's own blob after the space's delete → {code}")
+        raise SystemExit(
+            f"gfs-cluster: the channel's own blob after the space's delete → {code}"
+        )
     print(
         "  the same ciphertext under a channel is another blob at another "
         "address; the channel can't delete the space's; the space's delete via "
@@ -3178,7 +3193,9 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
 
     async def _run() -> dict:
         out: dict = {}
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as http:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=60)
+        ) as http:
             ws = await http.ws_connect(f"{urls[0]}/gfs/ws")
             ts = int(time.time())
             await ws.send_json(
@@ -3963,12 +3980,21 @@ def cmd_gfs_join_request() -> None:
     print("  e reads a's post in the space ✓")
 
     # e holds a space-scoped seat for a (``source: space_session``, the same
-    # row an invite-link join makes) — never a pairing.
+    # row an invite-link join makes) — never a pairing, so e's Connections
+    # never list a.
+    seat = _instance_row("e", a["instance_id"]) or {}
+    if seat.get("source") != "space_session":
+        raise SystemExit(
+            f"gfs-join-request: e's row for a is not a space seat: {seat!r}"
+        )
     s, conns = _request(f"{e_url}/api/connections", token=e["token"])
-    rows = [c for c in conns or [] if c.get("instance_id") == a["instance_id"]]
-    if s != 200 or [c.get("source") for c in rows] != ["space_session"]:
-        raise SystemExit(f"gfs-join-request: e's row for a is not a space seat: {rows!r}")
-    print("  e and a are not paired — e holds only a space-session seat ✓")
+    if s != 200 or any(c.get("instance_id") == a["instance_id"] for c in conns or []):
+        raise SystemExit(
+            f"gfs-join-request: e's /api/connections lists the seat: {conns!r}"
+        )
+    print(
+        "  e and a are not paired — e holds only a space-session seat, not a connection ✓"
+    )
     print("gfs-join-request: ok (unpaired household asked, was approved, reads)")
 
 
@@ -4249,11 +4275,276 @@ def cmd_gfs_space_follow() -> None:
     print("  e's own post is refused (403) ✓")
 
     s, conns = _request(f"{e_url}/api/connections", token=e["token"])
-    rows = [c for c in conns or [] if c.get("instance_id") == a["instance_id"]]
-    if s != 200 or [c.get("source") for c in rows] != ["space_session"]:
-        raise SystemExit(f"gfs-space-follow: e's row for a is not a space seat: {rows!r}")
+    if s != 200 or any(c.get("instance_id") == a["instance_id"] for c in conns or []):
+        raise SystemExit(
+            f"gfs-space-follow: e's /api/connections lists the seat: {conns!r}"
+        )
     print("  e and a are not paired — e holds only a space-session seat ✓")
     print("gfs-space-follow: ok (unpaired household followed, auto-approved, reads)")
+
+
+@_offline_step
+def cmd_gfs_global_channel() -> None:
+    """v_96 (P3) — a GLOBAL space reaches its members and followers over the
+    space's opaque channel, even with the host offline.
+
+    1. b (paired with a) becomes a GFS client if it is not one yet. a
+       creates a global ``invite_only`` space with followers on; b joins it
+       as a member (an internal link, the direct path); e (paired with
+       nobody) follows it through the GFS (auto-approved).
+    2. a registers the space's channel on the GFS (it proves
+       ``private_channels`` + ``subscriber_seats``); b (member, writer key)
+       and e (follower, pass only) hold grants and take seats; a never does.
+    3. Stop **a**. b posts; e receives it over the channel — exactly one
+       channel frame, and no space-keyed relay frame for the space.
+    4. The GFS log and database never hold the post's text.
+    5. Restart a; a catches b's post up over the member path.
+
+    Prereqs: ``pair`` (a↔b), ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a, b, e = (state["instances"][x] for x in ("a", "b", "e"))
+    if _instance_row("a", b["instance_id"]) is None:
+        raise SystemExit("gfs-global-channel: a and b are not paired — run 'pair'")
+    _ensure_gfs_client(state, "b")
+    a_url = f"http://127.0.0.1:{a['port']}"
+    b_url = f"http://127.0.0.1:{b['port']}"
+    e_url = f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+
+    # 1. The space, a member and a follower.
+    s, sp = _request(
+        f"{a_url}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": f"Global channel {time.time_ns()}",
+            "description": "global, members and followers on one channel",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must("gfs-global-channel: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _request(
+        f"{a_url}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": {"allow_subscribers": True}},
+    )
+    _must("gfs-global-channel: a enables followers", s, patched, ok=(200,))
+    s, link = _request(
+        f"{a_url}/api/spaces/{space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "member", "uses": 1, "via": "internal"},
+    )
+    link = _must("gfs-global-channel: a mints b's link", s, link, ok=(201,))
+    s, joined = _request(
+        f"{b_url}/api/spaces/join",
+        token=b["token"],
+        method="POST",
+        body=_join_body_from_blob(_decode_invite_blob(link["code"])),
+        timeout=40.0,
+    )
+    _must("gfs-global-channel: b joins as a member", s, joined, ok=(200, 201))
+    print(f"  a: global space {space_id[:8]}…; b joined as a member ✓")
+    entry: dict | None = None
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline and entry is None:
+        _request(f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST")
+        time.sleep(1.0)
+        s, rows = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and isinstance(rows, list):
+            entry = next(
+                (
+                    r
+                    for r in rows
+                    if r.get("space_id") == space_id and r.get("gfs_followable")
+                ),
+                None,
+            )
+    if entry is None:
+        raise SystemExit("gfs-global-channel: e never listed the space as followable")
+    s, body = _request(
+        f"{e_url}/api/spaces/{space_id}/subscribe",
+        token=e["token"],
+        method="POST",
+        body={},
+        timeout=30.0,
+    )
+    _must("gfs-global-channel: e follows", s, body, ok=(200,))
+    _poll_rows(
+        "e",
+        "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+        (space_id, e["user_id"]),
+        lambda r: bool(r) and r[0][0] == "subscriber",
+        what="e never held its follower seat",
+    )
+    print("  e follows it through the GFS (a subscriber seat) ✓")
+
+    # 2. The channel, the grants and the seats.
+    rows = _poll_rows(
+        "a",
+        "SELECT gfs_channel_id FROM spaces WHERE id = ?",
+        (space_id,),
+        lambda r: bool(r) and bool(r[0][0]),
+        what="a never registered the global space's channel",
+    )
+    channel_id = rows[0][0]
+    if space_id in channel_id or len(channel_id) != 32:
+        raise SystemExit(f"gfs-global-channel: odd channel id {channel_id!r}")
+    for label in ("b", "e"):
+        _poll_rows(
+            label,
+            "SELECT gfs_channel_id FROM spaces WHERE id = ?",
+            (space_id,),
+            lambda r: bool(r) and r[0][0] == channel_id,
+            what=f"{label} never took its channel grant",
+        )
+    want = {b["instance_id"], e["instance_id"]}
+    seats = _poll_gfs_rows(
+        "SELECT instance_id FROM gfs_channel_subscribers WHERE channel_id = ?",
+        (channel_id,),
+        lambda r: want <= {x[0] for x in r},
+        what="b and e never both took their seats on the channel",
+    )
+    if a["instance_id"] in {x[0] for x in seats}:
+        raise SystemExit("gfs-global-channel: the owner a holds a seat")
+    print(f"  channel {channel_id[:8]}…: member b and follower e seated, a not ✓")
+
+    # 3. Host offline; b posts; e gets it over the channel, once. b's FIRST
+    # post in the space also publishes b's author profile (v_60) on the
+    # channel — a second item — so a warm-up post goes first and the count
+    # is taken on the next one.
+    _kill_household("a", a)
+    st, warm = _request(
+        f"{b_url}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": f"Warm-up {time.time_ns()}"},
+    )
+    warm_id = _must("gfs-global-channel: b's warm-up post", st, warm, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT 1 FROM space_posts WHERE id = ?",
+        (warm_id,),
+        bool,
+        what="e never received b's warm-up post while a was down",
+    )
+    time.sleep(5.0)  # the profile item lands too
+    e_off = _log_size("e")
+    content = f"Member posts into a global space, host offline — {time.time_ns()}"
+    st, post = _request(
+        f"{b_url}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("gfs-global-channel: b posts", st, post, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (post_id,),
+        lambda r: bool(r) and r[0][0] == content,
+        what=f"e never received b's post {post_id} while a was down",
+    )
+    if not _await_log_lines(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    ):
+        raise SystemExit(
+            "gfs-global-channel: e logged no channel frame — b's post reached "
+            "it some other way."
+        )
+    time.sleep(5.0)  # anything late (a second copy) lands meanwhile
+    frames = _log_lines_matching(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    )
+    if len(frames) != 1:
+        raise SystemExit(
+            f"gfs-global-channel: e got {len(frames)} channel frames for one post"
+        )
+    keyed = _log_lines_matching(
+        "e", f"gfs.relay.received: space={space_id}", offset=e_off
+    )
+    if keyed:
+        raise SystemExit(
+            "gfs-global-channel: the space-keyed relay ALSO sent the space's "
+            f"item to e: {keyed[:2]}"
+        )
+    print("  e received b's post over the channel, once, with a offline ✓")
+
+    # 4. What the GFS saw.
+    log_text = "\n".join(_gfs_log_lines_matching("", offset=0))
+    db_bytes = b"".join(p.read_bytes() for p in GFS_DIR.glob("gfs.db*") if p.is_file())
+    if content in log_text or content.encode() in db_bytes:
+        raise SystemExit("gfs-global-channel: the GFS saw the post's text")
+    print("  the GFS never saw the post's text ✓")
+
+    # 5. The host comes back and catches the post up.
+    _respawn(state, "a")
+    _poll_rows(
+        "a",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (post_id,),
+        lambda r: bool(r) and r[0][0] == content,
+        what=f"a (host) never caught b's post {post_id} up after restarting",
+    )
+    # The host now holds b's post: b marked it ``channel_sent``, so a adds
+    # no copy on the channel — e still saw exactly one frame for it.
+    time.sleep(10.0)
+    frames = _log_lines_matching(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    )
+    if len(frames) != 1:
+        raise SystemExit(
+            f"gfs-global-channel: after a's catch-up e saw {len(frames)} channel "
+            "frames for b's one post — the host re-published a marked post"
+        )
+    unreached = _log_lines_matching(
+        "b", f"did not reach member household {e['instance_id']}", offset=0
+    )
+    if unreached:
+        raise SystemExit(
+            "gfs-global-channel: b tried to reach the GFS-reached follower e "
+            f"directly: {unreached[:1]}"
+        )
+    print("  a's catch-up added no channel copy; b never tried to reach e ✓")
+
+    # 6. The owner's own post reaches e over the channel (Q4: it publishes
+    #    into its own channel, holding no seat).
+    _wait_for_gfs_ws(a["instance_id"], timeout=120.0)
+    e_off = _log_size("e")
+    own = f"The owner posts into its own channel — {time.time_ns()}"
+    st, apost = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": own},
+    )
+    apost_id = _must("gfs-global-channel: a posts", st, apost, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (apost_id,),
+        lambda r: bool(r) and r[0][0] == own,
+        what=f"e never received a's post {apost_id}",
+    )
+    if not _await_log_lines(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    ):
+        raise SystemExit("gfs-global-channel: a's own post never came over the channel")
+    print("  a's own post reached e over the channel (a holds no seat) ✓")
+    state.setdefault("gfs", {})["global_channel_space_id"] = space_id
+    _save(state)
+    print(
+        "gfs-global-channel: ok (a member's and the owner's posts reach a "
+        "GFS follower over the global space's opaque channel, once, host "
+        "offline or online)"
+    )
 
 
 #: How long a household stays down in ``gfs-join-request-offline`` — past
@@ -4337,7 +4628,9 @@ def cmd_gfs_join_request_offline() -> None:
     row = None
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline and row is None:
-        s, queue = _request(f"{a_url}/api/spaces/{space_id}/join-requests", token=a["token"])
+        s, queue = _request(
+            f"{a_url}/api/spaces/{space_id}/join-requests", token=a["token"]
+        )
         if s == 200:
             row = next((r for r in queue if r.get("id") == request_id), None)
         time.sleep(1.0)
@@ -4345,7 +4638,9 @@ def cmd_gfs_join_request_offline() -> None:
         raise SystemExit("offline: a never filed the request it drained")
     if not row.get("via_gfs") or not row.get("unverified_name"):
         raise SystemExit(f"offline: the request is not marked as from the GFS: {row!r}")
-    print(f"  a filed it after {JOIN_OFFLINE_WAIT_S} s, named '{row['unverified_name']}' (unverified) ✓")
+    print(
+        f"  a filed it after {JOIN_OFFLINE_WAIT_S} s, named '{row['unverified_name']}' (unverified) ✓"
+    )
 
     _kill_household("e", e)
     s, body = _request(
@@ -4380,7 +4675,9 @@ def cmd_gfs_join_request_offline() -> None:
     seen = _await_space_post(state, "e", space_id, post_id)
     if seen.get("content") != content:
         raise SystemExit(f"offline: e read {seen.get('content')!r}")
-    print("gfs-join-request-offline: ok (queued > 5 min both ways, filed, seated, reads)")
+    print(
+        "gfs-join-request-offline: ok (queued > 5 min both ways, filed, seated, reads)"
+    )
 
 
 def cmd_gfs_open_signup() -> None:
@@ -4510,9 +4807,14 @@ def cmd_gfs_approval() -> None:
             f"{base}/api/gfs/connections/{conn_id}", token=c["token"], method="DELETE"
         )
     _gfs_admin_json(
-        gfs_url, "/admin/api/policy", method="PATCH", body={"auto_accept_clients": False}
+        gfs_url,
+        "/admin/api/policy",
+        method="PATCH",
+        body={"auto_accept_clients": False},
     )
-    _gfs_admin_json(gfs_url, f"/admin/api/clients/{c['instance_id']}/reject", method="POST")
+    _gfs_admin_json(
+        gfs_url, f"/admin/api/clients/{c['instance_id']}/reject", method="POST"
+    )
     try:
         s, conn = _request(
             f"{base}/api/gfs/connections/default", token=c["token"], method="POST"
@@ -7691,8 +7993,13 @@ def _gfs_invite_mailboxes(state: dict, space_id: str) -> tuple[str, str]:
             "gfs-invite-link-content: no member card with a mailbox on the seat "
             f"(a holds {on_a!r}, e holds {on_e!r}) — v_89 mailboxes were not minted.",
         )
-    if on_a["instance_id"] != e["instance_id"] or on_e["instance_id"] != a["instance_id"]:
-        raise SystemExit("gfs-invite-link-content: a member card names the wrong household")
+    if (
+        on_a["instance_id"] != e["instance_id"]
+        or on_e["instance_id"] != a["instance_id"]
+    ):
+        raise SystemExit(
+            "gfs-invite-link-content: a member card names the wrong household"
+        )
     e_mailbox = on_a["mailbox"]["mailbox_id"]
     a_mailbox = on_e["mailbox"]["mailbox_id"]
     if {e_mailbox, a_mailbox} & {e["instance_id"], a["instance_id"]}:
@@ -7747,10 +8054,9 @@ def cmd_gfs_invite_link_content() -> None:
        ``gfs-space-rotate`` does) and posts again. e must decrypt the
        NEW epoch — the re-key has to reach a link-joined member like any
        other, or e goes dark at the first roster change.
-    5. ``GET /api/connections`` on e labels a ``source=space_session``
-       with transport ``gfs_relay``. Anything else (``https`` in
-       particular) points an operator at an inbox URL that will never
-       exist.
+    5. e's seat for a is ``source=space_session`` and ``GET
+       /api/connections`` on e does not list a: a household met through
+       an invite link is no connection.
     """
     state = _load()
     if not state or not _gfs_alive(state):
@@ -7905,27 +8211,21 @@ def cmd_gfs_invite_link_content() -> None:
         )
     print("  e decrypts the post-rotation post — the re-key rode the relay ✓")
 
-    # 5. The operator-facing label.
+    # 5. A seat, not a connection.
+    seat = _instance_row("e", a["instance_id"]) or {}
+    if seat.get("source") != "space_session":
+        raise SystemExit(
+            f"gfs-invite-link-content: e's row for a is {seat!r}, "
+            "expected a 'space_session' seat",
+        )
     s, conns = _request(f"{e_base}/api/connections", token=e["token"])
     _must("e: GET /api/connections", s, conns)
-    row = next((c for c in conns if c.get("instance_id") == a["instance_id"]), None)
-    if row is None:
+    if any(c.get("instance_id") == a["instance_id"] for c in conns):
         raise SystemExit(
-            f"gfs-invite-link-content: e's /api/connections does not list a — "
-            f"got {conns!r}",
+            "gfs-invite-link-content: e's /api/connections lists a — a "
+            f"household met through an invite link is no connection: {conns!r}",
         )
-    if row.get("source") != "space_session":
-        raise SystemExit(
-            f"gfs-invite-link-content: e labels a source={row.get('source')!r}, "
-            "expected 'space_session'",
-        )
-    if row.get("transport") != "gfs_relay":
-        raise SystemExit(
-            f"gfs-invite-link-content: e labels a transport="
-            f"{row.get('transport')!r}, expected 'gfs_relay'. 'https' in "
-            "particular is a lie — there is no inbox URL to fall back to.",
-        )
-    print("  e's /api/connections labels a: space_session over gfs_relay ✓")
+    print("  e holds a space_session seat for a, not listed on Connections ✓")
 
     # 6. A cover change AFTER the join reaches the link-joined member. It
     #    used to ride SPACE_CONFIG_CHANGED as a cover_hash only, so e kept
@@ -8065,7 +8365,9 @@ def _picture_via_gfs_media_cache(
         if not refs:
             time.sleep(0.5)
     if not refs:
-        raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {filename}")
+        raise SystemExit(
+            f"{step}: {reader} holds no space_media_refs row for {filename}"
+        )
     blob_id, suite, _epoch, blob_size, local_name = refs[0]
     if not local_name.startswith(("sc-", "sg-")):
         raise SystemExit(
@@ -8078,7 +8380,9 @@ def _picture_via_gfs_media_cache(
         (post["id"], f"%{local_name}%"),
     )
     if not shown:
-        raise SystemExit(f"{step}: {reader}'s post {post['id']} does not show {local_name}")
+        raise SystemExit(
+            f"{step}: {reader}'s post {post['id']} does not show {local_name}"
+        )
     dst = _instance_dir(reader) / "media" / local_name
     while time.time() < deadline and not dst.is_file():
         time.sleep(0.5)
@@ -8088,7 +8392,9 @@ def _picture_via_gfs_media_cache(
             f"within {timeout:.0f} s — no picture through the GFS media cache.",
         )
     if dst.read_bytes() != src.read_bytes():
-        raise SystemExit(f"{step}: {reader}'s copy of {filename} differs from {author}'s")
+        raise SystemExit(
+            f"{step}: {reader}'s copy of {filename} differs from {author}'s"
+        )
     size = len(src.read_bytes())
     held = _gfs_rows(
         # The address is scope-bound: one blob, one owning scope.
@@ -8101,10 +8407,14 @@ def _picture_via_gfs_media_cache(
             f"{step}: the GFS holds no blob {blob_id[:12]} for space {space_id} "
             f"(rows: {held!r})",
         )
-    uploaded = _log_lines_matching(author, f"uploaded blob {blob_id[:12]}", offset=author_off)
+    uploaded = _log_lines_matching(
+        author, f"uploaded blob {blob_id[:12]}", offset=author_off
+    )
     fetched = [
         line
-        for line in _log_lines_matching(reader, f"fetched blob {blob_id[:12]}", offset=reader_off)
+        for line in _log_lines_matching(
+            reader, f"fetched blob {blob_id[:12]}", offset=reader_off
+        )
         if "from GFS" in line
     ]
     if not uploaded or not fetched:
@@ -8199,8 +8509,7 @@ def cmd_gfs_member_mesh() -> None:
     d_mailbox = on_e["mailbox"]["mailbox_id"]
     seat = _rows(
         "d",
-        "SELECT source, relay_via, remote_inbox_url FROM remote_instances "
-        "WHERE id = ?",
+        "SELECT source, relay_via, remote_inbox_url FROM remote_instances WHERE id = ?",
         (e["instance_id"],),
     )
     if not seat or seat[0][0] != "space_session" or seat[0][1] or seat[0][2]:
@@ -8286,9 +8595,7 @@ def cmd_gfs_member_mesh() -> None:
 
         # 3c. v_91 — that event went up ONCE for both mailboxes: one multi
         #     frame queued for 2 of 2 mailboxes (a's waits, d's drained).
-        multi = _gfs_log_lines_matching(
-            "multi frame queued for", offset=multi_off
-        )
+        multi = _gfs_log_lines_matching("multi frame queued for", offset=multi_off)
         if len(multi) != 1 or "for 2 of 2 mailboxes" not in multi[0]:
             raise SystemExit(
                 f"{step}: e's event did not go up as ONE multi-recipient "
@@ -8444,7 +8751,9 @@ def cmd_gfs_space_healing() -> None:
     on_d = _card_on("d", space_id, e["instance_id"])
     on_e = _card_on("e", space_id, d["instance_id"])
     if not (on_d and on_d.get("mailbox") and on_e and on_e.get("mailbox")):
-        raise SystemExit(f"{step}: d and e hold no member cards — run 'gfs-member-mesh'")
+        raise SystemExit(
+            f"{step}: d and e hold no member cards — run 'gfs-member-mesh'"
+        )
     e_mailbox = on_d["mailbox"]["mailbox_id"]
     d_mailbox = on_e["mailbox"]["mailbox_id"]
     gfs_off = _gfs_log_size()
@@ -8532,7 +8841,9 @@ def cmd_gfs_space_healing() -> None:
             "e did not hold the first picture", lambda: _held("e", post1, pic1), 90.0
         )
         if not name1.startswith("sc-"):
-            raise SystemExit(f"{step}: e holds the picture as {name1!r}, not a content name")
+            raise SystemExit(
+                f"{step}: e holds the picture as {name1!r}, not a content name"
+            )
         # d too, before the GFS copies go (it may read the GFS cache copy).
         _poll(
             "d did not hold the first picture",
@@ -8544,9 +8855,7 @@ def cmd_gfs_space_healing() -> None:
         a_off, e_off = _log_size("a"), _log_size("e")
         _, first = _view_until(post1, pic1, 90.0)
         asked = _log_lines_matching("e", f"to {a['instance_id']}: sent", offset=e_off)
-        helper_asked = _log_lines_matching(
-            "e", f"to {d['instance_id']}:", offset=e_off
-        )
+        helper_asked = _log_lines_matching("e", f"to {d['instance_id']}:", offset=e_off)
         served = _log_lines_matching(
             "a", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=a_off
         )
@@ -8625,7 +8934,9 @@ def cmd_gfs_space_healing() -> None:
             "DELETE FROM gfs_media_queue WHERE to_instance = ? AND id > ?",
             (e_mailbox, top_media),
         )
-        print(f"  e offline; d created an event; its {n_env} frame(s) for e's mailbox dropped ✓")
+        print(
+            f"  e offline; d created an event; its {n_env} frame(s) for e's mailbox dropped ✓"
+        )
         _respawn(state, "e")
         e_down = False
         seen = None
@@ -8669,9 +8980,7 @@ def cmd_gfs_space_healing() -> None:
         t0 = time.time()
         _, first = _view_until(post2, pic2, 180.0)
         took = time.time() - t0
-        to_d = _log_lines_matching(
-            "e", f"to {d['instance_id']}: sent", offset=e_off
-        )
+        to_d = _log_lines_matching("e", f"to {d['instance_id']}: sent", offset=e_off)
         served = [
             x
             for x in _log_lines_matching(
@@ -8800,7 +9109,9 @@ def cmd_gfs_relay_media() -> None:
                 f"{step}: the restarted GFS should prove envelope_media and no "
                 f"space_media cache; capabilities={sorted(caps)!r}"
             )
-        print("  GFS restarted with its media cache off: envelope_media, no space_media ✓")
+        print(
+            "  GFS restarted with its media cache off: envelope_media, no space_media ✓"
+        )
         # a re-reads /gfs/info on its reconnect; give it a moment.
         time.sleep(3.0)
         gfs_off = _gfs_log_size()
@@ -8825,7 +9136,9 @@ def cmd_gfs_relay_media() -> None:
         _await_space_post(state, "e", space_id, post["id"])
         src = (_instance_dir("a") / "media" / up["filename"]).read_bytes()
         if len(src) <= 200 * 1024:
-            raise SystemExit(f"{step}: the photo is only {len(src)} bytes — want > 200 KiB")
+            raise SystemExit(
+                f"{step}: the photo is only {len(src)} bytes — want > 200 KiB"
+            )
         deadline = time.time() + 120.0
         local = ""
         got = b""
@@ -8960,7 +9273,9 @@ def cmd_gfs_media_on_demand() -> None:
     def _counts() -> dict[str, int]:
         card = _gfs_admin_space_media(gfs)
         if not card.get("on_demand"):
-            raise SystemExit(f"{step}: the GFS admin card says on_demand is off: {card!r}")
+            raise SystemExit(
+                f"{step}: the GFS admin card says on_demand is off: {card!r}"
+            )
         return {k: int(card.get(k, 0)) for k in keys}
 
     def _ref(reader: str, filename: str) -> tuple[str, str] | None:
@@ -9034,8 +9349,14 @@ def cmd_gfs_media_on_demand() -> None:
     for reader, photo, _other, _kind in cases:
         ref = _ref(reader, photo)
         if ref is None:
-            raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {photo}")
-        blobs[reader] = (ref[0], ref[1], (_instance_dir("a") / "media" / photo).read_bytes())
+            raise SystemExit(
+                f"{step}: {reader} holds no space_media_refs row for {photo}"
+            )
+        blobs[reader] = (
+            ref[0],
+            ref[1],
+            (_instance_dir("a") / "media" / photo).read_bytes(),
+        )
 
     # 1. Fresh content: one re-upload into the cache.
     for reader, photo, other, kind in cases:
@@ -9045,10 +9366,10 @@ def cmd_gfs_media_on_demand() -> None:
         before = _counts()
         _view(reader, local_name, original)
         _wait(
-            lambda b=blob_id: _gfs_rows(
-                "SELECT 1 FROM gfs_space_media WHERE blob_id = ?", (b,)
-            )
-            and _gfs_file(b).is_file(),
+            lambda b=blob_id: (
+                _gfs_rows("SELECT 1 FROM gfs_space_media WHERE blob_id = ?", (b,))
+                and _gfs_file(b).is_file()
+            ),
             f"the GFS did not hold blob {blob_id[:12]} again (no re-upload)",
         )
         reup = _wait(
@@ -9058,8 +9379,10 @@ def cmd_gfs_media_on_demand() -> None:
             f"a logged no 're-uploaded on demand' for blob {blob_id[:12]}",
         )
         after = _counts()
-        if len(reup) != 1 or after["holder_requests"] - before["holder_requests"] != 1 or (
-            after["reuploads"] - before["reuploads"] != 1
+        if (
+            len(reup) != 1
+            or after["holder_requests"] - before["holder_requests"] != 1
+            or (after["reuploads"] - before["reuploads"] != 1)
         ):
             raise SystemExit(
                 f"{step}: {reader}'s view of a fresh blob → {len(reup)} re-upload "
@@ -9142,7 +9465,6 @@ def cmd_gfs_media_on_demand() -> None:
         f"{step}: ok (fresh → one re-upload, then a plain cache read; old → "
         "streamed, nothing stored; the follower d)"
     )
-
 
 
 @_offline_step
@@ -13448,8 +13770,11 @@ def cmd_verify() -> None:
                 "highlight-audience: c lost a's re-widened highlight "
                 f"({hla['caption']!r})"
             )
-        elif not stamps or not stamps[0][0] or not stamps[0][1] or not (
-            stamps[0][1] > stamps[0][0]
+        elif (
+            not stamps
+            or not stamps[0][0]
+            or not stamps[0][1]
+            or not (stamps[0][1] > stamps[0][0])
         ):
             failures.append(
                 "highlight-audience: c's stamp doesn't order the re-widen after "
@@ -13707,11 +14032,8 @@ def cmd_verify() -> None:
     for row in _conns.get("a", []):
         if (
             row.get("status") == "confirmed"
+            # (Never a link-joined seat: /api/connections does not list one.)
             and int(row.get("proto_version") or 1) >= _OURS
-            # Never a link-joined seat: ``INSTANCE_RESYNC_REQUEST`` is
-            # outside ``SPACE_SESSION_ALLOWED_EVENT_TYPES``, so aiming the
-            # probe at e would assert a refusal we deliberately built.
-            and row.get("source") != "space_session"
         ):
             resync_target = str(row.get("instance_id") or "")
             break
@@ -14052,7 +14374,9 @@ def cmd_verify() -> None:
         # v_69 — c's totals reach b (paired) and d (two hops, relayed).
         failures.extend(_verify_moment_totals(state, carol_moment["id"]))
     else:
-        print("  (v_67 routed-reaction check skipped — c's moment rate-limited or no d)")
+        print(
+            "  (v_67 routed-reaction check skipped — c's moment rate-limited or no d)"
+        )
 
     # 3c-ter. Deletes stick. c replies to its own moment (replies are exempt
     #     from the 15-min rate limit, so verify can re-run), the reply relays
@@ -14675,12 +14999,6 @@ def cmd_verify() -> None:
                 # only paired with b in the demo, so the channel may
                 # or may not have flipped to RTC by verify time.
                 if row["instance_id"] == d_iid:
-                    continue
-                # A link-joined seat can NEVER be ``rtc``: RTC signalling
-                # travels over the peer relationship this pair does not
-                # have, which is why the row reads ``gfs_relay``. Warning
-                # about it would report the design as a failure to settle.
-                if row.get("source") == "space_session":
                     continue
                 transport = row.get("transport") or "https"
                 if transport == "rtc":
@@ -16497,7 +16815,9 @@ def cmd_highlight_audience() -> None:
             token=a["token"],
             method="POST",
             body={
-                "media_url": _upload_demo_image(a_url, token=a["token"], label="hl-aud"),
+                "media_url": _upload_demo_image(
+                    a_url, token=a["token"], label="hl-aud"
+                ),
                 "frame_type": "image",
                 "caption_text": "[a] highlight-audience first frame",
                 "audience_kind": "all_paired",
@@ -16556,7 +16876,9 @@ def cmd_highlight_audience() -> None:
         },
     )
     _must("highlight-audience narrowed frame(a)", s, resp, ok=(201,))
-    _wait("b got the narrowed frame", lambda: caption in _highlight_captions(state, "b"))
+    _wait(
+        "b got the narrowed frame", lambda: caption in _highlight_captions(state, "b")
+    )
     if _todays("c") is not None:
         raise SystemExit("highlight-audience: c holds the highlight after narrowing")
     print("  c never got the narrowed frame ✓")
@@ -17564,9 +17886,7 @@ def cmd_space_media_blob() -> None:
 
     # 5. Bytes should now exist on d's media path with the same
     #    filename + same content.
-    d_media_path = (
-        _instance_dir("d") / "media" / _received_name(space_id, c, filename)
-    )
+    d_media_path = _instance_dir("d") / "media" / _received_name(space_id, c, filename)
     if not d_media_path.is_file():
         raise SystemExit(
             f"space-media-blob: {filename} missing from d's media path "
@@ -19174,7 +19494,11 @@ def cmd_space_reaction() -> None:
             token=inst[label]["token"],
         )
         feed = body if isinstance(body, list) else ((body or {}).get("posts") or [])
-        seen = next((p for p in feed if p.get("id") == post_id), None) if s == 200 else None
+        seen = (
+            next((p for p in feed if p.get("id") == post_id), None)
+            if s == 200
+            else None
+        )
         return {k: sorted(v) for k, v in ((seen or {}).get("reactions") or {}).items()}
 
     def converge(what: str, want: dict) -> None:
@@ -19262,7 +19586,9 @@ def cmd_space_poll_vote() -> None:
         method="POST",
         body={"question": "Which one?", "options": ["First", "Second"]},
     )
-    options = [o["id"] for o in _must(f"{step}: a adds a poll", s, made, ok=(201,))["options"]]
+    options = [
+        o["id"] for o in _must(f"{step}: a adds a poll", s, made, ok=(201,))["options"]
+    ]
 
     def wait(what: str, check, timeout: float = 45.0):
         deadline = time.time() + timeout
@@ -19351,7 +19677,7 @@ def cmd_space_poll_vote() -> None:
 
 
 def cmd_bazaar_ask() -> None:
-    """"Ask the seller" from the listing (v_74).
+    """ "Ask the seller" from the listing (v_74).
 
     Prereqs: ``space-chat`` (Beta's space: owner b, members a + c, d a
     follower household). Runs standalone after it.
@@ -19401,6 +19727,7 @@ def cmd_bazaar_ask() -> None:
         body={"features": {"bazaar": True}},
     )
     _must("bazaar on(b)", s, body)
+
     def bazaar_on(label: str) -> bool:
         rows = _rows(label, "SELECT feature_bazaar FROM spaces WHERE id=?", (space_id,))
         return bool(rows and rows[0][0])
@@ -19453,9 +19780,7 @@ def cmd_bazaar_ask() -> None:
     wait(
         "c to receive a's question",
         lambda: bool(
-            _rows(
-                "c", "SELECT 1 FROM conversation_messages WHERE content=?", (text,)
-            )
+            _rows("c", "SELECT 1 FROM conversation_messages WHERE content=?", (text,))
         ),
     )
     print("  a → Ask the seller → DM to c (paired) ✓")
@@ -19467,9 +19792,7 @@ def cmd_bazaar_ask() -> None:
         token=d["token"],
         method="POST",
     )
-    code = (
-        refused.get("error", {}).get("code") if isinstance(refused, dict) else None
-    )
+    code = refused.get("error", {}).get("code") if isinstance(refused, dict) else None
     if s != 403 or code != "SUBSCRIBER_READ_ONLY":
         raise SystemExit(f"bazaar-ask: follower d could ask: {s} {refused!r}")
     print("  d (follower) can't ask ✓")
@@ -19500,8 +19823,7 @@ def cmd_bazaar_ask() -> None:
                     f"(< {_Cap.MIN_FOR_BAZAAR_THREAD})"
                 )
     print(
-        f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_THREAD} "
-        f"(OURS={_OURS}) ✓"
+        f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_THREAD} (OURS={_OURS}) ✓"
     )
     state["bazaar_ask"] = {"post_id": post_id, "text": text}
     _save(state)
@@ -19602,8 +19924,11 @@ def cmd_app_group() -> None:
         if not hit or hit[0].get("groups") is not True:
             raise SystemExit(f"app-group: {node['username']} not offered for a group")
         picks.append(
-            {"instance_id": node["instance_id"], "user_ref": node["username"],
-             "is_local": False}
+            {
+                "instance_id": node["instance_id"],
+                "user_ref": node["username"],
+                "is_local": False,
+            }
         )
     # 2. Open the table.
     s, opened = api(a, "/groups", method="POST", body={"targets": picks})
@@ -19644,8 +19969,12 @@ def cmd_app_group() -> None:
         return g["state"] if g else None
 
     for label, node in (("b", b), ("c", c)):
-        wait(f"{label} to see the game start", lambda node=node: state_of(node) == "playing")
+        wait(
+            f"{label} to see the game start",
+            lambda node=node: state_of(node) == "playing",
+        )
         print(f"  app-group: {label} sees the game playing ✓")
+
     # 4b. Messages: one to everyone, one sealed to c's seat only.
     def me(node: dict) -> int:
         g = next((g for g in view(node) if g["session_id"] == sid), None)
@@ -19703,7 +20032,9 @@ def cmd_app_group() -> None:
     s, closed = api(a, f"/groups/{sid}/close", method="POST")
     _must("close(a)", s, closed)
     for label, node in (("b", b), ("c", c)):
-        wait(f"{label} to see the table end", lambda node=node: state_of(node) == "ended")
+        wait(
+            f"{label} to see the table end", lambda node=node: state_of(node) == "ended"
+        )
         print(f"  app-group: {label} sees the table closed ✓")
     # 6. v_76 round-trips between the three.
     if _OURS < _Cap.MIN_FOR_APP_GROUPS:
@@ -19856,7 +20187,9 @@ def cmd_app_draw() -> None:
     for label, node in people.items():
         wait(f"{label} to see four seats", lambda node=node: seated(node) == 4)
     print("  app-draw: four people in three households at the table ✓")
-    seat = {label: int((mine(node) or {}).get("me") or 0) for label, node in people.items()}
+    seat = {
+        label: int((mine(node) or {}).get("me") or 0) for label, node in people.items()
+    }
     # 2. Settings, the pair, wish lists.
     s, conf = api(
         a,
@@ -19877,7 +20210,12 @@ def cmd_app_draw() -> None:
         raise SystemExit(f"app-draw: adding a pair wiped the settings: {conf!r}")
     marks = {label: f"DEMO-WISH-{label}-{secrets.token_hex(6)}" for label in people}
     for label, node in people.items():
-        s, w = api(node, f"/groups/{sid}/engines/draw/wish", method="POST", body={"text": marks[label]})
+        s, w = api(
+            node,
+            f"/groups/{sid}/engines/draw/wish",
+            method="POST",
+            body={"text": marks[label]},
+        )
         _must(f"wish({label})", s, w)
     a_log_from = _log_size("a")
     # 3. Draw names.
@@ -19890,7 +20228,9 @@ def cmd_app_draw() -> None:
         return s == 200 and d.get("state") == "ready" and d.get("has_result") is True
 
     for label, node in people.items():
-        wait(f"{label}'s name to be ready", lambda node=node: ready(node), timeout=240.0)
+        wait(
+            f"{label}'s name to be ready", lambda node=node: ready(node), timeout=240.0
+        )
     print("  app-draw: every household did its part — four names ready ✓")
     # 4. The results: one circle, the pair apart, the right wish lists.
     # The admins of a, b and c share one display name, so a sheet's person
@@ -19942,7 +20282,9 @@ def cmd_app_draw() -> None:
     print("  app-draw: no wish list or result in plaintext on any disk or a's log ✓")
     # 6. v_78 between the three.
     if _OURS < _Cap.MIN_FOR_APP_ENGINES:
-        raise SystemExit(f"app-draw: OURS={_OURS} < MIN_FOR_APP_ENGINES={_Cap.MIN_FOR_APP_ENGINES}")
+        raise SystemExit(
+            f"app-draw: OURS={_OURS} < MIN_FOR_APP_ENGINES={_Cap.MIN_FOR_APP_ENGINES}"
+        )
     for peer in (b, c):
         rows = _rows(
             "a",
@@ -20071,12 +20413,15 @@ def cmd_space_table() -> None:
     for label, node in (("c", c), ("d", d)):
         wait(
             f"{label} to see the game playing at two seats",
-            lambda node=node: group(node).get("state") == "playing"
-            and sorted(
-                pl["seat"] for pl in group(node).get("players", [])
-                if pl["state"] == "seated"
-            )
-            == [1, 2],
+            lambda node=node: (
+                group(node).get("state") == "playing"
+                and sorted(
+                    pl["seat"]
+                    for pl in group(node).get("players", [])
+                    if pl["state"] == "seated"
+                )
+                == [1, 2]
+            ),
         )
         print(f"  space-table: {label} sees the duel playing ✓")
     rows = _rows(
@@ -20109,11 +20454,15 @@ def cmd_space_table() -> None:
             got.extend((body or {}).get("group_messages", []))
         return got
 
-    wait("c to get d's move", lambda: any(m["data"] == {"move": marker} for m in held()))
+    wait(
+        "c to get d's move", lambda: any(m["data"] == {"move": marker} for m in held())
+    )
     print("  space-table: c got d's move over the space ✓")
     # 5. Nobody outside the space heard of it.
     for label in ("a", "b"):
-        if _rows(label, "SELECT 1 FROM app_group_sessions WHERE session_id = ?", (sid,)):
+        if _rows(
+            label, "SELECT 1 FROM app_group_sessions WHERE session_id = ?", (sid,)
+        ):
             raise SystemExit(f"space-table: {label} (no member) holds the table")
         for path in _instance_dir(label).glob("socialhome.db*"):
             if marker.encode() in path.read_bytes():
@@ -20265,9 +20614,7 @@ def cmd_bazaar_faq() -> None:
                     f"bazaar-faq: {label} sees {peer[:8]} at v{pv} "
                     f"(< {_Cap.MIN_FOR_BAZAAR_FAQ})"
                 )
-    print(
-        f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_FAQ} (OURS={_OURS}) ✓"
-    )
+    print(f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_FAQ} (OURS={_OURS}) ✓")
     state["bazaar_faq"] = {"entry_id": keep["entry_id"], "question": reworded}
     _save(state)
     print("bazaar-faq: ok")
@@ -20358,7 +20705,9 @@ def cmd_members_page_catchup() -> None:
             method="POST",
             body={"type": "text", "content": content},
         )
-        posts.append((_must(f"{step}: the host posts", s, post, ok=(201,))["id"], content))
+        posts.append(
+            (_must(f"{step}: the host posts", s, post, ok=(201,))["id"], content)
+        )
     page_body = f"{marker} — the house rules"
     s, page = _request(
         f"{b_url}/api/spaces/{space_id}/pages",
@@ -20404,7 +20753,9 @@ def cmd_members_page_catchup() -> None:
             lambda lb=label: _holds_all(lb),
             timeout=120.0,
         )
-    print(f"  host {_PC_HOST}'s space {space_id}: two posts + a page; {_PC_LAG} and {_PC_DLV} joined, hold them ✓")
+    print(
+        f"  host {_PC_HOST}'s space {space_id}: two posts + a page; {_PC_LAG} and {_PC_DLV} joined, hold them ✓"
+    )
 
     def _held_page(label: str) -> dict | None:
         rows = _rows(
@@ -20453,7 +20804,9 @@ def cmd_members_page_catchup() -> None:
     signed = _held_page(_PC_LAG)
     if _held_page(_PC_DLV) != signed:
         raise SystemExit(f"{step}: the members hold different pages of the host")
-    pushes = _log_lines_matching(_PC_HOST, f"pushed page {signed['seq']} of space {space_id}")
+    pushes = _log_lines_matching(
+        _PC_HOST, f"pushed page {signed['seq']} of space {space_id}"
+    )
     if not pushes:
         raise SystemExit(
             f"{step}: the host's log names no push of page {signed['seq']} — "
@@ -20497,10 +20850,14 @@ def cmd_members_page_catchup() -> None:
         finally:
             conn.close()
         if _holds_all(_PC_LAG):
-            raise SystemExit(f"{step}: {_PC_LAG} still holds the content after the removal")
+            raise SystemExit(
+                f"{step}: {_PC_LAG} still holds the content after the removal"
+            )
         _kill_household(_PC_HOST, b)
         b_down = True
-        print(f"  {_PC_LAG} lost the posts and the page; the host {_PC_HOST} is down too ✓")
+        print(
+            f"  {_PC_LAG} lost the posts and the page; the host {_PC_HOST} is down too ✓"
+        )
         # The respawn starts a fresh log.txt: read it whole (the lines name
         # this fresh space, so nothing older can match).
         t0 = time.time()
@@ -20544,7 +20901,9 @@ def cmd_members_page_catchup() -> None:
             if space_id in x
         ]
         if refused:
-            raise SystemExit(f"{step}: {_PC_LAG} refused rows of an honest member: {refused!r}")
+            raise SystemExit(
+                f"{step}: {_PC_LAG} refused rows of an honest member: {refused!r}"
+            )
         status = _poll(
             "a's status to read the space up to date with b still down",
             lambda: (
@@ -20777,6 +21136,7 @@ def _verify_sync_page(state: dict, *, want_match: bool = False) -> list[str]:
                 "rows), verified; match: true proven by the sync-pages step ✓"
             )
         return out
+
     # a compares its own rows with the page as soon as it stores it: wait
     # on a's status for the verdict, then it must match (after traffic a
     # holds everything b committed).
@@ -24672,7 +25032,9 @@ def _gfs_moment_reaction(state: dict, moment_id: str, author_uid: str) -> None:
     deadline = time.monotonic() + 120
     totals = None
     while time.monotonic() < deadline:
-        rows = _rows("e", "SELECT reaction_summary FROM moments WHERE id = ?", (moment_id,))
+        rows = _rows(
+            "e", "SELECT reaction_summary FROM moments WHERE id = ?", (moment_id,)
+        )
         totals = json.loads(rows[0][0]) if rows and rows[0][0] else None
         if totals and totals.get("counts") == {"🔥": 1} and totals.get("total") == 1:
             break
@@ -25313,7 +25675,9 @@ def _parity_compare(
         expected = views[ref]
         ok_ref = want is None or all(expected.get(k) == v for k, v in want.items())
         if ok_ref and all(views[m] == expected for m in members):
-            results.append((action, "PASS", f"{' = '.join(members)} = {ref}: {expected}"))
+            results.append(
+                (action, "PASS", f"{' = '.join(members)} = {ref}: {expected}")
+            )
             print(f"  {action}: {' and '.join(members)} match ✓")
             return True
         if time.monotonic() > deadline:
@@ -25412,7 +25776,7 @@ def _dir_seq_on(label: str, space_id: str, instance_id: str) -> int:
 
 
 def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> None:
-    """"Host" means the owner OR the delegated admin that invited us (owner
+    """ "Host" means the owner OR the delegated admin that invited us (owner
     decision 2026-11-13, ``federation/host_equivalence.py``).
 
     A fresh private space of a's (``private_gfs`` and
@@ -25961,8 +26325,10 @@ def cmd_gfs_moderator_parity() -> None:
             timeout=300.0,
             interval=3.0,
         )
-        via = "the host's catch-up" if _log_contains("a", needle, offset=a_log) else (
-            "its GFS mailbox"
+        via = (
+            "the host's catch-up"
+            if _log_contains("a", needle, offset=a_log)
+            else ("its GFS mailbox")
         )
         print(f"  e (offline during the submission) sees the item — from {via} ✓")
         approve_on_e(item_id, post_id, text)
@@ -26966,9 +27332,7 @@ def cmd_members_parity_apps() -> None:
         want={"game": "lobby", "my_state": "seated"},
     )
     seats = table(sid)("a").get("seats") or []
-    three = [(n, st) for n, _name, st in seats] == [
-        (n, "seated") for n in (1, 2, 3)
-    ]
+    three = [(n, st) for n, _name, st in seats] == [(n, "seated") for n in (1, 2, 3)]
     results.append(
         ("three seats at a's table", "PASS" if three else "DIFF", f"a shows {seats!r}")
     )
@@ -27068,7 +27432,11 @@ def cmd_members_parity_apps() -> None:
         s, body = games(host, f"/{duel}/close")
         if do(f"{host} closes {who}", s, body):
             _parity_show(
-                results, f"{who} closed", table(duel), {"closed": True}, members=everyone
+                results,
+                f"{who} closed",
+                table(duel),
+                {"closed": True},
+                members=everyone,
             )
 
     # 4. The lobby: one more open table of a's; the strip reads the same.
@@ -27089,7 +27457,11 @@ def cmd_members_parity_apps() -> None:
         listed = _parity_lobby(state, "a", space_id).get("tables") or []
         if not any(t[0] == lobby for t in listed):
             results.append(
-                ("space game lobby", "DIFF", f"a's lobby lacks its own table: {listed!r}")
+                (
+                    "space game lobby",
+                    "DIFF",
+                    f"a's lobby lacks its own table: {listed!r}",
+                )
             )
         s, body = games("a", f"/{lobby}/close")
         if do("a closes the lobby table", s, body):
@@ -27715,8 +28087,7 @@ def _admin_seed_refuses_to_forget(
             got = _space_col(label, space_id, "name")
             if got != names[label]:
                 raise SystemExit(
-                    f"{step}: {label} took the removed admin's old-key rename "
-                    f"({got!r})"
+                    f"{step}: {label} took the removed admin's old-key rename ({got!r})"
                 )
         print(
             "  e (seat + retired seed written back) signed a rename with K1: "
@@ -28034,8 +28405,7 @@ def cmd_gfs_admin_seed() -> None:
         gfs_lines = _gfs_log_lines_matching("POST /gfs/", offset=gfs_off)
         if not any("/gfs/member-publish-anon" in line for line in gfs_lines):
             raise SystemExit(
-                f"{step}: e's post never reached the GFS as an anonymous "
-                "member publish"
+                f"{step}: e's post never reached the GFS as an anonymous member publish"
             )
         signed = [line for line in gfs_lines if "POST /gfs/publish " in line]
         if signed:
@@ -28260,7 +28630,10 @@ def cmd_gfs_admin_seed() -> None:
             "a came back and applied d's removal of it — the host never told it"
         )
     print("  e lost the space once its host a was back and told it ✓")
-    for seed, whose in ((seed1, "e's first seed (K1)"), (seed2, "e's second seed (K2)")):
+    for seed, whose in (
+        (seed1, "e's first seed (K1)"),
+        (seed2, "e's second seed (K2)"),
+    ):
         _admin_seed_probe(state, space_id, seed, want=403, whose=whose, step=step)
     _admin_seed_probe(
         state, space_id, seed3, want=200, whose="d's seed (K3)", step=step
@@ -28270,9 +28643,7 @@ def cmd_gfs_admin_seed() -> None:
     # may land a little later than the row's last state shows).
     _poll(
         "d's rekey for a to leave d's outbox",
-        lambda: (
-            "space_key_exchange_rekey" not in _outbox_events("d", a["instance_id"])
-        ),
+        lambda: "space_key_exchange_rekey" not in _outbox_events("d", a["instance_id"]),
         timeout=300.0,
         interval=2.0,
     )
@@ -28563,6 +28934,10 @@ def main() -> None:
         # ``gfs-space-follow`` (v_96): e follows a's global invite-only
         # space through the GFS — auto-approved, no admin step, subscriber seat.
         cmd_gfs_space_follow()
+        # ``gfs-global-channel`` (v_96, P3): b (member) and e (follower)
+        # of a's global space read each other over the space's opaque
+        # channel while a is down. Restarts a.
+        cmd_gfs_global_channel()
         # ``members-page-catchup`` (v_95, sync pages Phase 3): host c down,
         # b catches up c's posts and page from the plain member a, every row
         # verified against c's signed page. Restarts b and c.

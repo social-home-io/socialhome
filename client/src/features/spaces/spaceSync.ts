@@ -13,7 +13,6 @@
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { isOne, t } from '@/i18n/i18n'
-import { connections } from '@/store/connections'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { SpaceSyncPageWire, SpaceSyncWire } from '@/types'
 import { ws } from '@/ws'
@@ -97,11 +96,20 @@ export function useHeldFor(on: boolean, delayMs: number): boolean {
   return on && held
 }
 
-/** The host household's name — the space's owner as a paired household
- *  knows it — else "the host". */
-export function syncHostName(ownerInstanceId: string | null | undefined): string | null {
-  if (!ownerInstanceId) return null
-  return connections.value.find(c => c.instance_id === ownerInstanceId)?.display_name || null
+/** The host household's name as the space's member list gives it
+ *  (``household_name`` of a member from that household), else ``null``
+ *  ("the host"). The member list, not Connections: a host met through an
+ *  invite link is no pairing of ours, and the space knows every household
+ *  in it. */
+export function syncHostName(
+  members: Iterable<{ instance_id?: string | null; household_name?: string | null }> | undefined,
+  ownerInstanceId: string | null | undefined,
+): string | null {
+  if (!ownerInstanceId || !members) return null
+  for (const m of members) {
+    if (m.instance_id === ownerInstanceId && m.household_name) return m.household_name
+  }
+  return null
 }
 
 const host = (name: string | null) => name || t('space.sync.host_fallback')

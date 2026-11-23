@@ -1,0 +1,35 @@
+-- GFS 0032 — a global space's member + follower counts, as its owner
+-- declares them. Follows 0031.
+--
+-- Owner decision (2026-11-23): the owning household puts ``member_count``
+-- and ``follower_count`` inside its SIGNED listing publish body (only to a
+-- GFS that advertises the signed ``listing_counts`` capability); this
+-- server stores and serves them on the directory, the viewer JSON and the
+-- public pages. Before this the GFS showed its own ``subscriber_count``,
+-- which counts relay seats, not members — so every listing read "0".
+--
+-- Audit (CLAUDE.md "Before adding a SQL migration"):
+--
+-- 1. Code paths touching this data: ``federation.publish_space`` (signed
+--    publish, carries ``subscriber_count`` forward), ``repositories``
+--    (``upsert_space`` / ``_row_to_space``; ``add_subscriber`` /
+--    ``remove_subscriber`` / ``purge_subscribers`` recount
+--    ``subscriber_count``), ``cluster`` (``_space_to_wire`` /
+--    ``_wire_to_space`` / ``apply_sync_space``), the served shapes
+--    (``routes/relay.public_space_dict``, ``page_models.load_space_page``,
+--    ``routes/viewer_pages``, ``public`` landing + space page) and the
+--    admin JSON (keeps ``subscriber_count``, operator bookkeeping).
+-- 2. Non-migration alternatives rejected: reusing ``subscriber_count`` is
+--    wrong — it is ``NOT NULL DEFAULT 0`` and means relay seats (recounted
+--    on every subscribe), while "the owner declared no number" needs NULL so
+--    an older household shows no count instead of "0 members". Recomputing
+--    at read time is impossible: the members live on the household, not
+--    here. Keeping them only in memory would show no number after every
+--    restart until each owner re-publishes.
+-- 3. Smallest change: three additive NULLable columns, NULL default, no
+--    backfill. ``counts_ts`` is the declaring publish's signed ``ts`` (UTC
+--    ISO) for last-writer-wins, so a delayed older publish or a cluster
+--    peer's stale row never overwrites newer counts.
+ALTER TABLE global_spaces ADD COLUMN member_count INTEGER;
+ALTER TABLE global_spaces ADD COLUMN follower_count INTEGER;
+ALTER TABLE global_spaces ADD COLUMN counts_ts TEXT;

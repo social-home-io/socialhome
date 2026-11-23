@@ -18,9 +18,14 @@
  * so it never covers a Save button. Re-measured (once per animation
  * frame) on scroll, resize, and when such a bar mounts or unmounts.
  *
- * Page end: while it shows, ``SHOWN_CLASS`` on <html> makes ``.sh-main``
- * reserve the button's footprint at its bottom, so the last row's
- * controls scroll clear of it instead of ending up underneath.
+ * Page end: on a page long enough for the button to show, ``SHOWN_CLASS``
+ * on <html> makes ``.sh-main`` reserve the button's footprint at its
+ * bottom, so the last row's controls (a comment's Post button) scroll
+ * clear of it instead of ending up underneath. The room is there from
+ * the start, not only once the button shows: reached in one go (End,
+ * focusing the comment field at the bottom of a post page) the end would
+ * otherwise sit under the button that appears there, with the reserve
+ * added out of sight below it.
  *
  * Modal layers: the button sits on the toast layer, above modals, and
  * the page behind an open dialog keeps its scroll position — so on a
@@ -42,7 +47,7 @@ export const STICKY_BAR_SELECTOR = '.sh-form-actions, .sh-savebar, .sh-timetable
 /** Open modal surfaces — the button hides while any is in the DOM. */
 export const MODAL_SELECTOR = '[aria-modal="true"], dialog[open]'
 
-/** On <html> while the button shows: the page keeps its end clear of it. */
+/** On <html> while the page is long enough for the button: its end stays clear of it. */
 export const SHOWN_CLASS = 'sh-back-to-top-shown'
 
 /** Breathing room between a lifted button and the bar under it. */
@@ -69,8 +74,19 @@ export function liftOverStickyBars(rest: Box, bars: Box[]): number {
 }
 
 const visible = signal(false)
+/** The page is long enough for the button to show: reserve its end. */
+const reserveEnd = signal(false)
 const lift = signal(0)
 const modalOpen = signal(false)
+
+/** Whether the page is long enough for the button to show. Stable either
+ *  way: the reserve only adds height, so a page that needs it keeps
+ *  needing it, and one that doesn't never gets it. */
+function checkLength() {
+  const scrollable = document.documentElement.scrollHeight - window.innerHeight
+  const next = scrollable > SHOW_AFTER_PX
+  if (next !== reserveEnd.value) reserveEnd.value = next
+}
 
 /** True when a mutation added or removed an element matching
  *  ``selector`` (or a subtree holding one). */
@@ -110,6 +126,7 @@ export function BackToTop() {
 
   const measureNow = () => {
     pending.current = false
+    checkLength()
     const btn = ref.current
     if (!btn) return
     const r = btn.getBoundingClientRect()
@@ -137,7 +154,12 @@ export function BackToTop() {
     onScroll()
     window.addEventListener('scroll', onScroll, { passive: true })
     window.addEventListener('resize', measure)
+    // Content loading in (a thread's comments) makes a page long enough
+    // without any scroll or resize.
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(checkLength)
+    ro?.observe(document.body)
     return () => {
+      ro?.disconnect()
       window.removeEventListener('scroll', onScroll)
       window.removeEventListener('resize', measure)
       if (pending.current) cancelAnimationFrame(frame.current)
@@ -175,16 +197,17 @@ export function BackToTop() {
   }, [modalOpen.value])
 
   // Past the fold the button floats over the bottom of the viewport, so
-  // the page's last row (a Join button, the Archived row) would scroll
-  // no further than under it. ``SHOWN_CLASS`` on <html> makes ``.sh-main``
-  // reserve the button's footprint at its end (app.css). It follows
-  // ``visible`` only — not a modal — so the page behind a dialog never
-  // changes height.
+  // the page's last row (a Join button, the Archived row, a comment's
+  // Post button) would scroll no further than under it. ``SHOWN_CLASS``
+  // on <html> makes ``.sh-main`` reserve the button's footprint at its
+  // end (app.css) — on any page long enough for the button. It ignores
+  // modals, so the page behind a dialog never changes height.
+  const reserve = visible.value || reserveEnd.value
   useLayoutEffect(() => {
     const root = document.documentElement
-    root.classList.toggle(SHOWN_CLASS, visible.value)
+    root.classList.toggle(SHOWN_CLASS, reserve)
     return () => root.classList.remove(SHOWN_CLASS)
-  }, [visible.value])
+  }, [reserve])
 
   if (!visible.value || modalOpen.value) return null
 

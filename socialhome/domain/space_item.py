@@ -487,6 +487,21 @@ SUPPORTED_AUTHORITY_KINDS: frozenset[str] = frozenset(
     {AUTHORITY_KIND_REMOVAL, AUTHORITY_KIND_APPROVED_POST}
 )
 
+#: v_96 — the ``item_type`` of an authority-only item on a space's opaque
+#: channel: ``{"item_type": "authority", "inner": <inner + authority
+#: signature>}`` inside the channel ciphertext. The channel frame has no
+#: authority signature of its own (the GFS authorizes it on the channel
+#: writer key, which every writer holds), so the space authority signs the
+#: inner itself (``authority_sig`` / ``authority_sig_suite``, event type
+#: ``space_channel_authority``). Never on the space-keyed relay.
+CHANNEL_AUTHORITY_ITEM_TYPE: str = "authority"
+
+#: v_96 — the mark an author's household sets in the ``public_relay`` hint
+#: of its federated post (outside the author signature, inside the encrypted
+#: payload) when it puts the post on the space's channel itself: the host
+#: then does not put it there again. Absent → the host does.
+CHANNEL_SENT_FIELD: str = "channel_sent"
+
 REMOVAL_TARGET_POST: str = "post"
 REMOVAL_TARGET_COMMENT: str = "comment"
 REMOVAL_TARGETS: frozenset[str] = frozenset(

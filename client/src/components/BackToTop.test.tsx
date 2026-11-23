@@ -237,3 +237,54 @@ describe('BackToTop stays out of open dialogs', () => {
     drawer.remove()
   })
 })
+
+describe('BackToTop keeps the page end clear before it appears', () => {
+  const root = document.documentElement
+  const setPage = (scrollHeight: number) =>
+    Object.defineProperty(root, 'scrollHeight', { value: scrollHeight, configurable: true })
+  let resized: (() => void) | null = null
+
+  beforeEach(() => {
+    Object.defineProperty(window, 'scrollY', { value: 0, writable: true, configurable: true })
+    Object.defineProperty(window, 'innerHeight', { value: 720, writable: true, configurable: true })
+    resized = null
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(cb: () => void) { resized = cb }
+      observe() {}
+      disconnect() { resized = null }
+    })
+  })
+
+  afterEach(() => {
+    delete (root as unknown as Record<string, unknown>).scrollHeight
+  })
+
+  it('a page long enough for the button reserves its end from the start', () => {
+    // Jumping to the end (the post page's Comment button focuses the field
+    // at the bottom) must not leave the Post button under the button that
+    // shows up there.
+    setPage(2700)
+    const { container, unmount } = render(<BackToTop />)
+    expect(container.querySelector('.sh-back-to-top')).toBeNull()
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(true)
+    unmount()
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(false)
+  })
+
+  it('a short page keeps its end as it is', () => {
+    setPage(1000)
+    const { unmount } = render(<BackToTop />)
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(false)
+    unmount()
+  })
+
+  it('reserves once the page grows long enough (comments load)', () => {
+    setPage(1000)
+    const { unmount } = render(<BackToTop />)
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(false)
+    setPage(2700)
+    act(() => { resized?.() })
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(true)
+    unmount()
+  })
+})

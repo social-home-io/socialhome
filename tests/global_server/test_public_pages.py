@@ -953,6 +953,15 @@ def test_rate_limit_counter_is_bounded():
     assert len(counter) <= RATE_LIMIT_MAX_TRACKED_IPS
 
 
+def test_rate_limit_counter_reports_its_limit():
+    """``limit`` is the constructor's, whatever a call overrides it with."""
+    counter = SlidingWindowCounter(limit=7)
+    assert counter.limit == 7
+    assert counter.allow("a", limit=1)
+    assert not counter.allow("a", limit=1)
+    assert counter.limit == 7
+
+
 def test_rate_limit_counter_drops_expired_hits():
     """A key whose window has rolled over starts fresh rather than growing."""
     counter = SlidingWindowCounter(limit=2)

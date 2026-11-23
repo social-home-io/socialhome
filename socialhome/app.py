@@ -68,7 +68,9 @@ from .domain.federation import (
     InstanceSource,
     PairingStatus,
 )
+from .domain.gfs_channel import InvalidChannelWire, valid_channel_id
 from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
+from .domain.gfs_server import MAX_GFS_SERVERS
 from .domain.space import ContentAction
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
@@ -461,6 +463,7 @@ from .services.space_crypto_service import (
     SpaceContentEncryption,
 )
 from .services.space_gfs_needed_service import SpaceGfsNeededService
+from .services.space_listing_counts_service import SpaceListingCountsService
 from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
@@ -1361,12 +1364,79 @@ def _wire_space_authority_rotation(
     return svc
 
 
+#: Channel frames one channel may bring this household per minute, before
+#: any decrypt / verify. A GFS admits at most 120 items a minute into a
+#: channel (cluster-wide, ``MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE`` — this
+#: package does not import the server's), and a household may be seated on
+#: the same channel at every server on the space's list (at most
+#: :data:`MAX_GFS_SERVERS`), each pushing its own copy: 8 × 120. A returning
+#: household's queued backlog drains in a burst too — at most 250 relay rows
+#: per server, across every channel — so only four or more servers draining
+#: a full backlog of ONE channel in the same minute could reach it; a frame
+#: dropped here is caught up by space sync.
+GFS_CHANNEL_FRAMES_PER_MINUTE: int = 120 * MAX_GFS_SERVERS
+
+#: Channel frames per minute across EVERY channel — the household-wide
+#: ceiling, as for every other relayed frame (``RELAY_ENVELOPE_INBOUND_LIMIT``).
+#: Charged only for a well-formed channel id with room left in its own
+#: budget, so a GFS inventing channel ids mints at most this many 32-hex
+#: per-channel keys a minute. Residual: ONE misbehaving GFS can spend this
+#: ceiling and so delay the channel frames of the household's other GFSs
+#: (it could already withhold its own); space sync heals.
+GFS_CHANNEL_FRAMES_PER_MINUTE_ALL: int = 3000
+
+#: The limiter keys: ``gfs_channel:<channel_id>`` and the household-wide one.
+GFS_CHANNEL_BUDGET_PREFIX: str = "gfs_channel:"
+GFS_CHANNEL_BUDGET_ALL: str = "gfs_channel:*"
+
+#: Idle per-channel keys are swept once the limiter holds this many keys:
+#: the household-wide ceiling keeps live channel keys under 3 000, so a sweep
+#: runs at most every couple of minutes however many ids a GFS invents.
+GFS_CHANNEL_BUDGET_SWEEP_AT: int = 8192
+
+
+def _gfs_channel_budget(limiter: RateLimiter, channel_id: object) -> bool:
+    """Spend one channel frame of the household-wide and the per-channel
+    budget on the federation inbound limiter; ``False`` (logged at WARNING,
+    at most once a minute) when either is spent. A malformed channel id is
+    refused before any key is made from it (the frame would be dropped
+    later anyway)."""
+    try:
+        channel_id = valid_channel_id(channel_id)
+    except InvalidChannelWire:
+        return False
+    if limiter.key_count > GFS_CHANNEL_BUDGET_SWEEP_AT:
+        limiter.prune(window_s=60, prefix=GFS_CHANNEL_BUDGET_PREFIX)
+    per_channel = f"{GFS_CHANNEL_BUDGET_PREFIX}{channel_id}"
+    if (
+        limiter.has_room(per_channel, limit=GFS_CHANNEL_FRAMES_PER_MINUTE, window_s=60)
+        and limiter.is_allowed(
+            GFS_CHANNEL_BUDGET_ALL, limit=GFS_CHANNEL_FRAMES_PER_MINUTE_ALL, window_s=60
+        )
+        and limiter.is_allowed(
+            per_channel,
+            limit=GFS_CHANNEL_FRAMES_PER_MINUTE,
+            window_s=60,
+        )
+    ):
+        return True
+    if limiter.is_allowed("gfs_channel_drop_warn", limit=1, window_s=60):
+        log.warning(
+            "gfs.channel: inbound channel frames over budget (%d a minute per "
+            "channel, %d in all) — dropping before decrypt; space sync heals",
+            GFS_CHANNEL_FRAMES_PER_MINUTE,
+            GFS_CHANNEL_FRAMES_PER_MINUTE_ALL,
+        )
+    return False
+
+
 async def dispatch_gfs_relay_frame(
     frame: dict,
     *,
     space_public_inbound: SpacePublicInbound | None,
     space_subscriber_key_inbound: SpaceSubscriberKeyInbound | None,
     gfs_channels: GfsChannelService | None = None,
+    inbound_limiter: RateLimiter | None = None,
 ) -> None:
     """Route one inbound GFS fan-out frame to its consumer.
 
@@ -1375,6 +1445,10 @@ async def dispatch_gfs_relay_frame(
     here reads (or logs) a household id. An older GFS may still ship an outer
     ``from_instance``; it is ignored — attribution comes from the encrypted,
     authority-signed inner alone.
+
+    A channel frame first spends the channel budget on *inbound_limiter*
+    (the federation inbound limiter): over it, it is dropped before any
+    decrypt or signature check.
     """
     # v_51 — a private space's opaque channel: the frame names a channel,
     # never a space; the channel service maps it locally.
@@ -1384,8 +1458,13 @@ async def dispatch_gfs_relay_frame(
             frame.get("channel_id"),
             frame.get("event_type"),
         )
-        if gfs_channels is not None:
-            await gfs_channels.handle_frame(frame)
+        if gfs_channels is None:
+            return
+        if inbound_limiter is not None and not _gfs_channel_budget(
+            inbound_limiter, frame.get("channel_id")
+        ):
+            return
+        await gfs_channels.handle_frame(frame)
         return
     log.info(
         "gfs.relay.received: space=%s event=%s",
@@ -3883,6 +3962,18 @@ def create_app(config: Config | None = None) -> web.Application:
         public_space_discovery.on_connections_changed
     )
 
+    # ── A space's member + follower counts (owner decision 2026-11-23) ───
+    # Shown on the space page from the roster or the host's shared listing;
+    # re-shared (coalesced) when they change, once federation is up.
+    space_listing_counts = SpaceListingCountsService(
+        bus=bus,
+        space_repo=repos.space,
+        public_space_repo=repos.public_space,
+        peer_space_directory_repo=repos.peer_space_directory,
+        gfs=gfs_connection_service,
+    )
+    space_listing_counts.wire()
+
     # ── Map tile proxy ───────────────────────────────────────────────────
     # OSM returns 403 to browser-issued tile requests (a browser cannot set
     # ``User-Agent``/``Referer``), so the backend fetches tiles instead with
@@ -4622,6 +4713,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.public_space_discovery_key] = public_space_discovery
     app[K.map_tile_service_key] = map_tile_service
     app[K.peer_space_directory_repo_key] = repos.peer_space_directory
+    app[K.space_listing_counts_service_key] = space_listing_counts
     app[K.gallery_service_key] = gallery_service
     app[K.gallery_trash_purge_scheduler_key] = gallery_trash_purge_scheduler
     app[K.gallery_repo_key] = gallery_repo
@@ -5176,6 +5268,7 @@ def create_app(config: Config | None = None) -> web.Application:
             own_identity_seed=identity_seed,
         )
         space_public_outbound.attach_writer_certs(writer_certs)
+        space_public_outbound.attach_channels(gfs_channels)
         space_public_outbound.attach_posts(space_post_repo)
         # Step 12 — a remote member's post skips the GFSs where every
         # follower reads the author's own ``space_item`` (the author's
@@ -5318,6 +5411,11 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
+        # Counts re-share to the GFS listings and the paired directory.
+        space_listing_counts.attach(
+            peer_directory=app[K.peer_directory_service_key],
+            own_instance_id=identity.instance_id,
+        )
         if boot_row_marks is not None:
             app[K.space_sync_scheduler_key].set_row_marks(boot_row_marks)
         # v_67: ``reactions_reach`` on every moment the API returns; seal /
@@ -6140,6 +6238,7 @@ def create_app(config: Config | None = None) -> web.Application:
                 space_public_inbound=space_public_inbound,
                 space_subscriber_key_inbound=space_subscriber_key_inbound,
                 gfs_channels=gfs_channels,
+                inbound_limiter=federation_service.inbound_limiter,
             )
 
         # Relay inbound leg — the GFS pushes ``{type:"envelope", sealed}``
@@ -6785,6 +6884,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await reaction_router.stop()
         await moment_reaction_gfs.stop()
         await moment_public_media_inbound.stop()
+        # A count re-share waiting for its window rides the publish session.
+        await space_listing_counts.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()
         # Background seat releases ride the HTTP session too.

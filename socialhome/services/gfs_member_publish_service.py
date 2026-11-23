@@ -129,6 +129,7 @@ from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..outbound_fetch import OutboundFetchRefused
 from ..task_drain import wait_tasks_done
 from ..writer_key import sign_with_writer_key
+from .gfs_channel_service import CHANNEL_TIERS
 from .gfs_connection_service import GfsConnectionService
 from .gfs_directory import GfsDirectoryCache
 from .gfs_http import refused_gfs_key
@@ -316,37 +317,55 @@ class GfsMemberPublishService:
         """Wire the private-space channel service (v_51)."""
         self._channels = channels
 
-    async def _private(self, space_id: str) -> bool:
+    async def _channel_tier(self, space_id: str) -> bool:
+        """A tier whose channel this household may hold: PRIVATE, or GLOBAL
+        since v_96 (the channel service retires / reconciles both)."""
         space = await self._spaces.get(space_id)
-        return space is not None and space.space_type is SpaceType.PRIVATE
+        return space is not None and space.space_type in CHANNEL_TIERS
+
+    async def _on_channel(self, space: Space | None) -> bool:
+        """Whether *space*'s items go through its opaque channel rather than
+        the space-keyed member relay: always for a PRIVATE space (no channel
+        → the host path); for a GLOBAL space once it stores a channel here
+        (v_96 — the owner registered one, or we hold a grant). A global
+        space with a channel never ALSO uses the space-keyed relay, so no
+        item reaches a household twice that way."""
+        if space is None or self._channels is None:
+            return False
+        if space.space_type is SpaceType.PRIVATE:
+            return True
+        return (
+            space.space_type is SpaceType.GLOBAL
+            and await self._channels.has_channel(space.id)
+        )
 
     async def channel_space(self, space_id: str) -> bool:
-        """Whether ``space_id`` is a PRIVATE space using an opaque channel
-        here (v_51) — its local writes are offered to the member publisher,
-        which then decides by our grant and cert."""
+        """Whether ``space_id`` is a PRIVATE (v_51) or GLOBAL (v_96) space
+        using an opaque channel here — its local writes are offered to the
+        member publisher, which then decides by our grant and cert."""
         return (
             self._channels is not None
-            and await self._private(space_id)
+            and await self._channel_tier(space_id)
             and await self._channels.has_channel(space_id)
         )
 
     async def retire_channel(self, space_id: str) -> None:
         """Before an authority rotation swaps the seed: unregister a private
         space's channel while its key can still be signed for."""
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._channel_tier(space_id):
             await self._channels.retire(space_id)
 
     async def enable_channel(self, space_id: str) -> None:
         """The owner turned a private space's ``private_gfs`` ON: start (or
         keep) its channel, announce it and distribute the grants."""
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._channel_tier(space_id):
             await self._channels.enable(space_id)
 
     async def reconcile_channel(self, space_id: str) -> None:
         """Before an authority-rotation bundle goes out: let the channel
         service start a fresh channel for the new seed (and announce it), so
         the bundle carries grants for it. No-op for other spaces."""
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._channel_tier(space_id):
             await self._channels.on_rotation(space_id)
 
     async def channel_rekey_sent(self, space_id: str) -> None:
@@ -354,7 +373,7 @@ class GfsMemberPublishService:
         private space's channel service renews our own seat now, as the
         members renew theirs on that rekey
         (:meth:`GfsChannelService.on_rekey_sent`). No-op for other spaces."""
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._channel_tier(space_id):
             await self._channels.on_rekey_sent(space_id)
 
     def wire(self, bus: EventBus) -> None:
@@ -473,14 +492,13 @@ class GfsMemberPublishService:
         current epoch. ``[]`` means today's host path. Otherwise: the
         servers proving ``member_publish_strict`` (no subscribe here)."""
         space = await self._spaces.get(space_id)
-        if (
-            space is not None
-            and space.space_type is SpaceType.PRIVATE
-            and self._channels is not None
-        ):
+        if self._channels is not None and await self._on_channel(space):
+            assert space is not None
             # v_51 — a private space publishes only through its opaque
             # channel, and only when our cert lets THIS author post THIS type
-            # (the cert rides inside the ciphertext, as always).
+            # (the cert rides inside the ciphertext, as always). v_96 — a
+            # global space with a channel too, the OWNER's own posts
+            # included (it publishes into its own channel, Q4).
             cert = await self._writer_certs.current_own_cert_wire(space_id)
             if cert is None or not _cert_lets(
                 cert, author_user_id, item_type, space.features
@@ -624,7 +642,9 @@ class GfsMemberPublishService:
         if sealed is None:
             return []
         epoch, ciphertext, compressed = sealed
-        if self._channels is not None and await self._private(space_id):
+        if self._channels is not None and await self._on_channel(
+            await self._spaces.get(space_id)
+        ):
             # A private space's opaque channel carries JSON only: no GFS
             # seat label covers a channel's members.
             return await self._channels.publish_sealed(
@@ -794,12 +814,20 @@ class GfsMemberPublishService:
         space = await self._spaces.get(space_id)
         if (
             space is not None
-            and space.space_type is SpaceType.PRIVATE
+            and space.space_type in CHANNEL_TIERS
             and self._channels is not None
         ):
             if only is not None:
-                return await self._channels.announce_epoch(space_id, only=only)
-            return await self._channels.on_rotation(space_id)
+                done = await self._channels.announce_epoch(space_id, only=only)
+            else:
+                done = await self._channels.on_rotation(space_id)
+            # v_96 — a global space that runs a channel (just reconciled)
+            # announces only there: nothing is published space-keyed.
+            if (
+                space.space_type is SpaceType.PRIVATE
+                or await self._channels.has_channel(space_id)
+            ):
+                return done
         if not self._publicly_readable(space):
             return 0
         assert space is not None
@@ -1043,6 +1071,9 @@ class GfsMemberPublishService:
         assert space is not None
         if await self._relays_as_owner(space):
             return 0
+        if await self._on_channel(space):
+            # v_96 — its channel seat carries the others' items.
+            return 0
         if not await self._local_writer(space_id):
             return 0
         return await self._subscribe(await self._capable_listed(space_id), space_id)
@@ -1089,6 +1120,8 @@ class GfsMemberPublishService:
                 continue
             if await self._relays_as_owner(space):
                 continue
+            if await self._on_channel(space):
+                continue  # v_96 — its channel seat carries the items
             if not await self._local_writer(space.id):
                 continue
             if await self._listed(conn, space.id):
@@ -1146,6 +1179,8 @@ class GfsMemberPublishService:
                 continue
             if not await self._relays_as_owner(space):
                 continue
+            if await self._on_channel(space):
+                continue  # v_96 — announced on the channel by heal() above
             try:
                 done += await self.announce_epoch(space.id, only=gfs_id)
             except Exception:
