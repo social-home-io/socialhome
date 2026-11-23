@@ -895,6 +895,12 @@ sequenceDiagram
 
 ### Subscriber-side on-ramp (local space mirror)
 
+> **Legacy since v_96.** A follow is now a join for the read-only role
+> ([Following through the GFS](#following-through-the-gfs-v_96)); the
+> subscribe call no longer mirrors a listing or takes a `space_subscribers`
+> seat. The mirror machinery below is kept only for stubs made before and
+> goes with the GFS subscriber fan-out in a later phase.
+
 Before a household can subscribe to a space it discovered through a GFS, it
 needs a **local `spaces` row** for it: `space_subscribers` fan-out only helps
 if the receiver has the space's Ed25519 authority pubkey to verify relayed
@@ -4226,7 +4232,11 @@ it:
    `socialhome/space_join_contact.py`), the key the GFS already pins for the
    space and serves as `identity_public_key`. Only for a space in `request`
    / `open` mode, only to a GFS whose signed capabilities prove
-   `join_contact` (GFS migration 0027). The GFS serves it only when it
+   `join_contact` (GFS migration 0027) — and, since v_96, also for a space
+   that takes followers (`allow_subscribers` on) whatever its join mode,
+   which for a space that takes followers but no requests goes only to a
+   GFS that also proves `subscriber_seats` (see "Following through the
+   GFS" below). The GFS serves it only when it
    verifies against its pin and names the owning instance — the pin this
    publish LEAVES: a publish that re-pins the space (the owner's cert for a
    new key) carries a contact signed with that new key, and is judged
@@ -4407,6 +4417,50 @@ budget) and at most 120 per space per hour whoever asks (≈ 240 KB/h of
 relay traffic for a space under a sustained flood). The meetup case — 40
 households asking within minutes — files all 40 under the new budgets and
 sends no "busy" at all.
+
+### Following through the GFS (v_96)
+
+A follow is a join for the read-only `subscriber` role, auto-approved while
+the space has `allow_subscribers` on
+([spaces.md › Followers](./spaces.md#followers-v_96)). A household that
+reaches the host only through a GFS follows over the same sealed leg as
+"Ask to join" above — no new event type, no new GFS route:
+
+1. **The contact.** The owner's listing carries the `join_contact` while the
+   space takes requests **or** followers. A space that takes only followers
+   (invite-only, `allow_subscribers` on) lists it only on a GFS whose signed
+   capabilities prove `subscriber_seats` (v_96; a GFS that relays the
+   follow bootstrap and is ready for follower seats); elsewhere it lists
+   without one, as before.
+2. **The request.** `POST /api/spaces/{id}/subscribe` on a space only a GFS
+   lists seals `SPACE_JOIN_REQUEST_BOOTSTRAP` exactly as step 3 above, with
+   one more field **inside the sealed body**: `requested_role:
+   "subscriber"` (the same field name the paired `SPACE_JOIN_REQUEST`
+   carries in its encrypted payload; `kind` stays `join_request`). The GFS
+   sees nothing new. The applicant's pending row reads "Following…".
+3. **The host.** Every gate of step 5 runs unchanged and in the same order
+   — the 200-pending cap and the per-space budget (120 / hour; "busy"
+   past either), per sender (10 / hour), ban, repeat, request-id reuse —
+   except that a follow needs a live global space this household hosts with
+   `allow_subscribers` on, and ignores the join mode. Then, instead of
+   filing a request for the admins (no bell), it approves on its own
+   (`SpaceService.approve_remote_follow`, which re-checks everything and
+   fails closed) and answers as an admin's approval does (step 6): a
+   single-use `subscriber` token bound to the applicant household and
+   person, 48 h. The request row is kept, `approved`, so it never counts
+   against the pending cap.
+4. **The seat.** The applicant redeems it over §D2b automatically (the
+   approval's retry on start and GFS reconnect included) and is seated as
+   a `space_session` subscriber — a member with the read-only role: it is
+   on the roster, gets the content key in the ACK and the space's events
+   the way a link-joined member does.
+
+A host below v_96 reads the extra field as nothing and files an ordinary
+request for its admins (accepted, breaking, D10). Cost per follow: one
+request (≈ 4 KiB) and one answer (≈ 4 KiB) through the GFS relay, one
+redeem + ACK (≤ 256 KiB, as any §D2b redeem), sent to the one household
+that asked — nothing to members or other followers beyond the roster
+gossip of the new seat.
 
 ## Peer directory sync (§D1a)
 

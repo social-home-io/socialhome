@@ -782,11 +782,11 @@ mesh-member-cert → space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
-admin-revoke-rotation → rotation-offline-catchup → space-chat →
+admin-revoke-rotation → rotation-offline-catchup → space-chat → space-follow-paired →
 space-reaction → space-poll-vote → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
-gfs-moment-late-delete → gfs-join-request → verify``
+gfs-moment-late-delete → gfs-join-request → gfs-space-follow → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
@@ -2460,6 +2460,31 @@ the request with e's message and approves, e is seated and reads a's post,
 and e is still no paired connection of a. Before v_84 the ask answered
 ``403 NOT_PAIRED``. The host's keys come off the GFS listing (``join_contact``,
 signed by the space authority key) — the GFS is asked for nothing.
+
+### ``space-follow-paired`` — a paired follow is an auto-approved join (v_96)
+
+Part of ``all`` (after ``space-chat``). Prereqs: ``up`` + ``pair``. a creates
+a ``public`` ``invite_only`` space and turns ``allow_subscribers`` on (join
+mode does not matter for a follow). b finds it in its paired directory and
+``POST /subscribe`` → ``{pending: true}``; a auto-approves (no admin step).
+b then holds a ``subscriber`` seat in ``space_members`` and a holds it in
+``space_remote_members``; a's post reaches b; b's post is refused (403).
+``DELETE /subscribe`` is b's own leave: a tombstones the seat and the
+content-key epoch (``space_keys``) does not move.
+
+### ``gfs-space-follow`` — an unpaired follow through the GFS (v_96)
+
+Part of ``all`` (right after ``gfs-join-request``). Prereqs: ``gfs-up`` +
+``gfs-pair``. a creates a global ``invite_only`` space with followers on,
+listed on the GFS (our GFS proves ``subscriber_seats``, so the listing carries
+a ``join_contact``). e (paired with nobody) sees it ``gfs_askable``,
+``POST /subscribe`` → ``{pending: true}`` through the sealed bootstrap with
+``requested_role: subscriber``; no approval by a. e is seated as
+``subscriber`` (a's ``space_remote_members`` too), reads a's post, cannot post
+(403), and holds only a ``space_session`` row for a.
+
+Mini-chain: ``up, pair, space-follow-paired, gfs-up, gfs-pair,
+gfs-space-follow, verify, down``.
 
 ### ``gfs-join-request-offline`` — the same ask with each side down > 5 min (v_84)
 

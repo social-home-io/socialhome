@@ -1558,7 +1558,7 @@ class SqliteSpaceRepo:
         first. Dissolved spaces excluded.
 
         Subscriptions are read-only memberships for public / global
-        spaces — see :class:`SpaceService.subscribe_to_space` for the
+        spaces — see :meth:`SpaceService.follow_space` for the
         write path. Distinct from the
         ``preferences_json['followed_space_ids']`` dashboard pin list
         used by :mod:`corner_service`, which is a per-user UI pin
