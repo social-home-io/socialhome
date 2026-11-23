@@ -228,6 +228,8 @@ export function CommentOverlay() {
       showToast(
         t('comments.error.post', { error: String((err as Error)?.message ?? err) }), 'error',
       )
+      // Tell the thread it failed, so it keeps the text to try again.
+      throw err
     }
   }
 
@@ -242,6 +244,8 @@ export function CommentOverlay() {
       showToast(
         t('comments.error.edit', { error: String((err as Error)?.message ?? err) }), 'error',
       )
+      // Tell the thread it failed, so it keeps the text to try again.
+      throw err
     }
   }
 

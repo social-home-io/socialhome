@@ -207,6 +207,8 @@ export function PostPermalink({ postId, spaceId, commentId = null, backPath }: P
       setPost({ ...post, comment_count: post.comment_count + 1 })
     } catch (err: unknown) {
       showToast(t('comments.error.post', { error: String((err as Error)?.message ?? err) }), 'error')
+      // Tell the thread it failed, so it keeps the text to try again.
+      throw err
     }
   }
   const edit = async (cid: string, content: string) => {
@@ -216,6 +218,8 @@ export function PostPermalink({ postId, spaceId, commentId = null, backPath }: P
       showToast(t('comments.updated'), 'success')
     } catch (err: unknown) {
       showToast(t('comments.error.edit', { error: String((err as Error)?.message ?? err) }), 'error')
+      // Tell the thread it failed, so it keeps the text to try again.
+      throw err
     }
   }
   const remove = async (cid: string) => {

@@ -137,6 +137,9 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
   const [draft, setDraft] = useState<string | null>(null)
   const canEdit = !!onEdit && isTextEditable(post)
   const menuButton = useRef<HTMLButtonElement | null>(null)
+  // The reaction picker hangs off the "+" (``position: fixed``) so it
+  // stays on screen wherever the card sits.
+  const reactionAddRef = useRef<HTMLButtonElement | null>(null)
   // Closing the inline editor hands focus back to the ··· button that
   // opened it (keyboard and screen-reader users land where they were).
   const closeEditor = () => {
@@ -380,6 +383,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
             )}
             <div class="sh-reaction-add-wrap">
               <button
+                ref={reactionAddRef}
                 class="sh-reaction-add"
                 aria-label={t('post.add_reaction')}
                 aria-haspopup="dialog"
@@ -393,6 +397,8 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
               </button>
               {reactionPickerFor.value === post.id && (
                 <ReactionPicker
+                  anchor={reactionAddRef}
+                  align="start"
                   onSelect={(emoji) => onReact?.(emoji)}
                   onClose={() => { reactionPickerFor.value = null }}
                 />
