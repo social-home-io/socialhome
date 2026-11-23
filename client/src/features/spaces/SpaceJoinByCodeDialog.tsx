@@ -10,8 +10,10 @@
  * visual stays in lockstep with pairing's muscle memory.
  *
  * Decoder accepts the new ``socialhome://invite#…`` shape, raw JSON,
- * and bare hex tokens (see :mod:`spaceInviteCode`). Three distinct
- * failure modes get three distinct messages.
+ * and bare hex tokens (see :mod:`spaceInviteCode`) — and a GFS invite
+ * link (``{gfs}/join/{token}``, what the invite QR carries), which the
+ * household resolves to the code first (``POST /api/spaces/invite-link``).
+ * Three distinct failure modes get three distinct messages.
  */
 import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
@@ -19,7 +21,7 @@ import { api, ApiError } from '@/api'
 import { askLocationConsent, isApiCode } from '@/components/localConsent'
 import { addBase } from '@/baseUrl'
 import { instanceConfig } from '@/store/instance'
-import { decodeInviteCode } from '@/lib/spaceInviteCode'
+import { decodeInviteCode, inviteLinkUrl } from '@/lib/spaceInviteCode'
 import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
 import { QrScanner } from '@/components/QrScanner'
@@ -77,13 +79,26 @@ export function SpaceJoinByCodeDialog() {
       return
     }
     errorMsg.value = null
-    const payload = decodeInviteCode(input)
-    if (!payload) {
+    let payload = decodeInviteCode(input)
+    // The invite QR carries the short ``{gfs}/join/{token}`` link, not the
+    // code. The household resolves it (the browser never fetches the GFS).
+    const link = payload ? null : inviteLinkUrl(input)
+    if (!payload && !link) {
       errorMsg.value = t('space.join_code.invalid')
       return
     }
     submitting.value = true
     try {
+      if (!payload) {
+        const r = await api.post(
+          '/api/spaces/invite-link', { url: link },
+        ) as { invite_code?: string }
+        payload = decodeInviteCode(r.invite_code ?? '')
+        if (!payload) {
+          errorMsg.value = t('space.join_code.invalid')
+          return
+        }
+      }
       // When the issuer is a different instance than ours, hand the
       // backend the issuer_instance_id so it can route the redeem
       // over the SPACE_INVITE_TOKEN_REDEEM federation flow. Same-

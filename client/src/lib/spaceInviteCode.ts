@@ -43,6 +43,7 @@
  * (``SPACE_INVITE_TOKEN_REDEEM`` family) when issuer ≠ receiver.
  */
 import { base64UrlEncode, base64UrlDecode } from './base64Url'
+import { pageBootFromHash } from '../../gfs/page_link'
 
 export interface SpaceInviteGfsRef {
   /** Base URL of the GFS the space is published on. */
@@ -159,4 +160,44 @@ export function decodeInviteCode(raw: string): SpaceInvitePayload | null {
     return { token: trimmed }
   }
   return null
+}
+
+// The GFS's invite tokens: URL-safe, never only dots (``page_link.ts``).
+const LINK_TOKEN_RE = /^(?!\.+$)[A-Za-z0-9._~-]{1,256}$/
+
+/**
+ * The GFS invite link in a scanned / pasted string, as
+ * ``{gfs}/join/{token}``, or ``null``.
+ *
+ * The invite QR carries this short link, not the code (the ~900-character
+ * code made a QR no phone could read). Accepts:
+ *
+ *   1. ``https://<gfs>[/base]/join/<token>`` — what the QR and the shared
+ *      link carry (``http://`` too: a household's own LAN GFS; the
+ *      household decides what it will follow).
+ *   2. The pinned viewer's address, ``…#v=join&g=<gfs>&t=<token>`` — what
+ *      the browser's address bar shows once the link opened.
+ *
+ * The SPA never fetches the link itself: the household resolves it to the
+ * code (``POST /api/spaces/invite-link``), which is then redeemed like a
+ * pasted one.
+ */
+export function inviteLinkUrl(raw: string): string | null {
+  const trimmed = raw.trim()
+  if (!/^https?:\/\//i.test(trimmed) || /[\\\s]/.test(trimmed)) return null
+  let url: URL
+  try {
+    url = new URL(trimmed)
+  } catch {
+    return null
+  }
+  if (url.username || url.password) return null
+  if (url.hash) {
+    const boot = pageBootFromHash(url.hash)
+    return boot?.view === 'join' ? `${boot.gfs}/join/${boot.token}` : null
+  }
+  if (url.search) return null
+  const match = /^(.*)\/join\/([^/]+)$/.exec(url.pathname)
+  if (!match || !LINK_TOKEN_RE.test(match[2])) return null
+  return `${url.origin}${match[1]}/join/${match[2]}`
 }

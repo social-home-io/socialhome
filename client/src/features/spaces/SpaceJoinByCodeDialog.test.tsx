@@ -26,6 +26,17 @@ vi.mock('qrcode', () => ({
   default: { toDataURL: vi.fn(async () => 'data:fake') },
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
+// The camera is out of reach in jsdom: a button stands in for a scan of the
+// invite page's QR, which carries the short ``/join/`` link.
+vi.mock('@/components/QrScanner', () => ({
+  QrScanner: ({ onPayload }: { onPayload: (raw: string) => void }) => (
+    <button
+      type="button"
+      data-testid="fake-scan"
+      onClick={() => onPayload('https://gfs.example.org/join/AbC_d-9')}
+    />
+  ),
+}))
 const confirmMock = vi.hoisted(() => vi.fn())
 vi.mock('@/components/confirm', () => ({ confirmDialog: (...a: unknown[]) => confirmMock(...a) }))
 vi.mock('@/store/householdHome', () => ({
@@ -342,7 +353,7 @@ describe('SpaceJoinByCodeDialog', () => {
     await act(async () => { fireEvent.click(getByText('Join')) })
     expect(api.post).not.toHaveBeenCalled()
     expect(container.querySelector('.sh-scan-error-inline')?.textContent)
-      .toContain("doesn't look like a Social Home invite code")
+      .toContain('Scan the QR on the invite page, or paste the code shown under it')
   })
 
   it('shows the expired-token message on 404 from the API', async () => {
@@ -422,5 +433,81 @@ describe('SpaceJoinByCodeDialog', () => {
     input = result.container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
     expect(input.value).toBe('')
     expect(result.container.querySelector('.sh-scan-error-inline')).toBeNull()
+  })
+
+  // The invite QR carries the short ``{gfs}/join/{token}`` link, not the
+  // code: the household resolves it, then the normal join runs.
+  const LINK = 'https://gfs.example.org/join/AbC_d-9'
+  const LINKED_CODE = buildInviteCode({
+    token: 'a1b2c3d4e5f60718',
+    space_id: 'space-uuid-xyz',
+    issuer_instance_id: OUR_INSTANCE_ID,
+  })
+
+  it('a pasted invite link is resolved by the household, then joined', async () => {
+    api.post
+      .mockResolvedValueOnce({ invite_code: LINKED_CODE })
+      .mockResolvedValueOnce({ space_id: 'space-uuid-xyz' })
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.input(input, { target: { value: LINK } })
+    })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+    await waitFor(() => {
+      expect(routeSpy).toHaveBeenCalledWith('/spaces/space-uuid-xyz')
+    })
+    expect(api.post.mock.calls).toEqual([
+      ['/api/spaces/invite-link', { url: LINK }],
+      ['/api/spaces/join', { token: 'a1b2c3d4e5f60718' }],
+    ])
+  })
+
+  it('a scanned invite link (the QR) joins the same way', async () => {
+    api.post
+      .mockResolvedValueOnce({ invite_code: LINKED_CODE })
+      .mockResolvedValueOnce({ space_id: 'space-uuid-xyz' })
+    const { container } = await renderAndOpen()
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="invite-method-qr"]')!)
+    })
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="fake-scan"]')!)
+    })
+    await waitFor(() => {
+      expect(routeSpy).toHaveBeenCalledWith('/spaces/space-uuid-xyz')
+    })
+    expect(api.post).toHaveBeenNthCalledWith(1, '/api/spaces/invite-link', { url: LINK })
+  })
+
+  it('a dead invite link shows the expired message and joins nothing', async () => {
+    api.post.mockRejectedValueOnce(new ApiError(404, 'gone'))
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.input(input, { target: { value: LINK } })
+    })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+    await waitFor(() => {
+      expect(container.querySelector('.sh-scan-error-inline')?.textContent)
+        .toContain('expired or already been used')
+    })
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(routeSpy).not.toHaveBeenCalled()
+  })
+
+  it('a link whose answer is not a code says so and joins nothing', async () => {
+    api.post.mockResolvedValueOnce({ invite_code: 'nonsense' })
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.input(input, { target: { value: LINK } })
+    })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+    await waitFor(() => {
+      expect(container.querySelector('.sh-scan-error-inline')?.textContent)
+        .toContain('Scan the QR on the invite page')
+    })
+    expect(api.post).toHaveBeenCalledTimes(1)
   })
 })

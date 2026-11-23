@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  buildInviteCode, decodeInviteCode, gfsBaseFromInviteUrl,
+  buildInviteCode, decodeInviteCode, gfsBaseFromInviteUrl, inviteLinkUrl,
 } from './spaceInviteCode'
 
 describe('spaceInviteCode', () => {
@@ -141,5 +141,48 @@ describe('via_gfs without a gfs_space_id', () => {
       via_gfs: { gfs_url: 'https://relay.example.org' },
     }
     expect(decodeInviteCode(buildInviteCode(payload))).toEqual(payload)
+  })
+})
+
+describe('inviteLinkUrl — the short link the invite QR carries', () => {
+  it('accepts a GFS /join/ link', () => {
+    expect(inviteLinkUrl('https://gfs.example.org/join/AbC_d-9.x~'))
+      .toBe('https://gfs.example.org/join/AbC_d-9.x~')
+    expect(inviteLinkUrl('  https://GFS.example.org:8443/base/join/tok \n'))
+      .toBe('https://gfs.example.org:8443/base/join/tok')
+    expect(inviteLinkUrl('http://192.168.1.5:8765/join/tok'))
+      .toBe('http://192.168.1.5:8765/join/tok')
+  })
+
+  it("maps the pinned viewer's join page to the same link", () => {
+    expect(inviteLinkUrl(
+      'https://viewer.social-home.io/v/abc123/#v=join&g=https%3A%2F%2Fgfs.example.org&t=tok',
+    )).toBe('https://gfs.example.org/join/tok')
+    // Another viewer page is not an invite.
+    expect(inviteLinkUrl(
+      'https://viewer.social-home.io/v/abc123/#v=space&g=https%3A%2F%2Fgfs.example.org&s=sp',
+    )).toBeNull()
+  })
+
+  it('refuses anything that is not an invite link', () => {
+    for (const raw of [
+      '',
+      'socialhome://invite#eyJ0b2tlbiI6ImFiYyJ9',
+      'ftp://gfs.example.org/join/tok',
+      'https://gfs.example.org/spaces/tok',
+      'https://gfs.example.org/join/',
+      'https://gfs.example.org/join/tok/',
+      'https://gfs.example.org/join/..',
+      'https://gfs.example.org/join/tok?x=1',
+      'https://u:p@gfs.example.org/join/tok',
+      'https://gfs.example.org\\@evil/join/tok',
+      'https://gfs.example.org/join/t%20k',
+    ]) {
+      expect(inviteLinkUrl(raw), raw).toBeNull()
+    }
+  })
+
+  it('is not mistaken for a code by decodeInviteCode', () => {
+    expect(decodeInviteCode('https://gfs.example.org/join/tok')).toBeNull()
   })
 })
