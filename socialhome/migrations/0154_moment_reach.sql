@@ -1,0 +1,25 @@
+-- v_96 — how many hops a moment goes, kept on its row.
+--
+-- Owner decisions 2026-11-23 (docs/protocol/momentum.md, "Reach"): a person
+-- chooses how far their moments go (1–5 hops); the effective reach is
+-- computed when the moment is written and kept here, so a later settings
+-- change never moves where an existing moment's delete or totals go.
+--
+-- Audit per the CLAUDE.md "Before adding a SQL migration" rule:
+--
+-- 1. Existing code paths touching this data. The origin needs the reach a
+--    moment was sent with when it deletes it (``MomentDeleted`` fan-out),
+--    sends its totals (``MomentReactionCounts``), or a reply's parent bounds
+--    it (``MomentService.create_moment``); a relay holding the row needs it
+--    to bound the totals it passes on. The person's current setting is not
+--    enough: lowered after posting, the delete would miss households that
+--    hold the moment for up to 30 days.
+-- 2. Non-migration alternatives considered and rejected: (a) the delete
+--    always travelling 5 hops — leaks the author's activity to households
+--    the moment never reached; (b) the in-memory relay seen-map — lost on
+--    restart and absent on the origin; (c) reusing ``hop_count`` — it means
+--    where the row landed, not how far the moment goes.
+-- 3. Minimality. One additive NULL column: NULL = 3 (every existing row
+--    went 3 hops), no backfill, no index. A tombstone keeps it.
+
+ALTER TABLE moments ADD COLUMN reach INTEGER;

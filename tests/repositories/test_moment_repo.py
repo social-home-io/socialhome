@@ -1572,3 +1572,29 @@ async def test_latest_replies_newest_readable_per_root(db, repo):
 
 async def test_latest_replies_empty_ids(db, repo):
     assert await repo.latest_replies([], "u-me") == {}
+
+
+# ── v_96 reach (migration 0154) ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("reach", [1, 2, 3, 4, 5])
+async def test_reach_round_trips(db, repo, reach):
+    await repo.save(replace(_moment(), reach=reach))
+    got = await repo.get("m-1")
+    assert got is not None and got.reach == reach
+
+
+async def test_a_row_without_reach_reads_as_3(db, repo):
+    """Every row written before v_96 has a NULL reach: it went 3 hops."""
+    await repo.save(replace(_moment(), reach=2))
+    await db.enqueue("UPDATE moments SET reach=NULL WHERE id='m-1'")
+    got = await repo.get("m-1")
+    assert got is not None and got.reach == 3
+
+
+async def test_a_tombstone_keeps_the_reach(db, repo):
+    await repo.save(replace(_moment(), reach=2))
+    await repo.delete("m-1")
+    got = await repo.get("m-1", include_deleted=True)
+    assert got is not None and got.deleted_at is not None
+    assert got.reach == 2

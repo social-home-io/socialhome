@@ -39,6 +39,7 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.moment import (
+    MOMENT_DEFAULT_REACH,
     Moment,
     MomentReaction,
     MomentReactionRoute,
@@ -431,8 +432,8 @@ class SqliteMomentRepo:
                 id, author_user_id, content, media_url, media_type,
                 duration_ms, parent_moment_id, origin_instance_id,
                 created_at, expires_at, hop_count, is_public,
-                received_via, received_via_gfs_id
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                received_via, received_via_gfs_id, reach
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -442,7 +443,8 @@ class SqliteMomentRepo:
                 hop_count=excluded.hop_count,
                 is_public=excluded.is_public,
                 received_via=excluded.received_via,
-                received_via_gfs_id=excluded.received_via_gfs_id
+                received_via_gfs_id=excluded.received_via_gfs_id,
+                reach=excluded.reach
             WHERE moments.deleted_at IS NULL
             """,
             (
@@ -460,6 +462,7 @@ class SqliteMomentRepo:
                 int(moment.is_public),
                 moment.received_via,
                 moment.received_via_gfs_id,
+                int(moment.reach),
             ),
         )
         # DELETE-INSERT keeps the tag set in sync with the latest
@@ -1518,4 +1521,6 @@ def _row_to_moment(row: dict | None) -> Moment | None:
         received_via=row.get("received_via") or "self",
         received_via_gfs_id=row.get("received_via_gfs_id"),
         deleted_at=row.get("deleted_at"),
+        # v_96: NULL (every row from before migration 0154) went 3 hops.
+        reach=int(row.get("reach") or MOMENT_DEFAULT_REACH),
     )
