@@ -120,7 +120,7 @@ from ....sync_page import (
     verify_listing,
     verify_page,
 )
-from ...host_equivalence import serves_as_host
+from ...host_equivalence import may_sign_pages, serves_as_host
 from .exporter import RESOURCE_ORDER, record_batches
 from .page_state import BucketRows
 from .stream_health import HELD_BACK_LIMIT, HeldBack
@@ -859,6 +859,7 @@ class SyncPageService:
         "_monotonic",
         "_on_change",
         "_own_instance_id",
+        "_parked",
         "_probes",
         "_push_pending",
         "_pushed",
@@ -969,6 +970,12 @@ class SyncPageService:
         #: Derived again after a restart: the stored rows plus "no verdict
         #: yet" restart each compare.
         self._matched: OrderedDict[str, set[bytes]] = OrderedDict()
+        #: A signer household: space → root → when (monotonic) the catch-up
+        #: against that page was left with only dry or stuck buckets — no
+        #: member can complete it now. Skipped for :data:`DRY_RECHECK_S`, so
+        #: the next signer's page is judged (security re-check 3, M-3: no
+        #: head-of-line blocking). Scheduling only: a restart re-judges.
+        self._parked: OrderedDict[str, dict[bytes, float]] = OrderedDict()
 
     # ─── The page held here ───────────────────────────────────────────
 
@@ -1007,7 +1014,11 @@ class SyncPageService:
         return None
 
     async def _own(self, space: Space) -> _Held | None:
-        """The newest page WE signed, if we did."""
+        """The newest page WE signed, while we are a signer (a stale row of
+        ours after a demotion is no page of a signer any more). Our row is
+        written only by our own seal — never from the wire (:meth:`_receive`)."""
+        if not await self._signs(space):
+            return None
         for held in await self._held_all(space):
             if held.page.signer == self._own_instance_id:
                 return held
@@ -1015,12 +1026,13 @@ class SyncPageService:
 
     async def _signs(self, space: Space) -> bool:
         """Whether we are one of the space's signers: its owner, or a
-        household holding a page it signed itself (a seed-holding delegated
-        admin). A signer judges every other signer's page and catches up
-        against it, taking only rows it lacks."""
+        delegated admin household holding the seed of the pinned key
+        (:meth:`_signing_seed`) — never because a row with our id is stored
+        (security re-check 3, M-2). A signer judges every other signer's
+        page and catches up against it, taking only rows it lacks."""
         if space.owner_instance_id == self._own_instance_id:
             return True
-        return await self._own(space) is not None
+        return await self._signing_seed(space) is not None
 
     async def ref_for(
         self, space_id: str, to_instance_id: str | None = None
@@ -1065,31 +1077,65 @@ class SyncPageService:
         rows = await self._held_all(space)
         if await self._signs(space):
             matched = self._matched.get(space.id, set())
+            parked = self._parked_now(space.id)
+            fallback: _Held | None = None
             for held in rows:
-                if held.page.signer != self._own_instance_id and (
-                    held.page.root not in matched
+                if held.page.signer == self._own_instance_id or (
+                    held.page.root in matched
                 ):
+                    continue
+                if held.page.root not in parked:
                     return held
-            return None
+                # Parked (M-3): only once no other page is left to judge.
+                fallback = fallback or held
+            return fallback
         newest = rows[0] if rows else None
         if newest is None or newest.page.signer == self._own_instance_id:
             return None
         return newest
 
-    def _note_matched(
-        self, space_id: str, root: bytes, complete: bool, signer: bool
+    def _note_verdict(
+        self,
+        space_id: str,
+        root: bytes,
+        *,
+        complete: bool,
+        blocked: bool,
+        signer: bool,
     ) -> None:
-        """A signer's catch-up page *root* has nothing missing or unresolved
-        any more: the next other signer's page, if any, is judged."""
-        if not complete or not signer:
+        """A signer's verdict on catch-up page *root*: nothing missing or
+        unresolved any more (*complete*) — matched; or what is left is only
+        dry or stuck buckets no member can complete now (*blocked*) —
+        parked for :data:`DRY_RECHECK_S` (M-3). Either way the next other
+        signer's page, if any, is judged."""
+        if not signer or not (complete or blocked):
             return
-        roots = self._matched.setdefault(space_id, set())
-        if root not in roots:
+        if complete:
+            roots = self._matched.setdefault(space_id, set())
+            fresh = root not in roots
             roots.add(root)
-            self.compare_soon(space_id)  # the next unmatched page, if any
-        self._matched.move_to_end(space_id)
-        while len(self._matched) > MAX_TRACKED:
-            self._matched.popitem(last=False)
+            self._matched.move_to_end(space_id)
+            while len(self._matched) > MAX_TRACKED:
+                self._matched.popitem(last=False)
+            self._parked.get(space_id, {}).pop(root, None)
+        else:
+            parked = self._parked.setdefault(space_id, {})
+            fresh = root not in self._parked_now(space_id)
+            parked[root] = self._monotonic()
+            self._parked.move_to_end(space_id)
+            while len(self._parked) > MAX_TRACKED:
+                self._parked.popitem(last=False)
+        if fresh:
+            self.compare_soon(space_id)  # the next page to judge, if any
+
+    def _parked_now(self, space_id: str) -> set[bytes]:
+        """The roots parked less than :data:`DRY_RECHECK_S` ago."""
+        now = self._monotonic()
+        return {
+            root
+            for root, at in self._parked.get(space_id, {}).items()
+            if now - at < DRY_RECHECK_S
+        }
 
     async def _held_root(self, space_id: str) -> bytes | None:
         """The root of the page we compare with now (:meth:`_subject`), or
@@ -1359,10 +1405,10 @@ class SyncPageService:
                 held = await self._held(space)
                 if held is None:
                     return None
-                if ref is not None and (
-                    ref.get("root") == held.page.root
-                    or _ref_key(ref) >= held.page.order_key()
-                ):
+                # The requester's entry for THAT page's signer (L-1): a
+                # signer catching up names an older page as its main ref.
+                entry = _signer_entry(ref, held.page.signer)
+                if entry is not None and entry >= held.page.order_key():
                     return None
                 return await self._page_event(space_id, held)
             threshold = mine.page.order_key()
@@ -1543,6 +1589,34 @@ class SyncPageService:
             pinned_epoch=int(space.authority_key_epoch or 0),
             now_ms=self._clock_ms(),
         )
+        if page.signer == self._own_instance_id:
+            # Our own row is written only by our own seal (security
+            # re-check 3, M-2): a page from the wire under OUR id — a seed
+            # holder forging it — would replace our chain or make a plain
+            # member look like a signer.
+            log.warning(
+                "sync page: refused a page of space %s signed under our own id "
+                "(seq %d, from %s)",
+                space_id,
+                page.seq,
+                provider,
+            )
+            return False
+        if not await may_sign_pages(
+            self._seats,  # type: ignore[arg-type]
+            space,
+            page.signer,
+        ):
+            # Only the owner, or a live admin household in OUR roster with
+            # delegation on, signs pages (M-1): no rows for made-up signers.
+            log.info(
+                "sync page: a page of space %s signed by %s (from %s) refused: "
+                "neither the owner nor an admin household here",
+                space_id,
+                page.signer,
+                provider,
+            )
+            return False
         same = next(
             (h for h in await self._held_all(space) if h.page.signer == page.signer),
             None,
@@ -1780,11 +1854,12 @@ class SyncPageService:
                 todo=todo,
             )
             self._remember(space_id, result)
-            self._note_matched(
+            self._note_verdict(
                 space_id,
                 page.root,
-                not todo and not result.missing,
-                await self._signs(space),
+                complete=not todo and not result.missing,
+                blocked=from_members and not todo - self._paused(space_id, page.root),
+                signer=await self._signs(space),
             )
             log.info(
                 "sync page: space %s against page %d: %d bucket(s) differ, %d "
@@ -2402,11 +2477,12 @@ class SyncPageService:
                 ),
             )
             await self._changed(space_id)
-            self._note_matched(
+            self._note_verdict(
                 space_id,
                 wanted.root,
-                not todo and not sum(still.values()) + stuck_before,
-                wanted.owner,
+                complete=not todo and not sum(still.values()) + stuck_before,
+                blocked=not todo - self._paused(space_id, wanted.root),
+                signer=wanted.owner,
             )
             if todo - self._paused(space_id, wanted.root):
                 self._spawn(self._fetch_next(space_id), f"sync-page-fetch-{space_id}")

@@ -37,6 +37,7 @@ from socialhome.federation.sync.space.pages import (
     FETCH_ANSWER_WAIT_S,
     MAX_FETCH_ASKS,
     SyncPageService,
+    _Held,
 )
 from socialhome.federation.sync.space.stream_health import HELD_BACK_LIMIT
 from socialhome.sync_page import (
@@ -185,7 +186,8 @@ async def trio(homes, tmp_dir):  # noqa: F811
     requester = await _home(tmp_dir / "requester.db", CARL)
     for home in (host, member, requester):
         await home.db.enqueue(
-            "UPDATE spaces SET identity_public_key=? WHERE id=?",
+            "UPDATE spaces SET identity_public_key=?,"
+            " delegated_admin_authority=1 WHERE id=?",
             (PK_HEX, SPACE),
         )
     clock = _Clock()
@@ -2109,6 +2111,7 @@ async def test_h1_restart_after_an_interim_seal_still_lands_the_admins_rows(trio
     clock.ms += 90 * 60_000
     await _post(host, "post-owner", content="queued while away")
     assert await host_pages.seal_if_due(SPACE) is not None  # interim O
+    await _owner_wired(host, member, host_pages, member_pages, versions)
     await _deliver_admin_page(member_pages, host_pages, admin_page)
     await host_pages.close()  # a restart before the catch-up ran
     restarted = _service(host, HOST, SEED, clock)
@@ -2131,6 +2134,7 @@ async def test_h2_the_admin_answers_an_owner_that_sealed_first(trio):
     assert own is not None
     await _post(member, "post-carl", author=CARL, content="written while away")
     clock = host_pages._clock_ms
+    member_pages = await _seeded_admin(member, MEMBER, BOB, clock)
     await _admin_seals(
         member,
         member_pages,
@@ -2270,6 +2274,7 @@ async def test_m3_a_returning_admin_judges_the_owners_page(trio):
     own = await host_pages.seal_if_due(SPACE)
     assert own is not None
     clock = host_pages._clock_ms
+    member_pages = await _seeded_admin(member, MEMBER, BOB, clock)
     await _admin_seals(
         member,
         member_pages,
@@ -2295,6 +2300,137 @@ async def test_m3_a_returning_admin_judges_the_owners_page(trio):
     assert await member.repos.space_post.get("post-owner") is not None
     pos = await _position(member, member_pages)
     assert pos is not None and not pos.catching_up
+
+
+async def _seeded_admin(home: Home, own: str, user_id: str, clock) -> SyncPageService:
+    """The household as a REAL delegated admin: one of its people holds an
+    admin seat here and it holds the authority seed (what makes it a
+    signer — security re-check 3, M-2)."""
+    await home.repos.space.save_member(
+        SpaceMember(
+            space_id=SPACE,
+            user_id=user_id,
+            role=SpaceRole.ADMIN.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    return _service(home, own, SEED, clock)
+
+
+async def _sealed_event(pages, page, vector) -> dict:
+    """The ``SPACE_SYNC_PAGE`` payload of any signed *page* (a forger's)."""
+    return await pages._page_event(
+        SPACE,
+        _Held(
+            page=page,
+            row=StoredSyncPage(SPACE, canonical_str(page.to_wire()), vector),
+        ),
+    )
+
+
+async def test_ghost_signers_never_reach_the_owner_or_a_member(trio):
+    """M-1 (security re-check 3): a seed holder mints 300 pages under
+    made-up signer ids. Neither the owner nor a member stores one (only the
+    owner or a live admin household in the receiver's own roster signs), so
+    no household keeps 300 × 9 KB rows; a real admin's page still lands."""
+    host, member, requester, host_pages, member_pages, r_pages, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    await _stream(host, requester)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    await _owner_wired(host, member, host_pages, member_pages, versions)
+    space = await host.repos.space.get(SPACE)
+    vector, rows = await host_pages._state.vector(SPACE, cutoff=own.cutoff)
+    for i in range(300):
+        ghost = sign_page(
+            space_id=SPACE,
+            epoch=int(space.authority_key_epoch or 0),
+            signer=f"ghost-{i}",
+            seq=i + 1,
+            issued_at=host_pages._clock_ms.ms,
+            cutoff=own.cutoff,
+            rows=rows,
+            vector=vector,
+            prev_root=None,
+            space_seed=SEED,
+        )
+        event = await _sealed_event(host_pages, ghost, vector)
+        assert not await host_pages.take_pushed(
+            space_id=SPACE, provider=MEMBER, payload=event
+        )
+        assert not await r_pages.take_pushed(
+            space_id=SPACE, provider=MEMBER, payload=event
+        )
+    assert [h.page.signer for h in await host_pages._held_all(space)] == [HOST]
+    assert await r_pages._held_all(await requester.repos.space.get(SPACE)) == []
+    admin = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=host_pages._clock_ms.ms + 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    assert await host_pages.take_pushed(
+        space_id=SPACE, provider=MEMBER, payload=await _event_of(member_pages, admin)
+    )
+
+
+async def test_a_dry_page_does_not_block_the_next_signers_page(trio):
+    """M-3 (security re-check 3): the newest unmatched page (admin A's)
+    commits a row nobody can prove any more — every member household
+    holding it answers ``held: false``, so its bucket is dry. The owner
+    parks it and judges the next signer's page (admin B's): B's rows land.
+    The owner still reads catching up — A's row is unresolved, never
+    "up to date"."""
+    host, member, requester, host_pages, member_pages, r_pages, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    await _stream(host, requester)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    clock = host_pages._clock_ms
+    # Admin B (the member household): its page commits post-carl, still held.
+    await _post(member, "post-carl", author=CARL, content="admin B's")
+    page_b = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms + 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    # Admin A (the requester), NEWER: commits post-gone, then deleted — no
+    # household can prove it any more.
+    await _post(requester, "post-gone", author=CARL, content="gone")
+    space = await requester.repos.space.get(SPACE)
+    vector_a, rows_a = await r_pages._state.vector(SPACE, cutoff=own.cutoff)
+    page_a = sign_page(
+        space_id=SPACE,
+        epoch=int(space.authority_key_epoch or 0),
+        signer=REQUESTER,
+        seq=own.seq + 9,
+        issued_at=clock.ms + 120_000,
+        cutoff=own.cutoff,
+        rows=rows_a,
+        vector=vector_a,
+        prev_root=None,
+        space_seed=SEED,
+    )
+    stored_a = StoredSyncPage(SPACE, canonical_str(page_a.to_wire()), vector_a)
+    for home in (requester, member):  # both member households hold page A
+        assert await home.repos.space_sync_page.put(stored_a, key=PK_HEX)
+    await requester.db.enqueue("DELETE FROM space_posts WHERE id='post-gone'")
+    wire = await _owner_wired(host, member, host_pages, member_pages, versions)
+    wire.deliverers[REQUESTER] = r_pages
+    await _seat(host, REQUESTER, CARL, "admin")
+    for page, pages in ((page_a, r_pages), (page_b, member_pages)):
+        assert await host_pages.take_pushed(
+            space_id=SPACE, provider=MEMBER, payload=await _event_of(pages, page)
+        )
+    await _owner_settles(host, host_pages, wire, rounds=8)
+    assert await host.repos.space_post.get("post-carl") is not None
+    assert await host.repos.space_post.get("post-gone") is None
+    assert await _owner_status(host, host_pages) is SpaceSyncState.CATCHING_UP
 
 
 async def _event_of(pages, page):

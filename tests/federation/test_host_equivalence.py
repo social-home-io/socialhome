@@ -22,6 +22,7 @@ from socialhome.domain.space import (
 from socialhome.federation.host_equivalence import (
     acts_as_host,
     is_trusted_inviter,
+    may_sign_pages,
     serves_as_host,
     touches_owner_household,
 )
@@ -256,3 +257,35 @@ async def test_no_serving_without_the_seed_of_the_pinned_key(admin_side, db):
     assert await _serves(admin_side) is False
     await db.enqueue("UPDATE spaces SET identity_private_key=NULL WHERE id='sp-2'")
     assert await _serves(admin_side) is False
+
+
+# ── may_sign_pages (sync pages, security re-check 3) ────────────────────
+
+
+async def test_the_owner_and_every_live_admin_household_may_sign_pages(env):
+    spaces, seats = env
+    space = await spaces.get("sp-1")
+    assert await may_sign_pages(seats, space, OWNER)
+    assert await may_sign_pages(seats, space, ADMIN)
+    assert await may_sign_pages(seats, space, OTHER_ADMIN)  # not only our inviter
+    assert not await may_sign_pages(seats, space, "ghost-1")
+
+
+async def test_page_signing_ends_with_the_admin_seat_or_delegation(env):
+    spaces, seats = env
+    await seats.set_role("sp-1", ADMIN, "u-admin", SpaceRole.MEMBER.value)
+    space = await spaces.get("sp-1")
+    assert not await may_sign_pages(seats, space, ADMIN)
+    await spaces.save(replace(space, features=SpaceFeatures()))
+    space = await spaces.get("sp-1")
+    assert not await may_sign_pages(seats, space, OTHER_ADMIN)
+    assert await may_sign_pages(seats, space, OWNER)
+
+
+async def test_page_signing_without_a_roster_or_a_space(env):
+    spaces, seats = env
+    space = await spaces.get("sp-1")
+    assert not await may_sign_pages(None, space, ADMIN)
+    assert await may_sign_pages(None, space, OWNER)
+    assert not await may_sign_pages(seats, None, OWNER)
+    assert not await may_sign_pages(seats, space, "")

@@ -386,7 +386,10 @@ sequenceDiagram
     to every peer, so every member holding the newer page answering would
     make ≈ N²/2 copies of each page (security check 2, M1). It relays its
     newest page only in a verified-fetch session (Phase 3: the requester's
-    hosts are silent, no signer answers it). "Sync now" is a BEGIN like
+    hosts are silent, no signer answers it), and only when the requester's
+    `signers` entry for THAT page's signer is older — a signer catching up
+    names its older catch-up page as the main ref, so the main ref alone
+    would resend a page it holds on every ask (security re-check 3, L-1). "Sync now" is a BEGIN like
     any other: a member that missed a push gets the page from each signer
     it asks, once.
 - **Offline members get only the newest page**: the outbox keeps one row
@@ -742,13 +745,28 @@ What shipped, where it is more exact than the design above:
   returning-signer grace with `RETURN_GRACE_S`, an admin deferring to the
   owner's fresh page — were removed: each was a timer or special case an
   admin's cadence or an outage could defeat.)
+- **Who signs** (security re-check 3, M-1 / M-2). A page is stored only
+  when its `signer` is the space's owner, or — `delegated_admin_authority`
+  on — a household holding a live `admin` seat in the RECEIVER's own
+  roster mirror (`may_sign_pages`, `federation/host_equivalence.py`): the
+  only households the seed is shared with. A seed holder cannot mint pages
+  under made-up ids, so a household keeps at most one row per real signer
+  (the owner + the space's admin households). A page under OUR own id is
+  never taken from the wire: our row is written only by our own seal. And
+  "we are a signer" means owning the space or holding the seed of the
+  pinned key (`_signing_seed`), never "a row with our id is stored".
 - **Every signer judges each other signer's stored page once** (security
   re-check 2026-11-23: H-1, M-2, M-3). The verdict is driven from the
   stored rows, not from memory: a signer (the owner, or a seed-holding
   admin with a page of its own) compares its copy with each other
   signer's stored newest page — one unmatched page at a time, newest
   first — and catches up against it (Phase 3) until nothing it commits
-  is missing or unresolved; then the next. A page is stored, and so
+  is missing or unresolved; then the next. A page whose remaining buckets
+  are all dry or stuck (no member household can complete it now) is
+  parked for `DRY_RECHECK_S` (1 h) and the next unmatched page is judged
+  (security re-check 3, M-3: no head-of-line blocking); a parked page is
+  taken up again once nothing else is left to judge, or after the hour,
+  and keeps the status at "catching up" — never "up to date". A page is stored, and so
   judged, only if it is newer than the stored page OF THAT SIGNER: an
   old page of a signer, relayed by anyone, never parks a catch-up (M-1).
   Because the rows are persisted, a restart loses nothing: the stored row
@@ -1324,6 +1342,10 @@ requester asks one member at a time):
 | An old page of a signer, relayed by anyone (90 days old, say) | older than the page stored from that signer: neither stored nor judged, never parks a catch-up (M-1) |
 | Two delegated admins' pages, in either order | two rows; each judged once and caught up against, one at a time; both admins' rows land (M-2) |
 | A returning admin, the owner's page newer | stored in the owner's row beside the admin's own; the admin judges it like any signer and reads "catching up" until it holds what it commits (M-3) |
+| A seed holder minting pages under made-up signer ids (300 `ghost-N`, ≈ 9 KB each) | refused: only the owner or a live admin household in the receiver's own roster (delegation on) signs — rows stay one per real signer (security re-check 3, M-1) |
+| A forged page under the receiver's OWN id (a plain member made to look like a signer; the owner's row replaced by a huge `seq` dated a minute ahead, stopping its seals) | never taken from the wire — our row is written only by our seal; "signer" means owning the space or holding the seed (M-2) |
+| The first unmatched page can never complete (its rows are gone everywhere: dry or stuck) | parked for 1 h; the next signer's page is judged meanwhile; the status stays "catching up" (M-3) |
+| A plain member relaying in a fetch session to a signer catching up against an older page | reads the requester's `signers` entry for the held page's signer: no resend of a page it holds (L-1) |
 | A seed-holding admin sealing often (every 14 min, or dated up to the 5-min skew ahead) | cannot stop the owner's seals — every signer seals by its own stored page and interval. **Design limit with two signers:** a seed holder is trusted like the owner for pages (it signs config and roster too); it can make members flip between two signers' pages for "newest" and cost the push budget twice, never forge a row |
 | `fetch` on a BEGIN (the requester asks a plain member to relay its page) | requester-controlled and accepted (security re-check L-3): it makes one member send ONE page to that one requester — no amplification, and the page is authority-signed |
 | Unasked answer, or one from another household | dropped |

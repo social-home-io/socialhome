@@ -221,6 +221,17 @@ class _Exporter:
             yield [{"id": "p"}]
 
 
+class _AdminSeats:
+    """The roster mirror's live ``admin`` households (the only households
+    the authority seed is shared with)."""
+
+    def __init__(self) -> None:
+        self.admins: list[str] = []
+
+    async def list_instances_with_roles(self, space_id, roles):
+        return list(self.admins) if "admin" in roles else []
+
+
 class _Env:
     def __init__(self, *, own: str = HOST, seed: bytes | None = SEED) -> None:
         self.now = T0
@@ -268,6 +279,8 @@ class _Env:
             sleep=sleep,
         )
         self.svc.attach_hosts(hosts)
+        self.seats = _AdminSeats()
+        self.svc._seats = self.seats  # the roster mirror (attach_member_fetch)
 
     def held(self):
         row = self.repo.rows.get(SPACE)
@@ -722,6 +735,7 @@ async def test_the_owner_takes_a_newer_page_its_delegated_admin_signed():
     its delegated admin sealed meanwhile (same epoch) and compares its copy
     with it; its own next page starts a fresh chain (no conflict)."""
     env = _Env()
+    _delegating(env)
     own = await env.svc.seal_if_due(SPACE)
     assert own is not None
     other = _signed(signer=ADMIN, issued_at=T0 + 5_000, seq=999, vector=_vec(7))
@@ -855,6 +869,8 @@ class _Listed:
 
     def __init__(self, host_rows, member_rows, *, gone=(), signer=HOST) -> None:
         self.env = _Env(own=ME, seed=None)
+        if signer != HOST:
+            _delegating(self.env)
         self.host_rows = list(host_rows)
         self.page_vector = _vector_of(self.host_rows)
         self.env.state.vec = _vector_of(member_rows)
@@ -1656,6 +1672,7 @@ def _delegating(env: _Env) -> None:
     env.spaces.space = _space(
         features=replace(SpaceFeatures(), delegated_admin_authority=True)
     )
+    env.seats.admins = [ADMIN]
 
 
 async def test_m1_a_stale_ref_gets_the_last_pushed_page_from_the_signer_only():
@@ -1971,3 +1988,136 @@ async def test_a_pushed_page_of_an_older_epoch_is_never_sent_again():
         got, _v = _pushed_page(env, payload)
         assert got.epoch == 4
     assert SPACE not in env.svc._pushed_payload or (env.svc._pushed[SPACE][1][0] == 4)
+
+
+# ── Security re-check 3: who may sign, our own id, member resends ───────
+
+
+async def test_ghost_signers_are_refused():
+    """M-1: a seed holder mints pages under 300 made-up signer ids. Only the
+    owner, or — delegation on — a household holding a live admin seat in
+    OUR roster, may sign: none is stored, the rows stay the real signers'.
+    A real admin's page is still taken."""
+    env = _Env(own=ME, seed=None)
+    _delegating(env)
+    for i in range(300):
+        ghost = _signed(signer=f"ghost-{i}", seq=i + 1, vector=_vec(9))
+        assert not await env.svc.receive(
+            space_id=SPACE,
+            sync_id="s-1",
+            provider=HOST,
+            sealed=await _sealed_for_member(ghost, vector=_vec(9)),
+        )
+    await env.svc.wait_idle()
+    assert await env.svc._held_all(env.spaces.space) == []
+    real = _admin_page(issued_at=T0)
+    assert await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(real, vector=_vec(7)),
+    )
+
+
+async def test_an_admin_page_needs_delegation():
+    """M-1: without delegated admin authority nobody but the owner signs."""
+    env = _Env(own=ME, seed=None)
+    env.seats.admins = [ADMIN]
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(_admin_page(issued_at=T0), vector=_vec(7)),
+    )
+
+
+async def test_a_page_under_our_own_id_from_the_wire_is_ignored():
+    """M-2: our own row is written only by our own seal. A page from the
+    wire signed under OUR id (a seed holder forging it) is never stored —
+    a plain member does not turn into a "signer" by it."""
+    env = _Env(own=ME, seed=None)
+    _delegating(env)
+    env.seats.admins = [ADMIN, ME]  # even with an admin seat of ours
+    forged = _signed(signer=ME, issued_at=T0, seq=7, vector=_vec(5))
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(forged, vector=_vec(5)),
+    )
+    assert await env.svc._held_all(env.spaces.space) == []
+    assert not await env.svc._signs(env.spaces.space)
+
+
+async def test_a_row_of_our_id_without_the_seed_does_not_make_us_a_signer():
+    """M-2: "signer" means holding the seed (or owning the space), never
+    "a row with my id is stored" — a stale own row of a demoted admin
+    neither judges nor answers stale refs."""
+    env = _Env(own=ME, seed=None)
+    _delegating(env)
+    mine = _signed(signer=ME, issued_at=T0, seq=7, vector=_vec(5))
+    env.repo.rows[SPACE] = StoredSyncPage(SPACE, canonical_str(mine.to_wire()), _vec(5))
+    assert not await env.svc._signs(env.spaces.space)
+    assert await env.svc._own(env.spaces.space) is None
+
+
+async def test_a_forged_owner_page_cannot_stop_the_owners_seals():
+    """M-2: a page under the owner's id with a huge ``seq`` and
+    ``issued_at`` a minute ahead, from the wire, is ignored by the owner —
+    its next seal goes out as due."""
+    env = _Env()
+    own = await env.svc.seal_if_due(SPACE)
+    assert own is not None
+    forged = _signed(
+        signer=HOST, issued_at=env.now + 60_000, seq=10**12, vector=_vec(6)
+    )
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=ADMIN,
+        sealed=await _sealed_for_member(forged, vector=_vec(6)),
+    )
+    env.exporter.changed_above = 10**9
+    env.now += PAGE_MIN_INTERVAL_S * 1000
+    page = await env.svc.seal_if_due(SPACE)
+    assert page is not None and page.prev_root == own.root
+
+
+async def test_a_member_never_resends_a_page_the_requester_holds():
+    """L-1: a plain member relaying in a fetch session reads the
+    requester's ``signers`` entry for the held page's signer — a requester
+    whose main ref is an older catch-up page of another signer but which
+    holds our page already gets nothing; one lacking it gets the page."""
+    env = _Env(own=ME, seed=None)
+    _delegating(env)
+    newest = _signed(issued_at=T0 + 10, seq=60, vector=_vec(2))
+    assert await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(newest, vector=_vec(2)),
+    )
+    catch_up = _admin_page(issued_at=T0)
+    holds = {
+        **catch_up.ref(),
+        "signers": [
+            [HOST, newest.epoch, newest.issued_at, newest.seq],
+            [ADMIN, catch_up.epoch, catch_up.issued_at, catch_up.seq],
+        ],
+    }
+    assert (
+        await env.svc.page_for(
+            space_id=SPACE, requester_version=V, requester_ref=parse_page_ref(holds)
+        )
+        is None
+    )
+    lacks = {
+        **catch_up.ref(),
+        "signers": [[ADMIN, catch_up.epoch, catch_up.issued_at, catch_up.seq]],
+    }
+    assert (
+        await env.svc.page_for(
+            space_id=SPACE, requester_version=V, requester_ref=parse_page_ref(lacks)
+        )
+        is not None
+    )
