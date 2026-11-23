@@ -2026,6 +2026,8 @@
   "space.category.work_career": "Trabajo y carrera",
   "space.members.count": "{n} miembros",
   "space.members.count_one": "{n} miembro",
+  "space.followers.count": "{n} seguidores",
+  "space.followers.count_one": "{n} seguidor",
   "space.members.you": "tú",
   "space.members.custom_profile": "Perfil propio para este espacio",
   "space.members.household_profile": "Usa el perfil de tu hogar",

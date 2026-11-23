@@ -82,6 +82,7 @@ import { emptyFeedBodyKey } from './spaceFeedEmpty'
 import { personLabel } from '@/utils/names'
 import { titleEmoji } from './spaceGlyph'
 import { applySpacePostCreated } from './spaceFeedLive'
+import { followersShown } from './SpaceListRow'
 import { createLiveThrottle, type LiveThrottle } from '@/utils/liveThrottle'
 
 /** At most one whole-feed refetch (and one feed-read mark) per this gap
@@ -91,8 +92,11 @@ const SPACE_FEED_REFRESH_GAP_MS = 5_000
 interface SpaceDetail {
   id: string
   name: string
-  /** Members, never followers — the server's one count. */
-  member_count?: number
+  /** Members, never followers — the server's one count; ``null`` when it
+   *  knows none (then no number shows). Absent from an older server. */
+  member_count?: number | null
+  /** Followers; ``null`` when the server knows none. */
+  follower_count?: number | null
   /** §23.42 — gates the ``@here`` entry in the mention picker. */
   allow_here_mention?: boolean
   emoji: string | null
@@ -120,6 +124,8 @@ interface SpaceDetail {
     allowed_post_types?: string[]
     /** "Games allowed here" (group play, v_77). */
     allowed_apps?: string[]
+    /** The space takes followers. */
+    allow_subscribers?: boolean
     /** Owner opt-in: admins act for the owner while they're offline (an
      *  admin's household then holds the signing seed). Absent → off. */
     delegated_admin_authority?: boolean
@@ -417,8 +423,14 @@ export default function SpaceFeedPage() {
   // member joins (an unknown count doesn't hide it, so the section never
   // falls back to the feed while the roster loads).
   // The server's member count (the one every surface shows); the roster's
-  // own count only while an older server sends none.
-  const membersShown = spaceDetail.value?.member_count ?? memberCount.value
+  // own count only while an older server omits the key — a ``null`` from
+  // the server means "not known" and shows no number.
+  const detailCount = spaceDetail.value?.member_count
+  const membersShown = detailCount !== undefined ? detailCount : memberCount.value
+  const followerCount = spaceDetail.value?.follower_count
+  const followersOnHero = followersShown(followerCount, features?.allow_subscribers)
+    ? followerCount
+    : null
   const soloSpace = membersShown === 1
   const chatOn = !soloSpace && spaceChatOpenTo(features, viewerRole.value, spaceChatOf(spaceId))
   const follower = isFollower(viewerRole.value)
@@ -740,6 +752,7 @@ export default function SpaceFeedPage() {
           iconUrl={s.icon_url ?? null}
           about={s.about_markdown ?? null}
           memberCount={membersShown}
+          followerCount={followersOnHero}
           // A member's space picture, else their household one.
           members={memberPreview.value.map((m) => ({
             ...m, picture_url: resolveAvatar(spaceId, m.user_id, m.picture_url),

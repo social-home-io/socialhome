@@ -79,7 +79,13 @@ function color(v: unknown, fallback: string): string {
 }
 
 function count(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0
+  return optCount(v) ?? 0
+}
+
+/** A count the sender may leave out: an older host or GFS declares none,
+ *  and the page then shows no number — never "0 members". */
+function optCount(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null
 }
 
 function obj(v: unknown): Record<string, unknown> {
@@ -95,7 +101,13 @@ export interface SpacePageData {
   cover: string | null
   icon: string | null
   accent: string
-  members: number
+  /** Members, as the host declared them; ``null`` = not known. */
+  members: number | null
+  /** Followers, as the host declared them; ``null`` = not known. */
+  followers: number | null
+  /** The space takes followers (``allow_subscribers``); ``null`` when the
+   *  listing doesn't say. */
+  takesFollowers: boolean | null
   category: string
 }
 
@@ -134,7 +146,9 @@ export function parseSpace(raw: unknown): SpacePageData {
     cover: image(s.cover),
     icon: image(s.icon),
     accent: color(s.primary_color, color(s.accent_color, '#D2542A')),
-    members: count(s.member_count),
+    members: optCount(s.member_count),
+    followers: optCount(s.follower_count),
+    takesFollowers: typeof s.allow_subscribers === 'boolean' ? s.allow_subscribers : null,
     category,
   }
 }
@@ -284,6 +298,19 @@ function NotFound({ boot, serverName }: { boot: PageBoot; serverName: string }) 
   )
 }
 
+/** "6 members · 12 followers · Hobby & crafts" — a count the host didn't
+ *  declare is left out, and "0 followers" shows only for a space that says
+ *  it takes followers. */
+export function spaceCounts(data: SpacePageData): string {
+  const parts: string[] = []
+  if (data.members !== null) parts.push(tn('space.members', data.members))
+  if (data.followers !== null && (data.followers > 0 || data.takesFollowers === true)) {
+    parts.push(tn('space.followers', data.followers))
+  }
+  parts.push(t(`cat.${data.category}` as MessageKey))
+  return parts.join(' · ')
+}
+
 export function SpacePage({ gfs, data }: { gfs: string; data: SpacePageData }) {
   const about = renderMarkdown(data.about)
   return (
@@ -292,9 +319,7 @@ export function SpacePage({ gfs, data }: { gfs: string; data: SpacePageData }) {
       <div class="page-accent" />
       <BackLink href={`${gfs}/`} label={t('page.back', { server: data.serverName })} />
       <h1>{data.name || '—'}</h1>
-      <p class="page-muted">
-        {tn('space.members', data.members)} · {t(`cat.${data.category}` as MessageKey)}
-      </p>
+      <p class="page-muted page-counts">{spaceCounts(data)}</p>
       <section class="page-cta">
         <a class="page-btn" href={`${gfs}/`}>{t('space.cta')}</a>
         <p class="page-muted page-small">{t('space.cta_hint')}</p>

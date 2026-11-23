@@ -2311,6 +2311,8 @@
   "space.category.work_career": "Work & career",
   "space.members.count": "{n} members",
   "space.members.count_one": "{n} member",
+  "space.followers.count": "{n} followers",
+  "space.followers.count_one": "{n} follower",
   "space.members.you": "you",
   "space.members.custom_profile": "Custom profile for this space",
   "space.members.household_profile": "Using your household profile",
