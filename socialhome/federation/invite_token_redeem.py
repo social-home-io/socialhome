@@ -88,6 +88,7 @@ from ..services.space_authority_pin import (
     owner_authority_cert_via,
     owner_statement_via,
 )
+from ..services.space_member_guard import user_id_of_another_household
 from ..services.space_service import (
     UnfittableImages,
     _coerce_min_age,
@@ -1513,6 +1514,21 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._release_token_use(token, space_id)
             return None, REDEEM_DENY_REASON, None
 
+        # The redeemer names its own user id: never one of our own people,
+        # nor one seated (now or before) under another household — else a
+        # household could take a seat under somebody else's id and then act
+        # as that person's own household (edit / delete their rows). The
+        # follow path's rule (``SpaceService.approve_remote_follow``).
+        if await self._user_id_taken(space_id, redeemer_instance_id, redeemer_user_id):
+            log.warning(
+                "invite redeem from %s for space %s refused: the user id "
+                "belongs to another household",
+                redeemer_instance_id,
+                space_id,
+            )
+            await self._release_token_use(token, space_id)
+            return None, REDEEM_DENY_REASON, None
+
         # A local community: decided on the ~1 km location the redeem
         # carried — an invite link is no override. Checked after the consume
         # and the ban (so the specific reason reaches only a holder of a live
@@ -1786,6 +1802,27 @@ class SpaceInviteTokenRedeemCoordinator:
                 unfittable=self._unfittable,
             )
         return ack_body
+
+    async def _user_id_taken(
+        self, space_id: str, instance_id: str, user_id: str
+    ) -> bool:
+        """``user_id`` is one of our own people, or holds (or held) a seat
+        in ``space_id`` under a household other than ``instance_id``. A user
+        id belongs to one household; fail closed on a lookup error."""
+        try:
+            return await user_id_of_another_household(
+                seats=self._remote_members,
+                users=self._users,
+                space_id=space_id,
+                instance_id=instance_id,
+                user_id=user_id,
+            )
+        except Exception:
+            log.exception(
+                "invite redeem: user id ownership lookup failed for space %s",
+                space_id,
+            )
+            return True
 
     async def _reack_seated_redeemer(
         self,

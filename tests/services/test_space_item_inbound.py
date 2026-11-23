@@ -1009,8 +1009,7 @@ async def test_a_follower_deletes_its_own_comment_after_the_switch_is_off(env, m
         env, "comment", _comment(env, cid), member=True, authorship=_FollowerSeat()
     )
     await _switches(env, comment=False, react=False)
-    seats = _FollowerSeat(follower_blocked=True)
-    seats.follower_blocked = False
+    seats = _FollowerSeat()
     assert await _apply(
         env, "comment_delete", _cdel(env, cid), member=member, authorship=seats
     )
@@ -1018,17 +1017,31 @@ async def test_a_follower_deletes_its_own_comment_after_the_switch_is_off(env, m
     assert seats.calls and all(kw["subscriber_ok"] for _k, kw in seats.calls)
 
 
-async def test_a_follower_early_delete_of_its_own_comment_needs_no_switch(env):
-    """The tombstone of a delete that overtook its create is the author's
-    own delete too: the switch does not decide it."""
+@pytest.mark.parametrize("member", [True, False])
+async def test_a_follower_early_delete_follows_the_comment_switch(env, member):
+    """P4 adversarial review: a tombstone for a comment never seen here is no
+    delete of a held comment — with the switch off a follower (still holding
+    a react cert) could plant unbounded permanent rows on every household.
+    It follows the comment switch, like the comment it pre-empts."""
     cid = _cid()
-    await _switches(env, comment=False, react=False)
-    seats = _FollowerSeat()
+    await _switches(env, comment=False, react=True)
+    assert not await _apply(
+        env,
+        "comment_delete",
+        _cdel(env, cid),
+        member=member,
+        authorship=_FollowerSeat(),
+    )
+    assert await env["posts"].get_comment(cid) is None
+    await _switches(env, comment=True, react=True)
     assert await _apply(
-        env, "comment_delete", _cdel(env, cid), member=True, authorship=seats
+        env,
+        "comment_delete",
+        _cdel(env, cid),
+        member=member,
+        authorship=_FollowerSeat(),
     )
     assert (await env["posts"].get_comment(cid)).deleted
-    assert seats.calls and all(kw["subscriber_ok"] for _k, kw in seats.calls)
 
 
 async def test_a_follower_cannot_delete_someone_elses_comment(env):

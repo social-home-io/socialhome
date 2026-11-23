@@ -20,7 +20,8 @@ with the same rules as the federated ``SPACE_COMMENT_*`` /
   follower seat only where the space lets followers comment / react — an
   edit of its own comment needs the comment right like the comment
   itself, while deleting its own comment needs only the seat: an author
-  may always delete their own comment, owner decision F6); a post delete runs the ``posts`` access level
+  may always delete their own comment, owner decision F6); a post delete
+  runs the ``posts`` access level
   (:meth:`SpaceAuthorship.item_access_admits`), matching the ``write`` scope
   the cert already proves. A household without the roster (a GFS
   subscriber) relies on the cert scope plus the user binding.
@@ -636,8 +637,13 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        # The author's own delete, as in :meth:`_comment_delete`: no switch.
-        await self._await_post(item, subscriber_ok=True)
+        # Unlike the delete of a HELD comment (:meth:`_comment_delete`), a
+        # tombstone for a comment we never saw follows the comment switch:
+        # with it off a follower could plant unbounded permanent rows on
+        # every household (any id it mints is bound to itself), and the
+        # comment it pre-empts could not land with the switch off anyway.
+        subscriber_ok = item.space.features.allow_subscriber_comment
+        await self._await_post(item, subscriber_ok=subscriber_ok)
         post = await self._post_here(item.post_id, item)
         if post is None:
             log.info(
@@ -646,7 +652,7 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        if not await self._seat_ok(item, subscriber_ok=True):
+        if not await self._seat_ok(item, subscriber_ok=subscriber_ok):
             return False
         tombstone = Comment(
             id=cid,

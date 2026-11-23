@@ -50,10 +50,14 @@ from socialhome.federation.inbound_validator import (
     InboundContext,
     run_post_decrypt_gates,
 )
+from socialhome.federation.owner_bound_id import (
+    SPACE_COMMENT_KIND,
+    mint_owner_bound_id,
+)
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import WRITER_SCOPE_COMMENT, sign_writer_cert
 
-from .test_space_content_authorship import SP, env  # noqa: F401
+from .test_space_content_authorship import LOCAL_USER, SP, env  # noqa: F401
 
 pytestmark = pytest.mark.security
 
@@ -225,6 +229,63 @@ async def test_a_left_follower_deletes_nothing(env):  # noqa: F811
     delete = {"id": OWN, "comment_id": OWN, "post_id": "post-a", "author": FAN}
     assert not await _gated(app, _event(FET.SPACE_COMMENT_DELETED, delete))
     assert await _comment(db, OWN) == (FAN, 0, "mine")
+
+
+@pytest.mark.parametrize(
+    ("victim", "comment"), [(LOCAL_USER, "cmt-l"), ("u-a", "cmt-a")]
+)
+async def test_a_seat_squatted_under_a_victims_id_deletes_nothing(
+    env,  # noqa: F811
+    victim,
+    comment,
+):
+    """P4 adversarial review: a follower seat under somebody else's user id
+    — one of OUR people, or a user seated under another household (a redeem
+    now refuses such a seat; this is the receiver's own defence) — is no
+    authorship proof: the delete passes the gate (a live follower seat names
+    that author) and the handler still leaves the comment alone."""
+    app, db = env
+    await _follower(db, comment=False, react=False)
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?, ?, ?, 'subscriber')",
+        (SP, FOLLOWER, victim),
+    )
+    before = await _comment(db, comment)
+    delete = {"id": comment, "comment_id": comment, "author": victim}
+    await _gated(app, _event(FET.SPACE_COMMENT_DELETED, {**delete, "post_id": "x"}))
+    assert await _comment(db, comment) == before
+    assert before is not None and before[1] == 0
+
+
+@pytest.mark.parametrize("comment_on", [False, True])
+async def test_a_follower_holds_a_delete_of_an_unknown_comment_only_when_owned(
+    env,  # noqa: F811
+    comment_on,
+    monkeypatch,
+):
+    """P4 adversarial review: a follower-only household's edit / delete of a
+    comment not held here waits in the parent buffer only for its own id
+    (bound to the payload author) and only while the comment switch is on —
+    never a slot for somebody else's id."""
+    app, db = env
+    await _follower(db, comment=comment_on, react=True)
+    fed = app[federation_service_key]
+    (handler,) = fed._event_registry.handlers_for(FET.SPACE_COMMENT_DELETED)
+    inbound = handler.__self__
+    held: list[str] = []
+
+    def _record(self, event, space_id, kind, parent_id, **kw):
+        held.append(parent_id)
+        return True
+
+    monkeypatch.setattr(type(inbound), "_hold_for_parent", _record)
+    own = mint_owner_bound_id(SPACE_COMMENT_KIND, space_id=SP, owner_user_id=FAN)
+    other = mint_owner_bound_id(SPACE_COMMENT_KIND, space_id=SP, owner_user_id="u-a")
+    for cid in (own, other):
+        delete = {"id": cid, "comment_id": cid, "post_id": "post-a", "author": FAN}
+        await _gated(app, _event(FET.SPACE_COMMENT_DELETED, delete))
+    assert held == ([own] if comment_on else [])
 
 
 # ── §25.6 sync stream ────────────────────────────────────────────────────

@@ -344,6 +344,7 @@ from .space_member_guard import (
     SpaceMemberGuardMixin,
     require_seat,
     seat_of,
+    user_id_of_another_household,
 )
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
@@ -8716,9 +8717,12 @@ class SpaceService(
             return False
         # The applicant picks ``user_id``: never one of our own people, nor
         # one seated (now or before) under another household.
-        if await self._users.get_by_user_id(user_id) is not None or (
-            await self._remote_members.list_instances_of_user(space_id, user_id)
-            - {instance_id}
+        if await user_id_of_another_household(
+            seats=self._remote_members,
+            users=self._users,
+            space_id=space_id,
+            instance_id=instance_id,
+            user_id=user_id,
         ):
             log.info(
                 "follow from %s for space %s refused: the user id belongs to "

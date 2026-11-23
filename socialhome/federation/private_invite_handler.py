@@ -76,6 +76,7 @@ from ..services.space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from ..services.space_member_guard import user_id_of_another_household
 from ..services.space_service import (
     SUPPORTED_SEED_SUITES,
     admit_join,
@@ -709,6 +710,28 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
                 invitee_user_id,
                 live_seat.role,
+            )
+            return
+        # A user id belongs to one household: never seat it under a second
+        # one (the redeem's rule) — the seat would let this household act as
+        # that person's own (P4 adversarial review). No user repo is wired
+        # here, so one of OUR people's ids is not caught at this step: the
+        # invitation names an id an admin picked from this household's own
+        # directory, and every receiver refuses acting for one of its own
+        # people (``SpaceAuthorship.acts_for``).
+        if await user_id_of_another_household(
+            seats=self._remote_members,
+            users=None,
+            space_id=invite["space_id"],
+            instance_id=event.from_instance,
+            user_id=invitee_user_id,
+        ):
+            log.warning(
+                "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s: %s is seated under "
+                "another household — refusing",
+                invite["space_id"],
+                event.from_instance,
+                invitee_user_id,
             )
             return
         if not await self._local_area_admits(invite, event, invitee_user_id):

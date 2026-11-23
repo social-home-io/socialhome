@@ -4192,7 +4192,9 @@ def _follower_comment_round(
         _must(f"{what}: {label}", s, patched, ok=(200,))
 
     def _epoch() -> int:
-        rows = _rows(host, "SELECT MAX(epoch) FROM space_keys WHERE space_id=?", (space_id,))
+        rows = _rows(
+            host, "SELECT MAX(epoch) FROM space_keys WHERE space_id=?", (space_id,)
+        )
         return int(rows[0][0])
 
     def _comment(text: str) -> tuple[int, Any]:
@@ -4237,14 +4239,24 @@ def _follower_comment_round(
             lambda r: bool(r) and r[0][0] == text,
             what=f"{what}: {label} never held {follower}'s comment",
         )
+        _poll_rows(
+            label,
+            "SELECT role, display_name FROM space_remote_members "
+            "WHERE space_id = ? AND user_id = ? AND tombstoned = 0",
+            (space_id, fol["user_id"]),
+            lambda r: bool(r) and r[0][0] == "subscriber" and bool(r[0][1]),
+            what=f"{what}: {label}'s roster never named the follower",
+        )
         st, roster = _as(state, label, "GET", f"/api/spaces/{space_id}/members")
         mine = [
             r
             for r in (roster if isinstance(roster, list) else [])
             if r.get("user_id") == fol["user_id"]
         ]
-        if not mine or mine[0].get("role") != "subscriber" or not mine[0].get(
-            "display_name"
+        if (
+            not mine
+            or mine[0].get("role") != "subscriber"
+            or not mine[0].get("display_name")
         ):
             raise SystemExit(
                 f"{what}: {label}'s roster does not name the follower: {mine!r}"
@@ -4260,6 +4272,7 @@ def _follower_comment_round(
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline and _epoch() <= before:
         time.sleep(1.0)
+    time.sleep(5.0)  # a second rotation, if any, lands meanwhile
     after = _epoch()
     if after != before + 1:
         raise SystemExit(
@@ -10271,7 +10284,7 @@ def cmd_gfs_follower_comment() -> None:
     with a), e a follower reached only through the GFS, both seated on the
     space's channel.
 
-    b posts; e reads it. Then :func:`_follower_comment_round` with host a,
+    b posts; a and e hold it. Then :func:`_follower_comment_round` with host a,
     follower e and members a + b: switch on → e's reader cert (and the
     channel writer key); e's comment reaches a and b — b over the channel
     (e publishes it anonymously, ``POST /gfs/channels/publish-anon``), named

@@ -46,6 +46,9 @@ if TYPE_CHECKING:
 
     from ..domain.space import SpaceMember, SpaceRole
     from ..domain.user import User
+    from ..repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
 
@@ -154,3 +157,28 @@ async def require_member_seat(
     if member.role not in WRITER_ROLES:
         raise SpacePermissionError(NOT_A_SPACE_MEMBER)
     return member
+
+
+async def user_id_of_another_household(
+    *,
+    seats: AbstractSpaceRemoteMemberRepo,
+    users: AbstractUserRepo | None,
+    space_id: str,
+    instance_id: str,
+    user_id: str,
+) -> bool:
+    """Whether ``user_id`` is NOT household ``instance_id``'s to claim in
+    ``space_id``: one of OUR people (when ``users`` is given), or a user
+    holding — or having held — a seat there under another household.
+
+    A user id belongs to one household. The one rule for every place that
+    takes a remote household's word for a user id — seating it (a redeem,
+    a follow, a private invitation's accept) and acting as it (the
+    receivers' authorship checks, ``SpaceAuthorship``) — so a seat taken
+    under somebody else's id seats nobody and proves nothing (P4
+    adversarial review: the own-comment delete needs no switch, owner
+    decision F6). The local lookup is a primary-key read; the roster read
+    is keyed on ``(space_id, user_id)``."""
+    if users is not None and await users.get_by_user_id(user_id) is not None:
+        return True
+    return bool(await seats.list_instances_of_user(space_id, user_id) - {instance_id})

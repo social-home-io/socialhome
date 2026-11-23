@@ -615,7 +615,20 @@ switches there either. Both hold on every path, `SPACE_ROUTED` included.
   - **locally:** `DELETE …/comments/{cid}` needs a seat of any role for
     the author's own comment.
   A left (tombstoned) follower deletes nothing over federation, like any
-  former member. Editing stays behind the switch.
+  former member. Editing stays behind the switch, and so does a delete
+  of a comment the receiver never held (the early-delete tombstone, and
+  the parent hold of a federated delete): with the switch off a follower
+  could otherwise plant unbounded rows on every household. Every
+  receiver also refuses an authorship claim for one of its own people or
+  for a user seated under another household, and a redeem never seats a
+  user id that belongs to another household (the follow path's rule,
+  `user_id_of_another_household`; a private invitation's accept too).
+  Residual: the rule is first come, first served — a household that
+  redeems a link under someone's id before they join blocks their own
+  redeem (the follow path had this already). The proper fix is to prove
+  the claim (`derive_user_id(instance_pk, anchor)` against the pinned
+  household key, as the public author check does), a version-gated
+  redeem field — a follow-up.
 
 Names: a follower's people reach members through the roster like any
 member's (the roster entry's display name, role `subscriber`), so a

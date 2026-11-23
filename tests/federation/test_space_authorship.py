@@ -84,6 +84,14 @@ class _Seats:
                 return r
         return None
 
+    async def list_instances_of_user(self, space_id, user_id):
+        # Tombstones included, like the real repo.
+        return {
+            r.instance_id
+            for r in self.rows
+            if (r.space_id, r.user_id) == (space_id, user_id)
+        }
+
 
 class _Users:
     def __init__(self, local: set[str]) -> None:
@@ -336,6 +344,29 @@ async def test_a_read_only_seat_authors_nothing() -> None:
 async def test_a_read_only_seat_may_still_change_its_own_row() -> None:
     a = _auth([_seat(AUTHOR_HOUSE, "u-f", role="subscriber")])
     assert await a.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-f")
+
+
+@pytest.mark.parametrize("any_role", [False, True])
+async def test_a_seat_under_somebody_elses_id_acts_for_nobody(any_role) -> None:
+    """P4 adversarial review: a user id belongs to one household. A seat
+    held under one of OUR people's ids, or under an id also seated (now or
+    before) under another household, proves nothing — for a write or an
+    own-row change alike (the own-comment delete needs no switch, F6)."""
+    local = _auth([_seat(AUTHOR_HOUSE, "u-local")], local={"u-local"})
+    assert not await local.acts_for(
+        _ev(AUTHOR_HOUSE), SPACE, "u-local", any_role=any_role
+    )
+    assert not await local.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-local")
+    twice = _auth(
+        [
+            _seat(OTHER_HOUSE, "u-v", tombstoned=True),
+            _seat(AUTHOR_HOUSE, "u-v", role="subscriber"),
+        ]
+    )
+    assert not await twice.acts_for(_ev(AUTHOR_HOUSE), SPACE, "u-v", any_role=True)
+    assert not await twice.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-v")
+    own = _auth([_seat(AUTHOR_HOUSE, "u-v")])
+    assert await own.acts_for(_ev(AUTHOR_HOUSE), SPACE, "u-v", any_role=any_role)
 
 
 async def test_a_follower_comment_needs_the_spaces_opt_in() -> None:
