@@ -692,6 +692,15 @@ silently wrong rather than just "unknown"):
    `federation/sync/space/watermark.py`. That gives a household crossing it
    one full stream; any other bump keeps every sync watermark (a tripwire
    test fails on an unlisted provider gate).
+7. The same change also changes the signed sync pages: every synced
+   resource is committed by `COMMIT_SPECS` in `socialhome/sync_page.py`
+   (which fields, in what form). A new resource, a new synced field or a
+   changed export form updates its `CommitSpec` in the same PR, and once
+   any page of the current form has shipped, bumps the page suite
+   (`PAGE_SUITE_SHA256_B256` → a sibling `-c2`, grown in
+   `SUPPORTED_PAGE_SUITES`) instead of changing the form under the old
+   id — otherwise host and members hash the same row differently and
+   every bucket reads as missing. See `docs/protocol/sync-pages.md` §2.
 
 Per-peer feature-flag sets on top of the integer are deferred until there's
 real evidence of selective deployments, asymmetric support, or forks — a
