@@ -194,6 +194,30 @@ async def test_a_follower_edits_its_comment_only_under_the_switch(env):  # noqa:
     assert await _comment(db, OWN) == (FAN, 0, "mine")
 
 
+async def test_a_mixed_households_follower_edits_only_under_the_switch(env):  # noqa: F811
+    """Final review I1: a household holding a member seat AND a follower
+    seat passes the §24.11 gate on its member seat — the handler still
+    holds its follower's edit to the comment switch, as the channel does
+    (members equal on any path). Its delete stays free (F6)."""
+    app, db = env
+    await _follower(db, comment=False, react=False)
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?, ?, 'u-m2', 'member')",
+        (SP, FOLLOWER),
+    )
+    edit = {"id": OWN, "comment_id": OWN, "author": FAN, "content": "rewritten"}
+    await _gated(app, _event(FET.SPACE_COMMENT_UPDATED, edit))
+    assert await _comment(db, OWN) == (FAN, 0, "mine")
+    await _switches(db, comment=True, react=False)
+    await _gated(app, _event(FET.SPACE_COMMENT_UPDATED, edit))
+    assert await _comment(db, OWN) == (FAN, 0, "rewritten")
+    await _switches(db, comment=False, react=False)
+    delete = {"id": OWN, "comment_id": OWN, "post_id": "post-a", "author": FAN}
+    await _gated(app, _event(FET.SPACE_COMMENT_DELETED, delete))
+    assert await _comment(db, OWN) == (FAN, 1, None)
+
+
 async def test_a_follower_deletes_its_own_comment_with_every_switch_off(env):  # noqa: F811
     """Owner decision F6: the author's own delete, no switch and no cert —
     the household's signed envelope and its live follower seat prove the

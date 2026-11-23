@@ -178,7 +178,10 @@ async def user_id_of_another_household(
     under somebody else's id seats nobody and proves nothing (P4
     adversarial review: the own-comment delete needs no switch, owner
     decision F6). The local lookup is a primary-key read; the roster read
-    is keyed on ``(space_id, user_id)``."""
+    filters ``(space_id, user_id)`` on the primary key's ``space_id``
+    prefix, so it walks the space's roster (the same read
+    ``get_including_tombstones`` already makes) — ≈ 10 000 index rows for a
+    10 000-follower space, run only after the sender's seat was found."""
     if users is not None and await users.get_by_user_id(user_id) is not None:
         return True
     return bool(await seats.list_instances_of_user(space_id, user_id) - {instance_id})

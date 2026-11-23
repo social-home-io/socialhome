@@ -261,13 +261,22 @@ class SpaceAuthorship:
         """``user_id`` is not one of our people and holds no seat in
         ``space_id`` under any household but ``sender`` — see
         :meth:`acts_for`."""
-        return not await user_id_of_another_household(
+        if await user_id_of_another_household(
             seats=self._seats,
             users=self._users,
             space_id=space_id,
             instance_id=sender,
             user_id=user_id,
-        )
+        ):
+            log.warning(
+                "space %s: %s holds a seat for %s, which is one of our people "
+                "or seated under another household — not its own; refusing",
+                space_id,
+                sender,
+                user_id,
+            )
+            return False
+        return True
 
     async def item_access_admits(
         self,
