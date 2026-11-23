@@ -723,7 +723,10 @@ async def test_poll_once_maps_global_space_shape(env):
     got = out[0]
     assert got.space_id == "s1"
     assert got.instance_id == "inst-a"
-    assert got.member_count == 7
+    # An older GFS serves only its relay-seat ``subscriber_count`` — not the
+    # space's members: no number, never that count and never 0.
+    assert got.member_count is None
+    assert got.follower_count is None
     assert got.category == "tech"
     assert got.min_age == 13
     # The GFS directory is geo-less — never invent coordinates.
@@ -985,3 +988,59 @@ async def test_a_pin_outlives_the_listing_so_tofu_cannot_be_redone(env):
     await svc.poll_once()
     assert await repo.get("sp-ask") is not None  # listed again…
     assert usable_contact(await repo.get_pin("sp-ask")) is None  # …not trusted
+
+
+async def test_poll_once_takes_the_hosts_declared_counts(env):
+    """A current GFS serves the counts the host declared in its signed
+    listing; the relay-seat ``subscriber_count`` is never read."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    item = _global_space_item(member_count=12, follower_count=40)
+    item.pop("subscriber_count")
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={"spaces": [item]}),
+    )
+    assert await svc.poll_once() == 1
+    got = (await repo.list_active())[0]
+    assert (got.member_count, got.follower_count) == (12, 40)
+
+
+@pytest.mark.parametrize("bad", [None, -1, 10_000_001, True, "12", 2.5])
+async def test_poll_once_shows_no_number_for_a_missing_or_bad_count(env, bad):
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    item = _global_space_item(member_count=bad, follower_count=bad)
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={"spaces": [item]}),
+    )
+    assert await svc.poll_once() == 1
+    got = (await repo.list_active())[0]
+    assert (got.member_count, got.follower_count) == (None, None)
+
+
+async def test_a_space_on_two_gfss_keeps_its_number_whatever_the_order(env):
+    """REGRESSION (review I4): one GFS declares the counts, an older one
+    lists the same space without — the row keeps the number either way."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://one.example"))
+    await gfs_repo.save(_gfs_conn("gfs-2", inbox_url="https://two.example"))
+    counted = _global_space_item(member_count=12, follower_count=40)
+    bare = _global_space_item()
+    for first, second in ((counted, bare), (bare, counted)):
+        svc = PublicSpaceDiscoveryService(
+            repo,
+            gfs_connection_repo=gfs_repo,
+            http_client=_PerUrlSession(
+                {
+                    "https://one.example": {"spaces": [first]},
+                    "https://two.example": {"spaces": [second]},
+                }
+            ),
+        )
+        await svc.poll_once()
+        got = (await repo.list_active())[0]
+        assert (got.member_count, got.follower_count) == (12, 40)

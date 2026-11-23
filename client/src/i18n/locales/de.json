@@ -2004,6 +2004,8 @@
   "space.category.work_career": "Beruf & Karriere",
   "space.members.count": "{n} Mitglieder",
   "space.members.count_one": "{n} Mitglied",
+  "space.followers.count": "{n} Follower",
+  "space.followers.count_one": "{n} Follower",
   "space.members.you": "du",
   "space.members.custom_profile": "Eigenes Profil für diesen Space",
   "space.members.household_profile": "Nutzt dein Haushaltsprofil",

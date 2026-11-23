@@ -7,6 +7,26 @@ cluster-node dataclasses for the full admin portal.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
+
+
+def normalize_counts_ts(value: object) -> str | None:
+    """A listing-counts stamp as stored: UTC ISO 8601 at a fixed microsecond
+    width (so stamps compare in time order as strings), or ``None`` for an
+    absent, unparseable or naive value.
+
+    Pure. Used for a publish's signed ``ts`` and for a cluster peer's
+    gossiped ``counts_ts``.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 @dataclass(slots=True, frozen=True)
@@ -117,6 +137,20 @@ class GlobalSpace:
     #: "Ask to join" to it — no lookup, so this server learns nothing about
     #: who asks. ``None`` for an invite-only space or an older owner.
     join_contact: dict | None = None
+    #: The space's member and follower counts as its owning household
+    #: DECLARES them inside its signed publish body (GFS migration 0032,
+    #: :mod:`socialhome.domain.space_listing_counts`) — what the directory
+    #: and public pages show. ``None`` = not declared (an older household or
+    #: an invalid value): readers show no number, never ``0``. Unrelated to
+    #: ``subscriber_count`` above, which is this server's relay-seat
+    #: bookkeeping and never served as a member count.
+    member_count: int | None = None
+    follower_count: int | None = None
+    #: The signed ``ts`` of the publish that declared the counts, as UTC ISO
+    #: 8601 — the last-writer-wins stamp, so a delayed older publish (or a
+    #: cluster peer's stale row) never overwrites newer counts. Internal:
+    #: never served.
+    counts_ts: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

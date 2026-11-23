@@ -427,3 +427,31 @@ async def test_list_names_a_paired_host_and_never_an_unnamed_one_by_id(client):
     assert rows["sp-keller"]["host_is_paired"] is True
     assert rows["sp-blank"]["host_display_name"] is None
     assert rows["sp-blank"]["host_is_paired"] is True
+
+
+async def test_list_returns_the_declared_counts_or_null(client):
+    """The counts the host declared in its signed GFS listing; a listing
+    from an older host or GFS has none — ``null``, never 0."""
+    repo = SqlitePublicSpaceRepo(client._db)
+    await repo.upsert(
+        PublicSpaceListing(
+            space_id="sp-new",
+            instance_id="remote-1",
+            name="New",
+            member_count=12,
+            follower_count=40,
+        )
+    )
+    await repo.upsert(
+        PublicSpaceListing(space_id="sp-old", instance_id="remote-1", name="Old")
+    )
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    rows = {s["space_id"]: s for s in await r.json()}
+    assert (rows["sp-new"]["member_count"], rows["sp-new"]["follower_count"]) == (
+        12,
+        40,
+    )
+    assert (rows["sp-old"]["member_count"], rows["sp-old"]["follower_count"]) == (
+        None,
+        None,
+    )

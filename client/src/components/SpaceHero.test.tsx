@@ -67,6 +67,34 @@ describe('SpaceHero', () => {
     expect(container.querySelector('.sh-space-hero-members')?.textContent).toBe('1 member')
   })
 
+  it('the followers follow the member count, before the tier', () => {
+    const { container } = render(
+      <SpaceHero name="Club" emoji={null} coverUrl={null} about={null} memberCount={6}
+                 followerCount={12} tier="global" />,
+    )
+    expect(container.querySelector('.sh-space-hero-line')?.textContent)
+      .toBe('6 members· 12 followers· Global')
+    expect(container.querySelector('.sh-space-hero-followers')?.textContent).toBe('· 12 followers')
+  })
+
+  it('one follower is singular; no member count leaves no dot before it', () => {
+    const { container } = render(
+      <SpaceHero name="Club" emoji={null} coverUrl={null} about={null} memberCount={null}
+                 followerCount={1} />,
+    )
+    expect(container.querySelector('.sh-space-hero-members')).toBeNull()
+    expect(container.querySelector('.sh-space-hero-followers')?.textContent).toBe('1 follower')
+  })
+
+  it('no follower count, no followers part', () => {
+    const { container } = render(
+      <SpaceHero name="Club" emoji={null} coverUrl={null} about={null} memberCount={4}
+                 followerCount={null} tier="public" />,
+    )
+    expect(container.querySelector('.sh-space-hero-followers')).toBeNull()
+    expect(container.querySelector('.sh-space-hero-line')?.textContent).toBe('4 members· Public')
+  })
+
   it('quick links are chips with a link icon, http(s) only, opening a new tab', () => {
     const { container } = render(
       <SpaceHero name="Family" emoji={null} coverUrl={null} about={null}

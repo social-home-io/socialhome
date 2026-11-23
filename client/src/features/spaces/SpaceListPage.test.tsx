@@ -74,6 +74,9 @@ const PAIRED = [
   { space_id: 'pBike', host_instance_id: 'iid-keller', host_display_name: 'Keller household', host_is_paired: true, name: 'Hottingen bike repair', description: null, emoji: '🚲', member_count: 12, join_mode: 'open', min_age: 0 },
 ]
 
+/** A test's own paired rows, in place of ``PAIRED``. */
+const PAIRED_EXTRA: { value: unknown[] | null } = { value: null }
+
 interface Wire {
   spaces?: unknown
   unread?: Record<string, unknown>
@@ -89,7 +92,7 @@ function wire({ spaces = SPACES, unread = {}, gfs = [], global = [] }: Wire = {}
     }
     if (url === '/api/spaces/chat-unread') return { spaces: unread }
     if (url === '/api/household/spaces') return HOUSEHOLD
-    if (url === '/api/peer_spaces') return PAIRED
+    if (url === '/api/peer_spaces') return PAIRED_EXTRA.value ?? PAIRED
     if (url === '/api/public_spaces') return global
     if (url === '/api/gfs/connections') return gfs
     if (url === '/api/me/subscriptions') return { subscriptions: [] }
@@ -436,6 +439,51 @@ describe('SpaceListPage — Discover', () => {
     const row = await r.findByTestId('discover-no-gfs')
     await r.waitFor(() => expect(row.textContent).toContain('Ask Pascal'))
     expect(r.queryByRole('link', { name: 'Add a GFS' })).toBeNull()
+  })
+
+  it('a row says how many members and followers its host declared — no number when it declared none', async () => {
+    const g = (space_id: string, name: string, over: Record<string, unknown>) => ({
+      space_id, host_instance_id: 'iid-far', host_display_name: null, host_is_paired: false,
+      name, description: null, emoji: null, join_mode: 'open', min_age: 0, ...over,
+    })
+    wire({
+      gfs: [{ id: 'g1', status: 'active' }],
+      global: [
+        g('gBoth', 'Both counts', { member_count: 6, follower_count: 12, allow_subscribers: true }),
+        g('gOne', 'One follower', { member_count: 1, follower_count: 1, allow_subscribers: true }),
+        // An older host declares no number: no "0 members".
+        g('gOld', 'Older host', { member_count: null, follower_count: null, allow_subscribers: true }),
+        // Takes no followers: never "0 followers".
+        g('gNoFollow', 'No followers taken', { member_count: 3, follower_count: 0, allow_subscribers: false }),
+        g('gZero', 'Nobody follows yet', { member_count: 3, follower_count: 0, allow_subscribers: true }),
+      ],
+    })
+    const r = await renderPage('/spaces?discover=global')
+    const meta = async (name: string) =>
+      (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
+    expect(await meta('Both counts')).toBe('6 members · 12 followers · open')
+    expect(await meta('One follower')).toBe('1 member · 1 follower · open')
+    expect(await meta('Older host')).toBe('open')
+    // (No Follow and no pairing: the row says how people do get in.)
+    expect(await meta('No followers taken')).toBe('3 members · open · members can invite you with a link')
+    expect(await meta('Nobody follows yet')).toBe('3 members · 0 followers · open')
+    expect(r.container.textContent).not.toContain('0 members')
+  })
+
+  it('a paired row shows its followers; an older paired household sends none', async () => {
+    PAIRED_EXTRA.value = [
+      { ...PAIRED[0], follower_count: 4 },
+      { ...PAIRED[1], follower_count: null },
+    ]
+    try {
+      const r = await renderPage('/spaces?discover=paired')
+      const meta = async (name: string) =>
+        (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
+      expect(await meta('Müller family market')).toBe('Müller household · 6 members · 4 followers · ask to join')
+      expect(await meta('Hottingen bike repair')).toBe('Keller household · 12 members · open')
+    } finally {
+      PAIRED_EXTRA.value = null
+    }
   })
 
   it('with a GFS, global spaces list; one you can only read along offers Follow', async () => {

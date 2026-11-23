@@ -198,6 +198,8 @@
 
   "space.members.count": "Member list heading for 0 or 2+ members. {n} = number. Singular form is space.members.count_one.",
   "space.members.count_one": "Member list heading for exactly one member (French also uses it for 0). {n} = number.",
+  "space.followers.count": "Follower count of a space, after its member count: '6 members · 12 followers'. {n} = number. Plural form; the _one key is the singular.",
+  "space.followers.count_one": "Singular of space.followers.count. {n} = 1 (French also uses it for 0).",
   "space.members.you": "Small lowercase chip next to your own name in the member list.",
   "space.members.joined_on": "Shown under a member who joined over a year ago. {date} = short month + year, e.g. 'Apr 2024'.",
   "space.members.banned_heading": "Section heading above people banned from the space. Plural.",

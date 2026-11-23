@@ -70,6 +70,19 @@ describe('t / tn', () => {
     expect(tn('space.members', 12)).toBe('12 members')
   })
 
+  it('counts a space\'s followers with a singular', () => {
+    expect(tn('space.followers', 1)).toBe('1 follower')
+    expect(tn('space.followers', 12)).toBe('12 followers')
+    setLocale('de')
+    expect(tn('space.followers', 12)).toBe('12 Follower')
+    setLocale('nl')
+    expect(tn('space.followers', 1)).toBe('1 volger')
+    setLocale('fr')
+    expect(tn('space.followers', 3)).toBe('3 abonnés')
+    setLocale('es')
+    expect(tn('space.followers', 3)).toBe('3 seguidores')
+  })
+
   it('speaks the chosen language', () => {
     setLocale('de')
     expect(locale()).toBe('de')

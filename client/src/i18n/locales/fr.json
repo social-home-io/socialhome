@@ -1999,6 +1999,8 @@
   "space.category.work_career": "Travail et carrière",
   "space.members.count": "{n} membres",
   "space.members.count_one": "{n} membre",
+  "space.followers.count": "{n} abonnés",
+  "space.followers.count_one": "{n} abonné",
   "space.members.you": "vous",
   "space.members.custom_profile": "Profil propre à cet espace",
   "space.members.household_profile": "Utilise le profil de votre foyer",

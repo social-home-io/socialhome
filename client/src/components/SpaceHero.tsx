@@ -47,6 +47,8 @@ interface Props {
   iconUrl?: string | null
   about: string | null
   memberCount?: number | null
+  /** Followers to show after the members; ``null`` → none shown. */
+  followerCount?: number | null
   /** Up to four members for the facepile, in roster order. */
   members?: readonly HeroMember[]
   /** Where the facepile leads (the space's Members section). */
@@ -77,7 +79,7 @@ const LINK_ICON = (
 )
 
 export function SpaceHero({
-  name, emoji, coverUrl, iconUrl, about, memberCount, members = [], membersHref,
+  name, emoji, coverUrl, iconUrl, about, memberCount, followerCount, members = [], membersHref,
   tier, links = [],
 }: Props) {
   const aboutRef = useRef<HTMLDivElement>(null)
@@ -101,6 +103,10 @@ export function SpaceHero({
     ? t(isOne(memberCount) ? 'space.header.members_one' : 'space.header.members',
         { count: String(memberCount) })
     : null
+  const followersText = followerCount != null
+    ? t(isOne(followerCount) ? 'space.followers.count_one' : 'space.followers.count',
+        { n: String(followerCount) })
+    : null
   const faces = members.slice(0, 4)
 
   return (
@@ -120,7 +126,7 @@ export function SpaceHero({
           </span>
           <div class="sh-space-hero-meta">
             <h2 class="sh-space-hero-name">{name}</h2>
-            {(countLabel || scope) && (
+            {(countLabel || followersText || scope) && (
               <div class="sh-space-hero-line">
                 {countLabel && (membersHref ? (
                   <a class="sh-space-hero-members" href={membersHref}>
@@ -136,9 +142,14 @@ export function SpaceHero({
                 ) : (
                   <span class="sh-space-hero-members">{countLabel}</span>
                 ))}
+                {followersText && (
+                  <span class="sh-space-hero-followers">
+                    {countLabel && <span aria-hidden="true">· </span>}{followersText}
+                  </span>
+                )}
                 {scope && (
                   <span class="sh-space-hero-scope">
-                    {countLabel && <span aria-hidden="true">· </span>}{scope}
+                    {(countLabel || followersText) && <span aria-hidden="true">· </span>}{scope}
                   </span>
                 )}
               </div>

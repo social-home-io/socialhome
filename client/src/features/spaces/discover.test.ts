@@ -36,11 +36,12 @@ describe('buildHouseholdEntries', () => {
   const row = {
     space_id: 'h1', name: 'Home', description: null, emoji: null, space_type: 'household' as const,
     join_mode: 'open' as const, category: 'general', allow_subscribers: false, min_age: 0,
-    member_count: 4, role: null as string | null,
+    member_count: 4, follower_count: 7, role: null as string | null,
   }
-  it('carries the count and the caller seat', () => {
+  it('carries the counts and the caller seat', () => {
     const [e] = buildHouseholdEntries([row], { subIds: new Set(), pendingIds: new Set(['h1']) })
     expect(e.member_count).toBe(4)
+    expect(e.follower_count).toBe(7)
     expect(e.already_member).toBe(false)
     expect(e.request_pending).toBe(true)
     expect(e.host_instance_id).toBe('local')

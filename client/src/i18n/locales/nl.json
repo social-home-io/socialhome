@@ -1999,6 +1999,8 @@
   "space.category.work_career": "Werk & loopbaan",
   "space.members.count": "{n} leden",
   "space.members.count_one": "{n} lid",
+  "space.followers.count": "{n} volgers",
+  "space.followers.count_one": "{n} volger",
   "space.members.you": "jij",
   "space.members.custom_profile": "Eigen profiel voor deze space",
   "space.members.household_profile": "Gebruikt je huishoudprofiel",

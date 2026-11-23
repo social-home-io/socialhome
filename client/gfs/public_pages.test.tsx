@@ -5,7 +5,7 @@
  * text — in the visitor's language.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, waitFor } from '@testing-library/preact'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import type { PageBoot } from './page_link'
 import {
   PublicPage,
@@ -111,6 +111,36 @@ describe('space page', () => {
     await waitFor(() => expect(container.textContent).toContain('12 Mitglieder · Hobby & Basteln'))
     expect(container.textContent).toContain('Verbinde dein Social Home')
     expect(container.textContent).toContain('Zurück zu Bern GFS')
+  })
+
+  it('shows members and followers the host declared', async () => {
+    answer = () => json({ ...SPACE, space: { ...SPACE.space, member_count: 6, follower_count: 12 } })
+    const { container } = render(<PublicPage boot={boot} />)
+    await waitFor(() => expect(container.querySelector('.page-counts')?.textContent)
+      .toBe('6 members · 12 followers · Hobby & crafts'))
+  })
+
+  it('says "0 followers" only for a space that takes followers', async () => {
+    answer = () => json({
+      ...SPACE, space: { ...SPACE.space, member_count: 1, follower_count: 0, allow_subscribers: true },
+    })
+    const { container } = render(<PublicPage boot={boot} />)
+    await waitFor(() => expect(container.querySelector('.page-counts')?.textContent)
+      .toBe('1 member · 0 followers · Hobby & crafts'))
+    cleanup()
+    answer = () => json({ ...SPACE, space: { ...SPACE.space, member_count: 1, follower_count: 0 } })
+    const again = render(<PublicPage boot={boot} />)
+    await waitFor(() => expect(again.container.querySelector('.page-counts')?.textContent)
+      .toBe('1 member · Hobby & crafts'))
+  })
+
+  it('shows no number when an older host or GFS sends none', async () => {
+    answer = () => json({ ...SPACE, space: { ...SPACE.space, member_count: null } })
+    const { container } = render(<PublicPage boot={boot} />)
+    await waitFor(() => expect(container.querySelector('.page-counts')?.textContent)
+      .toBe('Hobby & crafts'))
+    expect(container.textContent).not.toContain('0 members')
+    expect(container.textContent).not.toContain('followers')
   })
 
   it('reads "not listed" for a 404, naming the server', async () => {
@@ -266,6 +296,25 @@ describe('response checks', () => {
     expect(s.icon).toBeNull()
     expect(s.accent).toBe('#D2542A')
     expect(s.category).toBe('general')
+  })
+
+  it('keeps a missing count as no number, never 0', () => {
+    const none = parseSpace({ server_name: 'x', space: { ...SPACE.space, member_count: null } })
+    expect(none.members).toBeNull()
+    expect(none.followers).toBeNull()
+    const old = parseSpace({ server_name: 'x', space: { name: 'x', category: 'general' } })
+    expect(old.members).toBeNull()
+    expect(old.followers).toBeNull()
+    const both = parseSpace({
+      server_name: 'x', space: { ...SPACE.space, member_count: 6, follower_count: 0 },
+    })
+    expect(both.members).toBe(6)
+    expect(both.followers).toBe(0)
+    const bad = parseSpace({
+      server_name: 'x', space: { ...SPACE.space, member_count: -1, follower_count: 'many' },
+    })
+    expect(bad.members).toBeNull()
+    expect(bad.followers).toBeNull()
   })
 
   it('refuses an invite code of another scheme', () => {

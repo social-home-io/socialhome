@@ -13634,6 +13634,7 @@ a.sh-space-hero-members:hover { background: var(--sh-bg-secondary); color: var(-
   object-fit: cover;
 }
 .sh-space-hero-faces > * + * { margin-inline-start: -8px; }
+.sh-space-hero-followers,
 .sh-space-hero-scope { white-space: nowrap; }
 .sh-space-hero-about {
   display: -webkit-box;

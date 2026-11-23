@@ -48,9 +48,9 @@ class SqlitePublicSpaceRepo:
             """
             INSERT INTO public_space_cache(
                 space_id, instance_id, name, description, emoji,
-                lat, lon, radius_km, member_count,
+                lat, lon, radius_km, member_count, follower_count,
                 min_age, category, join_mode, allow_subscribers, cached_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 instance_id=excluded.instance_id,
                 name=excluded.name,
@@ -60,6 +60,7 @@ class SqlitePublicSpaceRepo:
                 lon=excluded.lon,
                 radius_km=excluded.radius_km,
                 member_count=excluded.member_count,
+                follower_count=excluded.follower_count,
                 min_age=excluded.min_age,
                 category=excluded.category,
                 join_mode=excluded.join_mode,
@@ -76,6 +77,7 @@ class SqlitePublicSpaceRepo:
                 listing.lon,
                 listing.radius_km,
                 listing.member_count,
+                listing.follower_count,
                 int(listing.min_age or 0),
                 listing.category or "general",
                 normalize_join_mode(listing.join_mode),
@@ -210,7 +212,8 @@ def _row(r) -> PublicSpaceListing:
         lat=r["lat"],
         lon=r["lon"],
         radius_km=r["radius_km"],
-        member_count=int(r["member_count"] or 0),
+        member_count=r["member_count"],
+        follower_count=_get(r, "follower_count"),
         cached_at=r["cached_at"],
         min_age=int(_get(r, "min_age") or 0),
         category=(_get(r, "category") or "general"),

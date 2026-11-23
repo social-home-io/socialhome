@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { render, cleanup } from '@testing-library/preact'
-import { SpaceListRow } from './SpaceListRow'
+import { SpaceListRow, followersLabel, followersShown } from './SpaceListRow'
 import { HA_SPACE_SYMBOL } from './spaceGlyph'
 
 function tile(container: Element): HTMLElement {
@@ -33,5 +33,21 @@ describe('SpaceListRow — the space symbol', () => {
     expect(tile(a).textContent).toBe('📚')
     const { container: b } = render(<ul><SpaceListRow emoji={null} name="garden" /></ul>)
     expect(tile(b).textContent).toBe('G')
+  })
+})
+
+describe('followersLabel / followersShown', () => {
+  it('counts followers with a singular', () => {
+    expect(followersLabel(1)).toBe('1 follower')
+    expect(followersLabel(12)).toBe('12 followers')
+  })
+
+  it('shows a declared number; "0 followers" only for a space that takes followers', () => {
+    expect(followersShown(12, undefined)).toBe(true)
+    expect(followersShown(0, true)).toBe(true)
+    expect(followersShown(0, false)).toBe(false)
+    expect(followersShown(0, undefined)).toBe(false)
+    expect(followersShown(null, true)).toBe(false)
+    expect(followersShown(undefined, true)).toBe(false)
   })
 })
