@@ -3292,6 +3292,19 @@ ciphertext under the epoch content key. The fan-out frame is
 `{type:"relay", channel_id, event_type:"space_item", epoch, payload}`, and
 offline seats are queued 24 h on the member-publish queue. The member broadcast to the host still runs first, always.
 
+**Publish limits** (all cluster-wide: every node admits its `node_share`,
+`ceil(L / N)` over the live nodes, so a round-robin balancer does not
+multiply them): 120 items a minute per channel, 120 per channel writer key
+and epoch, and **15 per (channel, client address)** — an eighth of the
+channel's, so one writer-key holder needs eight addresses (IPv6 per /64)
+to spend a channel's minute, and with seven an honest writer still gets
+its 15. There is no per-channel seat cap: a global space's channel with
+10 000 seats takes one publish in ~0.1 s (offline copies are written in
+batches of 500). The receiving household drops channel frames past 960 a
+minute per channel (120 × at most 8 servers) or 3 000 in all, before any
+decrypt. Numbers and the whole cap list:
+[`gfs-relay.md`](./gfs-relay.md#channel-limits-at-scale-v_51-channels-for-global-spaces).
+
 **Receiving.** The household maps `channel_id` to its local space
 (`spaces.gfs_channel_id`) — several spaces may name one id (no first-come
 claim: the owner of another space we belong to must not be able to block

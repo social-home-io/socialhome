@@ -371,6 +371,11 @@ class SlidingWindowCounter:
         self._evict()
         return True
 
+    @property
+    def limit(self) -> int:
+        """Hits per window this counter allows unless a call overrides it."""
+        return self._limit
+
     def exhausted(self, key: str, *, now: float | None = None) -> bool:
         """Whether the next :meth:`allow` for *key* would be refused.
 

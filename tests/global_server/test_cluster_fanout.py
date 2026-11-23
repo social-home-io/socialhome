@@ -1397,6 +1397,14 @@ async def test_a_member_item_reaches_every_node_and_queues_only_the_offline(
         return await real_enqueue(self, target, *args, **kwargs)
 
     monkeypatch.setattr(type(queue), "enqueue_relay", _recording_enqueue)
+    real_enqueue_many = type(queue).enqueue_relay_many
+
+    async def _recording_enqueue_many(self, targets, *args, **kwargs):
+        queued = await real_enqueue_many(self, targets, *args, **kwargs)
+        rows_for.extend(queued)
+        return queued
+
+    monkeypatch.setattr(type(queue), "enqueue_relay_many", _recording_enqueue_many)
     frame = {
         "space_id": _SPACE_ID,
         "event_type": "space_item",
@@ -1563,6 +1571,14 @@ async def test_a_moment_on_one_node_reaches_followers_on_every_node_once(
         return await real_enqueue(self, target, *args, **kwargs)
 
     monkeypatch.setattr(type(queue), "enqueue_relay", _recording_enqueue)
+    real_enqueue_many = type(queue).enqueue_relay_many
+
+    async def _recording_enqueue_many(self, targets, *args, **kwargs):
+        queued = await real_enqueue_many(self, targets, *args, **kwargs)
+        rows_for.extend(queued)
+        return queued
+
+    monkeypatch.setattr(type(queue), "enqueue_relay_many", _recording_enqueue_many)
     envelope = _moment_envelope(seeds[_PUBLISHER_ID])
     want = {"type": "incoming_public_moment", "payload": envelope}
     async with aiohttp.ClientSession() as http:

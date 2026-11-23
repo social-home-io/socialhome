@@ -557,6 +557,7 @@ class GfsApp:
             member_publish=member_publish,
             gfs_instance_id=config.instance_id,
             addressee=addressee,
+            nodes=cluster.live_node_count,
         )
         cluster_fan_out.register_audience(AUDIENCE_CHANNEL, channels.audience_targets)
         # Periodic retention sweep — purges expired admin sessions, expired

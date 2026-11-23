@@ -17,6 +17,7 @@ business logic.
 
 from __future__ import annotations
 
+import heapq
 import time
 from typing import Any, Protocol, runtime_checkable
 
@@ -3343,6 +3344,18 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         max_kind_row_bytes: int = 0,
     ) -> bool: ...
 
+    async def enqueue_relay_many(
+        self,
+        to_instances: list[str],
+        frame_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> list[str]: ...
+
     async def count_for(self, to_instance: str) -> int: ...
 
     async def enqueue_media(
@@ -3987,6 +4000,148 @@ class SqliteGfsEnvelopeQueueRepo:
                 (to_instance, frame_json, created_at, expires_at, size),
             )
             return True
+
+        return await self._db.transact(_run)
+
+    async def enqueue_relay_many(
+        self,
+        to_instances: list[str],
+        frame_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> list[str]:
+        """:meth:`enqueue_relay` (no capped kind) for each of *to_instances*
+        in ONE transaction — the same caps and the same eviction order: the
+        recipient's own oldest rows down to its caps, then the oldest row of
+        the largest holder while the server-wide total is over.
+
+        A channel item fanned out to 10 000 offline seats used to run 10 000
+        transactions, each summing EVERY live relay row for the server-wide
+        cap — quadratic, ~5 s per item and growing with every item queued
+        (T3.6). Here the server-wide total is read once and then tracked,
+        and the holders are ranked once (only when the cap is reached) and
+        kept in a heap, so a batch costs one index scan plus per-recipient
+        index lookups. Callers keep batches bounded
+        (``RELAY_QUEUE_BATCH``) so the write lock is not held long. Returns
+        the recipients that got a row; duplicates are queued once."""
+        size = len(frame_json)
+        if (
+            max_per_recipient <= 0
+            or size > max_bytes_per_recipient
+            or size > max_total_bytes
+        ):
+            return []
+
+        def _run(conn) -> list[str]:
+            live = "frame_type='relay' AND expires_at > ?"
+            total = int(
+                conn.execute(
+                    f"SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+                    f" WHERE {live}",
+                    (created_at,),
+                ).fetchone()[0]
+            )
+            # Bytes per holder and a max-heap of them, built on the first
+            # eviction the server-wide cap needs (most batches never do).
+            holders: dict[str, int] = {}
+            heap: list[tuple[int, str]] = []
+            ranked = False
+
+            def _evict_oldest(holder: str) -> int | None:
+                row = conn.execute(
+                    "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
+                    f" gfs_envelope_queue WHERE to_instance=? AND {live}"
+                    " ORDER BY created_at ASC, id ASC LIMIT 1) RETURNING size_bytes",
+                    (holder, created_at),
+                ).fetchone()
+                if row is None:
+                    return None
+                freed = int(row[0])
+                if ranked:
+                    holders[holder] = holders.get(holder, 0) - freed
+                    if holders[holder] > 0:
+                        heapq.heappush(heap, (-holders[holder], holder))
+                return freed
+
+            def _pop_valid() -> str | None:
+                while heap:
+                    neg, holder = heapq.heappop(heap)
+                    held = holders.get(holder, 0)
+                    if held > 0 and held == -neg:  # else a stale entry
+                        return holder
+                return None
+
+            def _largest(recipient: str) -> str | None:
+                # On a tie, someone other than the recipient being written
+                # to (it must not evict itself while an equal holder exists).
+                first = _pop_valid()
+                if first != recipient or first is None:
+                    return first
+                second = _pop_valid()
+                if second is not None and holders[second] == holders[first]:
+                    heapq.heappush(heap, (-holders[first], first))
+                    return second
+                if second is not None:
+                    heapq.heappush(heap, (-holders[second], second))
+                return first
+
+            queued: list[str] = []
+            for to in dict.fromkeys(to_instances):
+                fits = True
+                while True:
+                    count, held = conn.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)"
+                        f" FROM gfs_envelope_queue WHERE {live} AND to_instance=?",
+                        (created_at, to),
+                    ).fetchone()
+                    if (
+                        int(count) < max_per_recipient
+                        and int(held) + size <= max_bytes_per_recipient
+                    ):
+                        break
+                    freed = _evict_oldest(to)
+                    if freed is None:
+                        fits = False
+                        break
+                    total -= freed
+                while fits and total + size > max_total_bytes:
+                    if not ranked:
+                        ranked = True
+                        holders = {
+                            str(r[0]): int(r[1])
+                            for r in conn.execute(
+                                "SELECT to_instance, SUM(size_bytes) FROM"
+                                f" gfs_envelope_queue WHERE {live}"
+                                " GROUP BY to_instance",
+                                (created_at,),
+                            )
+                        }
+                        heap = [(-b, h) for h, b in holders.items() if b > 0]
+                        heapq.heapify(heap)
+                    victim = _largest(to)
+                    freed = _evict_oldest(victim) if victim is not None else None
+                    if freed is None:
+                        fits = False
+                        break
+                    total -= freed
+                if not fits:
+                    continue
+                conn.execute(
+                    "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
+                    " created_at, expires_at, frame_type, size_bytes)"
+                    " VALUES(?,?,?,?, 'relay', ?)",
+                    (to, frame_json, created_at, expires_at, size),
+                )
+                total += size
+                if ranked:
+                    holders[to] = holders.get(to, 0) + size
+                    heapq.heappush(heap, (-holders[to], to))
+                queued.append(to)
+            return queued
 
         return await self._db.transact(_run)
 
