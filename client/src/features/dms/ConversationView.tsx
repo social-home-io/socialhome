@@ -65,7 +65,7 @@ import { normaliseTimestamp } from '@/utils/relativeTime'
 import { addBase } from '@/baseUrl'
 import { safeHref } from '@/utils/safeHref'
 import { visibleArea } from '@/utils/popoverPlacement'
-import { growTextarea } from '@/utils/autoGrow'
+import { growTextarea, isSendKey } from '@/utils/autoGrow'
 import { useKeyboardOpen } from '@/hooks/useKeyboardOpen'
 
 /** Page size for the lazy-load older-history fetch. The initial
@@ -1795,13 +1795,7 @@ export function ConversationView({
       e.preventDefault()
       return
     }
-    if (e.key !== 'Enter') return
-    if (e.shiftKey) return  // explicit "give me a newline"
-    if (e.isComposing) return  // IME — let the input swallow Enter
-    const coarsePointer =
-      typeof window !== 'undefined' &&
-      window.matchMedia?.('(pointer: coarse)').matches
-    if (coarsePointer) return  // touch → newline, send via button
+    if (!isSendKey(e)) return
     e.preventDefault()
     const ta = e.currentTarget as HTMLTextAreaElement
     ta.form?.requestSubmit()

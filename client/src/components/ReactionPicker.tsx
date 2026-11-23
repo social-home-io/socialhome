@@ -42,6 +42,10 @@ export function ReactionPicker(
   { onSelect, onClose, inline = false, header, anchor, align = 'end' }: ReactionPickerProps,
 ) {
   const root = useRef<HTMLDivElement | null>(null)
+  // Owners pass a fresh ``onClose`` each render; read the latest without
+  // re-subscribing the listeners below.
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   const filtered = search.value
     ? ALL_EMOJI_WITH_KEYWORDS.filter(e => emojiMatches(e, search.value)).map(e => e.emoji)
     : ALL_EMOJI
@@ -50,25 +54,27 @@ export function ReactionPicker(
   // on the trigger button that opened the picker — the trigger
   // already toggles open/close on its own ``onClick`` and double-
   // firing here would either flicker the picker or leave it stuck
-  // open after a re-toggle. Triggers identify themselves via
-  // ``aria-haspopup="dialog"`` (set by :class:`EmojiPickButton` and
-  // the reaction-add button on post cards).
+  // open after a re-toggle. An anchored picker knows its trigger;
+  // otherwise triggers identify themselves via
+  // ``aria-haspopup="dialog"``.
   useEffect(() => {
     const onDocMouseDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null
       if (!t) return
-      if (t.closest('.sh-reaction-picker')) return
-      if (t.closest('[aria-haspopup="dialog"]')) return
-      onClose()
+      if (root.current?.contains(t)) return
+      if (anchor ? anchor.current?.contains(t) : t.closest('[aria-haspopup="dialog"]')) return
+      closeRef.current()
     }
     // Escape closes the picker — only the picker: caught on the way down
     // (window, capture) so the sheet or dialog around it, which listens
     // for Escape on ``document``, stays open.
+    // An Escape that cancels an input-method composition in the search
+    // stays with the composition.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
+      if (e.key !== 'Escape' || e.isComposing) return
       e.stopPropagation()
       e.preventDefault()
-      onClose()
+      closeRef.current()
       anchor?.current?.focus()
     }
     document.addEventListener('mousedown', onDocMouseDown)
@@ -77,48 +83,59 @@ export function ReactionPicker(
       document.removeEventListener('mousedown', onDocMouseDown)
       window.removeEventListener('keydown', onKey, true)
     }
-  }, [onClose, anchor])
+  }, [anchor])
 
-  // Anchored: place next to the button, and again whenever the page,
-  // a sheet or the visual viewport (phone keyboard) moves.
+  // Anchored: place next to the button, and again (once a frame at most)
+  // whenever the page, a sheet or the visual viewport (phone keyboard)
+  // moves. Once the button has scrolled out of sight, close.
   useLayoutEffect(() => {
     if (!anchor) return
     const place = () => {
       const el = root.current
       const button = anchor.current
       if (!el || !button) return
+      const area = visibleArea()
+      const b = button.getBoundingClientRect()
+      if (b.bottom < area.top || b.top > area.bottom) {
+        closeRef.current()
+        return
+      }
       // Measure the picker at its natural size, then fit it.
       el.style.maxHeight = ''
       el.style.width = ''
       el.classList.remove('sh-reaction-picker--above')
       const natural = el.getBoundingClientRect()
-      const p = placeAnchored(
-        button.getBoundingClientRect(),
-        { width: natural.width, height: natural.height },
-        visibleArea(),
-        align,
-      )
+      const p = placeAnchored(b, { width: natural.width, height: natural.height }, area, align)
       if (p.width < natural.width) el.style.width = `${p.width}px`
       el.style.maxHeight = `${p.maxHeight}px`
       el.classList.toggle('sh-reaction-picker--above', p.placement === 'above')
       pinFixed(el, p.left, p.top, p.placement)
     }
+    let frame = 0
+    const schedule = () => {
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        place()
+      })
+    }
     // Scrolling the emoji grid itself doesn't move the picker.
     const onScroll = (e: Event) => {
       if (e.target instanceof Node && root.current?.contains(e.target)) return
-      place()
+      schedule()
     }
     place()
     const vv = window.visualViewport
-    window.addEventListener('resize', place)
+    window.addEventListener('resize', schedule)
     document.addEventListener('scroll', onScroll, true)
-    vv?.addEventListener('resize', place)
-    vv?.addEventListener('scroll', place)
+    vv?.addEventListener('resize', schedule)
+    vv?.addEventListener('scroll', schedule)
     return () => {
-      window.removeEventListener('resize', place)
+      if (frame) cancelAnimationFrame(frame)
+      window.removeEventListener('resize', schedule)
       document.removeEventListener('scroll', onScroll, true)
-      vv?.removeEventListener('resize', place)
-      vv?.removeEventListener('scroll', place)
+      vv?.removeEventListener('resize', schedule)
+      vv?.removeEventListener('scroll', schedule)
     }
   }, [anchor, align])
 

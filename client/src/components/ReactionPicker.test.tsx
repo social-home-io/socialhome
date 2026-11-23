@@ -100,6 +100,67 @@ describe('ReactionPicker anchored to a button', () => {
     expect(picker.style.maxHeight).toBe('238px')
   })
 
+  it('follows its button when the sheet scrolls', () => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { cb(0); return 1 })
+    try {
+      const button = { top: 610, left: 834 }
+      restore = fakeLayout(button)
+      const anchor = createRef<HTMLButtonElement>()
+      const r = render(
+        <div>
+          <button ref={anchor} data-anchor="1">😀</button>
+          <ReactionPicker anchor={anchor} onSelect={() => {}} onClose={() => {}} />
+        </div>,
+      )
+      const picker = r.container.querySelector<HTMLElement>('.sh-reaction-picker')!
+      button.top = 500
+      fireEvent.scroll(document)
+      expect(picker.style.top).toBe(`${500 - POPOVER_GAP}px`)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('closes once its button has scrolled out of sight', () => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { cb(0); return 1 })
+    try {
+      const button = { top: 610, left: 834 }
+      restore = fakeLayout(button)
+      const anchor = createRef<HTMLButtonElement>()
+      const onClose = vi.fn()
+      render(
+        <div>
+          <button ref={anchor} data-anchor="1">😀</button>
+          <ReactionPicker anchor={anchor} onSelect={() => {}} onClose={onClose} />
+        </div>,
+      )
+      button.top = 900
+      fireEvent.scroll(document)
+      expect(onClose).toHaveBeenCalledOnce()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('lines up with the start of the button when asked (post reaction +)', () => {
+    restore = fakeLayout({ top: 610, left: 340 })
+    const anchor = createRef<HTMLButtonElement>()
+    const r = render(
+      <div>
+        <button ref={anchor} data-anchor="1">+</button>
+        <ReactionPicker anchor={anchor} align="start" onSelect={() => {}} onClose={() => {}} />
+      </div>,
+    )
+    expect(r.container.querySelector<HTMLElement>('.sh-reaction-picker')!.style.left).toBe('340px')
+  })
+
+  it('Escape during an input-method composition is left to the composition', () => {
+    const onClose = vi.fn()
+    mount({ top: 610, left: 834 }, onClose)
+    fireEvent.keyDown(document.body, { key: 'Escape', isComposing: true })
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
   it('Escape closes only the picker and hands focus back to its button', () => {
     const onClose = vi.fn()
     const sheetEscape = vi.fn()

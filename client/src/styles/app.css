@@ -4974,7 +4974,7 @@ body.sh-dm-thread-open .sh-messages {
 }
 /* Inline emoji-picker — pinned to the bottom-right of the textarea
  * pill. ``EmojiPickButton`` renders a ``.sh-emoji-pick-wrap`` div
- * around the button (so the popover can position relative to it),
+ * around the button (the picker itself is fixed to the viewport),
  * so we absolutely-position the wrap, not the button itself. The
  * button keeps its default 32×32 styling. */
 .sh-thread > .sh-composer > .sh-dm-input-wrap

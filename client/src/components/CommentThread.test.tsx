@@ -177,6 +177,21 @@ describe('the comment field', () => {
     expect(onReply).toHaveBeenCalledWith(null, 'line one')
   })
 
+  it('on a touch screen Return is a new line; the Post button sends', () => {
+    const orig = window.matchMedia
+    window.matchMedia = ((q: string) => ({ matches: q === '(pointer: coarse)' })) as never
+    try {
+      const { field, onReply, getByText } = mount()
+      fireEvent.input(field, { target: { value: 'line one' } })
+      fireEvent.keyDown(field, { key: 'Enter' })
+      expect(onReply).not.toHaveBeenCalled()
+      fireEvent.click(getByText('Post'))
+      expect(onReply).toHaveBeenCalledWith(null, 'line one')
+    } finally {
+      window.matchMedia = orig
+    }
+  })
+
   it('Enter that confirms an input-method composition does not send', () => {
     const { field, onReply } = mount()
     fireEvent.input(field, { target: { value: 'にほん' } })
@@ -237,6 +252,8 @@ describe('the comment field', () => {
       fireEvent.keyDown(field, { key: 'Escape' })
       expect(r.container.querySelector('.sh-comment-bubble--editing')).toBeNull()
       expect(sheetEscape).not.toHaveBeenCalled()
+      // Focus goes back to the ··· button that opened the editor.
+      expect(document.activeElement).toBe(r.container.querySelector('.sh-comment-overflow'))
     } finally {
       document.removeEventListener('keydown', sheetEscape)
     }

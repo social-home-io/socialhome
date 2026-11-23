@@ -39,7 +39,7 @@ import type { Comment } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { openReport } from './ReportDialog'
 import { t, formatLocale } from '@/i18n/i18n'
-import { growTextarea } from '@/utils/autoGrow'
+import { growTextarea, isSendKey } from '@/utils/autoGrow'
 import { visibleArea } from '@/utils/popoverPlacement'
 
 interface CommentThreadProps {
@@ -51,8 +51,11 @@ interface CommentThreadProps {
   /** Post the thread belongs to. Required for typing indicators; left
    *  optional only so existing test fixtures keep working. */
   postId?: string
+  /** Rejects when the comment wasn't sent (after telling the user): the
+   *  text then stays in the field. */
   onReply: (parentId: string | null, content: string) => Promise<void>
   onDelete?: (commentId: string) => Promise<void> | void
+  /** Rejects when the edit wasn't saved: the editor stays open. */
   onEdit?: (commentId: string, content: string) => Promise<void>
   /** The comment a link pointed at (``?comment=``): picked out. Every
    *  comment carries ``id="comment-{id}"`` so the page can scroll to it. */
@@ -83,15 +86,10 @@ export function commentFieldCap(visibleHeight: number): number {
   return Math.max(MIN_COMMENT_FIELD_PX, Math.floor(visibleHeight * COMMENT_FIELD_SHARE))
 }
 
-/** Enter sends; Shift+Enter is a new line; an Enter that confirms an
- *  input-method composition (Japanese, Chinese…) is neither. */
-function isSendKey(e: KeyboardEvent): boolean {
-  return e.key === 'Enter' && !e.shiftKey && !e.isComposing
-}
-
 type CommentFieldProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'onKeyDown'> & {
   value: string
-  /** Enter (not Shift+Enter). */
+  /** The send key (``isSendKey``: Enter with a keyboard; on a touch
+   *  screen Return is a new line and the button sends). */
   onSend: () => void
   /** Other keys — return ``true`` when consumed (autocomplete). */
   onKey?: (e: KeyboardEvent) => boolean
@@ -111,11 +109,23 @@ function CommentField({ value, onSend, onKey, autoFocus, ...rest }: CommentField
     el.focus()
     el.setSelectionRange(el.value.length, el.value.length)
   }, [autoFocus])
+  // Fit the text, and again when the visible height changes (the phone
+  // keyboard opens or closes, the phone turns): the cap follows it.
   useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const area = visibleArea()
-    growTextarea(el, commentFieldCap(area.bottom - area.top))
+    const grow = () => {
+      const el = ref.current
+      if (!el) return
+      const area = visibleArea()
+      growTextarea(el, commentFieldCap(area.bottom - area.top))
+    }
+    grow()
+    const vv = window.visualViewport
+    window.addEventListener('resize', grow)
+    vv?.addEventListener('resize', grow)
+    return () => {
+      window.removeEventListener('resize', grow)
+      vv?.removeEventListener('resize', grow)
+    }
   }, [value])
   return (
     <textarea
@@ -139,7 +149,7 @@ function CommentField({ value, onSend, onKey, autoFocus, ...rest }: CommentField
 function CommentCount({ text }: { text: string }) {
   if (text.length < COUNT_FROM) return null
   return (
-    <span class="sh-char-count sh-comment-count" aria-live="polite">
+    <span class="sh-char-count sh-comment-count">
       {text.length}/{MAX_COMMENT_LENGTH}
     </span>
   )
@@ -225,6 +235,8 @@ export function CommentThread(
       await onReply(parentId, draft.value)
       draft.value = ''
       if (parentId) replyTo.value = null
+    } catch {
+      // The owner showed the error; the text stays to send again.
     } finally {
       submitting.value = false
     }
@@ -349,6 +361,18 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent,
   const [draft, setDraft] = useState(comment.content ?? '')
   const [saving, setSaving] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  // Closing the editor (save, cancel, Escape) hands focus back to the
+  // ··· button that opened it, instead of dropping it on the page.
+  const overflowBtn = useRef<HTMLButtonElement | null>(null)
+  const wasEditing = useRef(false)
+  useEffect(() => {
+    if (editing) {
+      wasEditing.current = true
+    } else if (wasEditing.current) {
+      wasEditing.current = false
+      overflowBtn.current?.focus()
+    }
+  }, [editing])
 
   const isMine = currentUser.value?.user_id === comment.author
   // In a space, acting on somebody else's comment is content authority
@@ -373,11 +397,14 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent,
 
   if (editing) {
     const save = async () => {
-      if (!draft.trim() || !onEdit) return
+      // A held Enter must not save twice.
+      if (!draft.trim() || !onEdit || saving) return
       setSaving(true)
       try {
         await onEdit(comment.id, draft)
         setEditing(false)
+      } catch {
+        // The owner showed the error; the editor stays open with the text.
       } finally {
         setSaving(false)
       }
@@ -461,6 +488,7 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent,
           {hasMenu && (
             <div class="sh-comment-overflow-wrap">
               <button
+                ref={overflowBtn}
                 type="button"
                 class="sh-comment-overflow"
                 aria-haspopup="menu"

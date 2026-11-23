@@ -23,3 +23,21 @@ export function growTextarea(el: HTMLTextAreaElement, cap: number): void {
   el.style.height = `${target}px`
   el.style.overflowY = target >= cap ? 'auto' : 'hidden'
 }
+
+/**
+ * Whether a keydown in a growing text field sends it — one rule for the
+ * chat composer and comments:
+ *
+ *  - mouse / keyboard ``(pointer: fine)``: Enter sends, Shift+Enter is a
+ *    new line (Slack, WhatsApp Web);
+ *  - touch ``(pointer: coarse)``: Return is a new line and the Send
+ *    button sends. An on-screen keyboard has no Shift+Enter, and a
+ *    half-typed thought shouldn't go out by accident (WhatsApp mobile);
+ *  - an Enter that confirms an input-method choice (Japanese, Chinese…)
+ *    never sends: ``isComposing``, or ``keyCode`` 229 in Safari.
+ */
+export function isSendKey(e: KeyboardEvent, win: Window = window): boolean {
+  if (e.key !== 'Enter' || e.shiftKey) return false
+  if (e.isComposing || e.keyCode === 229) return false
+  return !win.matchMedia?.('(pointer: coarse)').matches
+}
