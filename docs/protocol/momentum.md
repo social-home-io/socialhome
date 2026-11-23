@@ -343,8 +343,11 @@ neither raise it, strip it nor splice it onto another moment:
 * **A far delete never suppresses the genuine one**: a delete tombstone
   keeps the lowest (clamped) hop a copy came at; a copy closer than that
   lowers it and travels on (``MomentTombstone.CLOSER``). The hop only goes
-  down, so a content-free delete gets at most *reach − 1* extra waves and a
-  replay at the same or a higher hop still stops.
+  down, so one delete is relayed at most ``MOMENT_MAX_HOPS`` − 1 times by a
+  household, and a replay at the same or a higher hop still stops. Wiping a
+  held moment records the delete's hop, not the create's; a delete that came
+  through a GFS records ``GFS_DELETE_HOP`` (above every mesh hop), so the
+  mesh copy arriving later still travels on.
 * **Totals** (``MOMENT_REACTIONS_COUNTED``, payload unchanged — its field
   set is closed) follow the create: the origin sends them under the same
   version gate as the moment (≥ v_96 for reach 2), and a relay passes them

@@ -5058,9 +5058,10 @@ class FederationInboundService(ProtectionGateMixin):
         # held the same way, for the longest a moment can live (30 days).
         # v_96: the tombstone keeps the (clamped) hop this copy came at, so a
         # far copy landing first — at a hop it can't be relayed from — never
-        # suppresses the genuine closer one (``CLOSER``, relayed on). The hop
-        # only goes down: at most reach − 1 extra waves of a content-free
-        # delete, and a replay at the same or a higher hop still stops.
+        # suppresses the genuine closer one (``CLOSER``, relayed on). Since
+        # the stored hop only goes down, one delete is relayed at most
+        # MOMENT_MAX_HOPS − 1 times here, and a replay at the same or a
+        # higher hop still stops.
         outcome = await self._moment_repo.tombstone(
             moment_id,
             author_user_id=author_user_id,
@@ -5201,8 +5202,9 @@ class FederationInboundService(ProtectionGateMixin):
         (:func:`~socialhome.moment_origin.moment_reach_of`) and the hop it
         came at (:func:`~socialhome.moment_origin.moment_hop_of`, clamped to
         ≥ 2 for a relayed copy; a missing hop counts as the lowest it could
-        be) — or ``None`` when it is refused: not a reach at all (``reach`` outside {2, 4, 5}, or
-        with ``no_relay``), or a copy beyond it — its hop, at least 2 for a
+        be) — or ``None`` when it is refused: not a reach at all
+        (``reach`` outside {2, 4, 5}, or with ``no_relay``), or a copy beyond
+        it — its hop, at least 2 for a
         copy not sent by its origin (``hop_count`` is outside the signature),
         above the reach. A refused event is neither stored, tombstoned nor
         relayed. Whether the reach is genuine is the origin signature's

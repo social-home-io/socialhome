@@ -434,9 +434,13 @@ class MomentReactionCounts(ProtectionGateMixin):
         """Sign the totals and hand them to every v_69 peer (a peer offline
         gets them from the outbox). ``False`` when that failed — the
         checkpoint stays due and is tried again next tick."""
-        # v_96: as far as the moment went — its row's reach (``None``: a row
-        # written before v_96, unmarked as then).
+        # v_96: as far as the moment went — its row's reach. A row written
+        # before v_96 (``None``) went as it did then: one hop (``no_relay``)
+        # for a protected author, else 3 hops, unmarked. Accepted edge: an
+        # author protected only after posting a legacy moment.
         reach = moment.reach
+        if reach is None and await self._is_protected(moment.author_user_id):
+            reach = 1
         try:
             payload = sign_counts(
                 seed=self._federation.own_identity_seed,

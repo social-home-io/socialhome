@@ -42,6 +42,7 @@ from ..domain.federation_retention import (
     MAX_PENDING_PER_PEER,
     NEVER_DROP,
     RELAYED_DELETE_KEY_PREFIX,
+    RELAYED_MOMENT_KEY_PREFIX,
     RETENTION_DAYS,
     capped_delete_key,
     retention_expires_at,
@@ -49,7 +50,7 @@ from ..domain.federation_retention import (
 
 # Domain dataclasses live in ``socialhome/domain/outbox.py``; re-exported
 # here so existing repo-level imports keep working.
-from ..domain.outbox import OutboxEntry, OutboxPayload
+from ..domain.outbox import OutboxEntry, OutboxPayload, RelayedRowDropped
 from .base import rows_to_dicts
 
 log = logging.getLogger(__name__)
@@ -68,11 +69,13 @@ _EVICT_FIRST_PARAMS: tuple[object, ...] = tuple(
 )
 
 
-def is_evict_first_key(key: str | None) -> bool:
-    """Whether a row keyed *key* is one this household only relays (a
-    relayed delete, create or totals update) — evicted first, and never
-    allowed to evict one of our own rows."""
-    return key is not None and key.startswith(EVICT_FIRST_KEY_PREFIXES)
+def is_droppable_relay_key(key: str | None) -> bool:
+    """Whether a row keyed *key* is a moment create or totals update this
+    household only relays (v_96): it may evict only another relayed row, and
+    is dropped rather than evict one of our own. A relayed *delete* is not —
+    it is content-free and already capped per origin
+    (``MAX_LONG_LIVED_RELAYED_PER_ORIGIN``), so it makes room as any row."""
+    return key is not None and key.startswith(RELAYED_MOMENT_KEY_PREFIX)
 
 
 #: Default batch size for :meth:`SqliteOutboxRepo.purge_terminal`. Exported so
@@ -277,13 +280,13 @@ class SqliteOutboxRepo:
         entry_id = msg_id or uuid.uuid4().hex
         room = await self._make_room(instance_id, event_type, supersede_key, expires_at)
         if room is None:
-            log.info(
-                "outbox: %s is at its cap with only our own rows — not queueing"
-                " a relayed %s",
-                instance_id,
+            log.debug(
+                "outbox full, relayed row dropped: %s %s for %s",
                 event_type.value,
+                supersede_key,
+                instance_id,
             )
-            return None
+            raise RelayedRowDropped(f"{instance_id}: {supersede_key}")
         supersede_key, expires_at = room
         params = _row_params(
             entry_id,
@@ -360,9 +363,9 @@ class SqliteOutboxRepo:
         """Before a row for *instance_id* goes in: its retention class and
         deadline, the pending row it supersedes dropped, and room made under
         the per-peer cap. Returns the row's ``(supersede_key, expires_at)``
-        — or ``None`` when it must not go in: a row we only relay
-        (:func:`is_evict_first_key`) at the cap with no other relayed row to
-        evict (v_96, D: it never evicts one of our own)."""
+        — or ``None`` when it must not go in: a create or totals row we only
+        relay (:func:`is_droppable_relay_key`) at the cap with no other
+        relayed row to evict (v_96, D: it never evicts one of our own)."""
         if (
             supersede_key is not None
             and supersede_key.startswith(RELAYED_DELETE_KEY_PREFIX)
@@ -389,7 +392,7 @@ class SqliteOutboxRepo:
         # backlog is entirely NEVER_DROP (nothing droppable) we let it through
         # rather than drop a security/structural event.
         if await self.count_pending_for(instance_id) >= MAX_PENDING_PER_PEER:
-            relayed = is_evict_first_key(supersede_key)
+            relayed = is_droppable_relay_key(supersede_key)
             evicted = await self.evict_oldest_droppable(
                 instance_id, relayed_only=relayed
             )
@@ -743,7 +746,8 @@ class SqliteOutboxRepo:
         self, instance_id: str, *, relayed_only: bool = False
     ) -> bool:
         """Delete the oldest PENDING non-NEVER_DROP row for ``instance_id``
-        (*relayed_only*: only a row we relay, :func:`is_evict_first_key`).
+        (*relayed_only*: only a row we relay — a relayed delete, create or
+        totals update).
 
         Returns True iff a row was evicted. NEVER_DROP rows (security /
         structural state) are excluded — they are never dropped to make room.
@@ -935,8 +939,9 @@ def _make_room_for(
     :meth:`SqliteOutboxRepo.evict_oldest_droppable`) of each one at or over
     :data:`MAX_PENDING_PER_PEER` evicted — one statement each, whatever the
     number of households. Returns the households that must get no row: for
-    a row we only relay (:func:`is_evict_first_key`), those at the cap with
-    no relayed row to evict (v_96, D: never one of our own)."""
+    a create or totals row we only relay (:func:`is_droppable_relay_key`),
+    those at the cap with no relayed row to evict (v_96, D: never one of our
+    own)."""
     ids = orjson.dumps(instance_ids).decode()
     if supersede_key is not None:
         conn.execute(
@@ -955,7 +960,7 @@ def _make_room_for(
     ]
     if not full:
         return frozenset()
-    relayed = is_evict_first_key(supersede_key)
+    relayed = is_droppable_relay_key(supersede_key)
     refused: frozenset[str] = frozenset()
     if relayed:
         refused = frozenset(full) - {

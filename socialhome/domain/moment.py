@@ -44,6 +44,12 @@ MOMENT_DEFAULT_REACH: int = 3
 #: a household forwards only while ``hop < min(reach, MOMENT_MAX_HOPS)``.
 MOMENT_MAX_REACH: int = 5
 
+#: v_96 — the hop a delete tombstone records when the delete came through a
+#: GFS: above every mesh hop, so the mesh copy of the same delete arriving
+#: later still counts as closer (``MomentTombstone.CLOSER``) and is relayed
+#: on to the households holding the moment over the mesh.
+GFS_DELETE_HOP: int = MOMENT_MAX_REACH + 1
+
 #: How long people who follow an author keep the author's moments when the
 #: author chose nothing (``moments.follower_retention_days``, decision 6d).
 #: Everyone else sees a moment for 24 hours.

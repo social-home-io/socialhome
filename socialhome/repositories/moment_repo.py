@@ -515,10 +515,12 @@ class SqliteMomentRepo:
         """Record that ``moment_id`` was deleted, stored or not.
 
         ``hop_count`` is the hop this copy of the delete came at (v_96): a
-        new tombstone keeps it, a wiped moment keeps the lower of its own and
-        it, and a held tombstone lowered by a closer copy reports
-        :attr:`MomentTombstone.CLOSER` — so a far copy landing first never
-        suppresses the genuine closer one. The hop only ever goes down.
+        new tombstone and a wiped moment take it (the delete's hop, not the
+        create's — a far delete wiping a moment held closer must leave room
+        for the genuine one), and a held tombstone lowered by a closer copy
+        reports :attr:`MomentTombstone.CLOSER` — so a far copy landing first
+        never suppresses the genuine closer one. Once a tombstone, the hop
+        only ever goes down.
 
         A stored row is wiped in place and keeps its own ``expires_at`` (a
         replay of its create carries the same expiry, so it is refused for
@@ -534,8 +536,8 @@ class SqliteMomentRepo:
         def _run(conn) -> MomentTombstone:
             if _tombstone_rows(conn, "id=?", (moment_id,)) > 0:
                 conn.execute(
-                    "UPDATE moments SET hop_count=? WHERE id=? AND hop_count>?",
-                    (hop_count, moment_id, hop_count),
+                    "UPDATE moments SET hop_count=? WHERE id=?",
+                    (hop_count, moment_id),
                 )
                 return MomentTombstone.REMOVED
             cur = conn.execute(

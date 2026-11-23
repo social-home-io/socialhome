@@ -64,6 +64,7 @@ from cryptography.exceptions import InvalidTag
 
 from ..domain.events import MomentCreated, MomentDeleted
 from ..domain.moment import (
+    GFS_DELETE_HOP,
     MOMENT_MAX_LIFETIME_DAYS,
     Moment,
     clamp_moment_expiry,
@@ -640,6 +641,9 @@ class MomentPublicInbound:
             expires_at=(
                 datetime.now(UTC) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
             ).isoformat(),
+            # v_96: above every mesh hop — the mesh copy of this delete must
+            # still be relayed on when it arrives later.
+            hop_count=GFS_DELETE_HOP,
         )
         if existing is None:
             return outcome.changed

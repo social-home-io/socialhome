@@ -1611,10 +1611,14 @@ async def test_a_recorded_tombstone_keeps_the_hop_it_landed_at(db, repo):
     assert (await repo.get("m-t", include_deleted=True)).hop_count == 3
 
 
-async def test_a_removed_moment_keeps_the_lower_hop(db, repo):
+async def test_a_removed_moment_takes_the_deletes_hop(db, repo):
+    """The tombstone's hop is the *delete's* hop, not the create's: a far
+    delete wiping a moment held at hop 2 leaves hop 3, so the genuine hop-2
+    delete arriving next is ``CLOSER`` and travels on."""
     await repo.save(replace(_moment(id="m-t"), hop_count=2))
     assert await _tomb(repo, 3) is MomentTombstone.REMOVED
-    assert (await repo.get("m-t", include_deleted=True)).hop_count == 2
+    assert (await repo.get("m-t", include_deleted=True)).hop_count == 3
+    assert await _tomb(repo, 2) is MomentTombstone.CLOSER
     await repo.save(replace(_moment(id="m-u"), hop_count=3))
     assert await _tomb(repo, 1, "m-u") is MomentTombstone.REMOVED
     assert (await repo.get("m-u", include_deleted=True)).hop_count == 1

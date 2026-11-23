@@ -292,9 +292,15 @@ class MomentFederationOutbound(
         # v_96: the delete goes exactly as far as the moment did — its row's
         # reach, under the same signed mark (reach 1: ``no_relay``, so a
         # protected account's delete is never relayed) and version gate. A
-        # row written before v_96 (``None``) goes unmarked, as it did then.
-        marks = {} if event.reach is None else reach_marks_of(event.reach)
-        min_version = reach_min_version(event.reach)
+        # row written before v_96 (``None``) went as it did then: one hop
+        # (``no_relay``) for a protected author, else 3 hops, unmarked.
+        # Accepted edge: an author protected only after posting a legacy
+        # moment gets a one-hop delete for it.
+        reach = event.reach
+        if reach is None and await self._is_protected(event.author_user_id):
+            reach = 1
+        marks = {} if reach is None else reach_marks_of(reach)
+        min_version = reach_min_version(reach)
         await self._fan_to_peers(
             event_type=FederationEventType.MOMENT_DELETED,
             payload=self._origin_signed(

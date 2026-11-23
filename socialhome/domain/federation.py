@@ -1674,6 +1674,13 @@ DELIVERY_ERROR_QUEUED: str = "delivery_failed"
 DELIVERY_ERROR_SUPERSEDED: str = "superseded"
 
 
+#: :attr:`DeliveryResult.error` value meaning "the peer's outbox is full of
+#: this household's own events, and this row we only relay (a stranger's
+#: moment create or totals, v_96) was dropped rather than evict one of
+#: them" — a terminal miss for this peer, by design.
+DELIVERY_ERROR_RELAYED_ROW_DROPPED: str = "relayed_row_dropped"
+
+
 #: :attr:`DeliveryResult.error` value meaning "queued in the mesh target's
 #: deferred FIFO" — NOT a loss yet. ``FederationService.broadcast_to_space_members``
 #: reports it for a mesh-only member it could not reach (route cooldown, no

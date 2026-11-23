@@ -339,23 +339,26 @@ async def test_a_protected_authors_totals_are_marked_no_relay(env):
     assert sent and all(s[2].get("no_relay") is True for s in sent)
 
 
-async def test_a_legacy_rows_totals_go_unmarked_whoever_wrote_it(env, monkeypatch):
-    """A row written before v_96 (NULL reach) went 3 hops: its totals go
-    unmarked, as they did then — even when its author is protected now (a
-    legacy ``no_relay`` moment was never relayed, so no relay passes its
-    totals on: it holds no row and relayed no create)."""
+@pytest.mark.parametrize("protected", [True, False])
+async def test_a_legacy_rows_totals_follow_the_authors_protection(
+    env, monkeypatch, protected
+):
+    """A row written before v_96 (NULL reach): a protected author's went
+    ``no_relay`` (one hop), so its totals do too — as on main; anyone
+    else's went 3 hops and its totals go unmarked. (Accepted edge: an
+    author protected only after posting a legacy moment.)"""
     _app, db, sent, own, anna, counts, _client = env
     start = datetime.now(UTC)
     await _moment(db, "m-anna", anna, own, "self", created=start)
     await _react(db, "m-anna", "u-x", "🔥")
 
     async def _protected(_self, _user_id):
-        return True
+        return protected
 
     monkeypatch.setattr(type(counts), "_is_protected", _protected)
     counts._clock_ms = lambda: int((start.timestamp() + 11 * 60) * 1000)
     assert await counts.tick() == 1
-    assert sent and all("no_relay" not in s[2] for s in sent)
+    assert sent and all(("no_relay" in s[2]) is protected for s in sent)
 
 
 # ═══ Receiver: only genuine, newer totals for a moment held here ══════════

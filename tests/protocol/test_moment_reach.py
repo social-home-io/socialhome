@@ -445,6 +445,47 @@ async def test_a_far_delete_landing_first_does_not_stop_the_origins(
     assert _deletes(sent, "m-del") == []
 
 
+@pytest.mark.parametrize(
+    ("held_at", "first_hop", "first_from", "then_hop", "then_from"),
+    [
+        # Held at hop 2: a hop-3 copy first, then the genuine hop-2 one.
+        (2, 3, RELAY, 2, RELAY),
+        # Held at hop 1: a relayed copy first, then the origin's own.
+        (1, 2, RELAY, 1, ORIGIN),
+    ],
+)
+async def test_a_holder_relays_the_genuine_delete_after_a_far_one(
+    env, held_at, first_hop, first_from, then_hop, then_from
+):
+    """The normal case: the moment is held here; a far copy of its delete
+    (or a relayed one, ahead of the origin's own) lands first and wipes it.
+    The closer delete arriving next must still travel on."""
+    app, _db, sent = env
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _signed(FET.MOMENT_CREATED, "m-held", hop=held_at),
+        from_instance=ORIGIN if held_at == 1 else RELAY,
+    )
+    sent.clear()
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-held", hop=first_hop),
+        from_instance=first_from,
+    )
+    first = _deletes(sent, "m-held")
+    sent.clear()
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-held", hop=then_hop),
+        from_instance=then_from,
+    )
+    assert {h for _to, h in _deletes(sent, "m-held")} == {then_hop + 1}
+    assert first == [] or {h for _to, h in first} == {first_hop + 1}
+
+
 async def test_a_delete_never_stored_first_from_far_then_from_the_origin(env):
     """The same when no moment was held: the far copy records a tombstone at
     its hop, the origin's closer copy lowers it and travels on."""

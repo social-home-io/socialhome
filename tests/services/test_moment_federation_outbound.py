@@ -1050,11 +1050,22 @@ async def test_a_protected_accounts_delete_is_no_relay(stack):
     assert all(c["payload"][NO_RELAY_FIELD] is True for c in _sent(fed))
 
 
-@pytest.mark.parametrize("row_reach", [3, None])
-async def test_a_delete_follows_the_row_not_todays_protection(stack, row_reach):
-    """B: a moment posted at reach 3 before its author became protected (or
-    a row written before v_96) went 3 hops — its delete must go as far,
-    unmarked, or households holding it keep it."""
+@pytest.mark.parametrize(
+    ("row_reach", "author", "no_relay"),
+    [
+        # B: posted at reach 3 before its author became protected — it went
+        # 3 hops, so its delete goes as far, unmarked.
+        (3, "uid-kid", False),
+        # A row written before v_96 by an author not protected: 3 hops.
+        (None, "uid-author", False),
+        # A row written before v_96 by a protected author: its create went
+        # ``no_relay`` (one hop), so its delete does too — as on main.
+        # Accepted edge: an author protected only after posting a legacy
+        # moment gets a one-hop delete for it.
+        (None, "uid-kid", True),
+    ],
+)
+async def test_a_delete_follows_the_row(stack, row_reach, author, no_relay):
     out, fed, fed_repo, user_repo = stack
     out.attach_child_protection(_ProtectedAuthorCp())
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
@@ -1062,15 +1073,19 @@ async def test_a_delete_follows_the_row_not_todays_protection(stack, row_reach):
     await out._on_deleted(
         MomentDeleted(
             moment_id="m-1",
-            author_user_id="uid-kid",
+            author_user_id=author,
             origin_instance_id="self",
             reach=row_reach,
         )
     )
-    assert _targets(fed) == {"p37", "p38", "p95", "p96"}
-    for call in _sent(fed):
-        assert NO_RELAY_FIELD not in call["payload"]
-        assert REACH_FIELD not in call["payload"]
+    if no_relay:
+        assert _targets(fed) == {"p38", "p95", "p96"}
+        assert all(c["payload"][NO_RELAY_FIELD] is True for c in _sent(fed))
+    else:
+        assert _targets(fed) == {"p37", "p38", "p95", "p96"}
+        for call in _sent(fed):
+            assert NO_RELAY_FIELD not in call["payload"]
+            assert REACH_FIELD not in call["payload"]
 
 
 async def test_a_protected_accounts_create_is_one_hop_whatever_the_event_says(
