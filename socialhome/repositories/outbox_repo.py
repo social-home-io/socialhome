@@ -37,7 +37,7 @@ from ..domain.federation import (
     PairingStatus,
 )
 from ..domain.federation_retention import (
-    ANY_RELAYED_DELETE_KEY_PREFIX,
+    EVICT_FIRST_KEY_PREFIXES,
     MAX_ATTEMPTS,
     MAX_PENDING_PER_PEER,
     NEVER_DROP,
@@ -45,6 +45,18 @@ from ..domain.federation_retention import (
     RETENTION_DAYS,
     capped_delete_key,
     retention_expires_at,
+)
+
+#: The ORDER BY head that puts the rows evicted first ahead of every other
+#: (:data:`~socialhome.domain.federation_retention.EVICT_FIRST_KEY_PREFIXES`:
+#: relayed deletes, and v_96 relayed creates and totals), with its params.
+_EVICT_FIRST_SQL = (
+    "COALESCE("
+    + " OR ".join("substr(supersede_key, 1, ?) = ?" for _ in EVICT_FIRST_KEY_PREFIXES)
+    + ", 0) DESC"
+)
+_EVICT_FIRST_PARAMS: tuple[object, ...] = tuple(
+    v for prefix in EVICT_FIRST_KEY_PREFIXES for v in (len(prefix), prefix)
 )
 
 # Domain dataclasses live in ``socialhome/domain/outbox.py``; re-exported
@@ -706,7 +718,8 @@ class SqliteOutboxRepo:
         structural state) are excluded — they are never dropped to make room.
         A moment's delete we only relay for another household goes first
         (adversarial review F2): a household flooding deletes can crowd out
-        other relayed ones, never our own events.
+        other relayed ones, never our own events. So do a moment create and
+        totals update we only relay (v_96, F5).
         """
         never = sorted(e.value for e in NEVER_DROP)
         placeholders = ",".join("?" * len(never))
@@ -715,16 +728,11 @@ class SqliteOutboxRepo:
             SELECT id FROM federation_outbox
              WHERE instance_id=? AND status='pending'
                AND event_type NOT IN ({placeholders})
-             ORDER BY COALESCE(substr(supersede_key, 1, ?) = ?, 0) DESC,
+             ORDER BY {_EVICT_FIRST_SQL},
                       datetime(created_at) ASC, id ASC
              LIMIT 1
             """,
-            (
-                instance_id,
-                *never,
-                len(ANY_RELAYED_DELETE_KEY_PREFIX),
-                ANY_RELAYED_DELETE_KEY_PREFIX,
-            ),
+            (instance_id, *never, *_EVICT_FIRST_PARAMS),
         )
         if row is None:
             return False
@@ -915,7 +923,7 @@ def _make_room_for(
             SELECT id FROM (
                 SELECT id, ROW_NUMBER() OVER (
                     PARTITION BY instance_id
-                    ORDER BY COALESCE(substr(supersede_key, 1, ?) = ?, 0) DESC,
+                    ORDER BY {_EVICT_FIRST_SQL},
                              datetime(created_at) ASC, id ASC
                 ) AS rn
                   FROM federation_outbox
@@ -925,12 +933,7 @@ def _make_room_for(
             ) WHERE rn = 1
         )
         """,
-        (
-            len(ANY_RELAYED_DELETE_KEY_PREFIX),
-            ANY_RELAYED_DELETE_KEY_PREFIX,
-            orjson.dumps(full).decode(),
-            *never,
-        ),
+        (*_EVICT_FIRST_PARAMS, orjson.dumps(full).decode(), *never),
     ).rowcount
     if evicted < len(full):
         log.warning(

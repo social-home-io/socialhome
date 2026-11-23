@@ -153,6 +153,26 @@ CAPPED_DELETE_KEY_PREFIX: str = "moment-delete:relay-capped:"
 #: rows the per-peer cap evicts first.
 ANY_RELAYED_DELETE_KEY_PREFIX: str = "moment-delete:relay"
 
+#: v_96 (F5) — outbox key prefix of a moment create or totals update this
+#: household only relays for another origin: ``moment-relay:<kind>:<origin>:
+#: <moment id>`` (:func:`relayed_moment_key`). Latest-only per (peer, kind,
+#: moment), and evicted first under the per-peer cap, so strangers' moments
+#: queued for an offline peer never push out this household's own events.
+RELAYED_MOMENT_KEY_PREFIX: str = "moment-relay:"
+
+#: Key prefixes of the rows the per-peer cap evicts before any other (oldest
+#: first among them): every relayed delete, create and totals update.
+EVICT_FIRST_KEY_PREFIXES: tuple[str, ...] = (
+    ANY_RELAYED_DELETE_KEY_PREFIX,
+    RELAYED_MOMENT_KEY_PREFIX,
+)
+
+
+def relayed_moment_key(kind: str, origin_instance_id: str, moment_id: str) -> str:
+    """The outbox key of a relayed moment row — *kind* ``create`` or
+    ``counts`` — for *origin_instance_id*'s *moment_id* (local only)."""
+    return f"{RELAYED_MOMENT_KEY_PREFIX}{kind}:{origin_instance_id}:{moment_id}"
+
 
 def moment_delete_key(
     event_type: FederationEventType, payload: dict, *, own_instance_id: str
