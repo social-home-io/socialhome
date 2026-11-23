@@ -1610,7 +1610,22 @@ from __future__ import annotations
 #:   requester's status keeps the v_94
 #:   rules. Not space-scoped. Labelled "Space sync status, even without the
 #:   host".
-OURS: int = 95
+#: * **v_96** (2026-11-23) — **subscriber seats** (``docs/protocol/
+#:   spaces.md`` "Followers (v_96)", principles sign-off "a space's host
+#:   and its admins know who follows"): a follow is an auto-approved join
+#:   with role ``subscriber`` — one read-only seat on every path (paired,
+#:   mesh, invite link, GFS). Subscriber seats go only to the acting host
+#:   and the admin households in roster gossip, the roster snapshot and
+#:   the mailbox directory; members see a ``follower_count``. A writer
+#:   cert gains a signed ``reader`` field. ``broadcast_to_space_members``
+#:   skips follower-only households unless the send is ``HOST_FORWARD`` /
+#:   ``KEY_AND_CONFIG``. Global spaces move to opaque channels. No new
+#:   event type. Breaking — no follower back-compat.
+#:   **Fallback**: a peer below v_96 cannot follow and gets no reader cert
+#:   or subscriber grant; a member household below v_96 keeps the
+#:   federation content path. Space-scoped. Labelled "Follow spaces with
+#:   one seat on every path".
+OURS: int = 96
 
 
 class FederationCapability:
@@ -2338,6 +2353,13 @@ class FederationCapability:
     #: ``page`` is older, and sends that ``page`` itself only to a provider
     #: at or above it. Below it: today's sentinel, Phase-1 status rules.
     MIN_FOR_SYNC_PAGES = 95
+    #: v_96 — a household at or above it can follow a space (an
+    #: auto-approved join with role ``subscriber``), is sent a signed
+    #: ``reader`` writer cert / subscriber grant, and sees subscriber seats
+    #: only as the acting host or an admin household (members get a
+    #: ``follower_count``). Below it: the peer cannot follow and gets no
+    #: reader cert; a behind member keeps the federation content path.
+    MIN_FOR_SUBSCRIBER_SEATS = 96
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2700,6 +2722,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SYNC_PAGES,
         "Space sync status, even without the host",
     ),
+    (
+        FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
+        "Follow spaces with one seat on every path",
+    ),
 ]
 
 
@@ -2805,6 +2831,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
     FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
     FederationCapability.MIN_FOR_SYNC_PAGES: "sync_pages",
+    FederationCapability.MIN_FOR_SUBSCRIBER_SEATS: "subscriber_seats",
 }
 
 
@@ -2934,6 +2961,10 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # list instead of merging it — a vote that raced another, or the
         # poll's close, can count differently there.
         FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
+        # A behind member household still sees follower households in its
+        # roster and sends its items to followers itself; its people cannot
+        # follow.
+        FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
     }
 )
 

@@ -153,7 +153,13 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   ``PollsExporter.unstamped_votes``): the crossing full stream brings
 #:   every poll's stamps, so votes it took unstamped while older are
 #:   ordered from then on.
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 87, 92, 94)
+#: * 96 — subscriber seats (``MIN_FOR_SUBSCRIBER_SEATS``): a follower
+#:   household is streamed the follower subset of a space, and the roster a
+#:   stream carries to a member household holds members only (subscriber
+#:   seats go only to the acting host and admin households). A household
+#:   crossing it gets one full stream, so a roster and content it took in
+#:   the older shape are replaced.
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 87, 92, 94, 96)
 
 
 def sync_version_bucket(peer_version: int) -> int:

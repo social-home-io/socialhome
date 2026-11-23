@@ -2705,6 +2705,7 @@
   "capability.space_post_reactions": "Reaktionen auf Space-Beiträge für alle Haushalte",
   "capability.poll_vote_stamps": "Umfragestimmen zählen in jedem Haushalt gleich",
   "capability.sync_pages": "Sync-Stand von Spaces, auch ohne den Host",
+  "capability.subscriber_seats": "Spaces folgen, mit einem Platz auf jedem Weg",
   "settings.tab.security": "Sicherheit",
   "settings.security.signing_in": "Anmelden",
   "settings.security.signing_in_hint": "Das nutzt nur du. Niemand sonst sieht deinen Anmeldenamen.",
