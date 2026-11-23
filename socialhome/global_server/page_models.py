@@ -18,7 +18,7 @@ from aiohttp import web
 
 from . import app_keys as K
 from .domain import GfsUserRegistration
-from .invites import build_invite_code
+from .invites import build_invite_code, invite_link_url
 
 #: A stored image a public page may show: a base64 ``data:`` URI of a raster
 #: type. An ``https://`` URL (or an SVG, which can carry script) is never
@@ -88,6 +88,8 @@ async def load_invite_page(app: web.Application, token: str) -> dict | None:
         "accent_color": space.accent_color,
         "icon_url": space.icon_url,
         "invite_code": build_invite_code(invite.blob),
+        # What the QR carries: the short link to this invite, not the code.
+        "invite_url": invite_link_url(app[K.gfs_config_key].base_url, token),
     }
 
 

@@ -14,7 +14,7 @@ import logging
 from aiohttp import web
 
 from .. import app_keys as K
-from ..invites import InvalidInvite, InviteRateLimited
+from ..invites import InvalidInvite, InviteRateLimited, invite_link_url
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ class SpaceInviteView(GfsBaseView):
         return web.json_response(
             {
                 "gfs_token": row.gfs_token,
-                "url": f"{cfg.base_url}/join/{row.gfs_token}",
+                "url": invite_link_url(cfg.base_url, row.gfs_token),
             },
             status=201,
         )

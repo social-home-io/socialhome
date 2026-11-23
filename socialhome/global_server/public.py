@@ -1252,9 +1252,9 @@ def _render_invite_page(
 
     Renders the space's already-public directory metadata (name, icon,
     accent) next to the one thing this page exists to hand over: the
-    ``socialhome://invite#<blob>`` code, as copyable text and as a QR of the
-    same string. Exactly the shape the landing page uses for the pairing
-    code, because it is exactly the same job.
+    ``socialhome://invite#<blob>`` code as copyable text, next to a QR of the
+    short link to this page (``invites.invite_link_url``): a phone's camera
+    opens the page, the app's scanner resolves the link to the code.
 
     There is deliberately no clickable "Open in Social Home" CTA. The visitor
     has to redeem this from THEIR OWN household, and a link can only ever open
@@ -1548,7 +1548,9 @@ async def handle_invite_page(request: web.Request) -> web.Response:
         return await invite_handoff(request.app, target)
     space = await load_invite_page(request.app, token)
     invite_code = space["invite_code"] if space else ""
-    qr_data = await _render_qr_png_data_uri(invite_code) if space else ""
+    # The QR carries the short link to this page (``invite_link_url``),
+    # never the ~900-character code; the code stays as copyable text.
+    qr_data = await _render_qr_png_data_uri(space["invite_url"]) if space else ""
     html, css = _render_invite_page(
         space=space,
         invite_code=invite_code,

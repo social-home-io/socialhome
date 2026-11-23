@@ -140,6 +140,21 @@ def build_invite_code(blob: str) -> str:
     return f"{INVITE_CODE_PREFIX}{blob}"
 
 
+def invite_link_url(base_url: str, gfs_token: str) -> str:
+    """The short web link of one invite: ``{base_url}/join/{gfs_token}``.
+
+    What the mint answers as ``url`` and what the invite QR carries — never
+    the whole ``socialhome://invite#…`` code: that is ~900 characters, a
+    version-24 QR of 113 × 113 modules no phone reads off a screen, under a
+    scheme a phone's own camera can't open. This link is a QR of version
+    ≤ 6: the camera opens the invite page, and the app's scanner resolves it
+    to the code through its own household (``POST /api/spaces/invite-link``).
+    Built from the configured ``[server] base_url`` (never a request's
+    ``Host``), trailing slashes dropped.
+    """
+    return f"{base_url.rstrip('/')}/join/{gfs_token}"
+
+
 class GfsInviteService:
     """Mint / revoke / look up invite rows.
 

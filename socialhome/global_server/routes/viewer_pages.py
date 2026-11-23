@@ -158,7 +158,9 @@ class InvitePageDataView(GfsBaseView):
                     "icon": image_data_uri(invite["icon_url"]),
                 },
                 "invite_code": code,
-                "qr": await _render_qr_png_data_uri(code),
+                # The short link to the invite page, never the code itself
+                # (``invites.invite_link_url``).
+                "qr": await _render_qr_png_data_uri(invite["invite_url"]),
             }
         )
         # It carries the code a redeemer needs: no cache may keep it.

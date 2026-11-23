@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import re
 import time
 from dataclasses import replace
@@ -10,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from PIL import Image
 
 from socialhome.crypto import derive_instance_id, ed25519_public_key
 from socialhome.global_server import public
@@ -618,6 +621,64 @@ async def test_invite_page_known_token(client):
     # coverage of the mint/serve/revoke flow is in ``test_invites.py``.
     assert "socialhome://invite#eyJ0b2tlbiI6ICJ4In0" in text
     assert "sh://" not in text
+
+
+#: A §D2b invite blob of realistic size (~860 base64url characters: token,
+#: space id + name, issuer id, two public keys, a signature, the GFS url,
+#: expiry). Its full code made a version-24 QR nobody could scan.
+_REAL_SIZE_BLOB = "eyJ0b2tlbiI6" + "A" * 850
+
+
+def _qr_version(data_uri: str) -> int:
+    """The QR version of a ``public._render_qr_png_data_uri`` PNG, read off
+    the image: ``box_size=8``, ``border=2`` → ``(modules + 4) * 8`` px."""
+    png = base64.b64decode(data_uri.split(",", 1)[1])
+    width, height = Image.open(io.BytesIO(png)).size
+    assert width == height
+    modules = width // 8 - 4
+    return (modules - 17) // 4
+
+
+async def test_invite_page_qr_is_the_short_link_not_the_code(client, monkeypatch):
+    """Regression: the QR carried the whole ``socialhome://invite#…`` code
+    (version 24, 113 × 113 modules at 180 px — unreadable from a screen, and
+    a scheme a phone camera can't open). It carries ``{base_url}/join/{token}``
+    now; the code stays on the page as copyable text."""
+    app = client._app
+    await app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id="o.home",
+            display_name="O",
+            public_key="aa" * 32,
+            status="active",
+        )
+    )
+    await app[gfs_fed_repo_key].upsert_space(
+        GlobalSpace(
+            space_id="inv-sp", owning_instance="o.home", name="Q", status="active"
+        )
+    )
+    await app[gfs_admin_repo_key]._db.enqueue(
+        "INSERT INTO gfs_invite_tokens(gfs_token, space_id, "
+        "source_instance_id, blob, expires_at) VALUES(?, ?, ?, ?, ?)",
+        ("invtok-qr", "inv-sp", "o.home", _REAL_SIZE_BLOB, int(time.time()) + 3600),
+    )
+    seen: list[str] = []
+    real = public._render_qr_png_data_uri
+
+    async def spy(payload: str) -> str:
+        seen.append(payload)
+        return await real(payload)
+
+    monkeypatch.setattr(public, "_render_qr_png_data_uri", spy)
+    resp = await client.get("/join/invtok-qr")
+    assert resp.status == 200
+    text = await resp.text()
+    assert seen == ["http://gfs.test/join/invtok-qr"]
+    assert f"socialhome://invite#{_REAL_SIZE_BLOB}" in text
+    qr = re.search(r'<img class="qr" src="(data:image/png;base64,[^"]+)"', text)
+    assert qr is not None
+    assert _qr_version(qr.group(1)) <= 6
 
 
 async def test_invite_page_unknown_token_404(client):
