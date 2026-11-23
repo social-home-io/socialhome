@@ -40,6 +40,16 @@ This module carries the "Ask to join" over that same sealed leg:
    or the token expires. The request reads "approved, joining…" meanwhile.
    A "busy" answer ends the applicant's request (``expired``, marked busy)
    and tells the person; Discover offers "Ask to join" again.
+
+A **follow** (v_96) is a join for the read-only ``subscriber`` role and
+rides the same leg: the sealed body carries ``requested_role:
+"subscriber"`` (the field the paired path carries), the host applies every
+budget and gate above in the same order, but needs a space that takes
+followers (``allow_subscribers``; the join mode does not matter) and,
+instead of filing a request for the admins, hands it to its automatic
+approval (:meth:`GfsJoinRequestCoordinator.attach_follow_approver`), which
+answers "approved" with a bound subscriber token. The applicant redeems it
+like any approval and is seated as a subscriber.
 """
 
 from __future__ import annotations
@@ -144,6 +154,17 @@ ANSWER_BUSY: str = "busy"
 #: ``{space_id, role}`` (:meth:`SpaceService.redeem_invite_token`).
 Redeem = Callable[..., Awaitable[dict]]
 
+#: The host's automatic approval of a follow (v_96) —
+#: :meth:`SpaceService.approve_remote_follow`: keyword-only ``space_id``,
+#: ``instance_id``, ``user_id``, ``request_id``, ``applicant_pk``,
+#: ``area_verdict``, ``gfs_relay``; ``True`` when it approved.
+FollowApprover = Callable[..., Awaitable[bool]]
+
+#: The one role a request may ask for (v_96): a follow. Rides as
+#: ``requested_role`` inside the sealed body, the same field the paired
+#: ``SPACE_JOIN_REQUEST`` carries.
+_FOLLOW_ROLE: str = SpaceRole.SUBSCRIBER.value
+
 
 class GfsJoinRequestCoordinator:
     """Both ends of an "Ask to join" sealed over the GFS relay."""
@@ -152,6 +173,7 @@ class GfsJoinRequestCoordinator:
         "_bus",
         "_federation",
         "_federation_repo",
+        "_follow_approver",
         "_in_flight",
         "_keywrap_public_key",
         "_keywrap_sig",
@@ -189,6 +211,9 @@ class GfsJoinRequestCoordinator:
         self._keywrap_sig = keywrap_sig
         self._rate_limiter = rate_limiter
         self._redeem: Redeem | None = None
+        #: Approves a follow (v_96) — :meth:`attach_follow_approver`; until
+        #: then a follow is dropped (fail closed).
+        self._follow_approver: FollowApprover | None = None
         #: Request ids whose redeem is running (never two at once).
         self._in_flight: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
@@ -196,6 +221,11 @@ class GfsJoinRequestCoordinator:
     def attach_redeem(self, redeem: Redeem) -> None:
         """Wire the seat step (:meth:`SpaceService.redeem_invite_token`)."""
         self._redeem = redeem
+
+    def attach_follow_approver(self, approver: FollowApprover) -> None:
+        """Wire the host's automatic approval of a follow (v_96,
+        :meth:`SpaceService.approve_remote_follow`)."""
+        self._follow_approver = approver
 
     # ─── Applicant side ───────────────────────────────────────────────────
 
@@ -218,14 +248,18 @@ class GfsJoinRequestCoordinator:
         Returns the request id, kept locally as a pending request.
 
         ``requested_role`` — :attr:`SpaceRole.SUBSCRIBER` for a follow
-        (v_96). Not used yet: the GFS follow (a sealed ``kind: "follow"``)
-        lands separately; until then the request is sent unchanged.
+        (v_96): ``requested_role: "subscriber"`` rides inside the sealed body
+        (the GFS never sees it), the field the paired path carries too. The
+        host approves it on its own while the space takes followers. Any
+        other role raises :class:`ValueError`.
 
         Raises :class:`HostNotReachableError` when the listing carries no
         usable contact for that host or the relay refuses the blob. Once the
         relay took it the request stands: the GFS queues it while the host
         is offline.
         """
+        if requested_role is not None and requested_role is not SpaceRole.SUBSCRIBER:
+            raise ValueError(f"cannot ask for the {requested_role!r} role")
         found = usable_contact(await self._public_spaces.get_pin(space_id))
         if found is None or found[0]["instance_id"] != host_instance_id:
             log.warning(
@@ -262,6 +296,8 @@ class GfsJoinRequestCoordinator:
         }
         if text:
             body["message"] = text
+        if requested_role is not None:
+            body["requested_role"] = _FOLLOW_ROLE
         try:
             envelope = seal_bootstrap_envelope(
                 body=body,
@@ -469,17 +505,36 @@ class GfsJoinRequestCoordinator:
             raise ValueError("gfs join request missing space_id / user_id / id")
         if not _ID_RE.match(user_id) or not _ID_RE.match(request_id):
             raise ValueError("gfs join request user_id / request_id malformed")
+        role = body.get("requested_role")
+        if role is not None and role != _FOLLOW_ROLE:
+            raise ValueError("gfs join request asks for an unknown requested_role")
+        follow = role == _FOLLOW_ROLE
         space = await self._spaces.get(space_id)
         if (
             space is None
             or space.dissolved
             or space.owner_instance_id != self._federation.own_instance_id
             or space.space_type is not SpaceType.GLOBAL
-            or space.join_mode is JoinMode.INVITE_ONLY
+            # A follow (v_96) is a join for the read-only role: it needs a
+            # space that takes followers, whatever its join mode; a request
+            # to join as a member needs one that takes requests.
+            or (
+                (space.archived or not space.features.allow_subscribers)
+                if follow
+                else space.join_mode is JoinMode.INVITE_ONLY
+            )
         ):
             log.info(
                 "gfs join request from %s for space %s refused: not a live "
-                "global space this household hosts that takes requests",
+                "global space this household hosts that takes %s",
+                applicant,
+                space_id,
+                "followers" if follow else "requests",
+            )
+            return {"ok": True, "filed": False}
+        if follow and self._follow_approver is None:
+            log.warning(
+                "gfs follow from %s for space %s dropped: no follow approver wired",
                 applicant,
                 space_id,
             )
@@ -535,6 +590,43 @@ class GfsJoinRequestCoordinator:
             return await self._refuse_busy(body, gfs_url=gfs_url)
         message = body.get("message")
         user_pk = body.get("user_public_key")
+        applicant_pk = str(user_pk) if isinstance(user_pk, str) and user_pk else None
+        # The applicant's relay contact: the answer goes back the same way.
+        gfs_relay = _dump(
+            {
+                "side": "host",
+                "identity_pk": str(body["identity_pk"]),
+                "keywrap_pk": str(body["keywrap_pk"]),
+                "keywrap_sig": str(body["keywrap_sig"]),
+                "gfs_url": gfs_url,
+                # What the applicant says about itself — shown to the
+                # admins as "via the GFS, not verified".
+                "person_name": _name(body.get("user_display_name")),
+                "household_name": _name(body.get("display_name")),
+            }
+        )
+        if follow:
+            # v_96 — approved on its own (no admin queue); the approver
+            # re-checks every gate and answers through the GFS with a bound
+            # subscriber token.
+            assert self._follow_approver is not None
+            approved = await self._follow_approver(
+                space_id=space_id,
+                instance_id=applicant,
+                user_id=user_id,
+                request_id=request_id,
+                applicant_pk=applicant_pk,
+                area_verdict=None,
+                gfs_relay=gfs_relay,
+            )
+            log.info(
+                "gfs follow %s from %s for space %s: %s",
+                request_id,
+                applicant,
+                space_id,
+                "approved" if approved else "refused",
+            )
+            return {"ok": True, "filed": bool(approved)}
         rid = await file_remote_join_request(
             self._spaces,
             self._bus,
@@ -542,22 +634,10 @@ class GfsJoinRequestCoordinator:
             household_instance_id=applicant,
             user_id=user_id,
             area_verdict=None,
-            applicant_pk=str(user_pk) if isinstance(user_pk, str) and user_pk else None,
+            applicant_pk=applicant_pk,
             message=str(message)[:MAX_MESSAGE_CHARS] if message else None,
             request_id=request_id,
-            gfs_relay=_dump(
-                {
-                    "side": "host",
-                    "identity_pk": str(body["identity_pk"]),
-                    "keywrap_pk": str(body["keywrap_pk"]),
-                    "keywrap_sig": str(body["keywrap_sig"]),
-                    "gfs_url": gfs_url,
-                    # What the applicant says about itself — shown to the
-                    # admins as "via the GFS, not verified".
-                    "person_name": _name(body.get("user_display_name")),
-                    "household_name": _name(body.get("display_name")),
-                }
-            ),
+            gfs_relay=gfs_relay,
         )
         log.info(
             "gfs join request %s from %s filed for space %s", rid, applicant, space_id

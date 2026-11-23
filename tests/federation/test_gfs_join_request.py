@@ -41,6 +41,8 @@ from socialhome.domain.space import (
     HostNotPairedError,
     HostNotReachableError,
     JoinMode,
+    SpaceFeatures,
+    SpaceRole,
     SpaceType,
     join_request_flags,
 )
@@ -1234,3 +1236,359 @@ def test_a_version_that_is_no_number_reads_as_one():
 def test_the_capability_names_the_version_that_shipped_it():
     assert FederationCapability.MIN_FOR_GFS_JOIN_REQUEST == 84
     assert OURS >= FederationCapability.MIN_FOR_GFS_JOIN_REQUEST
+
+
+# ─── 7. Follow through the GFS (v_96) ────────────────────────────────────
+#
+# A follow is a join for the read-only ``subscriber`` role: the same sealed
+# request (``requested_role`` inside the sealed body — the GFS never sees
+# it), the same budgets on the host, then the host's automatic approval
+# answers with a bound subscriber token the applicant redeems as usual.
+
+
+async def _followable_space(
+    b, gfs, a, *, join_mode=JoinMode.INVITE_ONLY, allow_subscribers=True
+):
+    """b hosts a global space that takes followers (invite-only by default:
+    it takes follows, no requests); a's poll cached its listing."""
+    space = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Follow Me Global",
+        space_type=SpaceType.GLOBAL,
+        join_mode=join_mode,
+        features=SpaceFeatures(allow_subscribers=allow_subscribers),
+    )
+    await _cache(a, await _listing_item(b, space), gfs.url)
+    return space
+
+
+def _follow(sender, **fields) -> dict:
+    return _signed(sender, requested_role="subscriber", **fields)
+
+
+def _approver(b, *, approved: bool = True) -> AsyncMock:
+    fn = AsyncMock(return_value=approved)
+    b.gfsjoin.join.attach_follow_approver(fn)
+    return fn
+
+
+def _spy_seal(sealed: list[dict]):
+    real_seal = gfs_join_module.seal_bootstrap_envelope
+
+    def _spy(**kwargs):
+        sealed.append(kwargs["body"])
+        return real_seal(**kwargs)
+
+    return patch.object(gfs_join_module, "seal_bootstrap_envelope", _spy)
+
+
+async def test_an_unpaired_household_follows_through_the_gfs(households, gfs):
+    """a follows b's invite-only space (followers on) through the GFS only:
+    b approves on its own and a is seated as a subscriber."""
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    bells: list[SpaceJoinRequested] = []
+    b.bus.subscribe(SpaceJoinRequested, bells.append)
+
+    rid = await a.space_service.request_join_remote(
+        space.id,
+        applicant_user_id=a.user_id,
+        host_instance_id=b.instance_id,
+        requested_role=SpaceRole.SUBSCRIBER,
+    )
+    await _settle(gfs, a, b)
+
+    member = await a.space_repo.get_member(space.id, a.user_id)
+    assert member is not None and member.role == SpaceRole.SUBSCRIBER
+    roster = await b.remote_members.list_for_space(space.id)
+    assert [(m.user_id, m.role) for m in roster] == [(a.user_id, "subscriber")]
+    assert (await a.space_repo.get_join_request(rid))["status"] == "approved"
+    assert (await b.space_repo.get_join_request(rid))["status"] == "approved"
+    # Nobody's queue: a follow needs no admin.
+    assert bells == []
+    assert await b.space_repo.list_pending_join_requests(space.id) == []
+    # The GFS saw sealed blobs only — not even that it was a follow.
+    for _to, body in gfs.mailbox:
+        assert set(body) == {"to_instance", "sealed"}
+        assert "subscriber" not in str(body)
+
+
+async def test_the_follow_role_rides_inside_the_sealed_body(households, gfs):
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    sealed: list[dict] = []
+    with _spy_seal(sealed):
+        await a.gfsjoin.join.request_join(
+            space.id,
+            applicant_user_id=a.user_id,
+            host_instance_id=b.instance_id,
+            requested_role=SpaceRole.SUBSCRIBER,
+        )
+    (body,) = sealed
+    assert body["requested_role"] == "subscriber"
+    # One field on both paths; the kind is the join request's own.
+    assert body["kind"] == KIND_JOIN_REQUEST
+
+
+async def test_a_plain_request_carries_no_role(households, gfs):
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    sealed: list[dict] = []
+    with _spy_seal(sealed):
+        await _ask(a, b, space)
+    assert "requested_role" not in sealed[0]
+
+
+@pytest.mark.parametrize("role", [SpaceRole.MEMBER, SpaceRole.ADMIN, SpaceRole.OWNER])
+async def test_the_applicant_asks_for_no_other_role(households, gfs, role):
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    with pytest.raises(ValueError):
+        await a.gfsjoin.join.request_join(
+            space.id,
+            applicant_user_id=a.user_id,
+            host_instance_id=b.instance_id,
+            requested_role=role,
+        )
+    assert gfs.mailbox == []
+
+
+async def test_a_follow_is_handed_to_the_approver_with_the_relay_contact(
+    households, gfs
+):
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    approve = _approver(b)
+    out = await b.gfsjoin.join.handle_body(
+        _follow(
+            a,
+            space_id=space.id,
+            user_id="u-fan",
+            request_id="rq-f",
+            user_public_key="pk-fan",
+            user_display_name="Fan",
+            display_name="Fan Home",
+        ),
+        gfs_url=gfs.url,
+    )
+    assert out == {"ok": True, "filed": True}
+    kwargs = dict(approve.await_args.kwargs)
+    relay = orjson.loads(kwargs.pop("gfs_relay"))
+    assert kwargs == {
+        "space_id": space.id,
+        "instance_id": a.instance_id,
+        "user_id": "u-fan",
+        "request_id": "rq-f",
+        "applicant_pk": "pk-fan",
+        "area_verdict": None,
+    }
+    assert relay == {
+        "side": "host",
+        "identity_pk": a.identity_pk.hex(),
+        "keywrap_pk": a.keywrap_pub.hex(),
+        "keywrap_sig": a.keywrap_sig,
+        "gfs_url": gfs.url,
+        "person_name": "Fan",
+        "household_name": "Fan Home",
+    }
+    # Never an admin's pending request.
+    assert await b.space_repo.list_pending_join_requests(space.id) == []
+
+
+async def test_a_follow_the_approver_refuses_is_not_filed(households, gfs):
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    _approver(b, approved=False)
+    out = await b.gfsjoin.join.handle_body(
+        _follow(a, space_id=space.id, user_id="u", request_id="r")
+    )
+    assert out == {"ok": True, "filed": False}
+
+
+async def test_a_request_mode_space_with_followers_takes_a_follow(households, gfs):
+    a, b = households
+    space = await _followable_space(b, gfs, a, join_mode=JoinMode.REQUEST)
+    approve = _approver(b)
+    out = await b.gfsjoin.join.handle_body(
+        _follow(a, space_id=space.id, user_id="u", request_id="r")
+    )
+    assert out["filed"] is True
+    approve.assert_awaited_once()
+
+
+@pytest.mark.parametrize("join_mode", [JoinMode.INVITE_ONLY, JoinMode.REQUEST])
+async def test_a_follow_of_a_space_without_followers_is_dropped(
+    households, gfs, join_mode
+):
+    a, b = households
+    space = await _followable_space(
+        b, gfs, a, join_mode=join_mode, allow_subscribers=False
+    )
+    approve = _approver(b)
+    before = await _answers_to(gfs, a)
+    out = await b.gfsjoin.join.handle_body(
+        _follow(a, space_id=space.id, user_id="u", request_id="r")
+    )
+    assert out == {"ok": True, "filed": False}
+    approve.assert_not_awaited()
+    assert await _answers_to(gfs, a) == before
+    assert await b.space_repo.list_pending_join_requests(space.id) == []
+
+
+async def test_a_follow_of_a_public_or_unknown_space_is_dropped(households, gfs):
+    """Only a global space is reached through the GFS."""
+    a, b = households
+    approve = _approver(b)
+    public = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Ours",
+        space_type=SpaceType.PUBLIC,
+        join_mode=JoinMode.INVITE_ONLY,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    for space_id in (public.id, "sp-unknown"):
+        out = await b.gfsjoin.join.handle_body(
+            _follow(a, space_id=space_id, user_id="u", request_id=f"r-{space_id}")
+        )
+        assert out == {"ok": True, "filed": False}
+    approve.assert_not_awaited()
+
+
+async def test_a_member_request_to_a_follows_only_space_is_still_dropped(
+    households, gfs
+):
+    """Followers on do not open an invite-only space to member requests."""
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    approve = _approver(b)
+    out = await b.gfsjoin.join.handle_body(
+        _signed(a, space_id=space.id, user_id="u", request_id="r")
+    )
+    assert out == {"ok": True, "filed": False}
+    approve.assert_not_awaited()
+    assert await b.space_repo.list_pending_join_requests(space.id) == []
+
+
+async def test_without_an_approver_a_follow_is_dropped(households, gfs):
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    b.gfsjoin.join._follow_approver = None
+    out = await b.gfsjoin.join.handle_body(
+        _follow(a, space_id=space.id, user_id="u", request_id="r")
+    )
+    assert out == {"ok": True, "filed": False}
+    assert await b.space_repo.get_join_request("r") is None
+
+
+@pytest.mark.parametrize("role", ["member", "admin", "owner", "follower", 1])
+async def test_an_unknown_requested_role_is_dropped(households, gfs, role):
+    a, b = households
+    space = await _followable_space(b, gfs, a, join_mode=JoinMode.REQUEST)
+    approve = _approver(b)
+    with pytest.raises(ValueError, match="requested_role"):
+        await b.gfsjoin.join.handle_body(
+            _signed(
+                a, space_id=space.id, user_id="u", request_id="r", requested_role=role
+            )
+        )
+    approve.assert_not_awaited()
+    assert await b.space_repo.list_pending_join_requests(space.id) == []
+
+
+async def test_a_follow_at_the_pending_cap_answers_busy(households, gfs):
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    approve = _approver(b)
+    with patch.object(gfs_join_module, "MAX_PENDING_PER_SPACE", 0):
+        out = await b.gfsjoin.join.handle_body(
+            _follow(a, space_id=space.id, user_id="u", request_id="r")
+        )
+    assert out["filed"] is False and out["busy"] is True
+    approve.assert_not_awaited()
+
+
+async def test_a_follow_over_the_space_budget_answers_busy(households, gfs):
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    approve = _approver(b)
+    b.gfsjoin.join._rate_limiter = RateLimiter()
+    with (
+        patch.object(gfs_join_module, "PER_SPACE_LIMIT", 1),
+        patch.object(gfs_join_module, "PER_SENDER_LIMIT", 100),
+    ):
+        first = await b.gfsjoin.join.handle_body(
+            _follow(a, space_id=space.id, user_id="u1", request_id="r1")
+        )
+        second = await b.gfsjoin.join.handle_body(
+            _follow(a, space_id=space.id, user_id="u2", request_id="r2")
+        )
+    assert first["filed"] is True
+    assert second["filed"] is False and second["busy"] is True
+    assert approve.await_count == 1
+
+
+async def test_a_banned_or_pending_follower_is_dropped_without_a_word(households, gfs):
+    a, b = households
+    space = await _followable_space(b, gfs, a, join_mode=JoinMode.REQUEST)
+    await b.space_repo.ban_member(space.id, "banned-u", banned_by=b.user_id)
+    # A member request of "asker" already waits for the admins.
+    assert (
+        await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id="asker", request_id="first")
+        )
+    )["filed"] is True
+    approve = _approver(b)
+    before = await _answers_to(gfs, a)
+    for user, rid in (("banned-u", "f1"), ("asker", "f2")):
+        out = await b.gfsjoin.join.handle_body(
+            _follow(a, space_id=space.id, user_id=user, request_id=rid)
+        )
+        assert out == {"ok": True, "filed": False}
+    approve.assert_not_awaited()
+    assert await _answers_to(gfs, a) == before
+
+
+async def test_a_follow_under_a_used_request_id_is_refused(households, gfs):
+    a, b = households
+    space = await _followable_space(b, gfs, a, join_mode=JoinMode.REQUEST)
+    # A member request filed under the id, then declined.
+    assert (
+        await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id="u1", request_id="r-same")
+        )
+    )["filed"] is True
+    await b.space_service.deny_join_request(
+        "r-same", actor_username=b.username, space_id=space.id
+    )
+    approve = _approver(b)
+    with pytest.raises(ValueError, match="already in use"):
+        await b.gfsjoin.join.handle_body(
+            _follow(a, space_id=space.id, user_id="u2", request_id="r-same")
+        )
+    approve.assert_not_awaited()
+
+
+async def test_an_approved_follow_answer_is_redeemed_as_a_subscriber(households, gfs):
+    """The applicant's side is the request's: the approval is kept, the
+    redeem seats the person, and the seat's role is the token's."""
+    a, b = households
+    space = await _followable_space(b, gfs, a)
+    seen: list[dict] = []
+    real_redeem = a.gfsjoin.join._redeem
+
+    async def _redeem(*args, **kwargs):
+        result = await real_redeem(*args, **kwargs)
+        seen.append(result)
+        return result
+
+    a.gfsjoin.join.attach_redeem(_redeem)
+    rid = await a.gfsjoin.join.request_join(
+        space.id,
+        applicant_user_id=a.user_id,
+        host_instance_id=b.instance_id,
+        requested_role=SpaceRole.SUBSCRIBER,
+    )
+    await _settle(gfs, a, b)
+    assert [(r["space_id"], r["role"]) for r in seen] == [(space.id, "subscriber")]
+    assert (await a.space_repo.get_join_request(rid))["status"] == "approved"
+    assert await a.space_service.list_joining_space_ids(a.user_id) == []

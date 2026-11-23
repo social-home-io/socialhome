@@ -10,6 +10,7 @@ self-leave without the immediate rotation.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,6 +41,7 @@ from socialhome.domain.space import (
     SpaceType,
     SubscribeNotAllowedError,
 )
+from socialhome.federation.gfs_join_request import APPROVAL_TOKEN_TTL
 from socialhome.federation.invite_token_redeem import (
     SpaceInviteTokenRedeemCoordinator,
 )
@@ -192,6 +194,42 @@ async def test_a_remote_follow_is_approved_with_a_bound_subscriber_token(stack):
     ]
 
 
+async def test_a_follow_through_the_gfs_is_answered_through_the_gfs(stack):
+    """A follow that came over the GFS (v_84 relay contact kept with the
+    request) is answered the same way: a 48 h bound subscriber token sealed
+    back through the GFS, never a direct send."""
+    space = await _hosted(stack)
+    gfs_join = MagicMock()
+    gfs_join.send_answer = AsyncMock(return_value=True)
+    stack.svc._gfs_join = gfs_join
+    relay = '{"side": "host", "gfs_url": "https://gfs.example"}'
+
+    assert (
+        await stack.svc.approve_remote_follow(
+            space_id=space.id,
+            instance_id=PEER,
+            user_id="u-fan",
+            request_id="rq-g",
+            gfs_relay=relay,
+        )
+        is True
+    )
+
+    token = await _token_row(stack, space.id)
+    assert token["role"] == SpaceRole.SUBSCRIBER.value
+    assert token["bound_instance_id"] == PEER
+    assert token["bound_user_id"] == "u-fan"
+    row = gfs_join.send_answer.await_args.args[0]
+    assert row["id"] == "rq-g" and row["gfs_relay"] == relay
+    kwargs = gfs_join.send_answer.await_args.kwargs
+    assert kwargs["answer"] == "approved"
+    assert kwargs["invite_token"] == token["token"]
+    assert kwargs["token_expires_at"] == token["expires_at"]
+    expires = datetime.fromisoformat(token["expires_at"])
+    assert expires - datetime.now(UTC) > APPROVAL_TOKEN_TTL - timedelta(minutes=1)
+    assert _approved_sends(stack) == []
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -219,6 +257,15 @@ async def test_a_follow_of_a_space_hosted_elsewhere_is_not_approved_here(stack):
 async def test_a_banned_person_cannot_follow(stack):
     space = await _hosted(stack)
     await stack.spaces.ban_member(space.id, "u-fan", banned_by="owner", reason="x")
+    assert await _approve_follow(stack, space.id) is False
+    assert _approved_sends(stack) == []
+
+
+async def test_a_follow_without_the_seat_store_fails_closed(stack):
+    """Without the remote seat store "not seated already" cannot be proved:
+    the follow is refused, never approved blind."""
+    space = await _hosted(stack)
+    stack.svc._remote_members = None
     assert await _approve_follow(stack, space.id) is False
     assert _approved_sends(stack) == []
 

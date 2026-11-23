@@ -330,6 +330,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # #5b — a follower that missed a space key asks for it.
         "space_key_pull": True,
         "join_contact": True,
+        # v_96 — serves the contact of a space that takes follows only.
+        "subscriber_seats": True,
         # Step 12 — counts followers that cannot read member items.
         "space_item_followers": True,
         # Takes zlib-compressed items; 409 while a follower can't open one.

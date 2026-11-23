@@ -246,17 +246,20 @@ def _served_join_contact(
     space_id: str,
     owning_instance: str,
     join_mode: str,
+    allow_subscribers: bool,
     space_public_key_hex: str,
 ) -> dict | None:
     """The join contact this listing serves (v_84), or ``None``.
 
     Applied AFTER the publish signature verified over the value as sent.
-    Served only for a space that takes requests, when it names the owning
+    Served only for a space that takes requests or follows (v_96: invite-only
+    with ``allow_subscribers`` on — a follow is a join for the read-only
+    role, sealed to the same contact), when it names the owning
     instance and its space-authority signature verifies against the key this
     server pinned for the space — so a listing never carries a contact a
     reader would refuse anyway. A dropped one is logged at WARNING.
     """
-    if raw is None or join_mode not in ("request", "open"):
+    if raw is None or (join_mode not in ("request", "open") and not allow_subscribers):
         return None
     contact = parse_join_contact(raw)
     if (
@@ -2200,6 +2203,7 @@ class GfsFederationService:
             space_id=space_id,
             owning_instance=owning_instance,
             join_mode=normalized_join_mode,
+            allow_subscribers=readable,
             space_public_key_hex=identity_public_key if repinning else pinned_pubkey,
         )
         space = GlobalSpace(

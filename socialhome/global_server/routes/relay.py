@@ -260,6 +260,14 @@ class GfsInfoView(GfsBaseView):
             # owner sends the field only to a server that proved this (an
             # older one would fold an unknown field out of the signed bytes).
             "join_contact": True,
+            # v_96 — a space that takes follows but no requests (invite-only
+            # with ``allow_subscribers`` on) gets its ``join_contact`` served
+            # too, so a household that never paired with the owner can seal a
+            # follow (a join for the read-only role) to it; the relay leg is
+            # the same sealed bootstrap, unread here. An owner sends such a
+            # space's contact only to a server that proved this. Channel seats
+            # for followers come with the channel phase.
+            "subscriber_seats": True,
             # Step 12 — keeps each seat's ``space_item`` label and answers
             # ``GET /gfs/spaces/{id}/subscribers?summary=1`` (counts, under the
             # authority signature). A seed holder skips its relay copy of a

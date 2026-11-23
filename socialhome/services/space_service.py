@@ -945,11 +945,10 @@ class SpaceService(
         return await self._gfs_selection.check_selection(gfs_ids, required=required)
 
     def attach_gfs_space_mirror(self, mirror) -> None:
-        """Wire the GFS-discovered-space on-ramp so ``subscribe_to_space``
-        can mirror a remote listing onto a local stub row (and register this
-        household on the GFS relay) before seating the subscriber. Optional:
-        absent when no GFS is paired — subscribe then behaves exactly as it
-        did before, 404ing on an unknown space id.
+        """Wire the legacy GFS mirror (pre-v_96 follows). A follow no longer
+        mirrors anything (:meth:`follow_space` asks the host); the mirror is
+        kept only so :meth:`unfollow_space` can purge a stub an older follow
+        made. Optional: absent when no GFS is paired.
         """
         self._gfs_mirror = mirror
 
@@ -1069,6 +1068,8 @@ class SpaceService(
         coordinator seats an approved person through our redeem."""
         self._gfs_join = coordinator
         coordinator.attach_redeem(self.redeem_invite_token)
+        # v_96 — a follow through the GFS is approved on its own here.
+        coordinator.attach_follow_approver(self.approve_remote_follow)
 
     async def list_joining_space_ids(self, user_id: str) -> list[str]:
         """Spaces *user_id* asked to join through the GFS whose host
