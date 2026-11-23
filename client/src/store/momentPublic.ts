@@ -162,7 +162,16 @@ export function gfsFollowOf(userId: string): MomentPublicFollow | undefined {
   return follows.value.find((f) => f.followed_user_id === userId)
 }
 
-/** Tests only. */
+/** Sign-out: the next account must not see this one's registrations,
+ *  follows, GFS list or a moment put aside in the composer. */
+export function resetMomentPublic(): void {
+  registrations.value = []
+  follows.value = []
+  parkedMoment.value = false
+  _resetGfsConnectionsForTests()
+}
+
+/** Tests only (and part of :func:`resetMomentPublic`). */
 export function _resetGfsConnectionsForTests(): void {
   gfsLoading = null
   gfsConnections.value = null

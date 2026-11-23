@@ -58,7 +58,7 @@ import { UploadProgressBar } from './UploadProgress'
 import { MOMENT_MAX_VIDEO_MS, prepareMomentMedia } from '@/features/momentum/momentMedia'
 import { getMomentsPreferences, momentRetentionLabel } from '@/utils/preferences'
 import { localClockTime } from '@/utils/relativeTime'
-import { currentUser } from '@/store/auth'
+import { currentUser, onLogout } from '@/store/auth'
 import { namedPersonLabel } from '@/store/householdUsers'
 import {
   canCarryPublicMoments,
@@ -103,6 +103,27 @@ const reachInfoOpen = signal<boolean>(false)
 /** Bumped per open so late answers from an earlier compose are dropped. */
 let openSeq = 0
 
+/** Sign-out: close and forget the compose, so the next account in this
+ *  tab never resumes it. Registered here because this module loads lazily
+ *  (no Momentum visited, nothing to forget); ``parkedMoment`` itself is
+ *  cleared by the store's own reset. */
+function forgetCompose(): void {
+  openSeq++
+  open.value = false
+  parentId.value = null
+  parent.value = null
+  content.value = ''
+  mediaUrl.value = null
+  mediaPreviewUrl.value = null
+  mediaType.value = null
+  durationMs.value = null
+  mediaBusy.value = false
+  submitting.value = false
+  isPublic.value = false
+  publicTouched.value = false
+}
+onLogout(forgetCompose)
+
 function setNextAllowed(iso: unknown): void {
   now.value = Date.now()
   nextAllowedAt.value =
@@ -145,16 +166,20 @@ export function openMomentumComposer(
   // Who the public row names, and whether a sign-up hint applies.
   void loadGfsConnections()
   const resume = parkedMoment.value && parentMomentId === null && parentId.value === null
+    && hasDraft()
   parkedMoment.value = false
   if (resume) {
     // Same compose as before: keep its sequence, so an upload still on
-    // its way lands in it.
+    // its way lands in it. The default may have changed in Settings
+    // meanwhile: apply it before the dialog shows, not after the reload.
     reachInfoOpen.value = false
+    submitting.value = false
+    if (!publicTouched.value) isPublic.value = sharesByDefault()
     open.value = true
     const seq = openSeq
     void loadRegistrations().then(() => {
       if (seq !== openSeq || !open.value || publicTouched.value) return
-      isPublic.value = registrations.value.some((r) => r.default_share)
+      isPublic.value = sharesByDefault()
     })
     loadLimits(seq)
     return
@@ -174,14 +199,13 @@ export function openMomentumComposer(
   publicTouched.value = false
   reachInfoOpen.value = false
   nextAllowedAt.value = null
-  const defaultShare = () => registrations.value.some((r) => r.default_share)
   // Cached registrations show the right state at once; the reload below
   // only fills in what the person hasn't decided themselves.
-  isPublic.value = parentMomentId === null && defaultShare()
+  isPublic.value = parentMomentId === null && sharesByDefault()
   open.value = true
   void loadRegistrations().then(() => {
     if (seq !== openSeq || !open.value) return
-    if (parentId.value === null && !publicTouched.value) isPublic.value = defaultShare()
+    if (parentId.value === null && !publicTouched.value) isPublic.value = sharesByDefault()
   })
   if (parentMomentId === null) loadLimits(seq)
   else if (!opts.parent) loadParent(seq, parentMomentId)
@@ -190,6 +214,11 @@ export function openMomentumComposer(
 /** Registrations public moments can actually go through (v_62). */
 function carriers() {
   return registrations.value.filter(canCarryPublicMoments)
+}
+
+/** "Make new moments public" is on for a GFS this moment can go through. */
+function sharesByDefault(): boolean {
+  return carriers().some((r) => r.default_share)
 }
 
 /** This moment could be public at all: not protected, and — for a reply
@@ -421,6 +450,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
     // waits for the way back instead of being discarded.
     e.preventDefault()
     e.stopPropagation()
+    if (submitting.value) return  // it's being posted; nothing to keep
     if (parentId.value === null) {
       putAside()
       loc.route(PUBLIC_SHARING_PATH)

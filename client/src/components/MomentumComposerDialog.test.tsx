@@ -5,7 +5,7 @@ import {
   openMomentumComposer,
 } from './MomentumComposerDialog'
 import { ApiError } from '@/api'
-import { currentUser } from '@/store/auth'
+import { currentUser, logout } from '@/store/auth'
 import {
   _resetGfsConnectionsForTests,
   parkedMoment,
@@ -181,6 +181,61 @@ describe('MomentumComposerDialog', () => {
     await openAndSettle()
     expect(container.querySelector('textarea')!.value).toBe('Half a thought')
     expect(parkedMoment.value).toBe(false)
+  })
+
+  it('a default changed in Settings applies to the resumed draft at once, not after a reload', async () => {
+    regs = [REG]
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    await waitFor(() => expect(publicSwitch(container)?.checked).toBe(true))
+    fireEvent.input(container.querySelector('textarea')!, { target: { value: 'Not for everyone' } })
+    const link = container.querySelector('a.sh-momentum-composer-public-settings') as HTMLAnchorElement
+    await act(async () => { fireEvent.click(link) })
+    // In Settings: "Make new moments public" turned off (the store's cache).
+    registrations.value = [REG_OFF]
+    // The reload never answers: the switch must already be off.
+    mockApi.get.mockImplementation((path: string) =>
+      path === '/api/moments/public/registrations' ? new Promise(() => {}) : routeGet(path))
+    act(() => { openMomentumComposer() })
+    expect(container.querySelector('textarea')!.value).toBe('Not for everyone')
+    expect(publicSwitch(container)!.checked).toBe(false)
+    expect(submitButton(container).textContent).toBe('Post moment')
+  })
+
+  it('signing out forgets a kept draft: the next account starts empty', async () => {
+    regs = []
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const link = await waitFor(() => container.querySelector('a.sh-momentum-composer-public-signup') as HTMLAnchorElement)
+    fireEvent.input(container.querySelector('textarea')!, { target: { value: 'Private words' } })
+    await act(async () => { fireEvent.click(link) })
+    act(() => { logout() })
+    currentUser.value = { user_id: 'u2', username: 'next', display_name: 'Next' } as User
+    await openAndSettle()
+    expect(container.querySelector('textarea')!.value).toBe('')
+  })
+
+  it('the links do nothing while the moment is being posted', async () => {
+    regs = [REG_OFF]
+    mockApi.post.mockImplementation(() => new Promise(() => {}))
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    fireEvent.input(container.querySelector('textarea')!, { target: { value: 'Going out' } })
+    await act(async () => { fireEvent.submit(container.querySelector('form')!) })
+    routeSpy.mockReset()
+    const link = container.querySelector('a.sh-momentum-composer-public-settings') as HTMLAnchorElement
+    await act(async () => { fireEvent.click(link) })
+    expect(routeSpy).not.toHaveBeenCalled()
+    expect(parkedMoment.value).toBe(false)
+  })
+
+  it('"share by default" on a GFS that cannot carry it does not pre-tick the switch', async () => {
+    regs = [{ ...REG, delivery: 'unsupported_server' }, { ...REG_OFF, gfs_id: 'g2', delivery: 'encrypted' }]
+    conns = [DEMO_GFS, { id: 'g2', display_name: 'Second GFS', status: 'active' }]
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    await waitFor(() => expect(publicSwitch(container)).not.toBeNull())
+    expect(publicSwitch(container)!.checked).toBe(false)
   })
 
   it('connected to a GFS but not signed up: public is unavailable, with a link to sign up', async () => {
