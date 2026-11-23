@@ -22,7 +22,11 @@ from socialhome.crypto import (
     generate_identity_keypair,
     verify_user_identity_assertion,
 )
-from socialhome.domain.events import UserProfileUpdated
+from socialhome.domain.events import (
+    UserDeprovisioned,
+    UserProfileUpdated,
+    UserProvisioned,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import User, UserIdentityAssertion
 from socialhome.infrastructure.event_bus import EventBus
@@ -622,3 +626,62 @@ async def test_block_with_nothing_queued_sends_no_snapshot():
     out.attach_snapshot_sender(_snapshot)
     await out.on_guardian_block("u1", "u-blocked")
     assert snapshots == []
+
+
+# ─── New member (UserProvisioned) ──────────────────────────────────────────
+
+
+def _provisioned(user_id: str = "u1") -> UserProvisioned:
+    return UserProvisioned(user_id=user_id, username="alice", is_admin=False)
+
+
+async def test_a_new_member_goes_to_every_paired_household():
+    """A member created after pairing reaches paired households at once —
+    the pair-confirm roster came before them (the child-account bug)."""
+    bus, fed, _out, _cp = _gated(blocked=())
+    await bus.publish(_provisioned())
+    by_peer = {to: (ev, payload) for to, ev, payload in fed.sent}
+    assert set(by_peer) == {"peer-1", "peer-2"}
+    for ev, payload in by_peer.values():
+        assert ev is FederationEventType.USER_UPDATED
+        assert payload == _FULL_WITH_BYTES
+
+
+async def test_a_new_member_skips_a_household_they_are_hidden_from():
+    bus, fed, _out, _cp = _gated(blocked=(), hidden=("peer-2",))
+    await bus.publish(_provisioned())
+    assert [to for to, _ev, _p in fed.sent] == ["peer-1"]
+
+
+async def test_a_new_member_keeps_the_guardian_block_rule():
+    bus, fed, _out, _cp = _gated(blocked=("peer-2",))
+    await bus.publish(_provisioned())
+    by_peer = {to: payload for to, _ev, payload in fed.sent}
+    assert by_peer["peer-2"] == _NAME_ONLY
+    assert by_peer["peer-1"] == _FULL_WITH_BYTES
+
+
+async def test_an_unknown_new_member_sends_nothing():
+    bus, fed, _out, _cp = _gated()
+    await bus.publish(_provisioned("u-gone"))
+    assert fed.sent == []
+
+
+# ─── Removed member (UserDeprovisioned) ────────────────────────────────────
+
+
+async def test_a_removed_member_leaves_every_paired_household():
+    """Before, a removed member stayed listed on paired households."""
+    bus, fed, _out, _cp = _gated(blocked=())
+    await bus.publish(UserDeprovisioned(user_id="u1", username="alice"))
+    assert sorted(fed.sent, key=lambda s: s[0]) == [
+        ("peer-1", FederationEventType.USER_REMOVED, {"user_id": "u1"}),
+        ("peer-2", FederationEventType.USER_REMOVED, {"user_id": "u1"}),
+    ]
+
+
+async def test_a_removed_member_skips_a_household_they_were_hidden_from():
+    """Hiding already sent that household ``USER_REMOVED``."""
+    bus, fed, _out, _cp = _gated(blocked=(), hidden=("peer-2",))
+    await bus.publish(UserDeprovisioned(user_id="u1", username="alice"))
+    assert [to for to, _ev, _p in fed.sent] == ["peer-1"]

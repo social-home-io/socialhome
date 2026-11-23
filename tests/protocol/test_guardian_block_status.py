@@ -123,7 +123,7 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
 
     sent: list[tuple[str, FederationEventType, dict]] = []
 
-    async def _record(self, *, to_instance_id, event_type, payload, space_id=None):
+    async def _record(self, *, to_instance_id, event_type, payload, **_kw):
         sent.append((to_instance_id, event_type, payload))
 
     # The wire itself is the protocol tests' business elsewhere; here only

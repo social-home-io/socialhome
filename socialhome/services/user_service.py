@@ -227,6 +227,21 @@ class UserService(ProtectionGateMixin):
                 source=source,
             )
             await self._repo.save(reactivated)
+            # Back in the household: paired households get them again
+            # (``USER_UPDATED`` lifts their ``USER_REMOVED``). Not
+            # ``UserProvisioned`` — calendar seeding and space seating ran
+            # when the account was first created.
+            await self._bus.publish(
+                UserProfileUpdated(
+                    user_id=reactivated.user_id,
+                    username=reactivated.username,
+                    display_name=reactivated.display_name,
+                    bio=reactivated.bio,
+                    picture_hash=reactivated.picture_hash,
+                    picture_webp=None,
+                    handle=reactivated.handle,
+                ),
+            )
             return reactivated
 
         user = User(

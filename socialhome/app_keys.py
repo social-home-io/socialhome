@@ -207,6 +207,9 @@ peer_gfs_relay_service_key: AppKey = AppKey("peer_gfs_relay_service")
 #: ``USER_UPDATED`` sender — the visible-users re-publish goes through it so
 #: the §CP.F2 guardian-block rule holds there too.
 profile_federation_outbound_key: AppKey = AppKey("profile_federation_outbound")
+#: ``USERS_SYNC`` sender — pair-confirm and fresh-connect roster snapshots
+#: (drained at shutdown).
+users_sync_outbound_key: AppKey = AppKey("users_sync_outbound")
 
 # ── Repos (exposed for routes / federation / inboxs) ───────────────────
 user_repo_key: AppKey = AppKey("user_repo")
