@@ -1142,6 +1142,22 @@ network address and timing, as for every envelope it relays (see the
 link-joined pair sign-off above) — the lookup that would have told it
 directly is gone.
 
+### Sign-off: a GFS learns a listed space's member and follower counts (signed off 2026-11-23)
+
+A global space's listing carries `member_count` (members — never followers)
+and `follower_count` (live follower seats) inside the owner-signed publish
+body, sent only to a GFS that proved the signed `listing_counts` capability.
+Each GFS listing the space therefore learns the **exact** counts, and serves
+them on its public pages and directory, so anyone reading the directory
+learns them too. The owner decided this (2026-11-23): a count is listing
+metadata, like the space's name, and a directory showing 0 for every space
+was the bug. The counts name nobody, are bounded (`0..10 000 000`, re-checked
+by every receiver) and change at most once per 5 minutes per space. A GFS
+cannot inflate them (the owner's signature covers them). A follower reached
+only through a GFS is no roster seat yet, so it is not counted until the
+subscriber-seats work makes it one. Paired households get the same two
+numbers in the `SPACE_DIRECTORY_SYNC` snapshot.
+
 ### Mailbox tickets hide a household among its epoch's households
 
 Creating a GFS mailbox spends an anonymous Privacy Pass ticket the

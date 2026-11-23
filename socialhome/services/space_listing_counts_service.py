@@ -52,7 +52,7 @@ log = logging.getLogger(__name__)
 __all__ = ["REPUBLISH_DEBOUNCE_S", "SpaceListingCountsService"]
 
 #: At most one count re-share per space in this window (seconds).
-REPUBLISH_DEBOUNCE_S: float = 180.0
+REPUBLISH_DEBOUNCE_S: float = 300.0
 
 #: The tiers whose listing carries counts: a global space is listed on GFSs,
 #: a public one in the paired-household directory.
