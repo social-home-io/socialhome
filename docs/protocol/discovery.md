@@ -2621,7 +2621,7 @@ acts on bound inside the author signature:
 | `post_delete` | generic (`space_item_author`) | `write` | the post's author only | `posts` access level |
 | `comment` | generic | `comment` (`write` implies it) | anyone whose cert binds them; id owner-bound to them | live writer seat on the origin, or a follower seat while `allow_subscriber_comment` is on |
 | `comment_edit` | generic — full snapshot | `comment` | the comment's author only | as for `comment` (own row) |
-| `comment_delete` | generic | `comment` | the comment's author only | as for `comment` (own row) |
+| `comment_delete` | generic | `comment` (a follower's `reader` cert carries it whatever the switches, v_96) | the comment's author only | the author's live seat of any role — a follower's too, whatever `allow_subscriber_comment` says (owner decision F6, v_96) |
 | `reaction_add` / `reaction_remove` | generic | `comment` | the reactor | live writer seat, or a follower seat while `allow_subscriber_react` is on |
 | `author_profile` (v_60) | generic — the profile in the signed `content` | `comment` | the author, about themself only (`item_target == post_id == author_user_id`) | — (kept, never a seat; see [Author profiles for followers](#author-profiles-for-followers-v_60)) |
 

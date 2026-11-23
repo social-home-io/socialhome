@@ -3007,6 +3007,25 @@ async def test_a_moderator_re_redeeming_the_link_keeps_their_seat():
     assert env.issuer_members.live[key]["role"] == SpaceRole.MODERATOR.value
 
 
+async def test_a_member_redeeming_a_follower_link_keeps_the_member_seat():
+    """P1 F3 (v_96): no path moves a live writer seat to a follower seat —
+    so none needs a rotation for it. A member household redeeming a
+    ``subscriber`` link is answered from the seat it holds; nothing is
+    consumed, re-seated or demoted."""
+    env = _atomic_pair()
+    env.relay.lose_to.add(env.redeemer_party.instance_id)
+    with pytest.raises(TimeoutError):
+        await _redeem(env)
+    key = ("space-1", env.redeemer_party.instance_id, "u-local")
+    assert env.issuer_members.live[key]["role"] == SpaceRole.MEMBER.value
+    env.issuer_spaces.tokens["tok-1"]["role"] = SpaceRole.SUBSCRIBER.value
+    env.relay.lose_to.clear()
+    result = await _redeem(env)
+    assert result["role"] == SpaceRole.MEMBER.value
+    assert len(env.issuer_members.added) == 1
+    assert env.issuer_members.live[key]["role"] == SpaceRole.MEMBER.value
+
+
 async def test_a_re_ack_that_is_refused_rolls_nothing_back():
     """A retry by an already-seated household whose re-ACK the relay
     refuses must not un-seat the household it seated the first time."""

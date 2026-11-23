@@ -1514,14 +1514,15 @@ async def test_accept_prefers_a_non_reader_cert_on_a_tie():
 
 
 #: Which follower switch a reader cert's item type needs: "comment", "react",
-#: "either" (author_profile) or None (never — posts and their edits/deletes).
+#: "either" (author_profile), "always" (the own-comment delete, owner F6) or
+#: None (never — posts and their edits/deletes).
 _READER_NEEDS: dict[str, str | None] = {
     "post": None,
     "post_edit": None,
     "post_delete": None,
     "comment": "comment",
     "comment_edit": "comment",
-    "comment_delete": "comment",
+    "comment_delete": "always",
     "reaction_add": "react",
     "reaction_remove": "react",
     "author_profile": "either",
@@ -1534,6 +1535,8 @@ def _reader_ok(item_type: str, comment: bool, react: bool) -> bool:
         return comment
     if needs == "react":
         return react
+    if needs == "always":
+        return True
     if needs == "either":
         return comment or react
     return False

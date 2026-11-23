@@ -964,6 +964,8 @@ non-reader cert, breaks `cert_sig`. Receivers apply the space's follower
 switches to a reader cert (`reader_cert_permits` in
 `domain/space_item.py`: comments only with `allow_subscriber_comment`,
 reactions only with `allow_subscriber_react`, `author_profile` with either,
+the author's delete of their own comment always — owner decision F6: the
+receiver decides that one on authorship, the stored comment's author —
 anything else refused). `WriterCert.from_wire` refuses any key outside
 `{cert_suite, space_id, epoch, instance_pk, scope, issued_at, cert_sig,
 writer_user_ids, users_sig, users_sig_suite, reader}`, a `reader` that is

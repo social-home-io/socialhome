@@ -79,7 +79,6 @@ def _reader_cert(*, reader: bool) -> WriterCert:
 _READER_ALLOWED: dict[str, tuple[bool, bool]] = {
     ITEM_TYPE_COMMENT: (True, False),
     ITEM_TYPE_COMMENT_EDIT: (True, False),
-    ITEM_TYPE_COMMENT_DELETE: (True, False),
     ITEM_TYPE_REACTION_ADD: (False, True),
     ITEM_TYPE_REACTION_REMOVE: (False, True),
 }
@@ -96,6 +95,8 @@ def test_reader_cert_permits_every_item_type(item_type, comment, react):
     assert reader_cert_permits(_reader_cert(reader=False), item_type, features)
     if item_type == "author_profile":
         expected = comment or react
+    elif item_type == ITEM_TYPE_COMMENT_DELETE:
+        expected = True  # the author's own delete: always (owner F6)
     elif item_type in _READER_ALLOWED:
         needs_comment, needs_react = _READER_ALLOWED[item_type]
         expected = (needs_comment and comment) or (needs_react and react)
