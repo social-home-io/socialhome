@@ -47,6 +47,13 @@ from ..domain.federation_retention import (
     retention_expires_at,
 )
 
+# Domain dataclasses live in ``socialhome/domain/outbox.py``; re-exported
+# here so existing repo-level imports keep working.
+from ..domain.outbox import OutboxEntry, OutboxPayload
+from .base import rows_to_dicts
+
+log = logging.getLogger(__name__)
+
 #: The ORDER BY head that puts the rows evicted first ahead of every other
 #: (:data:`~socialhome.domain.federation_retention.EVICT_FIRST_KEY_PREFIXES`:
 #: relayed deletes, and v_96 relayed creates and totals), with its params.
@@ -58,13 +65,6 @@ _EVICT_FIRST_SQL = (
 _EVICT_FIRST_PARAMS: tuple[object, ...] = tuple(
     v for prefix in EVICT_FIRST_KEY_PREFIXES for v in (len(prefix), prefix)
 )
-
-# Domain dataclasses live in ``socialhome/domain/outbox.py``; re-exported
-# here so existing repo-level imports keep working.
-from ..domain.outbox import OutboxEntry, OutboxPayload
-from .base import rows_to_dicts
-
-log = logging.getLogger(__name__)
 
 #: Default batch size for :meth:`SqliteOutboxRepo.purge_terminal`. Exported so
 #: the OutboxProcessor's batch-drain loop compares against the SAME value its
