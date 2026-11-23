@@ -43,6 +43,7 @@ from ..domain.federation import InstanceSource, PairingStatus
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.moment import (
     MOMENT_MAX_CONTENT_LEN,
+    MOMENT_MAX_REACH,
     MOMENT_MAX_VIDEO_MS,
     REACTION_REACH_AUTHOR,
     Moment,
@@ -59,6 +60,7 @@ from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from .inbound_media_store import optional_local_media_ref
 from .media_ref_guard import MediaRefGuardedMixin
+from .protection_gate import ProtectionGateMixin
 from .user_preferences import parse_moment_preferences
 
 if TYPE_CHECKING:
@@ -66,6 +68,7 @@ if TYPE_CHECKING:
 
     from ..infrastructure.event_bus import EventBus
     from ..repositories.federation_repo import AbstractFederationRepo
+    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.user_repo import AbstractUserRepo
 
@@ -75,6 +78,12 @@ log = logging.getLogger(__name__)
 #: Minimum interval between two top-level moments by the same author.
 #: Replies and reactions are exempt — see ``create_moment``.
 MOMENT_RATE_WINDOW = timedelta(minutes=15)
+
+
+#: v_96 — ``instance_config`` key holding the household's maximum reach: the
+#: most hops a person here may let their moments go (1–5; missing or not a
+#: number = :data:`MOMENT_MAX_REACH`, no limit).
+REACH_MAX_KEY = "moments.reach_max"
 
 
 #: The one message an unknown moment id and a moment the caller may not
@@ -140,11 +149,13 @@ class MomentRateLimitError(Exception):
         self.next_allowed_at = next_allowed_at
 
 
-class MomentService(MediaRefGuardedMixin):
+class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
     """Create + react + delete moments and drive their lifecycle."""
 
     __slots__ = (
         "_bus",
+        "_child_protection",
+        "_config",
         "_federation_repo",
         "_gfs_delete_log",
         "_media_dir",
@@ -167,6 +178,7 @@ class MomentService(MediaRefGuardedMixin):
         media_refs: AbstractMediaReferenceRepo | None = None,
         federation_repo: AbstractFederationRepo | None = None,
         gfs_delete_log: GfsDeleteLog | None = None,
+        config_repo: AbstractInstanceConfigRepo | None = None,
     ) -> None:
         self._moments = moment_repo
         self._users = user_repo
@@ -182,6 +194,11 @@ class MomentService(MediaRefGuardedMixin):
         self._gfs_delete_log = gfs_delete_log
         #: v_67 — where a reaction reaches (``MomentReactionRouter``).
         self._reaction_reach: ReactionReach | None = None
+        #: v_96 — the household's ``moments.reach_max``. Unset (a unit
+        #: test's bare service): no household limit.
+        self._config = config_repo
+        #: §CP.R — a protected account's moments go one hop (v_96 reach 1).
+        self._child_protection = None
 
     def attach_reaction_reach(self, reach: ReactionReach) -> None:
         """Wire what decides whether a reaction reaches a moment's author
@@ -231,6 +248,7 @@ class MomentService(MediaRefGuardedMixin):
 
         parent_author_user_id: str | None = None
         root: Moment | None = None
+        replied_to: Moment | None = None
         if parent_moment_id is not None:
             # Replying needs reading: a parent the author may not read is
             # the unknown-id 404, never a way to learn it exists.
@@ -248,7 +266,7 @@ class MomentService(MediaRefGuardedMixin):
             # Threads stay flat: a reply to a reply attaches to the
             # original root so list_replies(root) returns the whole
             # conversation in a single query.
-            root = parent
+            root = replied_to = parent
             if parent.parent_moment_id is not None:
                 root = await self._moments.get(parent.parent_moment_id)
                 parent_moment_id = parent.parent_moment_id
@@ -282,6 +300,12 @@ class MomentService(MediaRefGuardedMixin):
             # A reply never outlives its thread: once the root is gone from
             # the households that hold it, the reply would stand alone.
             expires_at = min(expires_at, root.expires_at, key=_expiry_key)
+        reach = await self._effective_reach(author_user_id)
+        # v_96: nor goes further than what it answers (the moment replied
+        # to and its thread's root, as held here).
+        for held in (replied_to, root):
+            if held is not None:
+                reach = min(reach, held.reach)
         moment = Moment(
             # Owner-bound (v_36): no other household can announce this id
             # first — as a moment or a delete — for its own user.
@@ -299,6 +323,7 @@ class MomentService(MediaRefGuardedMixin):
             expires_at=expires_at,
             is_public=is_public,
             received_via="self",
+            reach=reach,
         )
         await self._moments.save(moment)
         await self._bus.publish(
@@ -313,6 +338,7 @@ class MomentService(MediaRefGuardedMixin):
                 parent_author_user_id=parent_author_user_id,
                 origin_instance_id=moment.origin_instance_id,
                 expires_at=moment.expires_at,
+                reach=moment.reach,
             )
         )
         return moment
@@ -343,6 +369,9 @@ class MomentService(MediaRefGuardedMixin):
                 author_user_id=moment.author_user_id,
                 origin_instance_id=moment.origin_instance_id,
                 is_public=moment.is_public,
+                # v_96: as far as the moment went (its row), whatever the
+                # author's setting is now.
+                reach=moment.reach,
             )
         )
 
@@ -431,6 +460,30 @@ class MomentService(MediaRefGuardedMixin):
             author.preferences_json if author is not None else None
         )
         return prefs.follower_retention_days
+
+    async def _effective_reach(self, author_user_id: str) -> int:
+        """How many hops a new moment of *author_user_id* goes (v_96): one
+        for a protected account (§CP.R, never raised), else the person's
+        ``moments.reach`` within the household's ``moments.reach_max``."""
+        if await self._is_protected(author_user_id):
+            return 1
+        author = await self._users.get_by_user_id(author_user_id)
+        prefs = parse_moment_preferences(
+            author.preferences_json if author is not None else None
+        )
+        return min(prefs.reach, await self.household_reach_max())
+
+    async def household_reach_max(self) -> int:
+        """The household's maximum reach (``moments.reach_max``, 1–5)."""
+        raw = await self._config.get(REACH_MAX_KEY) if self._config else None
+        if raw is None:
+            return MOMENT_MAX_REACH
+        try:
+            value = int(raw)
+        except ValueError:
+            log.warning("moment reach maximum %r is not a number — no limit", raw)
+            return MOMENT_MAX_REACH
+        return max(1, min(value, MOMENT_MAX_REACH))
 
     async def _max_hops(self, viewer_user_id: str) -> int:
         """The viewer's ``moments.max_hops`` preference (§Momentum-relay-policy)."""

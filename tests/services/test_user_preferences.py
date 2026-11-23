@@ -141,7 +141,30 @@ def test_moment_preferences_keep_max_hops_beside_retention():
     assert (prefs.max_hops, prefs.follower_retention_days) == (1, 14)
 
 
-# ─── Home Assistant automation opt-in (D14) ──────────────────────────────
+@pytest.mark.parametrize(
+    ("blob", "reach"),
+    [
+        (None, 3),
+        ("{not json", 3),
+        ('{"moments": {}}', 3),
+        ('{"moments": {"reach": 1}}', 1),
+        ('{"moments": {"reach": 2}}', 2),
+        ('{"moments": {"reach": 5}}', 5),
+        ('{"moments": {"reach": 9}}', 5),
+        ('{"moments": {"reach": 0}}', 1),
+        ('{"moments": {"reach": -4}}', 1),
+        ('{"moments": {"reach": "far"}}', 3),
+        ('{"moments": {"reach": null}}', 3),
+    ],
+)
+def test_moment_reach(blob, reach):
+    """v_96: how far the person's moments go — 1–5 hops, 3 by default."""
+    prefs = parse_moment_preferences(blob)
+    assert prefs.reach == reach
+    assert prefs.max_hops == 3
+
+
+# ─── Home Assistant automation opt-in (D14)──────────────────────────────
 
 
 def test_ha_automation_events_off_by_default():
