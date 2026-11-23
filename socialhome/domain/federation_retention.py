@@ -121,7 +121,7 @@ _ONLINE_STATUS: frozenset[FederationEventType] = frozenset(
 #: ceiling backoff (like :data:`NEVER_DROP`) until :data:`LONG_LIVED_TTL`
 #: from enqueue, and stay evictable under :data:`MAX_PENDING_PER_PEER`
 #: (unlike it). Every relay hop enqueues its own copy, so a delete crosses
-#: the 3-hop mesh even when the households between are offline for weeks.
+#: the mesh even when the households between are offline for weeks.
 LONG_LIVED: frozenset[FederationEventType] = frozenset(
     {FederationEventType.MOMENT_DELETED}
 )

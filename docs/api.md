@@ -238,7 +238,7 @@ Voluntary adult-to-adult block list. Distinct from the parent-driven CP block (`
 
 ### Momentum (§Momentum)
 
-Household-broadcast posts that fan to a 3-hop peer mesh. Replies are themselves moments, linked via `parent_moment_id`. Rate-limited at one top-level moment per author per 15 minutes; replies and reactions are exempt. Default visibility: 24h; 7d for moments authored by anyone the viewer follows.
+Household-broadcast posts that fan out over the peer mesh up to `MOMENT_MAX_HOPS` hops, bounded by the signed reach (default 3). Replies are themselves moments, linked via `parent_moment_id`. Rate-limited at one top-level moment per author per 15 minutes; replies and reactions are exempt. Default visibility: 24h; 7d for moments authored by anyone the viewer follows.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -1370,7 +1370,7 @@ lists (and a withheld group message never counts as unread for the
 account); typing indicators never cross; their moments and highlights are
 hidden from each other — and the account's own moments and highlights are
 not sent to a household where someone it has blocked lives (the moment
-3-hop relay mesh can still carry a moment there through a third household,
+relay mesh — up to `MOMENT_MAX_HOPS` hops, bounded by the signed reach — can still carry a moment there through a third household,
 which knows nothing of the block); their statuses, whereabouts and online
 state are hidden from each other (`/api/friends`, `/api/presence`, the
 status in `/api/users`, and the matching `user.*` / `presence.updated`

@@ -838,6 +838,41 @@ async def test_an_outbox_key_queues_one_routed_reaction_per_person():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "key", "payloads"),
+    [
+        (
+            FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+            "capabilities",
+            [{"proto_version": OURS, "moment_look_hops": n} for n in (3, 5, 4)],
+        ),
+        (
+            FederationEventType.INSTANCE_RESYNC_REQUEST,
+            "resync:capabilities",
+            [{"scope": "capabilities"}] * 3,
+        ),
+    ],
+)
+async def test_capabilities_and_their_resync_request_are_latest_only(
+    event_type, key, payloads
+):
+    """Fable #3: the keys the capabilities sender and the startup resync
+    use go through the supersede path — one queued row per peer, the newest,
+    so an older look never lands after a newer one."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    for payload in payloads:
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=event_type,
+            payload=payload,
+            outbox_key=key,
+        )
+    (row,) = outbox_repo.enqueued
+    assert row["supersede_key"] == key
+    assert row["event_type"] is event_type
+
+
+@pytest.mark.asyncio
 async def test_a_dm_queued_for_an_offline_peer_is_never_superseded():
     svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
     for i in range(3):
@@ -7151,3 +7186,21 @@ async def test_the_files_hash_map_reaches_only_v85_households(monkeypatch):
         new.id: {"id": "p", "files": files, "files_suite": "sha256"},
         old.id: {"id": "p"},
     }
+
+
+# ─── peer moment look (v_96 decision C, in memory) ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_peer_moment_look_is_kept_in_memory_and_forgotten_on_unpair():
+    """How far a peer's people look for moments lives in memory only: not
+    heard → ``None``; set → kept per peer; an unpair forgets it, so a
+    re-paired household gets no hop-4–5 copy until it says again."""
+    svc, _ = _make_service()
+    assert svc.peer_moment_look_hops("peer-a") is None
+    svc.set_peer_moment_look_hops("peer-a", 5)
+    svc.set_peer_moment_look_hops("peer-b", 4)
+    assert svc.peer_moment_look_hops("peer-a") == 5
+    svc.note_unpaired("peer-a")
+    assert svc.peer_moment_look_hops("peer-a") is None
+    assert svc.peer_moment_look_hops("peer-b") == 4

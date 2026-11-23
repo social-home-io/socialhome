@@ -486,6 +486,7 @@ class FederationService:
         "_media_relay_inbound_pipeline",
         "_mesh_claim_answer",
         "_mesh_claim_answer_tasks",
+        "_moment_looks",
         "_online_status_service",
         "_outbox_payload_key",
         "_outbox_repo",
@@ -605,6 +606,14 @@ class FederationService:
         #: diagnostics, never persisted, never sent anywhere. Bounded by
         #: the number of paired peers.
         self._relay_accepted_at: dict[str, str] = {}
+        #: v_96 decision C — peer instance_id → how far its people look for
+        #: moments (``moment_look_hops``, 1–5), as it last advertised in
+        #: ``INSTANCE_CAPABILITIES_UPDATED``. In memory only: re-learned
+        #: after our restart through the startup capabilities resync
+        #: (:func:`~socialhome.services.capability_resync
+        #: .request_capability_resync`); forgotten on unpair
+        #: (:meth:`note_unpaired`). Bounded by the number of paired peers.
+        self._moment_looks: dict[str, int] = {}
         #: (peer instance_id, supersede key) → ticket of the newest
         #: :meth:`send_event` of that latest-only state still in flight.
         #: Only the newest send's outcome touches the outbox (an older one
@@ -744,8 +753,10 @@ class FederationService:
         :meth:`~socialhome.services.peer_unpair_service.PeerUnpairService.purge`
         BEFORE the row goes — a frame the DataChannel delivers between the
         delete and the :class:`PeerUnpaired` event must already count —
-        and again from that event.
+        and again from that event. Also forgets how far its people look for
+        moments (a re-paired household says it again).
         """
+        self._moment_looks.pop(instance_id, None)
         now = time.monotonic()
         self._unpaired_at = {
             iid: at
@@ -1793,6 +1804,17 @@ class FederationService:
             )
             and await self._transport.relay_media_ready(instance)
         )
+
+    def set_peer_moment_look_hops(self, instance_id: str, look: int) -> None:
+        """Keep how far *instance_id*'s people look for moments (v_96,
+        decision C) — validated by the caller (an integer 1–5)."""
+        self._moment_looks[instance_id] = look
+
+    def peer_moment_look_hops(self, instance_id: str) -> int | None:
+        """How far *instance_id*'s people look for moments, or ``None`` when
+        it has not said since our start (older, or not heard from yet) — a
+        relay then sends it no hop-4–5 copy."""
+        return self._moment_looks.get(instance_id)
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         """``True`` iff the named peer's advertised ``proto_version`` is

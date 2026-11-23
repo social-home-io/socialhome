@@ -240,6 +240,7 @@ async def test_nothing_routes_before_the_identity_is_attached():
     stamped = r.stamp_relayed_create(
         {"origin_keywrap_pk": "aa", "rt": ["x"], "rt_suite": "aesgcm-256"},
         received_hop=1,
+        reach=5,
         from_instance="a",
         to_instance="b",
     )
@@ -276,20 +277,69 @@ def _create(**over):
 
 def test_a_relay_appends_one_token_per_peer(router):
     first = router.r.stamp_relayed_create(
-        _create(), received_hop=1, from_instance="origin", to_instance="b"
+        _create(), received_hop=1, reach=5, from_instance="origin", to_instance="b"
     )
     second = router.r.stamp_relayed_create(
-        _create(), received_hop=1, from_instance="origin", to_instance="c"
+        _create(), received_hop=1, reach=5, from_instance="origin", to_instance="c"
     )
     assert len(first["rt"]) == 1 and first["rt_suite"] == "aesgcm-256"
     assert first["rt"] != second["rt"]
     onward = router.r.stamp_relayed_create(
         _create(rt=first["rt"], rt_suite="aesgcm-256"),
         received_hop=2,
+        reach=5,
         from_instance="b",
         to_instance="d",
     )
     assert onward["rt"][0] == first["rt"][0] and len(onward["rt"]) == 2
+
+
+def test_a_hop_5_copy_carries_four_tokens(router):
+    """v_96: the cap is 5, so a relay at hop 4 adds the fourth token."""
+    tokens: list[str] = []
+    for hop in range(1, 5):
+        stamped = router.r.stamp_relayed_create(
+            _create(**({"rt": tokens, "rt_suite": "aesgcm-256"} if tokens else {})),
+            received_hop=hop,
+            reach=5,
+            from_instance=f"h{hop}",
+            to_instance=f"h{hop + 1}",
+        )
+        tokens = stamped["rt"]
+    assert len(tokens) == 4
+
+
+async def _route_at(router, hop: int, tokens: int):
+    origin = generate_identity_keypair()
+    kw = generate_x25519_keypair()
+    payload = {
+        "origin_identity_pk": origin.public_key.hex(),
+        **origin_keywrap_fields(
+            kw.public_key,
+            b64url_encode(sign_ed25519(origin.private_key, kw.public_key)),
+        ),
+        "rt": [f"tok-{i}" for i in range(tokens)],
+        "rt_suite": "aesgcm-256",
+    }
+    return await router.r.route_from_create(
+        payload,
+        from_instance="b",
+        origin_instance_id=derive_instance_id(origin.public_key),
+        hop_count=hop,
+    )
+
+
+@pytest.mark.parametrize(
+    ("hop", "tokens", "kept"),
+    [(4, 3, True), (5, 4, True), (5, 3, False), (6, 5, False)],
+)
+async def test_a_route_up_to_hop_5_is_kept(router, hop, tokens, kept):
+    """A complete route has one token per relay — up to four at hop 5;
+    nothing past the cap."""
+    route = await _route_at(router, hop, tokens)
+    assert (route is not None) is kept
+    if kept:
+        assert len(route.tokens) == tokens
 
 
 @pytest.mark.parametrize(
@@ -303,7 +353,7 @@ def test_a_relay_appends_one_token_per_peer(router):
 )
 def test_a_broken_chain_is_stripped(router, payload, hop):
     stamped = router.r.stamp_relayed_create(
-        payload, received_hop=hop, from_instance="a", to_instance="b"
+        payload, received_hop=hop, reach=5, from_instance="a", to_instance="b"
     )
     assert "rt" not in stamped and "rt_suite" not in stamped
 

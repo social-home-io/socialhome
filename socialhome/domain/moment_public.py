@@ -1,7 +1,7 @@
 """Domain types for the public-Momentum-via-GFS pillar (§Momentum-public).
 
 The Momentum pillar (``socialhome/domain/moment.py``) federates
-moments only across paired households (3-hop relay, max). This module
+moments only across paired households (relayed up to 5 hops, bounded by reach). This module
 adds an opt-in *public* layer brokered by a GFS:
 
 * A user **registers** themself on one or more GFSes

@@ -559,7 +559,7 @@ class FederationEventType(str, enum.Enum):
     HIGHLIGHT_FRAME_REACTED = "highlight_frame_reacted"
     HIGHLIGHT_FRAME_REACTION_REMOVED = "highlight_frame_reaction_removed"
 
-    # ── Momentum (§Momentum) — household-broadcast posts with 3-hop relay ──
+    # ── Momentum (§Momentum) — household-broadcast posts relayed up to 5 hops ──
     MOMENT_CREATED = "moment_created"
     MOMENT_DELETED = "moment_deleted"
     MOMENT_REACTED = "moment_reacted"

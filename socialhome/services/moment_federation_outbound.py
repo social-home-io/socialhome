@@ -76,6 +76,7 @@ from ..domain.moment import (
     MOMENT_DEFAULT_REACH,
     MOMENT_MAX_HOPS,
     MOMENT_RELAY_MAX_AGE_HOURS,
+    MOMENT_UNGATED_HOPS,
     moment_too_old_to_relay,
 )
 from ..infrastructure.event_bus import EventBus
@@ -112,6 +113,17 @@ RELAY_SEEN_TTL_S: float = MOMENT_RELAY_MAX_AGE_HOURS * 3600.0
 #: Most entries remembered at once (oldest dropped first) — ~100 bytes
 #: each, so a few MB at worst. A relayed create takes two (its seen key and,
 #: v_69, its origin), a relayed totals update one per rev.
+#:
+#: Sized for v_96 (cap 5) with decision C: every household still takes (and
+#: so remembers) the moments of authors within 3 hops — hop-4–5 copies reach
+#: only households that look that far. With ≈ 4 moments per household a day
+#: at d = 10 peers (tree bound): 10 + 90 + 810 = 910 authors → ≈ 3 640
+#: creates/day × 2 entries × 2 days (the 48 h window) ≈ 14 600, plus at most
+#: one delete each (≈ 7 300) and a few totals revs on the reacted ones —
+#: ≈ 30 000 entries, inside 50 000. A household that itself looks 5 hops at
+#: d = 10 can overflow it: the oldest entries go first, and a replayed copy
+#: younger than 48 h is then relayed once more — bounded (relays still stop
+#: at the reach) and the cost lands on whoever asked to look that far.
 RELAY_SEEN_MAX: int = 50_000
 
 #: v_69 — a household relays a moment's totals only while they are this
@@ -519,8 +531,18 @@ class MomentFederationOutbound(
             # are passed on only when signed by that same origin; v_96: and
             # how far the moment goes, which bounds them.
             self._remember_relay(("origin", moment_id, origin), hop, reach=reach)
+        next_hop = hop + 1
+        look_hop: int | None = None
+        if next_hop > MOMENT_UNGATED_HOPS:
+            # v_96 decision C: a hop-4 / hop-5 copy (create, delete or
+            # totals) goes only to a household that looks that far — and is
+            # v_96 (an older one refuses a hop above 3), whatever its marks.
+            look_hop = next_hop
+            min_version = max(
+                min_version or 0, FederationCapability.MIN_FOR_MOMENT_REACH
+            )
         next_payload = dict(payload)
-        next_payload["hop_count"] = hop + 1
+        next_payload["hop_count"] = next_hop
         router = self._reaction_router
         payload_for = None
         if router is not None and event_type == FederationEventType.MOMENT_CREATED:
@@ -529,6 +551,7 @@ class MomentFederationOutbound(
                 return router.stamp_relayed_create(
                     next_payload,
                     received_hop=hop,  # clamped: tokens must match the hop
+                    reach=reach,
                     from_instance=from_instance,
                     to_instance=peer_id,
                 )
@@ -542,6 +565,7 @@ class MomentFederationOutbound(
             payload_for=payload_for,
             min_version=min_version,
             outbox_key=outbox_key,
+            look_hop=look_hop,
         )
 
     def _counts_reach(
@@ -600,14 +624,22 @@ class MomentFederationOutbound(
         or :attr:`_Copy.SEEN`. v_96 (F8): a closer copy is relayed again at
         most once — a relay claiming hops 4, 3, 2 … gets one extra wave, not
         r − 1 — except one the origin itself sent (envelope-authenticated
-        hop 1), which can't be faked and so can't burn the slot."""
+        hop 1), which can't be faked and so can't burn the slot, and the
+        first copy that reaches every household (forwarded at a hop up to
+        :data:`MOMENT_UNGATED_HOPS`) after only gated ones (forwarded past
+        it, to who looks that far): a gated wave never uses up the ungated
+        one. So a relay sends at most two gated and two ungated waves."""
         held = self._relayed.get(key)
         if held is None:
             return _Copy.FIRST
         if monotonic() - held.at > RELAY_SEEN_TTL_S:
             del self._relayed[key]
             return _Copy.FIRST
-        if hop < held.hop and (from_origin or not held.re_relayed):
+        if hop >= held.hop:
+            return _Copy.SEEN
+        if from_origin or not held.re_relayed:
+            return _Copy.CLOSER
+        if hop + 1 <= MOMENT_UNGATED_HOPS < held.hop + 1:
             return _Copy.CLOSER
         return _Copy.SEEN
 
@@ -661,9 +693,13 @@ class MomentFederationOutbound(
         min_version: int | None = None,
         payload_for: Callable[[str], dict] | None = None,
         outbox_key: str | None = None,
+        look_hop: int | None = None,
     ) -> int:
         """Send to every confirmed peer but *exclude_instances* and the
-        origin; returns how many it was handed to."""
+        origin; returns how many it was handed to. With *look_hop* (a relayed
+        copy at hop 4 or 5, v_96 decision C) only to a peer whose people look
+        at least that far (``FederationService.peer_moment_look_hops``; a peer
+        not heard from since our start gets none)."""
         # ``confirmed_peers`` already drops our own instance + null ids;
         # the relay/origin skip set adds the origin + the immediate sender.
         skip = exclude_instances | {origin_instance_id}
@@ -673,6 +709,10 @@ class MomentFederationOutbound(
             instance_id = peer.id
             if instance_id in skip:
                 continue
+            if look_hop is not None:
+                look = self._federation.peer_moment_look_hops(instance_id)
+                if look is None or look < look_hop:
+                    continue
             if min_version is not None and not await self._federation.peer_supports(
                 instance_id, min_version=min_version
             ):

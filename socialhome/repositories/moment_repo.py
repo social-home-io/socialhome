@@ -39,6 +39,8 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.moment import (
+    MOMENT_DEFAULT_MAX_HOPS,
+    MOMENT_MAX_HOPS,
     Moment,
     MomentReaction,
     MomentReactionRoute,
@@ -56,7 +58,7 @@ from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 #: directly paired households only — the circle its own ``no_relay`` moments
 #: reach (owner decision 14, 2026-10-25). Never one that arrived through a
 #: GFS (``received_via = 'gfs'`` — a stranger's public moment another member
-#: of the household follows), never one relayed from 2–3 hops away
+#: of the household follows), never one relayed from 2+ hops away
 #: (``hop_count > 1``; the inbound handler stores a relayed copy at hop ≥ 2
 #: whatever the relay claims). Moments written here are hop 1. Read-time, per
 #: viewer: the row is household-wide. Binds the viewer once.
@@ -178,10 +180,26 @@ _READABLE_SQL = f"""
 """
 
 
+#: One person's ``moments.max_hops`` (``u`` = their ``users`` row) as the
+#: parser reads it (:func:`~socialhome.services.user_preferences
+#: .parse_moment_preferences`): an integer clamped to
+#: ``[1, MOMENT_MAX_HOPS]``, anything else — missing, a bool, a string, a
+#: fraction, a blob that isn't JSON — the default. Bind
+#: :data:`_VIEWER_HOPS_PARAMS`.
+_VIEWER_HOPS_SQL = """
+    (CASE WHEN json_valid(u.preferences_json)
+           AND json_type(u.preferences_json, '$.moments.max_hops') = 'integer'
+          THEN MAX(1, MIN(CAST(json_extract(
+                   u.preferences_json, '$.moments.max_hops') AS INTEGER), ?))
+          ELSE ? END)
+"""
+_VIEWER_HOPS_PARAMS: tuple[int, int] = (MOMENT_MAX_HOPS, MOMENT_DEFAULT_MAX_HOPS)
+
+
 def _capped_hops(max_hops: int) -> int:
-    """``max_hops`` clamped to the wire cap [1, 3] (below 1 would hide even
-    the viewer's own)."""
-    return max(1, min(int(max_hops), 3))
+    """``max_hops`` clamped to the wire cap ``[1, MOMENT_MAX_HOPS]`` (below 1
+    would hide even the viewer's own)."""
+    return max(1, min(int(max_hops), MOMENT_MAX_HOPS))
 
 
 def _saved_params(viewer_user_id: str, max_hops: int) -> tuple:
@@ -226,8 +244,8 @@ _THREAD_READABLE_SQL = f"""
 
 def _thread_params(viewer_user_id: str, max_hops: int) -> tuple:
     """Bindings for :data:`_THREAD_READABLE_SQL`: the viewer for every
-    placeholder but the last, then ``max_hops`` clamped to [1, 3]."""
-    capped_hops = max(1, min(int(max_hops), 3))
+    placeholder but the last, then ``max_hops`` clamped (:func:`_capped_hops`)."""
+    capped_hops = _capped_hops(max_hops)
     return (*(viewer_user_id,) * (_THREAD_READABLE_SQL.count("?") - 1), capped_hops)
 
 
@@ -258,7 +276,7 @@ class AbstractMomentRepo(Protocol):
         before: str | None = None,
         limit: int = 50,
         tag: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
         top_level: bool = False,
     ) -> list[Moment]: ...
     async def latest_replies(
@@ -266,7 +284,7 @@ class AbstractMomentRepo(Protocol):
         parent_ids: list[str],
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, Moment]: ...
     async def list_public_for(
         self,
@@ -279,14 +297,14 @@ class AbstractMomentRepo(Protocol):
         parent_moment_id: str,
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[Moment]: ...
     async def get_readable(
         self,
         moment_id: str,
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> Moment | None: ...
     async def mark_public(self, moment_id: str) -> None: ...
     async def latest_top_level_at(
@@ -301,6 +319,7 @@ class AbstractMomentRepo(Protocol):
         author_user_id: str,
         hop_count: int,
     ) -> bool: ...
+    async def moment_look_hops(self) -> int: ...
 
     # Reactions -----------------------------------------------------------
     async def set_reaction(
@@ -363,7 +382,7 @@ class AbstractMomentRepo(Protocol):
         moment_ids: list[str],
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, dict[str, int]]: ...
 
     # Hashtags ------------------------------------------------------------
@@ -373,7 +392,7 @@ class AbstractMomentRepo(Protocol):
         viewer_user_id: str,
         *,
         limit: int = 20,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[tuple[str, int]]: ...
 
     # Retention -----------------------------------------------------------
@@ -401,7 +420,7 @@ class AbstractMomentRepo(Protocol):
         *,
         before: str | None = None,
         limit: int = 50,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[SavedMoment]: ...
     async def list_saved_media(
         self, user_id: str | None = None
@@ -581,7 +600,7 @@ class SqliteMomentRepo:
         before: str | None = None,
         limit: int = 50,
         tag: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
         top_level: bool = False,
     ) -> list[Moment]:
         """One query covers blocks, retention, hop visibility, and
@@ -604,10 +623,9 @@ class SqliteMomentRepo:
         """
         limit = max(1, min(int(limit), 100))
         normalised_tag = normalize_hashtag(tag) if tag else None
-        # Clamp ``max_hops`` to [1, 3]: the wire cap is 3 and a
-        # value below 1 would hide every row including the user's
-        # own moments.
-        capped_hops = max(1, min(int(max_hops), 3))
+        # Clamp ``max_hops`` to [1, MOMENT_MAX_HOPS]: a value below 1
+        # would hide every row including the user's own moments.
+        capped_hops = _capped_hops(max_hops)
         rows = await self._db.fetchall(
             f"""
             SELECT m.* FROM moments AS m
@@ -654,31 +672,46 @@ class SqliteMomentRepo:
         * They are not a protected account (§CP.R), or the moment is from a
           paired household (``hop_count`` 1) — a protected account sees no
           moment from further away, so a household of only protected
-          accounts passes a 2–3-hop moment on without storing it.
+          accounts passes a relayed moment on without storing it.
 
-        The preference is parsed inline via SQLite's ``json_extract``
-        so we don't have to load every user just to compute the
-        gate. Rows without a ``moments.max_hops`` key default to the
-        wire cap of 3 (most-permissive — matches new accounts).
+        The preference is read inline (:data:`_VIEWER_HOPS_SQL`) so we
+        don't have to load every user just to compute the gate. Rows
+        without a usable ``moments.max_hops`` default to
+        :data:`MOMENT_DEFAULT_MAX_HOPS` (3 — matches new accounts).
         """
         row = await self._db.fetchone(
-            """
+            f"""
             SELECT 1 FROM users AS u
              WHERE NOT EXISTS (
                  SELECT 1 FROM user_blocks
                   WHERE blocker_user_id = u.user_id
                     AND blocked_user_id = ?
              )
-               AND COALESCE(
-                   json_extract(u.preferences_json, '$.moments.max_hops'),
-                   3
-               ) >= ?
+               AND {_VIEWER_HOPS_SQL} >= ?
                AND (u.child_protection_enabled = 0 OR ? <= 1)
              LIMIT 1
             """,
-            (author_user_id, int(hop_count), int(hop_count)),
+            (author_user_id, *_VIEWER_HOPS_PARAMS, int(hop_count), int(hop_count)),
         )
         return row is not None
+
+    async def moment_look_hops(self) -> int:
+        """v_96 (decision C) — how far this household looks: the widest
+        ``moments.max_hops`` among its active, non-protected people
+        (:data:`_VIEWER_HOPS_SQL`: 1–5, 3 for anyone who chose nothing), or
+        ``1`` when there is none — a protected account sees hop 1 only,
+        whatever its preference. Paired households send a hop-4 or hop-5
+        copy only to a household that looks that far."""
+        row = await self._db.fetchone(
+            f"""
+            SELECT MAX({_VIEWER_HOPS_SQL}) AS look FROM users AS u
+             WHERE u.child_protection_enabled = 0
+               AND u.state = 'active' AND u.deleted_at IS NULL
+            """,
+            _VIEWER_HOPS_PARAMS,
+        )
+        look = row["look"] if row is not None else None
+        return int(look) if look is not None else 1
 
     async def list_public_for(
         self,
@@ -726,7 +759,7 @@ class SqliteMomentRepo:
         moment_id: str,
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> Moment | None:
         """``moment_id`` iff *viewer_user_id* may read it: its author (while
         it is live, or from their archive once expired), or anyone the inbox
@@ -744,7 +777,7 @@ class SqliteMomentRepo:
         parent_moment_id: str,
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[Moment]:
         """Replies in chronological order so the thread reads top-down.
 
@@ -772,7 +805,7 @@ class SqliteMomentRepo:
         parent_ids: list[str],
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, Moment]:
         """``{root id: its newest reply}`` that *viewer_user_id* may read
         (:data:`_THREAD_READABLE_SQL`, the rule :meth:`list_replies` and the
@@ -1099,7 +1132,7 @@ class SqliteMomentRepo:
         moment_ids: list[str],
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, dict[str, int]]:
         """Aggregate reactions + replies for the given moment ids.
 
@@ -1164,7 +1197,7 @@ class SqliteMomentRepo:
         viewer_user_id: str,
         *,
         limit: int = 20,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[tuple[str, int]]:
         """Return ``[(tag, n), …]`` of the most-used tags inside the
         viewer's visible window.
@@ -1177,7 +1210,7 @@ class SqliteMomentRepo:
         alphabetically so the order is stable for equal counts.
         """
         limit = max(1, min(int(limit), 50))
-        capped_hops = max(1, min(int(max_hops), 3))
+        capped_hops = _capped_hops(max_hops)
         rows = await self._db.fetchall(
             f"""
             SELECT mh.tag AS tag, COUNT(*) AS n
@@ -1338,7 +1371,7 @@ class SqliteMomentRepo:
         *,
         before: str | None = None,
         limit: int = 50,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[SavedMoment]:
         """*user_id*'s saved moments they may still read
         (:data:`_SAVED_READABLE_SQL`), newest save first. ``before`` is the

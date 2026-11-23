@@ -2702,6 +2702,20 @@ class UserPreferencesChanged(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
+@dataclass(slots=True, frozen=True)
+class UserPreferencesPatched(DomainEvent):
+    """A user's ``users.preferences_json`` blob was patched (``PATCH
+    /api/me``) — a different store from the ``preferences`` row of
+    :class:`UserPreferencesChanged`. ``keys`` are the top-level keys the
+    patch carried (set or removed). Local only: e.g. a ``moments`` patch
+    may change how far this household looks for moments (v_96).
+    """
+
+    user_id: str
+    keys: frozenset[str]
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Personal user blocks (§Privacy) ──────────────────────────────────────
 
 
