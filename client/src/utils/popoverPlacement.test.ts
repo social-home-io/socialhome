@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   POPOVER_EDGE, POPOVER_GAP, POPOVER_MIN_HEIGHT,
-  clampHorizontally, pinFixed, placeVertically, visibleArea,
+  clampHorizontally, pinFixed, placeAnchored, placeVertically, visibleArea,
 } from './popoverPlacement'
 
 describe('visibleArea', () => {
@@ -95,5 +95,56 @@ describe('pinFixed', () => {
     }
     pinFixed(el, 20, 300, 'above')
     expect(el.style.top).toBe('300px')
+  })
+})
+
+describe('placeAnchored', () => {
+  // The emoji picker: 300 × 330 px, hung off a 36 px 😀 button.
+  const picker = { width: 300, height: 330 }
+  const desktop = { top: 0, bottom: 720, width: 1280 }
+  const phone = { top: 0, bottom: 844, width: 390 }
+
+  it('opens above a button at the bottom of the screen (the comment field in the sheet)', () => {
+    const p = placeAnchored({ top: 610, bottom: 646, left: 834, right: 870 }, picker, desktop)
+    expect(p.placement).toBe('above')
+    expect(p.top).toBe(610 - POPOVER_GAP)
+    expect(p.maxHeight).toBeGreaterThanOrEqual(330)
+    // End-aligned with the button.
+    expect(p.left).toBe(870 - 300)
+  })
+
+  it('opens below a button near the top of the screen', () => {
+    const p = placeAnchored({ top: 90, bottom: 126, left: 834, right: 870 }, picker, desktop)
+    expect(p.placement).toBe('below')
+    expect(p.top).toBe(126 + POPOVER_GAP)
+  })
+
+  it('caps the height to the larger side when neither side fits (short sheet, keyboard up)', () => {
+    const short = { top: 0, bottom: 420, width: 390 }
+    const p = placeAnchored({ top: 250, bottom: 286, left: 300, right: 336 }, picker, short)
+    expect(p.placement).toBe('above')
+    expect(p.maxHeight).toBe(250 - POPOVER_GAP - POPOVER_EDGE)
+  })
+
+  it('never runs off the left edge of a phone (button mid-row)', () => {
+    const p = placeAnchored({ top: 500, bottom: 536, left: 205, right: 241 }, picker, phone)
+    expect(p.left).toBe(POPOVER_EDGE)
+  })
+
+  it('never runs off the right edge (start-aligned, button at the right)', () => {
+    const p = placeAnchored({ top: 500, bottom: 536, left: 340, right: 376 }, picker, phone, 'start')
+    expect(p.left).toBe(390 - 300 - POPOVER_EDGE)
+  })
+
+  it('starts at the button for start alignment when it fits', () => {
+    const p = placeAnchored({ top: 500, bottom: 536, left: 40, right: 76 }, picker, phone, 'start')
+    expect(p.left).toBe(40)
+  })
+
+  it('narrows to the screen on a very small phone', () => {
+    const tiny = { top: 0, bottom: 640, width: 280 }
+    const p = placeAnchored({ top: 500, bottom: 536, left: 200, right: 236 }, picker, tiny)
+    expect(p.left).toBe(POPOVER_EDGE)
+    expect(p.width).toBe(280 - 2 * POPOVER_EDGE)
   })
 })

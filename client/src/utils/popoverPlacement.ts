@@ -1,6 +1,7 @@
 /**
- * Placement maths for the small popovers that hang off a text field —
- * the ``:emoji`` and ``@mention`` autocompletes.
+ * Placement maths for the popovers that hang off a text field or a
+ * button — the ``:emoji`` and ``@mention`` autocompletes and the emoji
+ * picker (``ReactionPicker`` with an ``anchor``).
  *
  * On a phone with the keyboard up the area the user can actually see is
  * the *visual* viewport, which ends well above ``innerHeight`` on iOS
@@ -70,6 +71,33 @@ export function placeVertically(
 /** Keep ``[start, start + width]`` inside the visible width. */
 export function clampHorizontally(start: number, width: number, area: VisibleArea): number {
   return Math.max(POPOVER_EDGE, Math.min(start, area.width - width - POPOVER_EDGE))
+}
+
+export interface AnchoredPlacement extends VerticalPlacement {
+  left: number
+  /** The popover's width, narrowed to the visible width when needed. */
+  width: number
+}
+
+/**
+ * A ``width`` × ``height`` popover hung off ``anchor`` (a button): below
+ * it when it fits there, else on the side with more room, its height
+ * capped to that room; horizontally lined up with the anchor's ``end``
+ * (right) or ``start`` (left) edge and kept inside the visible width.
+ */
+export function placeAnchored(
+  anchor: { top: number, bottom: number, left: number, right: number },
+  size: { width: number, height: number },
+  area: VisibleArea,
+  align: 'start' | 'end' = 'end',
+): AnchoredPlacement {
+  const width = Math.min(size.width, area.width - 2 * POPOVER_EDGE)
+  const start = align === 'end' ? anchor.right - width : anchor.left
+  return {
+    ...placeVertically(anchor, area, size.height),
+    left: clampHorizontally(start, width, area),
+    width,
+  }
 }
 
 /**

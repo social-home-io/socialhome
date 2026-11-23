@@ -10,7 +10,8 @@
  */
 import { canModerate } from '@/features/spaces/spaceRoles'
 import { signal, type Signal } from '@preact/signals'
-import { useRef, useState } from 'preact/hooks'
+import type { TextareaHTMLAttributes } from 'preact'
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { Avatar } from './Avatar'
 import { Button } from './Button'
 import {
@@ -38,6 +39,8 @@ import type { Comment } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { openReport } from './ReportDialog'
 import { t, formatLocale } from '@/i18n/i18n'
+import { growTextarea } from '@/utils/autoGrow'
+import { visibleArea } from '@/utils/popoverPlacement'
 
 interface CommentThreadProps {
   comments: Comment[]
@@ -65,6 +68,83 @@ const replyContent = signal('')
 const newCommentContent = signal('')
 const submitting = signal(false)
 
+/** The server's comment limit (``MAX_COMMENT_LENGTH``). */
+const MAX_COMMENT_LENGTH = 2000
+/** Show a ``n/2000`` count once a comment gets this long. */
+const COUNT_FROM = 1800
+/** Share of the visible height a growing comment may take… */
+const COMMENT_FIELD_SHARE = 0.4
+/** …but never less than ~3 lines. */
+const MIN_COMMENT_FIELD_PX = 72
+
+/** Height cap for a growing comment field, given the visible height
+ *  (the visual viewport: a phone keyboard shrinks it). */
+export function commentFieldCap(visibleHeight: number): number {
+  return Math.max(MIN_COMMENT_FIELD_PX, Math.floor(visibleHeight * COMMENT_FIELD_SHARE))
+}
+
+/** Enter sends; Shift+Enter is a new line; an Enter that confirms an
+ *  input-method composition (Japanese, Chinese…) is neither. */
+function isSendKey(e: KeyboardEvent): boolean {
+  return e.key === 'Enter' && !e.shiftKey && !e.isComposing
+}
+
+type CommentFieldProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'onKeyDown'> & {
+  value: string
+  /** Enter (not Shift+Enter). */
+  onSend: () => void
+  /** Other keys — return ``true`` when consumed (autocomplete). */
+  onKey?: (e: KeyboardEvent) => boolean
+}
+
+/** A comment's text field: one line to start, grows with the text up to
+ *  ~40 % of the visible height, then scrolls inside; shrinks back when
+ *  the text is sent or deleted. */
+function CommentField({ value, onSend, onKey, autoFocus, ...rest }: CommentFieldProps) {
+  const ref = useRef<HTMLTextAreaElement | null>(null)
+  // ``autofocus`` only works once per page load; focus on mount so
+  // "Reply" / "Edit" leave the caret in the field, ready to type.
+  // The caret goes to the end, after the text being edited.
+  useEffect(() => {
+    const el = ref.current
+    if (!autoFocus || !el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  }, [autoFocus])
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const area = visibleArea()
+    growTextarea(el, commentFieldCap(area.bottom - area.top))
+  }, [value])
+  return (
+    <textarea
+      {...rest}
+      ref={ref}
+      rows={1}
+      maxLength={MAX_COMMENT_LENGTH}
+      value={value}
+      onKeyDown={(e) => {
+        if (onKey?.(e)) return
+        if (isSendKey(e)) {
+          e.preventDefault()
+          onSend()
+        }
+      }}
+    />
+  )
+}
+
+/** ``n/2000`` once a comment nears the limit. */
+function CommentCount({ text }: { text: string }) {
+  if (text.length < COUNT_FROM) return null
+  return (
+    <span class="sh-char-count sh-comment-count" aria-live="polite">
+      {text.length}/{MAX_COMMENT_LENGTH}
+    </span>
+  )
+}
+
 /** Splice an emoji into a Signal-bound text input at ``[start, end]``.
  *  Used by the ``:foo`` autocomplete to replace the typed token with
  *  the picked glyph. */
@@ -87,7 +167,7 @@ function bindEmojiAwareInput(target: Signal<string>, spaceId?: string | null) {
   const splice = (emoji: string, range: [number, number]) =>
     spliceIntoSignal(target, emoji, range)
   return (e: Event) => {
-    const t = e.target as HTMLInputElement
+    const t = e.target as HTMLTextAreaElement
     target.value = t.value
     checkForEmojiTrigger(t.value, t.selectionStart ?? 0, t, splice)
     // Space threads only (``spaceId`` null → never opens): ``@`` picks a
@@ -115,7 +195,7 @@ function closeAutocompletes(): void {
  *  only claims the picker it opened). */
 function mentionAria(id: string, spaceId?: string | null) {
   if (!spaceId) return {}
-  return mentionInputAria(document.getElementById(id), 'input')
+  return mentionInputAria(document.getElementById(id), 'textarea')
 }
 
 export function CommentThread(
@@ -150,6 +230,30 @@ export function CommentThread(
     }
   }
 
+  // The "Add a comment…" row at the bottom, on an empty thread as on a
+  // full one.
+  const newCommentRow = (
+    <div class="sh-comment-new">
+      <CommentField placeholder={t('comments.placeholder')} value={newCommentContent.value}
+        id="sh-comment-new-input"
+        {...mentionAria('sh-comment-new-input', spaceId)}
+        onInput={(e) => {
+          bindEmojiAwareInput(newCommentContent, spaceId)(e)
+          fireTyping()
+        }}
+        onKey={autocompleteKey}
+        onSend={() => void handleSubmit(null)}
+        onBlur={closeAutocompletes}
+        aria-label={t('comments.new_aria')} />
+      <CommentCount text={newCommentContent.value} />
+      <EmojiPickButton target={newCommentContent} openKey="comment-new" />
+      <Button onClick={() => handleSubmit(null)} loading={submitting.value}
+              disabled={!newCommentContent.value.trim()}>
+        {t('comments.post')}
+      </Button>
+    </div>
+  )
+
   if (topLevel.length === 0) {
     return (
       <div class="sh-comments">
@@ -159,26 +263,7 @@ export function CommentThread(
         {postId && (
           <TypingIndicator scope={`post:${postId}`} />
         )}
-        <div class="sh-comment-new">
-          <input placeholder={t('comments.placeholder')} value={newCommentContent.value}
-            id="sh-comment-new-input"
-            {...mentionAria('sh-comment-new-input', spaceId)}
-            onInput={(e) => {
-              bindEmojiAwareInput(newCommentContent, spaceId)(e)
-              fireTyping()
-            }}
-            onKeyDown={(e) => {
-              if (autocompleteKey(e)) return
-              if (e.key === 'Enter') handleSubmit(null)
-            }}
-            onBlur={closeAutocompletes}
-            aria-label={t('comments.new_aria')} />
-          <EmojiPickButton target={newCommentContent} openKey="comment-new" />
-          <Button onClick={() => handleSubmit(null)} loading={submitting.value}
-                  disabled={!newCommentContent.value.trim()}>
-            {t('comments.post')}
-          </Button>
-        </div>
+        {newCommentRow}
         <EmojiAutocomplete />
         {spaceId && <MentionAutocomplete />}
       </div>
@@ -203,7 +288,7 @@ export function CommentThread(
           )}
           {replyTo.value === c.id && (
             <div class="sh-comment-reply-form">
-              <input placeholder={t('comments.reply_placeholder', { name: c.author })}
+              <CommentField placeholder={t('comments.reply_placeholder', { name: c.author })}
                 id="sh-comment-reply-input"
                 {...mentionAria('sh-comment-reply-input', spaceId)}
                 value={replyContent.value} autoFocus
@@ -212,11 +297,10 @@ export function CommentThread(
                   bindEmojiAwareInput(replyContent, spaceId)(e)
                   fireTyping()
                 }}
-                onKeyDown={(e) => {
-                  if (autocompleteKey(e)) return
-                  if (e.key === 'Enter') handleSubmit(c.id)
-                }}
+                onKey={autocompleteKey}
+                onSend={() => void handleSubmit(c.id)}
                 onBlur={closeAutocompletes} />
+              <CommentCount text={replyContent.value} />
               <EmojiPickButton target={replyContent} openKey={`reply-${c.id}`} />
               <Button variant="secondary"
                       onClick={() => { replyTo.value = null; replyContent.value = '' }}>
@@ -234,26 +318,7 @@ export function CommentThread(
       {postId && (
         <TypingIndicator scope={`post:${postId}`} />
       )}
-      <div class="sh-comment-new">
-        <input placeholder={t('comments.placeholder')} value={newCommentContent.value}
-          id="sh-comment-new-input"
-          {...mentionAria('sh-comment-new-input', spaceId)}
-          onInput={(e) => {
-            bindEmojiAwareInput(newCommentContent, spaceId)(e)
-            fireTyping()
-          }}
-          onKeyDown={(e) => {
-            if (autocompleteKey(e)) return
-            if (e.key === 'Enter') handleSubmit(null)
-          }}
-          onBlur={closeAutocompletes}
-          aria-label={t('comments.new_aria')} />
-        <EmojiPickButton target={newCommentContent} openKey="comment-new" />
-        <Button onClick={() => handleSubmit(null)} loading={submitting.value}
-                disabled={!newCommentContent.value.trim()}>
-          {t('comments.post')}
-        </Button>
-      </div>
+      {newCommentRow}
       {/* Mounted once for the whole thread; module-level state keeps it
           singleton across all three input surfaces. Each input
           registers its own splice target via :func:`checkForEmojiTrigger`
@@ -323,11 +388,16 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent,
         <div class="sh-comment-body">
           <div class="sh-comment-bubble sh-comment-bubble--editing">
             <span class="sh-comment-author">{authorName}</span>
-            <input type="text" value={draft} maxLength={2000} autoFocus
-              onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void save()
-                if (e.key === 'Escape') setEditing(false)
+            <CommentField value={draft} autoFocus
+              aria-label={t('common.edit')}
+              onInput={(e) => setDraft((e.target as HTMLTextAreaElement).value)}
+              onSend={() => void save()}
+              onKey={(e) => {
+                if (e.key !== 'Escape') return false
+                // Closes the editor, not the comment sheet around it.
+                e.stopPropagation()
+                setEditing(false)
+                return true
               }} />
           </div>
           <div class="sh-comment-actions">
