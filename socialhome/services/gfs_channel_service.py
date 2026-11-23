@@ -293,6 +293,7 @@ class GfsChannelService:
         "_remote_members",
         "_retire_tried",
         "_retry",
+        "_seated",
         "_space_service",
         "_spaces",
         "_started_at",
@@ -351,6 +352,10 @@ class GfsChannelService:
         self._connected_at: dict[str, float] = {}
         #: Spaces with a host-return catch-up sync pending.
         self._catching_up: set[str] = set()
+        #: ``(space, channel, epoch)`` seats this process already took — a
+        #: config change of a GLOBAL space (thousands of follower households
+        #: apply every one) re-subscribes only where we hold none yet.
+        self._seated: set[tuple[str, str, int]] = set()
         self._tasks: set[asyncio.Task[None]] = set()
         #: Told each connection's capability once a reconnect read it
         #: (:meth:`GfsServerSelectionService.capability_known`).
@@ -1018,11 +1023,19 @@ class GfsChannelService:
         if not channel_on(space):
             # The option went off, or the space left the global tier.
             await self.drop_stale(space_id)
-        else:
-            # PRIVATE with the option on, or GLOBAL — a grant that arrived
-            # before the config that made the space a channel tier takes its
-            # seat now (a no-op without a grant for the current epoch).
+        elif space.space_type is SpaceType.PRIVATE:
             self._spawn(self.subscribe(space_id), "subscribe")
+        else:
+            # GLOBAL — a grant that arrived before the config that made the
+            # space global takes its seat now. Only when this process holds
+            # no seat for the current grant yet: every applied config change
+            # fires this on every follower household, and an unconditional
+            # subscribe would be one signed POST per household per edit.
+            grant = await self.current_grant(space_id)
+            if grant is not None and (
+                (space_id, grant.channel_id, grant.epoch) not in self._seated
+            ):
+                self._spawn(self.subscribe(space_id), "subscribe")
 
     async def drop_stale(self, space_id: str) -> bool:
         """Member side: leave a channel we may no longer use — the owner
@@ -1876,6 +1889,8 @@ class GfsChannelService:
             outcome = await self._keyed(conn, _subscribe)
             if outcome.kind == "delivered":
                 done += 1
+        if done:
+            self._seated.add((space_id, grant.channel_id, grant.epoch))
         return done
 
     async def _unsubscribe_all(self, channel_id: str, gfs_ids: tuple[str, ...]) -> None:

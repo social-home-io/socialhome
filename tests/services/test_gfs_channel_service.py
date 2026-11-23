@@ -2400,8 +2400,25 @@ async def test_a_global_grant_takes_its_seat_once_the_config_says_global(env):
     await _hand_grants(env, env.member)
     repo = env.app[gfs_channel_repo_key]
     await repo.remove_subscriber(channel_id, env.member.h.instance_id)
+    env.member.svc._seated.clear()  # the seat came with a grant, not taken yet
     bus = EventBus()
     env.member.svc.wire(bus)
     await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
     await env.member.svc.wait_idle()
     assert await repo.has_subscription(channel_id, env.member.h.instance_id)
+
+
+@pytest.mark.security
+async def test_a_global_config_change_does_not_resubscribe_a_seated_household(env):
+    """Every applied config change of a global space reaches every follower
+    household: one that already took its seat sends nothing."""
+    _go_global(env)
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    repo = env.app[gfs_channel_repo_key]
+    await repo.remove_subscriber(channel_id, env.member.h.instance_id)
+    bus = EventBus()
+    env.member.svc.wire(bus)
+    await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
+    await env.member.svc.wait_idle()
+    assert not await repo.has_subscription(channel_id, env.member.h.instance_id)

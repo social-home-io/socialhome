@@ -3092,6 +3092,21 @@ from a private channel:
   whatever `allow_subscribers` says, because the channel carries the
   members' content too.
 
+**Pictures and files** of a global space with a channel are uploaded to the
+GFS media cache under the channel scope, like a private channel's (the
+space-keyed writer-key pin is no longer announced once the space runs a
+channel): the owner with the channel key, a member with its grant's writer
+key; a follower without a writer key uploads nothing and reads with its
+grant. Accepted for P3: a blob past the cache TTL is re-filled on demand
+only by the seats the GFS asks (3 of them), never the owner (it holds no
+seat), and the owner uploads large videos eagerly rather than lazily; the
+space scope and its owner refill go in P7 (Q5).
+
+**Seats are taken once.** A config change of a global space reaches every
+follower household; one that already took its seat for the current grant
+in this process sends no new subscribe (a grant that came before the config
+made the space global takes its seat then).
+
 **Exactly once over the channel.** A seat gets one frame per publish per
 server; the author publishes once to each listed server, the host adds a
 copy only for an unmarked post, and receivers dedupe by item id (a post by
