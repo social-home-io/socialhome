@@ -7151,3 +7151,38 @@ async def test_the_files_hash_map_reaches_only_v85_households(monkeypatch):
         new.id: {"id": "p", "files": files, "files_suite": "sha256"},
         old.id: {"id": "p"},
     }
+
+
+class _Seats:
+    """The roster mirror as the fan-out sees it: who holds a writer seat."""
+
+    def __init__(self, writers: set[str]) -> None:
+        self.writers = writers
+
+    async def list_instances_with_roles(self, space_id, roles):
+        return sorted(self.writers)
+
+
+async def test_fan_out_skips_a_follower_it_cannot_address(monkeypatch):
+    """v_96 — a follower household we hold no row for and that never
+    claimed a version over the mesh (it followed through a GFS) gets no
+    per-event mesh route discovery: it is reached through its channel seat
+    or by the host. A member household in the same position is still
+    tried, and a follower we can address is too."""
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.mesh_claims = {"follower-mesh": 96}
+    for iid in ("follower-gfs", "follower-mesh", "member-mesh"):
+        fed_repo.add_space_member("sp", iid)
+    svc, _ = _make_service(federation_repo=fed_repo)
+    svc.attach_space_write_gate(None, _Seats({"member-mesh"}))
+    tried: list[str] = []
+
+    async def _send(self, *, to_instance_id, **_kw):
+        tried.append(to_instance_id)
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    monkeypatch.setattr(type(svc), "send_with_mesh_fallback", _send)
+    await svc.broadcast_to_space_members(
+        "sp", FederationEventType.SPACE_POST_CREATED, {"space_id": "sp"}
+    )
+    assert sorted(tried) == ["follower-mesh", "member-mesh"]

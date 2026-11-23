@@ -102,7 +102,7 @@ from ..domain.media_chunking import (
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.outbox import DeliveryOutcome, OutboxEntry, OutboxPayload, RetryAfter
 from ..domain.relay_media_frame import relay_event_payload_limit
-from ..domain.space import parse_have_seq
+from ..domain.space import WRITER_ROLES, parse_have_seq
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..peer_http import post_to_peer
@@ -239,6 +239,9 @@ def _digest_matches(expected: object, actual: str) -> bool:
 
 
 log = logging.getLogger(__name__)
+
+#: A writer seat's role values (a household holding none only follows).
+_WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
 #: ``begin_mesh_catchup_sync`` failures that are a window, not a fault: no
 #: route yet, and the route-discovery negative cooldown after one. The
@@ -1856,6 +1859,22 @@ class FederationService:
         if min_version <= 0:
             return False
         return await self.space_member_version(instance_id) >= min_version
+
+    async def _unaddressable_follower(self, space_id: str, instance_id: str) -> bool:
+        """Whether *instance_id* holds no writer seat in *space_id* and we
+        hold neither a peer row nor a mesh claim for it (see the fan-out).
+        A member household is never skipped this way."""
+        if self._space_remote_member_repo is None:
+            return False
+        if await self._federation_repo.get_instance(instance_id) is not None:
+            return False
+        claim = await self._federation_repo.get_space_member_version(instance_id)
+        if claim is not None and claim[0] > 0:
+            return False  # it claimed a version over the mesh: reachable
+        held = await self._space_remote_member_repo.list_instances_with_roles(
+            space_id, _WRITER_ROLE_VALUES
+        )
+        return instance_id not in held
 
     async def space_member_version(self, instance_id: str) -> int:
         """The protocol version of a space member household, which may be
@@ -4079,6 +4098,14 @@ class FederationService:
             if only_instances is not None and iid not in only_instances:
                 # Not in the caller's audience (e.g. a follower-only
                 # household for the space chat) — skip, like a non-member.
+                continue
+            if await self._unaddressable_follower(space_id, iid):
+                # v_96 — a follower household we hold no row for and that
+                # never claimed a version over the mesh (one that followed
+                # through a GFS): we have no path to it but a mesh route
+                # discovery per event — N × M at a global space's scale. It
+                # is reached through its own channel seat, or by the host
+                # (which holds its space-session row) and its catch-up.
                 continue
             if min_proto_version is not None and not await self.space_member_supports(
                 iid,

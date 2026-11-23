@@ -539,7 +539,11 @@ within seconds).
   channels): a household not connected to a channel server, or below v_96,
   gets the others' items over federation and the §25.6 catch-up when the
   host is back. A GFS-reached follower is reached only through its own
-  channel seat (it has no mailbox card in the directory).
+  channel seat (it has no mailbox card in the directory), or by the host,
+  which holds its space-session row: `broadcast_to_space_members` skips a
+  follower-only household it holds no peer row and no mesh claim for,
+  instead of a mesh route discovery per event (N × M at 10 000 followers).
+  A member household is never skipped this way.
 - **No sync pages for followers** (the existing role rule): a follower
   catches up over the §25.6 subset stream. The sync scheduler BEGINs and
   announces to the host of a space one of our people holds any seat in, a

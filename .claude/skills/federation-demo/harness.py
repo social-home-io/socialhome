@@ -4410,9 +4410,27 @@ def cmd_gfs_global_channel() -> None:
         raise SystemExit("gfs-global-channel: the owner a holds a seat")
     print(f"  channel {channel_id[:8]}…: member b and follower e seated, a not ✓")
 
-    # 3. Host offline; b posts; e gets it over the channel, once.
-    e_off = _log_size("e")
+    # 3. Host offline; b posts; e gets it over the channel, once. b's FIRST
+    # post in the space also publishes b's author profile (v_60) on the
+    # channel — a second item — so a warm-up post goes first and the count
+    # is taken on the next one.
     _kill_household("a", a)
+    st, warm = _request(
+        f"{b_url}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": f"Warm-up {time.time_ns()}"},
+    )
+    warm_id = _must("gfs-global-channel: b's warm-up post", st, warm, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT 1 FROM space_posts WHERE id = ?",
+        (warm_id,),
+        bool,
+        what="e never received b's warm-up post while a was down",
+    )
+    time.sleep(5.0)  # the profile item lands too
+    e_off = _log_size("e")
     content = f"Member posts into a global space, host offline — {time.time_ns()}"
     st, post = _request(
         f"{b_url}/api/spaces/{space_id}/posts",
