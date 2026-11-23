@@ -2738,6 +2738,21 @@ class GfsConnectionService:
             self._private_channels,
         )
 
+    async def subscriber_seats_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``subscriber_seats`` on /gfs/info
+        (v_96).
+
+        Gates a GLOBAL space's opaque channel
+        (:mod:`socialhome.services.gfs_channel_service`): the owner registers
+        it only on a listed server proving both ``private_channels`` and
+        this, so the server seats member AND follower households of a
+        global space on one channel."""
+        return await self._signed_capability_supported(
+            conn,
+            "subscriber_seats",
+            self._subscriber_seats,
+        )
+
     async def sealed_highlight_stream_supported(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s GFS proved ``sealed_highlight_stream`` on
         /gfs/info.

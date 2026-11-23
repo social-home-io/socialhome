@@ -5190,6 +5190,7 @@ def create_app(config: Config | None = None) -> web.Application:
             own_identity_seed=identity_seed,
         )
         space_public_outbound.attach_writer_certs(writer_certs)
+        space_public_outbound.attach_channels(gfs_channels)
         space_public_outbound.attach_posts(space_post_repo)
         # Step 12 — a remote member's post skips the GFSs where every
         # follower reads the author's own ``space_item`` (the author's

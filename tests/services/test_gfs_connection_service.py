@@ -5998,3 +5998,24 @@ async def test_a_listing_publish_names_the_server_it_is_for(env):
         assert verify_ed25519(
             owner.public_key, canonical, b64url_decode(body["signature"])
         )
+
+
+async def test_subscriber_seats_needs_the_signed_flag(env):
+    """v_96: a GLOBAL space's channel only on a server whose SIGNED block
+    proves ``subscriber_seats`` (an unsigned top-level flag is no proof)."""
+    _db, repo = env
+    signed = _make_conn("ss-1", public_key=_GFS_KP.public_key.hex())
+    unsigned = _make_conn("ss-2", public_key=_GFS_KP.public_key.hex())
+    for conn in (signed, unsigned):
+        await repo.save(conn)
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=signed.gfs_instance_id,
+            capabilities={"subscriber_seats": True},
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert await svc.subscriber_seats_supported(signed)
+    session = _InviteSession(info={"server_name": "x", "subscriber_seats": True})
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert not await svc.subscriber_seats_supported(unsigned)

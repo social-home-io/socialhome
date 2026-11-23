@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -11,6 +12,7 @@ from socialhome.crypto import (
     derive_instance_id,
     derive_user_id,
     generate_identity_keypair,
+    generate_space_keypair,
 )
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import LocationData, Post, PostType
@@ -18,6 +20,7 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_APPROVED_POST,
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
+    ITEM_SIZE_BUCKETS,
 )
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.services.inbound_media_store import space_direct_media_name
@@ -28,8 +31,11 @@ from socialhome.services.space_public_author import (
 )
 from socialhome.services.space_public_authority import (
     approved_relay_for,
+    channel_authority_plaintext,
     is_approved,
     is_authority_inner,
+    is_channel_authority,
+    open_channel_authority,
 )
 
 _KP = generate_identity_keypair()
@@ -223,3 +229,77 @@ def test_an_approved_relay_naming_other_files_is_refused(swap):
     else:
         held = dataclasses.replace(held, image_urls=held.image_urls[:1])
     assert approved_relay_for(_signed(signed), post=held, space_id="sp") is None
+
+
+# ── v_96: authority items on a space's channel ───────────────────────────
+
+_SPACE_KP = generate_space_keypair()
+_REMOVAL = {
+    AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL,
+    "space_id": "sp-1",
+    "target": "post",
+    "item_id": "p-1",
+    "post_id": "p-1",
+    "author_user_id": "u",
+}
+
+
+def _sealed(inner=None, *, space_id="sp-1", seed=None) -> bytes:
+    return channel_authority_plaintext(
+        dict(inner or _REMOVAL),
+        space_id=space_id,
+        space_seed=seed or _SPACE_KP.private_key,
+    )
+
+
+def test_a_channel_authority_item_round_trips_padded():
+    opened = _sealed()
+    assert len(opened) in ITEM_SIZE_BUCKETS
+    assert is_channel_authority(opened)
+    got = open_channel_authority(
+        opened, space_id="sp-1", space_pubkey_hex=_SPACE_KP.public_key.hex()
+    )
+    assert got == _REMOVAL
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("case", ["other_key", "other_space", "tampered", "suite"])
+def test_a_channel_authority_item_that_does_not_verify_is_refused(case):
+    opened = _sealed(
+        seed=generate_space_keypair().private_key if case == "other_key" else None
+    )
+    body = json.loads(opened)
+    if case == "tampered":
+        body["inner"]["item_id"] = "p-2"
+    if case == "suite":
+        body["inner"]["authority_sig_suite"] = "ed25519+mldsa65"
+    opened = json.dumps(body).encode()
+    space_id = "sp-2" if case == "other_space" else "sp-1"
+    assert (
+        open_channel_authority(
+            opened, space_id=space_id, space_pubkey_hex=_SPACE_KP.public_key.hex()
+        )
+        is None
+    )
+
+
+def test_an_ordinary_channel_item_is_no_authority_item():
+    opened = json.dumps({"item_type": "post", "inner": {}}).encode()
+    assert not is_channel_authority(opened)
+    assert not is_channel_authority(b"not json")
+    assert (
+        open_channel_authority(
+            opened, space_id="sp-1", space_pubkey_hex=_SPACE_KP.public_key.hex()
+        )
+        is None
+    )
+
+
+def test_a_stale_signature_or_padding_is_not_signed_over():
+    """Re-signing an inner that already carries signature fields or padding
+    signs the bare inner."""
+    inner = {**_REMOVAL, "authority_sig": "x", "authority_sig_suite": "y", "_pad": "00"}
+    got = open_channel_authority(
+        _sealed(inner), space_id="sp-1", space_pubkey_hex=_SPACE_KP.public_key.hex()
+    )
+    assert got == _REMOVAL

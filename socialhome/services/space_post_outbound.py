@@ -43,8 +43,9 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.post import post_to_wire_dict
-from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceType
 from ..domain.space_item import (
+    CHANNEL_SENT_FIELD,
     ITEM_TYPE_COMMENT,
     ITEM_TYPE_COMMENT_DELETE,
     ITEM_TYPE_COMMENT_EDIT,
@@ -187,6 +188,22 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._own_instance_id = own_instance_id
         self._own_instance_pk = own_instance_public_key
         self._own_identity_seed = own_identity_seed
+
+    async def _channel_sends(self, space_id: str, author_user_id: str) -> bool:
+        """Whether our member publisher puts *author_user_id*'s post in
+        *space_id* on the space's opaque channel (v_96) — a channel space,
+        and the publisher would send it to at least one channel server.
+        Never raises."""
+        if self._member_gfs is None:
+            return False
+        try:
+            return bool(
+                await self._member_gfs.channel_space(space_id)
+                and await self._member_gfs.plan_post(space_id, author_user_id)
+            )
+        except Exception:
+            log.exception("channel plan failed for space=%s", space_id)
+            return False
 
     async def _schedule_gfs_publish(
         self, space_id: str, post: Post, *, media_refs: dict | None = None
@@ -477,7 +494,13 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         relayable = bool(
             space is not None
             and space.space_type in PUBLIC_SPACE_TIERS
-            and space.features.allow_subscribers
+            # v_96 — a global space's channel carries its content to members
+            # and followers alike, whatever ``allow_subscribers`` says: the
+            # host needs the hint to put a post on the channel that its
+            # author could not.
+            and (
+                space.features.allow_subscribers or space.space_type is SpaceType.GLOBAL
+            )
             and self._own_instance_id
             and self._own_instance_pk
             and self._own_identity_seed
@@ -531,6 +554,12 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                         cert = None
                     if cert is not None:
                         payload["public_relay"]["writer_cert"] = cert
+                # v_96 — we put this post on the space's channel ourselves:
+                # the host then does not put it there again (it does for a
+                # post without the mark). Outside the author signature,
+                # inside the encrypted payload; it only ever stops a copy.
+                if await self._channel_sends(event.space_id, post.author):
+                    payload["public_relay"][CHANNEL_SENT_FIELD] = True
         with_release(payload)
         payload = await self._with_file_hashes(payload, media_urls)
         try:

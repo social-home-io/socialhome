@@ -104,6 +104,12 @@ AUTHORITY_EVENT_SPACE_EPOCH_NOTICE: str = "space_epoch_notice"
 #: space's TOFU-pinned key. Like the subscribers query these are NOT relays —
 #: kept out of ``AUTHORITY_RELAY_EVENT_TYPES``, so a media signature can never
 #: be fanned out and a relay payload can never authorize an upload.
+#: v_96 — an authority-only item (a removal, an approved post, a member's
+#: post the host puts on the channel for its author) sealed into a space's
+#: opaque channel: the space authority signs the INNER, inside the channel
+#: ciphertext — the channel frame itself carries no authority signature.
+AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY: str = "space_channel_authority"
+
 AUTHORITY_EVENT_SPACE_MEDIA_PUT: str = "space_media_put"
 AUTHORITY_EVENT_SPACE_MEDIA_DELETE: str = "space_media_delete"
 

@@ -136,9 +136,10 @@ from ..authority_sig import (
     strip_authority_sig_fields,
 )
 from ..domain.events import CommentDeleted, PostDeleted, SpacePostCreated
-from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceType
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
+    CHANNEL_SENT_FIELD,
     ITEM_TYPE_POST,
     PAYLOAD_SUITE_FIELD,
     REMOVAL_TARGET_COMMENT,
@@ -162,7 +163,7 @@ from .space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
 )
-from .space_public_authority import approved_relay_for
+from .space_public_authority import approved_relay_for, channel_authority_plaintext
 from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
@@ -170,6 +171,7 @@ if TYPE_CHECKING:
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .gfs_channel_service import GfsChannelService
     from .gfs_connection_service import GfsConnectionService
     from .media_file_hasher import MediaFileHasher
     from .space_crypto_service import SpaceContentEncryption
@@ -183,6 +185,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
 
     __slots__ = (
         "_bus",
+        "_channels",
         "_crypto",
         "_file_hasher",
         "_gfs",
@@ -234,6 +237,24 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         #: v_80 — the post's pictures for followers (``media_refs`` in the
         #: inner, under the author's ``media_refs_sig``; one upload per GFS).
         self._media_gfs = None
+        #: v_96 — a GLOBAL space's opaque channel: once the space runs one
+        #: here, every authority item goes INTO it (signed inside the
+        #: ciphertext), never also to the space-keyed ``/gfs/publish``.
+        self._channels: GfsChannelService | None = None
+
+    def attach_channels(self, channels: GfsChannelService) -> None:
+        """Wire the channel service (v_96, see :attr:`_channels`)."""
+        self._channels = channels
+
+    async def _on_channel(self, space: Space) -> bool:
+        """Whether *space*'s authority items go into its opaque channel (a
+        GLOBAL space that stores a channel here — the owner's own, or a
+        delegated admin's grant) rather than the space-keyed relay."""
+        return (
+            self._channels is not None
+            and space.space_type is SpaceType.GLOBAL
+            and await self._channels.has_channel(space.id)
+        )
 
     def attach_relay_coverage(self, coverage: SpaceRelayCoverage) -> None:
         """Wire step 12: a remote member's post skips the GFSs where every
@@ -288,12 +309,14 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         space = await self._spaces.get(event.space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
             return
+        on_channel = await self._on_channel(space)
         # Readability is an explicit admin opt-in, independent of join_mode: a
         # public/global space with ``allow_subscribers`` OFF is LISTED in the
         # GFS directory (discovery + invites) but is NOT publicly readable —
         # only members get content. Stop the relay at the source, so nothing
-        # of its content stream ever reaches the GFS.
-        if not space.features.allow_subscribers:
+        # of its content stream ever reaches the GFS. (v_96 — a global
+        # space's channel carries its members' content too.)
+        if not space.features.allow_subscribers and not on_channel:
             log.debug(
                 "space_public.outbound: space %s does not allow subscribers — "
                 "not publicly readable, skipping relay",
@@ -332,6 +355,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             # rather than relayed unattributable.
             if event.approved_by:
                 await self._relay_approved(event, space, seed)
+            return
+        if on_channel:
+            # v_96 — the owner's own post goes into its channel as its
+            # household's own item, like any member's (the member
+            # publisher, Q4): no authority copy of it.
             return
 
         # Per-author signature: the author's household identity seed signs the
@@ -401,10 +429,12 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         space = await self._spaces.get(event.space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
             return
+        on_channel = await self._on_channel(space)
         # Same gate on the remote-author path: a seed-holder must not launder
         # another member's post into the (nonexistent) public stream of a
-        # space that admits no subscribers.
-        if not space.features.allow_subscribers:
+        # space that admits no subscribers. (v_96 — a global space's channel
+        # carries its members' content too.)
+        if not space.features.allow_subscribers and not on_channel:
             log.debug(
                 "space_public.outbound: space %s does not allow subscribers — "
                 "not publicly readable, skipping remote-authored relay",
@@ -426,6 +456,18 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             # with an authority-signed copy would set it apart from every
             # other writer household — and a GFS could test a household by
             # handing a post to its seat alone.
+            return
+        # v_96 — the author put this post on the channel itself: never a
+        # second copy there. The mark rides outside the author signature
+        # and is never relayed on.
+        channel_sent = relay.get(CHANNEL_SENT_FIELD) is True
+        relay = {k: v for k, v in relay.items() if k != CHANNEL_SENT_FIELD}
+        if on_channel and channel_sent:
+            log.debug(
+                "space_public.outbound: author put its post on the channel of "
+                "space %s — no host copy",
+                event.space_id,
+            )
             return
         # Verify the ORIGINAL author's signature + self-cert before relaying —
         # never relay unverifiable / forgeable content (the subscriber
@@ -508,7 +550,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             await self._relay_coverage.redundant_on(
                 event.space_id, event.origin_instance_id
             )
-            if self._relay_coverage is not None
+            if self._relay_coverage is not None and not sealed.channel
             else None
         )
         await self._publish(
@@ -643,7 +685,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         space = await self._spaces.get(space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
             return
-        if not space.features.allow_subscribers:
+        if not space.features.allow_subscribers and not await self._on_channel(space):
             return
         if archive_refusal(space, "") is not None:
             return  # read-only: followers drop it anyway
@@ -693,7 +735,22 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         compressed copies that land in a smaller size bucket
         (:func:`compressed_item_plaintexts`: ``zlib1+dict1`` / ``zlib1``),
         sealed under the same epoch. Raises ``RuntimeError`` when there is
-        no content key."""
+        no content key.
+
+        v_96 — a global space that runs a channel here gets ONE copy: the
+        channel plaintext of an authority item (:func:`
+        channel_authority_plaintext`, the inner signed by the space
+        authority), JSON only, marked ``channel``."""
+        space = await self._spaces.get(space_id)
+        if space is not None and await self._on_channel(space):
+            seed = await self._spaces.get_space_seed(space_id)
+            if seed is None:
+                raise RuntimeError(f"no space seed for {space_id}")
+            plain = channel_authority_plaintext(
+                body, space_id=space_id, space_seed=seed
+            )
+            epoch, ct = await self._crypto.encrypt(space_id, plain)
+            return _Sealed(epoch, ct, {}, channel=True)
         plain = pad_json_object(body)
         epoch, ct = await self._crypto.encrypt(space_id, plain)
         compressed: dict[str, str] = {}
@@ -740,7 +797,19 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
     ) -> None:
         """Authority-sign ``{space_id, epoch, encrypted_payload}`` under
         ``space_post_public`` and hand it to every GFS the space is on — the
-        compressed copies too, for the servers that take them."""
+        compressed copies too, for the servers that take them. v_96 — an item
+        sealed for the space's channel goes there instead, and only there."""
+        if sealed.channel:
+            assert self._channels is not None
+            try:
+                await self._channels.publish_current(space_id, sealed.epoch, sealed.ct)
+            except Exception:
+                log.exception(
+                    "space_public.outbound: %s channel publish failed for space=%s",
+                    what,
+                    space_id,
+                )
+            return
         envelope = self._envelope(space_id, seed, sealed.epoch, sealed.ct, suite=None)
         compressed = {
             suite: self._envelope(space_id, seed, sealed.epoch, ct, suite=suite)
@@ -905,6 +974,8 @@ class _Sealed(NamedTuple):
     epoch: int
     ct: str
     compressed_cts: dict[str, str]
+    #: v_96 — sealed as a channel authority item (goes into the channel).
+    channel: bool = False
 
 
 class _NoWriterCert(Exception):
