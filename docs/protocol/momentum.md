@@ -481,11 +481,12 @@ are opt-ins; *p* = 10 %, *q* = 5 % below). Per moment, tree bound, reach 5:
 
 | d | reach 3 | reach 5, no bound | reach 5, bound | × vs reach 3 |
 |---|---|---|---|---|
-| 3 | 21 | 93 | 21 + 1.2 + 0.0 ≈ 23 | 1.1 |
-| 5 | 105 | 1 705 | 105 + 32 + 0.8 ≈ 138 | 1.3 |
-| 10 | 910 | 73 810 | 910 + 729 + 33 ≈ 1 672 | 1.8 |
+| 3 | 21 | 93 | 21 + 2.4 + 0.2 ≈ 24 | 1.1 |
+| 5 | 105 | 1 705 | 105 + 32 + 6.4 ≈ 143 | 1.4 |
+| 10 | 910 | 73 810 | 910 + 729 + 328 ≈ 1 967 | 2.2 |
 
-(hop 4: hop-3 households × (d−1) × *p*; hop 5: those lookers × (d−1) × *q*.)
+(hop 4: hop-3 households × (d−1) × *p* envelopes, each landing on a
+looker; hop 5: those hop-4 lookers × (d−1) × *q*.)
 
 Per household per day, creates, 2–2.5 KB envelopes, everyone at reach 5:
 a household forwards authors within 2 hops to all *d − 1* peers (the
