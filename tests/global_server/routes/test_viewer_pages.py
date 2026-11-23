@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import html
+import io
 import re
 import time
 from dataclasses import replace
@@ -16,6 +17,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from PIL import Image
 
 from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
@@ -27,6 +29,7 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GfsUserPicture, GlobalSpace
 from socialhome.global_server.public import LISTING_MAX_PER_MINUTE
+from socialhome.global_server.routes import viewer_pages
 from socialhome.global_server.routes.viewer_pages import (
     INVITE_BODY_MAX_BYTES,
     image_data_uri,
@@ -111,13 +114,15 @@ async def _space(app, **kw) -> None:
     await app[gfs_fed_repo_key].upsert_space(GlobalSpace(**fields))
 
 
-async def _invite(app, token="tok_abc-123", *, expires_in=3600) -> str:
+async def _invite(
+    app, token="tok_abc-123", *, expires_in=3600, blob="eyJ0IjoxfQ"
+) -> str:
     now = int(time.time())
     await app[gfs_invite_repo_key].create(
         gfs_token=token,
         space_id="sp-garden",
         source_instance_id="o.home",
-        blob="eyJ0IjoxfQ",
+        blob=blob,
         created_at=now,
         expires_at=now + expires_in,
     )
@@ -439,6 +444,29 @@ async def test_invite_json_hands_over_the_code_and_its_qr(client):
     assert body["invite_code"] == "socialhome://invite#eyJ0IjoxfQ"
     assert body["qr"].startswith("data:image/png;base64,")
     base64.b64decode(body["qr"].split(",", 1)[1], validate=True)
+
+
+async def test_invite_json_qr_is_the_short_link(client, monkeypatch):
+    """The viewer shows the PNG it is given, so the GFS alone decides what
+    the viewer's QR carries: the short ``{base_url}/join/{token}`` link, a
+    QR of version ≤ 6 — never the ~900-character code (version 24)."""
+    await _space(client._app)
+    token = await _invite(client._app, blob="eyJ0b2tlbiI6" + "A" * 850)
+    seen: list[str] = []
+    real = viewer_pages._render_qr_png_data_uri
+
+    async def spy(payload: str) -> str:
+        seen.append(payload)
+        return await real(payload)
+
+    monkeypatch.setattr(viewer_pages, "_render_qr_png_data_uri", spy)
+    body = await (await client.post("/gfs/pages/invite", json={"token": token})).json()
+    assert seen == [f"{_GFS}/join/{token}"]
+    assert body["invite_code"] == "socialhome://invite#eyJ0b2tlbiI6" + "A" * 850
+    png = base64.b64decode(body["qr"].split(",", 1)[1])
+    width, _ = Image.open(io.BytesIO(png)).size
+    # box_size 8, border 2: (modules + 4) * 8 px; version = (modules - 17) / 4.
+    assert (width // 8 - 4 - 17) // 4 <= 6
 
 
 @pytest.mark.parametrize("case", ["unknown", "expired", "unlisted"])

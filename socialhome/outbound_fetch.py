@@ -447,7 +447,7 @@ class OutboundFetcher:
                 declared = resp.content_length
                 if declared is not None and declared > max_bytes and not truncate:
                     raise OutboundFetchRefused("too_large")
-                body, cut = await _read_capped(
+                body, cut = await read_capped(
                     resp.content, max_bytes=max_bytes, truncate=truncate
                 )
                 return FetchResult(
@@ -518,7 +518,7 @@ async def open_pinned_session(
     )
 
 
-async def _read_capped(
+async def read_capped(
     stream: aiohttp.StreamReader, *, max_bytes: int, truncate: bool
 ) -> tuple[bytes, bool]:
     """Read *stream* up to ``max_bytes``; never buffer more than one chunk

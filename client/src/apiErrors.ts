@@ -162,6 +162,9 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     : t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
   APP_BUNDLE_TOO_LARGE: () => t('error.app_bundle_too_large'),
   APP_DOWNLOAD_FAILED: () => t('error.app_download_failed'),
+  // A scanned / pasted GFS invite link (POST /api/spaces/invite-link).
+  INVITE_LINK_REFUSED: () => t('error.invite_link_refused'),
+  INVITE_LINK_UNREACHABLE: () => t('error.invite_link_unreachable'),
   APP_CATALOG_DISABLED: () => t('error.app_catalog_disabled'),
   APP_CATALOG_UNREACHABLE: () => t('error.app_catalog_unreachable'),
   APP_NOT_ENABLED: () => t('error.app_not_enabled'),

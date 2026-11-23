@@ -333,8 +333,8 @@ parks it, a visitor's browser picks it up.
 | | |
 |---|---|
 | `POST /gfs/spaces/{id}/invite` | Owner parks a blob. Body `{owning_instance, blob, expires_at, ts, signature}`, signed over canonical `{action:"mint_invite", owning_instance, space_id, ts}` and verified against the household's registered instance key (±300 s). Returns `201 {gfs_token, url}`. |
-| `GET /join/{gfs_token}` | Public page. Shows the space's already-public directory metadata and the `socialhome://invite#<blob>` code — copyable text **and** a QR of the same string. With `[server] public_viewer_base_url` set (the default) it is a hand-off page (generic link-preview tags + a refresh) to the pinned viewer, which renders it (below); empty, this server renders it. |
-| `POST /gfs/pages/invite` | The same page's content for the viewer: body `{token}`, answer `{server_name, space: {name, accent_color, icon}, invite_code, qr}` or one `404 {server_name}` for every dead link. Cross-origin, no credentials, the same 30 / min / IP window as `/join/`. |
+| `GET /join/{gfs_token}` | Public page. Shows the space's already-public directory metadata and the `socialhome://invite#<blob>` code as copyable text, **and** a QR of the short link to this page, `{base_url}/join/{gfs_token}` (below). With `[server] public_viewer_base_url` set (the default) it is a hand-off page (generic link-preview tags + a refresh) to the pinned viewer, which renders it (below); empty, this server renders it. |
+| `POST /gfs/pages/invite` | The same page's content for the viewer: body `{token}`, answer `{server_name, space: {name, accent_color, icon}, invite_code, qr}` (`qr`: a PNG `data:` URI of the same short link) or one `404 {server_name}` for every dead link. Cross-origin, no credentials, the same 30 / min / IP window as `/join/`. |
 | `DELETE\|POST /gfs/spaces/{id}/invite/{gfs_token}` | Owner takes it down. Signed over `{action:"revoke_invite", gfs_token, owning_instance, space_id, ts}`. `204`, idempotent. |
 
 The `action` discriminator lives inside the signed bytes on both verbs,
@@ -402,6 +402,46 @@ QR encoder), "New to Social Home? Learn how to get it", and the one
 es) and colour scheme. A GFS without a viewer renders the page itself,
 as before; old links keep working either way.
 
+### The invite QR carries the link
+
+The QR — on the GFS's own page and the PNG it hands the viewer — encodes
+the short link `{base_url}/join/{gfs_token}`
+(`global_server/invites.py` `invite_link_url`; the configured
+`[server] base_url`, never the request's `Host`), **not** the
+`socialhome://invite#…` code. That code is ~900 characters: a version-24
+QR of 113 × 113 modules, about 1.5 CSS px per module at the page's 180 px,
+which no phone reads off a screen — and a phone's own camera can't open a
+`socialhome://` link anyway. The short link is a version-5 QR (37 × 37).
+The viewer only displays the PNG it is given, so the GFS alone decides
+this. The code stays on the page as copyable text; pasting it works as
+before.
+
+- **Phone camera:** opens the invite page in the browser.
+- **The app's scanner or paste field:** recognises a `…/join/{token}` link
+  (and the viewer's `…#v=join&g=<gfs>&t=<token>` address, mapped to the
+  same link) and asks **its own household** to resolve it:
+  `POST /api/spaces/invite-link {url}` → `{invite_code}`
+  (`services/invite_link_service.py`). The household sends
+  `POST {gfs}/gfs/pages/invite {token}` — the call the viewer makes — and
+  the SPA redeems the code exactly like a pasted one. A dead link answers
+  `404`, shown as the usual "expired or revoked" message.
+- **Guarded like a user-typed URL** (SSRF): `https://` only, no
+  user-info / query / fragment, host and port from the link, every
+  resolved address public (no loopback, private, link-local, CGNAT…) and
+  pinned for the connection; no redirects, one 8 s deadline, at most
+  64 KiB of answer. The one exception is a GFS this household has an
+  **active** connection to (same scheme, host, port and path as its
+  stored base URL): that one is asked at the stored URL over the
+  household's own anonymous GFS session, so a LAN or plain-http GFS works.
+  10 / min / user.
+- **Privacy:** the browser never contacts the GFS (no third-party
+  fetches). The household's IP and the token reach that GFS once, in an
+  anonymous request (`User-Agent: SocialHome`). A genuine GFS learns
+  nothing a redeem through it (`POST /gfs/envelope`) would not show it
+  anyway; a crafted link can make the household reveal its IP to any
+  public host the person scans — as a pasted code naming that host as
+  its GFS already does. Nothing new is stored on either side.
+
 **Nor may the blob carry an address.** The page is served to anyone with
 the link, so the payload holds public keys and ids only — the redeem
 travels by instance id through `POST /gfs/envelope` (above). This is the
@@ -443,8 +483,14 @@ sequenceDiagram
     V-->>B: index.html + viewer.js (SRI)
     B->>G: POST /gfs/pages/invite {token} (CORS, no credentials)
     Note over G: pure read — no counter, no row, no token in any log
-    G-->>B: space name + icon + socialhome://invite#<blob> + QR
-    B-->>R: human copies the code into their OWN Social Home
+    G-->>B: space name + icon + socialhome://invite#<blob> + QR of {gfs}/join/{gfs_token}
+    alt pastes the code
+        B-->>R: human copies the code into their OWN Social Home
+    else scans the QR in the app
+        B-->>R: the app's scanner reads {gfs}/join/{gfs_token}
+        R->>G: POST /gfs/pages/invite {token} (anonymous, SSRF-guarded)
+        G-->>R: invite_code (404 → "expired or revoked")
+    end
 
     R->>G: POST /gfs/envelope<br/>{to_instance, sealed}
     Note over G,R: the sealed redeem leg — see above

@@ -19,6 +19,7 @@ from ..app_keys import (
     federation_repo_key,
     gfs_server_selection_service_key,
     instance_id_key,
+    invite_link_service_key,
     media_signer_key,
     media_transcode_repo_key,
     notification_settings_service_key,
@@ -2098,6 +2099,25 @@ class InviteLinkCodeView(BaseView):
         if code is None:
             return error_response(404, "NOT_FOUND", "No such invite link.")
         return web.json_response({"code": code})
+
+
+class SpaceInviteLinkView(BaseView):
+    """POST /api/spaces/invite-link — body ``{url}`` → ``{invite_code}``.
+
+    The scanner / paste field got a GFS invite link (``…/join/{token}``, what
+    the invite QR carries) instead of a code; the household asks that GFS for
+    the code behind it (:mod:`socialhome.services.invite_link_service`, which
+    guards the request) and the SPA carries on with ``POST /api/spaces/join``.
+    404 when the invite expired or was revoked; 422 for a link this household
+    won't follow; 502 when its server doesn't answer.
+    """
+
+    async def post(self) -> web.Response:
+        _ = self.user
+        body = await self.body()
+        url = body.get("url") if isinstance(body, dict) else None
+        code = await self.svc(invite_link_service_key).resolve(url)
+        return self._json({"invite_code": code})
 
 
 class SpaceJoinView(BaseView):

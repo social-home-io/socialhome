@@ -37,6 +37,7 @@ from socialhome.global_server.invites import (
     INVITE_CODE_PREFIX,
     INVITE_MAX_TTL_SECONDS,
     INVITE_MINT_MAX_PER_MINUTE,
+    invite_link_url,
 )
 from socialhome.global_server.public import LISTING_MAX_PER_MINUTE
 from socialhome.global_server.server import create_gfs_app
@@ -176,6 +177,13 @@ async def _rows(app) -> list[dict]:
 
 
 # ─── Mint ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "base", ["https://gfs.example.org", "https://gfs.example.org/", "https://h/x//"]
+)
+def test_invite_link_url_is_base_plus_join_token(base):
+    assert invite_link_url(base, "tok") == base.rstrip("/") + "/join/tok"
 
 
 async def test_mint_creates_row_and_returns_url(client, owner):

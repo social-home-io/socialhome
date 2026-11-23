@@ -778,7 +778,15 @@ export function SpaceInviteDialog() {
               <div class="sh-invite-artifact-label">
                 {t('invite.qr.label')}
               </div>
-              <QrCodeImg data={code} size={180} alt={t('invite.qr.alt')} />
+              {/* A published invite's QR carries its short ``/join/`` link:
+                  the full code (with the bootstrap keys) is ~900 characters,
+                  a QR no phone reads off a screen. A camera opens the page;
+                  the app's scanner resolves the link through its household. */}
+              <QrCodeImg
+                data={row.gfs ? row.gfs.url : code}
+                size={180}
+                alt={t('invite.qr.alt')}
+              />
             </div>
 
             <div class="sh-form-actions">

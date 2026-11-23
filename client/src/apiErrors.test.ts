@@ -24,6 +24,15 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('The app catalog is turned off on this Social Home.')
   })
 
+  it('says what to do with an invite link the household could not resolve', () => {
+    expect(apiErrorMessage(422, '/api/spaces/invite-link', {
+      code: 'INVITE_LINK_REFUSED', detail: 'x',
+    })).toContain('paste the code shown under it')
+    expect(apiErrorMessage(502, '/api/spaces/invite-link', {
+      code: 'INVITE_LINK_UNREACHABLE', detail: 'x',
+    })).toBe("Couldn't reach the server of this invite. Try again, or paste the code shown under the QR.")
+  })
+
   it('names a household video length and the 5-minute limit', () => {
     expect(apiErrorMessage(422, '/api/gallery/albums/a/items', {
       code: 'VIDEO_TOO_LONG', detail: 'x', params: { duration_s: 432, max_s: 300 },
