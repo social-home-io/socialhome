@@ -61,6 +61,7 @@ from ..domain.space_item import (
     PayloadSuiteRefused,
     payload_suite_of,
 )
+from ..domain.space_listing_counts import parse_listing_count
 from ..domain.space_place import parse_place_pin_wire
 from ..domain.subscriber_accepts import (
     ACCEPTS_SPACE_KEY_PULL,
@@ -80,6 +81,7 @@ from .domain import (
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GlobalSpace,
+    normalize_counts_ts,
 )
 from .repositories import AbstractGfsFederationRepo
 
@@ -1924,6 +1926,8 @@ class GfsFederationService:
         join_contact: object = None,
         withdrawn: bool | None = None,
         gfs_key: str | None = None,
+        member_count: object = None,
+        follower_count: object = None,
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -1979,6 +1983,17 @@ class GfsFederationService:
         the server it is for: ``gfs_key`` (this server's identity key, inside
         the signed bytes) is mandatory with ``withdrawn`` and optional
         otherwise (:meth:`_assert_addressed_here`).
+
+        ``member_count`` / ``follower_count`` (advertised as the
+        ``listing_counts`` capability) are the space's counts as its owner
+        declares them, raw off the wire. Each is folded into the signed bytes
+        only when sent (an older household signs a body without them), so a
+        relay can neither add, change nor strip one. After the signature they
+        are re-validated with :func:`parse_listing_count`; an invalid one is
+        stored as ``None`` ("no number") and the listing still publishes.
+        They are stored with the publish's signed ``ts`` as the
+        last-writer-wins stamp (``upsert_space``); a publish without them
+        clears them. A pin-only ``withdrawn`` publish never touches them.
         """
         inst = await self._repo.get_instance(owning_instance)
         if inst is None:
@@ -2050,6 +2065,12 @@ class GfsFederationService:
         # (an older household sends none and signs a body without it).
         if join_contact is not None:
             signed["join_contact"] = join_contact
+        # The owner-declared counts ride inside the signed bytes too, as
+        # sent, only when present (an older household signs without them).
+        if member_count is not None:
+            signed["member_count"] = member_count
+        if follower_count is not None:
+            signed["follower_count"] = follower_count
         # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
         # subscribe/unsubscribe, ``publish_space`` has shipped production
         # callers, so hard-requiring ``ts`` would 403 every older household
@@ -2164,10 +2185,12 @@ class GfsFederationService:
             if repinned is None:
                 raise SpaceNotListedError(space_id)
             return repinned
-        # Preserve subscriber_count / posts_per_week / published_at from
-        # the existing row — those are GFS-side bookkeeping, not the
-        # owner's to declare. Only the owner's name / description /
-        # cover travel with the publish.
+        # Preserve posts_per_week / published_at from the existing row —
+        # those are GFS-side bookkeeping, not the owner's to declare. Only
+        # the owner's name / description / cover travel with the publish.
+        # ``subscriber_count`` (relay seats) is carried for a new row only:
+        # ``upsert_space`` never overwrites it on an existing one, so a
+        # subscribe landing between the read above and the upsert stays.
         next_status = "active" if inst.auto_accept else "pending"
         if existing is not None and existing.status in ("banned", "active"):
             # A moderator's decision sticks: a ban stays a ban, and an
@@ -2188,6 +2211,21 @@ class GfsFederationService:
         pin = parse_place_pin_wire(place)
         if place is not None and pin is None:
             log.warning("GFS: space %s published a malformed place; ignored", space_id)
+        # Verified above over the values as sent; stored re-validated. An
+        # invalid count is shown as no number, never refused — the counts
+        # only ever inform.
+        members = parse_listing_count(member_count)
+        followers = parse_listing_count(follower_count)
+        for field, raw, parsed in (
+            ("member_count", member_count, members),
+            ("follower_count", follower_count, followers),
+        ):
+            if raw is not None and parsed is None:
+                log.warning(
+                    "GFS: space %s published an invalid %s; stored as none",
+                    space_id,
+                    field,
+                )
         # The contact is judged against the key this publish leaves pinned:
         # a re-pinning publish carries one signed with the NEW key (the old
         # seed is retired). Judged against the key pinned BEFORE the re-pin
@@ -2234,6 +2272,11 @@ class GfsFederationService:
             # The hint is inside the same signed ``place`` object.
             place_radius_km=pin.radius_km if pin is not None else None,
             join_contact=contact,
+            member_count=members,
+            follower_count=followers,
+            # The signed, freshness-checked ``ts`` stamps the counts for
+            # last-writer-wins; none (an older household) clears the stamp.
+            counts_ts=normalize_counts_ts(ts) if has_ts else None,
         )
         if existing is not None and existing.withdrawn and not has_ts:
             log.info(

@@ -44,6 +44,7 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.space import normalize_category, normalize_join_mode
+from ..domain.space_listing_counts import parse_listing_count
 from ..domain.space_place import PlacePin, parse_place_pin_wire, place_pin_wire
 from ..domain.subscriber_accepts import parse_accepts
 from ..gfs_client_status import StatusRequest, sign_client_status
@@ -60,7 +61,13 @@ from .cluster_relay import (
     held_from_replies,
     wire_size,
 )
-from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
+from .domain import (
+    ClientInstance,
+    ClusterNode,
+    GfsFraudReport,
+    GlobalSpace,
+    normalize_counts_ts,
+)
 from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
 from .federation import certified_authority_repin
 from .peer_url import normalized_peer_url
@@ -2119,6 +2126,18 @@ class ClusterService:
             cert=space.authority_cert,
             stored_cert=existing.authority_cert if existing else None,
         )
+        # A peer's ``subscriber_count`` is its own relay-seat bookkeeping:
+        # ``upsert_space`` never overwrites ours with it. An OLDER node
+        # gossips no counts at all — keep ours rather than clearing them;
+        # otherwise the counts are last-writer-wins on ``counts_ts`` (in the
+        # upsert).
+        if existing is not None and "counts_ts" not in global_space:
+            space = replace(
+                space,
+                member_count=existing.member_count,
+                follower_count=existing.follower_count,
+                counts_ts=existing.counts_ts,
+            )
         wire_cert = space.authority_cert
         space = replace(
             space, authority_cert=existing.authority_cert if existing else None
@@ -2967,6 +2986,13 @@ def _space_to_wire(s: GlobalSpace) -> dict:
         # …and its join contact (v_84), authority-signed by the owner; a
         # reader verifies it, this server only carries it.
         "join_contact": s.join_contact,
+        # The owner-declared counts with their last-writer-wins stamp, so a
+        # node that missed the publish serves them too and a stale peer row
+        # never overwrites newer ones. (``subscriber_count`` above stays on
+        # the wire for older nodes; a receiving node never adopts it.)
+        "member_count": s.member_count,
+        "follower_count": s.follower_count,
+        "counts_ts": s.counts_ts,
     }
 
 
@@ -3000,6 +3026,10 @@ def _wire_to_space(d: dict) -> GlobalSpace:
         place_lon=_wire_place(d)[1],
         place_radius_km=_wire_place(d)[2],
         join_contact=parse_join_contact(d.get("join_contact")),
+        # Re-validated like any wire count; a malformed one is no number.
+        member_count=parse_listing_count(d.get("member_count")),
+        follower_count=parse_listing_count(d.get("follower_count")),
+        counts_ts=normalize_counts_ts(d.get("counts_ts")),
     )
 
 

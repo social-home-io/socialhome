@@ -93,7 +93,9 @@ class SpacePageDataView(GfsBaseView):
                     "icon": image_data_uri(space["icon_url"]),
                     "primary_color": primary,
                     "accent_color": css_color(space["accent_color"], primary),
-                    "member_count": int(space["subscriber_count"] or 0),
+                    # Owner-declared; null = not declared (show no number).
+                    "member_count": space["member_count"],
+                    "follower_count": space["follower_count"],
                     "category": category or "general",
                 },
             }

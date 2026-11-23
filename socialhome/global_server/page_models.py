@@ -61,7 +61,10 @@ async def load_space_page(app: web.Application, space_id: str) -> dict | None:
         "icon_url": space.icon_url,
         "accent_color": space.accent_color,
         "primary_color": space.primary_color,
-        "subscriber_count": space.subscriber_count,
+        # As the owner declared them; ``None`` = no number (never the
+        # relay-seat ``subscriber_count``).
+        "member_count": space.member_count,
+        "follower_count": space.follower_count,
         "category": space.category,
     }
 

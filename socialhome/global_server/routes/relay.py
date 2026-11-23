@@ -76,8 +76,18 @@ def public_space_dict(space) -> dict:
     the authority key it pinned only along that owner-signed chain, never on
     this server's word. The contact already names the owner's identity key,
     so the cert adds only that a rotation happened, and when.
+
+    ``member_count`` / ``follower_count`` are the owner-declared counts, or
+    ``None`` when it declared none — never the relay seats.
     """
     body = asdict(space)
+    # Members and followers as the owner declared them (``None`` = no
+    # number). ``subscriber_count`` is this server's relay-seat bookkeeping,
+    # not a member count — an older household reads
+    # ``subscriber_count or member_count``, so it must not be served; nor
+    # the internal last-writer-wins stamp.
+    body.pop("subscriber_count", None)
+    body.pop("counts_ts", None)
     if space.join_contact is None:
         body.pop("authority_cert", None)
     # The owner's place pin, as the ``{lat, lon, radius_km?}`` it was
@@ -260,6 +270,14 @@ class GfsInfoView(GfsBaseView):
             # owner sends the field only to a server that proved this (an
             # older one would fold an unknown field out of the signed bytes).
             "join_contact": True,
+            # The owner's listing publish may carry ``member_count`` and
+            # ``follower_count``; this server folds them into the signed
+            # bytes it verifies, stores them (last writer wins on the signed
+            # ``ts``) and serves them on the directory and public pages. An
+            # owner sends them only to a server that proved this — an older
+            # one folds only the fields it knows, so they would break the
+            # signature.
+            "listing_counts": True,
             # Step 12 — keeps each seat's ``space_item`` label and answers
             # ``GET /gfs/spaces/{id}/subscribers?summary=1`` (counts, under the
             # authority signature). A seed holder skips its relay copy of a
@@ -958,6 +976,10 @@ class SpacePublishView(GfsBaseView):
                 # present; a malformed one is stored as no pin.
                 place=body.get("place"),
                 join_contact=body.get("join_contact"),
+                # Optional, raw: the owner-declared counts, inside the signed
+                # bytes when present; an invalid one is stored as no number.
+                member_count=body.get("member_count"),
+                follower_count=body.get("follower_count"),
                 withdrawn=True if "withdrawn" in body else None,
                 gfs_key=gfs_key,
             )
