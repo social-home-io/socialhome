@@ -522,6 +522,11 @@ switches there either. Both hold on every path, `SPACE_ROUTED` included.
   admin, carries no `reader` flag, so only the epoch ending retires it.
   Turning a switch on rotates nothing; each follower household that can be
   issued a cert gets it at once (credentials only).
+- **An author may always delete their own comment** (owner decision
+  2026-11-23), a follower included: deleting one's own comment never needs
+  `allow_subscriber_comment`, and a cert the rotation retired does not block
+  it. The receiver decides on authorship (the stored comment's author is the
+  deleting person), not on the switch.
 
 Names: a follower that comments publishes its users' v_60 `author_profile`
 (scope `comment`) like any member; members also know its people from the
