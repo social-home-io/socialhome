@@ -4154,10 +4154,14 @@ class SpaceService(
             before.features.allow_subscriber_react
             and not after.features.allow_subscriber_react
         )
-        instances = {
-            r.instance_id
-            for r in await self._remote_members.list_for_space(after.id)
-            if r.instance_id
+        seats = await self._remote_members.list_for_space(after.id)
+        instances = {r.instance_id for r in seats if r.instance_id}
+        # Households holding a follower seat, whatever else they hold: a
+        # plain comment cert may have bound that follower earlier in the
+        # epoch (while the household only followed), so a switch turning off
+        # rotates for it even when its cert now is a write cert.
+        with_followers = {
+            r.instance_id for r in seats if r.role == SpaceRole.SUBSCRIBER.value
         }
         if self._own_instance_id:
             instances.add(self._own_instance_id)
@@ -4165,7 +4169,9 @@ class SpaceService(
         for instance_id in sorted(instances):
             was = await self._writer_certs.entitlement_for_instance(before, instance_id)
             now = await self._writer_certs.entitlement_for_instance(after, instance_id)
-            if scope_weakened(was, now) or (follower_switch_off and was.reader):
+            if scope_weakened(was, now) or (
+                follower_switch_off and (was.reader or instance_id in with_followers)
+            ):
                 log.info(
                     "space %s: a rights change narrows household %s's writers "
                     "— rotating the content key",

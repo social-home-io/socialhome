@@ -480,7 +480,9 @@ household gives up its channel seat.
   only when it may comment or react. A public (not global) space never
   touches a GFS and has no channel.
 - **No sync pages for followers** (the existing role rule): a follower
-  catches up over the §25.6 subset stream from its acting host.
+  catches up over the §25.6 subset stream. (Today the sync scheduler still
+  leaves a follow-only space out of its BEGINs; the follow phase changes
+  that to the acting host.)
 
 ### Comments and reactions
 
@@ -493,7 +495,11 @@ config, `reaction_*` only while `allow_subscriber_react` is on, an
 `author_profile` while either is; posts and every other family are refused
 for a `reader` cert (`reader_cert_permits`). On the federation path the
 follower's live `subscriber` seat decides it the same way (the Follower
-gate). Both hold on every path, `SPACE_ROUTED` included.
+gate). A follower-only receiver, which takes an author it does not know on
+the cert alone, still refuses a comment or reaction from an author it knows
+as a follower while the matching switch is off — so a plain comment cert
+issued before v_96 (or by a v_95 delegated admin) carries nothing past the
+switches there either. Both hold on every path, `SPACE_ROUTED` included.
 
 - **One flag per household.** `reader` is set when any user the cert binds
   holds only a follower seat, so a household whose comment set mixes a
@@ -509,7 +515,8 @@ gate). Both hold on every path, `SPACE_ROUTED` included.
   verify a `reader` cert (its signature covers `reader`, which the older
   parser ignores), so it refuses a follower's relayed comment or reaction.
 - **Turning a switch off rotates.** Either flag turning off rotates the
-  content key at once when a household's comment set bound a follower,
+  content key at once when a household holds a follower seat (whatever
+  else it holds) or its comment set bound a follower,
   even if its entitlement looks unchanged (comment off, react on): a plain
   comment cert issued to that follower before v_96, or by a v_95 delegated
   admin, carries no `reader` flag, so only the epoch ending retires it.
@@ -524,8 +531,10 @@ roster. The app may group followers as "Followers".
 
 Everyone in the space sees the same roster, followers included, with their
 role: the owner, admins, members and followers. Roster gossip
-(`SPACE_MEMBER_JOINED` / `_LEFT`), the roster snapshot, the digest and the
-mailbox directory treat a follower seat like any other seat. A GFS sees the
+(`SPACE_MEMBER_JOINED` / `_LEFT`), the roster snapshot and the digest treat
+a follower seat like any other seat. The mailbox directory stays a member
+surface (writer households only, the existing rule): a follower is reached
+through its own seat, not listed as a directory card. A GFS sees the
 channel's seats (identified, without the space id).
 
 ### Cost (v_96)

@@ -12170,29 +12170,6 @@ async def test_a_gain_and_a_loss_in_one_change_rotate_once(stack, monkeypatch):
     ] == []
 
 
-async def test_comment_rights_off_rotates_only_if_a_household_loses_a_right(
-    stack, monkeypatch
-):
-    """A household with a member seat next to its follower seat keeps its
-    cert when "followers may comment" goes off: nobody's entitlement
-    shrinks, so nothing rotates."""
-    space, _fed, remote, _pks = await _cert_space(stack, version=94)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(allow_subscriber_comment=True),
-    )
-    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
-    await _seat(remote, space.id, "peer-a", "u-a2", role="member")
-    rekeys = await _rekeys(stack, monkeypatch)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(allow_subscriber_comment=False),
-    )
-    assert rekeys == []
-
-
 def _snapshot_kwargs(fed):
     return [
         c.kwargs
@@ -12271,6 +12248,51 @@ async def test_comment_off_with_react_on_still_rotates(stack, monkeypatch):
         ),
     )
     assert rekeys == [space.id]
+
+
+async def test_a_switch_off_rotates_for_a_follower_in_a_writer_household(
+    stack, monkeypatch
+):
+    """A household that holds a member's seat and a follower's: its cert is
+    a write cert (never reader), yet a plain comment cert that bound the
+    follower earlier in the epoch (while the household only followed, at
+    v_95) would survive the switch — so any follower seat counts."""
+    space, _fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-m", role="member")
+    await _seat(remote, space.id, "peer-a", "u-f", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_a_switch_off_without_followers_rotates_nothing(stack, monkeypatch):
+    space, _fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-m", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == []
 
 
 async def test_the_react_switch_on_sends_nothing_to_a_follower_below_v96(stack):

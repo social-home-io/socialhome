@@ -373,8 +373,19 @@ class SpaceItemInbound:
     # ── Shared checks ────────────────────────────────────────────────────
 
     async def _seat_ok(self, item: _Item, *, subscriber_ok: bool) -> bool:
-        if item.authorship is None or not item.member:
+        if item.authorship is None:
             return True
+        if not item.member:
+            # A follower-only household: the cert decides an author it does
+            # not know, but one it knows as a follower still needs the
+            # switch — a plain comment cert issued before v_96 (or by a v_95
+            # delegated admin) carries no ``reader`` flag (v_96).
+            return not await item.authorship.known_follower_refused(
+                origin_instance_id=item.origin,
+                space_id=item.space.id,
+                author_user_id=item.author,
+                subscriber_ok=subscriber_ok,
+            )
         return await item.authorship.item_seat_admits(
             origin_instance_id=item.origin,
             space_id=item.space.id,

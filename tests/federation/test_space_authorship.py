@@ -1213,6 +1213,27 @@ async def test_item_seat_admits_a_follower_only_when_asked():
     assert await _seat_ok(auth, AUTHOR_HOUSE, "u-sub", subscriber_ok=True)
 
 
+async def test_a_known_follower_is_refused_while_its_switch_is_off():
+    """v_96 — a follower-only household's roster check: only a known
+    follower with the switch off is refused; a writer or an author it does
+    not know is left to the cert."""
+    auth = _access_authorship()
+
+    async def refused(author, *, subscriber_ok=False):
+        return await auth.known_follower_refused(
+            origin_instance_id=AUTHOR_HOUSE,
+            space_id=SPACE,
+            author_user_id=author,
+            subscriber_ok=subscriber_ok,
+        )
+
+    assert await refused("u-sub")
+    assert not await refused("u-sub", subscriber_ok=True)
+    assert not await refused("u-author")
+    assert not await refused("u-unknown")
+    assert not await refused("")
+
+
 # ── may_author_writer: the strict create rule of the v_55 space chat ───
 
 
