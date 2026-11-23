@@ -492,3 +492,49 @@ def test_a_peer_stamp_is_normalised_to_utc():
         ("yesterday", None),
     ):
         assert _wire_to_space({**wire, "counts_ts": raw}).counts_ts == stored
+
+
+async def test_a_row_without_a_stamp_never_wipes_the_counts_in_sql(gfs_client):
+    """REGRESSION (re-review N2): the keep rule is in ``upsert_space`` itself,
+    so a count-less publish that read the row before a counts-bearing one
+    committed still cannot wipe them."""
+    app = gfs_client.server.app
+    await _seed_counts(app)
+    repo = app[gfs_fed_repo_key]
+    stale_read = await repo.get_space(_SPACE)
+    await repo.upsert_space(
+        GlobalSpace(
+            space_id=_SPACE,
+            owning_instance="owner.home",
+            status="active",
+            identity_public_key=stale_read.identity_public_key,
+        )
+    )
+    stored = await _stored(gfs_client)
+    assert (stored.member_count, stored.follower_count) == (5, 3)
+    assert stored.counts_ts == "2026-11-23T10:00:00.000000+00:00"
+
+
+async def test_a_first_seen_space_never_takes_a_far_future_stamp(gfs_client):
+    """REGRESSION (re-review N5): a space this node first learns through
+    gossip does not store a stamp that would pin its counts."""
+    app = gfs_client.server.app
+    await _register_owner(app)
+    wire = _space_to_wire(
+        GlobalSpace(
+            space_id="sp-new",
+            owning_instance="owner.home",
+            status="active",
+            member_count=9,
+            follower_count=9,
+            counts_ts="2099-01-01T00:00:00.000000+00:00",
+        )
+    )
+    await app[gfs_cluster_key].apply_sync_space("upsert", wire)
+    stored = await app[gfs_fed_repo_key].get_space("sp-new")
+    assert stored is not None
+    assert (stored.member_count, stored.follower_count, stored.counts_ts) == (
+        None,
+        None,
+        None,
+    )

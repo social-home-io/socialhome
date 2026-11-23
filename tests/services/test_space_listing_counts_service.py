@@ -346,3 +346,49 @@ async def test_a_ban_or_role_change_is_a_config_change_that_marks_it(env):
     )
     await _settle(svc)
     assert gfs.calls == [("g", False)]
+
+
+async def test_stop_cancels_a_republish_in_flight(env):
+    """REGRESSION (re-review N1): the timer stays tracked through its
+    re-share, so ``stop`` cancels a publish still running."""
+    bus, spaces, _public, _peers, gfs, _peer_dir, svc = env
+    spaces.spaces["g"] = _space("g", SpaceType.GLOBAL)
+    spaces.counts["g"] = SpaceListingCounts(member_count=3, follower_count=1)
+    started = asyncio.Event()
+
+    async def _hang(space_id: str, *, announce: bool = True) -> int:
+        started.set()
+        await asyncio.sleep(10)
+        return 1
+
+    gfs.republish_space = _hang  # type: ignore[method-assign]
+    await bus.publish(SpaceMemberJoined(space_id="g", user_id="u1"))
+    await asyncio.wait_for(started.wait(), 1)
+    assert "g" in svc._tasks
+    await asyncio.wait_for(svc.stop(), 1)
+    assert svc._tasks == {}
+
+
+async def test_a_change_during_a_reshare_rearms_the_timer(env):
+    bus, spaces, _public, _peers, gfs, _peer_dir, svc = env
+    spaces.spaces["g"] = _space("g", SpaceType.GLOBAL)
+    spaces.counts["g"] = SpaceListingCounts(member_count=3, follower_count=1)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _slow(space_id: str, *, announce: bool = True) -> int:
+        gfs.calls.append((space_id, announce))
+        started.set()
+        await release.wait()
+        return 1
+
+    gfs.republish_space = _slow  # type: ignore[method-assign]
+    await bus.publish(SpaceMemberJoined(space_id="g", user_id="u1"))
+    await asyncio.wait_for(started.wait(), 1)
+    # The counts move while the first re-share is on the wire.
+    spaces.counts["g"] = SpaceListingCounts(member_count=4, follower_count=1)
+    await bus.publish(SpaceMemberJoined(space_id="g", user_id="u2"))
+    release.set()
+    await asyncio.sleep(0)
+    await _settle(svc)
+    assert len(gfs.calls) == 2
+    assert svc._last["g"] == SpaceListingCounts(member_count=4, follower_count=1)

@@ -65,12 +65,12 @@ _ADMIN_LOGIN_ATTEMPT_RETENTION_SECONDS = 86400
 #: INTEGER range, the same bound a cert's ``key_epoch`` carries.
 _MAX_ROTATION_SEQ = MAX_AUTHORITY_KEY_EPOCH
 
-#: ``upsert_space``'s last-writer-wins test for the owner-declared counts:
-#: both the stored and the incoming row carry a ``counts_ts`` and the
-#: incoming one is older.
-_COUNTS_OLDER_SQL = (
-    "(global_spaces.counts_ts IS NOT NULL AND excluded.counts_ts IS NOT NULL"
-    " AND excluded.counts_ts < global_spaces.counts_ts)"
+#: ``upsert_space``'s test for KEEPING the stored owner-declared counts: the
+#: incoming row declares none (no ``counts_ts``), or both carry one and the
+#: incoming one is older (last-writer-wins).
+_COUNTS_KEEP_SQL = (
+    "(excluded.counts_ts IS NULL OR (global_spaces.counts_ts IS NOT NULL"
+    " AND excluded.counts_ts < global_spaces.counts_ts))"
 )
 
 # Retention for ``gfs_pair_tokens``. Tokens are single-use with a 10-min TTL
@@ -402,18 +402,18 @@ class SqliteGfsFederationRepo:
                 join_contact = excluded.join_contact,
                 -- The owner-declared counts are last-writer-wins on the
                 -- declaring publish's signed ``ts``: a delayed OLDER publish
-                -- (or a peer node's stale row) keeps the stored counts. A
-                -- publish with no stamp (an older or downgraded household
-                -- declaring nothing) takes the incoming value, so the counts
-                -- clear to NULL = "no number" rather than going stale. ISO
+                -- (or a peer node's stale row) keeps the stored counts, and
+                -- so does a row that declares none (no stamp: a count-less
+                -- or replayable publish, a peer that never got counts) — in
+                -- one statement, so a racing publish cannot wipe them. ISO
                 -- strings in UTC at fixed microsecond width compare in time
                 -- order.
-                member_count = CASE WHEN {_COUNTS_OLDER_SQL} THEN
+                member_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
                     global_spaces.member_count ELSE excluded.member_count END,
-                follower_count = CASE WHEN {_COUNTS_OLDER_SQL} THEN
+                follower_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
                     global_spaces.follower_count ELSE excluded.follower_count
                     END,
-                counts_ts = CASE WHEN {_COUNTS_OLDER_SQL} THEN
+                counts_ts = CASE WHEN {_COUNTS_KEEP_SQL} THEN
                     global_spaces.counts_ts ELSE excluded.counts_ts END
             """,
             (

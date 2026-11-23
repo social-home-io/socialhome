@@ -2229,11 +2229,6 @@ class GfsFederationService:
         fresh_counts = has_ts and (
             member_count is not None or follower_count is not None
         )
-        kept_counts = (
-            (existing.member_count, existing.follower_count, existing.counts_ts)
-            if existing is not None
-            else (None, None, None)
-        )
         # The contact is judged against the key this publish leaves pinned:
         # a re-pinning publish carries one signed with the NEW key (the old
         # seed is retired). Judged against the key pinned BEFORE the re-pin
@@ -2285,9 +2280,11 @@ class GfsFederationService:
             # wins. A publish without counts (an older household, or one
             # sent before this server's ``listing_counts`` was known) and a
             # replayable no-``ts`` body leave the stored counts as they are.
-            member_count=members if fresh_counts else kept_counts[0],
-            follower_count=followers if fresh_counts else kept_counts[1],
-            counts_ts=normalize_counts_ts(ts) if fresh_counts else kept_counts[2],
+            # (``upsert_space`` keeps the stored ones for a row without a
+            # stamp, in the same statement.)
+            member_count=members if fresh_counts else None,
+            follower_count=followers if fresh_counts else None,
+            counts_ts=normalize_counts_ts(ts) if fresh_counts else None,
         )
         if existing is not None and existing.withdrawn and not has_ts:
             log.info(

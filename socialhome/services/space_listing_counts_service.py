@@ -73,6 +73,8 @@ class SpaceListingCountsService:
     __slots__ = (
         "_bus",
         "_debounce_s",
+        "_dirty",
+        "_flushing",
         "_gfs",
         "_last",
         "_locks",
@@ -115,6 +117,10 @@ class SpaceListingCountsService:
         #: window's timer never send side by side).
         self._locks: dict[str, asyncio.Lock] = {}
         self._stopped = False
+        #: Spaces whose timer is re-sharing now, and those of them that
+        #: changed again meanwhile (re-armed when the flush ends).
+        self._flushing: set[str] = set()
+        self._dirty: set[str] = set()
 
     def attach(
         self, *, peer_directory: PeerDirectoryRefresher, own_instance_id: str
@@ -188,8 +194,15 @@ class SpaceListingCountsService:
         # Synchronous up to the task: the slot is taken before any await, so
         # a burst of concurrent events is exactly one timer.
         space_id = event.space_id
-        if self._stopped or self._peer_directory is None or space_id in self._tasks:
+        if self._stopped or self._peer_directory is None:
             return
+        if space_id in self._tasks:
+            if space_id in self._flushing:
+                self._dirty.add(space_id)
+            return
+        self._arm(space_id)
+
+    def _arm(self, space_id: str) -> None:
         self._tasks[space_id] = asyncio.create_task(
             self._flush_later(space_id), name=f"listing-counts-{space_id}"
         )
@@ -211,16 +224,29 @@ class SpaceListingCountsService:
             await asyncio.sleep(self._debounce_s)
         except asyncio.CancelledError:
             return
-        self._tasks.pop(space_id, None)
+        # Tracked until the re-share is done, so ``stop`` cancels a publish
+        # in flight too (the session closes right after). A change during the
+        # flush re-arms the timer when it ends.
+        self._flushing.add(space_id)
         try:
             if await self._hosted_listing(space_id):
                 await self.flush(space_id)
+        except asyncio.CancelledError:
+            return
         except Exception:  # never kill the loop: the next change retries
             log.warning(
                 "space %s: re-sharing its listing counts failed",
                 space_id,
                 exc_info=True,
             )
+        finally:
+            self._flushing.discard(space_id)
+            if self._tasks.get(space_id) is asyncio.current_task():
+                self._tasks.pop(space_id, None)
+            if space_id in self._dirty:
+                self._dirty.discard(space_id)
+                if not self._stopped:
+                    self._arm(space_id)
 
     async def flush(self, space_id: str) -> None:
         """Re-share *space_id*'s counts now if they changed since last time."""

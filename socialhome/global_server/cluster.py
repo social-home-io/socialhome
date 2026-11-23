@@ -2133,12 +2133,10 @@ class ClusterService:
         # far-future stamp would pin them against every later owner
         # publish); otherwise ours stay. Among stamped ones the upsert keeps
         # the newer (last-writer-wins on ``counts_ts``).
-        if existing is not None and not _gossiped_counts_usable(space.counts_ts):
+        if not _gossiped_counts_usable(space.counts_ts):
+            # No stamp: the upsert keeps ours (or stores none for a new row).
             space = replace(
-                space,
-                member_count=existing.member_count,
-                follower_count=existing.follower_count,
-                counts_ts=existing.counts_ts,
+                space, member_count=None, follower_count=None, counts_ts=None
             )
         wire_cert = space.authority_cert
         space = replace(
