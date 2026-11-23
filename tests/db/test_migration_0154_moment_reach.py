@@ -47,3 +47,19 @@ def test_new_rows_take_a_reach(db):
     )
     row = db.execute("SELECT reach FROM moments WHERE id='m-new'").fetchone()
     assert row["reach"] == 2
+
+
+@pytest.mark.parametrize("bad", [0, 6, -1])
+def test_a_reach_out_of_range_is_refused(db, bad):
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+            " expires_at, reach) VALUES('m-bad', 'u', '', 'o', '2099-01-01', ?)",
+            (bad,),
+        )
+    db.execute(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " expires_at, reach) VALUES('m-ok', 'u', '', 'o', '2099-01-01', NULL)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE moments SET reach=? WHERE id='m-ok'", (bad,))

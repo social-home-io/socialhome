@@ -1155,6 +1155,97 @@ async def test_a_multi_enqueue_at_the_cap_evicts_a_relayed_moment_first(
     assert "ours-old" in await _pending_ids(env, "peer")
 
 
+async def _two_own_rows(env) -> None:
+    for i in range(2):
+        await _seed_pending(
+            env,
+            f"ours-{i}",
+            instance_id="peer",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            created_at=f"2025-12-3{i}T00:00:00+00:00",
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "key"),
+    [
+        (FederationEventType.MOMENT_CREATED, relayed_moment_key("create", "x", "m1")),
+        (
+            FederationEventType.MOMENT_REACTIONS_COUNTED,
+            relayed_moment_key("counts", "x", "m1"),
+        ),
+        (
+            FederationEventType.MOMENT_DELETED,
+            moment_delete_key(
+                FederationEventType.MOMENT_DELETED,
+                {"moment_id": "m1", "origin_instance_id": "x"},
+                own_instance_id="me",
+            ),
+        ),
+    ],
+)
+async def test_a_relayed_row_never_evicts_one_of_our_own(
+    env, monkeypatch, event_type, key
+):
+    """D: at the cap with only our own rows queued, a row we merely relay is
+    dropped instead — it may push out other relayed rows, never ours."""
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    await _two_own_rows(env)
+    queued = await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=event_type,
+        payload_json="{}",
+        supersede_key=key,
+    )
+    assert queued is None
+    assert await _pending_ids(env, "peer") == {"ours-0", "ours-1"}
+
+
+async def test_a_relayed_row_evicts_an_older_relayed_one_at_the_cap(env, monkeypatch):
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    await _seed_pending(
+        env,
+        "ours-0",
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        created_at="2025-12-30T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "relayed-old",
+        key=relayed_moment_key("create", "x", "m0"),
+        event_type=FederationEventType.MOMENT_CREATED,
+        created_at="2026-01-03T00:00:00+00:00",
+    )
+    queued = await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload_json="{}",
+        supersede_key=relayed_moment_key("create", "x", "m1"),
+    )
+    assert queued is not None
+    assert await _pending_ids(env, "peer") == {"ours-0", queued}
+
+
+async def test_a_relayed_multi_row_never_evicts_one_of_our_own(env, monkeypatch):
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    await _two_own_rows(env)
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer", "peer-a"],
+        event_type=POST_CREATED,
+        supersede_key=relayed_moment_key("create", "x", "m1"),
+        payload_ref=OutboxPayload(
+            id="p-relayed",
+            event_type=POST_CREATED,
+            space_id="sp",
+            payload_enc="x",
+            msg_id="msg-relayed",
+        ),
+    )
+    assert set(written) == {"peer-a"}  # not at the cap: queued
+    assert await _pending_ids(env, "peer") == {"ours-0", "ours-1"}
+
+
 async def test_relayed_deletes_past_an_origins_cap_are_queued_ordinary(
     env, monkeypatch
 ):

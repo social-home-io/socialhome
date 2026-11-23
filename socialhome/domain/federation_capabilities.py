@@ -1630,8 +1630,7 @@ from __future__ import annotations
 #:   1 keeps the v_38 ``no_relay`` gate; reach 4–5 goes to every paired
 #:   household (an older one relays it verbatim up to hop 3; an older one
 #:   further away can't verify the v3 bytes and drops it). Not
-#:   space-scoped. Labelled "Choose how far your moments go". (The unmerged
-#:   ``feat/subscriber-seats`` branch renumbers to v_97.)
+#:   space-scoped. Labelled "Choose how far your moments go".
 OURS: int = 96
 
 

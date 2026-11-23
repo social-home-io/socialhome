@@ -1,7 +1,7 @@
 """Origin signature for relayed ``MOMENT_*`` events (v_35).
 
-A moment fans out up to three hops: the author's household sends it to
-its paired peers, and each of them re-sends the same payload onward under
+A moment fans out up to ``MOMENT_MAX_HOPS``, bounded by its signed reach
+(v_96): the author's household sends it to its paired peers, and each of them re-sends the same payload onward under
 its *own* envelope signature. The §24.11 pipeline therefore authenticates
 only the last hop. ``origin_instance_id`` names the household the moment
 came from, but on a relayed delivery nothing tied that field to the
@@ -74,6 +74,7 @@ from .crypto import (
     verify_ed25519,
 )
 from .domain.federation import FederationEventType
+from .domain.moment import MOMENT_DEFAULT_REACH, MOMENT_MAX_REACH
 
 #: Signature suite for the moment origin signature. Same tag vocabulary as
 #: ``Encoder.sig_suite``; Phase 2 of ``docs/crypto.md`` adds
@@ -105,10 +106,11 @@ NO_RELAY_FIELD = "no_relay"
 #: 1 is :data:`NO_RELAY_FIELD`, reach 3 is the absence of both.
 REACH_FIELD = "reach"
 
-#: The reach a moment with neither mark has.
-_DEFAULT_REACH = 3
-#: The values ``reach`` may carry on the wire.
-_WIRE_REACHES: frozenset[int] = frozenset({2, 4, 5})
+#: The values ``reach`` may carry on the wire: every reach but 1 (the
+#: ``no_relay`` mark) and :data:`MOMENT_DEFAULT_REACH` (no mark at all).
+_WIRE_REACHES: frozenset[int] = frozenset(range(2, MOMENT_MAX_REACH + 1)) - {
+    MOMENT_DEFAULT_REACH
+}
 
 
 def carries_no_relay(payload: dict[str, Any]) -> bool:
@@ -129,11 +131,40 @@ def moment_reach_of(payload: dict[str, Any]) -> int | None:
     if carries_no_relay(payload):
         return None if has_reach else 1
     if not has_reach:
-        return _DEFAULT_REACH
+        return MOMENT_DEFAULT_REACH
     value = payload[REACH_FIELD]
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value if value in _WIRE_REACHES else None
+
+
+def reach_marks_of(reach: int) -> dict[str, Any]:
+    """The payload marks the origin signs for a moment (or delete) of
+    *reach* hops (v_96) — the inverse of :func:`moment_reach_of`: 1 →
+    ``no_relay``, :data:`MOMENT_DEFAULT_REACH` → nothing, else ``reach: N``.
+    *reach* is clamped to 1…:data:`MOMENT_MAX_REACH` first."""
+    reach = max(1, min(int(reach), MOMENT_MAX_REACH))
+    if reach == 1:
+        return {NO_RELAY_FIELD: True}
+    if reach == MOMENT_DEFAULT_REACH:
+        return {}
+    return {REACH_FIELD: reach}
+
+
+def moment_hop_of(
+    payload: dict[str, Any], *, from_instance: str, origin: str
+) -> int | None:
+    """The hop a moment event arrived at, as a receiver or relay may take
+    it: ``hop_count`` is outside the origin signature, so a copy not sent by
+    its *origin* counts as at least 2 (the relay clamp, v_96). ``None`` when
+    the hop is missing, unparseable or not positive."""
+    try:
+        hop = int(payload.get("hop_count") or 0)
+    except TypeError, ValueError:
+        return None
+    if hop <= 0:
+        return None
+    return hop if from_instance == origin else max(hop, 2)
 
 
 #: The payload fields the origin signs, per event type. Everything the
@@ -427,8 +458,10 @@ __all__ = [
     "check_relayed_moment_origin",
     "delete_cert_of",
     "delete_cert_refusal",
+    "moment_hop_of",
     "moment_origin_signing_bytes",
     "moment_reach_of",
+    "reach_marks_of",
     "sign_moment_origin",
     "verify_moment_origin",
 ]

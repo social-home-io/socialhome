@@ -387,3 +387,97 @@ async def test_a_closer_copy_is_relayed_again_only_once(env):
     # Two waves: the first copy and one closer one — never a third.
     per_peer = [to for to, _h in _relayed(sent, "m-wave") if to == NEW]
     assert len(per_peer) == 2
+
+
+# ═══ A: a far copy of a delete never suppresses the genuine closer one ═══
+
+
+def _deletes(sent, moment_id: str) -> list[tuple[str, int]]:
+    return sorted(
+        (to, p["hop_count"])
+        for to, et, p in sent
+        if et is FET.MOMENT_DELETED and p.get("moment_id") == moment_id
+    )
+
+
+@pytest.mark.parametrize(("reach", "far_hop"), [(2, 1), (3, 3), (5, 5)])
+async def test_a_far_delete_landing_first_does_not_stop_the_origins(
+    env, reach, far_hop
+):
+    """The moment is held at hop 2; a relay's copy of its delete lands first
+    at a hop it can't be relayed from (reach 2 claiming 1 → clamped 2; 3 at
+    3; 5 at 5 — beyond the cap). The origin's own delete must still travel
+    on — households downstream hold the moment too."""
+    app, db, sent = env
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _signed(FET.MOMENT_CREATED, "m-del", hop=2, reach=reach),
+        from_instance=RELAY,
+    )
+    sent.clear()
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-del", hop=far_hop, reach=reach),
+        from_instance=RELAY,
+    )
+    assert _deletes(sent, "m-del") == []
+    assert (await _row(db, "m-del"))["deleted_at"] is not None
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-del", hop=1, reach=reach),
+        from_instance=ORIGIN,
+    )
+    relayed = _deletes(sent, "m-del")
+    assert relayed and {h for _to, h in relayed} == {2}
+    assert (await _row(db, "m-del"))["hop_count"] == 1
+    # A replay — the origin's again, or a far one — stops here.
+    sent.clear()
+    for hop, sender in ((1, ORIGIN), (far_hop, RELAY)):
+        await _deliver(
+            app,
+            FET.MOMENT_DELETED,
+            _signed(FET.MOMENT_DELETED, "m-del", hop=hop, reach=reach),
+            from_instance=sender,
+        )
+    assert _deletes(sent, "m-del") == []
+
+
+async def test_a_delete_never_stored_first_from_far_then_from_the_origin(env):
+    """The same when no moment was held: the far copy records a tombstone at
+    its hop, the origin's closer copy lowers it and travels on."""
+    app, db, sent = env
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-tomb", hop=3),
+        from_instance=RELAY,
+    )
+    assert (await _row(db, "m-tomb"))["hop_count"] == 3
+    assert _deletes(sent, "m-tomb") == []
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-tomb", hop=1),
+        from_instance=ORIGIN,
+    )
+    assert {h for _to, h in _deletes(sent, "m-tomb")} == {2}
+
+
+# ═══ B: a delete follows the row, not today's protection ═════════════════
+
+
+async def test_a_moment_posted_before_protection_is_deleted_as_far_as_it_went(env):
+    app, db, sent = env
+    m = await _post(app, db, reach=3)
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await app[moment_service_key].delete_moment(m.id, actor_user_id="u-anna")
+    deletes = [
+        (to, p)
+        for to, et, p in sent
+        if et is FET.MOMENT_DELETED and p["moment_id"] == m.id
+    ]
+    assert {to for to, _p in deletes} == {ORIGIN, RELAY, OLD38, OLD95, NEW}
+    assert all(NO_RELAY_FIELD not in p and REACH_FIELD not in p for _to, p in deletes)

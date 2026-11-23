@@ -20,6 +20,8 @@
 --    restart and absent on the origin; (c) reusing ``hop_count`` — it means
 --    where the row landed, not how far the moment goes.
 -- 3. Minimality. One additive NULL column: NULL = 3 (every existing row
---    went 3 hops), no backfill, no index. A tombstone keeps it.
+--    went 3 hops), no backfill, no index. A tombstone keeps it. A CHECK keeps
+--    it in 1–5 (DB-level invariant; NULL allowed for the existing rows).
 
-ALTER TABLE moments ADD COLUMN reach INTEGER;
+ALTER TABLE moments ADD COLUMN reach INTEGER
+    CHECK (reach IS NULL OR reach BETWEEN 1 AND 5);

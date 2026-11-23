@@ -28,6 +28,7 @@ from ..domain.highlight import HighlightAudience
 from ..domain.moment import (
     MOMENT_DEFAULT_REACH,
     MOMENT_DEFAULT_RETENTION_DAYS,
+    MOMENT_MAX_HOPS,
     MOMENT_MAX_LIFETIME_DAYS,
     MOMENT_MAX_REACH,
     MOMENT_MIN_RETENTION_DAYS,
@@ -154,7 +155,7 @@ def parse_moment_preferences(preferences_json: str | None) -> MomentPreferences:
     """Pull the ``moments`` block out of a user's preferences blob.
 
     Returns a well-formed :class:`MomentPreferences` for any input.
-    ``max_hops`` clamps to ``[1, 3]`` since the wire cap is 3 and a value
+    ``max_hops`` clamps to ``[1, MOMENT_MAX_HOPS]`` (the wire cap) and a value
     < 1 would hide every moment including the user's own;
     ``follower_retention_days`` clamps to ``[1, 30]`` (30 is what every
     v_65 receiver keeps at most); ``reach`` clamps to ``[1, 5]``, default 3.
@@ -170,7 +171,9 @@ def parse_moment_preferences(preferences_json: str | None) -> MomentPreferences:
     raw = blob.get("moments")
     if not isinstance(raw, dict):
         raw = {}
-    max_hops = _coerce_int(raw.get("max_hops"), DEFAULT_MOMENT_MAX_HOPS, 1, 3)
+    max_hops = _coerce_int(
+        raw.get("max_hops"), DEFAULT_MOMENT_MAX_HOPS, 1, MOMENT_MAX_HOPS
+    )
     retention = _coerce_int(
         raw.get("follower_retention_days"),
         MOMENT_DEFAULT_RETENTION_DAYS,

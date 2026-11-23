@@ -1584,12 +1584,52 @@ async def test_reach_round_trips(db, repo, reach):
     assert got is not None and got.reach == reach
 
 
-async def test_a_row_without_reach_reads_as_3(db, repo):
-    """Every row written before v_96 has a NULL reach: it went 3 hops."""
+async def test_a_row_without_reach_stays_legacy(db, repo):
+    """Every row written before v_96 has a NULL reach: it went 3 hops, and
+    is told apart from a v_96 reach-3 row (its delete goes unmarked)."""
     await repo.save(replace(_moment(), reach=2))
     await db.enqueue("UPDATE moments SET reach=NULL WHERE id='m-1'")
     got = await repo.get("m-1")
-    assert got is not None and got.reach == 3
+    assert got is not None and got.reach is None
+    assert got.effective_reach == 3
+    await repo.save(_moment(id="m-2"))  # no reach: stored NULL
+    assert (await repo.get("m-2")).reach is None
+
+
+async def _tomb(repo, hop: int, mid: str = "m-t") -> MomentTombstone:
+    return await repo.tombstone(
+        mid,
+        author_user_id="u-author",
+        origin_instance_id="self",
+        expires_at=_now_iso(7 * 24 * 60),
+        hop_count=hop,
+    )
+
+
+async def test_a_recorded_tombstone_keeps_the_hop_it_landed_at(db, repo):
+    assert await _tomb(repo, 3) is MomentTombstone.RECORDED
+    assert (await repo.get("m-t", include_deleted=True)).hop_count == 3
+
+
+async def test_a_removed_moment_keeps_the_lower_hop(db, repo):
+    await repo.save(replace(_moment(id="m-t"), hop_count=2))
+    assert await _tomb(repo, 3) is MomentTombstone.REMOVED
+    assert (await repo.get("m-t", include_deleted=True)).hop_count == 2
+    await repo.save(replace(_moment(id="m-u"), hop_count=3))
+    assert await _tomb(repo, 1, "m-u") is MomentTombstone.REMOVED
+    assert (await repo.get("m-u", include_deleted=True)).hop_count == 1
+
+
+async def test_a_closer_copy_of_a_held_delete_lowers_its_hop_once(db, repo):
+    """A far copy of a delete must not suppress the genuine closer one: it
+    is ``CLOSER`` (changed — relayed on), and the hop only ever goes down,
+    so a replay at the same or a higher hop stays ``ALREADY``."""
+    assert await _tomb(repo, 3) is MomentTombstone.RECORDED
+    closer = await _tomb(repo, 1)
+    assert closer is MomentTombstone.CLOSER and closer.changed
+    assert (await repo.get("m-t", include_deleted=True)).hop_count == 1
+    for hop in (1, 2, 3):
+        assert await _tomb(repo, hop) is MomentTombstone.ALREADY
 
 
 async def test_a_tombstone_keeps_the_reach(db, repo):

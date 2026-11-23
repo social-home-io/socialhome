@@ -39,7 +39,6 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.moment import (
-    MOMENT_DEFAULT_REACH,
     Moment,
     MomentReaction,
     MomentReactionRoute,
@@ -249,6 +248,7 @@ class AbstractMomentRepo(Protocol):
         author_user_id: str,
         origin_instance_id: str,
         expires_at: str,
+        hop_count: int = 1,
     ) -> MomentTombstone: ...
     async def delete_by_author(self, author_user_id: str) -> int: ...
     async def list_visible_to(
@@ -462,7 +462,7 @@ class SqliteMomentRepo:
                 int(moment.is_public),
                 moment.received_via,
                 moment.received_via_gfs_id,
-                int(moment.reach),
+                moment.reach,
             ),
         )
         # DELETE-INSERT keeps the tag set in sync with the latest
@@ -510,8 +510,15 @@ class SqliteMomentRepo:
         author_user_id: str,
         origin_instance_id: str,
         expires_at: str,
+        hop_count: int = 1,
     ) -> MomentTombstone:
         """Record that ``moment_id`` was deleted, stored or not.
+
+        ``hop_count`` is the hop this copy of the delete came at (v_96): a
+        new tombstone keeps it, a wiped moment keeps the lower of its own and
+        it, and a held tombstone lowered by a closer copy reports
+        :attr:`MomentTombstone.CLOSER` — so a far copy landing first never
+        suppresses the genuine closer one. The hop only ever goes down.
 
         A stored row is wiped in place and keeps its own ``expires_at`` (a
         replay of its create carries the same expiry, so it is refused for
@@ -526,15 +533,27 @@ class SqliteMomentRepo:
 
         def _run(conn) -> MomentTombstone:
             if _tombstone_rows(conn, "id=?", (moment_id,)) > 0:
+                conn.execute(
+                    "UPDATE moments SET hop_count=? WHERE id=? AND hop_count>?",
+                    (hop_count, moment_id, hop_count),
+                )
                 return MomentTombstone.REMOVED
             cur = conn.execute(
                 "INSERT OR IGNORE INTO moments(id, author_user_id, content,"
-                " origin_instance_id, expires_at, received_via, deleted_at)"
-                " VALUES(?, ?, '', ?, ?, 'household', datetime('now'))",
-                (moment_id, author_user_id, origin_instance_id, expires_at),
+                " origin_instance_id, expires_at, received_via, deleted_at,"
+                " hop_count)"
+                " VALUES(?, ?, '', ?, ?, 'household', datetime('now'), ?)",
+                (moment_id, author_user_id, origin_instance_id, expires_at, hop_count),
             )
             if cur.rowcount > 0:
                 return MomentTombstone.RECORDED
+            lowered = conn.execute(
+                "UPDATE moments SET hop_count=? WHERE id=?"
+                " AND deleted_at IS NOT NULL AND hop_count>?",
+                (hop_count, moment_id, hop_count),
+            )
+            if lowered.rowcount > 0:
+                return MomentTombstone.CLOSER
             return MomentTombstone.ALREADY
 
         return await self._db.transact(_run)
@@ -1521,6 +1540,7 @@ def _row_to_moment(row: dict | None) -> Moment | None:
         received_via=row.get("received_via") or "self",
         received_via_gfs_id=row.get("received_via_gfs_id"),
         deleted_at=row.get("deleted_at"),
-        # v_96: NULL (every row from before migration 0154) went 3 hops.
-        reach=int(row.get("reach") or MOMENT_DEFAULT_REACH),
+        # v_96: NULL — every row from before migration 0154 — stays None
+        # (it went 3 hops; its delete and totals go unmarked).
+        reach=int(row["reach"]) if row.get("reach") is not None else None,
     )

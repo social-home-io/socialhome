@@ -305,7 +305,7 @@ class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
         # to and its thread's root, as held here).
         for held in (replied_to, root):
             if held is not None:
-                reach = min(reach, held.reach)
+                reach = min(reach, held.effective_reach)
         moment = Moment(
             # Owner-bound (v_36): no other household can announce this id
             # first — as a moment or a delete — for its own user.
@@ -338,7 +338,7 @@ class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
                 parent_author_user_id=parent_author_user_id,
                 origin_instance_id=moment.origin_instance_id,
                 expires_at=moment.expires_at,
-                reach=moment.reach,
+                reach=reach,
             )
         )
         return moment
@@ -471,9 +471,9 @@ class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
         prefs = parse_moment_preferences(
             author.preferences_json if author is not None else None
         )
-        return min(prefs.reach, await self.household_reach_max())
+        return min(prefs.reach, await self._household_reach_max())
 
-    async def household_reach_max(self) -> int:
+    async def _household_reach_max(self) -> int:
         """The household's maximum reach (``moments.reach_max``, 1–5)."""
         raw = await self._config.get(REACH_MAX_KEY) if self._config else None
         if raw is None:

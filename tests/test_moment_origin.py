@@ -18,8 +18,10 @@ from socialhome.moment_origin import (
     check_relayed_moment_origin,
     delete_cert_of,
     delete_cert_refusal,
+    moment_hop_of,
     moment_origin_signing_bytes,
     moment_reach_of,
+    reach_marks_of,
     sign_moment_origin,
     verify_moment_origin,
 )
@@ -334,6 +336,48 @@ def test_a_relay_cannot_add_reach(et):
 )
 def test_moment_reach_of(extra, expected):
     assert moment_reach_of(_create(**extra)) == expected
+
+
+@pytest.mark.parametrize(
+    ("reach", "marks"),
+    [
+        (1, {NO_RELAY_FIELD: True}),
+        (2, {REACH_FIELD: 2}),
+        (3, {}),
+        (4, {REACH_FIELD: 4}),
+        (5, {REACH_FIELD: 5}),
+        (0, {NO_RELAY_FIELD: True}),
+        (9, {REACH_FIELD: 5}),
+    ],
+)
+def test_reach_marks_of_is_the_inverse_of_moment_reach_of(reach, marks):
+    assert reach_marks_of(reach) == marks
+    assert moment_reach_of(_create(**marks)) == max(1, min(reach, 5))
+
+
+@pytest.mark.parametrize(
+    ("hop", "from_origin", "expected"),
+    [
+        (1, True, 1),
+        (3, True, 3),
+        (1, False, 2),
+        (2, False, 2),
+        (4, False, 4),
+        (0, True, None),
+        (-1, False, None),
+        (None, True, None),
+        ("x", True, None),
+        ("2", False, 2),
+    ],
+)
+def test_moment_hop_of_parses_and_clamps(hop, from_origin, expected):
+    """``hop_count`` is outside the signature: a copy not sent by its origin
+    is at least 2 hops away (the relay clamp)."""
+    payload = {"hop_count": hop}
+    got = moment_hop_of(
+        payload, from_instance=ORIGIN if from_origin else "relay", origin=ORIGIN
+    )
+    assert got == expected
 
 
 def test_the_legacy_unsigned_window_refuses_reach():

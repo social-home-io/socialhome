@@ -169,6 +169,7 @@ from ..moment_origin import (
     REACH_FIELD,
     carries_no_relay,
     check_relayed_moment_origin,
+    moment_hop_of,
     moment_reach_of,
 )
 from ..rate_limiter import RateLimiter
@@ -4861,7 +4862,8 @@ class FederationInboundService(ProtectionGateMixin):
 
         Authority check: the envelope's signed sender (``from_instance``)
         must equal the home of ``payload.author_user_id`` for a top-level
-        post. The 3-hop relay re-broadcasts the *original* envelope, so
+        post. The relay (up to ``MOMENT_MAX_HOPS``, bounded by the signed
+        reach) re-broadcasts the *original* envelope, so
         when the relay path is in play the receiver verifies against
         ``payload.origin_instance_id`` instead — that's the only field
         that pins the original sender across hops.
@@ -4877,9 +4879,10 @@ class FederationInboundService(ProtectionGateMixin):
             return
         if self._moment_id_refused(event, moment_id, author_user_id):
             return
-        reach = self._moment_reach_admitted(event, origin_instance_id)
-        if reach is None:
+        admitted = self._moment_reach_admitted(event, origin_instance_id)
+        if admitted is None:
             return
+        reach, hop_count = admitted
         if not await self._moment_authority_matches(
             event.from_instance,
             origin_instance_id,
@@ -4914,17 +4917,11 @@ class FederationInboundService(ProtectionGateMixin):
         media_type = p.get("media_type") if moment_media_url is not None else None
         if media_type not in ("image", "video", None):
             media_type = None
-        try:
-            hop_count = int(p.get("hop_count") or 1)
-        except TypeError, ValueError:
-            hop_count = 1
-        if event.from_instance != origin_instance_id:
-            # ``hop_count`` is outside the origin signature and each relay
-            # bumps it: a copy not sent by its origin is at least 2 hops
-            # away whatever it claims — kept out of a protected account's
-            # circle (§CP.R) and the viewers' ``max_hops``. The relay below
-            # still gets the payload as it came.
-            hop_count = max(hop_count, 2)
+        # ``hop_count`` (clamped in :meth:`_moment_reach_admitted`) is outside
+        # the origin signature and each relay bumps it: a copy not sent by
+        # its origin is at least 2 hops away whatever it claims — kept out of
+        # a protected account's circle (§CP.R) and the viewers' ``max_hops``.
+        # The relay below still gets the payload as it came.
         created_at = str(p.get("occurred_at") or _now_iso())
         moment = Moment(
             id=moment_id,
@@ -4990,10 +4987,11 @@ class FederationInboundService(ProtectionGateMixin):
                     origin_instance_id=moment.origin_instance_id,
                     expires_at=moment.expires_at,
                     hop_count=moment.hop_count,
-                    reach=moment.reach,
+                    reach=moment.effective_reach,
                 )
             )
-        # 3-hop relay: forward to the rest of *our* paired peers. The
+        # Relay (up to ``MOMENT_MAX_HOPS``, bounded by the signed reach):
+        # forward to the rest of *our* paired peers. The
         # outbound's bus subscriber would skip this event (author isn't
         # local), so the relay must be triggered explicitly here. Runs
         # whether or not we persisted locally — the no-redistribute
@@ -5037,8 +5035,10 @@ class FederationInboundService(ProtectionGateMixin):
         if self._moment_id_refused(event, moment_id, author_user_id):
             return
         # v_96: a delete carries its moment's reach, signed like the create.
-        if self._moment_reach_admitted(event, origin_instance_id) is None:
+        admitted = self._moment_reach_admitted(event, origin_instance_id)
+        if admitted is None:
             return
+        _reach, hop = admitted
         if not await self._moment_authority_matches(
             event.from_instance,
             origin_instance_id,
@@ -5056,6 +5056,11 @@ class FederationInboundService(ProtectionGateMixin):
         # expires, so a replayed create is refused. A moment we never
         # stored (the delete outran its create on another relay path) is
         # held the same way, for the longest a moment can live (30 days).
+        # v_96: the tombstone keeps the (clamped) hop this copy came at, so a
+        # far copy landing first — at a hop it can't be relayed from — never
+        # suppresses the genuine closer one (``CLOSER``, relayed on). The hop
+        # only goes down: at most reach − 1 extra waves of a content-free
+        # delete, and a replay at the same or a higher hop still stops.
         outcome = await self._moment_repo.tombstone(
             moment_id,
             author_user_id=author_user_id,
@@ -5063,6 +5068,7 @@ class FederationInboundService(ProtectionGateMixin):
             expires_at=(
                 datetime.now(UTC) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
             ).isoformat(),
+            hop_count=hop,
         )
         if outcome is MomentTombstone.REMOVED:
             await self._bus.publish(
@@ -5189,10 +5195,13 @@ class FederationInboundService(ProtectionGateMixin):
     @staticmethod
     def _moment_reach_admitted(
         event: FederationEvent, origin_instance_id: str
-    ) -> int | None:
-        """v_96 — the reach a ``MOMENT_CREATED`` / ``MOMENT_DELETED`` claims
-        (:func:`~socialhome.moment_origin.moment_reach_of`), or ``None`` when
-        it is refused: not a reach at all (``reach`` outside {2, 4, 5}, or
+    ) -> tuple[int, int] | None:
+        """v_96 — ``(reach, hop)`` of a ``MOMENT_CREATED`` /
+        ``MOMENT_DELETED``: the reach it claims
+        (:func:`~socialhome.moment_origin.moment_reach_of`) and the hop it
+        came at (:func:`~socialhome.moment_origin.moment_hop_of`, clamped to
+        ≥ 2 for a relayed copy; a missing hop counts as the lowest it could
+        be) — or ``None`` when it is refused: not a reach at all (``reach`` outside {2, 4, 5}, or
         with ``no_relay``), or a copy beyond it — its hop, at least 2 for a
         copy not sent by its origin (``hop_count`` is outside the signature),
         above the reach. A refused event is neither stored, tombstoned nor
@@ -5209,12 +5218,11 @@ class FederationInboundService(ProtectionGateMixin):
                 p.get("moment_id"),
             )
             return None
-        try:
-            hop = int(p.get("hop_count") or 1)
-        except TypeError, ValueError:
-            hop = 1
-        if event.from_instance != origin_instance_id:
-            hop = max(hop, 2)
+        hop = moment_hop_of(
+            p, from_instance=event.from_instance, origin=origin_instance_id
+        )
+        if hop is None:
+            hop = 1 if event.from_instance == origin_instance_id else 2
         if hop > reach:
             log.warning(
                 "%s from %s: hop %d beyond the moment's reach %d — refusing"
@@ -5226,7 +5234,7 @@ class FederationInboundService(ProtectionGateMixin):
                 p.get("moment_id"),
             )
             return None
-        return reach
+        return reach, hop
 
     async def _moment_authority_matches(
         self,
@@ -5238,7 +5246,7 @@ class FederationInboundService(ProtectionGateMixin):
 
         On a 1-hop direct delivery, ``from_instance == origin_instance_id``
         and ``origin_instance_id`` should be the author's home instance.
-        On a 2/3-hop relay, ``from_instance != origin_instance_id`` —
+        On a relayed copy, ``from_instance != origin_instance_id`` —
         we trust the origin field on the payload as long as the
         author's home instance lookup matches. Unknown authors (the
         ``USER_UPDATED`` envelope hasn't landed yet) fall through and

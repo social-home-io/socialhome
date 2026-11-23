@@ -8,6 +8,7 @@ is the tag the server stored.
 from __future__ import annotations
 
 import unicodedata
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -148,6 +149,7 @@ def test_relay_age_cutoff_is_48_hours():
 def test_only_a_tombstone_that_changed_something_relays():
     assert MomentTombstone.REMOVED.changed
     assert MomentTombstone.RECORDED.changed
+    assert MomentTombstone.CLOSER.changed
     assert not MomentTombstone.ALREADY.changed
 
 
@@ -251,7 +253,10 @@ def test_reach_defaults_and_bounds():
         created_at="t",
         expires_at="t",
     )
-    assert moment.reach == MOMENT_DEFAULT_REACH
+    # A row written before v_96 has no reach (NULL): it went 3 hops.
+    assert moment.reach is None
+    assert moment.effective_reach == MOMENT_DEFAULT_REACH
+    assert replace(moment, reach=2).effective_reach == 2
     created = MomentCreated(
         moment_id="m",
         author_user_id="u",
@@ -264,6 +269,6 @@ def test_reach_defaults_and_bounds():
         origin_instance_id="o",
         expires_at="t",
     )
-    assert created.reach == 3
+    assert created.reach == MOMENT_DEFAULT_REACH
     deleted = MomentDeleted(moment_id="m", author_user_id="u", origin_instance_id="o")
-    assert deleted.reach == 3
+    assert deleted.reach is None  # legacy row: unmarked, as before v_96

@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Literal
 
+from .moment import MOMENT_DEFAULT_REACH
+
 if TYPE_CHECKING:
     from .bazaar_faq import BazaarFaqEntry
     from .calendar import CalendarEvent
@@ -3144,7 +3146,7 @@ class MomentCreated(DomainEvent):
     #: notification) for one from 2+ hops away (§CP.R, decision 14).
     hop_count: int = 1
     #: v_96 — how many hops the moment goes (1–5, the row's ``reach``).
-    reach: int = 3
+    reach: int = MOMENT_DEFAULT_REACH
 
 
 @dataclass(slots=True, frozen=True)
@@ -3161,8 +3163,9 @@ class MomentDeleted(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
     is_public: bool = False
     #: v_96 — the deleted moment's reach (its row's): the delete goes as far
-    #: as the moment did, under the same signed mark.
-    reach: int = 3
+    #: as the moment did, under the same signed mark. ``None``: a row written
+    #: before v_96 — the delete goes unmarked, as it did then.
+    reach: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
