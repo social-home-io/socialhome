@@ -1,0 +1,1405 @@
+# Sync pages (signed state pages)
+
+**Status: Phase 2 (signed pages, the "behind?" check) and Phase 3
+(verified fetch from any member) are implemented at v_95, with the final
+whole-branch review's fixes (2026-11-22: no vector delta, changes after a
+page settle, the owner's catch-up completes) — see [Phase 2 as
+built](#phase-2-as-built-v_95) and [Phase 3 as
+built](#phase-3-as-built-v_95). The anti-entropy part of Phase 3
+(`page_match`) is not built yet.** It builds on [sync.md](./sync.md), the
+§25.6 space sync.
+
+The space authority signs a small **page** now and then: a commitment to
+the space's current content, split into 256 **buckets**. A member keeps
+only the newest page and its bucket vector. With them a member can tell
+whether it is behind, even while the host is offline. It can also take
+**anyone's** rows from **any** member household, because each row is
+checked against the signed page, not against who delivered it.
+
+## Recommendation
+
+1. **Commit to state, not to a log (option B).** A page header is
+   `{space_id, epoch, signer, seq, issued_at, cutoff, rows, root,
+   prev_root, page_suite}`, signed with the space authority key. `root`
+   is the hash of 256 bucket hashes. A bucket hash covers the sorted leaf
+   hashes of the rows in that bucket. A leaf is the SHA-256 of a row's
+   canonical **commit form** (§2).
+2. **Store almost nothing.** Every household — the host and a member
+   alike — keeps its newest page and its bucket vector: ≈ 9 KB per space
+   (no delta since the final review, I4). There
+   is no per-row data and no history. Leaves are recomputed on demand.
+   Hashing costs ≈ 3.3 µs per record (measured), so a 50 000-row space
+   takes 0.17 s of hashing, or an estimated 2–4 s on a Pi with the
+   database reads.
+3. **One event, pushed (owner decision 2026-11-22).** When a signer seals
+   a page it pushes it — `SPACE_SYNC_PAGE`, the page and its full bucket
+   vector sealed under the space content key — to every member household
+   through the space fan-out, at most once an hour per space (a seal
+   within the hour waits for the hour mark, and only the newest page goes
+   then). A member that missed a push is caught by its BEGIN `page` ref:
+   the provider sends the same event to that one household. The host
+   seals lazily: when a BEGIN finds the space changed since the stored
+   page, at most once every 15 min. (The page first rode the sentinel of
+   every BEGIN, with a vector delta; both are gone — §5.)
+4. **Phase 3 reuses the §25.6 session.** A member sends `SPACE_SYNC_BEGIN`
+   carrying `buckets` to **any** member household. That household
+   streams, for each requested bucket it still holds unchanged, the bucket
+   listing and the rows. The receiver accepts a row only if its leaf is in
+   a listing that hashes to the signed vector. The same round replaces the
+   host's daily full anti-entropy stream with a bucket diff.
+5. **Few new parts:** one suite tag (`PAGE_SUITE_SHA256_B256`), one
+   authority event type (`space_sync_page`, under the existing
+   `authority_sig_suite`), one version gate (`MIN_FOR_SYNC_PAGES` = 95) and
+   one additive migration.
+
+## Scope
+
+- **HFS**: every household that has a space member.
+  - The **signer** holds the space authority seed and acts as host: the
+    owner, or a delegated admin while delegation is on.
+  - Every member household verifies the page and stores the newest one.
+    From Phase 3 it also delivers rows and checks the rows it receives.
+- **GFS**: not involved. Pages travel only inside §25.6 sync sessions
+  (paired, mesh `SPACE_ROUTED`, or the household path of a GFS mailbox
+  seat). They are sealed end to end, so a relay sees no content.
+  Followers get no pages.
+- **Not covered**: media bytes (already content-addressed,
+  `SPACE_MEDIA_WANTED`), space config (`SPACE_CONFIG_CATCH_UP`), the
+  moderation queue, and the *host-only* resources in §2.
+
+## Event types
+
+- **`SPACE_SYNC_PAGE`** (new in v_95, never released before): `{page_sealed:
+  {epoch, payload, seal_suite}}` (`seal_suite` =
+  `PAGE_SEAL_SUITE_AESGCM_256`, required; an unknown or missing one is
+  refused, `UnsupportedPageSealSuite`) — the signed page and its 256 bucket hashes, sealed
+  under the space content key (AAD `space_id:epoch:page:push` — a `:` no session id may hold, so a chunk sealed for a requester-chosen `sync_id` never opens as a page)
+  inside the per-pair encrypted payload; only `space_id` routes it. From
+  the signer to every member household (pushed, ≤ 1 / h per space), or
+  from any member-seated provider to one household whose BEGIN named an
+  older page. Never to a follower-only household, never to a non-member;
+  a GFS relays it sealed, as content.
+- `SPACE_SYNC_BEGIN`: `page` (a reference to the requester's newest page)
+  and `buckets` (≤ 8: the listings the stream should end with; Phase 2 on
+  the incremental BEGIN to an acting host). Phase 3 as built adds `rows:
+  true` and `have` (8-byte prefixes of the leaves the requester holds in
+  those buckets) on an ordinary incremental BEGIN to any member household
+  while no host answers. `page_match` is not built.
+- New in-stream resource, carried in ordinary chunks right before the
+  sentinel: `__listing__` (one bucket's rows — identity, leaf, change
+  time; Phase 2) and `__rows__` (one row record of a listed bucket;
+  Phase 3).
+
+## 1. Log or state? (decision)
+
+The numbers below compare a **big** space (50 000 committed rows, 2 000
+changes a day, 200 member households) with a **small** one (2 000 rows,
+50 changes a day, 5 households). They were measured with Python `json`
+(the `canonical_json` encoder) and `hashlib` on synthetic 577-byte
+records, and with a real SQLite file (`WITHOUT ROWID`, after `VACUUM`).
+
+| | A. change log + Merkle pages | **B. state commitment, 256 buckets** | C. B + per-row leaf cache |
+|---|---|---|---|
+| Host storage, big | 114 B × 2 000 × 30 days ≈ **6.8 MB** (grows with activity, cliff at 30 days) | page + vector ≈ **9 KB** | + 56 B × 50 000 ≈ **2.8 MB** |
+| Host storage, small | ≈ 170 KB | ≈ 9 KB | ≈ 130 KB |
+| Member storage | header, plus the entry lists of recent pages if it is to prove rows while the host is offline | header + vector ≈ **9 KB** | ≈ 9 KB |
+| Host CPU per seal | O(changes) | O(rows): 0.17 s of hashing at 50 k rows, an estimated 2–4 s with DB reads on a Pi | O(changes) |
+| Seals per day, worst case | 1 per 256 changes or 5 min | ≤ 96 (lazy, ≥ 15 min apart, only when a BEGIN asks) | as B |
+| Member offline > 30 days | full stream from the host | no special case (no history to expire) | as B |
+| Two signers (owner + delegated admin, or a restored backup) | the chains fork, and someone must merge one log | each page stands alone as a signed snapshot of its signer's state | as B |
+| Proof for a catch-up | entry lists of every missing page (~20 KiB each) | listings of the differing buckets only (6.2 KiB raw per bucket at 50 k rows) | as B |
+| Replaces the daily full anti-entropy stream | no (a log says nothing about rows older than its window) | **yes**: compare roots, then buckets | yes |
+
+**Why B.** Catch-up only needs the **latest version of each row**. A log
+keeps every superseded version and needs a retention window with a cliff.
+It also forks as soon as two households sign: the owner and a delegated
+admin, or a host restored from a backup that reuses counter values. A
+state commitment answers exactly one question: is this row, in this
+version, part of the space now? It has no history. Two signers' pages
+simply describe two states, and the existing merge rules (last writer
+wins, stamps) already reconcile rows from either.
+
+**Why the vector travels and is stored.** While the host is offline,
+someone other than the signer has to prove rows. A deliverer can prove
+bucket *i* only if it knows the signed bucket hash. With the 8 KB vector
+it can compare that hash to its own recomputed bucket, so no per-row data
+is replicated. A log needs entry lists (≈ 80 B per change) replicated the
+same way.
+
+**Why no leaf cache (C) yet.** Storage comes first, and the lazy seal
+bounds the CPU: ≤ 96 recomputes a day for a space that changes all day,
+and none for a quiet one. If profiling on a Pi shows that seals hurt in
+very big spaces, C can be added later without a wire change (see
+[Decisions](#decisions-owner-2026-11-21)).
+
+### Shape
+
+```
+rkey   = SHA-256("sh-sync-rkey:v1:" ‖ resource ‖ 0x00 ‖ row_id)
+bucket = rkey[0]                                              (0 … 255)
+leaf   = SHA-256("sh-sync-leaf:v1:" ‖ canonical_bytes(commit_form(resource, record)))
+bucket_hash[i] = SHA-256("sh-sync-bucket:v1:" ‖ i ‖ concat(sorted leaves of bucket i))
+root   = SHA-256("sh-sync-root:v1:" ‖ concat(bucket_hash[0 … 255]))
+```
+
+A row's bucket depends only on its identity, so the row stays in the same
+bucket across versions while its leaf changes with every version. The
+domain prefixes keep each kind of hash apart. The commit form puts
+`resource` and the row id inside the hashed object, so every leaf names
+its row.
+
+**What is committed:** the set of records that a full §25.6 stream from
+the signer to a current, paired member household would send. Only the
+*committed resources* (§2) count, and the page's `cutoff` decides the
+retention window. Every household that evaluates the commitment uses the
+page's `cutoff`, never its own clock, so the sets agree.
+
+**Bucket granularity.** A deliverer can prove a bucket only while that
+bucket is unchanged on its side since the page. With *k* changes after
+the page, the share of buckets it can no longer prove is
+1 − e^(−k/256). That is 18 % at k = 50 (a small space's whole day, or
+about 35 min of a busy one) and 32 % at k = 100. A delegated admin keeps
+sealing while the owner is offline, which keeps *k* small. The rest
+falls back to today's helper path.
+
+## 2. Canonical commit form per resource
+
+`commit_form(resource, record)` = `{"r": resource, "v": projection}`.
+`projection` keeps only an **allow-list** of the record's fields for each
+resource (`COMMIT_FIELDS`, one table in one module), normalised as
+follows:
+
+- **Files by content hash.** Every file reference (`image_urls`,
+  `file_meta.url`, covers, page body pictures) is replaced by the file's
+  SHA-256 from the record's `files` map (v_85). Local names (`sc-`, `sg-`,
+  upload names) never enter a hash. If the signer has no hash for a file
+  in a record, that row is left out of the commitment (*host-only*).
+- **Per-requester fields dropped**: `media_refs` (for link-joined members
+  only) and version-gated legacy shapes. The commit form always uses the
+  newest shape, because only households at ≥ `MIN_FOR_SYNC_PAGES` take
+  part.
+- **Receipt-local fields dropped**: anything a receiver writes with its own
+  clock or ids (listed per resource below).
+- **Order and numbers fixed**: set-like lists are sorted, lists whose
+  order means something keep it, and there are no floats. Coordinates
+  (already 4 dp) are hashed as their decimal strings, typed apart from a
+  string (see "Phase 2 as built").
+- The bytes come from `canonical_bytes` in `socialhome/canonical_json.py`
+  (sorted keys, compact, ASCII).
+
+It is an allow-list, not a deny-list: a field that a later release adds
+to a record is **not** hashed until the commit form is revised, so a new
+field never silently breaks every page. A revised commit form is a new
+page suite (§3).
+
+**Three rules that come out of the audit** (the exporters, the
+`receive_*.py` receivers and the live inbound handlers, checked at the
+`feat/sync-pages` base):
+
+1. **Item state is never committed.** Reactions and their stamps, poll
+   votes and counts, RSVPs, schedule answers and bazaar bids are merged
+   per household under last-writer-wins. On top of that, their lists are
+   cut by local data (`MAX_SYNCED_REACTION_STAMPS`, 1 000 votes, 200 bids)
+   and the receiver re-stamps them (`receive_calendar.py:242`,
+   `receive_bazaar.py:194`). They keep healing from the host's stream as
+   today. A page commits to the **item**, not to who reacted to it.
+2. **Receipt-local and counted fields are dropped:** `joined_at`,
+   `banned_at`, `updated_at` (stickies, tasks, zones, timetables, albums),
+   `comment_count`, `item_count`, `rsvps_at` / `responses_at` (export
+   time), `actor_user_id` on tombstones (often empty on the live path),
+   and `calendar_deleted.created_at` (`calendar_repo.py:805`, local clock).
+3. **A mismatch never makes a wrong row pass.** If a deliverer's copy of
+   a row differs (for example a file it holds only under a GFS `sg-`
+   name, so it cannot compute the content hash), its bucket hash differs
+   from the page's. It then reports the bucket as `not_held` and the
+   requester asks someone else. An unstable field therefore costs
+   availability, never safety. That is why only the resources that would
+   *always* mismatch are kept out.
+
+| Resource | Commit form (allow-list) | Verdict |
+|---|---|---|
+| `posts` | `id, space_id, author, type, content, created_at, edited_at, hidden_from_feed`, files as hashes (`image_urls`, `file_meta` without `url`, link-card thumbnail) | stable after normalisation. Leave out `location`, `bot_id`, `linked_highlight_id`, `linked_event_id`, `no_link_preview`, `pinned`, `moderated`: the sync receiver never stores them (`receive_posts.py:738-775`) |
+| `posts_deleted`, `comments_deleted` | `id, post_id / comment_id, author, created_at` | stable (no `deleted_at` on the wire) |
+| `comments` | all fields, with `media_url` replaced by its hash | stable after normalisation |
+| `task_lists`, `tasks`, `tasks_archived` | all fields except `updated_at` (`domain/task.py:491`) | stable after normalisation |
+| `*_deleted` for lists, tasks, pages, stickies, zones, timetables, gallery | identity fields + `created_at`, without `actor_user_id` (and without `created_at` for `calendar_deleted`) | stable after normalisation |
+| `pages` | `id, title, content, cover_image_url, created_by, seq, version_hash, conflict` (`sp-` names are the same everywhere); locks and delete requests are local workflow | stable after normalisation |
+| `stickies`, `space_zones`, `timetables` | all fields except `updated_at`; floats (`position_*`, coordinates) as decimal strings | stable after normalisation |
+| `calendar` | the series row (never expanded) without `rsvps`, `rsvps_at`, `rsvps_partial`; `cover_url` as a hash | stable after normalisation |
+| `gallery` | non-system albums without `item_count`, `updated_at`; items with `url` / `thumbnail_url` as hashes | stable after normalisation (system albums have local ids and are left out, as in the stream) |
+| `polls`, `schedules` | definition only: `meta`, options `(id, text)`; schedule `title, deadline, slots, finalized_slot_id` | stable after normalisation |
+| `bazaar` | listing without `bids`, images as hashes; check the `sold_at` format (whole seconds, `space_content.py:3550`) in the tests | stable after normalisation |
+| `bans`, `members` | could be committed as `(user_id, role, …)` without `joined_at` / `banned_at` / `picture_hash` | **host-only for now.** The roster has its own `roster_digest` repair, and removals have no tombstone, so a member holding a removed seat would mismatch until that repair |
+| `member_pictures` | none | **host-only**: every receiver re-encodes the image (`receive_members.py:69`) |
+| `chat_messages`, `chat_messages_deleted` | none | **host-only**: each household prunes its own chat, and `created_at` is capped at the receiver's clock and `reply_to_id` nulled (`space_chat.py:346-366`) |
+
+**Files.** Since v_92 a receiver stores every hashed file under its
+content name (`sc-<sha256>`), so any household can derive the hash from
+the name. The host computes the hash from its own copy, as v_85 does for
+`files`. A row whose file the deliverer does not know by content (a
+pre-v_92 legacy name or a GFS `sg-` copy) falls under rule 3. The `files`
+map in the stream is capped at 200 records per stream; the commit form
+does not read it, it computes the hashes from the stored names.
+
+**Required tests (Phase 2 gate):** for every committed resource, stream a
+row from host to member through the real receiver, re-export it on the
+member, and compare the leaves. Do the same after a live event instead of
+a stream. Golden vectors pin the bytes.
+
+## 3. Signing, epochs and suites
+
+**Signed body** (`authority_sig.sign_authority_event`, event type
+`space_sync_page`, which reuses `authority_sig_suite`):
+
+| Field | Meaning |
+|---|---|
+| `space_id`, `epoch` | the space, and the `authority_key_epoch` of the signing key |
+| `signer` | instance id of the sealing household (owner or delegated admin) |
+| `seq` | the signer's `sync_seq` snapshot, read before the export (the same counter its watermarks use) |
+| `issued_at` | unix ms; refused if more than 300 s ahead of the receiver's clock |
+| `cutoff` | the retention cutoff the commitment used (`null` = keep forever) |
+| `rows` | leaf count (only for status, e.g. "≈ 3 % differs") |
+| `root`, `prev_root` | this page's root, and the root of this signer's previous page (`null` for the first) |
+| `page_suite` | `PAGE_SUITE_SHA256_B256 = "sha256-b256-c1"`: hash, bucket count and commit-form revision |
+
+**Who signs.** Only a household that holds the seed
+(`space_repo.get_space_seed`) **and** acts as host
+(`host_equivalence.acting_hosts`) seals. That means the owner, or a
+delegated admin while `delegated_admin_authority` is on. A plain member
+never signs. With delegation off and the owner offline, no new pages are
+sealed. The last one still proves everything the owner held when it went
+offline, which is the content a catch-up needs most.
+
+**Verification** (pure, in a `socialhome/sync_page.py` next to
+`space_owner_statement.py`):
+
+1. `page_suite` must be in `SUPPORTED_PAGE_SUITES`, or
+   `UnsupportedPageSuite(ValueError)` is raised. The page is refused and
+   never defaulted, and the receiver keeps what it had.
+2. `epoch` must equal the epoch this household pins. A lower epoch is a
+   retired key and is refused. A higher epoch is refused too; the
+   existing authority-epoch echo (v_46) fetches the rotation, and the
+   page comes again on the next round.
+3. `verify_authority_event` must pass against the pinned space public key.
+4. `issued_at` must not be more than 300 s in the future. The order key
+   is `(epoch, issued_at, seq)`, and only a newer page replaces the
+   stored one.
+5. The full vector must come with the page and hash to `root`; a page
+   without it is refused and the held one kept.
+
+**Epoch rotation.** When a member applies `SPACE_AUTHORITY_ROTATED`, it
+drops its stored page together with the baseline reset it already does.
+The owner seals a new page at the next BEGIN (an old-epoch page is always
+stale). A revoked admin who still holds the old seed can sign old-epoch
+pages only until a member applies the rotation. That is the same
+residual window every authority event has today (see the rotation
+service docstring). It gives the revoked admin no new power: as an acting
+host it was already trusted whole (`_acts_as_host`).
+
+**Suite rule (CLAUDE.md).**
+- `PAGE_SUITE_SHA256_B256`, `SUPPORTED_PAGE_SUITES` and
+  `UnsupportedPageSuite` carry the commitment scheme.
+- The signature keeps its own `authority_sig_suite`, so the PQ path
+  (`ed25519+mldsa65`) follows `authority_sig` with no page change.
+- A new commit-form revision, a different bucket count or another hash is
+  a sibling suite, sealed only when every member household at
+  `MIN_FOR_…` of that suite supports it. During a transition the host may
+  seal both suites.
+- A member whose suite is unknown keeps today's behaviour (host-only).
+
+**Equivocation.** Two valid pages with the same `(epoch, signer, seq)`
+but different roots are a conflict, and so is a page whose `prev_root`
+breaks the chain the receiver holds.
+
+- Causes: a host restored from a backup that reuses counter values
+  (benign), or a misbehaving seed holder.
+- What the receiver does:
+  - keeps the newer `issued_at`;
+  - logs WARNING with both page hashes;
+  - sets `page_conflict` in the sync status;
+  - in Phase 3, a deliverer also compares the page sent in the BEGIN with
+    its own.
+- The space is not halted. Seed holders are already trusted to sign
+  config and roster, and the two signed pages are evidence the owner can
+  act on (demote, which rotates the key).
+
+## 4. Wire
+
+### Phase 2: the page, pushed
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Member (paired / mesh)
+    participant G as GFS (send to many)
+    participant R as Member (GFS-reached)
+    participant H as Host (signer)
+    M->>H: SPACE_SYNC_BEGIN (incremental, have_seq,<br/>page = {signer, epoch, seq, issued_at, root} newest held<br/>+ signers = [[signer, epoch, issued_at, seq], …] per signer,<br/>buckets = the last compare's unexplained ones, ≤ 8)
+    Note over H: space changed since OUR stored page<br/>and it is ≥ 15 min old → seal in the background
+    H->>M: chunks, __listing__ chunks (asked buckets), sentinel (no page)
+    Note over H: sealed → push now, or at the next hour mark<br/>(≤ 1 push / h per space, the newest page only)
+    H->>M: SPACE_SYNC_PAGE {page_sealed} (direct, or SPACE_ROUTED)
+    H->>G: ONE POST /gfs/envelope/multi (every GFS-reached member's mailbox)
+    G->>R: SPACE_SYNC_PAGE (sealed, from its mailbox)
+    Note over M,R: verify page → vector hashes to root → store (only if newer)<br/>→ compare (≤ 1 / 15 min) → status
+    M->>H: later BEGIN whose signers entry for H is older than H's last pushed page
+    H->>M: SPACE_SYNC_PAGE to M alone (the same event)
+```
+
+- **`page` in BEGIN**: `{signer, epoch, seq, issued_at, root}` of the
+  newest page held, plus `signers`: per signer, the newest page the
+  requester holds from it, `[[signer, epoch, issued_at, seq], …]` (≤ 8
+  entries, `MAX_PAGE_REF_SIGNERS`; k ≤ 1 + delegated admins in practice).
+  About 170 B + ≈ 60 B per signer, inside the encrypted payload. A ref
+  without `signers` (none shipped: v_95 is unreleased) reads as its own
+  signer's entry only.
+- **`SPACE_SYNC_PAGE`**: `{page_sealed: {epoch, payload}}`, the page and
+  its vector sealed with `encrypt_chunk` under the space content key (AAD
+  `space_id:epoch:page:push` — a `:` no session id may hold, so a chunk sealed for a requester-chosen `sync_id` never opens as a page), inside the envelope's own encrypted
+  payload (encryption-first: only `space_id` and the routing fields are
+  in the clear). The plaintext is `{page, vector}` — ≈ 11.4 KB of JSON,
+  ≈ 15.3 KB sealed (measured).
+- **Two triggers, one receive path** (`SyncPageService.take_pushed` →
+  `receive`):
+  - **Push on seal.** The signer pushes each new page to every member
+    household holding a writer seat (`broadcast_to_space_members` with
+    `only_instances` = the writer households, `min_proto_version` = 95):
+    paired and mesh members directly (mesh as `SPACE_ROUTED`, end-to-end
+    sealed), GFS-reached ones in ONE `POST /gfs/envelope/multi` per GFS
+    (v_91 send to many — `SPACE_SYNC_PAGE` is in `MULTI_EVENT_TYPES`, so
+    `_queue_multi_groups` takes it like space content; tested). **At most
+    hourly per space**: a seal within the hour after the last push marks
+    the space due; the scheduler's tick (every 30 min) pushes the newest
+    page held then, once — never a queue of pages.
+  - **A stale BEGIN ref, judged per signer.** After a stream's sentinel
+    ships, a **signer** (the owner, or a household holding a page it
+    sealed itself) reads the requester's `signers` entry FOR ITSELF and,
+    when it is older than the page it LAST PUSHED (or absent), sends THAT
+    page — never a newer one waiting for its hour mark, so BEGINs never
+    undo the coalescing — to that one household (`send_with_mesh_fallback`).
+    Per signer, because every household keeps one page per signer
+    (*Phase 2 as built*): an owner that sealed its own page after its
+    admin's still names the admin's older page (or none) under the
+    admin's entry, so the admin answers (security re-check H-2), and an
+    admin's own newer page never hides that it lacks the owner's. A plain
+    member never answers an ordinary BEGIN's ref: a tick sends one BEGIN
+    to every peer, so every member holding the newer page answering would
+    make ≈ N²/2 copies of each page (security check 2, M1). It relays its
+    newest page only in a verified-fetch session (Phase 3: the requester's
+    hosts are silent, no signer answers it), and only when the requester's
+    `signers` entry for THAT page's signer is older — a signer catching up
+    names its older catch-up page as the main ref, so the main ref alone
+    would resend a page it holds on every ask (security re-check 3, L-1). "Sync now" is a BEGIN like
+    any other: a member that missed a push gets the page from each signer
+    it asks, once.
+- **Offline members get only the newest page**: the outbox keeps one row
+  per (space, peer) for this event (`supersede_key` `sync-page:<space>`;
+  a newer page replaces a queued older one, the multi path included). A
+  GFS mailbox keeps what it was handed; the receiver's conditional store
+  drops every page that is not newer (cost in §5).
+- **Followers and non-members get no page**: the fan-out names only the
+  writer households (a page's vector covers member-only resources, e.g.
+  zones), and a provider sends the targeted event only to a writer
+  household. The receiving half: a household holding no member seat drops
+  a page sent to it by mistake (`holds_member_seat`; security check 2,
+  L5). A non-member on a mesh path sees `SPACE_ROUTED` ciphertext;
+  a GFS sees the sealed multi body.
+- **Lazy seal.** When the provider is a signer and a stream to a member
+  ends, it seals a page if all of these hold — judged on ITS OWN stored
+  page only, never another signer's:
+  - the space changed since its own `page.seq` (the `is_quiet` probe with
+    `since = page.seq`);
+  - its own stored page is ≥ `PAGE_MIN_INTERVAL_S` (900 s) old by its
+    signed `issued_at` (persisted: a restart changes nothing — security
+    re-check L-3), or belongs to an older epoch, cutoff day or suite.
+
+  The seal runs as a background task, one per space under a lock. The
+  export is read in keyset pages (async DB) and the hashing runs through
+  `asyncio.to_thread`. A BEGIN never waits on a seal; the new page is
+  pushed when the seal is done (or at the hour mark).
+- **Version gate.** Pages go only to member households at
+  `MIN_FOR_SYNC_PAGES` (`min_proto_version` of the fan-out, the
+  requester's version for a targeted send). An older household gets no
+  page, and its status falls back to Phase 1 rules. No `SYNC_RECORD_LINES` entry is
+  needed: no record changes shape and no receiver takes a different
+  field, so no household needs a full stream to cross v_95.
+
+### Phase 3: verified fetch from any member
+
+*The design as reviewed; what shipped is in [Phase 3 as
+built](#phase-3-as-built-v_95): the fetch rides an ordinary incremental
+BEGIN (`buckets` + `rows` + `have`), no `page_match` yet.*
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Requester
+    participant D as Any member household
+    Note over R: host silent (HostContact) or daily anti-entropy;<br/>recompute own vector V_R; S = { i : V_R[i] ≠ V_P[i] }
+    R->>D: SPACE_SYNC_BEGIN (sync_mode = buckets,<br/>page = full signed P, buckets = S)
+    Note over D: verify P; recompute V_D;<br/>serve S ∩ { i : V_D[i] = V_P[i] }
+    loop per served bucket (≤ 8 KB chunks)
+        D->>R: __listing__ i (sorted leaves)
+        D->>R: rows of bucket i that R lacks or holds older
+    end
+    D->>R: sentinel (served, not_held = remaining buckets)
+    Note over R: listing hashes to V_P[i]? each row's leaf ∈ listing?<br/>→ apply as if from the host (same merge rules)
+    R->>D: SPACE_SYNC_COMPLETE
+    Note over R: not_held → ask the next member (helper rotation)
+```
+
+- **Request**: the full signed page P (so D needs no stored state to
+  check it) and up to 256 bucket indices. The `may_receive` writer gate
+  and the per-(requester, space) budget apply as for today's helpers.
+  The request rotates through member households with the same stable
+  offset as `trusted_helpers.py`, but any member household at ≥ v_95
+  qualifies, not only admins and moderators.
+- **Proof**: per bucket, one `__listing__` record (the sorted 32-byte
+  leaves) and then the rows. The receiver:
+  1. hashes the listing (with `i`) and compares it to the stored
+     `V_P[i]`;
+  2. hashes each row's commit form and checks the leaf is in the
+     listing;
+  3. applies the row through the normal receiver with `verified=True`,
+     which passes where `_acts_as_host` passes today, and nowhere else.
+
+  A listing also tells R exactly which leaves it still lacks, so a
+  partial delivery is harmless: R asks the next member for the rest.
+- **D sends only rows R lacks**: R puts its own leaves for S in the BEGIN
+  as `vector_hint`. That is a compact list of 8-byte leaf prefixes, about
+  8 B × the rows in S, which is ≤ 16 KiB for 10 buckets in a big space.
+  D skips rows whose leaf R already holds.
+- **Anti-entropy**: the host's daily full stream becomes the same flow
+  against the host:
+  1. R recomputes V_R against the newest page and finds S.
+  2. An empty S → the next BEGIN carries `page_match: {seq, root}`, and the
+     host refreshes `full_at` without streaming.
+  3. Otherwise R sends a `buckets` session to the host for S.
+
+  A false `page_match` only harms the household that sends it.
+- **Bounds**: page ≤ 1 KiB; vector exactly 256 × 32
+  B; ≤ 256 buckets per request; listing ≤ 4 096 leaves (128 KiB, spread
+  over chunks). That caps the b256 suite at about 1 M rows per space;
+  bigger spaces would need a sibling suite with more buckets.
+- **Encryption-first**: in the BEGIN, the page, the bucket list and the
+  hints are all inside the per-pair encrypted payload. Listings and rows
+  are chunk records under the content key. Only `space_id`, `sync_id`,
+  `resource` and chunk counters stay in the clear, as today.
+
+## 5. Cost
+
+Rewritten for the push (owner decision 2026-11-22). The busy space: 200
+member households — 100 paired or mesh-reached, 100 reached only through 2
+GFSs (50 each) — 50 000 committed rows, 2 000 changes a day, every member
+sending its periodic BEGIN 48 times a day. One pushed page: ≈ 15.3 KB
+sealed + ≈ 0.5 KB envelope ≈ 15.8 KB per direct send; one multi upload:
+one ≈ 15.8 KB body + one key wrap per mailbox (≈ 100 B × 50 ≈ 5 KB).
+
+| Trigger | Recipients × items × bytes | Busy space, per day | Small space (2 000 rows, 50 changes, 5 paired households) |
+|---|---|---|---|
+| Push on seal, ≤ 1 / h per space | per push: 100 direct × 15.8 KB ≈ 1.58 MB + 2 multi uploads × ≈ 21 KB ≈ 42 KB ≈ **1.62 MB host upload**; changes every ~45 s keep the space changed, so ≤ 24 pushes | ≈ **39 MB** host upload; the 2 GFSs hand each of their 50 mailboxes the 15.8 KB body (≈ 38 MB/day of GFS egress, not the host's) | ≤ 24 × 5 × 15.8 KB ≈ 1.9 MB, far less in practice (a quiet space is neither resealed nor pushed) |
+| A stale BEGIN ref (a member that missed a push) | 1 × 15.8 KB to that household from each signer whose entry it lacks or holds older (k ≤ 1 + delegated admins), never from a plain member | a returning member: once per signer; ≈ 0 otherwise (a member holding a signer's last pushed page gets nothing from it) | ≈ 0 |
+| `page` ref in every BEGIN | 200 members × 48 BEGINs × ≈ 0.23 KB (170 B JSON + ≈ 60 B per signer entry, k = 1; ≈ 0.29 KB at k = 2, encrypted) | ≈ **2.2 MB** (k = 2: ≈ 2.8 MB) | ≈ 0.06 MB |
+| Seal | 1 export + hash, ≤ 1 / 15 min, only when a BEGIN finds the space changed (the "changed?" probe is memoised on the change counter) | ≤ 96 × 6 s on x86 (2–4× on a Pi) | ≤ 96 × 0.1 s |
+| Member compare | 1 recompute per newer page, ≤ 1 / 15 min, `to_thread` | ≤ 24 × 6 s per member (one per pushed page) | trivial |
+| Phase 3, catch-up while the host is silent | 1 requester → 1 member per ask, ≤ 3 asks per round | see *Phase 3 as built*, Cost | |
+| Phase 3, anti-entropy (`page_match`, not built) | would replace a full stream per member per day | today ≈ 200 × 50 k × ~0.6 KB ≈ **6 GB/day** of host upload | |
+
+- **Live traffic, for scale**: 2 000 changes × 200 households × ~1.5 KB
+  ≈ 600 MB/day. The pushed pages add ≈ 7 % of host upload on top, nothing
+  to a quiet space.
+- **Backlog of an offline member**: a paired one keeps ONE queued page per
+  space in our outbox (`supersede_key`); a mesh-only one gets nothing
+  queued past the bounded mesh deferral and is caught by its next BEGIN;
+  a GFS-reached one finds up to 24 pages a day in its GFS mailbox
+  (≈ 380 KB/day, bounded by the mailbox's retention) and keeps only the
+  newest — its conditional store drops every older one.
+- **How it got here.** First the page rode the sentinel of every BEGIN
+  with a vector **delta** for a requester holding exactly the previous page
+  — it almost never applied (a busy host seals every 15 min, members ask
+  every 30), so the full vector went every round: ≈ 147 MB/day. A 1-h
+  resend rule halved that (≈ 74 MB/day); the push halves it again and
+  makes delivery independent of BEGINs: one event, one receive path.
+- **Amplification**: one signer's seals make at most one push an hour —
+  1 × N members, never N × M; a member's BEGIN costs at most one targeted
+  page, and only from a signer.
+- **k signers** (both kept — owner decision 2026-11-22): the owner and every
+  seed-holding delegated admin acting as host seal and push their own
+  pages, each at most hourly, so the push budget is **k × ≈ 39 MB/day** in
+  the busy space (k = 2, an owner and one admin: ≈ 78 MB/day). Not
+  bounded further: every signer keeps its own chain (one stored page per
+  signer), an admin seals only on BEGINs it receives (members BEGIN to
+  every acting host), and while the owner is away (the case delegation is
+  for) only the admin seals. Storage: one ≈ 9 KB row per signer per
+  space (k rows; ≈ 18 KB at k = 2). Judging: each signer compares once
+  per other signer's newer page (≤ k − 1 compares per push round).
+- **The 30-min quiet BEGIN stays.** It is the host-liveness probe
+  (`HostContact`) and the watermark exchange, and it catches a member that
+  missed a push. Phase 3's `page_match` is what would make the daily full
+  pass skippable.
+
+## 6. Security
+
+| Threat | Outcome |
+|---|---|
+| Forged row from a deliverer | Its leaf is not in a listing that hashes to the signed vector, so the row is refused and logged. The test is a demo step. |
+| Stale row version | An old version's leaf is not in the current listing, so it is refused. A version that is valid but older than one held is resolved by the existing merge rules (last writer wins on `edited_at`, stamps), so a newer local copy stays. |
+| Withheld page | A relay can only drop the page. The signer pushes it to every member household, any member-seated provider sends it to a stale BEGIN ref, and status shows the page's age ("as of 2 h ago"). |
+| Replayed old page | It is older by `(epoch, issued_at, seq)` than the page stored FROM ITS SIGNER, so it is neither stored nor judged (security re-check M-1). Rows proven by it are refused once a newer page is stored. |
+| Removed admin (epoch rotation) | The old-epoch page is refused after the member applies the rotation; the residual window is unchanged (§3). |
+| Equivocation | Detected per `(epoch, signer, seq)` and through the `prev_root` chain, then reported (§3). |
+| Withholding rows | A listing names every leaf, so R knows what is still missing and asks the next member. |
+| Oversized proof | The bounds in §4 apply; anything larger is refused before it is parsed further. |
+| Privacy | Pages, vectors and listings are encrypted under the space content key and go only to member households (§4). Hashes of low-entropy records (tombstones) could be guessed only by someone who already holds the key, which means a member who can read the content anyway. Non-members on a mesh path see `SPACE_ROUTED` ciphertext. The GFS sees nothing, because no sync traffic goes through it. A page reveals no person's location; zones are content and are encrypted with the rest. |
+
+## 7. Phase plan
+
+**Phase 2: pages and the "behind?" check** (one PR on `feat/sync-pages`,
+protocol v_95, with adversarial review).
+1. `socialhome/sync_page.py`: commit form, `COMMIT_FIELDS`, hashing,
+   sign / verify, suites.
+   - Tests: golden vectors per resource.
+   - Tests: host versus member export of the same row hashes the same, a
+     property test over each receiver (stream a row, re-export it,
+     compare the leaf).
+   - Tests: unknown suite refused, epoch checks, future skew, ordering,
+     a broken chain flagged as a conflict.
+2. Additive migration with the audit:
+   - `space_instances` gains nothing;
+   - one table `space_sync_pages(space_id, signer, page_json, vector
+     BLOB)`, PK `(space_id, signer)`, holds the newest page per signer
+     (as built, security re-check 2026-11-23);
+   - the PR shows why no existing column fits.
+3. Lazy seal in `provider.py`, plus `page` in BEGIN (`scheduler.py`) and
+   the page's delivery (as built: the `SPACE_SYNC_PAGE` push).
+4. Member side: verify, store, debounced root check, status.
+   - Phase 1's `SpaceSyncStatus` gains `page: {at, signer_role, match,
+     differing_buckets, conflict}`.
+   - With `match` the state is `up_to_date` ("matches the host as of …"),
+     even while the host is offline.
+   - A mismatch while the host is silent is `behind`.
+   - A mismatch while the host is reachable is `catching_up`.
+5. `MIN_FOR_SYNC_PAGES = 95`, capabilities.md row, the federation-demo
+   assertion that the version round-trips, and docs (this page, sync.md,
+   database.md).
+   - Demo: after a post, member b's status shows the page and `match`.
+     Stop the host a and post on c, and b's status shows `behind`, not
+     `never`.
+
+**Phase 3: verified fetch from any member** (one PR, same v_95 if it
+ships in the same release, otherwise v_96).
+1. `buckets` on a BEGIN to any member household (the Phase 2 listing
+   rides that round), with listings, hints and `not_held`.
+2. The receiver's `verified` path, which replaces the own-rows-only limit
+   of `resume.py` / `trusted_helpers.py` wherever a page covers a bucket.
+   Rows created after the page keep today's helper replay.
+3. Anti-entropy: `page_match` in BEGIN, and `since_for` refreshes
+   `full_at` on a match.
+4. Tests: a tampered row refused, a stale version refused, a forged
+   listing refused, a partial delivery followed by the next member, and
+   merge rules kept.
+5. Demo:
+   - The host goes down. Member b catches up a bucket of others' posts
+     and pages from member c and verifies it.
+   - A deliberately tampered row is refused (`verify: ok` twice).
+   - Show `pytest tests/protocol/ -m security -n 4` green.
+
+## Decisions (owner, 2026-11-21)
+
+1. **A state checksum (option B), not a change log.** The page keeps its
+   name and the `prev_root` chain.
+2. **Any member household may deliver verified rows in Phase 3.** The
+   proof makes trust in the deliverer unnecessary. Admins and moderators
+   get no priority; the request rotates with the stable offset from
+   `trusted_helpers.py`.
+3. **256 buckets now** (`sha256-b256-c1`). If big spaces need more, that
+   comes later as a sibling suite.
+4. **No leaf cache (C).** Measure a real seal on a Pi first, in the
+   Phase 2 PR, and decide on C from that number.
+5. **Timings:** a seal at most every 15 min (`PAGE_MIN_INTERVAL_S`). A
+   member compares its copy on each newer page, at most once per 15 min per
+   space; a mismatch resolves through the bucket listing (revised by the
+   owner on 2026-11-21: it replaced the hourly root check).
+6. **`members` / `bans` stay host-only for now.** Committing them is a
+   later step, after Phase 3. It needs a removal tombstone, or the roster
+   digest folded into the page.
+7. **Post fields the sync receiver drops stay uncommitted.** These are
+   `location`, `bot_id`, `linked_highlight_id`, `linked_event_id`,
+   `no_link_preview`, `pinned` and `moderated` (§2). This is a known limit,
+   with no receiver change.
+
+## Decisions (owner, 2026-11-22)
+
+8. **A page signed by any seed-holding delegated admin counts as the host
+   for rows (`VERIFIED_ROW`) — signed off.** A verified row passes the
+   receiver exactly where a row from the space's acting host passes
+   (`_acts_as_host`): for that space, that deliverer and that row only.
+   That widens who may cause a row to be written here — from "the host (or
+   a trusted helper, its own people's rows only)" to "any member household,
+   for any row a page of the owner or of a seed-holding delegated admin
+   commits". The page's signature is what makes it safe: the row must hash
+   to a leaf of a listing that hashes to the bucket the space authority
+   signed, so a deliverer can withhold or delay, never invent or alter a
+   row. What it can still do: replay the page's version of a row we
+   changed offline before the page's `issued_at` (the same outcome as the
+   host's stream), and learn our `have` prefixes. Raised as final-review
+   minor 4; the owner signed it off on 2026-11-22.
+
+## Phase 2 as built (v_95)
+
+What shipped, where it is more exact than the design above:
+
+- **Commit form** (`socialhome/sync_page.py`, `COMMIT_SPECS`). Every
+  committed field is always present (an absent field hashes as `null`).
+  Timestamps in the allow-list are normalised to UTC ISO 8601 with
+  microseconds (the stored forms differ between households). Every
+  string value is committed as `"s:" + value` and every float as
+  `"f:" + repr(value)` (ints, booleans and `null` stay JSON), so a string
+  never commits like a number or another string's float spelling (Phase 3
+  re-review N4: one leaf must mean one applied value). Lists whose order
+  means something commit **in order**: a post's and a bazaar listing's
+  `image_urls`, poll options, schedule slots, timetable entries
+  (`CommitSpec.ordered`); every other list is set-like and sorted —
+  strings by code point, anything else by its canonical JSON. A file
+  reference commits as its content SHA-256 plus the extension it is served
+  with (`<sha256>.webp`, `content_media_ext` — the one extension rule of
+  a content name, so every household derives the same; re-review R2). A
+  fetched row is applied in that committed spelling (`fetched_record`:
+  every committed field, an absent one as `null`; one stamp form; set-like
+  lists sorted). Per resource, beyond the §2 table:
+  - A calendar event's **feed card** (a post with `linked_event_id`) is
+    never committed: every household mints its own (own id, own words).
+  - **Suite.** The Phase 3 reviews changed the commit form (typed strings
+    and floats, ordered lists, file extensions) under the same
+    `sh-sync-leaf:v1:` prefix and `PAGE_SUITE_SHA256_B256`: v_95 was never
+    released or deployed (the owner confirmed nothing from
+    `feat/sync-pages` runs anywhere), so no page under the earlier form
+    exists and no sibling suite is needed. Any change after release is a
+    new page suite (§3).
+  - `posts` also commits `media_url` (as a hash); `file_meta` keeps
+    `url` (as a hash), `mime_type`, `original_name`, `size_bytes`; the
+    link card keeps `url`, `title`, `description`, `site_name`,
+    `thumbnail_url` (as a hash). Nested dicts are allow-listed too.
+  - `comments` leaves `edited_at` out: the sync receiver does not keep it
+    (a streamed edit lands without its stamp). The edited content is
+    committed.
+  - `polls` `meta` keeps `post_id, question, closes_at, closed,
+    allow_multiple`; schedule slots keep `id, slot_date, start_time,
+    end_time, position`.
+  - Tombstones commit their identity fields and `created_at`, except
+    `calendar_deleted` (receiver's clock) and `task_lists_deleted` /
+    `tasks_deleted` (their records carry none).
+  - File hashes come from the bytes this household stores
+    (`MediaFileHasher`, cached by name, size and mtime), on the host and on
+    a member alike; a file it cannot hash keeps the row out.
+  - Tested: for every item type of the §25.6 coverage table, the host's
+    export and the member's re-export after the real receiver hash the
+    same (`tests/federation/sync/space/test_page_state.py`), plus rows with
+    pictures, files, a link card, a cover and a sold listing. A golden leaf
+    pins the bytes (`tests/test_sync_page.py`). The same comparison after a
+    *live* event (instead of a stream) is not covered yet.
+- **Wire.** BEGIN `page` = `{signer, epoch, seq, issued_at, root}`
+  (`issued_at` is needed for the order key). Hashes are base64url without
+  padding; the vector is one base64url string. `SPACE_SYNC_PAGE` carries
+  `page_sealed` = `{epoch, payload}` from `encrypt_chunk` (content key, AAD
+  `space_id:epoch:page:push` — a `:` no session id may hold, so a chunk sealed for a requester-chosen `sync_id` never opens as a page), ≤ 24 KiB, always with the full vector
+  (no delta: final review I4, see §5) — pushed by the signer to every
+  writer household at most hourly, and sent to one household at
+  `MIN_FOR_SYNC_PAGES` whose BEGIN `page` is absent or older by
+  `(epoch, issued_at, seq)` than the page last pushed (see §4). BEGIN
+  `page` goes only
+  to a provider at v_95 (`space_member_supports`), on every BEGIN path
+  (paired, mesh catch-up / incremental, relay re-BEGIN).
+- **Receiver.** A page without its vector, or whose vector does not hash
+  to its root, is refused and the held page kept (never dropped: that
+  would let a relay roll a member back by then offering an older page).
+  The store itself is conditional (`space_sync_page_repo.put`, final review
+  minor 6): in one statement, only while the space still pins the key and
+  epoch the page was verified against, and only over an older page by
+  `(epoch, issued_at, seq)` — a slower writer, or a re-pin between the
+  verify and the write, never replaces a newer page. **One row per
+  signer** (security re-check 2026-11-23): the newest verified page of
+  each signer is kept, PK `(space_id, signer)`; a page replaces only the
+  stored page of ITS signer, so no signer's page is ever dropped for
+  another's, and every signer's own chain stays. "The held page" — the
+  status, the stale ref, a plain member's compare — is the newest across
+  signers. A page that does not open (wrong key, tag) is a one-line
+  WARNING.
+- **Equivocation** is flagged for two pages of one signer and epoch with
+  the same `seq` and different roots, or two different pages with the same
+  non-null `prev_root`. The flag is kept in memory (WARNING log with both
+  page hashes is the durable evidence).
+- **Rotation.** A trigger on `spaces` drops every signer's page in the same statement
+  that moves `authority_key_epoch` or `identity_public_key` (every path:
+  rotate, adopt, re-pin). A held page of another epoch is ignored anyway.
+- **Lazy seal.** As in §4 (both signers kept — owner decision
+  2026-11-22): every signer seals by its own stored page and its own
+  interval (≥ 15 min after its own last seal, by the persisted
+  `issued_at`), whatever other signers' pages it holds — never held back
+  by another signer's cadence or by a catch-up; its next page chains on
+  its own (`prev_root` = its own last root). There are no seal holds and
+  no timers: an incomplete page is only temporary, because the catch-up
+  runs against the other signer's stored page whatever it seals (below),
+  and its next page includes what it fetched. (Earlier holds — an
+  unjudged-page hold, a catch-up hold with `CATCH_UP_HOLD_S`, a
+  returning-signer grace with `RETURN_GRACE_S`, an admin deferring to the
+  owner's fresh page — were removed: each was a timer or special case an
+  admin's cadence or an outage could defeat.)
+- **Who signs** (security re-check 3, M-1 / M-2). A page is stored only
+  when its `signer` is the space's owner, or — `delegated_admin_authority`
+  on — a household holding a live `admin` seat in the RECEIVER's own
+  roster mirror (`may_sign_pages`, `federation/host_equivalence.py`): the
+  only households the seed is shared with. A seed holder cannot mint pages
+  under made-up ids, so a household keeps at most one row per real signer
+  (the owner + the space's admin households). A page under OUR own id is
+  never taken from the wire: our row is written only by our own seal. And
+  "we are a signer" means owning the space or holding the seed of the
+  pinned key (`_signing_seed`), never "a row with our id is stored".
+- **Every signer judges each other signer's stored page once** (security
+  re-check 2026-11-23: H-1, M-2, M-3). The verdict is driven from the
+  stored rows, not from memory: a signer (the owner, or a seed-holding
+  admin with a page of its own) compares its copy with each other
+  signer's stored newest page — one unmatched page at a time, newest
+  first — and catches up against it (Phase 3) until nothing it commits
+  is missing or unresolved; then the next. A page whose remaining buckets
+  are all dry or stuck (no member household can complete it now) is
+  parked for `DRY_RECHECK_S` (1 h) and the next unmatched page is judged
+  (security re-check 3, M-3: no head-of-line blocking); a parked page is
+  taken up again once nothing else is left to judge, or after the hour,
+  and keeps the status at "catching up" — never "up to date". A page is stored, and so
+  judged, only if it is newer than the stored page OF THAT SIGNER: an
+  old page of a signer, relayed by anyone, never parks a catch-up (M-1).
+  Because the rows are persisted, a restart loses nothing: the stored row
+  with no verdict yet restarts the compare (H-1); two admins' pages are
+  two rows and both land, in either order (M-2); a returning admin judges
+  the owner's page like the owner judges its (M-3). Fetch asks name the
+  judged page (`ref_for(space, to)`); listings and the status position
+  use it. A signer takes only rows it LACKS, never another version of one
+  it holds. A plain member compares only with the newest page overall: an
+  older page's versions could roll its newer copy back. Members comparing
+  with a signer's temporarily incomplete page see its extra rows as
+  ahead — nothing reads missing that is not; the rows reach everyone
+  through the streams and later pages.
+- **Known limit: "ahead" against an ageing page** (security re-check
+  L-2). A row we changed after a page's signed `issued_at` counts as
+  ahead in a compare. The older the judged page, the more of our rows
+  are newer than it, so more buckets are explained as ahead without a
+  listing — a row the page commits in a bucket we since changed is not
+  asked for against THAT page. Kept: the row still reaches us through the
+  streams and the signer's next page (which replaces this one), and
+  judging only the newest page per signer keeps the age bounded by that
+  signer's last seal.
+  The "changed
+  since the page?" probe is memoised on the change
+  counter (`current_seq`): a "changed" holds for that page, a "quiet" while
+  the counter has not moved — every BEGIN to the signer asks (minor 9).
+  Accepted exception: when
+  the retention cutoff rolls over to a new day, a changed space re-seals
+  even if its page is younger than 15 min — at most once a day. The seal reads the
+  `sync_seq` snapshot before the export, exports with the window cutoff of
+  now (stored in the page) and hashes page by page in a worker thread.
+- **Compare (owner decisions 2026-11-21).** A member compares its own
+  bucket vector with the page's when a **newer** page is stored — never on
+  a repeat — at most once per 15 min per space (a page arriving sooner
+  waits out the rest once; the compare then takes the newest page). Never
+  for a page we signed. Hashing runs in `asyncio.to_thread`. Verdicts are
+  memory only, so a held page with none (after a restart) is compared on
+  the next stream's sentinel or the next read of the sync status,
+  whichever comes first — once (one compare of a page at a time, however
+  many paths ask); a judged page never again.
+  1. **Explain locally, no wire cost.** A differing bucket in which we hold
+     a row whose change time (the newest of `created_at`, `edited_at`,
+     `updated_at`, `last_edited_at`, `archived_at`, `sold_at`, `deleted_at`
+     the record carries) is after the page's `issued_at` is explained: we
+     are ahead there (live events between pages). Not fetched, not counted.
+     A change time later than now + 300 s (the page skew) explains
+     nothing, here or in step 3: one writer stamping rows far in the
+     future must not make every member read "up to date".
+     **A move we hold** (final review I1) — a delete (its tombstone keeps
+     the row's `created_at`, no delete time), an archive or un-archive (the
+     row under its other identity), none with a change time of its own:
+     a moved row of ours whose other identity's bucket differs too is not
+     in the page when our bucket **without it** hashes to the page's signed
+     bucket. That bucket is then explained **exactly** (ours is the page's
+     plus the move; an old tombstone, in the page, never explains
+     anything). The bucket of the row's other identity — where the page may
+     still hold the old version — is **not** explained: we cannot recompute
+     the page's leaf there, and it may hold another signed row we lack (an
+     adversarial re-review showed crediting it hid a missing row behind a
+     delete). It is asked like any other and, when nobody can prove it
+     (Phase 3: every member household on the page answers `held: false`
+     — each made the same move), it goes dry: paused for 1 h, unresolved.
+  2. **Listings only for unexplained buckets**, at most
+     `MAX_LISTING_BUCKETS` = 8 per compare; the rest stay unresolved until
+     the next page. They are asked of ONE household acting as host (the
+     signer if it is one, else the first) on the **next round's** BEGIN to
+     it — see *Bucket listings* below. Never a BEGIN of its own.
+  3. **Classify**, on that round's sentinel and against our rows read
+     then (the round's own rows applied — a row the same stream delivered
+     is not missing), each listed row: listed
+     and absent here → **missing**, unless we hold its tombstone or its
+     archived copy, or its post is deleted (gone after the page → ahead);
+     listed with another leaf → **missing** unless our change time is newer
+     than the listed one (→ ahead); a row of ours not listed was created
+     after the page → ahead.
+  4. Only a **proven missing** row makes `match: false` (state
+     `behind`). No extra BEGIN: the rounds go on anyway, and a row lost
+     below the provider's watermark would not come back on an incremental
+     stream either — the daily full anti-entropy stream (or Phase 3's
+     verified fetch) heals it. The next compare comes only with the next
+     page — no loop.
+- **Bucket listings — the general shape (Phase 3 reuses it).** A listing
+  rides the normal §25.6 round: the member's incremental `SPACE_SYNC_BEGIN`
+  to the acting host (periodic, or Sync now) carries `buckets` (≤ 8
+  indices) next to `page`, both in the encrypted payload, only to a
+  household at v_95 (`SpaceSyncScheduler._page_fields_for`; also on the
+  mesh BEGIN and the relay re-BEGIN after an ICE timeout). The provider
+  streams the round as usual and appends one `__listing__` chunk per ≤ 8 KB
+  of listing records right before the sentinel, under the space content
+  key (the chunk AAD), counted in the sentinel's `chunk_count`
+  (`SpaceSyncService._listing_chunks`); only to a member household (a
+  writer seat) — as is the page itself: its vector covers member-only
+  resources (zones), so a follower gets neither. No session kind, budget or session-cap rule of its own:
+  the round's admission rules apply. Each record is `{i, held: true,
+  rows: [[resource, row_id, leaf, change_time], …]}` or `{i, held:
+  false}`: a provider lists a bucket as of the page only when its own rows
+  of it still hash to the requester's page (the same page it holds). A
+  bucket changed since the page cannot be proven (no leaf cache); a
+  provider that acts as the space's host then lists it **as it is now** —
+  `{i, held: false, current: true, rows}` — which the requester classifies
+  without the page check: it asked an acting host, whose stream it takes
+  unchecked anyway. Any other provider (Phase 3) answers `{i, held:
+  false}` and the bucket stays unresolved. A delete on the host shows in
+  its tombstone's bucket, not in a current listing, so a delete we missed
+  is not counted missing there (the 30-min sync heals it). The requester
+  asks only on a BEGIN that names the page the ask is for (a newer page
+  held while its compare waits out the spacing carries no `buckets` — the
+  host would export for listings we drop). It
+  takes listings only from the household its BEGIN asked, for a space it
+  asked about, and only for the page that BEGIN asked about (its
+  pending-request record keeps the `page` it carried): a round that
+  carried an older ask, while a newer page's compare replaced it, brings
+  listings made for the older page — they are dropped, never checked
+  against the newer one. A listing must hash to the page's signed bucket
+  (unless `current`), name only rows of that bucket and committed
+  resources, each row once, and stay within 4 096 rows — otherwise the
+  whole answer is refused (WARNING) and those buckets stay unresolved.
+  A bucket a listing settled (every listed row held, or ahead here) leaves
+  the buckets still to fetch (`todo`), so a host that goes silent later
+  is never followed by a member ask for it, and a match stays a match
+  (final review I2).
+  The change times in a listing are the provider's word: Phase 2 asks
+  only an acting host, whose stream it trusts anyway; a provider that is
+  not (Phase 3, any member) must not be trusted on them — its listing
+  proves the leaves, not which version is newer. A round that brings no listing (an
+  older host) keeps them asked for the next round. After a restart the
+  lost verdict is rebuilt: the held page is compared again and the next
+  round asks. Phase 3 adds: the same `buckets` on a BEGIN to any member
+  household, and the rows themselves.
+- **Accepted gap.** A missing row that shares a bucket with a row we
+  changed after the page stays hidden (the bucket is explained) until a
+  later page or the 30-min sync heals it. Change times come from the
+  authors' clocks, so a clock far ahead can hide a bucket the same way.
+- **A verdict waits for the next allowed round.** The listing rides a
+  normal round, so it is gated by the host's limit of 5 sync BEGINs per
+  hour per requester and space (`SYNC_BEGIN_RATE_LIMIT_PER_HOUR`, no
+  exemption). After heavy use — a restart or two, "Sync now" pressed 3
+  times — the round that would carry `buckets` is refused (`rate_limited`)
+  and the verdict waits for the next round the limit allows, up to about
+  an hour. Until then `match` stays `null` and the status shows the
+  Phase 1 state (answers, stream outcomes); nothing reads "needs sync"
+  because of it.
+- **Cost.** Normally ≈ 0 on the wire: every differing bucket of a busy
+  member is explained locally. Otherwise the listing adds ≤ 8 × ~6 KB
+  (50 000 rows: ≈ 195 rows per bucket × ~32 B, base64 and JSON; ≤ 50 KB)
+  to a round that runs anyway — no extra round trip, no extra BEGIN; at
+  most one compare per 15 min per member and space, and only on a
+  mismatch. The provider pays one full-space export for a BEGIN that
+  carries `buckets` (as a seal or a full stream: ~5.8 s at 50 000 rows
+  today, see *Measured*; much less once the exporters' keyset query is
+  fixed), at most 5 / h per member and space — the round's own budget, as
+  for a full stream.
+- **Status** (`GET /api/spaces/{id}` `sync.page`, also in the
+  `space.sync_state` frame). Rules
+  (`domain/space_sync_page.state_with_page`): a running stream stays
+  **catching up**; `match: true` (nothing missing: no unexplained
+  bucket, or every listing showed none) → **up to date** while the page is
+  at most `PAGE_MATCH_FRESH_S` (2 h: the hourly push + one 30-min tick +
+  the 15-min seal lag + 15 min slack, so a member keeps its match between
+  two pushes) old, and at any age while the host is offline (no newer
+  page comes from it then) — an older match no longer masks a host that
+  answers `deferred` / unclean for hours (final review minor 3);
+  `match: false` (a listing proved a row missing) →
+  **behind**; `match: null` (not compared yet, a listing pending or a
+  bucket unresolved) → the Phase-1 state. The field is `{seq, at,
+  signer_role, match, missing, differing_buckets, conflict}`: `missing` —
+  rows proven missing (`0` with a match); `differing_buckets` — buckets
+  that differ at all, being ahead included. After a match the Space
+  settings say "Checked {time}: nothing is missing." with the page's time
+  and no host named (the page may have been relayed by any member). No
+  page (an older host): the answer-based status, unchanged. A space hosted
+  here always reads up to date, with no warning.
+  `signer_role` is `owner` when `signer` names the owner; it is a label any
+  seed holder could set.
+- **Measured** (x86 dev machine, real SQLite with every migration, the
+  real exporters, 50 001 committed rows: 40 000 posts with ~400-char text,
+  6 000 comments, 4 000 tasks): a full seal takes **5.8 s**, and a member's
+  compare is the same recompute (**5.8 s**); of that the hashing is
+  **0.37 s** (7.4 µs per row). The rest is the existing `posts`
+  exporter: its keyset query (`ORDER BY rowid DESC` with the
+  `(space_id, created_at)` index) sorts the whole space for every page of
+  200 rows, ~25 ms per page — O(n²), and the same cost every full §25.6
+  stream pays today. Fixing that query (an index or a rowid-ordered plan)
+  is a separate change; with it a seal would be well under a second here.
+  A Pi will be several times slower. No leaf cache (decision 4).
+- **Storage** (tested): ≤ 9 KB per space (page ≈ 0.5 KB + vector
+  8 KiB), the same on a signer and a member.
+- **Not in Phase 2:** verified fetch from any member, `sync_mode:
+  "buckets"`, listings, `page_match` (all Phase 3); SPA text for the page
+  ("as of page N"), the API field is there.
+
+## Phase 3 as built (v_95)
+
+**Goal (owner):** sync even when neither the host nor a delegated admin is
+available. A member that is behind catches up from **any** member household
+that holds the content, and checks every row against the newest signed page
+it holds, so the deliverer needs no trust. Same version as Phase 2
+(`MIN_FOR_SYNC_PAGES` = 95, still unreleased): no new event type, no new
+field an older household must understand, no `SYNC_RECORD_LINES` entry.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Member behind
+    participant H as Host (and delegated admin) — offline
+    participant D as Member household (any seat but a follower's)
+    R->>H: SPACE_SYNC_BEGIN (periodic tick)
+    Note over R,H: no answer within HOST_ANSWER_WAIT_S (120 s) → silent
+    Note over R: compare held page P with own rows → buckets to fetch (todo)<br/>(at once, or kept from the last compare)
+    R->>D: SPACE_SYNC_BEGIN (an ordinary incremental one), page=ref(P),<br/>buckets ≤ 8, rows=true, have=8-byte leaf prefixes R holds
+    Note over D: holds P? its own rows of each bucket hash to P's bucket?
+    D->>R: its usual incremental chunks (its writers' rows)
+    D->>R: __listing__ per bucket (held: rows+leaves | held: false)
+    D->>R: __rows__ (rows of held buckets R lacks, ≤ 256 rows, ≤ 512 KiB)
+    D->>R: sentinel
+    Note over R: listing → signed bucket hash? row's committed part → listed leaf<br/>of a row R lacks? → apply as the host's row (that row only)
+    R->>D: SPACE_SYNC_COMPLETE
+    Note over R: buckets still to fetch → next member of the round (≤ 3)<br/>host heard again → stop; status: match → up to date
+```
+
+**Trigger — only while the host is silent.** The scheduler's trigger 10
+already waits `HOST_ANSWER_WAIT_S` for an answer from the households acting
+as the space's host; when none comes it marks the space silent
+(`HostContact.went_silent`) and now also calls `SyncPageService.host_silent`
+(`SpaceSyncScheduler.attach_host_silent`). A compare that finds unexplained
+buckets while the host is silent asks a member instead of the host. **One
+path**: the compare decides what is missing (`todo`, the unexplained
+buckets not yet proven complete) and keeps ONE ask (`_Wanted`) that rides
+the next incremental BEGIN to the household it is meant for — the acting
+host (Phase 2: `buckets`, listings before the sentinel) or, while no host
+answers, a member household (Phase 3: the same `buckets` plus `rows` and
+`have`). A member's answer narrows `todo`; what is left goes to the
+round's next member. No member is ever asked
+while a host answers (`HostContact.is_silent`), and a host heard again in
+the middle of a round stops it before the next ask. The one exception is
+the owner itself, which has no host above it (see "The owner back from a
+long absence" below).
+
+**Picking deliverers** (`trusted_helpers.member_deliverers`, the helper
+picker with other roles): every household with a live **member seat**
+(owner, admin, moderator, member) in our roster mirror at v_95, never
+a follower-only household, never us, never a household acting as host;
+sorted, rotated from the stable per-household offset (`helper_offset`, never
+random) plus one step per round, at most `MAX_FETCH_ASKS` = 3 asked one
+after another per round — the next one only when an answer leaves
+buckets to fetch; an unanswered ask holds the round until it is given up
+(`FETCH_ANSWER_WAIT_S`, 5 min), and the next silent round asks the next
+member; an answer with no listing at all counts as an answer (the next
+member is asked at once), and a newer page's compare that replaces the ask
+frees the round for its own ask at once. Admins and moderators get no priority (owner
+decision 2). The window of buckets asked also rotates per round, so a
+bucket nobody can prove never blocks the others.
+
+**Request** — no session kind, budget or cap exemption of its own: the
+ordinary incremental BEGIN to that member (`SpaceSyncScheduler.sync_with`,
+the BEGIN a tick sends a paired co-member; over the mesh for a mesh-only
+one), carrying Phase 2's `page` and `buckets` plus `rows: true` and
+`have` (`SyncPageService.have_for`, through `_page_fields_for`) — the
+first 8 bytes of every leaf the requester holds in the asked buckets
+(base64url, ≤ `MAX_HINT_LEAVES` = 2 048 prefixes; buckets are dropped
+from the ask until the hint fits, the first always goes). All inside the
+per-pair encrypted payload. It obeys every rule of a BEGIN: never over a
+running sync of the space from that household (the ask then rides the
+next one), the provider's 5 / h stream budget and session cap; a relay
+retry after an ICE timeout carries the same `rows` / `have`
+(`PendingSyncRequest.fetch_have`). A malformed hint asks for listings
+only (`parse_fetch_request`), never every row. The only difference from
+Phase 2's ask: the member is not an acting host, so it never sends a
+`current` listing and its answer is checked row by row.
+
+**Deliverer** (`SyncPageService.fetch_records`, any member household): it
+serves only a requester holding a member seat in its roster mirror (the
+provider's member gate — a follower gets the bare sentinel) and only for
+the page it holds itself (the same root). Per asked bucket it recomputes its
+own rows: when they hash to the page's signed bucket, it sends the listing
+and then the rows the hint does not name, as `__rows__` records
+(`{i, r, row}`, the full exporter record plus the content hashes of its
+files, `files`); otherwise `held: false` and no row of that bucket — it
+never sends a row it cannot prove. The listings and rows end its normal
+incremental stream, right before the sentinel (`_listing_chunks`).
+Bounded per answer: `MAX_FETCH_ROWS` = 256 rows and `MAX_FETCH_BYTES` =
+512 KiB, a record over the GFS frame cap of a relay-seated requester is
+left out. One export of the space per ask (the same cost as a listing);
+its hashing, the proofs and the answer's sizing run in worker threads
+(`rows_in`, `_fetch_answer`; Phase 2's `_host_listings` too), the database
+reads stay async. A scan memo per page root is not kept: the rows change
+between asks, and a stale memo would prove nothing.
+
+**Receiver** (`SyncPageService._fetch_done`, `SpaceSyncReceiver
+.apply_verified`):
+
+1. Only an answer to the ask our BEGIN carried, from the household we
+   asked, for the page it asked about (the pending-request record); at
+   most 256 rows / 512 KiB are kept from it, the rest dropped on receipt.
+   Classified at the sentinel, after the round's own rows applied.
+2. Each listing must parse, be of an asked bucket, appear once and hash to
+   the signed bucket of the held page — or the **whole answer** is refused
+   (one WARNING), as in Phase 2. A `current` listing (a host's rows as
+   they are now, which Phase 2 takes from an acting host) proves nothing
+   from a member: that bucket counts as not held, and a deliverer never
+   sends one with rows.
+3. Only the listing's **leaves** count: its labels (resource, row id) and
+   change times are not signed, so they play no part in what is applied. A
+   delivered row counts only if its own committed part hashes to a leaf of
+   its bucket's verified listing, and whether we lack it is decided from
+   the row's own identity (the leaf commits to it) against **our** rows: we
+   hold no row of that identity (and it is not deleted / archived here
+   since), or hold another version that we did not change after the page's
+   signed `issued_at` (and before now plus the page skew — a far-future
+   stamp of ours never counts as newer) — so a deliverer cannot roll a
+   newer local edit back to the page's version. One stored row under two
+   identities counts as held under either (`COUNTERPARTS`: `tasks:T` live,
+   `tasks_archived:T` archived — re-review N2), judged by the same rules;
+   a tombstone is no counterpart, **delete wins** (a held `*_deleted`
+   tombstone settles the live row, and a verified tombstone may remove a
+   live row even when it was edited offline). **Completeness is judged by
+   leaves only, never by labels, on our rows as they are after the
+   apply:** the requester re-reads the asked buckets once the rows are
+   handed to the receiver (the hashes of files just named come from the
+   applied rows, their bytes may still be on the way), and a listed leaf
+   is accounted for when we now hold it, or a delivered row with that leaf
+   verified and its own identity shows we do not need it (ours is newer,
+   it is deleted here, the owner holds it); every other listed leaf is
+   missing — a row the receiver refused without saying so (an id held in
+   another space, an unbound tombstone id, the newer words of a post
+   kept) stays missing (re-review N1). A deliverer that withholds a row and relabels its leaf with the
+   id of a row we hold as deleted therefore leaves the bucket incomplete —
+   the space never reads "up to date" on its word (security review, with a
+   regression test).
+4. The row is cut down to its **committed part** (`sync_page.fetched_record`:
+   the commit form's allow-list, nested and shaped fields by their committed
+   keys, ordered lists in the order delivered) plus the file hashes of its
+   committed file references; that part must hash to the listed leaf. Every
+   file reference must already be in the canonical local shape
+   (`api/media/<name>`, not a name another receiving path owns —
+   `space_media_ref(url) == url`): the leaf commits a file's content, not
+   its name, so a rewritten URL would keep the leaf while the receiver
+   drops the file (re-review N1). Anything else in the delivered record
+   (reactions, votes, bids, a pin, a moderation flag, `updated_at`, a GFS
+   descriptor, …) is never applied; those uncommitted fields come from
+   **our own** copy of the row when we hold one (re-review N3: a pin, a
+   moderation mark, reactions and their stamps, local stamps are kept, not
+   reset), minus our file hashes and GFS descriptors. Every **committed**
+   field is applied, an absent one as `null` — the leaf commits it so, and
+   a receiver reads an absent key as "keep what is held", so a deliverer
+   dropping a field the signer cleared (a task's due date, its
+   description) would otherwise apply a row nobody signed (re-review R1).
+   A verified file always takes its **content name** (`sc-…` from the
+   committed hash and extension), never a name our copy of the row already
+   shows: a deliverer naming the new cover after our old file would
+   otherwise keep the old picture (re-review R2). Every refused row of an
+   answer is counted in one WARNING.
+5. Verified rows apply in stream order (lists before tasks, posts before
+   comments and polls) through the normal receiver (`_apply`), one row at a
+   time, with `VERIFIED_ROW` set to `(space, deliverer)`: the row passes
+   where a host's record passes (`_acts_as_host`, and a page's host
+   version by `seq`), for that space, that deliverer and that row only —
+   the same merge rules (last writer wins, a deleted row stays deleted,
+   tombstones), the same archive refusal and owner-bound id checks.
+6. The verdict narrows: a bucket whose missing rows all landed is complete;
+   rows still missing keep `match: false` (behind); the rest stays
+   unresolved. With nothing left the space reads **up to date** through the
+   status's one `_request_recheck` path, also while the host is offline.
+   Buckets still to fetch go to the round's next member. A bucket whose
+   every missing row was delivered, verified and then refused **by rule**
+   by our own receiver (an id held here in another space, newer words
+   kept) would come back the same from every member: it is remembered for
+   that page (memory only, at most 256 spaces, dropped when our bucket
+   changes or a newer page comes) and not asked of members again
+   (re-review R3). A row only **held back** — its parent not held here at
+   all yet: a comment, poll, schedule or listing before its post, a task
+   before its list, a gallery item before its album (`apply_verified`
+   reports it in `HeldBack.count`) — does not mark a bucket at once, and
+   whenever a verified row lands the space's remembered buckets are asked
+   again (the parent may have come). A parent deleted here never comes: a
+   child of a tombstoned list or album is a refusal by rule (a deleted
+   post stays held, so its children already are). A bucket held back
+   answer after answer — its parent outside the page — counts as stuck
+   after `HELD_BACK_LIMIT` (3) answers in a row, the stream's own limit;
+   a row landing starts the count over. A remembered bucket stays **missing** in every
+   later verdict of that page, so it never reads up to date (re-review
+   S1). The host's stream, or the next page, settles it.
+7. **A bucket nobody can prove is paused, never dropped** (final review
+   I1, reworked after the security check's HIGH-1). A change made after the
+   page that carries no change time — a poll closed, an edit whose stamp a
+   receiver does not keep, a delete or move (the bucket of its other
+   identity) — changes the bucket on every member too, so every member
+   holding the page answers `held: false` for it.
+   - **Only a member on the same page is a nay.** A deliverer that holds
+     no page, an older or a newer one sends **no listing at all** (not
+     `held: false` per bucket): its answer says nothing about any bucket
+     and the round asks the next member. Without that, a member left on an
+     older page (the hourly resend rule makes that common) would have
+     silenced every bucket after one ask.
+   - **The quorum is every member household we can ask** (`_eligible`, all
+     of `member_deliverers`, not only the ≤ 3 of a round). Once each has
+     answered `held: false` for a bucket it is **dry**. Only the nays of
+     households we can ask NOW count: one removed since, or no longer at
+     v_95, falls out (security check 2, L1).
+   - **Dry is a pause** of `DRY_RECHECK_S` (1 h, two rounds): then the
+     bucket is asked again from scratch. It **stays to fetch** (`todo`):
+     unresolved — `match` stays `null`, the Phase-1 state shows — and it
+     keeps the owner's status at "catching up" (never "up to date").
+   Memory only, per page, with the stuck buckets. Without the pause the
+   round asked every tick, for nothing, until the host returned; with it
+   a bucket nobody can prove costs one round an hour.
+
+**The owner back from a long absence is a requester too.** While the owner
+household was offline a seed-holding delegated admin may have sealed newer
+pages (§3). The owner takes such a page over its own older one — same
+epoch, verified, newer by `(epoch, issued_at, seq)` than the admin's
+stored page, kept in the admin's own row beside the owner's — compares
+its copy with it and, having no host above it, goes straight to member households
+(the admin's included; never itself as "the host") for what the page proves
+it lacks, content whose author household is offline now included. It takes
+only rows it LACKS — an identity it holds no version of, tombstones
+included — and never replaces a version it holds: the admin's page may
+predate the owner's own offline edits, and what the owner applies it then
+spreads as the host (security review; tested with tasks and stickies, which
+are taken whole). A row it holds in another version counts as settled — and
+so does a row it holds under its counterpart identity: a task the owner
+un-archived and edited offline stays live although the admin's page has it
+archived (re-review N2). **Delete wins**, as everywhere in sync: a
+`*_deleted` tombstone is an identity the owner lacks, so a delete the
+admin's page commits removes the owner's live row even if the owner edited
+it offline — the same outcome the live delete event and the host's stream
+would have had. Its sync status never shows the "may be missing" warning
+(final review minor 1: no ⚠ for a space hosted here). While that page's
+verdict is not a match — rows proven missing or buckets unresolved — it
+reads **catching up** ("Getting the latest…: getting what an admin
+household received while this one was away"), never "up to date"
+(security check HIGH-1); with a match, or once its own page is held
+again, **up to date**. **Every tick** the scheduler starts the owner's next
+round for each space it owns (`_tick_owner_catch_up`): no host above the
+owner ever goes silent, so without it the catch-up would get one round
+only. The owner may seal meanwhile (no holds): its catch-up runs against
+the admin's stored page whatever it seals, and **every** admin page newer
+than that admin's stored one is judged once even when it is older than
+the owner's own (*Every signer judges…* above). Its next own page
+chains on its own last page. Limits: the owner is the wiki
+pages' sequencer (v_48), so it never takes a page *version* from a stream —
+a verified wiki page row is ignored there and the admin's page edits reach
+it the existing way (proposals). **Boundary:** content created while **no**
+seed holder sealed a page (no delegated admin, or none online) is in no
+page; it reaches the owner — and everyone else — the existing way: each
+author's household delivers its own rows (live events, the outbox, the
+§25.6 stream and `SPACE_SYNC_RESUME`).
+
+**Archive wins over a member fetch (a known gap).** A task we hold
+archived (`tasks_archived:T`) settles a page's live `tasks:T`, as a
+tombstone settles a live row (`is_superseded`). So a member that missed
+an un-archive while the host is offline counts that leaf as settled and
+reads **up to date** while it still holds the task archived — until the
+host's stream (or the author's live event) brings the un-archive. Kept:
+un-archiving is rare, the outcome is a stale archive flag, never a row
+nobody signed, and judging an archive against an un-archive by change
+times would need the archive time committed.
+
+**The trust `VERIFIED_ROW` widens — signed off (owner decision 8,
+2026-11-22, see [Decisions](#decisions-owner-2026-11-22)).**
+
+**Partial answers are fine.** A deliverer that changed a bucket since the
+page answers `held: false` for it; one that holds another page (or none)
+answers with no listing at all. Either way the round asks the next member
+for what is left.
+
+**Residuals (security re-check).** No memory-only state decides
+correctness any more: the pages being judged are the stored rows, the
+seal interval is the stored own page's `issued_at`; a restart re-judges
+each other signer's stored page once (one compare each). A signer
+restart still forgets a push waiting for its hour mark (`_push_pending`,
+L-5): that page goes out with the next seal's push; meanwhile a stale
+BEGIN ref still gets it (nothing pushed is remembered, so its own stored
+page is sent). Two signers push k × the budget and members may flip
+between their pages for "newest" (see §5 and the threat table). Two
+bounded leftovers (security re-check 3): **L-2** — the BEGIN's `signers`
+names at most the newest 8 signers (`MAX_PAGE_REF_SIGNERS`), so a ninth
+signer would find no entry for itself and resend its page on every BEGIN;
+not reachable with honest spaces (a page is kept only for the owner and
+live admin households, M-1). **L-3** — verdicts (`_matched`, the parked
+roots) live in memory: a restart re-judges each other signer's stored page
+once, spaced 15 min, plus fetch rounds while it is unmatched — bounded by
+the number of signers, so a restart loop never costs more than one compare
+per 15 min per space. The 2 h freshness of a match (`PAGE_MATCH_FRESH_S`) is the
+hourly push plus one tick, the seal lag and slack.
+
+**Older households degrade.** A household below v_95 is never picked (no
+pages, no fetch); with no deliverer at v_95 the member waits for the host
+(logged once per round). A deliverer at v_95 that does not know `rows`
+(none exist: same unreleased version) would answer listings only, which
+classify but deliver nothing.
+
+**What stays out** — still only from the host's §25.6 stream:
+
+- item state and host-only resources (§2): reactions and their stamps, poll
+  votes, RSVPs, schedule answers, bazaar bids, the chat, `member_pictures`,
+  `members` / `bans` (the roster has its own repair);
+- the uncommitted fields of committed rows: a post's location, pin,
+  moderation, bot, linked highlight, link-card opt-out; `updated_at` /
+  `created_at` where the commit form leaves them out; counters
+  (`comment_count`, `item_count`) — kept as our own copy has them, or the
+  receiver's local default for a row new here, until the host's stream;
+- a calendar event's **feed card** (a post with `linked_event_id`): not
+  committed (Phase 2 — every household mints its own), and never applied
+  from a member either;
+- rows created after the newest page (the helper resume below still covers
+  the helpers' own people's rows, unchanged);
+- media bytes: a verified row's files are named by their content hash; the
+  bytes come when someone opens them (`SPACE_MEDIA_WANTED`: the host, or a
+  trusted helper while the host is silent).
+
+The v_92 trusted-helper resume stays as it was (rows newer than the page,
+own people's only); Phase 3 runs next to it and covers everything the page
+commits, from anyone.
+
+**Not built from the Phase 3 design:** `page_match` in BEGIN and the
+bucket-diff anti-entropy that would replace the daily full stream; the
+deliverer checking the full signed page sent in the BEGIN (it must hold the
+same page — members converge on the newest page through the push and a
+stale BEGIN ref, and a deliverer with another page sends no listing).
+
+**Cost** (recipients × items × bytes per trigger; nothing fans out — one
+requester asks one member at a time):
+
+| Per ask | Small space (2 000 rows, ~8 per bucket) | Big space (50 000 rows, ~195 per bucket) |
+|---|---|---|
+| BEGIN (8 buckets, `have`) | ≈ 0.6 KiB | ≈ 12.5 KiB raw, ≈ 17 KB encoded |
+| Listings (8 buckets) | ≈ 2 KB | ≈ 50 KB |
+| Rows | only rows the requester lacks, ≤ 256 / 512 KiB | same |
+| CPU | one export on each side | one export on each side (≈ 6 s on x86 per the Phase 2 measurement; several times that on a Pi) |
+
+- **Per round**: ≤ 3 asks per behind member per silent space, one round per
+  30-min tick (plus one when a newer page arrives while the host is silent),
+  and none once nothing is left to fetch (`todo` empty) — a caught-up
+  member costs nothing while the host stays offline. A bucket every member
+  household on the page answered `held: false` for (dry, step 7) is paused
+  for 1 h: a change nobody can prove costs one round an hour, not one per
+  tick.
+- **Worst realistic case**: a global space with 200 member households and
+  50 000 rows, the host offline for a day, every member missing the host's
+  last ~2 h (≈ 170 changes at 2 000 a day). 170 rows fall into ≈ 125
+  buckets (1 − e^(−170/256) ≈ 49 %), i.e. 16 asks of 8 buckets — 6 rounds
+  (3 h) at 3 asks per round. Per member: 125 listings × 6 KB ≈ 750 KB +
+  hints 125 × 1.6 KB ≈ 200 KB + rows 170 × ~0.6 KB ≈ 100 KB ≈ **1.1 MB**;
+  all 200 members ≈ **210 MB**, once (the host's stream would have been
+  ≈ 20 MB — the price of proof is the listings). Load per deliverer: 200 ×
+  3 asks spread by the offsets over 199 member households ≈ 3 asks (3
+  exports) per deliverer per round, each on a BEGIN within the provider's
+  usual 5 / h per (requester, space). After the catch-up: 0.
+- **Upper bound** per member and silent space: 48 rounds × 3 asks × (17 KB
+  + 50 KB + 512 KiB) ≈ 84 MB a day — reached only by a member that keeps
+  missing ≥ 256 rows per ask, i.e. one that really lacks that much.
+- **Storage**: none. The ask is memory only (one per space, as Phase 2's;
+  5 min until an unanswered one is given up); so are the buckets our
+  receiver refused (R3: ≤ 256 spaces × ≤ 256 buckets × ~100 B).
+- **Rows our receiver refuses** (R3): one ask brings them, after that 0 —
+  without it, up to 3 asks with a full export each, every 30-min round,
+  until the host returned.
+
+**Security** (beyond §6):
+
+| Threat | Outcome |
+|---|---|
+| Forged or truncated listing | does not hash to the signed bucket → the whole answer refused (WARNING), the buckets stay to fetch |
+| Tampered row | its committed part does not hash to the listed leaf → refused (WARNING); the rest of the answer is kept |
+| A file reference rewritten (full URL, reserved `dm-` / `sg-` name, a `?query`) while the hash map keeps the leaf | refused: every file reference must be in the canonical local shape (re-review N1) |
+| A field the signer cleared, dropped from the row (absent reads as "keep") | applied as cleared: every committed field is applied, absent as `null` (re-review R1) |
+| A new file named after the one our copy already shows, or served under another extension | the content name of the committed hash is used, never a held name; the extension is committed with the hash (re-review R2) |
+| A row our receiver refuses, asked for again and again | remembered per page, not asked again; still missing in the status (re-review R3) |
+| A row the receiver refuses without an error (id held in another space, unbound tombstone id, newer words kept) | still missing: completeness is re-read from our rows after the apply (re-review N1) |
+| The page's archived copy of a task we hold live and edited since (or, as the owner, at all) | not applied: the live counterpart is the same row (re-review N2); a delete still wins |
+| Uncommitted fields (pin, moderation, reactions) | never the deliverer's; ours are carried onto the verified version (re-review N3) |
+| One leaf, two applied values (stamp spelling, `1.0` vs `"1.0"`, list order) | strings and floats are typed in the commit form, ordered lists commit in order, and the committed spelling is what is applied (re-review N4) |
+| A household removed from the space since our roster mirror last heard (accepted, re-review N6) | it may still be asked until the roster catches up; it learns only the `have` leaf prefixes and which buckets we lack — no content — and cannot inject: everything it sends must verify against the signed page |
+| Extra fields in a row (reactions, pins, `updated_at`, `linked_event_id`, …) | never applied — only the committed part is (`fetched_record`); a feed card is left out |
+| Inflated change time in a listing, to roll back a newer local row | a row changed here after the page's signed `issued_at` is ahead; otherwise the page's version is the signer's own, applied under the host's rules exactly as the host's stream would |
+| A row of another space / bucket, a non-committed resource | refused at parse (`parse_fetched_row`) |
+| Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked. A bucket is paused (dry) only once **every** member household on the page answered `held: false`, and only for 1 h; it stays unresolved meanwhile (never "up to date"; the owner reads "catching up"). The one residual: when a single member household can be asked at all, that household alone can keep a bucket unresolved — withholding by the only source, which no proof can overcome |
+| A deliverer on another page (or forging that it is) | no listing at all — no nay, the next member is asked (HIGH-1) |
+| An admin page that arrives after the owner sealed (back, partitioned, restored, rotated) | stored in that admin's own row (one page per signer), judged and caught up against; the owner reads "catching up" until it holds every row the page commits — across a restart too, the row is persisted (security re-check H-1) |
+| The owner sealed before its BEGIN to the admin | its BEGIN names per signer the newest page it holds: none (or an older one) of the admin's, so the admin answers with its last pushed page (H-2) |
+| An old page of a signer, relayed by anyone (90 days old, say) | older than the page stored from that signer: neither stored nor judged, never parks a catch-up (M-1) |
+| Two delegated admins' pages, in either order | two rows; each judged once and caught up against, one at a time; both admins' rows land (M-2) |
+| A returning admin, the owner's page newer | stored in the owner's row beside the admin's own; the admin judges it like any signer and reads "catching up" until it holds what it commits (M-3) |
+| A seed holder minting pages under made-up signer ids (300 `ghost-N`, ≈ 9 KB each) | refused: only the owner or a live admin household in the receiver's own roster (delegation on) signs — rows stay one per real signer (security re-check 3, M-1) |
+| A forged page under the receiver's OWN id (a plain member made to look like a signer; the owner's row replaced by a huge `seq` dated a minute ahead, stopping its seals) | never taken from the wire — our row is written only by our seal; "signer" means owning the space or holding the seed (M-2) |
+| The first unmatched page can never complete (its rows are gone everywhere: dry or stuck) | parked for 1 h; the next signer's page is judged meanwhile; the status stays "catching up" (M-3) |
+| A plain member relaying in a fetch session to a signer catching up against an older page | reads the requester's `signers` entry for the held page's signer: no resend of a page it holds (L-1) |
+| A seed holder signing under ANOTHER real signer's id (another admin household, or the owner) toward third parties | within seed-holder trust (a seed holder can sign anything the space key signs): it lands in that signer's row on third parties; the real signer's next page replaces it, and a forged `issued_at` can be at most the 5-min future skew ahead — so its effect lasts at most that long past the real signer's next seal. Never on the impersonated household itself: its own id is never taken from the wire (M-2) (confirm-check L-A) |
+| Head-of-line with nothing going dry: no member household can be asked, or a member keeps answering without the rows | the page is never parked (only dry or stuck buckets park it), so a later signer's page waits behind it; the status stays "catching up" meanwhile — never "up to date" — and every round asks again (confirm-check L-B, accepted) |
+| A signer whose host answers its compare by listing, not by a member fetch | records the match from the listing too (`listing_done` → `_note_verdict`), so a third signer's page is judged next (confirm-check L-C, fixed) |
+| A seed-holding admin sealing often (every 14 min, or dated up to the 5-min skew ahead) | cannot stop the owner's seals — every signer seals by its own stored page and interval. **Design limit with two signers:** a seed holder is trusted like the owner for pages (it signs config and roster too); it can make members flip between two signers' pages for "newest" and cost the push budget twice, never forge a row |
+| `fetch` on a BEGIN (the requester asks a plain member to relay its page) | requester-controlled and accepted (security re-check L-3): it makes one member send ONE page to that one requester — no amplification, and the page is authority-signed |
+| Unasked answer, or one from another household | dropped |
+| A follower asking | the deliverer's member gate sends nothing; a follower is never asked |
+| Oversized answer | ≤ 256 rows / 512 KiB kept, the rest dropped |
+| Privacy | the hint (leaf prefixes), listings and rows travel only inside the encrypted BEGIN and chunks under the content key, between member households; the GFS sees none of it (relay mode carries sealed frames) |
+
+## Implementation pointers
+
+- Phase 2 (built): `socialhome/sync_page.py` (commit form, hashing, page
+  sign / verify, suites), `federation/sync/space/page_state.py` (the
+  vector from the local exporters), `federation/sync/space/pages.py`
+  (`SyncPageService`: seal, push / `push_due` / `offer_page`, receive,
+  root check, status), `domain/federation.py` (`SPACE_SYNC_PAGE`),
+  `domain/federation_retention.py` (its `supersede_key`), `provider.py`
+  (`_offer_page`), `receiver.py` (sentinel path), `scheduler.py`
+  (`page` in BEGIN, `attach_page_push`), `app.py` (`attach_push`, the
+  handler), `sync_manager.py` / `federation_service.py` (`page`
+  through every BEGIN path), `window.py` (`pinned_cutoff`),
+  `authority_sig.py` (`space_sync_page`), migration `0151`
+  (`space_sync_pages` + the rotation trigger), `domain/space_sync_page.py`
+  and `services/space_sync_status.py` (status), `MIN_FOR_SYNC_PAGES`.
+- Phase 3 (built): `sync_page.py` (`fetched_record`, the `have` hint,
+  `__rows__` records, `parse_fetch_request`), `page_state.py`
+  (`rows_in(keep_records=True)`), `pages.py` (`have_for`,
+  `fetch_records`, `host_silent`, `_fetch_round` / `_fetch_next` /
+  `_fetch_done`, the owner's page), `trusted_helpers.py`
+  (`member_deliverers`), `provider.py` (`__rows__` after the listings),
+  `receiver.py` (`__rows__` → the page service, `apply_verified`),
+  `receiver_base.py` (`VERIFIED_ROW` in `_acts_as_host`),
+  `receive_pages.py` (a verified page is the host's version),
+  `scheduler.py` (`sync_with`, `rows` / `have` in `_page_fields_for`,
+  `attach_host_silent`, the owner's per-tick round `_tick_owner_catch_up`), `federation_service.py` / `sync_manager.py` /
+  `sync_rtc.py` (`rows` / `have` on BEGIN, the mesh BEGIN and the relay
+  retry), `space_sync_status.py` (the owner's status); demo step
+  `members-page-catchup`.
+- Phase 3 (planned, not built): `watermark.py` (`page_match` → `full_at`).
+
+## Spec references
+
+§25.6 (space sync), §24.11 (inbound pipeline), §25.8.21
+(encryption-first), §4.4.1 (outbox retention). Related:
+[sync.md](./sync.md) ("Host offline: trusted helpers", "Incremental
+sessions", "Coverage"), [capabilities.md](./capabilities.md),
+[../crypto.md](../crypto.md).

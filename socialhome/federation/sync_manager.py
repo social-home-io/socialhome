@@ -21,9 +21,11 @@ Implements the security audit fixes from §25.6.2:
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 from collections import defaultdict, deque
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from ..domain.federation import FederationEventType, PairingStatus
@@ -33,6 +35,10 @@ from .sync_rtc import (
     SyncRtcSession,
     SyncSessionRecord,
 )
+
+#: A sync session id: the requester's word, part of the content key's AAD
+#: (``space_id:epoch:sync_id``) — letters, digits, ``_`` and ``-`` only.
+SYNC_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +61,10 @@ MAX_ICE_CANDIDATE_BYTES: int = 2048
 #: when we ask and answer on its next boot — but finite, so a request the
 #: provider never answers does not sit there for the process's lifetime.
 PENDING_REQUEST_TTL_SECONDS: float = 3600.0
+
+#: A stream counts as arriving (the sync status's "catching up") while a
+#: chunk of it moved within this long.
+RECEIVING_IDLE_S: float = 120.0
 
 #: Cap on outstanding requests, so a retry storm cannot grow the table
 #: without end. Oldest-first eviction.
@@ -107,6 +117,15 @@ class PendingSyncRequest:
     #: The ``roster_digest`` the BEGIN carried — a relay re-BEGIN carries it
     #: too (the host repairs a roster mirror only on a digest mismatch).
     roster_digest: dict | None = None
+    #: The ``page`` the BEGIN carried (v_95, the sync page we hold, wire
+    #: form) — a relay re-BEGIN carries it too.
+    page_ref: dict | None = None
+    #: The ``buckets`` the BEGIN asked listings for (v_95).
+    buckets: list[int] | None = None
+    #: Phase 3: the ``have`` hint when those buckets are a verified fetch
+    #: from a member household (the BEGIN carried ``rows: true``) — a relay
+    #: re-BEGIN carries it too.
+    fetch_have: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -223,6 +242,9 @@ class SyncSessionManager:
         sync_mode: str = "initial",
         have_seq: int | None = None,
         roster_digest: dict | None = None,
+        page_ref: dict | None = None,
+        buckets: list[int] | None = None,
+        fetch_have: str | None = None,
     ) -> None:
         """Remember a ``SPACE_SYNC_BEGIN`` we are about to send.
 
@@ -241,6 +263,9 @@ class SyncSessionManager:
             sync_mode=sync_mode,
             have_seq=have_seq,
             roster_digest=roster_digest,
+            page_ref=page_ref,
+            buckets=buckets,
+            fetch_have=fetch_have,
         )
 
     def pending_sync_request(self, sync_id: str) -> PendingSyncRequest | None:
@@ -297,6 +322,7 @@ class SyncSessionManager:
         sess = self._sessions.pop(sync_id, None)
         if sess is None:
             return
+        sess.closed = True
         if sess.rtc_watcher is not None:
             # Stop the requester-side wait_ready / chunk-drain task
             # before tearing down the RTC handle so the loop doesn't
@@ -312,6 +338,58 @@ class SyncSessionManager:
         record = self._sessions.get(sync_id)
         if record is not None:
             record.touch(now)
+
+    def receiving(
+        self,
+        space_id: str,
+        requester_instance_id: str,
+        providers: Collection[str],
+        *,
+        ignore_sync_id: str = "",
+        now: float | None = None,
+    ) -> bool:
+        """Whether a stream of ``space_id`` from one of ``providers`` (the
+        households acting as its host here) is arriving now: a session we
+        requested whose sentinel has not landed, with a chunk moved in the
+        last :data:`RECEIVING_IDLE_S`. A co-member's stream says nothing
+        about how far the host's view got. A session registered before its
+        BEGIN (a mesh host) that never got a chunk does not count — an
+        offline host must not read as "catching up". ``ignore_sync_id``:
+        a stream that is ending right now."""
+        current = now if now is not None else time.time()
+        return any(
+            s.space_id == space_id
+            and s.requester_instance_id == requester_instance_id
+            and s.provider_instance_id in providers
+            and s.sync_id != ignore_sync_id
+            and not s.sentinel_landed
+            and s.last_activity > s.created_at
+            and current - s.last_activity <= RECEIVING_IDLE_S
+            for s in self._sessions.values()
+        )
+
+    def syncing_from(
+        self,
+        space_id: str,
+        requester_instance_id: str,
+        provider_instance_id: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Whether our sync of ``space_id`` from ``provider_instance_id`` is
+        live: a requester session whose sentinel has not landed, opened or
+        fed a chunk in the last :data:`RECEIVING_IDLE_S`. A new BEGIN for
+        that space would make the provider replace it (one sync of a space
+        per household) — the running stream must finish instead."""
+        current = now if now is not None else time.time()
+        return any(
+            s.space_id == space_id
+            and s.requester_instance_id == requester_instance_id
+            and s.provider_instance_id == provider_instance_id
+            and not s.sentinel_landed
+            and current - max(s.created_at, s.last_activity) <= RECEIVING_IDLE_S
+            for s in self._sessions.values()
+        )
 
     def reap_stale(self, ttl_seconds: float, *, now: float | None = None) -> int:
         """Close sessions idle for more than ``ttl_seconds``.
@@ -428,12 +506,18 @@ class SyncSessionManager:
         sync_mode: str = "initial",
         ice_servers: list[dict] | None = None,
         have_seq: int | None = None,
+        page_ref: dict | None = None,
+        buckets: list[int] | None = None,
+        want_rows: bool = False,
+        have: frozenset[bytes] | None = None,
     ) -> SyncDecision:
         """Admit a new sync session.
 
         ``have_seq`` — the requester's echo from its BEGIN (§25.6,
         migration 0087), already parsed; kept on the session for the
-        provider's watermark decision.
+        provider's watermark decision. ``page_ref`` — the sync page the
+        requester holds (v_95), already parsed; the sentinel carries ours
+        only when newer.
 
         Runs the S-6 rate limit (5/h + 3 concurrent) and the S-8 cap.
         On rejection returns a :class:`SyncDecision` with
@@ -441,8 +525,25 @@ class SyncSessionManager:
         ``SPACE_SYNC_DIRECT_FAILED`` event the caller should send back
         to the requester.
         """
+        if not SYNC_ID_RE.fullmatch(sync_id):
+            # A session id is a requester's word that ends up in the content
+            # key's AAD (``space_id:epoch:sync_id``): letters, digits, ``_``
+            # and ``-`` only, so it never takes a label another use seals
+            # under (``page:push`` — security check 2, L4).
+            return SyncDecision(accepted=False, reason="malformed_sync_id")
         if sync_id in self._sessions:
             return SyncDecision(accepted=False, reason="duplicate_sync_id")
+
+        # A household runs one sync of a space with us at a time: its new
+        # BEGIN for the space replaces the session it left (it restarted, or
+        # gave up on it) — otherwise that orphan holds a slot until the
+        # 30-min reaper and its BEGINs are refused ``too_many_sessions``.
+        # The sessions it replaces do not count against the caps; they are
+        # closed only once this BEGIN passes every check below, so a refused
+        # BEGIN never stops a live stream.
+        replaced = self._sessions_of(
+            requester_instance_id, space_id, provider_instance_id
+        )
 
         # Capacity before the hourly budget: a BEGIN refused for lack of a
         # slot was never served, so it must not spend one of the
@@ -450,7 +551,7 @@ class SyncSessionManager:
         # asks for more spaces than the cap at once retries the rest
         # (``SpaceSyncDeferred``) and would otherwise lock itself out.
         if (
-            self.active_sessions_for_instance(requester_instance_id)
+            self.active_sessions_for_instance(requester_instance_id) - len(replaced)
             >= MAX_ACTIVE_SESSIONS_PER_INSTANCE
         ):
             return SyncDecision(
@@ -460,7 +561,7 @@ class SyncSessionManager:
                 next_payload={"sync_id": sync_id, "reason": "too_many_sessions"},
             )
 
-        if len(self._sessions) >= MAX_SIGNALING_SESSIONS:
+        if len(self._sessions) - len(replaced) >= MAX_SIGNALING_SESSIONS:
             return SyncDecision(
                 accepted=False,
                 reason="node_capacity",
@@ -536,6 +637,15 @@ class SyncSessionManager:
                     next_payload=payload,
                 )
 
+        for sid in replaced:
+            log.info(
+                "sync %s: replaced by a new BEGIN from %s for space %s",
+                sid,
+                requester_instance_id,
+                space_id,
+            )
+            self.close_session(sid)
+
         rtc = SyncRtcSession(
             sync_id=sync_id,
             space_id=space_id,
@@ -555,9 +665,26 @@ class SyncSessionManager:
             rtc=rtc,
             created_at=time.time(),
             have_seq=have_seq,
+            page_ref=page_ref,
+            buckets=buckets,
+            want_rows=want_rows,
+            have=have,
         )
         self._sessions[sync_id] = record
         return SyncDecision(accepted=True)
+
+    def _sessions_of(
+        self, requester_instance_id: str, space_id: str, provider_instance_id: str
+    ) -> list[str]:
+        """The sessions *requester_instance_id* holds with us for *space_id*
+        (provider side) — what its new BEGIN of that space replaces."""
+        return [
+            sid
+            for sid, rec in self._sessions.items()
+            if rec.requester_instance_id == requester_instance_id
+            and rec.space_id == space_id
+            and rec.provider_instance_id == provider_instance_id
+        ]
 
     def register_requester_https_session(
         self,
@@ -609,6 +736,9 @@ class SyncSessionManager:
         ice_servers: list[dict] | None = None,
         have_seq: int | None = None,
         roster_digest: dict | None = None,
+        page_ref: dict | None = None,
+        buckets: list[int] | None = None,
+        fetch_have: str | None = None,
     ) -> str:
         """Requester-side handling of ``SPACE_SYNC_OFFER``.
 
@@ -651,6 +781,9 @@ class SyncSessionManager:
                 created_at=time.time(),
                 have_seq=have_seq,
                 roster_digest=roster_digest,
+                page_ref=page_ref,
+                buckets=buckets,
+                fetch_have=fetch_have,
             )
             self._sessions[sync_id] = record
 
@@ -742,6 +875,37 @@ class SyncSessionManager:
         # household's to the host, which repairs its mirror by the echo.
         if record.roster_digest is not None:
             payload["roster_digest"] = record.roster_digest
+        # …and the sync page we hold (v_95), so the provider sends its page
+        # only when newer.
+        if record.page_ref is not None:
+            payload["page"] = record.page_ref
+        if record.buckets:
+            payload["buckets"] = list(record.buckets)
+            if record.fetch_have is not None:
+                # Phase 3: the same verified fetch the direct BEGIN asked.
+                payload["rows"] = True
+                payload["have"] = record.fetch_have
+        # The retry is a BEGIN of ours like any other: recorded (so its
+        # answer and its listings are recognised) and with its HTTPS receive
+        # session open (so its chunks are not dropped as an unknown id).
+        self.record_sync_request(
+            sync_id=new_sync_id,
+            space_id=record.space_id,
+            provider_instance_id=record.provider_instance_id,
+            sync_mode=record.sync_mode,
+            have_seq=record.have_seq,
+            roster_digest=record.roster_digest,
+            page_ref=record.page_ref,
+            buckets=list(record.buckets) if record.buckets else None,
+            fetch_have=record.fetch_have,
+        )
+        self.register_requester_https_session(
+            sync_id=new_sync_id,
+            space_id=record.space_id,
+            requester_instance_id=record.requester_instance_id,
+            provider_instance_id=record.provider_instance_id,
+            sync_mode=record.sync_mode,
+        )
         return SyncDecision(
             accepted=True,
             reason="relay_fallback",

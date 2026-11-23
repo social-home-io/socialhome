@@ -184,6 +184,34 @@ async def serves_as_host(
     )
 
 
+async def may_sign_pages(
+    seat_repo: AbstractSpaceRemoteMemberRepo | None,
+    space: Space | None,
+    signer: str,
+) -> bool:
+    """Whether *signer* may sign *space*'s sync pages, judged on THIS
+    household's own rows: its owner, or — ``delegated_admin_authority`` on —
+    a household holding a live ``admin`` seat in our roster mirror, the
+    only households the authority seed is shared with (the seed holders
+    :func:`serves_as_host` lets act as host). Wider than
+    :func:`acts_as_host` on purpose: the owner and every member judge every
+    seed-holding admin's page, not only their own inviter's. It binds a
+    page's ``signer`` label to a real household, so a seed holder cannot
+    mint pages under made-up ids (sync pages, security re-check 3, M-1).
+    Without a roster mirror (*seat_repo*) only the owner."""
+    if space is None or not signer:
+        return False
+    if signer == space.owner_instance_id:
+        return True
+    features = getattr(space, "features", None)
+    if seat_repo is None or not getattr(features, "delegated_admin_authority", False):
+        return False
+    admins = await seat_repo.list_instances_with_roles(
+        space.id, frozenset({SpaceRole.ADMIN.value})
+    )
+    return signer in admins
+
+
 async def holds_local_admin_seat(space_repo: AbstractSpaceRepo, space_id: str) -> bool:
     """Whether one of THIS household's people holds a live ``admin`` seat in
     *space_id* — what makes it a delegated admin household at all (the seed
@@ -224,6 +252,7 @@ __all__ = [
     "acts_as_host",
     "holds_local_admin_seat",
     "is_trusted_inviter",
+    "may_sign_pages",
     "owner_statement_current",
     "serves_as_host",
     "touches_owner_household",

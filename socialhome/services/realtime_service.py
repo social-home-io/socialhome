@@ -123,6 +123,7 @@ from ..domain.events import (
     SpacePostCreated,
     SpacePostModerated,
     SpaceProposalUpdated,
+    SpaceSyncStateChanged,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
     StickyCreated,
@@ -333,6 +334,7 @@ class RealtimeService:
         self._bus.subscribe(SpaceModerationExpired, self._on_space_mod_expired)
         self._bus.subscribe(SpaceConfigChanged, self._on_space_config_changed)
         self._bus.subscribe(SpaceProposalUpdated, self._on_space_proposal_updated)
+        self._bus.subscribe(SpaceSyncStateChanged, self._on_space_sync_state)
         self._bus.subscribe(RemoteSpaceDissolved, self._on_remote_space_dissolved)
         self._bus.subscribe(SpaceZoneUpserted, self._on_space_zone_upserted)
         self._bus.subscribe(SpaceZoneDeleted, self._on_space_zone_deleted)
@@ -964,6 +966,20 @@ class RealtimeService:
                 "space_id": event.space_id,
                 "proposal_id": event.proposal_id,
                 "proposal": event.view,
+            },
+            members_only=True,
+        )
+
+    async def _on_space_sync_state(self, event: SpaceSyncStateChanged) -> None:
+        """The space's sync status changed (``SpaceSyncStatusService``):
+        up to date, catching up, behind, host offline. Members only — a
+        follower gets no sync status. Sent on a change, never per sync."""
+        await self._broadcast_space(
+            event.space_id,
+            {
+                "type": "space.sync_state",
+                "space_id": event.space_id,
+                "sync": dict(event.sync),
             },
             members_only=True,
         )

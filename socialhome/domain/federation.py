@@ -438,6 +438,13 @@ class FederationEventType(str, enum.Enum):
     SPACE_SYNC_ANSWER = "space_sync_answer"
     SPACE_SYNC_ICE = "space_sync_ice"
     SPACE_SYNC_DIRECT_READY = "space_sync_direct_ready"
+    #: v_95 sync pages: the space authority's newest signed page and its
+    #: bucket vector (``docs/protocol/sync-pages.md``), ``{page_sealed:
+    #: {epoch, payload}}`` — sealed under the space content key inside the
+    #: encrypted payload. Pushed by the signer to every member household
+    #: (never a follower) at most hourly, and sent to ONE household whose
+    #: BEGIN names an older page than the one last pushed.
+    SPACE_SYNC_PAGE = "space_sync_page"
     SPACE_SYNC_DIRECT_FAILED = "space_sync_direct_failed"
     SPACE_SYNC_REQUEST_MORE = "space_sync_request_more"
     SPACE_SYNC_REJECTED = "space_sync_rejected"
@@ -841,6 +848,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: deliberately absent: it exists to negotiate a DIRECT peer
         #: connection, and the whole point of §D2b is that these two
         #: households never learn each other's address.
+        #: v_95: the signed sync page pushed to every member household —
+        #: a GFS-seated one included (members equal on any path).
+        FederationEventType.SPACE_SYNC_PAGE,
         FederationEventType.SPACE_SYNC_BEGIN,
         FederationEventType.SPACE_SYNC_CHUNK,
         FederationEventType.SPACE_SYNC_CHUNK_ACK,
@@ -1189,6 +1199,8 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         # ── §25.6 catch-up sync. A reader syncs the same way a member
         #    does; what the chunks may CONTAIN is the exporter's call on
         #    the sending side, not this gate's. ──
+        #: v_95: authority-signed, never content; any member relays it.
+        FederationEventType.SPACE_SYNC_PAGE,
         FederationEventType.SPACE_SYNC_BEGIN,
         FederationEventType.SPACE_SYNC_CHUNK,
         FederationEventType.SPACE_SYNC_CHUNK_ACK,

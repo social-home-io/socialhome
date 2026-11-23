@@ -75,6 +75,7 @@ from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import MULTI_MAX_TRANSIENT, FederationService
 from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
+from .federation.host_equivalence import acting_hosts
 from .federation.host_hop import HostHop
 from .federation.inbox_reply import inbox_holds_envelope
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
@@ -130,6 +131,8 @@ from .federation.sync.dm_history import (
 )
 from .federation.sync.space.file_gate import CatchUpFileGates, SpaceFileBudget
 from .federation.sync.space.host_contact import HostContact
+from .federation.sync.space.page_state import PageStateHasher
+from .federation.sync.space.pages import SyncPageService
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
@@ -290,6 +293,7 @@ from .repositories.space_remote_location_repo import (
     SqliteSpaceRemoteLocationRepo,
 )
 from .repositories.space_remote_member_repo import SqliteSpaceRemoteMemberRepo
+from .repositories.space_sync_page_repo import SqliteSpaceSyncPageRepo
 from .repositories.space_sync_watermark_repo import SqliteSpaceSyncWatermarkRepo
 from .repositories.space_zone_repo import SqliteSpaceZoneRepo
 from .repositories.theme_repo import SqliteThemeRepo
@@ -484,6 +488,7 @@ from .services.space_service import own_inviter_proof
 from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
 from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
 from .services.space_summary_service import SpaceSummaryService
+from .services.space_sync_status import SpaceSyncStatusService
 from .services.space_writer_cert_service import SpaceWriterCertService
 from .services.space_writer_households import SpaceWriterHouseholds
 from .services.space_zone_outbound import SpaceZoneOutbound
@@ -572,6 +577,8 @@ def _build_outbox_processor(
     payload to mailbox seats on one GFS go up as ONE upload (v_91); rows the
     moderation check refuses stay single. The federation service wakes it
     when a broadcast queued a multi payload — it is the only multi sender.
+    Both tell the sync status when a space's rows are queued or leave the
+    queue (its "N waiting to send", migration 0150).
     """
 
     def _still_wanted():
@@ -588,13 +595,23 @@ def _build_outbox_processor(
             still_wanted=_still_wanted(),
         )
 
+    def _space_changed(space_id: str) -> None:
+        """A space's rows were queued or left the queue: the sync status
+        frames its "N waiting to send" if it moved (once it is wired)."""
+        status = app.get(K.space_sync_status_key)
+        if status is not None:
+            status.outbox_changed(space_id)
+
     processor = OutboxProcessor(
         outbox_repo,
         _deliver,
         after_prune=peer_unpair.sweep_tombstones,
         multi=federation_service,
+        space_changed=_space_changed,
     )
-    federation_service.attach_outbox_wake(processor.wake, still_wanted=_still_wanted)
+    federation_service.attach_outbox_wake(
+        processor.wake, still_wanted=_still_wanted, space_changed=_space_changed
+    )
     return processor
 
 
@@ -1503,6 +1520,7 @@ def _build_repos(db: AsyncDatabase):
         space_zone=SqliteSpaceZoneRepo(db),
         household_zone=SqliteHouseholdZoneRepo(db),
         space_sync_watermark=SqliteSpaceSyncWatermarkRepo(db),
+        space_sync_page=SqliteSpaceSyncPageRepo(db),
         space_media_ref=SqliteSpaceMediaRefRepo(db),
         password_reset=SqlitePasswordResetRepo(db),
         local_area_attempt=SqliteLocalAreaAttemptRepo(db),
@@ -1562,6 +1580,7 @@ def _wire_federation_stack(
     pairing_relay_repo,
     space_zone_repo,
     space_sync_watermark_repo,
+    space_sync_page_repo,
     presence_repo,
     ws_manager,
     peer_user_visibility_repo,
@@ -2484,6 +2503,40 @@ def _wire_federation_stack(
         # before this process started (the boot marks, set at startup).
         newest_from=space_post_repo.newest_from_household,
     )
+    # Migration 0150 — each sync outcome of a space's acting hosts, and the
+    # "does this space need sync?" status a member reads.
+    app[K.space_sync_status_key] = _build_space_sync_status(
+        bus=bus,
+        space_repo=space_repo,
+        seat_repo=space_remote_member_repo,
+        outcomes=space_sync_watermark_repo,
+        outbox=outbox_repo,
+        sync_manager=sync_manager,
+        receiver=space_sync_receiver,
+        scheduler=space_sync_scheduler,
+        federation_service=federation_service,
+        own_instance_id=identity.instance_id,
+    )
+    # v_95 — signed sync pages: sealed lazily by a signing host, pushed to
+    # the member households, verified and kept, read by the sync status.
+    app[K.sync_page_service_key] = _build_sync_pages(
+        repo=space_sync_page_repo,
+        space_repo=space_repo,
+        seat_repo=space_remote_member_repo,
+        seqs=space_sync_watermark_repo,
+        crypto=space_crypto,
+        exporters=exporters,
+        windows=sync_windows,
+        file_hasher=space_media_sync_service.file_hasher,
+        provider=space_sync_service,
+        receiver=space_sync_receiver,
+        scheduler=space_sync_scheduler,
+        status=app[K.space_sync_status_key],
+        sync_manager=sync_manager,
+        federation_service=federation_service,
+        host_contact=host_contact,
+        own_instance_id=identity.instance_id,
+    )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
     app[K.space_media_wanted_key] = _build_space_media_wanted(
@@ -2568,6 +2621,143 @@ def _wire_federation_stack(
         gallery_federation_outbound=gallery_federation_outbound,
         page_federation_outbound=page_federation_outbound,
     )
+
+
+def _build_space_sync_status(
+    *,
+    bus: EventBus,
+    space_repo,
+    seat_repo,
+    outcomes,
+    outbox,
+    sync_manager: SyncSessionManager,
+    receiver,
+    scheduler,
+    federation_service: FederationService,
+    own_instance_id: str,
+) -> SpaceSyncStatusService:
+    """The §25.6 sync status (migration 0150): outcomes from the receiver
+    (via the bus), the scheduler's silent-host verdict and the receiver's
+    stream starts; "catching up" from the session manager; "Not sent yet"
+    from the outbox (``FederationService.undelivered_space_items``)."""
+
+    async def _hosts(space) -> list[str]:
+        return await acting_hosts(
+            space_repo, seat_repo, space, own_instance_id=own_instance_id
+        )
+
+    def _receiving(
+        space_id: str, providers: list[str], ignore_sync_id: str = ""
+    ) -> bool:
+        return sync_manager.receiving(
+            space_id, own_instance_id, providers, ignore_sync_id=ignore_sync_id
+        )
+
+    status = SpaceSyncStatusService(
+        bus=bus,
+        space_repo=space_repo,
+        outcomes=outcomes,
+        outbox=outbox,
+        hosts=_hosts,
+        own_instance_id=own_instance_id,
+        receiving=_receiving,
+    )
+    status.wire()
+    scheduler.attach_status(status)
+    receiver.attach_stream_watch(status)
+
+    async def _unsent_posts(space_id: str) -> list[str]:
+        return await federation_service.undelivered_space_items(
+            space_id, FederationEventType.SPACE_POST_CREATED
+        )
+
+    status.attach_delivery(_unsent_posts)
+    return status
+
+
+def _build_sync_pages(
+    *,
+    repo,
+    space_repo,
+    seat_repo,
+    seqs,
+    crypto,
+    exporters: dict,
+    windows: SyncWindows,
+    file_hasher,
+    provider: SpaceSyncService,
+    receiver: SpaceSyncReceiver,
+    scheduler: SpaceSyncScheduler,
+    status: SpaceSyncStatusService,
+    sync_manager: SyncSessionManager,
+    federation_service: FederationService,
+    host_contact: HostContact,
+    own_instance_id: str,
+) -> SyncPageService:
+    """v_95 sync pages (``docs/protocol/sync-pages.md``): the signer pushes
+    each new page (at most hourly) to every member household as
+    ``SPACE_SYNC_PAGE``, a provider sends it to one household whose BEGIN
+    names an older page, the receiver verifies and keeps one, every BEGIN
+    names the page we hold, and the sync status reads it."""
+    pages = SyncPageService(
+        repo=repo,
+        spaces=space_repo,
+        seqs=seqs,
+        crypto=crypto,
+        state=PageStateHasher(exporters=exporters, windows=windows, files=file_hasher),
+        exporters=exporters,
+        own_instance_id=own_instance_id,
+        on_change=status.page_changed,
+    )
+    provider.attach_sync_pages(pages)
+    receiver.attach_sync_pages(pages)
+    scheduler.attach_sync_pages(pages.ref_for, pages.buckets_for, pages.have_for)
+    status.attach_pages(pages.position)
+
+    async def _hosts(space) -> list[str]:
+        return await acting_hosts(
+            space_repo, seat_repo, space, own_instance_id=own_instance_id
+        )
+
+    # Unexplained differences are listed by one acting host, on the next
+    # round's BEGIN to it; its listings are taken only for the page that
+    # BEGIN asked about (our pending-request record of it).
+    pages.attach_hosts(_hosts)
+
+    def _asked(sync_id: str) -> dict | None:
+        request = sync_manager.pending_sync_request(sync_id)
+        if request is None or not request.buckets:
+            return None
+        return request.page_ref
+
+    pages.attach_asks(_asked)
+    # Phase 3 — while no acting host answers (or we are the owner), what
+    # the newest page proves we lack comes from any member household: the
+    # fetch rides an ordinary incremental BEGIN to it, every row verified.
+    pages.attach_member_fetch(
+        seats=seat_repo,
+        versions=federation_service,
+        silent=host_contact.is_silent,
+        request=scheduler.sync_with,
+        apply=receiver.apply_verified,
+    )
+    scheduler.attach_host_silent(pages.host_silent)
+    # Delivery: the space fan-out to the writer households (paired and mesh
+    # members directly, GFS-reached ones in one multi upload per GFS), at
+    # most hourly per space (the scheduler's tick pushes a page that waited
+    # for the hour mark); one receive path for the push and the targeted
+    # send a stale BEGIN ref gets.
+    writers = SpaceWriterHouseholds(seat_repo, own_instance_id=own_instance_id)
+
+    async def _writers(space_id: str) -> set[str]:
+        return set(await writers.writer_households(space_id))
+
+    pages.attach_push(sender=federation_service, writers=_writers)
+    federation_service._event_registry.register(
+        FederationEventType.SPACE_SYNC_PAGE, pages.on_page_event
+    )
+    scheduler.attach_page_push(pages.push_due)
+    return pages
 
 
 def _build_space_media_wanted(
@@ -5105,6 +5295,7 @@ def create_app(config: Config | None = None) -> web.Application:
             pairing_relay_repo=repos.pairing_relay,
             space_zone_repo=repos.space_zone,
             space_sync_watermark_repo=repos.space_sync_watermark,
+            space_sync_page_repo=repos.space_sync_page,
             presence_repo=repos.presence,
             ws_manager=ws_manager,
             peer_user_visibility_repo=repos.peer_user_visibility,
@@ -5590,7 +5781,14 @@ def create_app(config: Config | None = None) -> web.Application:
         # the hashes of the files it streams.
         app[K.space_sync_service_key].attach_file_hasher(file_hasher)
         if gfs_member_publish is not None:
-            space_post_outbound.attach_member_gfs(gfs_member_publish)
+            sync_status = app.get(K.space_sync_status_key)
+            space_post_outbound.attach_member_gfs(
+                gfs_member_publish,
+                # A post a GFS took is no longer "Not sent yet".
+                on_published=(
+                    sync_status.post_reached_gfs if sync_status is not None else None
+                ),
+            )
             # v_60 — our authors' public profiles for a space's GFS followers.
             author_profiles: SpaceAuthorProfileOutbound = SpaceAuthorProfileOutbound(
                 bus=bus,
@@ -6521,6 +6719,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # deletes) are published off the author's lock; send them while
         # the federation client and the database are still up.
         await app[K.highlight_service_key].stop()
+        # Background sync-page seals and root checks (they read the DB).
+        await app[K.sync_page_service_key].close()
         # Fresh-connect roster snapshots still being sent.
         await app[K.users_sync_outbound_key].drain()
         # Upload batches still open become their "new photos" rows first.
@@ -6535,6 +6735,11 @@ def create_app(config: Config | None = None) -> web.Application:
         await platform_adapter.on_cleanup(app)
         if outbox_processor is not None:
             await outbox_processor.stop()
+        # The sync status: outcomes still being recorded finish (bounded),
+        # its rechecks end — after the outbox (which tells it of rows) and
+        # while the database is up.
+        if (sync_status := app.get(K.space_sync_status_key)) is not None:
+            await sync_status.stop()
         if stale_call_scheduler is not None:
             await stale_call_scheduler.stop()
         if gfs_capability_warmup is not None:

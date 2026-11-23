@@ -20,8 +20,9 @@
  * Who sees what (``settingsSections``): owners / admins get every section
  * (a remote admin — space hosted elsewhere — only what forwards to the
  * host); members and moderators their notifications, "You in this space",
- * their bots and Leave — moderators also Games (D9); followers their
- * notifications and Unfollow.
+ * Sync, their bots and Leave — moderators also Games (D9); followers their
+ * notifications and Unfollow. Everyone but a follower sees Sync: is this
+ * household up to date with the space, and "Sync now".
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { useLocation, useRoute } from 'preact-iso'
@@ -36,6 +37,7 @@ import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
 import { isOne, t } from '@/i18n/i18n'
 import { setNavigationGuard, useBeforeUnload } from '@/router/navigationGuard'
 import { currentUser } from '@/store/auth'
+import { ensureConnections } from '@/store/connections'
 import { instanceConfig } from '@/store/instance'
 import { setSpaceHereAllowed } from '@/store/spaceMembers'
 import type { Space } from '@/types'
@@ -57,6 +59,8 @@ import { GamesSection } from './settings/GamesSection'
 import { LocationSection } from './settings/LocationSection'
 import { MembersSection } from './settings/MembersSection'
 import { ModerationSection } from './settings/ModerationSection'
+import { SyncSection } from './settings/SyncSection'
+import { syncHostName } from './spaceSync'
 import { patchSpace } from './settings/spacePatch'
 import { basicsOf, useBasicsForm } from './settings/useBasicsForm'
 import type { LinksDraftHandle } from './SpaceLinksTab'
@@ -93,7 +97,7 @@ export function settingsViewer(role: string | undefined, isRemoteSpace: boolean)
 // t('space.settings_page.lead.members') t('space.settings_page.lead.sections')
 // t('space.settings_page.lead.notifications') t('space.settings_page.lead.location')
 // t('space.settings_page.lead.moderation') t('space.settings_page.lead.you')
-// t('space.settings_page.lead.games')
+// t('space.settings_page.lead.games') t('space.settings_page.lead.sync')
 const LEADS: Partial<Record<SettingsSection, string>> = {
   basics: 'space.settings_page.lead.basics',
   find: 'space.settings_page.lead.find',
@@ -104,6 +108,7 @@ const LEADS: Partial<Record<SettingsSection, string>> = {
   location: 'space.settings_page.lead.location',
   moderation: 'space.settings_page.lead.moderation',
   you: 'space.settings_page.lead.you',
+  sync: 'space.settings_page.lead.sync',
 }
 
 /** Rows that end the page as one collapsed row, titled by their summary. */
@@ -170,6 +175,8 @@ export default function SpaceSettingsPage() {
   const viewer = space ? settingsViewer(myRole, isRemoteSpace) : null
   const isOwner = myRole === 'owner'
   const admin = viewer === 'admin' || viewer === 'remote-admin'
+  // "Is everything here?" names the host household.
+  useEffect(() => { if (isRemoteSpace) void ensureConnections() }, [isRemoteSpace])
   // The owner, admins and moderators choose the space's games (D9) —
   // never in a global space.
   const extras = {
@@ -369,6 +376,9 @@ export default function SpaceSettingsPage() {
                               open={segment === 'danger'} onUpdate={refresh} />
       case 'you':
         return <YouSection space={space} seat={me} locationAllowed={sharing.allowed} sharing={sharing.on} />
+      case 'sync':
+        return <SyncSection spaceId={space.id} sync={space.sync} hostedHere={!isRemoteSpace}
+                            hostName={syncHostName(space.owner_instance_id)} isAdmin={admin} />
       case 'leave':
         return <LeaveSection space={space} />
       case 'unfollow':

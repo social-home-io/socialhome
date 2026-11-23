@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 
 from socialhome.repositories.base import (
     bool_col,
     dump_json,
+    first_changed_page,
     load_json,
+    page_stamp_col,
     pick,
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
+    sync_page_below,
     sync_page_cursor,
 )
 
@@ -212,3 +216,57 @@ def test_sync_page_cursor():
     assert sync_page_cursor(rows, 2) == 9
     assert sync_page_cursor(rows, 3) is None
     assert sync_page_cursor([], 2) is None
+
+
+def test_sync_page_below_is_a_seekable_upper_bound():
+    """``rowid <= sync_page_below(cursor)`` keeps exactly the rows the old
+    ``(? IS NULL OR rowid < ?)`` kept: everything on the first page, and
+    the rows below the cursor after it — as a plain range SQLite can seek.
+    """
+    assert sync_page_below(None) == 2**63 - 1
+    assert sync_page_below(10) == 9
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)")
+        conn.executemany("INSERT INTO t(id) VALUES(?)", [(1,), (5,), (2**63 - 1,)])
+        for cursor in (None, 2**63 - 1, 5, 2, 1):
+            old = conn.execute(
+                "SELECT id FROM t WHERE (? IS NULL OR rowid < ?) ORDER BY rowid DESC",
+                (cursor, cursor),
+            ).fetchall()
+            new = conn.execute(
+                "SELECT id FROM t WHERE rowid <= ? ORDER BY rowid DESC",
+                (sync_page_below(cursor),),
+            ).fetchall()
+            assert new == old
+        plan = " ".join(
+            r[3]
+            for r in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM t WHERE rowid <= ? ORDER BY rowid DESC",
+                (sync_page_below(None),),
+            )
+        )
+        assert "INTEGER PRIMARY KEY (rowid<?)" in plan
+
+
+def test_first_changed_page_is_the_first_page_of_an_incremental_run():
+    assert first_changed_page(since=5, cursor=None)
+    assert not first_changed_page(since=5, cursor=10)
+    assert not first_changed_page(since=None, cursor=None)
+    assert not first_changed_page(since=None, cursor=10)
+
+
+def test_page_stamp_col_keeps_the_stamp_index_out_past_the_first_page():
+    assert page_stamp_col("c.sync_seq", since=5, cursor=None) == "c.sync_seq"
+    assert page_stamp_col("c.sync_seq", since=5, cursor=10) == "+c.sync_seq"
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, sync_seq INT)")
+        conn.execute("CREATE INDEX t_seq ON t(sync_seq)")
+        plan = " ".join(
+            r[3]
+            for r in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM t WHERE "
+                + page_stamp_col("sync_seq", 5, 10)
+                + " > 5 AND rowid > 10 ORDER BY rowid"
+            )
+        )
+        assert "t_seq" not in plan, plan

@@ -109,6 +109,7 @@ from ..peer_http import post_to_peer
 from ..rate_limiter import RateLimiter
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
+from ..sync_page import parse_bucket_request, parse_fetch_request, parse_page_ref
 from ..task_drain import wait_tasks_done
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
@@ -481,6 +482,7 @@ class FederationService:
         "_online_status_service",
         "_outbox_payload_key",
         "_outbox_repo",
+        "_outbox_space_changed",
         "_outbox_still_wanted",
         "_outbox_wake",
         "_own_identity_pk",
@@ -623,6 +625,9 @@ class FederationService:
         #: send under way (:meth:`_seat_turn`); empty when none is.
         self._seat_send_locks: dict[str, _SeatTurn] = {}
         self._outbox_still_wanted: StillWantedOf | None = None
+        #: Told the space of every payload queued for it — the sync
+        #: status's "N waiting to send" (:meth:`attach_outbox_wake`).
+        self._outbox_space_changed: Callable[[str], None] | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
         # dropped (no app bridge wired on this instance).
@@ -1164,6 +1169,9 @@ class FederationService:
         sync_mode: str = "initial",
         have_seq: int | None = None,
         roster_digest: dict | None = None,
+        page_ref: dict | None = None,
+        buckets: list[int] | None = None,
+        fetch_have: str | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -1181,6 +1189,9 @@ class FederationService:
             sync_mode=sync_mode,
             have_seq=have_seq,
             roster_digest=roster_digest,
+            page_ref=page_ref,
+            buckets=buckets,
+            fetch_have=fetch_have,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -1501,14 +1512,29 @@ class FederationService:
         wake: Callable[[], None],
         *,
         still_wanted: StillWantedOf | None = None,
+        space_changed: Callable[[str], None] | None = None,
     ) -> None:
         """Wire ``OutboxProcessor.wake`` — the outbox is the only multi
         sender (v_91), and a broadcast that queued a multi payload wakes it.
         *still_wanted* resolves the moderation queue's per-row check (or
         ``None`` until it is wired): :meth:`outbox_multi_groups` keeps a row
-        it refuses out of every group (it goes single and is dropped)."""
+        it refuses out of every group (it goes single and is dropped).
+        *space_changed* is told the space of every payload queued for one
+        (the sync status's "N waiting to send"); it must not block."""
         self._outbox_wake = wake
         self._outbox_still_wanted = still_wanted
+        self._outbox_space_changed = space_changed
+
+    def _queued_for_space(self, space_id: str | None) -> None:
+        """A payload of *space_id* was queued (the outbox, or a deferred
+        mesh send queued or released): tell the sync status. Never
+        raises."""
+        if self._outbox_space_changed is None or not space_id:
+            return
+        try:
+            self._outbox_space_changed(space_id)
+        except Exception:
+            log.exception("outbox: space %s change hook failed", space_id)
 
     def attach_call_signaling(self, call_signaling) -> None:
         """Attach a :class:`CallSignalingService` after construction."""
@@ -2389,6 +2415,7 @@ class FederationService:
                 status_code=status_code if isinstance(status_code, int) else None,
                 error="unknown_instance",
             )
+        self._queued_for_space(space_id)
         if transport_error == DELIVERY_ERROR_RELAY_THROTTLED:
             # Queued like any other failure — a throttle must never cost
             # an event — but reported as the waitable window it is, so a
@@ -2478,6 +2505,7 @@ class FederationService:
             return DeliveryResult(
                 instance_id=to_instance_id, ok=False, error="unknown_instance"
             )
+        self._queued_for_space(space_id)
         log.info(
             "fed send: %s for %s queued behind its pending outbox row(s)",
             event_type.value,
@@ -2870,6 +2898,11 @@ class FederationService:
         stored = await self._outbox_repo.get_payload(payload_id)
         if stored is None:
             raise ValueError(f"outbox payload {payload_id} is gone")
+        return stored, self._unwrap_outbox_payload(stored)
+
+    def _unwrap_outbox_payload(self, stored: OutboxPayload) -> str:
+        """*stored*'s payload JSON, unwrapped from the local KEK. Raises
+        :class:`ValueError` when it does not unwrap."""
         try:
             raw = self._key_manager.decrypt(
                 stored.payload_enc,
@@ -2878,8 +2911,60 @@ class FederationService:
                 ),
             )
         except Exception as exc:
-            raise ValueError(f"outbox payload {payload_id} does not unwrap") from exc
-        return stored, raw.decode("utf-8")
+            raise ValueError(f"outbox payload {stored.id} does not unwrap") from exc
+        return raw.decode("utf-8")
+
+    async def undelivered_space_items(
+        self, space_id: str, event_type: FederationEventType
+    ) -> list[str]:
+        """The ids of the *event_type* items of *space_id* this household
+        broadcast that NO member household has yet — "Not sent yet" on a
+        post (the sync status). Newest first.
+
+        The audience is the one :meth:`broadcast_to_space_members` sends to
+        (``list_member_instance_ids`` minus us). An item is undelivered
+        only while EVERY household of it still waits for it: a row in our
+        outbox (``pending_targets_for_space``; a delivered row is gone, a
+        mailbox upload to the GFS delivers the multi payload's rows
+        together) or a deferred mesh send. A household that took it at
+        once has no row, so the item is sent. With no other member
+        household there is nobody to send to: nothing is undelivered. The
+        stored payload is unwrapped (local KEK) for the item's ``id``.
+
+        Known gaps (``docs/protocol/sync.md``): a terminal mesh failure (no
+        outbox, no deferral) leaves nothing waiting, so the item reads
+        sent; a household that joined after the broadcast holds no row yet
+        is in the audience, so the item reads sent; on a
+        host, members' content it forwards shares the newest-payloads
+        window (``pending_targets_for_space``)."""
+        audience = {
+            iid
+            for iid in await self._federation_repo.list_member_instance_ids(space_id)
+            if iid and iid != self._own_instance_id
+        }
+        if not audience:
+            return []
+        waiting: dict[str, set[str]] = {}
+        for stored, households in await self._outbox_repo.pending_targets_for_space(
+            space_id, event_type
+        ):
+            try:
+                item_id = _orjson.loads(self._unwrap_outbox_payload(stored)).get("id")
+            except ValueError, AttributeError:
+                continue
+            if isinstance(item_id, str) and item_id:
+                waiting.setdefault(item_id, set()).update(households)
+        for iid, queue in self._deferred_mesh_queues.items():
+            for deferred in queue:
+                item_id = deferred.payload.get("id")
+                if (
+                    deferred.space_id == space_id
+                    and deferred.event_type is event_type
+                    and isinstance(item_id, str)
+                    and item_id
+                ):
+                    waiting.setdefault(item_id, set()).add(iid)
+        return [item for item, held in waiting.items() if audience <= held]
 
     async def seal_outbox_entry(
         self, entry: OutboxEntry, instance: RemoteInstance
@@ -3267,6 +3352,9 @@ class FederationService:
         have_seq: int | None = None,
         mod_held: dict | None = None,
         roster_digest: dict | None = None,
+        page_ref: dict | None = None,
+        buckets: list[int] | None = None,
+        have: str | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
@@ -3302,6 +3390,17 @@ class FederationService:
                 # Not a failure: the confirmed-peer sweep owns this host, so
                 # the caller should stop asking about it.
                 return True
+            if self._sync_manager.syncing_from(
+                space_id, self._own_instance_id, host_instance_id
+            ):
+                # Not a failure either: our sync of the space from that host
+                # is running, and a new BEGIN would make the host replace it.
+                log.debug(
+                    "mesh catch-up of %s from %s skipped: a sync of it is running",
+                    space_id,
+                    host_instance_id,
+                )
+                return True
             sync_id = uuid.uuid4().hex
             self._sync_manager.record_sync_request(
                 sync_id=sync_id,
@@ -3310,6 +3409,9 @@ class FederationService:
                 sync_mode=sync_mode,
                 have_seq=have_seq,
                 roster_digest=roster_digest,
+                page_ref=page_ref,
+                buckets=buckets,
+                fetch_have=have,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -3333,6 +3435,16 @@ class FederationService:
                 payload["mod_held"] = mod_held
             if roster_digest is not None:
                 payload["roster_digest"] = roster_digest
+            if page_ref is not None:
+                # v_95: the sync page we hold (the caller gated it) …
+                payload["page"] = page_ref
+            if buckets:
+                # … and the bucket listings the stream should end with.
+                payload["buckets"] = list(buckets)
+                if have is not None:
+                    # Phase 3: a verified fetch from a member household.
+                    payload["rows"] = True
+                    payload["have"] = have
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
@@ -4177,6 +4289,8 @@ class FederationService:
                 event_type, space_id, payload, msg_id=str(uuid.uuid4())
             ),
         )
+        if written:
+            self._queued_for_space(space_id)
         if written and self._outbox_wake is not None:
             self._outbox_wake()
         return {
@@ -4479,6 +4593,7 @@ class FederationService:
             )
         )
         self._deferred_mesh_bytes += size
+        self._queued_for_space(space_id)
         return DeliveryResult(
             instance_id=target, ok=False, error=DELIVERY_ERROR_MESH_DEFERRED
         )
@@ -4515,6 +4630,8 @@ class FederationService:
     def _release_deferred(self, items: Iterable[_DeferredMeshSend]) -> None:
         for item in items:
             self._deferred_mesh_bytes = max(0, self._deferred_mesh_bytes - item.size)
+            # Sent or dropped: the sync status's "Not sent yet" may move.
+            self._queued_for_space(item.space_id)
 
     def _log_deferred_cap(self, target: str, why: str) -> None:
         if target in self._deferred_mesh_cap_logged:
@@ -5489,6 +5606,7 @@ class FederationService:
         space_id = event.space_id or payload.get("space_id") or ""
         if not sync_id or not space_id:
             return
+        want_rows, have = parse_fetch_request(payload)
         decision = await self._sync_manager.begin_session(
             sync_id=sync_id,
             space_id=space_id,
@@ -5499,6 +5617,15 @@ class FederationService:
             # §25.6 (migration 0087): the requester's echo of the last
             # stream it applied cleanly. Absent / malformed → a full stream.
             have_seq=parse_have_seq(payload.get("have_seq")),
+            # v_95: the sync page the requester holds (absent / malformed →
+            # it gets our newest page, if we hold one).
+            page_ref=parse_page_ref(payload.get("page")),
+            # v_95: the buckets whose listings the stream ends with.
+            buckets=parse_bucket_request(payload.get("buckets")),
+            # Phase 3: a verified fetch also wants those buckets' rows, minus
+            # those its ``have`` hint names (a malformed hint: listings only).
+            want_rows=want_rows,
+            have=have,
         )
         if not decision.accepted and decision.next_event is not None:
             if (
@@ -5753,6 +5880,9 @@ class FederationService:
                 sync_mode=pending.sync_mode,
                 have_seq=pending.have_seq,
                 roster_digest=pending.roster_digest,
+                page_ref=pending.page_ref,
+                buckets=pending.buckets,
+                fetch_have=pending.fetch_have,
             )
         except ConnectionError:
             # Closed while the offer was applied (reaped, superseded):
@@ -6175,8 +6305,8 @@ class FederationService:
         if record is None:
             record = self._open_quiet_relay_session(sync_id, event.from_instance)
         if record is None:
-            log.debug(
-                "SPACE_SYNC_CHUNK for unknown sync_id=%s from %s",
+            log.info(
+                "SPACE_SYNC_CHUNK for unknown sync_id=%s from %s — dropped",
                 sync_id,
                 event.from_instance,
             )

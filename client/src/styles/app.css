@@ -30686,3 +30686,129 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
 .sh-length-counter--full { color: var(--sh-danger); }
 /* Directly under its field, not a form gap away. */
 .sh-form > .sh-length-counter { margin-top: calc(2px - var(--sh-space-md)); }
+
+/* ── Space sync status: header chip, list dot, "Is everything here?",
+   "Not sent yet" ─────────────────────────────────────────────────────── */
+/* The chip shows only for "Some posts may be missing" (warning tint),
+   "Getting the space ready…" and a slow "Getting the latest…" (muted).
+   Every state has an icon AND words — never colour alone. Text stays
+   --sh-text on a light tint, so it reads in both themes. */
+.sh-sync-chip-row {
+  display: flex;
+  padding-block-start: var(--sh-space-xs);
+  min-width: 0;
+}
+.sh-sync-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  min-height: 36px;
+  max-width: 100%;
+  padding-inline: var(--sh-space-sm);
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-sm);
+  text-decoration: none;
+}
+.sh-sync-chip:hover { background: var(--sh-bg-tertiary); }
+.sh-sync-chip:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-sync-chip__icon { flex: none; font-size: 14px; line-height: 1; }
+.sh-sync-chip__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sh-sync-chip__chev { flex: none; opacity: 0.6; }
+.sh-sync-chip__chev:dir(rtl) { transform: scaleX(-1); }
+[dir='rtl'] .sh-sync-chip__chev { transform: scaleX(-1); }
+.sh-sync-chip--missing {
+  border-color: var(--sh-warning);
+  background: color-mix(in srgb, var(--sh-warning) 12%, var(--sh-bg-secondary));
+}
+.sh-sync-chip--latest {
+  border-color: var(--sh-border);
+  background: transparent;
+  color: var(--sh-text-muted);
+}
+
+/* Spaces list: a small ⚠ only for "Some posts may be missing" (a shape,
+   not colour alone; role="img" with its words, also in the row's label). */
+.sh-spaces-sync-warn {
+  flex: none;
+  color: var(--sh-warning);
+  font-size: var(--sh-font-size-sm);
+  line-height: 1;
+}
+
+/* Settings → "Is everything here?" */
+.sh-sync-card__state {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  margin: 0;
+}
+.sh-sync-card__icon { flex: none; width: 1.25em; text-align: center; }
+.sh-sync-card__state--missing .sh-sync-card__icon { color: var(--sh-warning); }
+.sh-sync-card__state--here .sh-sync-card__icon { color: var(--sh-success); }
+.sh-sync-card__body { margin: 0; }
+.sh-sync-card__body time { white-space: nowrap; }
+.sh-sync-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-sm);
+}
+.sh-sync-card__why {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-sync-card__details {
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-sync-card__details summary {
+  /* Keeps its disclosure triangle (a list item); padded to a 36 px
+     tap target. */
+  cursor: pointer;
+  padding-block: 8px;
+  width: fit-content;
+}
+.sh-sync-card__details summary:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-sync-card__facts {
+  margin: 0;
+  padding-inline-start: var(--sh-space-lg);
+}
+
+/* "○ Not sent yet" in the meta line of one's own post (the DM receipt's
+   "Sending" glyph); tapping it opens the reason. Padded to a 36 px tap
+   target without moving the line. */
+.sh-post-not-sent {
+  /* Inline text flow: a wrapped second line starts under the ○, never
+     indented past it. */
+  display: inline-block;
+  align-self: flex-start;
+  max-width: 100%;
+  margin-block: -9px;
+  padding-block: 9px;
+  padding-inline: 0;
+  border: 0;
+  background: none;
+  color: var(--sh-text-muted);
+  font: inherit;
+  font-size: var(--sh-font-size-xs);
+  text-align: start;
+  cursor: pointer;
+}
+.sh-post-not-sent .sh-receipt { margin-inline-end: 4px; }
+.sh-post-not-sent:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}

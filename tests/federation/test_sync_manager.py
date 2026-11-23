@@ -19,6 +19,7 @@ from socialhome.federation.sync_manager import (
     MAX_INSTANCE_SYNC_STATUS_SPACES,
     MAX_PENDING_REQUESTS,
     PENDING_REQUEST_TTL_SECONDS,
+    RECEIVING_IDLE_S,
     SYNC_BEGIN_RATE_LIMIT_PER_HOUR,
     SYNC_REJECT_NOT_SEATED,
     PendingSyncRequest,
@@ -223,6 +224,117 @@ async def test_begin_session_blocks_when_rate_limited_s6():
     assert decision.reason == "rate_limited"
     assert decision.next_event == FederationEventType.SPACE_SYNC_DIRECT_FAILED
     assert decision.next_payload["reason"] == "rate_limited"
+
+
+async def test_a_new_begin_replaces_the_requesters_session_of_that_space():
+    """Phase 3 finding: a requester that restarted mid-session left its
+    sessions here until the 30-min reaper, and its next BEGINs were refused
+    ``too_many_sessions``. A household runs one sync of a space with us at a
+    time, so its new BEGIN for that space replaces the old session — for
+    every kind of sync, before the cap is counted."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    for i in range(MAX_ACTIVE_SESSIONS_PER_INSTANCE):
+        d = await mgr.begin_session(
+            sync_id=f"old-{i}",
+            space_id=f"sp-{i}",
+            requester_instance_id="alice",
+            provider_instance_id="me",
+            sync_mode="incremental",
+        )
+        assert d.accepted
+    again = await mgr.begin_session(
+        sync_id="new-0",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="incremental",
+    )
+    assert again.accepted is True
+    assert mgr.get_session("old-0") is None
+    assert mgr.get_session("old-1") is not None  # other spaces untouched
+    # Another household's session of the same space is never touched.
+    await mgr.begin_session(
+        sync_id="bob-0",
+        space_id="sp-0",
+        requester_instance_id="bob",
+        provider_instance_id="me",
+    )
+    assert mgr.get_session("new-0") is not None
+    # A fourth space is still refused: the cap stands.
+    blocked = await mgr.begin_session(
+        sync_id="new-9",
+        space_id="sp-9",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    assert blocked.reason == "too_many_sessions"
+
+
+async def test_a_refused_begin_never_kills_the_live_session():
+    """Review A1/B2: the replacement runs only once the new BEGIN is
+    admitted — one refused by the hourly budget or the member check leaves
+    the session it would have replaced streaming."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    for i in range(SYNC_BEGIN_RATE_LIMIT_PER_HOUR):
+        d = await mgr.begin_session(
+            sync_id=f"s-{i}",
+            space_id="sp-0",
+            requester_instance_id="alice",
+            provider_instance_id="me",
+            sync_mode="incremental",
+        )
+        assert d.accepted
+    live = f"s-{SYNC_BEGIN_RATE_LIMIT_PER_HOUR - 1}"
+    refused = await mgr.begin_session(
+        sync_id="s-over",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="incremental",
+    )
+    assert refused.reason == "rate_limited"
+    assert mgr.get_session(live) is not None
+    assert not mgr.get_session(live).closed
+
+    member = SyncSessionManager(
+        _FakeFedRepo(), check_member=AsyncMock(return_value=True)
+    )
+    assert (
+        await member.begin_session(
+            sync_id="m-1",
+            space_id="sp-0",
+            requester_instance_id="alice",
+            provider_instance_id="me",
+        )
+    ).accepted
+    member._check_member = AsyncMock(return_value=False)
+    gone = await member.begin_session(
+        sync_id="m-2",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    assert gone.accepted is False
+    assert member.get_session("m-1") is not None
+
+
+async def test_a_replaced_session_is_marked_closed_so_its_stream_stops():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    await mgr.begin_session(
+        sync_id="old",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    old = mgr.get_session("old")
+    assert old is not None and old.closed is False
+    await mgr.begin_session(
+        sync_id="new",
+        space_id="sp-0",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    assert old.closed is True and mgr.get_session("old") is None
 
 
 async def test_begin_session_blocks_at_concurrent_cap_s6():
@@ -506,6 +618,68 @@ async def test_trigger_relay_sync_returns_new_begin_for_initial_mode_s15():
     assert decision.next_event == FederationEventType.SPACE_SYNC_BEGIN
     assert decision.next_payload["prefer_direct"] is False
     assert decision.next_payload["space_id"] == "sp-1"
+
+
+async def test_a_relay_retry_is_recorded_and_its_receive_session_opened():
+    """Re-review (pre-existing): the relay re-BEGIN after an ICE timeout
+    minted a fresh sync id that nothing recorded — its chunks were dropped
+    as an unknown id (no session, no pending request for the quiet-relay
+    path) and its listings as unasked. It is a BEGIN of ours like any
+    other: recorded with what it asks, its HTTPS receive session open."""
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        sync_mode="incremental",
+        page_ref={"root": "r"},
+        buckets=[3],
+    )
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode="incremental",
+            page_ref={"root": "r"},
+            buckets=[3],
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    new_id = decision.next_payload["sync_id"]
+    assert mgr.get_session("s1") is None
+    request = mgr.pending_sync_request(new_id)
+    assert request is not None
+    assert (request.provider_instance_id, request.sync_mode) == ("host", "incremental")
+    assert (request.page_ref, request.buckets) == ({"root": "r"}, [3])
+    session = mgr.get_session(new_id)
+    assert session is not None and session.transport_mode == "https"
+    assert (session.requester_instance_id, session.provider_instance_id) == (
+        "us",
+        "host",
+    )
+
+
+async def test_syncing_from_sees_a_live_sync_of_ours_only():
+    mgr = _mgr()
+    mgr.register_requester_https_session(
+        sync_id="r1",
+        space_id="sp",
+        requester_instance_id="us",
+        provider_instance_id="host",
+    )
+    now = time.time()
+    assert mgr.syncing_from("sp", "us", "host", now=now)
+    assert not mgr.syncing_from("sp", "us", "other", now=now)
+    assert not mgr.syncing_from("sp-2", "us", "host", now=now)
+    # Idle past RECEIVING_IDLE_S (an offline host): no longer running.
+    assert not mgr.syncing_from("sp", "us", "host", now=now + RECEIVING_IDLE_S + 1)
+    mgr.get_session("r1").sentinel_landed = True
+    assert not mgr.syncing_from("sp", "us", "host", now=now)
 
 
 async def test_trigger_relay_sync_aborts_tier3_per_25_8_18():
@@ -1013,3 +1187,192 @@ async def test_the_relay_retry_carries_the_roster_digest_of_its_begin():
         )
     decision = await mgr.trigger_relay_sync("s1")
     assert decision.next_payload["roster_digest"] == digest
+
+
+async def test_the_relay_retry_carries_the_sync_page_of_its_begin():
+    """v_95: the relay re-BEGIN names the same sync page the first BEGIN
+    did, so the provider sends its page only when newer."""
+    ref = {"signer": "host", "epoch": 1, "seq": 4, "issued_at": 9, "root": "r"}
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        sync_mode="incremental",
+        page_ref=ref,
+    )
+    pending = mgr.pending_sync_request("s1")
+    assert pending.page_ref == ref
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode=pending.sync_mode,
+            page_ref=pending.page_ref,
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    assert decision.next_payload["page"] == ref
+
+
+async def test_begin_session_records_the_requesters_sync_page():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    ref = {"signer": "h", "epoch": 1, "seq": 2, "issued_at": 3, "root": b"\x00" * 32}
+    d = await mgr.begin_session(
+        sync_id="s-page",
+        space_id="sp-1",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="incremental",
+        page_ref=ref,
+    )
+    assert d.accepted is True
+    assert mgr.get_session("s-page").page_ref == ref
+
+
+async def test_begin_session_records_the_asked_buckets():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    await mgr.begin_session(
+        sync_id="s-b",
+        space_id="sp-1",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="incremental",
+        buckets=[3, 9],
+    )
+    assert mgr.get_session("s-b").buckets == [3, 9]
+
+
+async def test_the_relay_retry_carries_the_asked_buckets():
+    """v_95: the relay re-BEGIN after an ICE timeout asks for the same
+    bucket listings the first BEGIN did."""
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        sync_mode="incremental",
+        buckets=[5, 2],
+    )
+    pending = mgr.pending_sync_request("s1")
+    assert pending.buckets == [5, 2]
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode=pending.sync_mode,
+            buckets=pending.buckets,
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    assert decision.next_payload["buckets"] == [5, 2]
+    assert "rows" not in decision.next_payload
+
+
+async def test_the_relay_retry_carries_a_verified_fetch():
+    """Sync pages Phase 3: the relay re-BEGIN asks the member household for
+    the same rows (``rows: true`` + the ``have`` hint) as the first BEGIN,
+    and records them for its own retry."""
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="member",
+        sync_mode="incremental",
+        buckets=[5],
+        fetch_have="AAAAAAAAAAA",
+    )
+    pending = mgr.pending_sync_request("s1")
+    assert pending.fetch_have == "AAAAAAAAAAA"
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="member",
+            space_id="sp",
+            sync_mode=pending.sync_mode,
+            buckets=pending.buckets,
+            fetch_have=pending.fetch_have,
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    payload = decision.next_payload
+    assert (payload["buckets"], payload["rows"], payload["have"]) == (
+        [5],
+        True,
+        "AAAAAAAAAAA",
+    )
+    retry = mgr.pending_sync_request(payload["sync_id"])
+    assert retry is not None and retry.fetch_have == "AAAAAAAAAAA"
+
+
+# ─── Sync status: is a stream of a space arriving? ─────────────────────────
+
+
+def test_receiving_needs_a_chunk_that_moved_lately():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    mgr.register_requester_https_session(
+        sync_id="s1",
+        space_id="sp",
+        requester_instance_id="me",
+        provider_instance_id="h",
+    )
+    now = mgr.get_session("s1").created_at + 1
+    hosts = ["h"]
+    # Registered before the BEGIN (a mesh host): no chunk yet, not running.
+    assert not mgr.receiving("sp", "me", hosts, now=now)
+    mgr.touch_session("s1", now=now)
+    assert mgr.receiving("sp", "me", hosts, now=now + 10)
+    assert not mgr.receiving("other", "me", hosts, now=now + 10)
+    assert not mgr.receiving("sp", "someone-else", hosts, now=now + 10)
+    assert not mgr.receiving("sp", "me", hosts, ignore_sync_id="s1", now=now + 10)
+    # Idle past the window: no longer running.
+    assert not mgr.receiving("sp", "me", hosts, now=now + RECEIVING_IDLE_S + 1)
+    # The sentinel landed: the stream is over.
+    mgr.get_session("s1").sentinel_landed = True
+    assert not mgr.receiving("sp", "me", hosts, now=now + 10)
+
+
+def test_receiving_counts_only_a_stream_from_an_acting_host():
+    """A paired co-member's stream of the space is no "catching up": only
+    a stream from a household acting as the space's host counts."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    mgr.register_requester_https_session(
+        sync_id="s1",
+        space_id="sp",
+        requester_instance_id="me",
+        provider_instance_id="co-member",
+    )
+    now = mgr.get_session("s1").created_at + 1
+    mgr.touch_session("s1", now=now)
+    assert not mgr.receiving("sp", "me", ["owner", "admin"], now=now + 10)
+    assert mgr.receiving("sp", "me", ["owner", "co-member"], now=now + 10)
+    assert not mgr.receiving("sp", "me", [], now=now + 10)
+
+
+@pytest.mark.parametrize("sync_id", ["page:push", "a b", "", "x" * 129, "s/1"])
+async def test_a_malformed_sync_id_is_refused(sync_id):
+    """Security check 2, L4: a session id is the requester's word inside the
+    content key's AAD; only letters, digits, ``_`` and ``-`` (≤ 128) — so it
+    never takes a label another use seals under (``page:push``)."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    decision = await mgr.begin_session(
+        sync_id=sync_id,
+        space_id="sp",
+        requester_instance_id="peer",
+        provider_instance_id="me",
+    )
+    assert not decision.accepted and decision.reason == "malformed_sync_id"

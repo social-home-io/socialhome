@@ -36,6 +36,8 @@ from ..utils.datetime import as_utc
 from .base import (
     bool_col,
     changed_since_sql,
+    first_changed_page,
+    page_stamp_col,
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
@@ -1347,11 +1349,21 @@ class SqliteConversationRepo:
         ``next_cursor`` is ``None`` after the last page (keyset on the row
         id: no page repeats or skips a row)."""
         window, window_params = retention_window_sql("created_at", cutoff)
-        changed, changed_params = changed_since_sql("sync_seq", since)
+        # See ``first_changed_page``: the first incremental page reads only
+        # the changed messages.
+        changed, changed_params = changed_since_sql(
+            page_stamp_col("sync_seq", since, cursor), since
+        )
+        source = (
+            "conversation_messages INDEXED BY idx_conversation_messages_sync_seq"
+            if first_changed_page(since, cursor)
+            else "conversation_messages"
+        )
         rows = rows_to_dicts(
             await self._db.fetchall(
-                "SELECT rowid AS sync_rowid, * FROM conversation_messages"
-                " WHERE conversation_id=? AND deleted=?"
+                "SELECT rowid AS sync_rowid, * FROM "
+                + source
+                + " WHERE conversation_id=? AND deleted=?"
                 + window
                 + changed
                 + " AND rowid > ? ORDER BY rowid LIMIT ?",

@@ -31,6 +31,7 @@ _ROW_KEYS = {
     "owner_instance_id",
     "my_role",
     "member_count",
+    "sync_may_be_missing",
     "last_activity_at",
     "unread_posts",
     "icon_url",

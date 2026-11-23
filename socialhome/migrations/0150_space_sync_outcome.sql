@@ -1,0 +1,63 @@
+-- 0150 — §25.6 sync status: the last outcome of a sync from a household.
+--
+-- ``space_instances.sync_result TEXT``, ``space_instances.sync_result_at
+-- TEXT`` and ``space_instances.sync_ok_at TEXT`` (all NULL by default) — on the REQUESTER's row for a (space,
+-- provider household) that acts as the space's host here (the owner, or the
+-- trusted inviting admin — ``federation/host_equivalence.acting_hosts``):
+--
+-- * ``sync_result`` — what that household's last answer to our
+--   ``SPACE_SYNC_BEGIN`` was: ``ok`` (a clean stream, or the quiet sentinel
+--   of an up-to-date space), ``unclean`` (records held back or a chunk
+--   lost — the next round streams again), ``deferred`` (it refused for now:
+--   busy, its hourly budget spent, or the stream broke off), ``unreachable``
+--   (a round's BEGIN went unanswered for the scheduler's full wait).
+-- * ``sync_result_at`` — when that last result came (UTC ISO 8601): a last
+--   answer two rounds old is no answer — with another acting host found
+--   unreachable, the space reads "host offline" whatever that answer said.
+-- * ``sync_ok_at`` — when it last answered ``ok`` (UTC ISO 8601).
+--
+-- Read at request time by ``SpaceSyncStatusService`` to tell a member
+-- whether the space is up to date, catching up, behind or its host offline
+-- (``GET /api/spaces/{id}`` ``sync``). Written at most once per sync round
+-- per (space, acting host): a change of result, or the same result
+-- refreshing its time (throttled to once per round) — never per chunk.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this data. ``space_instances``
+--       is written by ``space_repo.add_space_instance`` (an upsert that sets
+--       only ``last_seen_at`` — the new columns survive it),
+--       ``remove_space_instance`` (a DELETE: the outcome goes with the
+--       seat), 0078's version / identity UPDATEs, 0086/0087's watermark
+--       columns, 0090's unarchive trigger (clears ``applied_seq`` only) and
+--       0144's ``mailbox``. Every sync outcome already surfaces in one
+--       place: the receiver's ``SpaceSyncComplete {clean}`` (the quiet
+--       sentinel included), the federation service's ``SpaceSyncDeferred``,
+--       and the scheduler's host-silent verdict (``HostContact.went_silent``)
+--       — all in memory, gone on restart. The member household already
+--       holds a row for every acting host (the accept / invite paths add
+--       it; the scheduler's BEGINs go to these households). The backup
+--       export does not copy ``space_instances``.
+--   (2) Non-migration alternatives considered and rejected:
+--       * Memory only (``HostContact``, the scheduler's maps) — lost on
+--         every restart: a rebooted household would show "never synced" for
+--         every space until each host answered again, and could not say how
+--         long ago it was last up to date.
+--       * ``instance_config`` KV — one key per (space, household) recreates
+--         a per-space table in a store meant for household settings, and
+--         would outlive the seat (no cleanup on leave).
+--       * Reuse ``applied_seq`` (0087) — it moves only on a clean stream
+--         and says nothing about when, nor about a refusal or silence.
+--       * Reading a host's last answer time off ``sync_ok_at`` alone — a
+--         host that keeps refusing or streaming unclean has no ``ok`` time,
+--         so a stale ``deferred`` from a host gone quiet would still count
+--         as answering and hide "host offline" (spec review, Phase 1).
+--       * A history table — the status reads the latest outcome only.
+--   (3) Smallest possible change: three NULL-default columns (metadata-only
+--       ALTERs — no table rewrite, no backfill). NULL result = never
+--       answered; NULL ``sync_ok_at`` = never up to date from that household.
+
+ALTER TABLE space_instances ADD COLUMN sync_result TEXT
+    CHECK (sync_result IN ('ok', 'unclean', 'deferred', 'unreachable'));
+ALTER TABLE space_instances ADD COLUMN sync_result_at TEXT;
+ALTER TABLE space_instances ADD COLUMN sync_ok_at TEXT;

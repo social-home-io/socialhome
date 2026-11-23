@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from aiohttp import web
@@ -39,13 +40,13 @@ from ..app_keys import (
     space_service_key,
     space_summary_service_key,
     space_sync_scheduler_key,
+    space_sync_status_key,
     space_zone_repo_key,
     user_repo_key,
 )
 from ..csp import MEDIA_CSP
 from ..domain.child_protection import name_only
 from ..domain.errors import CodedError, ImageTooLargeError
-from ..domain.federation import PairingStatus
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.local_community import local_area_of, local_area_wire
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
@@ -72,7 +73,7 @@ from ..domain.user import SYSTEM_AUTHOR
 from ..domain.zone_geo import match_zone
 from ..federation.invite_bootstrap import InviteBootstrapHint
 from ..media_signer import sign_media_urls_in, strip_signature_query
-from ..rate_limiter import client_bucket
+from ..rate_limiter import RateLimiter, client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_attention import needs_you_count, space_attention
@@ -206,8 +207,17 @@ class SpaceCollectionView(BaseView):
                 # "Needs you" — the total the space's More badge shows;
                 # null unless the caller has content authority here.
                 "needs_you": await self._needs_you(s.id, listing.role),
+                # "Some posts may be missing" — the list's dot; the
+                # detail's ``sync.may_be_missing``, never for a follower.
+                "sync_may_be_missing": await self._may_be_missing(s.id, listing.role),
             }
         )
+
+    async def _may_be_missing(self, space_id: str, role: str) -> bool:
+        status_svc = self.request.app.get(space_sync_status_key)
+        if status_svc is None or role == SpaceRole.SUBSCRIBER:
+            return False
+        return await status_svc.may_be_missing(space_id)
 
     async def _needs_you(self, space_id: str, role: str) -> int | None:
         if role not in CONTENT_AUTHORITY_ROLES:
@@ -407,6 +417,10 @@ class SpaceDetailView(BaseView):
                 # "Needs you": held items, reports, join requests and open
                 # proposals waiting for the caller — null unless they have
                 # content authority here (owner / admin / moderator).
+                # Does this space need sync? ``{state, last_ok_at,
+                # waiting_to_send}`` — members only (a follower is fed by
+                # the GFS, not the host); null otherwise.
+                "sync": await self._sync_status(space.id, member.role),
                 "attention": await space_attention(
                     space.id,
                     seat=member,
@@ -440,6 +454,24 @@ class SpaceDetailView(BaseView):
         if not (is_member or owner_household_admin):
             return None, False
         return await selection.describe(space)
+
+    async def _sync_status(self, space_id: str, role: str) -> dict | None:
+        status_svc = self.request.app.get(space_sync_status_key)
+        if status_svc is None or role == SpaceRole.SUBSCRIBER:
+            return None
+        status = await status_svc.status(space_id)
+        if status is None:
+            return None
+        wire = status.to_wire()
+        # When "Check now" works again (UTC ISO 8601), from the per-space
+        # limit "Sync now" keeps for the whole household — so a reload
+        # shows the countdown at once; absent while it is allowed.
+        wait = sync_now_wait_s(self.request.app.get(rate_limiter_key), space_id)
+        if wait:
+            wire["next_check_at"] = (
+                datetime.now(UTC) + timedelta(seconds=wait)
+            ).isoformat()
+        return wire
 
     async def _has_remote_households(self, space_id: str) -> bool:
         moderation = self.request.app.get(space_moderation_service_key)
@@ -2262,45 +2294,72 @@ class SpaceUnbanView(BaseView):
         return web.json_response({"ok": True})
 
 
-class SpaceSyncTriggerView(BaseView):
-    """POST /api/spaces/{id}/sync — admin-triggered space-sync kickoff.
+#: "Sync now" asks per space and hour. A host allows 5 BEGINs an hour per
+#: (household, space) and the periodic rounds use 2, so these 3 never make
+#: a host refuse the periodic sync.
+SYNC_NOW_RATE_LIMIT: int = 3
+SYNC_NOW_RATE_WINDOW_S: int = 3600
 
-    Enqueues a :class:`FederationEventType.SPACE_SYNC_BEGIN` to every
-    confirmed peer instance that is a member of this space. Returns
-    ``202 Accepted`` with the list of peers targeted — the actual
-    streaming happens on the reconnect queue.
+
+def _sync_now_key(space_id: str) -> str:
+    """The rate-limit bucket of "Sync now": per space, for the whole
+    household (every member shares it)."""
+    return f"space-sync-now:{space_id}"
+
+
+def sync_now_wait_s(limiter: RateLimiter | None, space_id: str) -> int:
+    """Seconds until "Sync now" is allowed again for *space_id*; ``0``
+    when it is now (or no limiter is wired). A pure read."""
+    if limiter is None or limiter.has_room(
+        _sync_now_key(space_id),
+        limit=SYNC_NOW_RATE_LIMIT,
+        window_s=SYNC_NOW_RATE_WINDOW_S,
+    ):
+        return 0
+    return limiter.retry_after_s(
+        _sync_now_key(space_id), window_s=SYNC_NOW_RATE_WINDOW_S
+    )
+
+
+class SpaceSyncTriggerView(BaseView):
+    """POST /api/spaces/{id}/sync — "Sync now", any member (not a follower).
+
+    The small incremental ``SPACE_SYNC_BEGIN`` of one round, right away
+    (``SpaceSyncScheduler.sync_now``), to each household acting as the
+    space's host — one reached only over the mesh too — never to a paired
+    co-member (its BEGIN budget for us is not ours to spend); a space hosted
+    here asks its paired member households. Never a full stream. Returns ``202 Accepted`` with the households asked; the
+    streams arrive on their own (the ``space.sync_state`` frame tells).
+    ``429`` past :data:`SYNC_NOW_RATE_LIMIT` an hour for the space.
     """
 
     async def post(self) -> web.Response:
         ctx = self.user
         space_svc = self.svc(space_service_key)
         space_id = self.match("id")
-        space = await space_svc._require_space(space_id)
-        await space_svc._require_admin_or_owner(space, ctx.username)
-
-        space_repo = self.svc(space_repo_key)
-        federation_repo = self.svc(federation_repo_key)
-        scheduler = self.svc(space_sync_scheduler_key)
-
-        member_instances = await space_repo.list_member_instances(space_id)
-        targets: list[str] = []
-        for inst_id in member_instances:
-            instance = await federation_repo.get_instance(inst_id)
-            if instance is None or instance.status is not PairingStatus.CONFIRMED:
-                continue
-            await scheduler.enqueue_sync_for_space(
-                space_id=space_id,
-                peer_instance_id=inst_id,
+        await space_svc._require_space(space_id)
+        member = await space_svc._require_member(space_id, ctx.user_id)
+        space_svc._assert_writable_member(member, action="sync")
+        limiter = self.request.app.get(rate_limiter_key)
+        key = _sync_now_key(space_id)
+        if limiter is not None and not limiter.is_allowed(
+            key,
+            limit=SYNC_NOW_RATE_LIMIT,
+            window_s=SYNC_NOW_RATE_WINDOW_S,
+        ):
+            # When the next one is allowed: the SPA disables "Check now"
+            # with "You can check again in {m} min".
+            wait = limiter.retry_after_s(key, window_s=SYNC_NOW_RATE_WINDOW_S)
+            resp = error_response(
+                429,
+                "RATE_LIMITED",
+                "Synced a moment ago — try again later.",
+                extra={"retry_after_s": wait},
             )
-            targets.append(inst_id)
-
-        return web.json_response(
-            {
-                "space_id": space_id,
-                "targets": targets,
-            },
-            status=202,
-        )
+            resp.headers["Retry-After"] = str(wait)
+            return resp
+        targets = await self.svc(space_sync_scheduler_key).sync_now(space_id)
+        return web.json_response({"space_id": space_id, "targets": targets}, status=202)
 
 
 class SpaceFeedReadView(BaseView):

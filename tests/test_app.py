@@ -201,6 +201,60 @@ async def test_cleanup_stops_the_routed_handler(tmp_dir):
     assert handler._deferred_retransmits == {}
 
 
+async def test_cleanup_stops_the_sync_status_while_the_database_is_up(
+    tmp_dir, monkeypatch
+):
+    """``_on_cleanup`` stops the sync status (its outcomes still being
+    recorded finish, its rechecks end) before the database shuts down."""
+    from socialhome.app_keys import db_key
+    from socialhome.services.space_sync_status import SpaceSyncStatusService
+
+    stopped: list[int] = []
+    app_ref: list[web.Application] = []
+
+    async def _stop(self, timeout: float = 5.0) -> None:
+        # The database still answers: the outcomes can still be written.
+        row = await app_ref[0][db_key].fetchone("SELECT 1 AS one")
+        stopped.append(row["one"])
+
+    monkeypatch.setattr(SpaceSyncStatusService, "stop", _stop)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    app_ref.append(app)
+    async with TestClient(TestServer(app)) as tc:
+        await tc.get("/healthz")
+        assert stopped == []
+    assert stopped == [1]
+
+
+async def test_sync_pages_wire_the_verified_member_fetch(tmp_dir):
+    """Sync pages Phase 3: the scheduler's silent-host round reaches the
+    page service, which asks member households through the federation
+    service and applies verified rows through the sync receiver."""
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        pages = app[K.sync_page_service_key]
+        scheduler = app[K.space_sync_scheduler_key]
+        assert scheduler._host_silent == pages.host_silent
+        assert pages._request_round.__name__ == "sync_with"
+        assert scheduler._sync_page_have == pages.have_for
+        assert pages._apply_verified.__name__ == "apply_verified"
+        assert pages._silent.__name__ == "is_silent"
+
+
 async def test_cleanup_publishes_queued_highlight_events(tmp_dir, monkeypatch):
     """``_on_cleanup`` lets the highlight service publish what it already
     queued (published off the author's lock) before the federation client
@@ -725,17 +779,19 @@ def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
         wake = None
         still_wanted = None
 
-        def attach_outbox_wake(self, wake, *, still_wanted=None):
+        def attach_outbox_wake(self, wake, *, still_wanted=None, space_changed=None):
             self.wake = wake
             self.still_wanted = still_wanted
+            self.space_changed = space_changed
 
     class _Unpair:
         async def sweep_tombstones(self):
             return 0
 
     fed = _Fed()
+    app = web.Application()
     processor = _build_outbox_processor(
-        web.Application(),
+        app,
         object(),
         fed,  # type: ignore[arg-type]
         object(),
@@ -744,6 +800,22 @@ def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
     assert fed.wake == processor.wake
     assert processor._multi is fed
     assert fed.still_wanted is not None and fed.still_wanted() is None
+    # The sync status hears of each queued / delivered space row once it
+    # is wired; before that (or without it) the hook does nothing.
+    assert fed.space_changed is processor._space_changed
+    fed.space_changed("sp")
+
+    class _Status:
+        def __init__(self) -> None:
+            self.changed: list[str] = []
+
+        def outbox_changed(self, space_id: str) -> None:
+            self.changed.append(space_id)
+
+    status = _Status()
+    app[K.space_sync_status_key] = status
+    fed.space_changed("sp")
+    assert status.changed == ["sp"]
 
 
 def test_build_gfs_relay_inbound_returns_the_service():

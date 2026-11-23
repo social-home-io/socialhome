@@ -1586,7 +1586,31 @@ from __future__ import annotations
 #:   re-encoded from the released v_80 line; the host repairs a member's
 #:   roster only on a ``roster_digest`` mismatch (``MIN_FOR_ROSTER_DIGEST``,
 #:   v_81). Wire otherwise unchanged.
-OURS: int = 94
+#: * **v_95** (2026-11-21) — **signed sync pages** (``docs/protocol/
+#:   sync-pages.md``, Phases 2 and 3): the space authority signs a commitment to
+#:   the space's state (256 bucket hashes under one root, suite
+#:   ``sha256-b256-c1``, authority event ``space_sync_page``). A
+#:   ``SPACE_SYNC_BEGIN`` carries ``page`` (the page the requester holds);
+#:   the new :data:`FederationEventType.SPACE_SYNC_PAGE` carries the page
+#:   with its full vector, sealed under the space content key — pushed by
+#:   the signer to every member household at most hourly (one multi upload
+#:   per GFS), and sent to one household whose BEGIN names an older page
+#:   than the last pushed one; only to households at v_95. Members store
+#:   the newest page and tell whether they are behind, also while the host
+#:   is offline; the BEGIN's ``buckets`` asks the acting host for bucket
+#:   listings (``__listing__`` chunks before the sentinel). Phase 3: while
+#:   no host answers, the same BEGIN to any member household at v_95 adds
+#:   ``rows: true`` and ``have`` (leaf prefixes), and the member ends its
+#:   stream with the listings and ``__rows__`` of the buckets it holds
+#:   unchanged — every row verified against the signed page. One new event
+#:   type (v_95 was never released), no record change, no
+#:   ``SYNC_RECORD_LINES`` entry.
+#:   **Fallback**: a household below v_95 is sent no page (the fan-out's
+#:   ``min_proto_version``); a provider below v_95 sends none and the
+#:   requester's status keeps the v_94
+#:   rules. Not space-scoped. Labelled "Space sync status, even without the
+#:   host".
+OURS: int = 95
 
 
 class FederationCapability:
@@ -2309,6 +2333,11 @@ class FederationCapability:
     #: ``roster_digest`` on every BEGIN to its host; a BEGIN without one
     #: from it asks for no roster repair (only an older one's echo does).
     MIN_FOR_ROSTER_DIGEST = 81
+    #: v_95 — a §25.6 requester at or above it is sent the provider's newest
+    #: signed sync page on the sentinel (``page_sealed``) when its BEGIN's
+    #: ``page`` is older, and sends that ``page`` itself only to a provider
+    #: at or above it. Below it: today's sentinel, Phase-1 status rules.
+    MIN_FOR_SYNC_PAGES = 95
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2667,6 +2696,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
         "Poll votes count the same in every household",
     ),
+    (
+        FederationCapability.MIN_FOR_SYNC_PAGES,
+        "Space sync status, even without the host",
+    ),
 ]
 
 
@@ -2771,6 +2804,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
     FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
     FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
+    FederationCapability.MIN_FOR_SYNC_PAGES: "sync_pages",
 }
 
 

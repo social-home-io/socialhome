@@ -242,6 +242,52 @@ describe('SpaceListPage — one number per row', () => {
   })
 })
 
+describe('SpaceListPage — "Some posts may be missing" dot', () => {
+  const missing = (...ids: string[]) =>
+    SPACES.map((x) => (ids.includes(x.id) ? { ...x, sync_may_be_missing: true } : x))
+  const dot = (row: Element) => row.querySelector('[data-testid="space-sync-dot"]')
+
+  it('only on a space whose posts may be missing: a ⚠ shape with its words', async () => {
+    wire({ spaces: missing('sA') })
+    const r = await renderPage()
+    const choir = (await r.findByText('Choir')).closest('a')!
+    const d = dot(choir)!
+    expect(d.getAttribute('role')).toBe('img')
+    expect(d.getAttribute('aria-label')).toBe('Some posts may be missing')
+    expect(d.textContent).toContain('⚠')
+    expect(choir.getAttribute('aria-label')).toContain('Some posts may be missing')
+    expect(dot(r.getByText('Band').closest('a')!)).toBeNull()
+  })
+
+  it('never on a followed space', async () => {
+    wire({ spaces: missing('sK') })
+    const r = await renderPage()
+    const kunst = (await r.findByText('Kunstverein')).closest('a')!
+    expect(dot(kunst)).toBeNull()
+  })
+
+  it('sits next to the row\'s count', async () => {
+    wire({ spaces: missing('sG') })
+    const r = await renderPage()
+    const garden = (await r.findByText('Garden')).closest('a')!
+    expect(dot(garden)).not.toBeNull()
+    expect(garden.querySelector('.sh-spaces-attn')!.textContent).toBe('3')
+  })
+
+  it('follows the space.sync_state frame live', async () => {
+    const r = await renderPage()
+    await r.findByText('Choir')
+    emit('space.sync_state', { space_id: 'sA', sync: { state: 'behind', may_be_missing: true } })
+    await r.waitFor(() => expect(dot(r.getByText('Choir').closest('a')!)).not.toBeNull())
+    emit('space.sync_state', { space_id: 'sA', sync: { state: 'up_to_date', may_be_missing: false } })
+    await r.waitFor(() => expect(dot(r.getByText('Choir').closest('a')!)).toBeNull())
+    // A malformed frame or another space's changes nothing.
+    emit('space.sync_state', { space_id: 'sA' })
+    emit('space.sync_state', { space_id: 'nope', sync: { may_be_missing: true } })
+    expect(dot(r.getByText('Choir').closest('a')!)).toBeNull()
+  })
+})
+
 describe('SpaceListPage — header and search', () => {
   it('has one primary "New space" and a visible "Join with a code"', async () => {
     const r = await renderPage()

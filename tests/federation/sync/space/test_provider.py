@@ -110,6 +110,216 @@ async def test_stream_initial_sends_chunks_then_sentinel(provider):
     assert last["is_last"] is True
 
 
+class _FakePages:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def offer_page(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+async def test_the_stream_end_offers_the_page_never_on_the_sentinel(provider):
+    """v_95 push: at the end of a stream the page service is told who asked
+    and which ``page`` its BEGIN named — it sends a newer page to that
+    household as its own ``SPACE_SYNC_PAGE`` event; the sentinel carries no
+    page."""
+    pages = _FakePages()
+    provider.attach_sync_pages(pages)
+
+    async def member(space_id, requester):
+        return True
+
+    provider.attach_member_gate(member)
+    session = _FakeSession()
+    session.page_ref = {"signer": "h"}
+    session.peer_version = 95
+    await provider.stream_initial(session)
+    last = orjson.loads(session.rtc.sent[-1])
+    assert "page_sealed" not in last
+    assert pages.calls == [
+        {
+            "space_id": "sp-1",
+            "requester": session.requester_instance_id,
+            "requester_version": 95,
+            "requester_ref": {"signer": "h"},
+            "fetch": False,
+        }
+    ]
+
+
+@pytest.mark.parametrize("gate", [False, None])
+async def test_a_follower_household_gets_no_page_and_no_vector(provider, gate):
+    """Review B1: the page's vector covers member-only resources (zones), so
+    a follower-only household (no writer seat) — or a provider with no
+    member gate wired — never gets the page."""
+    pages = _FakePages()
+    provider.attach_sync_pages(pages)
+    if gate is not None:
+
+        async def follower(space_id, requester):
+            return gate
+
+        provider.attach_member_gate(follower)
+    session = _FakeSession()
+    session.peer_version = 95
+    await provider.stream_initial(session)
+    last = orjson.loads(session.rtc.sent[-1])
+    assert last["resource"] == SENTINEL_RESOURCE
+    assert "page_sealed" not in last
+    assert pages.calls == []
+
+
+async def test_a_replaced_https_stream_stops_at_its_next_chunk(provider):
+    """Review A1/B2: a session the requester's new BEGIN replaced is closed;
+    its stream stops at the next chunk (https here, rtc the same) — no
+    sentinel, so it never keeps streaming beside the new one."""
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+    session.closed = False
+    federation = AsyncMock()
+
+    async def send(**kwargs):
+        session.closed = True  # replaced while the first chunk was in flight
+        return MagicMock(ok=True, error=None)
+
+    federation.send_with_mesh_fallback.side_effect = send
+    provider.attach_federation(federation)
+    await provider.stream_initial(session)
+    assert federation.send_with_mesh_fallback.await_count == 1
+    federation.close_sync_session.assert_not_called()
+
+
+class _ListingPages(_FakePages):
+    async def listing_records(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs["requester_version"] < 95:
+            return []
+        return [{"i": b, "held": False} for b in kwargs["buckets"]]
+
+
+async def _listing_session(provider, *, version=95, member=True, buckets=(4, 9)):
+    pages = _ListingPages()
+    provider.attach_sync_pages(pages)
+
+    async def gate(space_id, requester):
+        return member
+
+    provider.attach_member_gate(gate)
+    session = _FakeSession(sync_mode="incremental")
+    session.peer_version = version
+    session.page_ref = {"root": b"\x01" * 32}
+    session.buckets = list(buckets)
+    await provider.stream_initial(session)
+    frames = [orjson.loads(f) for f in session.rtc.sent]
+    return pages, session, frames
+
+
+async def test_a_stream_replaced_before_its_listings_pays_no_listing_export(
+    provider,
+):
+    """Re-review: a session replaced while its content chunks went out stops
+    before the listings are built — the full-space export is not paid."""
+    pages = _ListingPages()
+    provider.attach_sync_pages(pages)
+
+    async def gate(space_id, requester):
+        return True
+
+    provider.attach_member_gate(gate)
+    session = _FakeSession(sync_mode="incremental")
+    session.peer_version = 95
+    session.page_ref = {"root": b"\x01" * 32}
+    session.buckets = [4]
+    session.closed = False
+    sent = session.rtc.sent
+
+    async def send_chunk(data):
+        sent.append(data)
+        if len(sent) == 2:  # the last content chunk: then replaced
+            session.closed = True
+
+    session.rtc.send_chunk = send_chunk
+    await provider.stream_initial(session)
+    assert len(sent) == 2
+    assert not any("buckets" in c for c in pages.calls)
+
+
+async def test_the_listings_ride_the_stream_before_its_sentinel(provider):
+    """v_95: the ``buckets`` a BEGIN names come back as ``__listing__``
+    chunks (under the content key) at the end of that same stream, right
+    before the sentinel, counted with its chunks."""
+    pages, _session, frames = await _listing_session(provider)
+    resources = [f["resource"] for f in frames]
+    assert resources[-2:] == ["__listing__", "__complete__"]
+    assert sorted(resources[:-2]) == ["members", "posts"]
+    plain = orjson.loads(base64.urlsafe_b64decode(frames[-2]["encrypted_payload"]))
+    assert plain["records"] == [{"i": 4, "held": False}, {"i": 9, "held": False}]
+    listing_call = next(c for c in pages.calls if "buckets" in c)
+    assert listing_call["buckets"] == [4, 9]
+    assert frames[-1]["chunk_count"] == len(frames) - 1
+
+
+@pytest.mark.parametrize(
+    ("version", "member", "buckets"),
+    [(94, True, (4,)), (95, False, (4,)), (95, True, ())],
+)
+async def test_no_listings_for_an_older_household_a_follower_or_none_asked(
+    provider, version, member, buckets
+):
+    pages, _session, frames = await _listing_session(
+        provider, version=version, member=member, buckets=buckets
+    )
+    assert "__listing__" not in [f["resource"] for f in frames]
+    if not member or not buckets:
+        assert not any("buckets" in c for c in pages.calls)
+
+
+class _FetchPages(_ListingPages):
+    async def fetch_records(self, **kwargs):
+        self.calls.append({"fetch": True, **kwargs})
+        listings = [{"i": b, "held": True, "rows": []} for b in kwargs["buckets"]]
+        return listings, [{"i": 4, "r": "posts", "row": {"id": "p"}}]
+
+
+async def test_a_verified_fetch_rides_the_stream_listings_then_rows(provider):
+    """Phase 3: an ordinary incremental BEGIN to any member household with
+    ``buckets`` and ``rows: true`` — its stream ends with the listings, then
+    the proven rows as ``__rows__`` chunks under the content key, then the
+    sentinel; the page service gets the hint and the record cap of the
+    requester's path. No session kind or budget of its own."""
+    pages = _FetchPages()
+    provider.attach_sync_pages(pages)
+
+    async def gate(space_id, requester):
+        return True
+
+    provider.attach_member_gate(gate)
+    session = _FakeSession(sync_mode="incremental")
+    session.peer_version = 95
+    session.page_ref = {"root": b"\x01" * 32}
+    session.buckets = [4]
+    session.want_rows = True
+    session.have = frozenset({b"\x00" * 8})
+    await provider.stream_initial(session)
+    frames = [orjson.loads(f) for f in session.rtc.sent]
+    resources = [f["resource"] for f in frames]
+    assert resources[-3:] == ["__listing__", "__rows__", "__complete__"]
+    plain = orjson.loads(base64.urlsafe_b64decode(frames[-2]["encrypted_payload"]))
+    assert plain["records"] == [{"i": 4, "r": "posts", "row": {"id": "p"}}]
+    call = next(c for c in pages.calls if c.get("fetch"))
+    assert call["have"] == frozenset({b"\x00" * 8})
+    assert call["max_record_bytes"] is None  # not a relay-seated requester
+    assert not any("buckets" in c and not c.get("fetch") for c in pages.calls)
+    assert frames[-1]["chunk_count"] == len(frames) - 1
+
+
+async def test_no_page_service_no_page_field(provider):
+    session = _FakeSession()
+    await provider.stream_initial(session)
+    assert "page_sealed" not in orjson.loads(session.rtc.sent[-1])
+
+
 async def test_stream_initial_skips_missing_exporters(provider):
     """Resources without a registered exporter are skipped (this
     fixture only provides 2 of the 11)."""

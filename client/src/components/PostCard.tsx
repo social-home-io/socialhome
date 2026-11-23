@@ -2,6 +2,7 @@
  * PostCard — canonical post display component (§23.43).
  * Renders in household feed, space feeds, search results.
  */
+import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Avatar } from './Avatar'
@@ -81,12 +82,15 @@ interface PostCardProps {
    *  ``'space'`` suppresses zone names so they never leak across the
    *  household boundary. */
   surface?: 'household' | 'space'
+  /** After the time in the meta line: e.g. the space feed's "Not sent
+   *  yet" on the viewer's own post. */
+  metaEnd?: ComponentChildren
 }
 
 /** Reaction chips a post shows before folding the rest behind "+k". */
 const MAX_REACTION_CHIPS = 6
 
-export function PostCard({ post, onReact, onComment, onDelete, onEdit, spaceId, spaceName, surface }: PostCardProps) {
+export function PostCard({ post, onReact, onComment, onDelete, onEdit, spaceId, spaceName, surface, metaEnd }: PostCardProps) {
   const timeAgo = formatRelative(post.created_at)
 
   if (post.pinned) {
@@ -95,7 +99,7 @@ export function PostCard({ post, onReact, onComment, onDelete, onEdit, spaceId, 
         <div class="sh-post-pin-badge">📌 {t('post.pinned')}</div>
         <PostContent post={post} timeAgo={timeAgo} onReact={onReact}
           onComment={onComment} onDelete={onDelete} onEdit={onEdit}
-          spaceId={spaceId} spaceName={spaceName} surface={surface} />
+          spaceId={spaceId} spaceName={spaceName} surface={surface} metaEnd={metaEnd} />
       </article>
     )
   }
@@ -104,12 +108,12 @@ export function PostCard({ post, onReact, onComment, onDelete, onEdit, spaceId, 
     <article class={`sh-post ${post.content === null ? 'sh-post--deleted' : ''}`}>
       <PostContent post={post} timeAgo={timeAgo} onReact={onReact}
         onComment={onComment} onDelete={onDelete} onEdit={onEdit}
-        spaceId={spaceId} spaceName={spaceName} surface={surface} />
+        spaceId={spaceId} spaceName={spaceName} surface={surface} metaEnd={metaEnd} />
     </article>
   )
 }
 
-function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spaceId, spaceName, surface }: PostCardProps & { timeAgo: string }) {
+function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spaceId, spaceName, surface, metaEnd }: PostCardProps & { timeAgo: string }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const closeMenu = () => setMenuOpen(false)
   // Reaction chips: the most used first (ties keep their order), at most
@@ -211,6 +215,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
           )}
           <span class="sh-post-time">{timeAgo}</span>
           {post.edited_at && <span class="sh-post-edited">(edited)</span>}
+          {metaEnd}
         </div>
         {showCrossSpaceBadge && (
           <a class="sh-post-space-badge" href={addBase(`/spaces/${spaceId}`)}>

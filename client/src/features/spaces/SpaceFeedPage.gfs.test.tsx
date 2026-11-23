@@ -99,3 +99,21 @@ describe('the space GFS notice', () => {
     await m.tl.waitFor(() => expect(m.r.getByTestId('space-gfs-notice-optional')).toBeTruthy())
   }, 20000)
 })
+
+describe('the space sync chip', () => {
+  it('shows only when posts may be missing — never for an away host', async () => {
+    wire({ space_type: 'private', sync: { state: 'host_offline', last_ok_at: null, waiting_to_send: 2 } })
+    let m = await open()
+    await m.tl.waitFor(() => expect(m.r.container.querySelector('.sh-space-hero')).toBeTruthy())
+    expect(m.r.queryByTestId('space-sync-chip')).toBeNull()
+    m.tl.cleanup()
+    vi.resetModules()
+    wire({ space_type: 'private', sync: {
+      state: 'behind', last_ok_at: null, waiting_to_send: 0, may_be_missing: true, unsent_posts: [],
+    } })
+    m = await open()
+    const chip = await m.tl.waitFor(() => m.r.getByTestId('space-sync-chip'))
+    expect(chip.textContent).toBe('⚠Some posts may be missing›')
+    expect(chip.getAttribute('href')).toBe('/spaces/s1/settings/sync')
+  }, 20000)
+})

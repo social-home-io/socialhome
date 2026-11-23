@@ -17,7 +17,9 @@ a whole resource in memory.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar
@@ -71,6 +73,28 @@ def window_for_space(space: Space | None, *, now: datetime | None = None) -> Syn
     )
 
 
+#: A sync page's cutoff pinned for one space while this task reads it
+#: (:func:`pinned_cutoff`) — ``(space_id, cutoff)``.
+_PINNED_CUTOFF: ContextVar[tuple[str, str | None] | None] = ContextVar(
+    "sync_window_pinned_cutoff", default=None
+)
+
+
+@contextmanager
+def pinned_cutoff(space_id: str, cutoff: str | None) -> Iterator[None]:
+    """Within the block, :meth:`SyncWindows.for_space` of *space_id* uses
+    *cutoff* instead of ``now - retention_days`` (the space's exempt post
+    types still apply). A sync page commits to the rows of ITS cutoff, so
+    every household evaluates it with that cutoff, never its own clock
+    (``docs/protocol/sync-pages.md`` §1). Task-local: a stream running
+    alongside keeps its own window."""
+    token = _PINNED_CUTOFF.set((space_id, cutoff))
+    try:
+        yield
+    finally:
+        _PINNED_CUTOFF.reset(token)
+
+
 class SyncWindows:
     """Look up a space's :class:`SyncWindow` when an export starts."""
 
@@ -80,7 +104,11 @@ class SyncWindows:
         self._spaces = space_repo
 
     async def for_space(self, space_id: str) -> SyncWindow:
-        return window_for_space(await self._spaces.get(space_id))
+        window = window_for_space(await self._spaces.get(space_id))
+        pin = _PINNED_CUTOFF.get()
+        if pin is not None and pin[0] == space_id:
+            return SyncWindow(cutoff=pin[1], exempt_types=window.exempt_types)
+        return window
 
     async def retention_key(self, space_id: str) -> str:
         """The space's retention as a stable string — ``"<days>:<exempt

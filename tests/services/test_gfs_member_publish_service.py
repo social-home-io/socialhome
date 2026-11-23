@@ -1111,6 +1111,20 @@ async def test_on_published_runs_once_a_server_took_the_item(world):
     assert done == [True]
 
 
+async def test_schedule_post_hands_its_on_published_through(world):
+    """A post a server took is reported (the sync status's "Not sent yet"
+    clears)."""
+    svc = world["svc"]
+    done: list[bool] = []
+
+    async def _done() -> None:
+        done.append(True)
+
+    assert svc.schedule_post(SPACE_ID, AUTHOR, {"post_id": "p"}, on_published=_done)
+    await svc.wait_idle()
+    assert done == [True]
+
+
 async def test_on_published_never_runs_when_no_server_took_it(world):
     svc = world["svc"]
     svc._writer_certs.scope = "comment"  # our cert cannot carry this type

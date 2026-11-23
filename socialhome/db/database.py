@@ -42,6 +42,24 @@ log = logging.getLogger(__name__)
 #: statement commits in its own transaction — slower under a burst).
 DEFAULT_WRITE_BATCH_WINDOW_MS = 5
 
+#: How often, at most, the writer refreshes the query planner's statistics
+#: (``PRAGMA optimize``) while writes keep arriving. SQLite recommends a
+#: long-lived connection run it "periodically, perhaps once per day or once
+#: per hour"; it re-analyzes only tables whose size changed a lot since
+#: their last analysis, so most runs do nothing. No writes, no change — an
+#: idle database is not re-optimized.
+DEFAULT_OPTIMIZE_INTERVAL_S = 3600.0
+
+#: Run once when the connection opens: ``0x10000`` checks every table (not
+#: only the ones this connection has queried yet), ``0x02`` analyzes those
+#: that need it. SQLite 3.46+; ``optimize`` caps each analysis itself.
+_OPTIMIZE_ON_OPEN = "PRAGMA optimize=0x10002"
+
+#: Rows ``ANALYZE`` samples per index (``PRAGMA analysis_limit``) — SQLite's
+#: suggested value. Set on open so a periodic ``PRAGMA optimize`` never runs a
+#: full-table ``ANALYZE`` on a SQLite older than 3.46.
+_ANALYSIS_LIMIT = 400
+
 
 @dataclass
 class _PendingWrite:
@@ -70,6 +88,14 @@ class AsyncDatabase:
     * ``PRAGMA cache_size=-16384`` — 16 MiB of page cache.
     * ``PRAGMA mmap_size=134217728`` — 128 MiB memory-mapped read window.
     * ``PRAGMA foreign_keys=ON`` — enforce referential integrity.
+    * ``PRAGMA analysis_limit=400`` — every ``ANALYZE`` samples, never reads
+      whole tables (SQLite 3.46+ does this itself inside ``optimize``).
+    * ``PRAGMA optimize=0x10002`` — planner statistics (``sqlite_stat1``),
+      refreshed by ``PRAGMA optimize`` at most every
+      ``optimize_interval_s`` after a write batch and once more on
+      :meth:`shutdown`. Without statistics SQLite cannot tell that a big
+      space is most of a table, and pages a §25.6 sync export by sorting
+      the whole space for every page.
     """
 
     def __init__(
@@ -80,6 +106,7 @@ class AsyncDatabase:
         batch_timeout_ms: int = DEFAULT_WRITE_BATCH_WINDOW_MS,
         busy_timeout_ms: int = 5000,
         migrations_dir: Path | None = None,
+        optimize_interval_s: float = DEFAULT_OPTIMIZE_INTERVAL_S,
     ) -> None:
         self._path = str(path)
         self._batch_max = batch_max
@@ -98,6 +125,10 @@ class AsyncDatabase:
         # seconds is far longer than any single write here takes.
         self._busy_timeout_ms = max(0, int(busy_timeout_ms))
         self._migrations_dir = migrations_dir or MIGRATIONS_DIR
+        self._optimize_interval_s = max(0.0, float(optimize_interval_s))
+        self._optimize_sql = "PRAGMA optimize"
+        #: Loop time after which the writer next runs ``PRAGMA optimize``.
+        self._next_optimize_at = 0.0
 
         # Populated by ``startup()``.
         self._conn: sqlite3.Connection | None = None
@@ -163,9 +194,14 @@ class AsyncDatabase:
                     "migrations (most likely a transaction is still open). "
                     "Every ON DELETE CASCADE would be inert for this process."
                 )
+            # Cap every ANALYZE ``optimize`` runs: SQLite 3.46+ does this
+            # itself, an older library would analyze whole tables.
+            conn.execute(f"PRAGMA analysis_limit={_ANALYSIS_LIMIT}")
+            self._optimize_quietly(conn, _OPTIMIZE_ON_OPEN)
             return conn
 
         self._conn = await loop.run_in_executor(None, _open)
+        self._next_optimize_at = loop.time() + self._optimize_interval_s
 
         self._write_queue = asyncio.Queue()
         self._writer_lock = asyncio.Lock()
@@ -203,6 +239,9 @@ class AsyncDatabase:
                 # ``sqlite3.ProgrammingError: Cannot operate on a closed
                 # database`` instead, which a caller can see and log.
                 with lock:
+                    # SQLite's advice: optimize just before closing, so the
+                    # next open starts from fresh statistics.
+                    self._optimize_quietly(conn, self._optimize_sql)
                     conn.close()
 
             await loop.run_in_executor(None, _locked_close)
@@ -367,6 +406,41 @@ class AsyncDatabase:
         async with self._writer_lock:
             return await loop.run_in_executor(None, _run)
 
+    async def optimize(self) -> None:
+        """Refresh the query planner's statistics (``PRAGMA optimize``).
+
+        Runs on the writer's turn (``ANALYZE`` writes ``sqlite_stat1``) in
+        the executor, never on the event loop. The writer calls this itself
+        at most every ``optimize_interval_s``; a failure is logged, never
+        raised — statistics only make queries faster.
+        """
+        self._assert_running()
+        await self._optimize_now()
+
+    async def _optimize_now(self) -> None:
+        # No ``_assert_running``: the writer also calls this for the batches
+        # it drains after ``shutdown`` began (the connection is still open
+        # until the writer has exited).
+        assert self._conn is not None
+        assert self._writer_lock is not None
+        conn = self._conn
+        lock = self._conn_thread_lock
+        sql = self._optimize_sql
+
+        def _run() -> None:
+            with lock:
+                self._optimize_quietly(conn, sql)
+
+        async with self._writer_lock:
+            await asyncio.get_running_loop().run_in_executor(None, _run)
+
+    @staticmethod
+    def _optimize_quietly(conn: sqlite3.Connection, sql: str) -> None:
+        try:
+            conn.execute(sql).fetchall()
+        except sqlite3.Error as exc:
+            log.warning("PRAGMA optimize failed: %s", exc)
+
     # ── Internals ────────────────────────────────────────────────────────
 
     async def _read(self, fn):
@@ -424,6 +498,16 @@ class AsyncDatabase:
                 batch.append(nxt)
 
             await self._apply_batch(conn, batch)
+            if loop.time() >= self._next_optimize_at:
+                self._next_optimize_at = loop.time() + self._optimize_interval_s
+                try:
+                    await self._optimize_now()
+                except Exception:
+                    # ``_optimize_quietly`` absorbs SQLite errors; this is
+                    # anything else (an executor already shut down raises
+                    # ``RuntimeError``). Statistics are an optimisation —
+                    # never let them end the writer every write waits on.
+                    log.warning("periodic PRAGMA optimize failed", exc_info=True)
 
     async def _apply_batch(
         self,

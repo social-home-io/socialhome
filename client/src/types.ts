@@ -403,6 +403,38 @@ export interface Comment {
   created_at: string
 }
 
+/** v_95: the newest signed sync page held, and how our copy compared
+ *  with it (``match`` / ``missing`` / ``differing_buckets`` ``null``: not
+ *  compared yet). Shown only in the admin Details. */
+export interface SpaceSyncPageWire {
+  seq: number
+  at: string
+  match: boolean | null
+  /** Rows a listing PROVED missing (``match: false``). */
+  missing: number | null
+  differing_buckets: number | null
+  /** ``owner`` or ``admin`` (a seed-holding delegated admin). */
+  signer_role: string | null
+  /** The signer equivocated (two pages that cannot both be honest). */
+  conflict: boolean
+}
+
+/** ``GET /api/spaces/{id}`` ``sync`` (see ``features/spaces/spaceSync``). */
+export interface SpaceSyncWire {
+  state: 'up_to_date' | 'catching_up' | 'behind' | 'host_offline' | 'never'
+  last_ok_at: string | null
+  waiting_to_send: number
+  /** "Some posts may be missing" — the one warning. */
+  may_be_missing: boolean
+  /** Posts written here that no other household has yet ("Not sent
+   *  yet" on the post; the SPA marks only the viewer's own). */
+  unsent_posts: string[]
+  /** Only while "Check now" is refused: when it works again (UTC ISO
+   *  8601; the limit is per space for the whole household). */
+  next_check_at?: string
+  page?: SpaceSyncPageWire
+}
+
 export interface Space {
   id: string
   name: string
@@ -461,6 +493,10 @@ export interface Space {
   /** ``GET /api/spaces/{id}`` only: global but listed on no GFS ("global,
    *  not listed") — the SPA shows a banner until the owner picks one. */
   gfs_unlisted?: boolean
+  /** ``GET /api/spaces/{id}`` only: is this household up to date with the
+   *  space — ``{state, last_ok_at, waiting_to_send}`` for a member, ``null``
+   *  for a follower (``features/spaces/spaceSync``). */
+  sync?: SpaceSyncWire | null
   /** ``GET /api/spaces`` rows: the caller's seat (``subscriber`` = follows). */
   my_role?: string
   /** ``GET /api/spaces`` rows: members (local + remote, never followers). */
@@ -474,6 +510,9 @@ export interface Space {
   /** ``GET /api/spaces`` rows: what waits for the caller (the More badge's
    *  total) — ``null`` unless they are owner / admin / moderator. */
   needs_you?: number | null
+  /** ``GET /api/spaces`` rows: "Some posts may be missing" — the list's
+   *  dot (``sync.may_be_missing``; never for a follower). */
+  sync_may_be_missing?: boolean
   /** The uploaded icon (signed), ``null`` without one. */
   icon_url?: string | null
 }

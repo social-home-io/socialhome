@@ -290,6 +290,19 @@ async def test_the_sentinel_carries_and_signs_the_owner_statement():
     assert "owner_statement" not in plain
 
 
+async def test_no_sync_page_rides_the_sentinel():
+    """v_95 push: a page is its own ``SPACE_SYNC_PAGE`` event; the sentinel
+    has no field for it."""
+    kp = generate_identity_keypair()
+    builder = ChunkBuilder(
+        encoder=FederationEncoder(kp.private_key), crypto=_FakeCrypto()
+    )
+    plain = await builder.build_sentinel(
+        space_id="sp-1", sync_id="sync-x", sig_suite="ed25519"
+    )
+    assert "page_sealed" not in plain
+
+
 async def test_the_sentinel_carries_the_providers_inviter_proof():
     kp = generate_identity_keypair()
     builder = ChunkBuilder(

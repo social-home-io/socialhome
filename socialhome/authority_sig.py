@@ -108,6 +108,14 @@ AUTHORITY_EVENT_SPACE_MEDIA_PUT: str = "space_media_put"
 AUTHORITY_EVENT_SPACE_MEDIA_DELETE: str = "space_media_delete"
 
 
+#: Authority event-type for a sync page (``docs/protocol/sync-pages.md``): a
+#: seed-holder acting as host signs its commitment to the space's state
+#: (:mod:`socialhome.sync_page`). Members verify it against the space key they
+#: pin. NOT a relay — kept out of ``AUTHORITY_RELAY_EVENT_TYPES``: a page
+#: travels only inside a §25.6 session, never through a GFS.
+AUTHORITY_EVENT_SPACE_SYNC_PAGE: str = "space_sync_page"
+
+
 #: The set of event types the GFS will authorize on the space-authority relay
 #: path (a NON-owner seed-holder relaying content the GFS stays blind to). Both
 #: are space-authority-signed and content-blind to the GFS; anything else is

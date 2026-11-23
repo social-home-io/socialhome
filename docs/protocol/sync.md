@@ -364,6 +364,161 @@ requester per 30 min in all, `SPACE_MEDIA_WANTED` included) — 200 × 48 =
 9 600 small requests a day in all, ~4 800 per helper. Nothing fans out: one
 requester, one helper, one space per round.
 
+#### Verified fetch from any member (v_95, sync pages Phase 3)
+
+The helper resume above is limited to the helper's own people's rows,
+because a row on the mesh is not signed by itself. With signed sync pages
+([sync-pages.md](./sync-pages.md#phase-3-as-built-v_95)) that limit goes
+for everything the newest page commits: the same silent round also calls
+`SyncPageService.host_silent`, and the member asks **any** member
+household (any member seat — not only admins and moderators — never a
+follower, never the host; the helper picker with other roles, the same
+stable offset, at most 3 per round, one at a time) for the rows of the
+buckets its page proves it lacks — on an ordinary incremental BEGIN to it
+(`buckets` + `rows` + `have`, like the host's listing ask). The deliverer serves only buckets it
+holds unchanged since that page (`held: false` for the rest); the member
+checks every listing against the signed bucket hashes and every row's
+committed part against a listed leaf, refuses anything else (one
+WARNING), and applies what passes through the normal receiver as the host's
+row — that row only. A partial answer goes on to the next member; a host
+heard again stops it. Once nothing is left, the space reads **up to date**
+while the host is still offline. A bucket every member household on the
+page answers `held: false` for (each changed it after the page too: a
+delete, a poll closed) is paused for 1 h — still unresolved, never "up to
+date" — so a silent host never costs one ask per tick for nothing; a member
+on another page sends no listing and is no "no"; a delete or archive we hold explains
+its own bucket locally. The owner, back from a long absence, judges every
+page its delegated admin sealed — even one older than its own — and
+catches up against it, a round every tick (no host above it goes silent);
+it seals by its own lazy rule meanwhile and reads "catching up" until it
+holds what that page commits.
+
+The helper resume is unchanged and runs next to it: it covers the rows
+newer than the page (its own people's), while the verified fetch covers
+every row the page commits, from anyone. What a page does not commit (item
+state such as reactions and votes, the chat, member pictures, the roster,
+a calendar event's feed card) still comes only from the host; files still
+come on view (`SPACE_MEDIA_WANTED`).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Member (behind)
+    participant H as Host (offline)
+    participant D as Any member household
+    M->>H: SPACE_SYNC_BEGIN (periodic tick)
+    Note over M: 120 s, no answer → silent → compare with the held page
+    M->>D: SPACE_SYNC_BEGIN (incremental) + buckets + rows + have (offset + round)
+    D->>M: its chunks, then __listing__ + __rows__ (proven buckets only) + sentinel
+    Note over M: verify against the signed page → apply → next member if anything is left
+```
+
+### Sync status
+
+A member household tells its people whether a space it does not host needs
+sync — local only, no new message on the wire. Each answer of a household
+acting as the space's host here (`host_equivalence.acting_hosts`: the owner,
+or the trusted inviting admin) to our `SPACE_SYNC_BEGIN` ends in one result,
+kept on that household's `space_instances` row (migration 0150):
+
+| `sync_result` | From |
+|---|---|
+| `ok` (+ `sync_ok_at`) | a clean `SpaceSyncComplete` — the quiet sentinel of an up-to-date space included |
+| `unclean` | `SpaceSyncComplete {clean: false}` (held back / lost chunk) |
+| `deferred` | `SpaceSyncDeferred` (a refusal, or a stream cut mid-way) |
+| `unreachable` | the scheduler's silent-host verdict (`HOST_ANSWER_WAIT_S`, trigger 10) |
+
+A result is written with its time (`sync_result_at`) when it changes; the
+same result refreshes that time (an `ok` its `sync_ok_at` too) at most every
+15 minutes — never per chunk. The silent-host check runs for every space
+hosted elsewhere that one of our people holds a member seat in, a household
+holding the roster authority included (it records the host `unreachable`,
+it just asks no helper). `SpaceSyncStatusService` computes the state at read
+time: **host offline** when a host was found unreachable and no host
+answered (any result) within 1 h — a last answer two rounds old is no
+answer, whatever it said; otherwise **up to date** (an `ok` within 2 h; a
+refusal right after an `ok` within 1 h keeps it); **catching up** (a chunk
+of a stream from a household acting as host moved within 2 minutes — a
+co-member's stream does not count; it also beats host offline); then host
+offline, **never** (no `ok` yet), else **behind**. The space's owner
+household is always up to date. It rides `GET /api/spaces/{id}` (`sync`,
+with `waiting_to_send` — the space's content items still in our outbox,
+`SPACE_WRITE_EVENT_TYPES` only: never a queued `SPACE_SYNC_BEGIN` or other
+control traffic, never the `SPACE_MEDIA_BLOB` chunks of an item's files, and
+content queued for the mesh as `SPACE_ROUTED` is not counted; the payload is sealed, so on the host this includes the
+members' content it forwards) and, when the state or the waiting count
+changes, the local `space.sync_state` frame, members only — the outbox tells
+the status when a space's rows are queued, delivered or dropped. Every
+trigger takes one recheck path per space: one at a time (frames in order),
+at most one frame per 2 s per space (fixed), never one per row. **Sync now** (`POST /api/spaces/{id}/sync`) sends the incremental
+BEGIN of one round right away to the households acting as host only — a
+mesh-only one over the mesh too, never a paired co-member — within 3 per
+hour per space, inside the host's 5 BEGINs / h budget next to the 2
+periodic ones; a space hosted here asks its paired member households. Past
+the limit it answers `429` with `Retry-After` and `error.retry_after_s`
+(when the next one is allowed).
+
+**What a member sees** (owner decisions 2026-11-21/22) is plain language,
+not plumbing. The status carries one warning, `may_be_missing` ("Some
+posts may be missing", the DM gap's wording): true from the **second
+failed round** after the newest `ok` (the newest answer at least 45 min
+after it — rounds are 30 min apart; one failed round is no warning), with
+no `ok` ever after an unclean stream, or when the newest signed page
+**proved** a row missing (`page.match: false`, `page.missing > 0` — known
+only after the round that carried the listing, so still true after that
+automatic sync; a first mismatch says nothing). Never while catching up,
+never for an away host (`host_offline`, neutral, settings only) or a space
+not synced yet. Only this warning gets a header chip and a dot on the
+Spaces list (`GET /api/spaces` rows carry `sync_may_be_missing`); the
+settings section "Is everything here?" words every state, and the page,
+parts, signer, outbox count and last sync sit in an admin-only Details.
+`unsent_posts` names our posts **no member household has yet** ("Not
+sent yet" on the author's own post): every member household of the
+broadcast's audience still holds a live outbox row of the post's stored
+payload (`federation_outbox_payloads`, unwrapped under the local KEK to
+read the post id) or a deferred mesh send, and no GFS took it (the member
+publish's `on_published`; memory only — after a restart such a post reads
+"Not sent yet" until a household takes it). A household that took it at
+once has no row, so the post is sent; a deferred mesh send queued or
+released moves it like an outbox row. Bounded (newest 100 stored payloads
+read, 50 ids sent). Known gaps, accepted: a **terminal mesh failure** (no
+outbox row, no deferral left) leaves nothing waiting, so that post reads
+sent; a household that **joined after the post** holds no row for it and
+is still in the audience, so a post every older member still waits for
+reads sent (the newcomer gets it by sync from the host anyway);
+the **GFS "took it" note** is memory only and lost on a restart; on a
+**host**, members' content it forwards shares the 100-payload window with
+its own (the payloads are sealed, so the query cannot pick ours first —
+that would need a column). The time rule counts from this household's own
+start too: rounds missed while it was down are no failed rounds, so after
+a restart the warning needs two failed rounds again (up to three when the
+first round runs right after the start, since that round's answer can land
+before the start time is a round old); with no `ok` ever it
+counts from the host's seat here (`space_instances.joined_at`, when we
+joined) — a first unclean stream reads "Getting the space ready". The
+Spaces list reads the page verdict the last full read saw and never starts
+a page compare itself. `next_check_at` (UTC, only while "Sync now" is
+refused) comes from the per-space limit, which the whole household shares. It
+is not carried in the `space.sync_state` frame: another family member's open
+settings page learns of the limit on its own next press (or a reload).
+
+**Signed sync pages (v_95).** The household acting as host that holds the
+space's authority seed seals, lazily and at most every 15 minutes, a signed
+commitment to the space's state (a **page**: 256 bucket hashes under one
+root). It pushes each new page — `SPACE_SYNC_PAGE`, sealed under the
+content key — to every member household (never a follower), at most once
+an hour per space (one multi upload per GFS for the GFS-reached ones); a
+member whose BEGIN `page` is older than the page a signer last pushed
+gets that page from the signer alone (a plain member relays it only in a
+verified-fetch session, while no host answers). A member keeps the newest page and its
+vector, compares its own rows with each newer page (at most every 15
+minutes): differences explained by its own newer rows cost nothing; the
+rest is settled by at most 8 bucket listings an acting host appends to
+the next round's stream (`buckets` on its incremental BEGIN — no extra
+BEGIN). Its status adds `sync.page`: `match: true` is up to date even while
+the host is offline; a row a listing proves missing is `behind`. See
+[sync-pages.md](./sync-pages.md).
+
 ## What a sync streams
 
 The provider walks `RESOURCE_ORDER` (`federation/sync/space/exporter.py`)
@@ -1469,7 +1624,21 @@ capability gate.
 
 **A provider with no free slot.** The provider admits at most 3
 concurrent syncs per household (S-6) and caps its signalling sessions
-overall (S-8). A BEGIN refused for lack of a slot is answered
+overall (S-8). A household runs one sync of a space with a provider at a
+time, so a new BEGIN from it for a space replaces the session it still
+holds there for that space: that session does not count against the caps,
+and it is closed once the new BEGIN passes every check (slots, the hourly
+budget, membership) — a refused BEGIN never stops a live stream. Its
+stream stops at the next chunk (the closed session record, either
+transport). The requester never sends a BEGIN of a space while one of
+it to that provider is in flight or its stream is still arriving
+(`SyncSessionManager.syncing_from`, the scheduler's in-flight slots, the
+mesh catch-up): Sync now, a periodic tick or an echo during a long full
+stream is skipped, not sent — so the replacement only ever meets the
+orphan of a requester that restarted mid-stream, which then does not hold
+its slots until the 30-minute reaper. The relay re-BEGIN after an ICE
+timeout is recorded and opens its HTTPS receive session like any other
+BEGIN of ours, so its chunks and listings are taken. A BEGIN refused for lack of a slot is answered
 `SPACE_SYNC_DIRECT_FAILED {reason: "too_many_sessions" | "node_capacity"}`.
 That refusal spends **none** of the requester's 5 / h budget for the space:
 the provider checks capacity before it charges the hourly bucket. No

@@ -170,11 +170,18 @@ def space_content_media_name(space_id: str, h: str, filename: str) -> str:
     id keeps a file of one space from ever matching another space's.
     Fixed length, always a safe media name."""
     digest = hashlib.sha256(f"space-content\0{space_id}\0{h}".encode()).hexdigest()
+    return f"{SPACE_CONTENT_MEDIA_PREFIX}{digest[:40]}{content_media_ext(filename)}"
+
+
+def content_media_ext(filename: str) -> str:
+    """The extension a content name keeps of *filename* (``.webp``), or
+    ``""``: a dot and 1–9 ASCII letters / digits. The same on every
+    household for one file (an upload name, a direct name, a content name
+    all keep it), so a sync page commits it with the file's hash — a
+    deliverer cannot pick how a verified file is served."""
     dot = filename.rfind(".")
     ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""
-    if not re.fullmatch(r"\.[A-Za-z0-9]{1,9}", ext):
-        ext = ""
-    return f"{SPACE_CONTENT_MEDIA_PREFIX}{digest[:40]}{ext}"
+    return ext if re.fullmatch(r"\.[A-Za-z0-9]{1,9}", ext) else ""
 
 
 def is_space_content_media_name(name: str) -> bool:

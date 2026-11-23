@@ -1,0 +1,36 @@
+-- 0152 — §25.6 sync export: one index so a space's pages seek, not sort.
+--
+-- ``idx_space_posts_sync_keyset ON space_posts(space_id, deleted)``. Like
+-- every SQLite index it ends in the rowid, so the exporters' page
+--   WHERE space_id=? AND deleted=? AND rowid <= ? ORDER BY rowid DESC LIMIT ?
+-- (``list_sync_page``, ``list_post_tombstones_page``) is one range seek that
+-- stops after ``limit`` rows. Without it SQLite read the space through
+-- ``idx_space_posts_created`` and sorted all of it in a temp B-tree for
+-- every page: O(n²) — ~1.1 s for a 40k-post space.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this data. ``space_posts`` is
+--       read by the sync exporters above (newest-first keyset on rowid, the
+--       incremental run adding ``sync_seq > ?``), the bazaar exporter (joins
+--       it by ``id``; its own ``idx_bazaar_listings_space`` already seeks),
+--       the comments exporter (joins it by ``id``), the feed
+--       (``idx_space_posts_created``) and the 0086 change stamps
+--       (``idx_space_posts_sync_seq``). No index puts a space's rows in
+--       rowid order: ``(space_id, created_at DESC)`` orders by time, and
+--       ``(space_id, sync_seq)`` is partial and orders by stamp.
+--   (2) Non-migration alternatives, tried and measured (60k posts, a
+--       40k-post space): a seekable cursor (``rowid <= ?`` instead of
+--       ``(? IS NULL OR rowid < ?)``) plus ``PRAGMA optimize`` statistics
+--       brings the export to ~50 ms — but only while the household has few
+--       spaces. The planner has per-table averages only (no STAT4); at ~50
+--       spaces the average space looks small and it sorts again (~1.1 s).
+--       Ordering by ``created_at`` instead would change the page order and
+--       cursors the exporters hand out. Forcing a rowid walk (``NOT
+--       INDEXED``) costs a full table walk for every small space.
+--   (3) Smallest change: one additive two-column index, no row touched, no
+--       backfill. ~13 bytes per post (770 KB for 60k posts, ~6% of the
+--       table). The cursor rewrite and ``PRAGMA optimize`` stay: they make
+--       the other exporters seek too.
+CREATE INDEX IF NOT EXISTS idx_space_posts_sync_keyset
+    ON space_posts(space_id, deleted);

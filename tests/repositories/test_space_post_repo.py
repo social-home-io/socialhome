@@ -12,6 +12,7 @@ from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Comment, CommentType, FileMeta, Post, PostType
 from socialhome.domain.space_item import stamp_to_db
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from tests.repositories.sync_page_plans import query_plans, set_statistics
 
 
 @pytest.fixture
@@ -1281,3 +1282,350 @@ async def test_a_row_stamped_in_the_old_shape_still_takes_a_later_edit(env, stor
     assert await repo.edit("p-1", "same day", space_id="sp-1", edited_at=later)
     assert not await repo.edit_comment("c-1", "stale", space_id="sp-1", edited_at=older)
     assert await repo.edit_comment("c-1", "same day", space_id="sp-1", edited_at=later)
+
+
+# ── §25.6 sync pages: a seekable keyset cursor ───────────────────────────
+
+# The query shapes from before the keyset rewrite, verbatim: the rewrite
+# must page the same rows, in the same order, with the same cursors.
+_OLD_POSTS_PAGE = (
+    "SELECT rowid AS sync_rowid, id FROM space_posts"
+    " WHERE space_id=? AND deleted=0{window}"
+    " AND (? IS NULL OR rowid < ?) ORDER BY rowid DESC LIMIT ?"
+)
+_OLD_TOMBSTONES_PAGE = (
+    "SELECT rowid AS sync_rowid, id FROM space_posts"
+    " WHERE space_id=? AND deleted=1"
+    " AND (? IS NULL OR rowid < ?) ORDER BY rowid DESC LIMIT ?"
+)
+
+
+async def _seed_interleaved(env, n: int, *, spaces: int = 2, big: bool = False) -> None:
+    """``n`` posts spread round-robin over sp-1 and ``spaces - 1`` others
+    (``big``: sp-1 takes two of every three, the others share the rest),
+    every 4th one deleted, every 3rd one outside a 2025 retention window."""
+    others = [f"sp-x{k}" for k in range(spaces - 1)]
+    for sid in others:
+        await env.db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id,"
+            " owner_username, identity_public_key) VALUES(?,?,?,?,?)",
+            (sid, "Other", "inst-y", "alice", "ccdd" * 16),
+        )
+    ring = ["sp-1", *others]
+
+    def _fill(conn):
+        conn.executemany(
+            "INSERT INTO space_posts(id, space_id, author, type, content,"
+            " created_at, deleted) VALUES(?,?,?,?,?,?,?)",
+            [
+                (
+                    f"kp-{i}",
+                    (
+                        ring[i % len(ring)]
+                        if not big
+                        else "sp-1"
+                        if i % 3 != 2
+                        else others[(i // 3) % len(others)]
+                    ),
+                    "uid-alice",
+                    "text",
+                    "x",
+                    "2020-01-01 00:00:00" if i % 3 == 0 else "2026-01-01 00:00:00",
+                    int(i % 4 == 0),
+                )
+                for i in range(n)
+            ],
+        )
+
+    await env.db.transact(_fill)
+
+
+async def _old_pages(env, sql: str, params: tuple, limit: int) -> list[list[str]]:
+    pages, cursor = [], None
+    while True:
+        rows = await env.db.fetchall(sql, (*params, cursor, cursor, limit))
+        pages.append([r["id"] for r in rows])
+        if len(rows) < limit:
+            return pages
+        cursor = rows[-1]["sync_rowid"]
+
+
+async def _new_pages(fetch, limit: int) -> list[list[str]]:
+    pages, cursor = [], None
+    while True:
+        page, cursor = await fetch(cursor=cursor, limit=limit)
+        pages.append([p.id for p in page])
+        if cursor is None:
+            return pages
+
+
+@pytest.mark.parametrize("cutoff", [None, "2025-01-01 00:00:00"])
+async def test_list_sync_page_pages_exactly_like_the_old_or_cursor(env, cutoff):
+    await _seed_interleaved(env, 61)
+    window = " AND datetime(created_at) >= datetime(?)" if cutoff else ""
+    old = await _old_pages(
+        env,
+        _OLD_POSTS_PAGE.format(window=window),
+        (env.space_id, *((cutoff,) if cutoff else ())),
+        4,
+    )
+    new = await _new_pages(
+        lambda **kw: env.repo.list_sync_page(env.space_id, cutoff=cutoff, **kw), 4
+    )
+    assert len(new) >= 3  # several pages
+    assert new == old
+    flat = [i for page in new for i in page]
+    assert len(flat) == len(set(flat))  # no repeats
+    rowid = {
+        r["id"]: r["rowid"]
+        for r in await env.db.fetchall("SELECT rowid, id FROM space_posts")
+    }
+    assert [rowid[i] for i in flat] == sorted((rowid[i] for i in flat), reverse=True)
+    # No gaps: every live sp-1 post inside the window, nothing else.
+    held = await env.db.fetchall(
+        "SELECT id FROM space_posts WHERE space_id='sp-1' AND deleted=0"
+        + (" AND created_at >= '2025'" if cutoff else "")
+    )
+    assert set(flat) == {r["id"] for r in held}
+
+
+async def test_list_post_tombstones_page_pages_exactly_like_the_old_or_cursor(env):
+    await _seed_interleaved(env, 61)
+    old = await _old_pages(env, _OLD_TOMBSTONES_PAGE, (env.space_id,), 2)
+    new = await _new_pages(
+        lambda **kw: env.repo.list_post_tombstones_page(env.space_id, **kw), 2
+    )
+    assert len(new) > 3
+    assert new == old
+    held = await env.db.fetchall(
+        "SELECT id FROM space_posts WHERE space_id='sp-1' AND deleted=1"
+    )
+    assert sorted(i for p in new for i in p) == sorted(r["id"] for r in held)
+
+
+async def test_list_sync_page_first_page_starts_at_the_newest_row(env):
+    """The sentinel first page starts at the very top of the table."""
+    await _seed_interleaved(env, 9)
+    page, cursor = await env.repo.list_sync_page(env.space_id, limit=2)
+    # sp-1 holds the even ids; kp-8, kp-4 and kp-0 are deleted.
+    assert [p.id for p in page] == ["kp-6", "kp-2"]
+    assert cursor == await env.db.fetchval(
+        "SELECT rowid FROM space_posts WHERE id='kp-2'"
+    )
+    page, cursor = await env.repo.list_sync_page(env.space_id, cursor=cursor, limit=2)
+    assert (page, cursor) == ([], None)
+
+
+_SYNC_PAGE_READS = {
+    "posts": lambda env: env.repo.list_sync_page(env.space_id, limit=50),
+    "posts-windowed": lambda env: env.repo.list_sync_page(
+        env.space_id, cutoff="2025-01-01 00:00:00", limit=50
+    ),
+    "tombstones": lambda env: env.repo.list_post_tombstones_page(
+        env.space_id, limit=50
+    ),
+    # Past the first page of an incremental run (more than ``limit``
+    # changed): the keyset walk, never a re-sort of every changed row.
+    "posts-since-page-2": lambda env: env.repo.list_sync_page(
+        env.space_id, since=0, cursor=2**40, limit=50
+    ),
+    "tombstones-since-page-2": lambda env: env.repo.list_post_tombstones_page(
+        env.space_id, since=0, cursor=2**40, limit=50
+    ),
+}
+
+# The first page of an incremental run — the quiet check reads only this,
+# every 30 min per (household, space), and usually finds nothing.
+_FIRST_CHANGED_PAGE_READS = {
+    "posts-since": lambda env, since: env.repo.list_sync_page(
+        env.space_id, since=since, limit=50
+    ),
+    "tombstones-since": lambda env, since: env.repo.list_post_tombstones_page(
+        env.space_id, since=since, limit=50
+    ),
+}
+
+
+async def _big_space_among_many(env, *, stats: bool) -> None:
+    await _seed_interleaved(env, 3000, spaces=50, big=True)
+    await set_statistics(env.db, on=stats)
+
+
+_KEYSET_SEEK = "idx_space_posts_sync_keyset (space_id=? AND deleted=? AND rowid<?)"
+
+
+@pytest.mark.parametrize("stats", [False, True], ids=["no-stats", "optimized"])
+@pytest.mark.parametrize("read", sorted(_SYNC_PAGE_READS))
+async def test_a_big_space_among_many_seeks_the_keyset_index(env, read, stats):
+    """A page of a big space walks ``idx_space_posts_sync_keyset`` down from
+    the cursor and stops after ``limit`` rows — no temp B-tree over the
+    whole space per page (that made a 40k-post export O(n²), ~1.1 s). With
+    many spaces the planner's averages make the space look small, so
+    statistics alone did not get here (migration 0152)."""
+    await _big_space_among_many(env, stats=stats)
+    plans = await query_plans(env.db, lambda: _SYNC_PAGE_READS[read](env))
+    for plan in plans:
+        assert "TEMP B-TREE" not in plan, plan
+        assert _KEYSET_SEEK in plan, plan
+
+
+@pytest.mark.parametrize("stats", [False, True], ids=["no-stats", "optimized"])
+@pytest.mark.parametrize("read", sorted(_FIRST_CHANGED_PAGE_READS))
+async def test_the_first_changed_page_reads_the_change_stamp_index(env, read, stats):
+    """A quiet check or a small incremental run touches only the changed
+    rows (``idx_space_posts_sync_seq``, ~0.1 ms) — the keyset index would
+    walk the whole space (~7 ms for 40k posts) for every household, every
+    round."""
+    await _big_space_among_many(env, stats=stats)
+    mark = await env.db.fetchval("SELECT max(sync_seq) FROM space_posts")
+    plans = await query_plans(
+        env.db, lambda: _FIRST_CHANGED_PAGE_READS[read](env, mark)
+    )
+    for plan in plans:
+        assert "idx_space_posts_sync_seq (space_id=? AND sync_seq>?)" in plan, plan
+
+
+@pytest.mark.parametrize("cutoff", [None, "2025-01-01 00:00:00"])
+async def test_an_incremental_run_pages_exactly_like_the_old_or_cursor(env, cutoff):
+    """First page by change stamp, later pages by the keyset: the same rows,
+    order and cursors as the one old query."""
+    await _seed_interleaved(env, 121)
+    mark = await env.db.fetchval("SELECT sync_seq FROM space_posts WHERE id='kp-40'")
+    window = " AND datetime(created_at) >= datetime(?)" if cutoff else ""
+    old = await _old_pages(
+        env,
+        _OLD_POSTS_PAGE.format(window=window + " AND sync_seq > ?"),
+        (env.space_id, *((cutoff,) if cutoff else ()), mark),
+        4,
+    )
+    new = await _new_pages(
+        lambda **kw: env.repo.list_sync_page(
+            env.space_id, cutoff=cutoff, since=mark, **kw
+        ),
+        4,
+    )
+    assert len(new) >= 3
+    assert new == old
+    old_gone = await _old_pages(
+        env,
+        _OLD_TOMBSTONES_PAGE.replace(
+            " AND (? IS NULL", " AND sync_seq > ? AND (? IS NULL"
+        ),
+        (env.space_id, mark),
+        2,
+    )
+    new_gone = await _new_pages(
+        lambda **kw: env.repo.list_post_tombstones_page(env.space_id, since=mark, **kw),
+        2,
+    )
+    assert len(new_gone) >= 3
+    assert new_gone == old_gone
+
+
+async def test_a_small_space_among_many_pages_every_row_once(env):
+    await _seed_interleaved(env, 3000, spaces=50, big=True)
+    seen, cursor = [], None
+    while True:
+        page, cursor = await env.repo.list_sync_page("sp-x3", cursor=cursor, limit=3)
+        seen.extend(p.id for p in page)
+        if cursor is None:
+            break
+    held = await env.db.fetchall(
+        "SELECT id FROM space_posts WHERE space_id='sp-x3' AND deleted=0"
+        " ORDER BY rowid DESC"
+    )
+    assert len(held) > 6
+    assert seen == [r["id"] for r in held]
+
+
+# ── Comments: the same first-changed-page rule ───────────────────────────
+
+_OLD_COMMENTS_PAGE = (
+    "SELECT c.rowid AS sync_rowid, c.id FROM space_post_comments c"
+    " JOIN space_posts p ON p.id = c.post_id"
+    " WHERE p.space_id=? AND c.deleted=?{live} AND c.sync_seq > ?"
+    " AND c.rowid > ? ORDER BY c.rowid LIMIT ?"
+)
+
+
+async def _seed_comments(env, posts: int, comments: int) -> None:
+    """``posts`` posts over 5 spaces (sp-1 the big one) and ``comments``
+    comments spread over them, every 5th deleted."""
+    await _seed_interleaved(env, posts, spaces=5, big=True)
+
+    def _fill(conn):
+        conn.executemany(
+            "INSERT INTO space_post_comments(id, post_id, author, type, content,"
+            " created_at, deleted) VALUES(?,?,?,?,?,?,?)",
+            [
+                (
+                    f"kc-{k}",
+                    f"kp-{(k * 7) % posts}",
+                    "uid-alice",
+                    "text",
+                    "c",
+                    "2026-01-01 00:00:00",
+                    int(k % 5 == 0),
+                )
+                for k in range(comments)
+            ],
+        )
+
+    await env.db.transact(_fill)
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "deleted"])
+async def test_an_incremental_comments_run_pages_exactly_like_one_query(env, deleted):
+    await _seed_comments(env, 120, 300)
+    mark = await env.db.fetchval(
+        "SELECT sync_seq FROM space_post_comments WHERE id='kc-60'"
+    )
+    old, cursor = [], None
+    while True:
+        rows = await env.db.fetchall(
+            _OLD_COMMENTS_PAGE.format(live="" if deleted else " AND p.deleted=0"),
+            (env.space_id, int(deleted), mark, cursor or 0, 3),
+        )
+        old.append([r["id"] for r in rows])
+        if len(rows) < 3:
+            break
+        cursor = rows[-1]["sync_rowid"]
+    new, cursor = [], None
+    while True:
+        page, cursor = await env.repo.list_comments_sync_page(
+            env.space_id, deleted=deleted, since=mark, cursor=cursor, limit=3
+        )
+        new.append([c.id for c in page])
+        if cursor is None:
+            break
+    assert len(new) >= 3
+    assert new == old
+
+
+@pytest.mark.parametrize("stats", [False, True], ids=["no-stats", "optimized"])
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "deleted"])
+async def test_a_quiet_comments_check_reads_the_change_stamps(env, stats, deleted):
+    """First incremental page — all a quiet check reads: only the changed
+    comments (``idx_space_post_comments_sync_seq``), never a walk of the
+    space's posts (~10 ms) or of every comment (~0.4 ms per 6k)."""
+    await _seed_comments(env, 600, 900)
+    await set_statistics(env.db, on=stats)
+    mark = await env.db.fetchval("SELECT max(sync_seq) FROM space_post_comments")
+    first = await query_plans(
+        env.db,
+        lambda: env.repo.list_comments_sync_page(
+            env.space_id, deleted=deleted, since=mark, limit=50
+        ),
+    )
+    for plan in first:
+        assert "idx_space_post_comments_sync_seq (sync_seq>?)" in plan, plan
+    # Past the first page (many changed): the stamp index stays out — it
+    # would re-sort every changed comment for every page.
+    later = await query_plans(
+        env.db,
+        lambda: env.repo.list_comments_sync_page(
+            env.space_id, deleted=deleted, since=0, cursor=1, limit=50
+        ),
+    )
+    for plan in later:
+        assert "idx_space_post_comments_sync_seq" not in plan, plan

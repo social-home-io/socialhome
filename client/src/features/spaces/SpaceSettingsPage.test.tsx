@@ -47,6 +47,7 @@ const confirm = vi.hoisted(() => vi.fn())
 vi.mock('@/components/confirm', () => ({ confirmDialog: confirm }))
 
 import { confirmLeave, shouldConfirmLeave } from '@/router/navigationGuard'
+import type { InstanceConfig } from '@/store/instance'
 
 let detail: Record<string, unknown>
 let role: string
@@ -94,7 +95,7 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     const links = indexLinks(view)
     expect(links.map(a => a.textContent)).toEqual([
       'Basics', 'Who can find it', 'Members & joining', 'Sections', 'Games allowed here',
-      'Your notifications', 'Location & zones', 'Moderation & age', 'Bots', 'Archive or delete',
+      'Your notifications', 'Location & zones', 'Moderation & age', 'Is everything here?', 'Bots', 'Archive or delete',
     ])
     expect(links[0].getAttribute('href')).toBe('/spaces/sp-1/settings/basics')
     expect(links[0].getAttribute('aria-current')).toBe('page')
@@ -103,7 +104,7 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     expect(view.queryAllByRole('tab')).toHaveLength(0)
     expect(view.queryAllByRole('tablist')).toHaveLength(0)
     // Every section is on the page, with its own anchor.
-    for (const s of ['basics', 'find', 'members', 'sections', 'games', 'notifications', 'location', 'moderation', 'bots', 'danger']) {
+    for (const s of ['basics', 'find', 'members', 'sections', 'games', 'notifications', 'location', 'moderation', 'sync', 'bots', 'danger']) {
       expect(view.container.querySelector(`#settings-${s}`)).not.toBeNull()
     }
   })
@@ -112,7 +113,7 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     role = 'moderator'
     let view = await mount()
     expect(indexLinks(view).map(a => a.textContent)).toEqual([
-      'Your notifications', 'Games allowed here', 'You in this space', 'Bots', 'Leave',
+      'Your notifications', 'Games allowed here', 'You in this space', 'Is everything here?', 'Bots', 'Leave',
     ])
     view.unmount()
     role = 'member'
@@ -160,11 +161,11 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     expect((again.getByTestId('settings-danger') as HTMLDetailsElement).open).toBe(true)
   })
 
-  it('a plain member gets their notifications, "You in this space", bots and Leave', async () => {
+  it('a plain member gets their notifications, "You in this space", Sync, bots and Leave', async () => {
     role = 'member'
     const view = await mount()
     expect(indexLinks(view).map(a => a.textContent)).toEqual([
-      'Your notifications', 'You in this space', 'Bots', 'Leave',
+      'Your notifications', 'You in this space', 'Is everything here?', 'Bots', 'Leave',
     ])
     expect(view.container.querySelector('#settings-basics')).toBeNull()
     expect(view.getByTestId('settings-you-profile')).toBeTruthy()
@@ -477,5 +478,50 @@ describe('SpaceSettingsPage — under the HA ingress prefix', () => {
       .toBe('/api/hassio_ingress/tok/spaces/sp-1')
     expect(view.getByRole('link', { name: 'Manage zones' }).getAttribute('href'))
       .toBe('/api/hassio_ingress/tok/spaces/sp-1/zones')
+  })
+})
+
+
+describe('SpaceSettingsPage — "Is everything here?" on a space hosted elsewhere', () => {
+  const SYNC = {
+    state: 'up_to_date', last_ok_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    waiting_to_send: 1, may_be_missing: false, unsent_posts: [],
+    page: { seq: 41, at: new Date().toISOString(), signer_role: 'owner', match: true,
+      missing: 0, differing_buckets: 0, conflict: false },
+  }
+  // Earlier blocks reset the module registry: take the stores the page
+  // will import now.
+  let stores: { instance: typeof import('@/store/instance'); conns: typeof import('@/store/connections') }
+  beforeEach(async () => {
+    stores = { instance: await import('@/store/instance'), conns: await import('@/store/connections') }
+    stores.instance.instanceConfig.value = { instance_id: 'me' } as InstanceConfig
+    stores.conns.connections.value = []
+    detail = { ...detail, owner_instance_id: 'host-x', sync: SYNC }
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (url === '/api/connections'
+      ? [{ instance_id: 'host-x', display_name: 'The Müllers' }]
+      : base(url)))
+  })
+  afterEach(() => {
+    stores.instance.instanceConfig.value = null
+    stores.conns.connections.value = []
+  })
+
+  it('a match with the signed page names no host; the Details for a space admin', async () => {
+    role = 'admin'
+    const view = await mount()
+    const section = await view.findByTestId('space-sync-section')
+    await waitFor(() => expect(section.textContent).toContain('nothing is missing'))
+    expect(section.textContent).not.toContain('The Müllers')
+    expect(view.getByTestId('space-sync-now')).toBeTruthy()
+    expect(view.getByTestId('space-sync-details').textContent).toContain('Matches page 41')
+  })
+
+  it('a member gets the plain words without the Details', async () => {
+    role = 'member'
+    const view = await mount()
+    const section = await view.findByTestId('space-sync-section')
+    expect(section.textContent).toContain("Everything's here")
+    expect(view.queryByTestId('space-sync-details')).toBeNull()
   })
 })

@@ -180,6 +180,11 @@ That single command runs the full sequence:
      attempt on) and the sealed redeem body carries the redeemer's (what
      the issuer stamps on the seat). Both land on the seats, so the seats
      are where the round-trip is provable.
+   - **Sync status (migration 0150).** Beta reads its own space
+     ``up_to_date`` (``GET /api/spaces/{id}`` ``sync``), and so must Alpha
+     and Gamma — their host answered a sync with ``ok``. A member that
+     doesn't yet presses "Sync now" once (``POST …/sync``, the incremental
+     BEGIN) and must read ``up_to_date`` within 90 s.
    - **v_39 space timetable.** Alpha and Gamma (plain members of Beta's
      space) ``GET /api/spaces/{id}/timetables`` and must see Beta's
      timetable at its latest version with the "Mathe" lesson — which also
@@ -589,6 +594,24 @@ That single command runs the full sequence:
    retraction is refused (409) and the vote stays everywhere. ``verify``
    re-reads **b** and fails when it no longer holds **c**'s vote under
    **c**'s stamp, and pins ``MIN_FOR_ITEM_MERGE_STAMPS`` = 94.
+
+9f-t. ``sync-pages`` — signed sync pages (v_95,
+   ``docs/protocol/sync-pages.md`` Phase 2), its own step right after
+   ``calendar`` (``up → pair → traffic → calendar → sync-pages``). **a**
+   sends "Sync now" for the tri-household salon (host **b**) up to three
+   times — the first BEGIN makes **b** seal a page in the background and
+   push it to its member households (``SPACE_SYNC_PAGE``; a later BEGIN
+   naming an older page gets it too) — and fails unless **a** holds a page signed by
+   **b** that verifies against the space key **a** pins, whose stored
+   vector hashes to its root, and that **a**'s ``GET /api/spaces/{id}``
+   ``sync.page`` shows. It then waits on **a**'s status for the verdict
+   (a difference **a** cannot explain locally is listed on its next round —
+   up to two more "Sync now") and fails unless it is ``match: true``. It
+   runs early on purpose: that next round is gated by **b**'s hourly sync
+   budget for **a** and the salon (5 / h), which the later steps spend; a
+   verdict then waits up to an hour. ``verify`` keeps this step's result
+   and re-checks only that **a** still holds the page, verified (no round
+   of its own). It pins ``MIN_FOR_SYNC_PAGES`` = 95.
 
 9f. ``space-chat`` (v_55, every space's members' chat) — in **b**'s
    space from ``traffic`` / ``calendar`` (owner **b**, members **a** and
@@ -1007,6 +1030,7 @@ python .claude/skills/federation-demo/harness.py up
 python .claude/skills/federation-demo/harness.py pair
 python .claude/skills/federation-demo/harness.py traffic
 python .claude/skills/federation-demo/harness.py calendar   # verify checks what it creates (roster, moderator, access levels)
+python .claude/skills/federation-demo/harness.py sync-pages # v_95 match: true, before later steps spend a's sync budget
 python .claude/skills/federation-demo/harness.py gfs-up
 python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-traffic
@@ -1034,6 +1058,7 @@ python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after m
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
 python .claude/skills/federation-demo/harness.py gfs-private-channel-multi
+python .claude/skills/federation-demo/harness.py members-page-catchup   # host c down, b catches up from the plain member a, verified (v_95); restarts b and c — before gfs-admin-seed
 python .claude/skills/federation-demo/harness.py gfs-admin-seed   # last before verify: needs relay-pair (a ↔ d) and, for the withdrawn-listing checks, gfs-b-up; restarts a and e
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-b-down
@@ -1322,6 +1347,41 @@ retired seeds are still refused.
 
 ```bash
 python .claude/skills/federation-demo/harness.py gfs-admin-seed
+```
+
+### ``members-page-catchup`` — the host is down, a member catches up from a plain member, verified (v_95)
+
+Sync pages Phase 3 (``docs/protocol/sync-pages.md``). Roles (``_PC_*`` in
+the harness): host c, the member that falls behind b, the plain member that
+delivers a. a never syncs from b here (b may still hold stale provider
+sessions for a process of a that earlier steps restarted) and is not
+restarted (its hourly stream budget toward b, the salon host ``verify``
+asks for its page, stays for ``verify``). The chain runs the step before
+``gfs-admin-seed``, whose restart of a right before ``verify`` it keeps.
+
+c creates a fresh private space, writes two posts and a wiki page and only
+then invites b and a, so c's first signed page (sealed at the end of the
+first join's stream) commits all three. c **pushes** it to its member
+households (``SPACE_SYNC_PAGE``): b is never asked to sync for it — the
+step fails unless b holds the page and c's log names the push of that
+page; only a may press "Sync now" (a BEGIN, which also makes c seal).
+b's status reads the page as a match. b goes down and its copies of the posts and the page
+are removed from its database (what lost deliveries would leave — the one
+place the step writes app state); then the host c goes down (no delegated
+admin). b comes back: its BEGIN to c goes unanswered for
+``HOST_ANSWER_WAIT_S``, so b asks the plain member a — not an admin or
+moderator — for the rows of the buckets its page proves it lacks, checks
+every row against c's signed page and applies it. With c still down the
+step asserts that b shows both posts (same words) and the page, that its
+log names the verified catch-up from a and refuses nothing, and that b's
+sync status reads ``up_to_date`` with ``page.match: true``. b and c are
+respawned at the end. ``verify`` (state key ``page_catchup``) re-checks
+that b holds all three and reads the space up to date. A tampered row and
+a forged listing are covered by
+``tests/federation/sync/space/test_pages_fetch.py``.
+
+```bash
+python .claude/skills/federation-demo/harness.py members-page-catchup
 ```
 
 ### ``gfs-fallback-switch`` — the GFS fallback for an existing pair (v_54)

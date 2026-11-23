@@ -15,7 +15,10 @@
  *     only what forwards to the host (no zones / bots of the space / age
  *     gate — host-local).
  *   - ``member`` — member or moderator: their own notifications, "You in
- *     this space", their bots, and Leave.
+ *     this space", Sync, their bots, and Leave.
+ *
+ * Sync (is this household up to date with the space? and "Sync now") is
+ * every viewer's but a follower's.
  *   - ``follower`` — notifications and Unfollow, nothing else.
  *
  * Games ("Games allowed here", group play D9) is the one section a
@@ -37,6 +40,7 @@ export type SettingsSection =
   | 'bots'
   | 'danger'
   | 'you'
+  | 'sync'
   | 'leave'
   | 'unfollow'
 
@@ -51,19 +55,19 @@ export interface SettingsExtras {
 const ORDER: Record<SettingsViewer, readonly SettingsSection[]> = {
   admin: [
     'basics', 'find', 'members', 'sections', 'notifications',
-    'location', 'moderation', 'bots', 'danger',
+    'location', 'moderation', 'sync', 'bots', 'danger',
   ],
   'remote-admin': [
     'basics', 'find', 'members', 'sections', 'notifications',
-    'location', 'moderation', 'bots', 'danger',
+    'location', 'moderation', 'sync', 'bots', 'danger',
   ],
-  member: ['notifications', 'you', 'bots', 'leave'],
+  member: ['notifications', 'you', 'sync', 'bots', 'leave'],
   follower: ['notifications', 'unfollow'],
 }
 
 const ALL: readonly SettingsSection[] = [
   'basics', 'find', 'members', 'sections', 'games', 'notifications', 'location',
-  'moderation', 'bots', 'danger', 'you', 'leave', 'unfollow',
+  'moderation', 'bots', 'danger', 'you', 'sync', 'leave', 'unfollow',
 ]
 
 /** The viewer's sections, in page order: Games after Sections for an
@@ -126,6 +130,7 @@ export function settingsSectionLabel(section: SettingsSection): string {
     case 'bots':          return t('space.settings_page.section.bots')
     case 'danger':        return t('space.settings_page.section.danger')
     case 'you':           return t('space.settings_page.section.you')
+    case 'sync':          return t('space.settings_page.section.sync')
     case 'leave':         return t('space.settings_page.section.leave')
     case 'unfollow':      return t('space.settings_page.section.unfollow')
   }

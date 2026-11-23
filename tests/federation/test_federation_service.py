@@ -413,6 +413,24 @@ class InMemoryOutboxRepo:
     async def get_payload(self, payload_id: str):
         return self.payloads.get(payload_id)
 
+    async def pending_targets_for_space(self, space_id, event_type, *, limit=100):
+        """Newest stored payload first, with the households still holding a
+        row of it (a test drops a row from ``enqueued`` to deliver it)."""
+        held: dict[str, set[str]] = {}
+        for e in self.enqueued:
+            pid = e["payload_id"]
+            stored = self.payloads.get(pid) if pid is not None else None
+            if (
+                stored is not None
+                and stored.space_id == space_id
+                and stored.event_type is event_type
+            ):
+                held.setdefault(pid, set()).add(e["instance_id"])
+        return [
+            (self.payloads[pid], frozenset(households))
+            for pid, households in reversed(held.items())
+        ][:limit]
+
     def entries(self) -> list[OutboxEntry]:
         """The queued rows as ``list_due`` would return them (test helper)."""
         return [
@@ -784,6 +802,23 @@ async def test_an_offline_peer_queues_one_online_status_per_person():
         )
     (row,) = outbox_repo.enqueued
     assert row["event_type"] is FederationEventType.USER_OFFLINE
+
+
+@pytest.mark.asyncio
+async def test_an_offline_member_gets_only_the_newest_sync_page():
+    """Sync pages push: the pages pushed while a member household is offline
+    leave ONE queued row per space — the newest page; an older page is
+    never delivered after it."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    for n in range(3):
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.SPACE_SYNC_PAGE,
+            payload={"page_sealed": {"epoch": 1, "payload": f"page-{n}"}},
+            space_id="s1",
+        )
+    (row,) = outbox_repo.enqueued  # each newer page replaced the older row
+    assert row["supersede_key"] == "sync-page:s1"
 
 
 @pytest.mark.asyncio
@@ -2060,6 +2095,7 @@ async def test_begin_mesh_catchup_sync_registers_session_and_sends_for_mesh_host
     session and ship SPACE_SYNC_BEGIN(prefer_direct=False) via mesh fallback."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     sync_manager.close_session = MagicMock()
     svc.attach_sync_manager(sync_manager)
@@ -2100,10 +2136,75 @@ async def test_begin_mesh_catchup_sync_registers_session_and_sends_for_mesh_host
 
 
 @pytest.mark.asyncio
+async def test_a_mesh_begin_to_a_member_carries_a_verified_fetch():
+    """Sync pages Phase 3: the incremental BEGIN to a mesh-only member
+    household carries the fetch (``buckets`` + ``rows: true`` + ``have``)
+    inside the encrypted payload, and records the hint for a retry."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(return_value=DeliveryResult(instance_id="m-1", ok=True))
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        await svc.begin_mesh_catchup_sync(
+            space_id="sp-1",
+            host_instance_id="m-1",
+            sync_mode="incremental",
+            page_ref={"root": "r"},
+            buckets=[7],
+            have="AAAAAAAAAAA",
+        )
+    payload = send_mock.call_args.kwargs["payload"]
+    assert (payload["buckets"], payload["rows"], payload["have"]) == (
+        [7],
+        True,
+        "AAAAAAAAAAA",
+    )
+    recorded = sync_manager.record_sync_request.call_args.kwargs
+    assert recorded["fetch_have"] == "AAAAAAAAAAA"
+
+
+@pytest.mark.asyncio
+async def test_begin_mesh_catchup_sync_never_cuts_off_a_running_sync():
+    """Re-review: our sync of the space from that host is running (a long
+    catch-up stream): a new BEGIN would make the host replace it, so none
+    is sent — reported as handled, not as a transient failure."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
+    sync_manager.syncing_from = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock()
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        shipped = await svc.begin_mesh_catchup_sync(
+            space_id="sp-1", host_instance_id="host-1"
+        )
+    assert shipped is True
+    sync_manager.syncing_from.assert_called_once_with(
+        "sp-1", svc._own_instance_id, "host-1"
+    )
+    sync_manager.record_sync_request.assert_not_called()
+    sync_manager.register_requester_https_session.assert_not_called()
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_begin_mesh_catchup_sync_carries_the_authority_echo():
     """v_46: the BEGIN to a mesh-only owner carries the echo it is given."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
     send_mock = AsyncMock(
@@ -2130,6 +2231,7 @@ async def test_begin_mesh_catchup_sync_carries_the_roster_digest():
     the digest is recorded with the request for a relay re-BEGIN."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
     send_mock = AsyncMock(
@@ -2155,6 +2257,7 @@ async def test_begin_mesh_catchup_sync_carries_the_moderation_echo():
     moderation items it holds — an empty list is an echo too."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
     send_mock = AsyncMock(
@@ -2180,6 +2283,7 @@ async def test_begin_mesh_catchup_sync_noop_for_confirmed_host():
     """A CONFIRMED host is a no-op — the SpaceSyncScheduler already syncs it."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
 
@@ -2202,6 +2306,7 @@ async def test_begin_mesh_catchup_sync_closes_session_on_send_failure():
     (no dangling session leak) and no exception propagates."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     sync_manager.close_session = MagicMock()
     svc.attach_sync_manager(sync_manager)
@@ -2236,6 +2341,7 @@ async def test_begin_mesh_catchup_sync_transient_failure_is_info(caplog, error, 
     INFO, not a WARNING per tick. Any other failure stays a WARNING."""
     svc, _ = _make_service()
     sync_manager = MagicMock()
+    sync_manager.syncing_from = MagicMock(return_value=False)  # none running
     sync_manager.register_requester_https_session = MagicMock(return_value=True)
     svc.attach_sync_manager(sync_manager)
     send_mock = AsyncMock(

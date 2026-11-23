@@ -27,6 +27,7 @@ CLAUDE.md "Encryption-First Rule").
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -87,6 +88,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         "_media_gfs",
         "_media_sync",
         "_member_gfs",
+        "_on_gfs_post",
         "_own_identity_seed",
         "_own_instance_id",
         "_own_instance_pk",
@@ -123,6 +125,9 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         #: v_49 — when wired, a non-seed-holding writer household publishes
         #: its own public/global post to the GFS itself (anonymously).
         self._member_gfs: GfsMemberPublishService | None = None
+        #: ``(space_id, post_id)`` once a GFS took our post (the sync
+        #: status: it is no longer "Not sent yet").
+        self._on_gfs_post: Callable[[str, str], None] | None = None
         #: Optional — when wired, ``SPACE_POST_CREATED`` broadcasts
         #: are followed by per-peer outbox enqueues for every
         #: referenced media URL. The sync service's scheduler reads
@@ -158,9 +163,16 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         """Wire the v_49 writer-cert holder for the relay hint."""
         self._writer_certs = writer_certs
 
-    def attach_member_gfs(self, member_gfs: GfsMemberPublishService) -> None:
-        """Wire the v_49 member publisher."""
+    def attach_member_gfs(
+        self,
+        member_gfs: GfsMemberPublishService,
+        *,
+        on_published: Callable[[str, str], None] | None = None,
+    ) -> None:
+        """Wire the v_49 member publisher; *on_published* is told
+        ``(space_id, post_id)`` once a GFS took one of our posts."""
         self._member_gfs = member_gfs
+        self._on_gfs_post = on_published
 
     def attach_identity(
         self,
@@ -204,13 +216,32 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 # One name on every path for the post's files.
                 file_hashes=await self._file_hashes_of(item_media_urls("posts", post)),
             )
-            self._member_gfs.schedule_post(space_id, post.author, inner)
+            self._member_gfs.schedule_post(
+                space_id,
+                post.author,
+                inner,
+                on_published=self._gfs_took(space_id, post.id),
+            )
         except Exception:
             log.exception(
                 "member GFS publish could not be scheduled for space=%s post=%s",
                 space_id,
                 post.id,
             )
+
+    def _gfs_took(
+        self, space_id: str, post_id: str
+    ) -> Callable[[], Awaitable[None]] | None:
+        """The member publisher's ``on_published`` for one post: tell
+        :attr:`_on_gfs_post` (``None`` when nobody listens)."""
+        note = self._on_gfs_post
+        if note is None:
+            return None
+
+        async def _took() -> None:
+            note(space_id, post_id)
+
+        return _took
 
     # ── v_49 member publish of comments, reactions, own edits / deletes ──
 

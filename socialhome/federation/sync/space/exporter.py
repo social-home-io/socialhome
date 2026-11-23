@@ -156,6 +156,18 @@ REMOVAL_RESOURCES: frozenset[str] = frozenset(
 )
 
 
+#: Bucket listings (v_95, sync pages): the chunks a stream appends right
+#: before its sentinel when the BEGIN named ``buckets``; each record one
+#: listing (``socialhome.sync_page.listing_to_wire``).
+#: Never part of a content stream, so not in :data:`ALLOWED_RESOURCES`.
+LISTING_RESOURCE: str = "__listing__"
+
+#: … and, for a verified fetch (Phase 3: ``rows: true``), the rows of the
+#: buckets it lists (``socialhome.sync_page.fetched_row_to_wire``). Checked
+#: against the signed page by the requester, never applied as a stream.
+FETCHED_ROWS_RESOURCE: str = "__rows__"
+
+
 #: Sentinel resource sent over the channel after all real chunks.
 #: Not encrypted (no payload to hide); only signed.
 SENTINEL_RESOURCE: str = "__complete__"
@@ -382,6 +394,9 @@ class ChunkBuilder:
     ) -> dict[str, Any]:
         """Build the final ``__complete__`` envelope for the session.
 
+        No sync page rides it (v_95: a page is its own ``SPACE_SYNC_PAGE``
+        event, ``docs/protocol/sync-pages.md``).
+
         ``owner_statement`` (migration 0093) — the space owner's signed
         ownership statement (fresh from the owner, relayed by a member):
         public, self-authenticating, no content. It keeps members' copies
@@ -436,7 +451,10 @@ class ChunkBuilder:
         is_last: bool,
         chunk_index: int | None = None,
     ) -> dict[str, Any]:
-        if resource not in ALLOWED_RESOURCES:
+        if resource not in ALLOWED_RESOURCES and resource not in (
+            LISTING_RESOURCE,
+            FETCHED_ROWS_RESOURCE,
+        ):
             raise ValueError(f"resource {resource!r} not in ALLOWED_RESOURCES")
         body: dict[str, Any] = {"records": records}
         if chunk_index is not None:

@@ -32,6 +32,7 @@ from ..db import AsyncDatabase
 from ..domain import federation_retention
 from ..domain.federation import (
     MULTI_EVENT_TYPES,
+    SPACE_WRITE_EVENT_TYPES,
     FederationEventType,
     PairingStatus,
 )
@@ -59,6 +60,10 @@ log = logging.getLogger(__name__)
 #: not drift from the repo's default limit.
 PURGE_BATCH = 5000
 
+#: Default bound of :meth:`SqliteOutboxRepo.pending_targets_for_space`: the
+#: newest payloads of one space and event type it reads.
+MAX_PENDING_TARGETS = 100
+
 
 #: A pending row still inside its retention window (§4.4.7). ``expires_at``
 #: is ISO-8601 with a ``T`` and a timezone suffix; ``datetime(...)`` puts
@@ -66,6 +71,18 @@ PURGE_BATCH = 5000
 _LIVE = (
     "{t}.status='pending'"
     " AND ({t}.expires_at IS NULL OR datetime({t}.expires_at) > datetime('now'))"
+)
+
+#: The event types :meth:`SqliteOutboxRepo.count_pending_for_space` counts:
+#: space content items, never control traffic, and never the bytes of one
+#: (``SPACE_MEDIA_BLOB`` chunks are each a payload of their own — a picture
+#: post counts once, through its post event). Sorted: a stable statement.
+_SPACE_CONTENT_TYPES: tuple[str, ...] = tuple(
+    sorted(
+        t.value
+        for t in SPACE_WRITE_EVENT_TYPES
+        if t is not FederationEventType.SPACE_MEDIA_BLOB
+    )
 )
 
 #: A pending row the v_91 seat ordering counts: inside its retention window
@@ -165,6 +182,14 @@ class AbstractOutboxRepo(Protocol):
         self, cutoff_iso: str, *, limit: int = PURGE_BATCH
     ) -> int: ...
     async def count_pending_for(self, instance_id: str) -> int: ...
+    async def count_pending_for_space(self, space_id: str) -> int: ...
+    async def pending_targets_for_space(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        *,
+        limit: int = ...,
+    ) -> list[tuple[OutboxPayload, frozenset[str]]]: ...
     async def count_failed_for(self, instance_id: str) -> int: ...
     async def count_pending_with_key_prefix(
         self, instance_id: str, prefix: str
@@ -583,6 +608,75 @@ class SqliteOutboxRepo:
                 default=0,
             )
         )
+
+    async def count_pending_for_space(self, space_id: str) -> int:
+        """How many content items of the space still wait to reach a
+        household — the sync status's "N waiting to send". Each stored
+        payload (migration 0145) counts once, however many households it
+        waits for, and only a content event (:data:`SPACE_WRITE_EVENT_TYPES`:
+        posts, comments, chat, pages, gallery, calendar, bazaar, …) — never
+        control traffic (a ``SPACE_SYNC_BEGIN``, config, roster, keys),
+        which would grow every round a host is offline, and never the
+        ``SPACE_MEDIA_BLOB`` chunks of an item's files (a picture post
+        counts once). The payload is sealed, so who wrote it is not read:
+        on the host this includes the members' content it forwards. Content
+        queued for the mesh wrapped as ``SPACE_ROUTED`` is not counted (its
+        type is the wrapper's)."""
+        marks = ",".join("?" * len(_SPACE_CONTENT_TYPES))
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(DISTINCT p.id) FROM federation_outbox_payloads p"
+                " JOIN federation_outbox o ON o.payload_id = p.id"
+                f" WHERE p.space_id=? AND p.event_type IN ({marks})"
+                f" AND {_LIVE.format(t='o')}",
+                (space_id, *_SPACE_CONTENT_TYPES),
+                default=0,
+            )
+        )
+
+    async def pending_targets_for_space(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        *,
+        limit: int = MAX_PENDING_TARGETS,
+    ) -> list[tuple[OutboxPayload, frozenset[str]]]:
+        """The stored payloads of *event_type* in *space_id* that still wait
+        in the outbox, newest first (at most *limit*), each with the
+        households whose live row still holds it — the sync status's "Not
+        sent yet" (``FederationService.undelivered_space_items``). A
+        delivered row is gone (``mark_delivered``), a failed one is no wait.
+        One query. No index on ``(space_id, event_type)`` — accepted: the
+        payload table holds only what still waits for someone (a payload
+        goes with its last ref row), bounded by the per-peer cap, and the
+        join uses ``idx_federation_outbox_payload`` (docs/database.md).
+        On a host, payloads of members' content it forwards share the
+        *limit* window with our own (they are sealed; nothing here says
+        whose they are)."""
+        rows = await self._db.fetchall(
+            "SELECT p.id, p.event_type, p.space_id, p.payload_enc, p.msg_id,"
+            " json_group_array(o.instance_id) AS households"
+            " FROM federation_outbox_payloads p"
+            " JOIN federation_outbox o ON o.payload_id = p.id"
+            f" WHERE p.space_id=? AND p.event_type=? AND {_LIVE.format(t='o')}"
+            " GROUP BY p.id"
+            " ORDER BY p.created_at DESC, p.rowid DESC"
+            " LIMIT ?",
+            (space_id, event_type.value, int(limit)),
+        )
+        return [
+            (
+                OutboxPayload(
+                    id=r["id"],
+                    event_type=FederationEventType(r["event_type"]),
+                    space_id=r["space_id"],
+                    payload_enc=r["payload_enc"],
+                    msg_id=r["msg_id"],
+                ),
+                frozenset(orjson.loads(r["households"])),
+            )
+            for r in rows
+        ]
 
     async def count_failed_for(self, instance_id: str) -> int:
         """Count envelopes permanently given up on for ``instance_id``.

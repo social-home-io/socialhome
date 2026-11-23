@@ -27,6 +27,14 @@ const mockPost: FeedPost = {
 }
 
 describe('PostCard', () => {
+  it('puts the metaEnd slot after the time (pinned too)', () => {
+    const { container } = render(<PostCard post={mockPost} metaEnd={<span data-testid="extra">x</span>} />)
+    const meta = container.querySelector('.sh-post-meta')!
+    expect(meta.lastElementChild?.getAttribute('data-testid')).toBe('extra')
+    const pinned = render(<PostCard post={{ ...mockPost, pinned: true }} metaEnd={<span data-testid="extra2" />} />)
+    expect(pinned.container.querySelector('.sh-post-meta [data-testid="extra2"]')).not.toBeNull()
+  })
+
   it('renders post content', () => {
     const { getByText } = render(<PostCard post={mockPost} />)
     expect(getByText('Hello world!')).toBeTruthy()

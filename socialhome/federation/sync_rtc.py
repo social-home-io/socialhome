@@ -536,6 +536,10 @@ class SyncSessionRecord:
     #: ``SPACE_SYNC_DIRECT_FAILED`` on the 15 s ICE timeout. Tracked so
     #: ``close_session`` can cancel it cleanly.
     rtc_watcher: Any | None = None
+    #: Set by ``SyncSessionManager.close_session``: the provider's stream of
+    #: a closed session (a new BEGIN replaced it, the requester completed
+    #: it, the reaper dropped it) stops at its next chunk, on either path.
+    closed: bool = False
     #: When a chunk last moved on this session (sent by the provider,
     #: received by the requester). The stale reaper measures idleness from
     #: it, not from ``created_at``: a big stream may run longer than the
@@ -562,6 +566,24 @@ class SyncSessionRecord:
     #: … (requester side) the ``roster_digest`` our BEGIN carried, re-sent
     #: by a relay re-BEGIN after an ICE timeout …
     roster_digest: dict | None = None
+    #: … the sync page the requester holds (v_95, ``page`` on its BEGIN,
+    #: parsed by :func:`socialhome.sync_page.parse_page_ref`): the provider
+    #: sends its own page only when newer. On the requester side, the
+    #: ``page`` our BEGIN carried, re-sent by a relay re-BEGIN …
+    page_ref: dict | None = None
+    #: … the buckets whose listings the BEGIN asked for (v_95, sync pages,
+    #: :func:`socialhome.sync_page.parse_bucket_request`); on the requester
+    #: side, those our BEGIN carried, re-sent by a relay re-BEGIN …
+    buckets: list[int] | None = None
+    #: … whether it also wants the rows of those buckets (a verified fetch,
+    #: sync pages Phase 3: ``rows: true``) and the 8-byte prefixes of the
+    #: leaves it holds there (``have``, :func:`socialhome.sync_page
+    #: .hint_from_wire`; ``None``: no hint) …
+    want_rows: bool = False
+    have: frozenset[bytes] | None = None
+    #: … (requester side) the ``have`` hint our BEGIN carried for a verified
+    #: fetch, re-sent by a relay re-BEGIN …
+    fetch_have: str | None = None
     #: … the requester's protocol version, read once when the session is
     #: planned (``None``: not yet) — the exporter choice, the shape and the
     #: chunk numbering all follow it …

@@ -949,3 +949,57 @@ async def test_the_host_hop_carries_a_sync_chunk_past_a_pending_multi_row():
         space_id=_SPACE,
     )
     hop.send.assert_awaited_once()
+
+
+# ── Sync status: queuing a space row moves its "N waiting to send" ──────
+
+
+async def test_queuing_a_space_event_tells_the_sync_status():
+    """A multi payload for seats and a failed per-recipient send both queue
+    rows of the space: the sync status hears of the space each time (one
+    call per queued payload, not per row)."""
+    s = _Sender()
+    changed: list[str] = []
+    s.svc.attach_outbox_wake(lambda: None, space_changed=changed.append)
+    for _ in range(3):
+        await s.seat()
+    await s.broadcast()
+    assert changed == [_SPACE]
+    await s.paired()
+    s.transport.send_ok = False
+    changed.clear()
+    await s.broadcast(payload={"post_id": "p-2"})
+    assert set(changed) == {_SPACE}
+
+
+async def test_a_failing_sync_status_hook_never_costs_the_queued_row():
+    s = _Sender()
+
+    def _boom(space_id: str) -> None:
+        raise RuntimeError("status down")
+
+    s.svc.attach_outbox_wake(lambda: None, space_changed=_boom)
+    seats = [await s.seat() for _ in range(2)]
+    await s.broadcast()
+    [(_payload, rows)] = _queued(s).items()
+    assert rows == sorted(seats)
+
+
+async def test_a_pushed_sync_page_goes_in_one_multi_upload_per_gfs():
+    """Sync pages push: the page the signer broadcasts to its member
+    households reaches the seats behind one GFS as ONE stored payload and
+    ONE upload (v_91 send to many), like space content; a paired member gets
+    it directly."""
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    peer = await s.paired()
+    sealed = {"page_sealed": {"epoch": 1, "payload": "c2VhbGVk"}}
+    result = await s.broadcast(FederationEventType.SPACE_SYNC_PAGE, payload=sealed)
+    by_id = {r.instance_id: r for r in result.results}
+    assert all(by_id[i].error == DELIVERY_ERROR_QUEUED for i in seats)
+    assert s.transport.per_recipient_ids() == [peer]
+    [(_payload_id, rows)] = _queued(s).items()
+    assert rows == sorted(seats)
+    await _drain(s.svc, s.outbox)
+    [upload] = s.transport.multi
+    assert _mailboxes(upload) == _boxes(s, seats)

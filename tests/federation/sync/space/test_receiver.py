@@ -121,6 +121,131 @@ async def test_on_chunk_sentinel_publishes_completion(bus, receiver, peer_setup)
     assert captured[0].sync_id == "sync-1"
 
 
+class _PageSink:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.listings: list[dict] = []
+        self.done: list[dict] = []
+        self.rows: list[dict] = []
+
+    def sentinel_seen(self, space_id):
+        self.calls.append(space_id)
+
+    async def take_listing(self, **kwargs):
+        self.listings.append(kwargs)
+
+    async def listing_done(self, **kwargs):
+        self.done.append(kwargs)
+
+    async def take_rows(self, **kwargs):
+        self.rows.append(kwargs)
+
+
+async def test_a_verified_sentinel_tells_the_page_service(bus, receiver, peer_setup):
+    """v_95: a sentinel whose provider signature verified tells the page
+    service the stream ended (a held page without a verdict is compared
+    now); no page rides it any more — a ``page_sealed`` on one is ignored.
+    A forged sentinel never reaches it."""
+    r, _, _ = receiver
+    _peer, kp = peer_setup
+    sink = _PageSink()
+    r.attach_sync_pages(sink)
+    sentinel = {
+        "sync_id": "sync-1",
+        "resource": SENTINEL_RESOURCE,
+        "space_id": "sp-1",
+        "is_last": True,
+    }
+    sentinel = await _sign_as_peer(kp, sentinel)
+    await r.on_chunk(serialise_chunk(sentinel), from_instance="peer-a")
+    assert sink.calls == ["sp-1"]
+    forged = {**sentinel, "page_sealed": {"epoch": 2, "payload": "other"}}
+    await r.on_chunk(serialise_chunk(forged), from_instance="peer-a")
+    assert sink.calls == ["sp-1"]
+
+
+async def test_listing_chunks_and_their_sentinel_reach_the_page_service(
+    bus, receiver, peer_setup
+):
+    """v_95: ``__listing__`` chunks of a ``buckets`` session go to the page
+    service (which checks the session was ours), never to a content
+    resource; the session's sentinel closes the listing."""
+    r, _, _ = receiver
+    _peer, kp = peer_setup
+    sink = _PageSink()
+    r.attach_sync_pages(sink)
+    records = [{"i": 3, "held": False}]
+    _, ciphertext = await _FakeCrypto().encrypt_chunk(
+        space_id="sp-1",
+        sync_id="L1",
+        plaintext=orjson.dumps({"records": records, "chunk_index": 0}),
+    )
+    chunk = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "L1",
+            "resource": "__listing__",
+            "space_id": "sp-1",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 1,
+            "is_last": False,
+            "encrypted_payload": ciphertext,
+        },
+    )
+    await r.on_chunk(serialise_chunk(chunk), from_instance="peer-a")
+    assert sink.listings == [
+        {"space_id": "sp-1", "sync_id": "L1", "provider": "peer-a", "records": records}
+    ]
+    sentinel = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "L1",
+            "resource": SENTINEL_RESOURCE,
+            "space_id": "sp-1",
+            "is_last": True,
+            "chunk_count": 1,
+        },
+    )
+    await r.on_chunk(serialise_chunk(sentinel), from_instance="peer-a")
+    assert sink.done == [{"space_id": "sp-1", "sync_id": "L1", "provider": "peer-a"}]
+
+
+async def test_fetched_row_chunks_go_to_the_page_service_never_applied(
+    bus, receiver, peer_setup
+):
+    """Phase 3: ``__rows__`` chunks of a verified fetch go to the page
+    service (checked against the signed page at the sentinel) — a row is
+    never applied straight off the stream."""
+    r, _space_repo, _ = receiver
+    _peer, kp = peer_setup
+    sink = _PageSink()
+    r.attach_sync_pages(sink)
+    records = [{"i": 3, "r": "posts", "row": {"id": "p", "content": "x"}}]
+    _, ciphertext = await _FakeCrypto().encrypt_chunk(
+        space_id="sp-1",
+        sync_id="F1",
+        plaintext=orjson.dumps({"records": records, "chunk_index": 1}),
+    )
+    chunk = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "F1",
+            "resource": "__rows__",
+            "space_id": "sp-1",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 1,
+            "is_last": False,
+            "encrypted_payload": ciphertext,
+        },
+    )
+    await r.on_chunk(serialise_chunk(chunk), from_instance="peer-a")
+    assert sink.rows == [
+        {"space_id": "sp-1", "sync_id": "F1", "provider": "peer-a", "records": records}
+    ]
+
+
 async def test_on_chunk_rejects_unknown_peer(receiver, peer_setup):
     """No paired-peer row AND no stored host key → drop.
 
@@ -1103,6 +1228,41 @@ async def test_a_plain_members_chunk_does_not_mark_the_host_heard(receiver, peer
     await r.on_chunk(await _sentinel_frame(kp, "s-m", 0), from_instance="peer-a")
     await r.on_chunk(await _members_chunk(kp, "s-m2"), from_instance="peer-a")
     assert contact.spaces == []
+
+
+class _Streams:
+    def __init__(self) -> None:
+        self.started: list[tuple[str, str]] = []
+
+    def stream_started(self, space_id: str, provider: str) -> None:
+        self.started.append((space_id, provider))
+
+
+async def test_the_first_chunk_of_a_stream_tells_the_sync_status(receiver, peer_setup):
+    """Once per stream (its first chunk), never per chunk, and never for a
+    sentinel-only (quiet) session."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+    streams = _Streams()
+    r.attach_stream_watch(streams)
+    await r.on_chunk(await _sentinel_frame(kp, "s-q", 0), from_instance="peer-a")
+    assert streams.started == []
+    await r.on_chunk(await _members_chunk(kp, "s-c"), from_instance="peer-a")
+    await r.on_chunk(await _members_chunk(kp, "s-c"), from_instance="peer-a")
+    assert streams.started == [("sp-1", "peer-a")]
+
+
+async def test_a_failing_stream_watch_never_costs_the_chunk(receiver, peer_setup):
+    r, _, _ = receiver
+    _, kp = peer_setup
+
+    class _Boom:
+        def stream_started(self, space_id: str, provider: str) -> None:
+            raise RuntimeError("boom")
+
+    r.attach_stream_watch(_Boom())
+    await r.on_chunk(await _members_chunk(kp, "s-b"), from_instance="peer-a")
+    assert not r._health._streams["s-b"].failed
 
 
 async def test_a_forged_chunk_does_not_mark_the_host_heard(receiver):

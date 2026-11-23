@@ -55,13 +55,16 @@ Triggers:
     admin gets the incremental BEGIN now; its sentinel's inviter proof for
     the new key makes it count as host here again (migration 0093).
 10. **Host offline: trusted helpers** (v_92) — for every space this
-    household holds a member seat in but does not host (nor hold its roster
-    authority), a round's BEGIN to the household acting as host — from the
-    moment it actually goes out (not when queued; a parked or skipped BEGIN
-    expects no answer) — waits :data:`HOST_ANSWER_WAIT_S` (fixed) for its
-    answer (:class:`~.host_contact.HostContact`, marked by the receiver — an
-    empty session's sentinel counts — and by any signed refusal of the BEGIN). No
-    answer: ONE trusted helper (:mod:`.trusted_helpers`: a live ``admin`` /
+    household holds a member seat in but does not host, a round's BEGIN to
+    the household acting as host — from the moment it actually goes out
+    (not when queued; a parked or skipped BEGIN expects no answer) — waits
+    :data:`HOST_ANSWER_WAIT_S` (fixed) for its answer
+    (:class:`~.host_contact.HostContact`, marked by the receiver — an empty
+    session's sentinel counts — and by any signed refusal of the BEGIN). No
+    answer: the hosts are recorded unreachable (the sync status, migration
+    0150, :meth:`SpaceSyncScheduler.attach_status`), and — unless we hold
+    the space's roster authority (host-equivalent: nothing to fall back
+    from) — ONE trusted helper (:mod:`.trusted_helpers`: a live ``admin`` /
     ``moderator`` seat household at v_92 other than us and the host,
     sorted, starting at a stable per-household offset so a space's members
     spread over its helpers, one step further each round; none at v_92 →
@@ -75,6 +78,10 @@ Triggers:
     own people's rows and their files. The round also marks the host silent
     (``HostContact.went_silent``, with the households it waited on) until
     one of them answers a BEGIN or sends any verified event of the space.
+    v_95 (sync pages Phase 3): the same round tells the page service
+    (:meth:`SpaceSyncScheduler.attach_host_silent`), which fetches what the
+    newest signed page proves we lack from ANY member household — every
+    row verified against the page, so not only the helper's own people's.
     The host is still
     asked first every tick — a mesh-only host too, with the small
     incremental BEGIN once its full catch-up completed or hit its cap
@@ -104,7 +111,12 @@ from ....domain.events import (
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
-from ....domain.federation import FederationEventType, InstanceSource, PairingStatus
+from ....domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
 from ....domain.federation_capabilities import FederationCapability
 from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
@@ -223,6 +235,10 @@ class _HostContact(Protocol):
     def went_silent(self, space_id: str, hosts: Iterable[str]) -> None: ...
 
 
+class _SyncStatus(Protocol):
+    async def host_unreachable(self, space_id: str, hosts: Iterable[str]) -> None: ...
+
+
 class _NewestFrom(Protocol):
     async def __call__(
         self, space_id: str, instance_id: str, *, upto: tuple[int, int] | None = None
@@ -293,6 +309,7 @@ class SpaceSyncScheduler:
         "_helper_round",
         "_host_ask_due",
         "_host_contact",
+        "_host_silent",
         "_inflight",
         "_interval",
         "_mesh_announce",
@@ -303,6 +320,7 @@ class SpaceSyncScheduler:
         "_moderation_echo",
         "_newest_from",
         "_own_instance_id",
+        "_page_push",
         "_parked",
         "_queue",
         "_resume",
@@ -313,8 +331,12 @@ class SpaceSyncScheduler:
         "_seat_repo",
         "_space_repo",
         "_startup_task",
+        "_status",
         "_stop",
         "_sync_manager",
+        "_sync_page_buckets",
+        "_sync_page_have",
+        "_sync_page_ref",
         "_task",
     )
 
@@ -364,6 +386,12 @@ class SpaceSyncScheduler:
         self._roster_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: Roster digest builder (see :meth:`attach_roster_digest`).
         self._roster_digest: Callable[[str, str], Awaitable[dict | None]] | None = None
+        #: v_95 — ``space_id ->`` the sync page we hold (BEGIN ``page``).
+        self._sync_page_ref: Callable[[str, str], Awaitable[dict | None]] | None = None
+        self._sync_page_buckets: Callable[[str, str, dict], list[int] | None] | None = (
+            None
+        )
+        self._sync_page_have: Callable[[str, str, dict], str | None] | None = None
         #: v_89 member directory version echo (see :meth:`attach_directory_echo`).
         self._directory_echo: Callable[[str, str], Awaitable[int | None]] | None = None
         #: Moderation queue echo (see :meth:`attach_moderation_echo`).
@@ -411,6 +439,21 @@ class SpaceSyncScheduler:
         self._helper_round: dict[str, int] = {}
         #: space → its pending wait for the host's answer (one at a time).
         self._helper_checks: dict[str, asyncio.Task] = {}
+        #: Where a round's silent hosts are recorded (migration 0150,
+        #: :meth:`attach_status`); ``None``: not recorded.
+        self._status: _SyncStatus | None = None
+        #: v_95 sync pages Phase 3 (:meth:`attach_host_silent`): told when a
+        #: space's hosts went silent, to catch up from a member household.
+        self._host_silent: Callable[[str], None] | None = None
+        #: v_95 sync pages (:meth:`attach_page_push`): each tick pushes the
+        #: pages that waited for their hour mark.
+        self._page_push: Callable[[], Awaitable[None]] | None = None
+
+    def attach_status(self, status: _SyncStatus) -> None:
+        """Wire the sync status (``SpaceSyncStatusService``): a round whose
+        BEGIN the households acting as the host left unanswered records
+        them ``unreachable`` — what makes a member read "host offline"."""
+        self._status = status
 
     def attach_helpers(
         self,
@@ -431,6 +474,21 @@ class SpaceSyncScheduler:
         self._resume = resume
         self._roster_authority = roster_authority
         self._newest_from = newest_from
+
+    def attach_host_silent(self, on_silent: Callable[[str], None]) -> None:
+        """``on_silent(space_id)`` — called when trigger 10 finds a space's
+        acting hosts silent (sync pages Phase 3,
+        ``SyncPageService.host_silent``), and every tick for each space we
+        own (no host above us): what the newest signed page proves we lack
+        is fetched, verified, from a member household. Next to the helper
+        resume, which covers rows newer than the page."""
+        self._host_silent = on_silent
+
+    def attach_page_push(self, push_due: Callable[[], Awaitable[None]]) -> None:
+        """``push_due()`` — called every tick (sync pages,
+        ``SyncPageService.push_due``): a page sealed within the hour after
+        its space's last push goes out at the hour mark, once."""
+        self._page_push = push_due
 
     def set_row_marks(self, marks: tuple[int, int]) -> None:
         """Which rows were stored before this process started — read by the
@@ -500,6 +558,72 @@ class SpaceSyncScheduler:
         else:
             await self._mesh_incremental(space, host, periodic=True, done=True)
 
+    async def sync_with(self, space_id: str, instance_id: str) -> None:
+        """One incremental §25.6 BEGIN of *space_id* to *instance_id* now,
+        with every field a BEGIN carries — sync pages Phase 3: the member
+        household a verified fetch asks, whose ``buckets`` / ``rows`` /
+        ``have`` ride this BEGIN (:meth:`_page_fields_for`). The same
+        BEGIN a periodic tick sends a paired co-member (a mesh-only one over
+        the mesh); skipped while a sync of the space from it runs, like
+        every BEGIN — the fetch then rides the next one."""
+        space = await self._space_repo.get(space_id)
+        if (
+            space is None
+            or space.dissolved
+            or not instance_id
+            or instance_id == self._own_instance_id
+        ):
+            return
+        if await self._federation.is_confirmed_peer(instance_id):
+            await self.enqueue_sync_for_space(
+                space_id=space_id,
+                peer_instance_id=instance_id,
+                sync_mode="incremental",
+            )
+        else:
+            await self._mesh_incremental(space, instance_id, periodic=True, done=True)
+
+    async def sync_now(self, space_id: str) -> list[str]:
+        """The "Sync now" of one space: the small incremental BEGIN (never a
+        full stream) of one round, right away, to each household acting as
+        its host here — a mesh-only one over the mesh
+        (:meth:`_mesh_incremental`). Never to a paired co-member: its BEGIN
+        budget (5 / h per household and space) would go on 3 Sync now plus
+        2 periodic rounds, and the host is the one whose view the status
+        reads. Returns the households asked. Only for a space one of our
+        people holds a member seat in (a follower never contacts the host);
+        a space hosted here has no host to ask, so it asks its paired member
+        households — the only source of what it lacks. The providers' own
+        budget still applies."""
+        space = await self._space_repo.get(space_id)
+        if space is None or space.dissolved:
+            return []
+        hosted_here = space.owner_instance_id == self._own_instance_id
+        if not hosted_here and not await self._holds_member_seat(space):
+            return []
+        asked: list[str] = []
+        if not hosted_here:
+            for host in await self._mesh_targets(space):
+                if await self._federation.is_confirmed_peer(host):
+                    await self.enqueue_sync_for_space(
+                        space_id=space.id,
+                        peer_instance_id=host,
+                        sync_mode="incremental",
+                    )
+                else:
+                    await self._mesh_incremental(space, host, periodic=True, done=True)
+                asked.append(host)
+            return asked
+        peers = {p.id for p in await self._sweep_peers()}
+        for member in await self._space_repo.list_member_instances(space.id):
+            if member == self._own_instance_id or member not in peers:
+                continue
+            await self.enqueue_sync_for_space(
+                space_id=space.id, peer_instance_id=member, sync_mode="incremental"
+            )
+            asked.append(member)
+        return asked
+
     def attach_roster_echo(
         self, echo: Callable[[str, str], Awaitable[dict | None]]
     ) -> None:
@@ -530,6 +654,75 @@ class SpaceSyncScheduler:
         except Exception:
             log.exception("roster digest for %s failed", space_id)
             return None
+
+    def attach_sync_pages(
+        self,
+        ref_for: Callable[[str, str], Awaitable[dict | None]],
+        buckets_for: Callable[[str, str, dict], list[int] | None] | None = None,
+        have_for: Callable[[str, str, dict], str | None] | None = None,
+    ) -> None:
+        """``ref_for(space_id, to_instance_id)`` → the sync page we hold for
+        the space — or, for an ask to that household, the page the ask is
+        about — as a BEGIN's ``page`` (v_95, ``SyncPageService.ref_for``), or
+        ``None``.
+        Carried on every BEGIN path to a provider at ``MIN_FOR_SYNC_PAGES``
+        so it sends its page only when newer than ours. ``buckets_for(
+        space_id, to_instance_id)`` — the buckets whose listings that BEGIN
+        asks for (``SyncPageService.buckets_for``): a listing rides the
+        round, never a BEGIN of its own. ``have_for(space_id,
+        to_instance_id, page)`` — Phase 3: when those buckets are a verified
+        fetch from that member household, the ``have`` hint (the BEGIN then
+        asks for the rows too; ``SyncPageService.have_for``)."""
+        self._sync_page_ref = ref_for
+        self._sync_page_buckets = buckets_for
+        self._sync_page_have = have_for
+
+    async def _page_fields_for(self, space_id: str, to_instance_id: str) -> dict:
+        """v_95 fields of a BEGIN to *to_instance_id*: ``page`` (the page we
+        hold — a provider whose last pushed page is newer sends it to us,
+        ``SPACE_SYNC_PAGE``) and ``buckets`` (listings asked of that
+        household). Only to a household at ``MIN_FOR_SYNC_PAGES``."""
+        if self._sync_page_ref is None:
+            return {}
+        try:
+            if not await self._federation.space_member_supports(
+                to_instance_id, min_version=FederationCapability.MIN_FOR_SYNC_PAGES
+            ):
+                return {}
+            out: dict = {}
+            ref = await self._sync_page_ref(space_id, to_instance_id)
+            if ref is not None:
+                out["page"] = ref
+                buckets = (
+                    self._sync_page_buckets(space_id, to_instance_id, ref)
+                    if self._sync_page_buckets is not None
+                    else None
+                )
+                if buckets:
+                    out["buckets"] = buckets
+                    have = (
+                        self._sync_page_have(space_id, to_instance_id, ref)
+                        if self._sync_page_have is not None
+                        else None
+                    )
+                    if have is not None:
+                        # Phase 3: a verified fetch from that member household
+                        # — its rows too, minus those we hold.
+                        out["rows"] = True
+                        out["have"] = have
+            return out
+        except Exception:
+            log.exception("sync page fields for %s failed", space_id)
+            return {}
+
+    async def _mesh_page_fields(self, space_id: str, host: str) -> dict:
+        """:meth:`_page_fields_for` as ``begin_mesh_catchup_sync`` keywords."""
+        fields = await self._page_fields_for(space_id, host)
+        return {
+            "page_ref": fields.get("page"),
+            "buckets": fields.get("buckets"),
+            "have": fields.get("have"),
+        }
 
     def attach_mesh_announce(self, announce: Callable[[str], Awaitable[bool]]) -> None:
         """``announce(instance_id)`` → ``True`` once nothing more is needed
@@ -626,6 +819,7 @@ class SpaceSyncScheduler:
             # Every member BEGIN to the host carries the digest: one without
             # it from this version asks for no roster repair.
             roster_digest=await self._roster_digest_for(event.space_id, owner),
+            **await self._mesh_page_fields(event.space_id, owner),
         )
 
     async def _on_inviter_reproof_due(self, event: SpaceInviterReproofDue) -> None:
@@ -903,9 +1097,10 @@ class SpaceSyncScheduler:
         ``sync_mode`` ``"incremental"`` is the periodic re-sync of a space
         we already hold: the provider re-ships no media and streams only the
         rows changed since the last stream we confirmed (its per-household
-        watermark, migration 0086 — a full stream when it has none). A
-        pairing, an echo or "Sync now" is ``"initial"`` and also enqueues
-        the catch-up media; a deferred retry asks for what was refused.
+        watermark, migration 0086 — a full stream when it has none); "Sync
+        now" asks for it too (:meth:`sync_now`). A pairing or an echo is
+        ``"initial"`` and also enqueues the catch-up media; a deferred retry
+        asks for what was refused.
         While the provider has no free slot for us (trigger 8) the sync
         waits for one rather than being sent.
 
@@ -947,6 +1142,24 @@ class SpaceSyncScheduler:
                 peer_instance_id
             ):
                 prefer_direct = False
+            # One sync of a space per provider at a time: the provider
+            # replaces our earlier session of the space with a new BEGIN's,
+            # so a BEGIN while one is in flight or its stream runs (Sync now,
+            # a tick, an echo during a long full stream) would cut it off.
+            # It is skipped; what it carried rides the next round. Only a
+            # restart (nothing in flight here) leaves an orphan to replace.
+            if any(
+                sp == space_id
+                for sp, _at in self._inflight.get(peer_instance_id, {}).values()
+            ) or self._sync_manager.syncing_from(
+                space_id, self._own_instance_id, peer_instance_id
+            ):
+                log.debug(
+                    "space sync %s → %s skipped: a sync of it is running",
+                    space_id,
+                    peer_instance_id,
+                )
+                return
             sync_id = uuid.uuid4().hex
             self._inflight.setdefault(peer_instance_id, {})[sync_id] = (
                 space_id,
@@ -958,6 +1171,8 @@ class SpaceSyncScheduler:
                 sync_mode=sync_mode,
             )
             roster_digest = await self._roster_digest_for(space_id, peer_instance_id)
+            page_fields = await self._page_fields_for(space_id, peer_instance_id)
+            page_ref = page_fields.get("page")
             # Record what we are asking for, so the provider's
             # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An
             # offer for a sync_id nobody here issued is refused. The mode
@@ -970,6 +1185,9 @@ class SpaceSyncScheduler:
                 sync_mode=sync_mode,
                 have_seq=fields.get("have_seq"),
                 roster_digest=roster_digest,
+                page_ref=page_ref,
+                buckets=page_fields.get("buckets"),
+                fetch_have=page_fields.get("have"),
             )
             payload: dict = {
                 "sync_id": sync_id,
@@ -988,6 +1206,7 @@ class SpaceSyncScheduler:
                 payload["roster_echo"] = roster_echo
             if roster_digest is not None:
                 payload["roster_digest"] = roster_digest
+            payload.update(page_fields)
             dir_seq = await self._directory_echo_for(space_id, peer_instance_id)
             if dir_seq is not None:
                 payload["dir_seq"] = dir_seq
@@ -1069,6 +1288,35 @@ class SpaceSyncScheduler:
             log.exception("space-sync-scheduler: listing hosted-elsewhere spaces")
             self._host_ask_due = {}
         await self._tick_sweeps()
+        await self._tick_owner_catch_up()
+        if self._page_push is not None:
+            # v_95: a page sealed within the hour after the last push goes
+            # out now, once (the push is at most hourly per space).
+            try:
+                await self._page_push()
+            except Exception:
+                log.exception("space-sync-scheduler: pushing due sync pages failed")
+
+    async def _tick_owner_catch_up(self) -> None:
+        """Sync pages Phase 3 (final review I3): no host above us ever goes
+        silent for a space WE own, so the page service hears of each one
+        every tick — its catch-up from members, when a newer page our
+        delegated admin sealed while we were away proves we lack rows, goes
+        on round by round (a no-op otherwise)."""
+        if self._host_silent is None:
+            return
+        try:
+            spaces = await self._list_local_spaces()
+        except Exception:
+            log.exception("space-sync-scheduler: listing owned spaces failed")
+            return
+        for space in spaces:
+            if space.owner_instance_id != self._own_instance_id:
+                continue
+            try:
+                self._host_silent(space.id)
+            except Exception:
+                log.exception("space %s: the owner's catch-up round failed", space.id)
 
     async def _tick_sweeps(self) -> None:
         """The tick's sync sweeps (mesh-only hosts, confirmed peers)."""
@@ -1083,17 +1331,7 @@ class SpaceSyncScheduler:
             log.exception("space-sync-scheduler: mesh catch-up failed")
         await self._tick_mesh_announce()
 
-        confirmed = [
-            inst
-            for inst in await self._federation_repo.list_instances()
-            if inst.status is PairingStatus.CONFIRMED
-            # v_89 — a member seated from the host's directory (a
-            # ``space_session`` row with no relay of its own) is reached for
-            # live fan-out only: catch-up comes from the host, or every
-            # member would sync with every GFS-reached member (N² streams
-            # through the GFS every 30 min).
-            and not (inst.source is InstanceSource.SPACE_SESSION and not inst.relay_via)
-        ]
+        confirmed = await self._sweep_peers()
         local_spaces = await self._list_local_space_ids()
         for peer in confirmed:
             peer_id = peer.id
@@ -1107,6 +1345,21 @@ class SpaceSyncScheduler:
                     priority=P6_PRODUCTIVITY,
                     sync_mode="incremental",
                 )
+
+    async def _sweep_peers(self) -> list[RemoteInstance]:
+        """The confirmed peers the periodic sweep asks for each shared
+        space."""
+        return [
+            inst
+            for inst in await self._federation_repo.list_instances()
+            if inst.status is PairingStatus.CONFIRMED
+            # v_89 — a member seated from the host's directory (a
+            # ``space_session`` row with no relay of its own) is reached for
+            # live fan-out only: catch-up comes from the host, or every
+            # member would sync with every GFS-reached member (N² streams
+            # through the GFS every 30 min).
+            and not (inst.source is InstanceSource.SPACE_SESSION and not inst.relay_via)
+        ]
 
     # ─── Host offline: trusted helpers (trigger 10, v_92) ─────────────
 
@@ -1130,20 +1383,15 @@ class SpaceSyncScheduler:
 
     async def _fallback_spaces(self) -> dict[str, set[str]]:
         """``space_id -> the households acting as its host here`` for every
-        space we hold a member seat in but neither host nor hold the roster
-        authority of — the spaces whose host could go silent on us. Empty
-        when trigger 10 is not wired."""
-        if (
-            self._host_contact is None
-            or self._resume is None
-            or self._roster_authority is None
-            or self._seat_repo is None
-        ):
+        space hosted elsewhere we hold a member seat in — the spaces whose
+        host could go silent on us. Its silence is recorded for each (the
+        sync status); whether a helper is asked is decided once it is found
+        silent (:meth:`_await_host_answer`). Empty when no host contact is
+        wired (nothing tells us the host answered)."""
+        if self._host_contact is None:
             return {}
         out: dict[str, set[str]] = {}
         for space in await self._list_joined_remote_spaces():
-            if await self._roster_authority(space.id):
-                continue
             out[space.id] = set(await self._mesh_targets(space))
         return out
 
@@ -1156,19 +1404,49 @@ class SpaceSyncScheduler:
         self, space_id: str, hosts: set[str], asked: float
     ) -> None:
         """Wait :data:`HOST_ANSWER_WAIT_S` for the host's answer to this
-        round's BEGIN; none (offline, or no path) → ask one helper."""
+        round's BEGIN; none (offline, or no path) → record it unreachable
+        (the sync status) and, unless we hold the roster authority, ask one
+        helper.
+
+        A household holding the roster authority records its silent owner
+        too, on purpose: holding the authority does not make it hold the
+        content — a delegated admin household can itself be behind — so its
+        members honestly read "host offline" while the owner is down. Only
+        the helper fallback is skipped for it (nothing to fall back from)."""
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=HOST_ANSWER_WAIT_S)
             return  # stopped while waiting
         except TimeoutError:
             pass
-        contact, resume, seats = self._host_contact, self._resume, self._seat_repo
-        newest_from = self._newest_from
-        if contact is None or resume is None or seats is None or newest_from is None:
+        contact = self._host_contact
+        if contact is None or contact.heard_since(space_id, asked):
             return
-        if contact.heard_since(space_id, asked):
+        if self._status is not None:
+            try:
+                await self._status.host_unreachable(space_id, hosts)
+            except Exception:
+                log.exception("space %s: recording the silent host failed", space_id)
+        # A helper only where trigger 10 is wired and we do not hold the
+        # roster authority (then we are host-equivalent: nothing to fall
+        # back from).
+        resume, seats, newest_from = self._resume, self._seat_repo, self._newest_from
+        authority = self._roster_authority
+        if resume is None or seats is None or newest_from is None or authority is None:
+            return
+        try:
+            if await authority(space_id):
+                return
+        except Exception:
+            log.exception("space %s: reading the roster authority failed", space_id)
             return
         contact.went_silent(space_id, hosts)
+        if self._host_silent is not None:
+            # v_95: the signed page's rows from any member household,
+            # verified — independent of the helper resume below.
+            try:
+                self._host_silent(space_id)
+            except Exception:
+                log.exception("space %s: the verified member fetch failed", space_id)
         if self._row_marks is None:
             # No boot cut (the startup read failed): a resume could start
             # past rows still missing — ask no helper rather than guess.
@@ -1321,6 +1599,7 @@ class SpaceSyncScheduler:
                     ),
                     dir_seq=dir_seq,
                     roster_digest=await self._roster_digest_for(space.id, host),
+                    **await self._mesh_page_fields(space.id, host),
                 )
             except Exception:  # pragma: no cover — begin_* is fail-soft
                 log.exception(
@@ -1337,7 +1616,12 @@ class SpaceSyncScheduler:
         return pending
 
     async def _mesh_incremental(
-        self, space: Space, host: str, *, periodic: bool, done: bool
+        self,
+        space: Space,
+        host: str,
+        *,
+        periodic: bool,
+        done: bool,
     ) -> None:
         """The incremental BEGIN to a mesh-only *host* outside the full
         catch-up: every periodic tick, else (startup) only to echo a
@@ -1371,6 +1655,7 @@ class SpaceSyncScheduler:
                     else None
                 ),
                 roster_digest=await self._roster_digest_for(space.id, host),
+                **await self._mesh_page_fields(space.id, host),
             )
         except Exception:  # pragma: no cover — fail-soft
             log.debug("mesh incremental BEGIN failed", exc_info=True)

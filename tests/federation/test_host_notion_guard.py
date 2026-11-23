@@ -34,6 +34,25 @@ GUARDED: tuple[str, ...] = (
 
 #: (module, function) → why comparing with ``owner_instance_id`` is right.
 ALLOWED: dict[tuple[str, str], str] = {
+    ("federation/sync/space/pages.py", "position"): (
+        "a label, not a host check: the status says whether the sync page "
+        "was signed by the owner or by a delegated admin"
+    ),
+    ("federation/sync/space/pages.py", "_signs"): (
+        "are WE the owner: the owner is always a signer (it judges every "
+        "other signer's stored page and takes only rows it lacks); any other "
+        "household signs only once it holds a page it sealed itself"
+    ),
+    ("federation/sync/space/pages.py", "_no_host_answers"): (
+        "are WE the owner: only the owner has no host above it, so it asks "
+        "member households for a newer page's rows at once (sync pages "
+        "Phase 3); a delegated admin waits for its owner like any member"
+    ),
+    ("federation/sync/space/scheduler.py", "_tick_owner_catch_up"): (
+        "are WE the owner: only the owner has no host above it whose silence "
+        "would start its catch-up from members (sync pages Phase 3), so it "
+        "gets a round every tick; a delegated admin waits like any member"
+    ),
     ("services/space_member_directory.py", "_owns"): (
         "are WE the owner: only the owner takes a card a delegated admin "
         "passes on, and a delegated admin passes cards on to it"
@@ -63,6 +82,10 @@ ALLOWED: dict[tuple[str, str], str] = {
     ),
     ("federation/sync/space/scheduler.py", "_on_invite_answered"): (
         "are WE the owner: nothing to catch up; targets come from acting_hosts()"
+    ),
+    ("federation/sync/space/scheduler.py", "sync_now"): (
+        "are WE the owner: no host to ask, so its paired members are asked; "
+        "otherwise the targets come from acting_hosts()"
     ),
     ("federation/sync/space/scheduler.py", "_tick_mesh_announce"): (
         "are WE the owner: then every member household is announced to"

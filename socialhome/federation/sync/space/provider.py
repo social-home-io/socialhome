@@ -47,6 +47,8 @@ from ....domain.space_media_ref import (
 )
 from ....services.space_media_names import space_own_files
 from .exporter import (
+    FETCHED_ROWS_RESOURCE,
+    LISTING_RESOURCE,
     RESOURCE_ORDER,
     BatchedExporter,
     ChunkBuilder,
@@ -353,6 +355,38 @@ class _FileHasher(Protocol):
     async def hashes_for(self, urls: Any) -> dict: ...
 
 
+class _SyncPages(Protocol):
+    async def listing_records(
+        self,
+        *,
+        space_id: str,
+        page_ref: Any,
+        buckets: list[int],
+        requester_version: int,
+    ) -> list[dict]: ...
+
+    async def fetch_records(
+        self,
+        *,
+        space_id: str,
+        page_ref: Any,
+        buckets: list[int],
+        requester_version: int,
+        have: frozenset[bytes] | None,
+        max_record_bytes: int | None,
+    ) -> tuple[list[dict], list[dict]]: ...
+
+    async def offer_page(
+        self,
+        *,
+        space_id: str,
+        requester: str,
+        requester_version: int,
+        requester_ref: Any,
+        fetch: bool = False,
+    ) -> None: ...
+
+
 class _WithFileHashes:
     """v_85 — a resource the host (or a delegated admin) streams to a v_85
     requester: each record that shows files carries their ``files`` hash
@@ -556,9 +590,33 @@ class SpaceSyncService:
         "_roster_authority",
         "_roster_sent",
         "_sig_suite",
+        "_sync_pages",
         "_watermarks",
         "_windows",
     )
+
+    async def _offer_page(self, session: SyncSessionRecord) -> None:
+        """v_95: the stream ends — when the requester's BEGIN ``page`` shows
+        it missed a push, the page service sends it the newest page as its
+        own ``SPACE_SYNC_PAGE`` event (never on the sentinel), and a seal due
+        here starts. Only to a member household (a writer seat): the page's
+        vector covers member-only resources (zones), which a follower never
+        gets."""
+        if (
+            self._sync_pages is None
+            or self._member_gate is None
+            or not await self._member_gate(
+                session.space_id, session.requester_instance_id
+            )
+        ):
+            return
+        await self._sync_pages.offer_page(
+            space_id=session.space_id,
+            requester=session.requester_instance_id,
+            requester_version=await self._session_version(session),
+            requester_ref=getattr(session, "page_ref", None),
+            fetch=bool(getattr(session, "want_rows", False)),
+        )
 
     async def _sentinel_proof(self, space_id: str) -> dict | None:
         if self._inviter_proof_for is None:
@@ -650,6 +708,13 @@ class SpaceSyncService:
         #: v_86 — which files of a row this household ships on catch-up
         #: (``None``: every file of every row, as before).
         self._file_gates: CatchUpFileGates | None = None
+        #: v_95 — signed sync pages: each sentinel carries the newest page
+        #: held here (``None``: no pages).
+        self._sync_pages: _SyncPages | None = None
+
+    def attach_sync_pages(self, pages: _SyncPages) -> None:
+        """Wire the v_95 sync pages (``docs/protocol/sync-pages.md``)."""
+        self._sync_pages = pages
 
     def attach_file_gates(self, gates: CatchUpFileGates) -> None:
         """Wire the v_86 catch-up file gate: on a full stream a non-host
@@ -921,6 +986,8 @@ class SpaceSyncService:
                     next_index=_allocator(session) if indexed else None,
                     max_record_bytes=record_limit,
                 ):
+                    if _stopped(session):
+                        return
                     sent = await self._send_chunk(session, envelope, waits)
                     chunk_count += 1
                     if sent:
@@ -949,6 +1016,17 @@ class SpaceSyncService:
                         # discovery window warms the cache right after this.
                         self._close_session(sync_id)
                         return
+            # v_95: the bucket listings the BEGIN asked for, right before
+            # the sentinel (the requester classifies on it, after this
+            # stream's rows are applied).
+            async for envelope in self._listing_chunks(session, indexed, record_limit):
+                if _stopped(session):
+                    return
+                chunk_count += 1
+                if await self._send_chunk(session, envelope, waits):
+                    session.touch()
+                else:
+                    any_failure = True
             sentinel = await self._builder.build_sentinel(
                 space_id=space_id,
                 sync_id=sync_id,
@@ -965,10 +1043,15 @@ class SpaceSyncService:
                 owner_statement=await self._sentinel_statement(space_id),
                 inviter_proof=await self._sentinel_proof(space_id),
             )
+            if _stopped(session):
+                return
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.
             session.stream_clean = not any_failure
             sent_sentinel = await self._send(session, sentinel)
+            # v_95: after the sentinel shipped (a network send of its own
+            # never delays the stream's end — security check 2, L7).
+            await self._offer_page(session)
             if not sent_sentinel.ok:
                 session.stream_clean = False
             # An ``incremental`` session is the periodic re-sync of a
@@ -1008,6 +1091,80 @@ class SpaceSyncService:
             # Same reasoning as the abandon path above — a session whose
             # stream died is garbage, and holding it blocks the retry.
             self._close_session(sync_id)
+
+    async def _listing_chunks(
+        self,
+        session: SyncSessionRecord,
+        indexed: bool,
+        record_limit: int | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """``__listing__`` chunks for the ``buckets`` the BEGIN named (v_95,
+        sync pages): only to a member household (a writer seat); the page
+        service gates on its version. Nothing when none were asked.
+
+        Phase 3 (``rows: true`` — a verified fetch, which any member
+        household may be asked): the listings of the buckets this household
+        can prove (held unchanged since the page; never ``current``), then
+        those buckets' rows the requester's ``have`` hint does not name, as
+        ``__rows__`` chunks — bounded (rows, bytes, the record cap of the
+        requester's path)."""
+        buckets = list(getattr(session, "buckets", None) or [])
+        if _stopped(session):
+            return
+        if (
+            not buckets
+            or self._sync_pages is None
+            or self._member_gate is None
+            or not await self._member_gate(
+                session.space_id, session.requester_instance_id
+            )
+        ):
+            return
+        rows: list[dict] = []
+        try:
+            if getattr(session, "want_rows", False):
+                records, rows = await self._sync_pages.fetch_records(
+                    space_id=session.space_id,
+                    page_ref=getattr(session, "page_ref", None),
+                    buckets=buckets,
+                    requester_version=await self._session_version(session),
+                    have=getattr(session, "have", None),
+                    max_record_bytes=record_limit,
+                )
+            else:
+                records = await self._sync_pages.listing_records(
+                    space_id=session.space_id,
+                    page_ref=getattr(session, "page_ref", None),
+                    buckets=buckets,
+                    requester_version=await self._session_version(session),
+                )
+        except Exception:
+            log.exception(
+                "sync %s: listings of space %s failed",
+                session.sync_id,
+                session.space_id,
+            )
+            return
+        log.info(
+            "sync %s: %d bucket listing(s) of space %s to %s",
+            session.sync_id,
+            len(records),
+            session.space_id,
+            session.requester_instance_id,
+        )
+        for part in (
+            _Listings(records),
+            _Listings(rows, resource=FETCHED_ROWS_RESOURCE),
+        ):
+            async for envelope in self._builder.build_chunks(
+                exporter=part,
+                space_id=session.space_id,
+                sync_id=session.sync_id,
+                sig_suite=self._sig_suite,
+                next_index=_allocator(session) if indexed else None,
+                max_record_bytes=record_limit,
+            ):
+                yield envelope
 
     async def _plan(self, session: SyncSessionRecord) -> list[ResourceExporter]:
         """The exporters this session streams, in :data:`RESOURCE_ORDER`,
@@ -1425,6 +1582,8 @@ class SpaceSyncService:
                 next_index=_allocator(session) if indexed else None,
                 max_record_bytes=await self._record_limit(session),
             ):
+                if _stopped(session):
+                    return
                 result = await self._send(session, envelope)
                 if result.error == SYNC_ERROR_RTC_CHANNEL:
                     # The channel is gone; the rest of the slice would only
@@ -1555,6 +1714,36 @@ class SpaceSyncService:
         raise ValueError(
             f"Unknown transport_mode {mode!r} on session {session.sync_id}",
         )
+
+
+def _stopped(session: SyncSessionRecord) -> bool:
+    """The session was closed under its stream (a new BEGIN of the same
+    requester and space replaced it, or it ended): stop streaming."""
+    if not getattr(session, "closed", False):
+        return False
+    log.info(
+        "sync %s: stream of space %s to %s stopped (session closed)",
+        session.sync_id,
+        session.space_id,
+        session.requester_instance_id,
+    )
+    return True
+
+
+class _Listings:
+    """The bucket listings a BEGIN's ``buckets`` asked for, as an exporter
+    (or, Phase 3, its fetched rows: *resource* ``__rows__``)."""
+
+    __slots__ = ("_records", "resource")
+
+    def __init__(
+        self, records: list[dict[str, Any]], resource: str = LISTING_RESOURCE
+    ) -> None:
+        self._records = records
+        self.resource = resource
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return list(self._records)
 
 
 def _series_rows(version: int) -> bool:
