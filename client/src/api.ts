@@ -1,5 +1,6 @@
 // Import token from its own module (NOT '@/store/auth') so api.ts has no
 // static dependency on auth.ts — breaks the api↔auth import cycle.
+import { signal } from '@preact/signals'
 import { token } from '@/store/token'
 import { showToast } from '@/components/Toast'
 import { apiErrorMessage, type ApiErrorBody } from '@/apiErrors'
@@ -65,6 +66,12 @@ function retryAfterMs(res: Response): number {
   if (!Number.isFinite(ms) || ms < 0) ms = RETRY_DEFAULT_MS
   return Math.min(ms, RETRY_MAX_MS)
 }
+
+/** When a read the app cannot start without (:meth:`ApiClient.getPatiently`)
+ *  next tries again after a 429 (epoch ms), or ``null`` when none is
+ *  waiting. The App shell shows "Too many requests, trying again in N s"
+ *  from it instead of a blank page or the login form. */
+export const rateLimitedUntil = signal<number | null>(null)
 
 /** The ``error`` object of a canonical ``{"error": {"code", "detail"}}``
  *  body, or ``null`` when the body is missing / not JSON / another shape
@@ -259,6 +266,28 @@ class ApiClient {
     }
     const res = await this._handle(raw, path)
     return res.json()
+  }
+
+  /** A GET the app cannot start without (the cold-start ``/api/me`` probe,
+   *  the instance config): every 429 is waited out — ``Retry-After``, else
+   *  ~2 s, at most 30 s — and asked again until it gets another answer,
+   *  which it returns or throws like :meth:`get`. Unlike :meth:`get` the
+   *  wait is never silent: :data:`rateLimitedUntil` holds the next try
+   *  from the first 429, so the shell can say so. A 429 is not "signed
+   *  out": giving up on it painted the login form, and the silent retry
+   *  before that a blank page. */
+  async getPatiently<T = any>(path: string): Promise<T> {
+    try {
+      for (;;) {
+        const raw = await fetch(_rel(path), { headers: this.headers() })
+        if (raw.status !== 429) return (await this._handle(raw, path)).json()
+        const ms = retryAfterMs(raw)
+        rateLimitedUntil.value = Date.now() + ms
+        await new Promise(resolve => setTimeout(resolve, ms))
+      }
+    } finally {
+      rateLimitedUntil.value = null
+    }
   }
 
   async post<T = any>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> {

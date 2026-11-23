@@ -38,7 +38,9 @@ let inflight: Promise<InstanceConfig> | null = null
 
 export async function loadInstanceConfig(): Promise<InstanceConfig> {
   if (inflight) return inflight
-  inflight = api.get('/api/instance/config')
+  // Patiently: the shell renders nothing without the config, so a 429
+  // is waited out (with a countdown on screen) instead of failing.
+  inflight = api.getPatiently('/api/instance/config')
     .then((cfg) => {
       const typed = cfg as InstanceConfig
       instanceConfig.value = typed

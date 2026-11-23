@@ -52,4 +52,32 @@ describe('instance store', () => {
     await expect(loadInstanceConfig()).rejects.toThrow()
     expect(instanceConfigError.value).toBeTruthy()
   })
+
+  it('loadInstanceConfig waits out a 429 instead of leaving the page blank', async () => {
+    vi.useFakeTimers()
+    try {
+      const limited = {
+        ok: false, status: 429,
+        headers: { get: (k: string) => (k.toLowerCase() === 'retry-after' ? '2' : null) },
+        json: async () => ({ error: { code: 'RATE_LIMITED', detail: 'x' } }),
+      }
+      fetchSpy
+        .mockResolvedValueOnce(limited as any)
+        .mockResolvedValueOnce(limited as any)
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: async () => ({
+            mode: 'haos', instance_name: 'Home', instance_id: null,
+            capabilities: [], setup_required: false,
+          }),
+        } as any)
+      const p = loadInstanceConfig()
+      await vi.advanceTimersByTimeAsync(4_000)
+      await expect(p).resolves.toMatchObject({ mode: 'haos' })
+      expect(instanceConfig.value?.mode).toBe('haos')
+      expect(fetchSpy).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

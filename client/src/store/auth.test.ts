@@ -130,4 +130,35 @@ describe('onLogout hooks', () => {
     doLogout()
     expect(a).toHaveBeenCalledTimes(1)
   })
+
+  it('loadCurrentUser waits out a 429 instead of treating it as signed out', async () => {
+    // A rate-limited cold-start probe is not "no session": returning
+    // null here made the App shell paint the login form (or, under
+    // haos, IngressAuthFailed) — and blank while the silent retry ran.
+    vi.useFakeTimers()
+    try {
+      const u = {
+        user_id: 'u1', username: 'a', display_name: 'A', tz: 'Europe/Zurich',
+        is_admin: false, picture_url: null, picture_hash: null,
+        bio: null, is_new_member: false,
+      }
+      const limited = {
+        ok: false, status: 429,
+        headers: { get: (k: string) => (k.toLowerCase() === 'retry-after' ? '4' : null) },
+        json: async () => ({ error: { code: 'RATE_LIMITED', detail: 'x' } }),
+      }
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(limited as any)
+        .mockResolvedValueOnce(limited as any)
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => u } as any)
+      const p = loadCurrentUser()
+      await vi.advanceTimersByTimeAsync(8_000)
+      await expect(p).resolves.toEqual(u)
+      expect(currentUser.value).toEqual(u)
+      expect(fetchSpy).toHaveBeenCalledTimes(3)
+      fetchSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
