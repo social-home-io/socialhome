@@ -4082,6 +4082,8 @@ class SqliteGfsEnvelopeQueueRepo:
                 if first != recipient or first is None:
                     return first
                 second = _pop_valid()
+                while second == first:  # a second live entry for the same holder
+                    second = _pop_valid()
                 if second is not None and holders[second] == holders[first]:
                     heapq.heappush(heap, (-holders[first], first))
                     return second

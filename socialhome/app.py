@@ -68,6 +68,7 @@ from .domain.federation import (
     InstanceSource,
     PairingStatus,
 )
+from .domain.gfs_channel import InvalidChannelWire, valid_channel_id
 from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from .domain.gfs_server import MAX_GFS_SERVERS
 from .domain.space import ContentAction
@@ -1370,15 +1371,18 @@ def _wire_space_authority_rotation(
 #: the same channel at every server on the space's list (at most
 #: :data:`MAX_GFS_SERVERS`), each pushing its own copy: 8 × 120. A returning
 #: household's queued backlog drains in a burst too — at most 250 relay rows
-#: per server, across every channel — so only three or more servers draining
+#: per server, across every channel — so only four or more servers draining
 #: a full backlog of ONE channel in the same minute could reach it; a frame
 #: dropped here is caught up by space sync.
 GFS_CHANNEL_FRAMES_PER_MINUTE: int = 120 * MAX_GFS_SERVERS
 
 #: Channel frames per minute across EVERY channel — the household-wide
 #: ceiling, as for every other relayed frame (``RELAY_ENVELOPE_INBOUND_LIMIT``).
-#: Charged first, so a GFS inventing channel ids mints at most this many
-#: per-channel keys a minute.
+#: Charged only for a well-formed channel id with room left in its own
+#: budget, so a GFS inventing channel ids mints at most this many 32-hex
+#: per-channel keys a minute. Residual: ONE misbehaving GFS can spend this
+#: ceiling and so delay the channel frames of the household's other GFSs
+#: (it could already withhold its own); space sync heals.
 GFS_CHANNEL_FRAMES_PER_MINUTE_ALL: int = 3000
 
 #: The limiter keys: ``gfs_channel:<channel_id>`` and the household-wide one.
@@ -1394,15 +1398,26 @@ GFS_CHANNEL_BUDGET_SWEEP_AT: int = 8192
 def _gfs_channel_budget(limiter: RateLimiter, channel_id: object) -> bool:
     """Spend one channel frame of the household-wide and the per-channel
     budget on the federation inbound limiter; ``False`` (logged at WARNING,
-    at most once a minute) when either is spent."""
+    at most once a minute) when either is spent. A malformed channel id is
+    refused before any key is made from it (the frame would be dropped
+    later anyway)."""
+    try:
+        channel_id = valid_channel_id(channel_id)
+    except InvalidChannelWire:
+        return False
     if limiter.key_count > GFS_CHANNEL_BUDGET_SWEEP_AT:
         limiter.prune(window_s=60, prefix=GFS_CHANNEL_BUDGET_PREFIX)
-    if limiter.is_allowed(
-        GFS_CHANNEL_BUDGET_ALL, limit=GFS_CHANNEL_FRAMES_PER_MINUTE_ALL, window_s=60
-    ) and limiter.is_allowed(
-        f"{GFS_CHANNEL_BUDGET_PREFIX}{channel_id}",
-        limit=GFS_CHANNEL_FRAMES_PER_MINUTE,
-        window_s=60,
+    per_channel = f"{GFS_CHANNEL_BUDGET_PREFIX}{channel_id}"
+    if (
+        limiter.has_room(per_channel, limit=GFS_CHANNEL_FRAMES_PER_MINUTE, window_s=60)
+        and limiter.is_allowed(
+            GFS_CHANNEL_BUDGET_ALL, limit=GFS_CHANNEL_FRAMES_PER_MINUTE_ALL, window_s=60
+        )
+        and limiter.is_allowed(
+            per_channel,
+            limit=GFS_CHANNEL_FRAMES_PER_MINUTE,
+            window_s=60,
+        )
     ):
         return True
     if limiter.is_allowed("gfs_channel_drop_warn", limit=1, window_s=60):

@@ -670,6 +670,23 @@ async def test_gfs_channel_frames_share_a_household_wide_budget():
     assert limiter.key_count <= GFS_CHANNEL_FRAMES_PER_MINUTE_ALL + 2
 
 
+async def test_a_malformed_channel_id_makes_no_budget_key():
+    """A channel id that is not 32 lowercase hex never becomes a limiter key
+    (a hostile GFS could otherwise pin arbitrarily large keys) and is not
+    handed on."""
+    channels, limiter = _RecordingChannels(), RateLimiter()
+    for bad in ("*", "x" * 100_000, "A" * 32):
+        await dispatch_gfs_relay_frame(
+            _channel_frame(bad),
+            space_public_inbound=None,
+            space_subscriber_key_inbound=None,
+            gfs_channels=channels,  # type: ignore[arg-type]
+            inbound_limiter=limiter,
+        )
+    assert channels.frames == []
+    assert limiter.key_count == 0
+
+
 async def test_gfs_channel_budget_sweeps_idle_channel_keys():
     clock = [0.0]
     limiter = RateLimiter(monotonic=lambda: clock[0])

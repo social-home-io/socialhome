@@ -2018,7 +2018,14 @@ seven an honest writer still gets its full 15. Fair sharing past that would
 need a writer identity, which the anonymous publish deliberately lacks: K
 addresses look like K writers. An honest household posts far below 15 a
 minute (one item every 4 s, sustained); a burst past it gets `429` and its
-retry queue lands it.
+retry queue lands it. **On a cluster the per-address share is per node**
+(`ceil(15 / N)`: 4 a minute on each of 4 nodes): round-robin does not spread
+one household's requests evenly, so it typically meets a `429` after about
+6–10 items in a minute, and behind an IP-hash balancer at 4 a minute (30
+before). Comments and reactions are publishes too. Accepted for P3 (the
+retry queue lands them); a floor on the per-node share would loosen the
+one-holder bound and is an owner decision. The route-level per-IP limiter
+(120 a minute) and the publish replay cache stay per node.
 
 ## Inbound budgets on the household
 

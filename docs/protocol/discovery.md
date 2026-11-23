@@ -3325,7 +3325,8 @@ multiply them): 120 items a minute per channel, 120 per channel writer key
 and epoch, and **15 per (channel, client address)** — an eighth of the
 channel's, so one writer-key holder needs eight addresses (IPv6 per /64)
 to spend a channel's minute, and with seven an honest writer still gets
-its 15. There is no per-channel seat cap: a global space's channel with
+its 15 on one node (on a cluster the per-address share is per node, so a
+household meets `429` sooner — see gfs-relay.md). There is no per-channel seat cap: a global space's channel with
 10 000 seats takes one publish in ~0.1 s (offline copies are written in
 batches of 500). The receiving household drops channel frames past 960 a
 minute per channel (120 × at most 8 servers) or 3 000 in all, before any

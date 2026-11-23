@@ -1287,10 +1287,13 @@ class GfsEnvelopeRelay:
             return queued
         # One transaction per RELAY_QUEUE_BATCH targets, not one per target:
         # a channel item to 10 000 offline seats was quadratic (T3.6).
-        written: list[str] = []
+        # Each batch's recipients are hinted (cluster drain, hello race) as
+        # soon as their rows are committed — never held back by a later
+        # batch, or lost should one fail.
+        written = 0
         for i in range(0, len(targets), RELAY_QUEUE_BATCH):
             now = int(time.time())
-            written += await self._queue_repo.enqueue_relay_many(
+            batch = await self._queue_repo.enqueue_relay_many(
                 targets[i : i + RELAY_QUEUE_BATCH],
                 blob,
                 created_at=now,
@@ -1299,14 +1302,17 @@ class GfsEnvelopeRelay:
                 max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
                 max_total_bytes=RELAY_QUEUE_MAX_TOTAL_BYTES,
             )
-        if not written:
+            for target in batch:
+                await self._after_enqueue(target)
+            written += len(batch)
+        if written < len(targets):
             log.warning(
-                "gfs.envelope: a relay frame exceeds the relay queue caps on "
-                "its own — not queued"
+                "gfs.envelope: a relay frame exceeds the relay queue caps for %d of %d "
+                "recipients (relay queue caps)",
+                len(targets) - written,
+                len(targets),
             )
-        for target in written:
-            await self._after_enqueue(target)
-        return len(written)
+        return written
 
     async def queue_relay(self, target: str, frame: dict) -> bool:
         """Queue one relay *frame* (``{space_id, event_type, payload}`` — the
