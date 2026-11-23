@@ -8668,7 +8668,7 @@ class SpaceService(
         if await self._spaces.is_banned(space_id, user_id):
             log.info("follow from %s refused: banned from %s", instance_id, space_id)
             return False
-        if self._remote_members is not None and (
+        if self._remote_members is None or (
             await self._remote_members.get(space_id, instance_id, user_id) is not None
         ):
             log.info(

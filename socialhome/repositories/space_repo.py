@@ -3108,7 +3108,10 @@ class SqliteSpaceRepo:
         """Did an admin approve ``user_id`` of ``remote_applicant_instance_id``
         joining ``space_id`` in the last ``within_days`` days? (A local
         community seats such a person on their redeem without another
-        check: the approval was the decision.)"""
+        check: the approval was the decision.) An auto-approved follow
+        (v_96, ``reviewed_by`` NULL) counts too: it is approved only after
+        the same area check said inside (an edge follow goes to the
+        admins), so it stands for that decision."""
         row = await self._db.fetchone(
             """
             SELECT 1 FROM space_join_requests

@@ -2530,6 +2530,20 @@ async def test_has_approved_join_request(env):
     assert not await env.repo.has_approved_join_request("sp-ap", "uid-bob", **kw)
 
 
+async def test_an_auto_approved_follow_counts_as_an_approval(env):
+    """v_96: a follow is approved automatically (``reviewed_by`` NULL) only
+    after the local-community check said inside, so its redeem (which
+    carries no location) is seated on it like on an admin's approval."""
+    await env.repo.save(_space("sp-fo"))
+    rid = await env.repo.save_join_request(
+        "sp-fo", "uid-bob", remote_applicant_instance_id="peer"
+    )
+    assert await env.repo.answer_join_request(rid, "approved", reviewed_by=None)
+    assert await env.repo.has_approved_join_request(
+        "sp-fo", "uid-bob", remote_applicant_instance_id="peer", within_days=7
+    )
+
+
 async def test_answer_join_request_moves_a_pending_request_once(env):
     """Two answers racing on one request: exactly one moves it out of
     ``pending``; the other is told it lost and changes nothing."""
