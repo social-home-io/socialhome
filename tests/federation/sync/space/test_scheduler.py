@@ -3113,7 +3113,7 @@ async def test_begin_carries_our_sync_page_only_to_a_v95_provider(
     sched, _ = _echo_sched(bus, queue, sync_manager, fed)
     ref = {"signer": "owner-o", "epoch": 1, "seq": 9, "issued_at": 5, "root": "r"}
 
-    async def _ref_for(space_id):
+    async def _ref_for(space_id, to=None):
         if space_id == "sp-boom":
             raise RuntimeError("boom")
         return ref
@@ -3161,7 +3161,7 @@ async def test_a_mesh_begin_carries_our_sync_page(bus, queue, sync_manager):
     )
     ref = {"signer": "host-x", "epoch": 1, "seq": 9, "issued_at": 5, "root": "r"}
 
-    async def _ref_for(space_id):
+    async def _ref_for(space_id, to=None):
         return ref
 
     sched.attach_sync_pages(_ref_for, lambda space_id, to, page_ref: [3])
@@ -3199,7 +3199,7 @@ async def test_a_verified_fetch_rides_an_ordinary_begin_to_that_member(
     )
     ref = {"signer": "owner-o", "epoch": 1, "seq": 9, "issued_at": 5, "root": "r"}
 
-    async def _ref_for(space_id):
+    async def _ref_for(space_id, to=None):
         return ref
 
     def _have_for(space_id, to, page_ref):

@@ -387,10 +387,11 @@ page answers `held: false` for (each changed it after the page too: a
 delete, a poll closed) is paused for 1 h — still unresolved, never "up to
 date" — so a silent host never costs one ask per tick for nothing; a member
 on another page sends no listing and is no "no"; a delete or archive we hold explains
-its own bucket locally. The owner, back from a long absence with a newer
-page its delegated admin sealed, has no host to go silent: it gets a round
-every tick and does not seal over that page while its catch-up has
-buckets to fetch (at most 2 h).
+its own bucket locally. The owner, back from a long absence, judges every
+page its delegated admin sealed — even one older than its own — and
+catches up against it, a round every tick (no host above it goes silent);
+it seals by its own lazy rule meanwhile and reads "catching up" until it
+holds what that page commits.
 
 The helper resume is unchanged and runs next to it: it covers the rows
 newer than the page (its own people's), while the verified fetch covers

@@ -29,11 +29,8 @@ from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.federation.sync.space.page_state import BucketRows
 from socialhome.federation.sync.space.pages import (
-    CATCH_UP_HOLD_S,
-    DRY_RECHECK_S,
     PAGE_PUSH_AAD,
     PAGE_PUSH_INTERVAL_S,
-    RETURN_GRACE_S,
     SyncPageService,
 )
 from socialhome.sync_page import (
@@ -395,17 +392,29 @@ async def test_a_new_cutoff_day_reseals_a_young_page():
 
 async def test_a_fresh_page_of_another_signer_holds_our_seal_back():
     """A delegated admin that holds the owner's page (synced as a member)
-    does not seal on top of every owner page: only once it is 15 min old."""
-    env = _Env()
-    other = _signed(signer=ADMIN, issued_at=T0, vector=_vec(4))
+    does not seal on top of every owner page: only once it is 15 min old.
+    (The owner is never held back by an admin's pages — see below.)"""
+    env = _Env(own=ADMIN)
+    env.spaces.space = _space(
+        features=replace(SpaceFeatures(), delegated_admin_authority=True)
+    )
+    env.spaces.local = ["u-admin"]
+    env.spaces.members = [
+        SpaceMember(
+            space_id=SPACE,
+            user_id="u-admin",
+            role=SpaceRole.ADMIN.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    ]
+    other = _signed(signer=HOST, issued_at=T0, vector=_vec(4))
     env.repo.rows[SPACE] = StoredSyncPage(
         SPACE, canonical_str(other.to_wire()), _vec(4)
     )
     assert await env.svc.seal_if_due(SPACE) is None
-    await env.svc.compare(SPACE)  # judged (an unjudged one holds the seal)
     env.now += PAGE_MIN_INTERVAL_S * 1000
     page = await env.svc.seal_if_due(SPACE)
-    assert page is not None and page.signer == HOST and page.prev_root is None
+    assert page is not None and page.signer == ADMIN and page.prev_root is None
 
 
 async def test_an_old_epoch_page_is_not_held_and_a_new_one_is_sealed():
@@ -1601,88 +1610,6 @@ def _delegating(env: _Env) -> None:
     )
 
 
-async def test_h1_route3_an_unjudged_admin_page_holds_the_owners_seal():
-    """H1 route 3: an admin page arrives while the owner's compare waits out
-    its 15-min spacing — unjudged. A lazy seal now would replace it and the
-    catch-up would never run: an unjudged foreign page holds the seal, for
-    at most CATCH_UP_HOLD_S since it was first seen."""
-    env = _Env()
-    _delegating(env)
-    own = await env.svc.seal_if_due(SPACE)
-    assert own is not None
-    env.gate = asyncio.Event()  # the compare waits
-    env.svc._compared_at[SPACE] = env.mono  # a compare ran just now
-    other = _admin_page(issued_at=T0 + 60_000)
-    assert await env.svc.receive(
-        space_id=SPACE,
-        sync_id="s-1",
-        provider=ADMIN,
-        sealed=await _sealed_for_member(other, vector=_vec(7)),
-    )
-    _change(env, 30, 900)
-    env.gate = None
-    assert await env.svc.seal_if_due(SPACE) is None  # held: not judged yet
-    env.mono += CATCH_UP_HOLD_S
-    assert await env.svc.seal_if_due(SPACE) is not None  # bounded
-
-
-async def test_h1_route2_after_a_restart_an_unjudged_admin_page_holds_the_seal():
-    """H1 route 2: verdicts are memory only; after a restart the stored
-    admin page has none — it is unjudged, so it holds the seal (the state is
-    derived from the stored page and "no verdict yet")."""
-    env = _Env()
-    _delegating(env)
-    other = _admin_page(issued_at=T0 - 3 * 3600_000)  # hours old already
-    env.repo.rows[SPACE] = StoredSyncPage(
-        SPACE, canonical_str(other.to_wire()), _vec(7)
-    )
-    env.exporter.changed_above = 10**9
-    assert await env.svc.seal_if_due(SPACE) is None
-    env.mono += CATCH_UP_HOLD_S
-    assert await env.svc.seal_if_due(SPACE) is not None
-
-
-async def test_h1_route1_a_returning_owner_waits_for_its_admins_page():
-    """H1 route 1: back after hours away (its own page is old), with a
-    delegated admin that may have sealed meanwhile, the owner does not seal
-    at the first BEGIN: it waits RETURN_GRACE_S for the admin's newer page
-    (the queued push, or its own BEGIN's stale ref). It arrives — newer than
-    the owner's own old page — and is judged; only then the catch-up and
-    its hold decide. With no admin page within the grace, it seals."""
-    env = _Env()
-    _delegating(env)
-    own = await env.svc.seal_if_due(SPACE)
-    assert own is not None
-    _change(env, 6 * 60, 900)  # six hours later, queued events: changed
-    assert await env.svc.seal_if_due(SPACE) is None  # the grace starts
-    other = _admin_page(issued_at=own.issued_at + 3600_000)
-    assert await env.svc.receive(
-        space_id=SPACE,
-        sync_id="s-1",
-        provider=ADMIN,
-        sealed=await _sealed_for_member(other, vector=_vec(7)),
-    )
-    await env.svc.wait_idle()
-    assert env.held() == other  # newer than the owner's own old page
-    # The control: no admin page comes; the grace ends, the owner seals.
-    env2 = _Env()
-    _delegating(env2)
-    assert await env2.svc.seal_if_due(SPACE) is not None
-    _change(env2, 6 * 60, 900)
-    assert await env2.svc.seal_if_due(SPACE) is None
-    env2.mono += RETURN_GRACE_S
-    assert await env2.svc.seal_if_due(SPACE) is not None
-
-
-async def test_h1_route1_no_grace_without_a_delegated_admin():
-    """Only another seed holder can have sealed while the owner was away:
-    with delegation off, the owner seals at once."""
-    env = _Env()
-    assert await env.svc.seal_if_due(SPACE) is not None
-    _change(env, 6 * 60, 900)
-    assert await env.svc.seal_if_due(SPACE) is not None
-
-
 async def test_m1_a_stale_ref_gets_the_last_pushed_page_from_the_signer_only():
     """M1: a member's stale ref is answered by the signer alone — never by
     every member provider of a tick's BEGINs — and with the page LAST
@@ -1779,12 +1706,6 @@ async def test_l1_a_nay_counts_only_from_a_household_we_can_ask_now():
     assert env.svc._paused(SPACE, root) == {5}
 
 
-def test_l2_a_dry_bucket_is_asked_again_before_the_seal_hold_ends():
-    """L2: with one askable household, the owner's held seal must see a
-    paused bucket asked again before the hold runs out."""
-    assert DRY_RECHECK_S < CATCH_UP_HOLD_S
-
-
 @pytest.mark.parametrize("suite", [None, "aes128-something"])
 async def test_l3_a_page_without_a_known_seal_suite_is_refused(suite, caplog):
     """L3: ``page_sealed`` carries its ``seal_suite``; a receiver refuses a
@@ -1800,3 +1721,158 @@ async def test_l3_a_page_without_a_known_seal_suite_is_refused(suite, caplog):
             space_id=SPACE, sync_id="s-1", provider=HOST, sealed=sealed
         )
     assert env.held() is None and "refused the page" in caplog.text
+
+
+# ── Security re-check: judge every foreign page once; no seal holds ─────
+
+
+async def test_the_owner_judges_an_admin_page_that_is_not_newer_than_its_own():
+    """H1 (the rule): the owner sealed its own page meanwhile (back, or
+    partitioned); its delegated admin's page arrives OLDER than it. It is
+    not stored as held — but it is judged: compared, and caught up against
+    (``_subjects``); its status position reads the admin's page until
+    nothing it commits is missing."""
+    env = _Env()
+    _delegating(env)
+    own = await env.svc.seal_if_due(SPACE)
+    assert own is not None
+    other = _admin_page(issued_at=own.issued_at - 60_000)
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=ADMIN,
+        sealed=await _sealed_for_member(other, vector=_vec(7)),
+    )
+    await env.svc.wait_idle()
+    assert env.held() == own  # what we store: unchanged
+    check = env.svc._checks.get(SPACE)
+    assert check is not None and check.root == other.root  # judged
+    pos = await env.svc.position(env.spaces.space)
+    assert pos is not None and pos.signer_role == "admin" and pos.match is not True
+    # Delivered again: not compared again.
+    calls = env.state.calls
+    await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=ADMIN,
+        sealed=await _sealed_for_member(other, vector=_vec(7)),
+    )
+    await env.svc.wait_idle()
+    assert env.state.calls == calls
+
+
+async def test_a_member_never_judges_an_older_page():
+    """Only the owner catches up against a page that is not newer than the
+    one it holds (it takes only rows it lacks); a member would roll its
+    newer copy back to the older page's versions."""
+    env = _Env(own=ME, seed=None)
+    newer = _signed(issued_at=T0 + 10, seq=60, vector=_vec(2))
+    assert await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(newer, vector=_vec(2)),
+    )
+    await env.svc.wait_idle()
+    older = _signed(issued_at=T0, seq=50, vector=_vec(3))
+    assert not await env.svc.receive(
+        space_id=SPACE,
+        sync_id="s-1",
+        provider=HOST,
+        sealed=await _sealed_for_member(older, vector=_vec(3)),
+    )
+    await env.svc.wait_idle()
+    assert env.svc._subjects == {}
+    assert env.svc._checks[SPACE].root == newer.root
+
+
+@pytest.mark.parametrize("minutes", [60, 14])
+async def test_an_admins_page_cadence_never_stops_the_owners_seals(minutes):
+    """M-1 / M-2: hourly admin pages (an unprovable bucket each time), or a
+    seed-holding admin sealing every 14 min, never stop the owner's seals —
+    it seals by its own lazy interval (≥ 15 min apart) whatever it holds."""
+    env = _Env()
+    _delegating(env)
+    assert await env.svc.seal_if_due(SPACE) is not None
+    seals = 0
+    for k in range(8):
+        _change(env, minutes, 1000 + k)
+        page = _admin_page(issued_at=env.now - 1_000, seq=2000 + k, vector=_vec(k + 20))
+        await env.svc.receive(
+            space_id=SPACE,
+            sync_id="s-1",
+            provider=ADMIN,
+            sealed=await _sealed_for_member(page, vector=_vec(k + 20)),
+        )
+        await env.svc.wait_idle()
+        if await env.svc.seal_if_due(SPACE) is not None:
+            seals += 1
+    # Never stopped: every change once the own 15-min interval allows it.
+    assert seals >= (8 if minutes >= 15 else 4)
+
+
+async def test_a_restarting_owner_still_seals():
+    """Restart loops: no timer or hold survives in memory to block it — a
+    restarted owner holding its admin's page (no verdict yet) seals by its
+    lazy rule."""
+    env = _Env()
+    _delegating(env)
+    other = _admin_page(issued_at=T0 - 3 * 3600_000)
+    env.repo.rows[SPACE] = StoredSyncPage(
+        SPACE, canonical_str(other.to_wire()), _vec(7)
+    )
+    for _ in range(3):
+        restarted = SyncPageService(
+            repo=env.repo,
+            spaces=env.spaces,
+            seqs=env.seqs,
+            crypto=env.crypto,
+            state=env.state,
+            exporters={"posts": env.exporter},
+            own_instance_id=HOST,
+            clock_ms=lambda: env.now,
+            monotonic=lambda: env.mono,
+        )
+        env.exporter.changed_above = 10**9
+        env.now += PAGE_MIN_INTERVAL_S * 1000
+        assert await restarted.seal_if_due(SPACE) is not None
+        await restarted.close()
+
+
+@pytest.mark.parametrize("bad", [["x"], {"a": 1}, 7])
+async def test_an_unhashable_seal_suite_is_a_clean_refusal(bad, caplog):
+    """L-1: a ``seal_suite`` of the wrong type is refused like an unknown
+    one (one WARNING), never a TypeError."""
+    env = _Env(own=ME, seed=None)
+    sealed = await _sealed_for_member(_signed())
+    sealed["seal_suite"] = bad
+    with caplog.at_level(logging.WARNING):
+        assert not await env.svc.receive(
+            space_id=SPACE, sync_id="s-1", provider=HOST, sealed=sealed
+        )
+    assert "refused the page" in caplog.text and "Traceback" not in caplog.text
+
+
+async def test_a_pushed_page_of_an_older_epoch_is_never_sent_again():
+    """L-2: after a key or epoch change the payload pushed under the old
+    epoch is dropped — a stale ref never gets it."""
+    env = _Env()
+    sender = _pushing(env)
+    await env.svc.seal_if_due(SPACE)
+    await env.svc.wait_idle()
+    env.spaces.space = _space(authority_key_epoch=4)  # rotated; old page gone
+    env.repo.rows.clear()
+    _change(env, 1, 5000)
+    newer = await env.svc.seal_if_due(SPACE)  # pending: within the hour
+    assert newer is not None and newer.epoch == 4
+    older = _signed(issued_at=T0 - 60_000, seq=1, epoch=4, vector=_vec(8))
+    await env.svc.offer_page(
+        space_id=SPACE,
+        requester="member-a",
+        requester_version=V,
+        requester_ref=parse_page_ref(older.ref()),
+    )
+    for _s, _to, _e, payload in sender.sends:
+        got, _v = _pushed_page(env, payload)
+        assert got.epoch == 4
+    assert SPACE not in env.svc._pushed_payload or (env.svc._pushed[SPACE][1][0] == 4)

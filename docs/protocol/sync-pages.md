@@ -714,27 +714,36 @@ What shipped, where it is more exact than the design above:
   that moves `authority_key_epoch` or `identity_public_key` (every path:
   rotate, adopt, re-pin). A held page of another epoch is ignored anyway.
 - **Lazy seal.** As in §4, plus (both signers kept — owner decision
-  2026-11-22): a signer that holds another signer's page younger than
-  15 min does not seal on top of it — nor while that page has **no
-  verdict yet** (its compare waits out the 15-min spacing, or a restart
-  lost the memory-only verdict: the state is derived from the stored page
-  plus "no verdict"; its compare is started), for at most
-  `CATCH_UP_HOLD_S` (2 h) since it was first seen so (security check 2,
-  H1 routes 2 and 3) — nor while its
-  catch-up from members (Phase 3) still has
-  buckets to fetch, for at most `CATCH_UP_HOLD_S` (2 h) after its compare
-  (final review I3: the owner's own seal would replace the page it is
-  catching up to, end the catch-up and commit the incomplete state; the
-  bound keeps a catch-up nobody can serve from stopping the seals for
-  good). **A returning signer waits** (H1 route 1): one whose own page is
-  older than `PAGE_MATCH_FRESH_S` (2 h — it sealed nothing that long, it
-  was away) in a space with delegated admin authority — another seed
-  holder may have sealed meanwhile — does not seal at its first BEGIN but
-  waits `RETURN_GRACE_S` (45 min): that signer's newer page (its queued
-  push, or our own tick's BEGIN whose stale ref it answers) arrives, is
-  stored (newer than our old page) and judged, and the holds above
-  decide. Otherwise its seal would be newer than the admin's page, which
-  would then be refused as "not newer" and never compared. The "changed
+  2026-11-22; security re-check: one condition, no holds): a delegated
+  admin that holds the owner's page younger than 15 min does not seal on
+  top of it; the OWNER seals by its own lazy interval (≥ 15 min after its
+  own last seal) whatever page it holds — never held back by an admin's
+  cadence or by a catch-up. There are no seal holds and no timers: an
+  incomplete owner page is only temporary, because the owner's catch-up
+  runs against the admin's page whatever it seals (below), and its next
+  page includes what it fetched. (Earlier holds — an unjudged-page hold, a
+  catch-up hold with `CATCH_UP_HOLD_S`, a returning-signer grace with
+  `RETURN_GRACE_S` — were removed: each was a timer an admin's cadence or
+  an outage could defeat.)
+- **The owner judges every verified foreign page once, whatever its age.**
+  A valid page of another signer of the pinned epoch whose root the owner
+  has not judged (`_judged_roots`, the last 4 per space) is compared and
+  caught up against even when it is NOT newer than the page the owner
+  holds: "not newer" decides only what is STORED as held, never what is
+  caught up. It is kept in memory beside the held page (`_subjects`) —
+  the page compares, fetch asks (their BEGIN names it: `ref_for(space,
+  to)`), listings and the status position use — until nothing it commits
+  is missing or unresolved. So a returning, partitioned or restored owner
+  (its own page sealed meanwhile, or none at all, or a new epoch) always
+  fetches the rows an admin page proves it lacks. A restart forgets it;
+  the admin's next push, or its answer to the owner's stale ref (the
+  owner is exempt from the self-signed-ref rule), brings it back. Only the
+  owner does this: it takes only rows it lacks, never another version of
+  its own; a member catching up against an older page could roll its
+  newer copy back. Members comparing with the owner's temporarily
+  incomplete page see its extra rows as ahead — nothing reads missing that
+  is not; the rows reach everyone through the streams and later pages.
+  The "changed
   since the page?" probe is memoised on the change
   counter (`current_seq`): a "changed" holds for that page, a "quiet" while
   the counter has not moved — every BEGIN to the signer asks (minor 9).
@@ -1111,13 +1120,10 @@ between asks, and a stale memo would prove nothing.
      answered `held: false` for a bucket it is **dry**. Only the nays of
      households we can ask NOW count: one removed since, or no longer at
      v_95, falls out (security check 2, L1).
-   - **Dry is a pause** of `DRY_RECHECK_S` (1 h, two rounds — shorter
-     than the owner's seal hold of 2 h, so a paused bucket is asked again
-     before the hold ends; security check 2, L2): then the
+   - **Dry is a pause** of `DRY_RECHECK_S` (1 h, two rounds): then the
      bucket is asked again from scratch. It **stays to fetch** (`todo`):
      unresolved — `match` stays `null`, the Phase-1 state shows — and it
-     never releases the owner's seal hold (only a complete catch-up or
-     `CATCH_UP_HOLD_S` does).
+     keeps the owner's status at "catching up" (never "up to date").
    Memory only, per page, with the stuck buckets. Without the pause the
    round asked every tick, for nothing, until the host returned; with it
    a bucket nobody can prove costs one round an hour.
@@ -1150,8 +1156,10 @@ household received while this one was away"), never "up to date"
 again, **up to date**. **Every tick** the scheduler starts the owner's next
 round for each space it owns (`_tick_owner_catch_up`): no host above the
 owner ever goes silent, so without it the catch-up would get one round
-only, and while it has buckets to fetch the owner does not seal over the
-admin's page (*Lazy seal*, I3). Its next own page starts a new chain (`prev_root`
+only. The owner may seal meanwhile (no holds): its catch-up runs against
+the admin's page whatever it seals, and **every** verified admin page is
+judged once even when it is older than the owner's own (*Lazy seal* above,
+security re-check H1). Its next own page starts a new chain (`prev_root`
 null, the full vector), which is no conflict. Limits: the owner is the wiki
 pages' sequencer (v_48), so it never takes a page *version* from a stream —
 a verified wiki page row is ignored there and the admin's page edits reach
@@ -1178,6 +1186,16 @@ times would need the archive time committed.
 page answers `held: false` for it; one that holds another page (or none)
 answers with no listing at all. Either way the round asks the next member
 for what is left.
+
+**Residuals (security re-check).** A restart forgets the owner's
+catch-up page and the judged roots; the admin's next delivery restores
+them. A signer restart also forgets a push waiting for its hour mark
+(`_push_pending`, L-5, older than this rework): that page goes out with
+the next seal's push; meanwhile a stale BEGIN ref still gets it (nothing
+pushed is remembered, so the held page is sent). A delegated admin keeps only its own page, so two signers push k ×
+the budget and members may flip between their pages (see §5 and the
+threat table). The 2 h freshness of a match (`PAGE_MATCH_FRESH_S`) is the
+hourly push plus one tick, the seal lag and slack.
 
 **Older households degrade.** A household below v_95 is never picked (no
 pages, no fetch); with no deliverer at v_95 the member waits for the host
@@ -1270,8 +1288,11 @@ requester asks one member at a time):
 | Extra fields in a row (reactions, pins, `updated_at`, `linked_event_id`, …) | never applied — only the committed part is (`fetched_record`); a feed card is left out |
 | Inflated change time in a listing, to roll back a newer local row | a row changed here after the page's signed `issued_at` is ahead; otherwise the page's version is the signer's own, applied under the host's rules exactly as the host's stream would |
 | A row of another space / bucket, a non-committed resource | refused at parse (`parse_fetched_row`) |
-| Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked. A bucket is paused (dry) only once **every** member household on the page answered `held: false`, and only for 1 h; it stays unresolved meanwhile (never "up to date"), and never releases the owner's seal hold (HIGH-1). The one residual: when a single member household can be asked at all, that household alone can keep a bucket unresolved — withholding by the only source, which no proof can overcome |
+| Withholding (`held: false`, rows left out) | the listing shows what is missing; the next member is asked. A bucket is paused (dry) only once **every** member household on the page answered `held: false`, and only for 1 h; it stays unresolved meanwhile (never "up to date"; the owner reads "catching up"). The one residual: when a single member household can be asked at all, that household alone can keep a bucket unresolved — withholding by the only source, which no proof can overcome |
 | A deliverer on another page (or forging that it is) | no listing at all — no nay, the next member is asked (HIGH-1) |
+| An admin page that arrives after the owner sealed (back, partitioned, restored, rotated) | judged and caught up against anyway — "not newer" decides only what is stored; the owner reads "catching up" until it holds every row the page commits (security re-check H1) |
+| A seed-holding admin sealing often (every 14 min, or dated up to the 5-min skew ahead) | cannot stop the owner's seals — the owner seals by its own interval (M-1/M-2). **Design limit with two signers:** a seed holder is trusted like the owner for pages (it signs config and roster too); it can make members flip between two signers' pages and cost the push budget twice, never forge a row |
+| `fetch` on a BEGIN (the requester asks a plain member to relay its page) | requester-controlled and accepted (security re-check L-3): it makes one member send ONE page to that one requester — no amplification, and the page is authority-signed |
 | Unasked answer, or one from another household | dropped |
 | A follower asking | the deliverer's member gate sends nothing; a follower is never asked |
 | Oversized answer | ≤ 256 rows / 512 KiB kept, the rest dropped |

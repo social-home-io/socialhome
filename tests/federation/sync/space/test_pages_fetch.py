@@ -33,7 +33,6 @@ from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.domain.task import Task, TaskList, TaskStatus
 from socialhome.federation.owner_bound_id import SPACE_PAGE_KIND, SPACE_TASK_LIST_KIND
 from socialhome.federation.sync.space.pages import (
-    CATCH_UP_HOLD_S,
     DRY_RECHECK_S,
     FETCH_ANSWER_WAIT_S,
     MAX_FETCH_ASKS,
@@ -126,7 +125,7 @@ class _Wire:
         """The scheduler's ``sync_with``: one incremental BEGIN to that
         member, carrying ``buckets`` / ``rows`` / ``have`` as
         ``_page_fields_for`` builds them."""
-        ref = await self.requester.ref_for(space_id)
+        ref = await self.requester.ref_for(space_id, deliverer)
         self.ref = ref
         buckets = self.requester.buckets_for(space_id, deliverer, ref)
         have = self.requester.have_for(space_id, deliverer, ref)
@@ -1631,11 +1630,11 @@ async def test_the_owners_catch_up_is_not_cut_short_by_its_own_seal(trio):
     """Final review I3: back from a long absence, the owner takes a
     20-minute-old page of its delegated admin that commits 30 posts it
     lacks. A member's BEGIN mid catch-up asks the owner's sentinel, which
-    would seal over the admin's page and end the catch-up after 8 of 30 —
-    the owner's own page then committing the incomplete state. The owner
-    holds its seal while that page's catch-up has buckets to fetch, and
-    goes on round by round (its per-tick round: no host above it ever
-    goes silent), until it holds all 30."""
+    would seal over the admin's page. The owner may seal (security
+    re-check: no seal holds) — its catch-up runs against the admin's page
+    whatever it seals (``_subjects``), round by round (its per-tick round:
+    no host above it ever goes silent), until it holds all 30; its next
+    page then commits them."""
     host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
     await _post(host)
     await _stream(host, member)
@@ -1700,39 +1699,14 @@ async def test_the_owners_catch_up_is_not_cut_short_by_its_own_seal(trio):
         await host_pages.wait_idle()
     for k in range(30):
         assert await host.repos.space_post.get(f"away-{k}") is not None, k
-    # Caught up, the owner sealed its own page again — over the complete
-    # state, the one the admin's page commits.
+    # Caught up: the owner's next page commits the complete state — the one
+    # the admin's page commits — and its status reads its own page again.
+    host_pages._clock_ms.ms += PAGE_MIN_INTERVAL_S * 1000
+    await host_pages.seal_if_due(SPACE)
     ref = await host_pages.ref_for(SPACE)
     assert ref is not None and ref["signer"] == HOST
     assert parse_page_ref(ref)["root"] == admin_page.root
-
-
-async def test_the_owners_seal_hold_is_bounded(trio):
-    """Final review I3, the bound: no member household answers the owner's
-    catch-up (here: none reachable). The owner holds its seal over the
-    admin's page only for CATCH_UP_HOLD_S after the compare, never for
-    good."""
-    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
-    await _post(host)
-    await _stream(host, member)
-    own = await host_pages.seal_if_due(SPACE)
-    assert own is not None
-    await _post(member, "post-carl", author=CARL, content="written while away")
-    now = [1_000.0]
-    host_pages._monotonic = lambda: now[0]
-    versions.version[MEMBER] = 94  # no member household can deliver
-    wire = await _admin_page_reaches_owner(
-        host, member, host_pages, member_pages, versions, own
-    )
-    assert wire.asks == []
-    await _post(host, "post-owner", content="the owner writes again")
-    host_pages._clock_ms.ms += 2 * PAGE_MIN_INTERVAL_S * 1000  # not young
-    check = host_pages._checks.get(SPACE)
-    assert check is not None and check.todo
-    assert await host_pages.seal_if_due(SPACE) is None  # held: catching up
-    now[0] += CATCH_UP_HOLD_S
-    page = await host_pages.seal_if_due(SPACE)
-    assert page is not None and page.signer == HOST
+    assert SPACE not in host_pages._subjects
 
 
 async def test_a_delete_never_hides_a_missing_row_in_its_bucket(trio):
@@ -1834,10 +1808,10 @@ async def test_poc_b_one_forged_not_held_answer_is_no_permanent_stop(trio):
 async def test_poc_c_the_owner_never_seals_an_incomplete_page_on_a_nay(trio):
     """HIGH-1 PoC C: back from a long absence, the owner takes its admin's
     page committing 30 posts it lacks; the admin's household (its only
-    deliverer) answers ``held: false`` for every bucket. Dry buckets stay
-    to fetch: the seal hold is not released by them (only a complete
-    catch-up or CATCH_UP_HOLD_S), and the owner's verdict never reads
-    matched."""
+    deliverer) answers ``held: false`` for every bucket. The owner may seal
+    its own page (no seal holds — security re-check), but its catch-up
+    against the admin's page goes on (dry buckets stay to fetch) and its
+    verdict never reads matched: it does not report "up to date"."""
     host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
     now = [5_000.0]
     host_pages._monotonic = lambda: now[0]
@@ -1892,9 +1866,9 @@ async def test_poc_c_the_owner_never_seals_an_incomplete_page_on_a_nay(trio):
     await wire.settle()
     await _silent_ticks(host_pages, wire, 4)
     host_pages._clock_ms.ms += 2 * PAGE_MIN_INTERVAL_S * 1000  # a seal is due
-    assert await host_pages.seal_if_due(SPACE) is None  # held: not complete
+    assert await host_pages.seal_if_due(SPACE) is not None  # no hold
     pos = await _position(host, host_pages)
-    assert pos is not None and pos.match is not True
+    assert pos is not None and pos.signer_role == "admin" and pos.match is not True
     assert (
         sum(
             [
@@ -1904,5 +1878,205 @@ async def test_poc_c_the_owner_never_seals_an_incomplete_page_on_a_nay(trio):
         )
         == 0
     )
-    now[0] += CATCH_UP_HOLD_S  # the bound still holds
-    assert await host_pages.seal_if_due(SPACE) is not None
+    assert SPACE in host_pages._subjects  # the catch-up is still on
+
+
+# ── Security re-check H1: the owner judges every admin page, whatever ────
+#    its age, and never reads up to date before it holds what it commits.
+
+
+async def _owner_wired(host, member, host_pages, member_pages, versions) -> _Wire:
+    wire = _Wire(host_pages)
+    wire.deliverers[MEMBER] = member_pages
+    wire.silent = False
+    await _seat(host, MEMBER, BOB, "admin")
+    host_pages.attach_hosts(wire.hosts)
+    host_pages.attach_asks(wire.asked_page)
+    host_pages.attach_member_fetch(
+        seats=host.repos.space_remote_member,
+        versions=versions,
+        silent=lambda space_id: False,
+        request=wire.request,
+        apply=host.receiver.apply_verified,
+    )
+    return wire
+
+
+async def _admin_seals(member, member_pages, *, issued_at, seq, cutoff, epoch=None):
+    """The delegated admin (the member household) seals ITS copy and keeps
+    it — the page its push or a stale-ref answer then carries."""
+    space = await member.repos.space.get(SPACE)
+    vector, rows = await member_pages._state.vector(SPACE, cutoff=cutoff)
+    page = sign_page(
+        space_id=SPACE,
+        epoch=int(space.authority_key_epoch or 0) if epoch is None else epoch,
+        signer=MEMBER,
+        seq=seq,
+        issued_at=issued_at,
+        cutoff=cutoff,
+        rows=rows,
+        vector=vector,
+        prev_root=None,
+        space_seed=SEED,
+    )
+    assert await member.repos.space_sync_page.put(
+        StoredSyncPage(
+            space_id=SPACE, page_json=canonical_str(page.to_wire()), vector=vector
+        ),
+        key=PK_HEX,
+    )
+    return page
+
+
+async def _deliver_admin_page(member_pages, host_pages, page) -> None:
+    """The admin's push (or its answer to the owner's stale ref) arrives —
+    the same ``SPACE_SYNC_PAGE`` whatever the owner holds."""
+    held = await member_pages._held(await member_pages._spaces.get(SPACE))
+    payload = await member_pages._page_event(SPACE, held)
+    await host_pages.take_pushed(space_id=SPACE, provider=MEMBER, payload=payload)
+
+
+async def _owner_settles(host, host_pages, wire, rounds: int = 4) -> None:
+    for _ in range(rounds):
+        await host_pages.wait_idle()
+        await wire.settle()
+        host_pages.host_silent(SPACE)  # the owner's per-tick round
+        await wire.settle()
+
+
+async def _owner_status(host, host_pages) -> SpaceSyncState:
+    """The status service's owner rule: catching up while the page it
+    catches up against has no match."""
+    pos = await _position(host, host_pages)
+    if pos is not None and pos.signer_role != "owner" and pos.match is not True:
+        return SpaceSyncState.CATCHING_UP
+    return SpaceSyncState.UP_TO_DATE
+
+
+@pytest.mark.parametrize("away_min", [90, 60 * 6])
+async def test_h1_a_returning_owner_seals_first_then_catches_up(trio, away_min):
+    """H1-a (a 90-min absence) and H1-b (a grace that started before a long
+    outage): the owner comes back with queued changes and seals at once,
+    BEFORE its delegated admin's page arrives; that page is then older than
+    the owner's — not stored, but judged and caught up against: the owner
+    ends up holding every row the admin's page commits, and never reads up
+    to date before that."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    clock = host_pages._clock_ms
+    admin_page = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms + 10 * 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    clock.ms += away_min * 60_000
+    await _post(host, "post-owner", content="queued while away")  # changed
+    wire = await _owner_wired(host, member, host_pages, member_pages, versions)
+    mine = await host_pages.seal_if_due(SPACE)  # the first BEGIN: it seals
+    assert mine is not None and mine.is_newer_than(admin_page)
+    await _deliver_admin_page(member_pages, host_pages, admin_page)
+    assert await _owner_status(host, host_pages) is SpaceSyncState.CATCHING_UP
+    await _owner_settles(host, host_pages, wire)
+    got = await host.repos.space_post.get("post-carl")
+    assert got is not None and got[1].content == "written while away"
+    assert await _owner_status(host, host_pages) is SpaceSyncState.UP_TO_DATE
+
+
+async def test_h1_c_an_owner_with_no_page_catches_up_after_sealing_its_first(trio):
+    """H1-c (own is None): an owner holding no page at all (restored from a
+    backup) seals its first page before the admin's arrives — judged and
+    caught up all the same."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    cutoff = await host_pages._state.cutoff(SPACE)
+    clock = host_pages._clock_ms
+    admin_page = await _admin_seals(
+        member, member_pages, issued_at=clock.ms - 60_000, seq=7, cutoff=cutoff
+    )
+    wire = await _owner_wired(host, member, host_pages, member_pages, versions)
+    assert await host_pages.seal_if_due(SPACE) is not None  # its first page
+    await _deliver_admin_page(member_pages, host_pages, admin_page)
+    assert await _owner_status(host, host_pages) is SpaceSyncState.CATCHING_UP
+    await _owner_settles(host, host_pages, wire)
+    assert await host.repos.space_post.get("post-carl") is not None
+    assert await _owner_status(host, host_pages) is SpaceSyncState.UP_TO_DATE
+
+
+async def test_h1_c_a_partitioned_owner_holding_a_judged_admin_page_still_catches_up(
+    trio,
+):
+    """H1-c (partitioned): the owner took and judged its admin's page, then
+    sealed its own (no hold): the catch-up runs on against the admin's page
+    and brings every row it commits."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    own = await host_pages.seal_if_due(SPACE)
+    assert own is not None
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    clock = host_pages._clock_ms
+    admin_page = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=own.issued_at + 60_000,
+        seq=own.seq + 5,
+        cutoff=own.cutoff,
+    )
+    versions.version[MEMBER] = 94  # partitioned: nobody to fetch from yet
+    wire = await _owner_wired(host, member, host_pages, member_pages, versions)
+    await _deliver_admin_page(member_pages, host_pages, admin_page)  # newer: held
+    await host_pages.wait_idle()
+    assert (
+        await host_pages._held(await host_pages._spaces.get(SPACE))
+    ).page == admin_page
+    clock.ms += 2 * PAGE_MIN_INTERVAL_S * 1000
+    await _post(host, "post-owner", content="written in the partition")
+    assert await host_pages.seal_if_due(SPACE) is not None  # sealed over it
+    assert await _owner_status(host, host_pages) is SpaceSyncState.CATCHING_UP
+    versions.version[MEMBER] = 95  # the partition heals
+    await _owner_settles(host, host_pages, wire)
+    assert await host.repos.space_post.get("post-carl") is not None
+    assert await _owner_status(host, host_pages) is SpaceSyncState.UP_TO_DATE
+
+
+async def test_h1_c_after_an_authority_rotation_the_owner_catches_up(trio):
+    """H1-c (rotation): the key moved on; the owner sealed the first page of
+    the new epoch before its admin's page of that epoch arrived — judged and
+    caught up all the same (an old-epoch page is refused)."""
+    host, member, _requester, host_pages, member_pages, _r, _w, versions = trio
+    await _post(host)
+    await _stream(host, member)
+    await _post(member, "post-carl", author=CARL, content="written while away")
+    for h in (host, member):
+        await h.db.enqueue(
+            "UPDATE spaces SET authority_key_epoch=authority_key_epoch+1 WHERE id=?",
+            (SPACE,),
+        )
+    space = await host.repos.space.get(SPACE)
+    epoch = int(space.authority_key_epoch or 0)
+    cutoff = await host_pages._state.cutoff(SPACE)
+    clock = host_pages._clock_ms
+    admin_page = await _admin_seals(
+        member,
+        member_pages,
+        issued_at=clock.ms - 60_000,
+        seq=9,
+        cutoff=cutoff,
+        epoch=epoch,
+    )
+    wire = await _owner_wired(host, member, host_pages, member_pages, versions)
+    mine = await host_pages.seal_if_due(SPACE)
+    assert mine is not None and mine.epoch == epoch
+    await _deliver_admin_page(member_pages, host_pages, admin_page)
+    assert await _owner_status(host, host_pages) is SpaceSyncState.CATCHING_UP
+    await _owner_settles(host, host_pages, wire)
+    assert await host.repos.space_post.get("post-carl") is not None
+    assert await _owner_status(host, host_pages) is SpaceSyncState.UP_TO_DATE

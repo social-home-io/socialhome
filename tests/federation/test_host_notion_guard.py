@@ -48,6 +48,14 @@ ALLOWED: dict[tuple[str, str], str] = {
         "another version of its own (a delegated admin's page may predate "
         "the owner's edits; what it applies it spreads as the host)"
     ),
+    ("federation/sync/space/pages.py", "_seal_if_due"): (
+        "are WE the owner: the owner seals by its own lazy interval whatever "
+        "page it holds; a delegated admin defers to the owner's fresh page"
+    ),
+    ("federation/sync/space/pages.py", "compare"): (
+        "are WE the owner: only the owner keeps the page it catches up "
+        "against beside its own (it takes only rows it lacks)"
+    ),
     ("federation/sync/space/pages.py", "_receive"): (
         "are WE the owner: only the owner takes a newer page its delegated "
         "admin signed over its own; a delegated admin keeps its own chain"

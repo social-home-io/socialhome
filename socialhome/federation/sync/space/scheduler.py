@@ -387,7 +387,7 @@ class SpaceSyncScheduler:
         #: Roster digest builder (see :meth:`attach_roster_digest`).
         self._roster_digest: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: v_95 — ``space_id ->`` the sync page we hold (BEGIN ``page``).
-        self._sync_page_ref: Callable[[str], Awaitable[dict | None]] | None = None
+        self._sync_page_ref: Callable[[str, str], Awaitable[dict | None]] | None = None
         self._sync_page_buckets: Callable[[str, str, dict], list[int] | None] | None = (
             None
         )
@@ -657,12 +657,14 @@ class SpaceSyncScheduler:
 
     def attach_sync_pages(
         self,
-        ref_for: Callable[[str], Awaitable[dict | None]],
+        ref_for: Callable[[str, str], Awaitable[dict | None]],
         buckets_for: Callable[[str, str, dict], list[int] | None] | None = None,
         have_for: Callable[[str, str, dict], str | None] | None = None,
     ) -> None:
-        """``ref_for(space_id)`` → the sync page we hold for the space, as a
-        BEGIN's ``page`` (v_95, ``SyncPageService.ref_for``), or ``None``.
+        """``ref_for(space_id, to_instance_id)`` → the sync page we hold for
+        the space — or, for an ask to that household, the page the ask is
+        about — as a BEGIN's ``page`` (v_95, ``SyncPageService.ref_for``), or
+        ``None``.
         Carried on every BEGIN path to a provider at ``MIN_FOR_SYNC_PAGES``
         so it sends its page only when newer than ours. ``buckets_for(
         space_id, to_instance_id)`` — the buckets whose listings that BEGIN
@@ -688,7 +690,7 @@ class SpaceSyncScheduler:
             ):
                 return {}
             out: dict = {}
-            ref = await self._sync_page_ref(space_id)
+            ref = await self._sync_page_ref(space_id, to_instance_id)
             if ref is not None:
                 out["page"] = ref
                 buckets = (
