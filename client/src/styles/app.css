@@ -22650,6 +22650,37 @@ span.sh-hlv__who { cursor: default; }
   outline-offset: 2px;
   border-radius: var(--sh-radius-sm);
 }
+/* Public can't be switched on here: says why, and where to sign up. */
+.sh-momentum-composer-public.is-unavailable {
+  align-items: flex-start;
+  border-style: dashed;
+  cursor: default;
+}
+.sh-momentum-composer-public.is-unavailable > .sh-momentum-composer-icon {
+  margin-top: 2px;
+  color: var(--sh-text-muted);
+}
+.sh-momentum-composer-public__text .sh-momentum-composer-public-signup {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  color: var(--sh-primary-text);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sh-momentum-composer-public-signup:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}
+/* Settings › Public sharing: back to the moment put aside in the composer. */
+.sh-public-sharing-back {
+  align-self: flex-start;
+  text-decoration: none;
+}
 /* Momentum › Yours: the Public sharing row (→ Settings › Privacy). */
 .sh-momentum-sharing-row {
   display: grid;

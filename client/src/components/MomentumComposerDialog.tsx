@@ -14,12 +14,21 @@
  *   long followers keep it (the author's own setting). No "Change" link:
  *   ``max_hops`` only changes what *you* see, never how far yours go.
  * * **Public** — a separate switch, shown only when the person is
- *   registered on a GFS, and for a reply only under a public moment
- *   (decision 2), with a link to Settings › Privacy › Public sharing
- *   (decision 5). It starts from "Make new moments public" (off for new
- *   registrations, decision 4); once the person flips it, a late
- *   registrations load never overwrites that (B25). When it's on the
- *   button reads "Post publicly".
+ *   registered on a GFS that can carry encrypted moments (v_62), and for
+ *   a reply only under a public moment (decision 2), with a link to
+ *   Settings › Privacy › Public sharing (decision 5). It starts from
+ *   "Make new moments public" (off for new registrations, decision 4);
+ *   once the person flips it, a late registrations load never overwrites
+ *   that (B25). When it's on the button reads "Post publicly".
+ *   Where the switch can't be, the row still says why, so public sharing
+ *   is never a secret: the household is on a GFS but the person isn't
+ *   signed up there → "Sign up in Settings" (anyone can, for themselves);
+ *   signed up only on GFSs that can't carry encrypted moments → says so,
+ *   no link (nothing in Settings helps). No GFS at all, or a protected
+ *   account: no row.
+ *   Both links put a new moment aside instead of asking to discard it;
+ *   the next "Share a moment" (and the panel's "Back to your moment")
+ *   brings it back.
  * * **Rate limit** — one top-level moment per 15 minutes (decision 13).
  *   ``GET /api/moments/limits`` says when the next one can go; the banner
  *   says so and the button reads "Post at 13:24" (disabled) until then.
@@ -52,10 +61,15 @@ import { localClockTime } from '@/utils/relativeTime'
 import { currentUser } from '@/store/auth'
 import { namedPersonLabel } from '@/store/householdUsers'
 import {
+  canCarryPublicMoments,
+  gfsConnections,
+  gfsName,
+  loadGfsConnections,
   loadRegistrations,
+  parkedMoment,
   registrations,
 } from '@/store/momentPublic'
-import type { GfsConnection, Moment, MomentDetail } from '@/types'
+import type { Moment, MomentDetail } from '@/types'
 import { t, isOne } from '@/i18n/i18n'
 import { formatSeconds } from '@/utils/videoDuration'
 
@@ -86,8 +100,6 @@ const nextAllowedAt = signal<string | null>(null)
 /** Wall clock for the countdown; bumped by a timer while limited. */
 const now = signal<number>(Date.now())
 const reachInfoOpen = signal<boolean>(false)
-/** Active GFS connections, for naming the one the public switch uses. */
-const gfsNames = signal<Record<string, string>>({})
 /** Bumped per open so late answers from an earlier compose are dropped. */
 let openSeq = 0
 
@@ -115,15 +127,6 @@ function loadParent(seq: number, id: string): void {
     .catch(() => { /* no quote; unknown counts as not public */ })
 }
 
-function loadGfsNames(): void {
-  if (Object.keys(gfsNames.value).length > 0) return
-  api.get('/api/gfs/connections')
-    .then((rows: GfsConnection[] | null) => {
-      gfsNames.value = Object.fromEntries((rows ?? []).map((g) => [g.id, g.display_name]))
-    })
-    .catch(() => { /* the row says "a GFS" instead */ })
-}
-
 /** Open the composer dialog. Pass a moment id to compose a reply; omit
  *  for a new top-level moment.
  *
@@ -132,11 +135,30 @@ function loadGfsNames(): void {
  *  never pre-ticked) or ``parentIsPublic``. Without either (a deep link)
  *  the parent is read; unknown counts as not public — the toggle stays
  *  hidden. "Make new moments public" applies to new top-level moments
- *  only. */
+ *  only.
+ *
+ *  A new moment put aside for Settings comes back as it was, once. */
 export function openMomentumComposer(
   parentMomentId: string | null = null,
   opts: { parentIsPublic?: boolean; parent?: Moment } = {},
 ): void {
+  // Who the public row names, and whether a sign-up hint applies.
+  void loadGfsConnections()
+  const resume = parkedMoment.value && parentMomentId === null && parentId.value === null
+  parkedMoment.value = false
+  if (resume) {
+    // Same compose as before: keep its sequence, so an upload still on
+    // its way lands in it.
+    reachInfoOpen.value = false
+    open.value = true
+    const seq = openSeq
+    void loadRegistrations().then(() => {
+      if (seq !== openSeq || !open.value || publicTouched.value) return
+      isPublic.value = registrations.value.some((r) => r.default_share)
+    })
+    loadLimits(seq)
+    return
+  }
   const seq = ++openSeq
   parentId.value = parentMomentId
   parent.value = parentMomentId !== null ? opts.parent ?? null : null
@@ -159,18 +181,40 @@ export function openMomentumComposer(
   open.value = true
   void loadRegistrations().then(() => {
     if (seq !== openSeq || !open.value) return
-    if (registrations.value.length > 0) loadGfsNames()
     if (parentId.value === null && !publicTouched.value) isPublic.value = defaultShare()
   })
   if (parentMomentId === null) loadLimits(seq)
   else if (!opts.parent) loadParent(seq, parentMomentId)
 }
 
-/** The "share publicly" toggle applies: registered, not protected, and —
- *  for a reply — the parent is public. */
-function canSharePublic(): boolean {
-  if (registrations.value.length === 0 || isRestricted('public_moments')) return false
+/** Registrations public moments can actually go through (v_62). */
+function carriers() {
+  return registrations.value.filter(canCarryPublicMoments)
+}
+
+/** This moment could be public at all: not protected, and — for a reply
+ *  — the parent is public. */
+function publicApplies(): boolean {
+  if (isRestricted('public_moments')) return false
   return parentId.value === null || parentIsPublic.value
+}
+
+/** The "share publicly" toggle applies: it could be public, and the
+ *  person is signed up on a GFS that carries it. */
+function canSharePublic(): boolean {
+  return publicApplies() && carriers().length > 0
+}
+
+/** What the public row shows: the switch, why it's unavailable, or
+ *  nothing (no GFS, protected, a private parent). */
+type PublicRow = 'switch' | 'unsupported' | 'signup' | null
+
+function publicRow(): PublicRow {
+  if (!publicApplies()) return null
+  if (carriers().length > 0) return 'switch'
+  if (registrations.value.length > 0) return 'unsupported'
+  if ((gfsConnections.value?.length ?? 0) > 0) return 'signup'
+  return null
 }
 
 /** Top-level and the next allowed time is still ahead. */
@@ -202,15 +246,32 @@ async function requestClose(): Promise<boolean> {
 /** Settings › Privacy › Public sharing (decision 5). */
 const PUBLIC_SHARING_PATH = '/settings#public-sharing'
 
-function publicTitle(): string {
-  const regs = registrations.value
-  if (regs.length === 1) {
-    const name = gfsNames.value[regs[0].gfs_id]
+/** "Also public on …", named after the GFSs in question. */
+function publicTitle(gfsIds: string[]): string {
+  if (gfsIds.length === 1) {
+    const name = gfsName(gfsIds[0])
     return name
       ? t('moment.composer.public_on', { gfs: name })
       : t('moment.composer.public_on_one')
   }
-  return t('moment.composer.public_on_many', { n: String(regs.length) })
+  return t('moment.composer.public_on_many', { n: String(gfsIds.length) })
+}
+
+/** "Public on …: not available", named only when it's one GFS. */
+function unavailableTitle(gfsIds: string[]): string {
+  const name = gfsIds.length === 1 ? gfsName(gfsIds[0]) : null
+  return name
+    ? t('moment.composer.public_unavailable', { gfs: name })
+    : t('moment.composer.public_unavailable_any')
+}
+
+/** Close without asking and remember a new moment's draft, so a visit to
+ *  Settings › Public sharing never costs the words. A reply is never put
+ *  aside (its links only exist for a public parent; the reply field on
+ *  the moment page keeps its own draft). */
+function putAside(): void {
+  parkedMoment.value = parentId.value === null && hasDraft()
+  open.value = false
 }
 
 function IconPeople() {
@@ -352,8 +413,21 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
   const minutesLeft = limited
     ? Math.max(1, Math.ceil((Date.parse(nextAllowedAt.value!) - now.value) / 60_000))
     : 0
-  const showPublic = canSharePublic()
+  const row = publicRow()
+  const showPublic = row === 'switch'
   const publicOn = showPublic && isPublic.value
+  const goToSharing = (e: Event) => {
+    // The router takes the move once the dialog is closed; a new moment
+    // waits for the way back instead of being discarded.
+    e.preventDefault()
+    e.stopPropagation()
+    if (parentId.value === null) {
+      putAside()
+      loc.route(PUBLIC_SHARING_PATH)
+    } else {
+      void requestClose().then((closed) => { if (closed) loc.route(PUBLIC_SHARING_PATH) })
+    }
+  }
 
   const reachLine = isReply
     ? t(isProtected ? 'moment.composer.reach_reply_protected' : 'moment.composer.reach_reply')
@@ -502,7 +576,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
           <label class={`sh-momentum-composer-public${publicOn ? ' is-on' : ''}`}>
             <IconGlobe />
             <span class="sh-momentum-composer-public__text">
-              <strong>{publicTitle()}</strong>
+              <strong>{publicTitle(carriers().map((r) => r.gfs_id))}</strong>
               <span id="sh-momentum-composer-public-hint">{t('moment.composer.public_hint')}</span>
             </span>
             <Switch
@@ -519,16 +593,35 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
           <a
             class="sh-momentum-composer-public-settings"
             href={addBase(PUBLIC_SHARING_PATH)}
-            onClick={(e) => {
-              // The router handles the move once the dialog is closed — a
-              // draft is asked about first, like any other way out.
-              e.preventDefault()
-              e.stopPropagation()
-              void requestClose().then((closed) => { if (closed) loc.route(PUBLIC_SHARING_PATH) })
-            }}
+            onClick={goToSharing}
           >
             {t('moment.composer.public_settings')}
           </a>
+        )}
+        {(row === 'signup' || row === 'unsupported') && (
+          <div class="sh-momentum-composer-public is-unavailable">
+            <IconGlobe />
+            <span class="sh-momentum-composer-public__text">
+              <strong>
+                {unavailableTitle(row === 'signup'
+                  ? (gfsConnections.value ?? []).map((g) => g.id)
+                  : registrations.value.map((r) => r.gfs_id))}
+              </strong>
+              <span id="sh-momentum-composer-public-hint">
+                {t(row === 'signup' ? 'moment.composer.public_signup_hint' : 'moment.composer.public_unsupported')}
+              </span>
+              {row === 'signup' && (
+                <a
+                  class="sh-momentum-composer-public-signup"
+                  href={addBase(PUBLIC_SHARING_PATH)}
+                  aria-describedby="sh-momentum-composer-public-hint"
+                  onClick={goToSharing}
+                >
+                  {t('moment.composer.public_signup_link')}
+                </a>
+              )}
+            </span>
+          </div>
         )}
 
         <div class="sh-form-actions sh-momentum-composer-actions">

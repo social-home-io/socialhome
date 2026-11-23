@@ -17,6 +17,17 @@ import type {
 
 export const registrations = signal<MomentPublicRegistration[]>([])
 export const follows = signal<MomentPublicFollow[]>([])
+/** A new moment was put aside in the composer to visit Settings › Public
+ *  sharing; the next "Share a moment" (``/momentum/new``) brings it back,
+ *  and the panel offers the way back while it waits. In memory only. */
+export const parkedMoment = signal<boolean>(false)
+
+/** Public moments can go through this registration: the GFS proved
+ *  ``encrypted_moments`` (v_62). Unknown (an older backend) counts as
+ *  yes — the server still decides. */
+export function canCarryPublicMoments(r: MomentPublicRegistration): boolean {
+  return r.delivery !== 'unsupported_server'
+}
 
 export async function loadRegistrations(): Promise<void> {
   try {

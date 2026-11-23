@@ -6,7 +6,11 @@ import {
 } from './MomentumComposerDialog'
 import { ApiError } from '@/api'
 import { currentUser } from '@/store/auth'
-import { registrations } from '@/store/momentPublic'
+import {
+  _resetGfsConnectionsForTests,
+  parkedMoment,
+  registrations,
+} from '@/store/momentPublic'
 import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
 import { uploadWithProgress } from './UploadProgress'
@@ -54,11 +58,13 @@ const REG_OFF: MomentPublicRegistration = { ...REG, default_share: false }
 
 let regs: MomentPublicRegistration[] = [REG]
 let nextAllowed: string | null = null
+let conns: Array<{ id: string; display_name: string; status: string }> = []
+const DEMO_GFS = { id: 'g1', display_name: 'Demo GFS', status: 'active' }
 
 function routeGet(path: string) {
   if (path === '/api/moments/public/registrations') return Promise.resolve(regs)
   if (path === '/api/moments/limits') return Promise.resolve({ next_allowed_at: nextAllowed })
-  if (path === '/api/gfs/connections') return Promise.resolve([{ id: 'g1', display_name: 'Demo GFS', status: 'active' }])
+  if (path === '/api/gfs/connections') return Promise.resolve(conns)
   return Promise.reject(new Error(`unexpected GET ${path}`))
 }
 
@@ -94,7 +100,10 @@ describe('MomentumComposerDialog', () => {
   beforeEach(() => {
     regs = [REG]
     nextAllowed = null
+    conns = [DEMO_GFS]
     registrations.value = []
+    parkedMoment.value = false
+    _resetGfsConnectionsForTests()
     currentUser.value = { user_id: 'u1', username: 'me', display_name: 'Me' } as User
     mockApi.get.mockReset()
     mockApi.post.mockReset()
@@ -149,7 +158,7 @@ describe('MomentumComposerDialog', () => {
     expect(publicSwitch(container)!.checked).toBe(false)
   })
 
-  it('the public row links to Settings › Privacy › Public sharing; leaving asks about a draft first', async () => {
+  it('the public row links to Settings › Privacy › Public sharing; the draft waits there', async () => {
     regs = [REG_OFF]
     const { container } = render(<MomentumComposerDialog />)
     await openAndSettle()
@@ -160,21 +169,157 @@ describe('MomentumComposerDialog', () => {
     })
     expect(link.textContent).toBe('Public sharing settings')
     expect(link.getAttribute('href')).toBe('/settings#public-sharing')
-    // A draft: the person is asked, and "keep writing" stays here.
     const ta = container.querySelector('textarea')!
     await act(async () => { fireEvent.input(ta, { target: { value: 'Half a thought' } }) })
-    vi.mocked(confirmDialog).mockResolvedValueOnce(false)
     routeSpy.mockReset()
     await act(async () => { fireEvent.click(link) })
-    expect(confirmDialog).toHaveBeenCalled()
-    expect(routeSpy).not.toHaveBeenCalled()
-    expect(container.querySelector('textarea')).not.toBeNull()
-    vi.mocked(confirmDialog).mockResolvedValueOnce(true)
-    await act(async () => { fireEvent.click(link) })
-    await waitFor(() => expect(routeSpy).toHaveBeenCalledWith('/settings#public-sharing'))
+    // Nothing to discard: the draft is kept for the way back.
+    expect(confirmDialog).not.toHaveBeenCalled()
+    expect(routeSpy).toHaveBeenCalledWith('/settings#public-sharing')
+    expect(container.querySelector('textarea')).toBeNull()
+    expect(parkedMoment.value).toBe(true)
+    await openAndSettle()
+    expect(container.querySelector('textarea')!.value).toBe('Half a thought')
+    expect(parkedMoment.value).toBe(false)
   })
 
-  it('no public row without a registration', async () => {
+  it('connected to a GFS but not signed up: public is unavailable, with a link to sign up', async () => {
+    regs = []
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const row = await waitFor(() => {
+      const r = container.querySelector('.sh-momentum-composer-public.is-unavailable')
+      expect(r).not.toBeNull()
+      return r!
+    })
+    expect(publicSwitch(container)).toBeNull()
+    // Never worded as if it were public.
+    expect(row.textContent).toContain('Public on Demo GFS: not available')
+    expect(row.textContent).not.toContain('Also public')
+    expect(row.textContent).toContain('You’re not signed up there yet.')
+    const link = container.querySelector('a.sh-momentum-composer-public-signup') as HTMLAnchorElement
+    expect(link.textContent).toBe('Sign up in Settings')
+    expect(link.getAttribute('href')).toBe('/settings#public-sharing')
+    // The hint and the link are tied together for a screen reader.
+    expect(link.getAttribute('aria-describedby')).toBe('sh-momentum-composer-public-hint')
+    expect(container.querySelector('a.sh-momentum-composer-public-settings')).toBeNull()
+    expect(submitButton(container).textContent).toBe('Post moment')
+  })
+
+  it('following the sign-up link keeps the draft, even with a picture, and brings it back', async () => {
+    regs = []
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const link = await waitFor(() => {
+      const a = container.querySelector('a.sh-momentum-composer-public-signup') as HTMLAnchorElement
+      expect(a).not.toBeNull()
+      return a
+    })
+    fireEvent.input(container.querySelector('textarea')!, { target: { value: 'Lake at dawn' } })
+    routeSpy.mockReset()
+    await act(async () => { fireEvent.click(link) })
+    expect(confirmDialog).not.toHaveBeenCalled()
+    expect(routeSpy).toHaveBeenCalledWith('/settings#public-sharing')
+    expect(container.querySelector('textarea')).toBeNull()
+    // Signed up meanwhile: back in the composer, the switch is there now.
+    regs = [REG_OFF]
+    await openAndSettle()
+    expect(container.querySelector('textarea')!.value).toBe('Lake at dawn')
+    await waitFor(() => expect(publicSwitch(container)).not.toBeNull())
+  })
+
+  it('a kept draft is offered once: after it is back, a new compose starts empty', async () => {
+    regs = []
+    const { container, getByText } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const link = await waitFor(() => container.querySelector('a.sh-momentum-composer-public-signup') as HTMLAnchorElement)
+    fireEvent.input(container.querySelector('textarea')!, { target: { value: 'Kept' } })
+    await act(async () => { fireEvent.click(link) })
+    await openAndSettle()
+    expect(container.querySelector('textarea')!.value).toBe('Kept')
+    vi.mocked(confirmDialog).mockResolvedValue(true)
+    await act(async () => { fireEvent.click(getByText('Cancel')) })
+    await waitFor(() => expect(container.querySelector('textarea')).toBeNull())
+    await openAndSettle()
+    expect(container.querySelector('textarea')!.value).toBe('')
+  })
+
+  it('a reply opened meanwhile does not pick up a kept moment', async () => {
+    regs = []
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const link = await waitFor(() => container.querySelector('a.sh-momentum-composer-public-signup') as HTMLAnchorElement)
+    fireEvent.input(container.querySelector('textarea')!, { target: { value: 'Mine' } })
+    await act(async () => { fireEvent.click(link) })
+    await openAndSettle('m-parent', { parent: PARENT })
+    expect(container.querySelector('textarea')!.value).toBe('')
+    expect(parkedMoment.value).toBe(false)
+  })
+
+  it('no GFS connected: no public row and no hint', async () => {
+    regs = []
+    conns = []
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(container.querySelector('.sh-momentum-composer-public')).toBeNull()
+    expect(container.querySelector('a.sh-momentum-composer-public-signup')).toBeNull()
+  })
+
+  it('a GFS that cannot carry encrypted moments: says so, no switch and no link', async () => {
+    regs = [{ ...REG, delivery: 'unsupported_server' }]
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const row = await waitFor(() => {
+      const r = container.querySelector('.sh-momentum-composer-public.is-unavailable')
+      expect(r).not.toBeNull()
+      return r!
+    })
+    expect(row.textContent).toContain('Public on Demo GFS: not available')
+    expect(row.textContent).toContain('can’t carry encrypted moments yet')
+    expect(publicSwitch(container)).toBeNull()
+    expect(container.querySelector('a.sh-momentum-composer-public-signup')).toBeNull()
+    expect(container.querySelector('a.sh-momentum-composer-public-settings')).toBeNull()
+    // "Share by default" is on, but the moment can't go public: never sent as public.
+    expect(submitButton(container).textContent).toBe('Post moment')
+    fireEvent.input(container.querySelector('textarea')!, { target: { value: 'hi' } })
+    fireEvent.submit(container.querySelector('form')!)
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled())
+    expect((mockApi.post.mock.calls[0][1] as Record<string, unknown>).is_public).toBe(false)
+  })
+
+  it('one GFS that can carry it is enough for the switch', async () => {
+    regs = [{ ...REG, delivery: 'unsupported_server' }, { ...REG, gfs_id: 'g2', delivery: 'encrypted' }]
+    conns = [DEMO_GFS, { id: 'g2', display_name: 'Second GFS', status: 'active' }]
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    await waitFor(() => expect(publicSwitch(container)).not.toBeNull())
+    // Named after the server it actually goes through.
+    expect(container.querySelector('.sh-momentum-composer-public')!.textContent).toContain('Also public on Second GFS')
+  })
+
+  it('a protected account connected to a GFS gets no public row and no hint', async () => {
+    regs = []
+    currentUser.value = {
+      user_id: 'u1', username: 'finn', display_name: 'Finn', protected: true, restrictions: ['public_moments'],
+    } as User
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(container.querySelector('.sh-momentum-composer-public')).toBeNull()
+    expect(container.querySelector('a.sh-momentum-composer-public-signup')).toBeNull()
+    expect(container.querySelector('.sh-momentum-composer-reach')!.textContent).toContain('Your household and paired households')
+  })
+
+  it('a reply to a moment that is not public shows no sign-up hint', async () => {
+    regs = []
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle('m-parent', { parent: PARENT })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(container.querySelector('.sh-momentum-composer-public')).toBeNull()
+  })
+
+  it('no public switch without a registration', async () => {
     regs = []
     const { container } = render(<MomentumComposerDialog />)
     await openAndSettle()

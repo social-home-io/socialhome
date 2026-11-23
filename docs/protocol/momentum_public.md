@@ -1247,7 +1247,15 @@ identical bytes-for-bytes to the sender's canonical encoding.
   unless chosen —, Leave) lives in Settings › Privacy
   (`/settings#public-sharing`; the old `/momentum/public/sharing`
   redirects), linked from Momentum › Yours, the composer's public row and
-  the pairing screen.
+  the pairing screen. Signing up is each person's own choice (no admin
+  needed). The composer's public row says why it can't be switched on
+  instead of hiding: the household is on an active GFS but the person
+  isn't signed up → "Sign up in Settings"; signed up only on GFSs that
+  haven't proved `encrypted_moments` → says so, no link, and the moment
+  goes out as not public. No GFS, a protected account or a reply under a
+  private moment: no row. Following either link puts a new moment's draft
+  aside (in memory) instead of asking to discard it; "Back to your
+  moment" in the panel, or the next "Share a moment", brings it back.
 * **Profile sync** — `UserProfileUpdated` (published from
   `UserService.patch_profile` and `set_picture`) is consumed by
   `ProfileSyncService`, which calls
