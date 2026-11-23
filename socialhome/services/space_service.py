@@ -9937,7 +9937,7 @@ class SpaceService(
                 raise SubscribeNotAllowedError()
             return space.owner_instance_id or None
         if self._peer_spaces is not None:
-            entry = await self._peer_spaces.get(space_id)
+            entry = await self._peer_spaces.get_any(space_id)
             if entry is not None:
                 # No ``allow_subscribers`` here: the host refuses when off.
                 return entry.instance_id or None

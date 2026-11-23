@@ -200,3 +200,43 @@ async def test_attach_registers_event_type():
     (event_type, fn), _kwargs = registry.register.call_args
     assert event_type == FederationEventType.SPACE_DIRECTORY_SYNC
     assert fn == handler._on_snapshot
+
+
+async def test_snapshot_carries_the_follower_count(repo):
+    """A current host declares its followers; an older one sends none (no
+    number, never 0); a malformed value is no number either."""
+    handler = PeerDirectoryHandler(repo)
+    await handler._on_snapshot(
+        _event(
+            "peerA",
+            [
+                {
+                    "space_id": "s1",
+                    "name": "One",
+                    "member_count": 3,
+                    "follower_count": 9,
+                },
+                {"space_id": "s2", "name": "Two", "member_count": 4},
+                {
+                    "space_id": "s3",
+                    "name": "Tri",
+                    "member_count": 1,
+                    "follower_count": -2,
+                },
+            ],
+        )
+    )
+    rows = {r.space_id: r for r in await repo.list_for_instance("peerA")}
+    assert (rows["s1"].member_count, rows["s1"].follower_count) == (3, 9)
+    assert (rows["s2"].member_count, rows["s2"].follower_count) == (4, None)
+    assert rows["s3"].follower_count is None
+
+
+async def test_get_reads_one_hosts_entry(repo):
+    handler = PeerDirectoryHandler(repo)
+    await handler._on_snapshot(
+        _event("peerA", [{"space_id": "s1", "name": "One", "follower_count": 2}])
+    )
+    got = await repo.get("peerA", "s1")
+    assert got is not None and (got.name, got.follower_count) == ("One", 2)
+    assert await repo.get("peerB", "s1") is None

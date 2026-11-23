@@ -65,6 +65,7 @@ import { normaliseTimestamp } from '@/utils/relativeTime'
 import { addBase } from '@/baseUrl'
 import { safeHref } from '@/utils/safeHref'
 import { visibleArea } from '@/utils/popoverPlacement'
+import { growTextarea, isSendKey } from '@/utils/autoGrow'
 import { useKeyboardOpen } from '@/hooks/useKeyboardOpen'
 
 /** Page size for the lazy-load older-history fetch. The initial
@@ -1469,34 +1470,13 @@ export function ConversationView({
 
   let typingTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** Grow the composer textarea to fit its content up to a hard cap,
-   *  then scroll internally. Called on every input event + after send
-   *  / reset to land the height back at one line. ``scrollHeight`` is
-   *  the layout height required to show all content; assigning ``auto``
-   *  first lets it shrink when the user deletes lines. */
+  /** Grow the composer textarea to fit its content up to the cap for
+   *  the visible height, then scroll inside (``growTextarea``). Called
+   *  on every input event + after send / reset to land the height back
+   *  at one line. */
   const autoResize = (el: HTMLTextAreaElement) => {
-    el.style.height = 'auto'
-    // Under ``box-sizing: border-box`` the textarea's ``height``
-    // includes its 2 px top + bottom border, but ``scrollHeight``
-    // does not. Setting ``height = scrollHeight`` therefore leaves
-    // the content area 2 px short of the natural row size and
-    // triggers ``overflow-y: auto``'s scrollbar at every rest
-    // point. Add the border delta so a 1-row composer stays
-    // scrollbar-free; the cap still applies past the limit.
-    const borderDelta = el.offsetHeight - el.clientHeight
     const area = visibleArea()
-    const cap = composerHeightCap(area.bottom - area.top)
-    const target = Math.min(el.scrollHeight + borderDelta, cap)
-    el.style.height = `${target}px`
-    // Toggle the vertical scrollbar: visible only when the user has
-    // typed past the height cap. On Linux Chrome (classic
-    // scrollbars) ``overflow-y: auto`` always reserves a 17 px
-    // gutter on the right, eating into the input width and making
-    // tiny step arrows show at rest. Flipping to ``hidden`` below
-    // the cap reclaims that gutter for the text; only the rare
-    // "drafting a screenplay in the chat bar" case still gets a
-    // scrollbar.
-    el.style.overflowY = target >= cap ? 'auto' : 'hidden'
+    growTextarea(el, composerHeightCap(area.bottom - area.top))
   }
 
   /** Drive a file picker → ``/api/media/upload`` → composer chip.
@@ -1702,7 +1682,7 @@ export function ConversationView({
   /** Replace ``ta.value[start:end]`` with ``emoji`` and place the caret
    *  immediately after the inserted glyph. Shared by the
    *  ``:shortcode`` autocomplete (range = the typed token) and the
-   *  ``EmojiPickButton`` (range = current caret position). */
+   *  ``EmojiPickButton`` (range = the caret, or the selection). */
   const spliceEmojiIntoTextarea = (emoji: string, range: [number, number]) => {
     const ta = composerInputRef.current
     if (!ta) return
@@ -1720,12 +1700,13 @@ export function ConversationView({
     })
   }
 
-  /** Picker-button entry point — inserts at the current caret position. */
+  /** Picker-button entry point — at the caret, replacing a selection
+   *  like typing would. */
   const insertEmojiAtCursor = (emoji: string) => {
     const ta = composerInputRef.current
     if (!ta) return
-    const pos = ta.selectionStart ?? ta.value.length
-    spliceEmojiIntoTextarea(emoji, [pos, pos])
+    const start = ta.selectionStart ?? ta.value.length
+    spliceEmojiIntoTextarea(emoji, [start, ta.selectionEnd ?? start])
   }
 
   /** Slack-style ``:foo:`` → glyph: scan the textarea value for closed
@@ -1815,13 +1796,7 @@ export function ConversationView({
       e.preventDefault()
       return
     }
-    if (e.key !== 'Enter') return
-    if (e.shiftKey) return  // explicit "give me a newline"
-    if (e.isComposing) return  // IME — let the input swallow Enter
-    const coarsePointer =
-      typeof window !== 'undefined' &&
-      window.matchMedia?.('(pointer: coarse)').matches
-    if (coarsePointer) return  // touch → newline, send via button
+    if (!isSendKey(e)) return
     e.preventDefault()
     const ta = e.currentTarget as HTMLTextAreaElement
     ta.form?.requestSubmit()

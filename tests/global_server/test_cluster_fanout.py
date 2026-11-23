@@ -734,6 +734,9 @@ async def test_wire_helpers_roundtrip_client_space_report():
         authority_cert={"key_epoch": 2, "space_id": "s"},
         authority_rotation_seq=7,
         withdrawn=True,
+        member_count=4,
+        follower_count=9,
+        counts_ts="2026-11-23T10:00:00.000000+00:00",
     )
     # Every field round-trips. ``identity_public_key`` in particular: it used
     # to fall off the wire, so an inbound NODE_SYNC_SPACE rebuilt the row with

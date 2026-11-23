@@ -3134,15 +3134,9 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   flex: 1;
   align-items: center;
 }
-/* Anchor for the reaction picker. ``position: relative`` lets the
- * absolutely-positioned ``.sh-reaction-picker`` open above-right of
- * the + button rather than relative to the entire post. */
-.sh-reaction-add-wrap { position: relative; display: inline-flex; }
-.sh-reaction-add-wrap .sh-reaction-picker {
-  bottom: calc(100% + 6px);
-  left: 0;
-  top: auto;
-}
+/* The reaction picker hangs off the + button with ``position: fixed``
+ * (``ReactionPicker``'s ``anchor``). */
+.sh-reaction-add-wrap { display: inline-flex; }
 .sh-reaction-chip, .sh-reaction-add {
   display: inline-flex;
   align-items: center;
@@ -3473,33 +3467,28 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   display: flex;
   gap: var(--sh-space-xs);
   margin-top: var(--sh-space-xs);
-  align-items: center;
+  /* The field grows upwards with long text; the buttons stay on its
+   * last line, next to where you type. */
+  align-items: flex-end;
+  /* Never squeeze the field into a sliver: when the buttons (long in
+   * German) leave it less than ~220 px it takes its own line and they
+   * wrap under it, right-aligned. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
-.sh-comment-new input, .sh-comment-reply-form input { flex: 1; }
-/* Emoji-insert button next to the comment input. The popover
- * (``ReactionPicker``) opens above the button so it doesn't push
- * surrounding posts down. */
-.sh-comment-emoji-wrap { position: relative; display: inline-flex; }
-.sh-comment-emoji-btn {
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  font-size: 1.1rem;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--sh-radius-full);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background var(--sh-transition-fast);
+/* A comment field: one line to start, grows with the text up to ~40 % of
+ * the visible height (``CommentField``), then scrolls inside. */
+.sh-comment-new textarea, .sh-comment-reply-form textarea,
+.sh-comment-bubble--editing textarea {
+  min-width: 0;
+  min-height: 38px;
+  resize: none;
+  line-height: 1.4;
+  overflow-y: hidden;
 }
-.sh-comment-emoji-btn:hover { background: var(--sh-bg-secondary); }
-.sh-comment-emoji-wrap .sh-reaction-picker {
-  bottom: calc(100% + 6px);
-  right: 0;
-  left: auto;
-  top: auto;
-}
+.sh-comment-new textarea, .sh-comment-reply-form textarea { flex: 1 1 220px; }
+.sh-comment-bubble--editing textarea { width: 100%; }
+.sh-comment-count { align-self: center; flex-shrink: 0; }
 .sh-comment-replies {
   padding-left: var(--sh-space-md);
   display: flex;
@@ -4985,7 +4974,7 @@ body.sh-dm-thread-open .sh-messages {
 }
 /* Inline emoji-picker — pinned to the bottom-right of the textarea
  * pill. ``EmojiPickButton`` renders a ``.sh-emoji-pick-wrap`` div
- * around the button (so the popover can position relative to it),
+ * around the button (the picker itself is fixed to the viewport),
  * so we absolutely-position the wrap, not the button itself. The
  * button keeps its default 32×32 styling. */
 .sh-thread > .sh-composer > .sh-dm-input-wrap
@@ -13645,6 +13634,7 @@ a.sh-space-hero-members:hover { background: var(--sh-bg-secondary); color: var(-
   object-fit: cover;
 }
 .sh-space-hero-faces > * + * { margin-inline-start: -8px; }
+.sh-space-hero-followers,
 .sh-space-hero-scope { white-space: nowrap; }
 .sh-space-hero-about {
   display: -webkit-box;
@@ -16492,7 +16482,7 @@ a.sh-link-preview-link:focus-visible {
 /* Shared 😀 emoji-picker trigger button for any text input
  * (composer, comments, DM, bazaar). Replaces the per-component inline
  * versions; opens :class:`ReactionPicker` as a popover. */
-.sh-emoji-pick-wrap { position: relative; display: inline-flex; }
+.sh-emoji-pick-wrap { display: inline-flex; }
 .sh-emoji-pick-btn {
   background: transparent;
   border: 0;
@@ -16513,19 +16503,6 @@ a.sh-link-preview-link:focus-visible {
     height: var(--sh-tap-target-compact);
   }
 }
-.sh-emoji-pick-wrap .sh-reaction-picker {
-  bottom: calc(100% + 6px);
-  right: 0;
-  left: auto;
-  top: auto;
-  /* Never wider than a phone screen; ``EmojiPickButton`` nudges it
-   * sideways (inline ``right``) to keep it inside the visible width. */
-  max-width: calc(100vw - 16px);
-}
-.sh-emoji-pick-wrap .sh-reaction-picker.sh-reaction-picker--below {
-  top: calc(100% + 6px);
-  bottom: auto;
-}
 
 /* Reaction picker */
 .sh-reaction-picker {
@@ -16539,6 +16516,23 @@ a.sh-link-preview-link:focus-visible {
   width: 300px;
   animation: sh-slide-up 180ms var(--sh-ease-spring);
 }
+/* Hung off its button (``ReactionPicker``'s ``anchor``): fixed to the
+ * viewport, so a scrolling sheet or an ``overflow: hidden`` card can't
+ * cut it off. ``ReactionPicker`` sets ``left`` / ``top`` / ``max-height``
+ * from the room around the button; the emoji grid takes what's left and
+ * scrolls. ``--above`` pins its bottom edge at ``top``. Fades in only — a
+ * moving transform would throw off the placement measurement. */
+.sh-reaction-picker--anchored {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-width: calc(100vw - 16px);
+  animation: sh-fade-in 140ms ease;
+}
+.sh-reaction-picker--anchored.sh-reaction-picker--above { transform: translateY(-100%); }
+.sh-reaction-picker--anchored > * { flex-shrink: 0; }
+.sh-reaction-picker--anchored > .sh-reaction-grid { flex: 0 1 auto; min-height: 0; }
 .sh-reaction-picker-header {
   display: flex;
   justify-content: space-between;
@@ -16550,12 +16544,17 @@ a.sh-link-preview-link:focus-visible {
   margin-bottom: var(--sh-space-xs);
 }
 .sh-reaction-frequent {
-  display: flex;
-  gap: 4px;
+  /* One row of equal cells: the 8 frequent emoji fit the picker's width
+   * (as flex items the last one spilled past the edge). */
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 2px;
   padding-bottom: var(--sh-space-xs);
   border-bottom: 1px solid var(--sh-border);
   margin-bottom: var(--sh-space-xs);
 }
+.sh-reaction-frequent .sh-emoji-btn { width: 100%; max-width: 36px; justify-self: center; }
 .sh-reaction-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
@@ -16841,12 +16840,14 @@ a.sh-link-preview-link:focus-visible {
 @media (max-width: 768px) {
   .sh-back-to-top { bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--sh-back-to-top-lift, 0px)); }
 }
-/* While the button shows (``SHOWN_CLASS`` on <html>, set by BackToTop),
- * the page's end scrolls clear of it: ``.sh-main`` reserves the button's
- * footprint — its offset from the viewport bottom, its 44 px and a gap —
- * so the last row's controls (a Join button, the Archived row) never sit
- * under it. Not while the keyboard is up (the button is hidden then) and
- * not on the full-height chat / DM layouts, which own their bottom edge. */
+/* On a page long enough for the button (``SHOWN_CLASS`` on <html>, set by
+ * BackToTop — before it shows, so reaching the end in one go is covered
+ * too), the page's end scrolls clear of it: ``.sh-main`` reserves the
+ * button's footprint — its offset from the viewport bottom, its 44 px and
+ * a gap — so the last row's controls (a Join button, the Archived row, a
+ * comment's Post button) never sit under it. Not while the keyboard is
+ * up (the button is hidden then) and not on the full-height chat / DM
+ * layouts, which own their bottom edge. */
 html.sh-back-to-top-shown:not(.sh-kbd-open):not(:has(body.sh-dm-thread-open))
   .sh-main:not(:has(.sh-feed-host--chat, .sh-space-feed--chat)) {
   padding-bottom: calc(var(--sh-space-md) + 44px + var(--sh-space-md) + env(safe-area-inset-bottom, 0px));

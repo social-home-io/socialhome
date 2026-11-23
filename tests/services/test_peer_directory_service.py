@@ -29,6 +29,7 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceType,
 )
+from socialhome.domain.space_listing_counts import SpaceListingCounts
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.peer_directory_service import PeerDirectoryService
 
@@ -57,15 +58,19 @@ class _FakeSpaceRepo:
     ) -> None:
         self._spaces = public_spaces
         self._members = members
+        self._followers: dict[str, list[str]] = {}
 
     async def list_by_type(self, space_type: SpaceType) -> list[Space]:
         assert space_type is SpaceType.PUBLIC
         return list(self._spaces)
 
-    async def count_members(self, space_id: str) -> int:
-        # The repo's member count (followers excluded) — the snapshot
-        # publishes it as is.
-        return len(self._members.get(space_id, []))
+    async def listing_counts(self, space_id: str) -> SpaceListingCounts:
+        # The shared listing builder (members exclude followers) — the
+        # snapshot publishes both as they are.
+        return SpaceListingCounts(
+            member_count=len(self._members.get(space_id, [])),
+            follower_count=len(self._followers.get(space_id, [])),
+        )
 
 
 class _PeerRow:
@@ -166,6 +171,7 @@ async def test_space_config_changed_broadcasts_to_confirmed_peers(env):
         # Member counts come from list_members, join_mode is enum-stringified.
         garden = next(s for s in payload["spaces"] if s["space_id"] == "sp-1")
         assert garden["member_count"] == 2
+        assert garden["follower_count"] == 0
         assert garden["join_mode"] == "open"
 
 
@@ -498,3 +504,27 @@ async def test_a_failed_send_is_tried_again_on_the_next_change(env):
     assert [r[0] for r in fed.sent] == ["peer-2"]
     await bus.publish(_changed())
     assert [r[0] for r in fed.sent] == ["peer-2", "peer-1"]
+
+
+async def test_a_follower_count_change_is_a_change(env):
+    bus, fed, svc = env
+    await bus.publish(_changed())
+    fed.sent.clear()
+    svc._space_repo._followers["sp-1"] = ["f1", "f2"]
+    await bus.publish(_changed())
+    assert len(fed.sent) == 2
+    garden = next(s for s in fed.sent[0][2]["spaces"] if s["space_id"] == "sp-1")
+    assert garden["follower_count"] == 2
+
+
+async def test_refresh_resends_only_a_changed_snapshot(env):
+    """A count change outside a config change: :meth:`refresh` re-sends to
+    the peers whose copy it changes, and nothing when nothing changed."""
+    bus, fed, svc = env
+    await bus.publish(_changed())
+    fed.sent.clear()
+    await svc.refresh()
+    assert fed.sent == []
+    svc._space_repo._followers["sp-1"] = ["f1"]
+    await svc.refresh()
+    assert [r[0] for r in fed.sent] == ["peer-1", "peer-2"]

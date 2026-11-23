@@ -65,6 +65,14 @@ _ADMIN_LOGIN_ATTEMPT_RETENTION_SECONDS = 86400
 #: INTEGER range, the same bound a cert's ``key_epoch`` carries.
 _MAX_ROTATION_SEQ = MAX_AUTHORITY_KEY_EPOCH
 
+#: ``upsert_space``'s test for KEEPING the stored owner-declared counts: the
+#: incoming row declares none (no ``counts_ts``), or both carry one and the
+#: incoming one is older (last-writer-wins).
+_COUNTS_KEEP_SQL = (
+    "(excluded.counts_ts IS NULL OR (global_spaces.counts_ts IS NOT NULL"
+    " AND excluded.counts_ts < global_spaces.counts_ts))"
+)
+
 # Retention for ``gfs_pair_tokens``. Tokens are single-use with a 10-min TTL
 # and only LIVE ones (unexpired, unconsumed) are counted against the mint
 # caps, so a row past the TTL is dead weight. The server-wide live count
@@ -342,7 +350,7 @@ class SqliteGfsFederationRepo:
 
     async def upsert_space(self, space: GlobalSpace) -> None:
         await self._db.enqueue(
-            """
+            f"""
             INSERT INTO global_spaces(
                 space_id, owning_instance, name, description, about_markdown,
                 cover_url, icon_url, min_age, category, join_mode,
@@ -350,9 +358,11 @@ class SqliteGfsFederationRepo:
                 accent_color,
                 primary_color, status, subscriber_count, posts_per_week,
                 published_at, identity_public_key, withdrawn, authority_cert,
-                place_lat, place_lon, place_radius_km, join_contact
+                place_lat, place_lon, place_radius_km, join_contact,
+                member_count, follower_count, counts_ts
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?)
+                     COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?,
+                     ?, ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -366,7 +376,13 @@ class SqliteGfsFederationRepo:
                 accent_color = excluded.accent_color,
                 primary_color = excluded.primary_color,
                 status = excluded.status,
-                subscriber_count = excluded.subscriber_count,
+                -- ``subscriber_count`` is NOT updated here: it counts relay
+                -- seats and only the subscribe / unsubscribe recount and
+                -- ``purge_subscribers`` set it. A publish builds its row
+                -- from a read taken before the upsert, so carrying the old
+                -- value over would undo a subscribe that landed in between;
+                -- a cluster peer's count is its own bookkeeping, never ours.
+                -- A NEW row still inserts the given value.
                 posts_per_week = excluded.posts_per_week,
                 -- The pinned space authority key never moves on an upsert
                 -- (see the pin comment in ``federation.publish_space``): an
@@ -383,7 +399,22 @@ class SqliteGfsFederationRepo:
                 place_lat = excluded.place_lat,
                 place_lon = excluded.place_lon,
                 place_radius_km = excluded.place_radius_km,
-                join_contact = excluded.join_contact
+                join_contact = excluded.join_contact,
+                -- The owner-declared counts are last-writer-wins on the
+                -- declaring publish's signed ``ts``: a delayed OLDER publish
+                -- (or a peer node's stale row) keeps the stored counts, and
+                -- so does a row that declares none (no stamp: a count-less
+                -- or replayable publish, a peer that never got counts) — in
+                -- one statement, so a racing publish cannot wipe them. ISO
+                -- strings in UTC at fixed microsecond width compare in time
+                -- order.
+                member_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
+                    global_spaces.member_count ELSE excluded.member_count END,
+                follower_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
+                    global_spaces.follower_count ELSE excluded.follower_count
+                    END,
+                counts_ts = CASE WHEN {_COUNTS_KEEP_SQL} THEN
+                    global_spaces.counts_ts ELSE excluded.counts_ts END
             """,
             (
                 space.space_id,
@@ -414,6 +445,9 @@ class SqliteGfsFederationRepo:
                     else None
                 ),
                 _dump_cert(space.join_contact),
+                space.member_count,
+                space.follower_count,
+                space.counts_ts,
             ),
         )
 
@@ -1650,7 +1684,15 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         place_lon=row.get("place_lon"),
         place_radius_km=row.get("place_radius_km"),
         join_contact=_load_cert(row.get("join_contact")),
+        member_count=_opt_int(row.get("member_count")),
+        follower_count=_opt_int(row.get("follower_count")),
+        counts_ts=row.get("counts_ts") or None,
     )
+
+
+def _opt_int(value: object) -> int | None:
+    """A stored nullable count: NULL stays ``None`` ("no number")."""
+    return int(value) if isinstance(value, int) else None
 
 
 def _dump_cert(cert: dict | None) -> str | None:

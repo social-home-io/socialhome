@@ -17,7 +17,11 @@ class PublicSpaceListing:
     lat: float | None = None
     lon: float | None = None
     radius_km: float | None = None
-    member_count: int = 0
+    #: The host's declared counts (signed in its GFS listing). ``None`` — it
+    #: declared none (an older host, an older GFS): shown as no number,
+    #: never 0.
+    member_count: int | None = None
+    follower_count: int | None = None
     cached_at: str | None = None
     min_age: int = 0
     #: Discovery category (§23.50) — normalizes to ``"general"`` if unknown.

@@ -77,6 +77,8 @@ const en = {
 
   'space.members_one': '{count} member',
   'space.members': '{count} members',
+  'space.followers_one': '{count} follower',
+  'space.followers': '{count} followers',
   'space.cta': 'Connect your Social Home',
   'space.cta_hint': 'Already connected? Find this space under Spaces → Discover → Global.',
   'space.about': 'About',
@@ -197,6 +199,8 @@ const de: Table = {
 
   'space.members_one': '{count} Mitglied',
   'space.members': '{count} Mitglieder',
+  'space.followers_one': '{count} Follower',
+  'space.followers': '{count} Follower',
   'space.cta': 'Verbinde dein Social Home',
   'space.cta_hint': 'Schon verbunden? Du findest diesen Space unter Spaces → Entdecken → Global.',
   'space.about': 'Über',
@@ -314,6 +318,8 @@ const nl: Table = {
 
   'space.members_one': '{count} lid',
   'space.members': '{count} leden',
+  'space.followers_one': '{count} volger',
+  'space.followers': '{count} volgers',
   'space.cta': 'Koppel je Social Home',
   'space.cta_hint': 'Al gekoppeld? Je vindt deze space onder Spaces → Ontdekken → Wereldwijd.',
   'space.about': 'Over',
@@ -431,6 +437,8 @@ const fr: Table = {
 
   'space.members_one': '{count} membre',
   'space.members': '{count} membres',
+  'space.followers_one': '{count} abonné',
+  'space.followers': '{count} abonnés',
   'space.cta': 'Connectez votre Social Home',
   'space.cta_hint': 'Déjà connecté ? Retrouvez cet espace sous Espaces → Découvrir → Global.',
   'space.about': 'À propos',
@@ -548,6 +556,8 @@ const es: Table = {
 
   'space.members_one': '{count} miembro',
   'space.members': '{count} miembros',
+  'space.followers_one': '{count} seguidor',
+  'space.followers': '{count} seguidores',
   'space.cta': 'Conecta tu Social Home',
   'space.cta_hint': '¿Ya estás conectado? Encuentra este espacio en Espacios → Descubrir → Global.',
   'space.about': 'Acerca de',

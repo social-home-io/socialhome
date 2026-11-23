@@ -11,7 +11,6 @@
 		},
 		"ghcr.io/devcontainers/features/github-cli:1": {},
 		"ghcr.io/jsburckhardt/devcontainer-features/uv:1": {},
-		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
 		// ``chromium-driver`` pulls in Debian's ``chromium`` package, which
 		// lands the launcher at ``/usr/bin/chromium``. That launcher is a
 		// shell wrapper that sources ``/etc/chromium.d/*.conf`` for extra
@@ -27,8 +26,8 @@
 
 	// One-time setup after the container is created (chromium flags
 	// config, venv, Python deps, pre-commit hooks, pnpm, frontend
-	// deps) — see ``.devcontainer/post-create.sh`` for the per-step
-	// breakdown. Kept as a script so quoting is straightforward and
+	// deps, Claude Code in user mode) — see
+	// ``.devcontainer/post-create.sh`` for the per-step breakdown. Kept as a script so quoting is straightforward and
 	// ``set -e`` aborts on the first failure.
 	"postCreateCommand": ".devcontainer/post-create.sh",
 
@@ -69,6 +68,12 @@
 		// sees the same binary.
 		"PUPPETEER_EXECUTABLE_PATH": "/usr/bin/chromium",
 		"CHROME_PATH": "/usr/bin/chromium"
+	},
+	// Claude Code installs into the remote user's ``~/.local/bin`` (see
+	// ``post-create.sh``); put it on PATH for VS Code terminals, tasks
+	// and lifecycle commands.
+	"remoteEnv": {
+		"PATH": "${containerEnv:PATH}:/home/vscode/.local/bin"
 	},
 
 	// No port forwarding: dev servers, test instances and headless Chromium
@@ -114,7 +119,8 @@
 				"charliermarsh.ruff",
 				"dbaeumer.vscode-eslint",
 				"vitest.explorer",
-				"esbenp.prettier-vscode"
+				"esbenp.prettier-vscode",
+				"anthropic.claude-code"
 			]
 		}
 	}

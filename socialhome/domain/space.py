@@ -1775,6 +1775,8 @@ class HostedSpaceListing:
     member_count: int
     caller_role: str | None = None
     caller_banned: bool = False
+    #: Live follower seats (``space_repo.FOLLOWER_COUNT_SQL``).
+    follower_count: int = 0
 
 
 @dataclass(slots=True, frozen=True)

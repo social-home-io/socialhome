@@ -315,7 +315,9 @@ async def test_publish_space_preserves_subscriber_count_across_publishes(gfs_cli
     assert resp.status == 200
     detail = await (await gfs_client.get("/gfs/spaces/sp-keep")).json()
     assert detail["name"] == "New Name"
-    assert detail["subscriber_count"] == 42
+    # Relay seats are operator bookkeeping: kept, but never served publicly.
+    assert "subscriber_count" not in detail
+    assert (await fed_repo.get_space("sp-keep")).subscriber_count == 42
     assert detail["posts_per_week"] == 3.5
     assert detail["published_at"] == "2026-05-01T00:00:00Z"
 

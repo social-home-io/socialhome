@@ -4,14 +4,21 @@
  *
  * Two flavours:
  *
- * 1. Signal-target — pass ``target: Signal<string>`` and the chosen
- *    emoji is appended to the signal value. Used by :mod:`CommentThread`
- *    where the input is bound to a module-level signal.
+ * 1. Signal-target — pass ``target: Signal<string>`` plus the ``field``
+ *    bound to it. The chosen emoji goes in at the field's caret
+ *    (replacing a selection, like typing would), and focus and the caret
+ *    — right after the emoji — go back to the field. Used by
+ *    :mod:`CommentThread`.
  *
  * 2. Callback-target — pass ``onInsert: (emoji) => void`` for owners
- *    that need to splice into a richer state shape (e.g. the
- *    composer's textarea ref + ``content`` signal, where insertion
- *    should land at the caret rather than at the end).
+ *    that splice into a richer state shape (the post composer, the DM
+ *    composer, a Highlight caption). Each inserts at the caret, replacing
+ *    a selection, and hands focus and the caret back the same way (their
+ *    splice is shared with their ``:emoji`` autocomplete).
+ *
+ * The picker hangs off the button with ``position: fixed`` (see
+ * ``ReactionPicker``'s ``anchor``): it opens on whichever side has room
+ * and stays inside the visible area, wherever the button sits.
  *
  * A module-level ``openFor`` signal keeps at most one picker open
  * across the whole page; callers pass an ``openKey`` string so each
@@ -19,40 +26,37 @@
  * other inputs.
  */
 import { signal, type Signal } from '@preact/signals'
-import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
+import type { RefObject } from 'preact'
+import { useEffect, useRef } from 'preact/hooks'
 import { ReactionPicker } from './ReactionPicker'
 import { t } from '@/i18n/i18n'
-import { POPOVER_EDGE, visibleArea, type VisibleArea } from '@/utils/popoverPlacement'
 
 const openFor = signal<string | null>(null)
 
-/** Where to nudge an open picker so it stays on screen. */
-export interface PickerFit {
-  /** Px to move it right (negative: left). */
-  shiftX: number
-  /** Open below the button: no room above (e.g. a field near the top). */
-  below: boolean
-}
+type TextField = HTMLTextAreaElement | HTMLInputElement
 
 /**
- * The picker opens above its button, end-aligned with it — on a phone a
- * 300 px popover hanging off a button near the left edge runs off the
- * screen (the post composer's 😀 sits mid-row). Keep it inside the
- * visible width, and open it below the button when it would leave the
- * top of the visible area while there is more room below.
+ * ``text`` with ``insert`` at ``field``'s caret (replacing its selection)
+ * — at the end when there is no field. Returns the new text and where
+ * the caret goes: right after the insert.
  */
-export function fitPicker(
-  picker: { left: number, right: number, top: number, height: number },
-  button: { top: number, bottom: number },
-  area: VisibleArea,
-): PickerFit {
-  let shiftX = 0
-  if (picker.left < POPOVER_EDGE) shiftX = POPOVER_EDGE - picker.left
-  else if (picker.right > area.width - POPOVER_EDGE) shiftX = area.width - POPOVER_EDGE - picker.right
-  const roomBelow = area.bottom - button.bottom
-  const below = picker.top < area.top + POPOVER_EDGE
-    && roomBelow > button.top - area.top
-  return { shiftX: Math.round(shiftX), below }
+export function spliceAtCaret(
+  text: string, insert: string, field: TextField | null | undefined,
+): { text: string, caret: number } {
+  const start = field?.selectionStart ?? text.length
+  const end = field?.selectionEnd ?? start
+  const before = text.slice(0, start) + insert
+  return { text: before + text.slice(end), caret: before.length }
+}
+
+/** Focus ``field`` with the caret at ``caret`` once the new text has
+ *  rendered (setting the value earlier would move the caret to the end). */
+function restoreCaret(field: TextField | null | undefined, caret: number): void {
+  if (!field) return
+  requestAnimationFrame(() => {
+    field.focus()
+    field.setSelectionRange(caret, caret)
+  })
 }
 
 interface BaseProps {
@@ -67,11 +71,14 @@ interface BaseProps {
 
 interface SignalTargetProps extends BaseProps {
   target: Signal<string>
+  /** The text field bound to ``target``: the emoji lands at its caret. */
+  field: RefObject<TextField | null>
   onInsert?: never
 }
 
 interface CallbackTargetProps extends BaseProps {
   target?: never
+  field?: never
   onInsert: (emoji: string) => void
 }
 
@@ -79,21 +86,9 @@ export type EmojiPickButtonProps = SignalTargetProps | CallbackTargetProps
 
 export function EmojiPickButton(props: EmojiPickButtonProps) {
   const isOpen = openFor.value === props.openKey
+  // The picker is anchored to this button (``position: fixed``), so the
+  // comment sheet's scroll area or a card around it can't cut it off.
   const buttonRef = useRef<HTMLButtonElement | null>(null)
-  const pickerRef = useRef<HTMLDivElement | null>(null)
-  // Keep the open picker on screen (see ``fitPicker``). It is laid out
-  // end-aligned above the button by CSS; measured once on open.
-  useLayoutEffect(() => {
-    if (!isOpen) return
-    const picker = pickerRef.current
-    const button = buttonRef.current
-    if (!picker || !button) return
-    const fit = fitPicker(
-      picker.getBoundingClientRect(), button.getBoundingClientRect(), visibleArea(),
-    )
-    if (fit.shiftX) picker.style.right = `${-fit.shiftX}px`
-    if (fit.below) picker.classList.add('sh-reaction-picker--below')
-  }, [isOpen])
   // An open picker belongs to this mount under this key: close it when
   // the key changes (e.g. the DM composer switching conversations) or
   // the button unmounts, so coming back later never finds it popped
@@ -104,7 +99,10 @@ export function EmojiPickButton(props: EmojiPickButtonProps) {
   }, [key])
   const insert = (emoji: string) => {
     if (props.target) {
-      props.target.value = props.target.value + emoji
+      const el = props.field.current
+      const next = spliceAtCaret(props.target.value, emoji, el)
+      props.target.value = next.text
+      restoreCaret(el, next.caret)
     } else {
       props.onInsert(emoji)
     }
@@ -126,7 +124,7 @@ export function EmojiPickButton(props: EmojiPickButtonProps) {
       </button>
       {isOpen && (
         <ReactionPicker
-          ref={pickerRef}
+          anchor={buttonRef}
           onSelect={(emoji) => insert(emoji)}
           onClose={() => { openFor.value = null }}
         />

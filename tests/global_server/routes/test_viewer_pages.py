@@ -108,7 +108,8 @@ async def _space(app, **kw) -> None:
         "primary_color": "red; background:url(x)",
         "status": "active",
         "category": "hobby_crafts",
-        "subscriber_count": 12,
+        "member_count": 12,
+        "follower_count": 4,
     }
     fields.update(kw)
     await app[gfs_fed_repo_key].upsert_space(GlobalSpace(**fields))
@@ -401,6 +402,8 @@ async def test_space_page_json_carries_what_the_page_shows(client):
             "primary_color": "#3a7d44",
             "accent_color": "#3a7d44",
             "member_count": 12,
+            "follower_count": 4,
+            "allow_subscribers": False,
             "category": "hobby_crafts",
         },
     }

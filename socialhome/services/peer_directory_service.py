@@ -120,13 +120,17 @@ class PeerDirectoryService:
         )
         out: list[dict] = []
         for s in spaces:
+            # The shared listing builder — the same counts the GFS listing
+            # carries: members (never followers) and live follower seats.
+            counts = await self._space_repo.listing_counts(s.id)
             entry: dict[str, object] = {
                 "space_id": s.id,
                 "name": s.name,
                 "description": s.description,
                 "emoji": s.emoji,
-                # Members, never followers (``MEMBER_COUNT_SQL``).
-                "member_count": await self._space_repo.count_members(s.id),
+                "member_count": counts.member_count if counts else 0,
+                # An older peer ignores the key (additive, no version gate).
+                "follower_count": counts.follower_count if counts else 0,
                 "join_mode": s.join_mode.value,
                 "category": normalize_category(s.category),
             }
@@ -159,6 +163,12 @@ class PeerDirectoryService:
             return
         # Delivered or queued in the outbox: either way it is on its way.
         self._sent[peer_id] = digest
+
+    async def refresh(self) -> None:
+        """Something an entry shows changed outside a config change (a
+        space's member or follower count): re-send to every paired peer
+        whose copy it changes."""
+        await self._broadcast_snapshot()
 
     async def _broadcast_snapshot(self) -> None:
         # §D2b: social surface — a ``space_session`` row (a household we

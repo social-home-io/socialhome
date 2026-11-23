@@ -28,6 +28,9 @@ class PeerSpaceDirectoryEntry:
     description: str | None = None
     emoji: str | None = None
     member_count: int = 0
+    #: The host's declared follower count; ``None`` from an older host
+    #: (shown as no number, never 0).
+    follower_count: int | None = None
     join_mode: str = "request"
     min_age: int = 0
     #: Discovery category (§23.50) — normalizes to ``"general"`` if unknown.
@@ -58,7 +61,11 @@ class AbstractPeerSpaceDirectoryRepo(Protocol):
         instance_id: str,
     ) -> list[PeerSpaceDirectoryEntry]: ...
 
-    async def get(self, space_id: str) -> PeerSpaceDirectoryEntry | None: ...
+    async def get(
+        self, instance_id: str, space_id: str
+    ) -> PeerSpaceDirectoryEntry | None: ...
+
+    async def get_any(self, space_id: str) -> PeerSpaceDirectoryEntry | None: ...
 
     async def clear_instance(self, instance_id: str) -> None: ...
 
@@ -85,6 +92,7 @@ class SqlitePeerSpaceDirectoryRepo:
                 e.description,
                 e.emoji,
                 int(e.member_count or 0),
+                e.follower_count,
                 e.join_mode or "request",
                 int(e.min_age or 0),
                 e.category or "general",
@@ -105,9 +113,9 @@ class SqlitePeerSpaceDirectoryRepo:
                     """
                     INSERT INTO peer_space_directory(
                         instance_id, space_id, name, description, emoji,
-                        member_count, join_mode, min_age, category,
-                        updated_at, cached_at, radius_km
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        member_count, follower_count, join_mode, min_age,
+                        category, updated_at, cached_at, radius_km
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -146,7 +154,17 @@ class SqlitePeerSpaceDirectoryRepo:
         )
         return [_row(r) for r in rows_to_dicts(rows)]
 
-    async def get(self, space_id: str) -> PeerSpaceDirectoryEntry | None:
+    async def get(
+        self, instance_id: str, space_id: str
+    ) -> PeerSpaceDirectoryEntry | None:
+        """The entry *instance_id* advertised for *space_id*, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT * FROM peer_space_directory WHERE instance_id=? AND space_id=?",
+            (instance_id, space_id),
+        )
+        return _row(dict(row)) if row is not None else None
+
+    async def get_any(self, space_id: str) -> PeerSpaceDirectoryEntry | None:
         """The entry a paired household lists ``space_id`` under (the
         freshest when several do), or ``None``."""
         row = await self._db.fetchone(
@@ -171,6 +189,7 @@ def _row(row: dict) -> PeerSpaceDirectoryEntry:
         description=row.get("description"),
         emoji=row.get("emoji"),
         member_count=int(row.get("member_count") or 0),
+        follower_count=row.get("follower_count"),
         join_mode=row.get("join_mode") or "request",
         min_age=int(row.get("min_age") or 0),
         category=row.get("category") or "general",

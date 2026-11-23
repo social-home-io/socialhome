@@ -34,6 +34,7 @@ from ..app_keys import (
     space_chat_service_key,
     space_cover_repo_key,
     space_icon_repo_key,
+    space_listing_counts_service_key,
     space_moderation_service_key,
     space_remote_location_repo_key,
     space_remote_member_repo_key,
@@ -285,7 +286,9 @@ class SpaceCollectionView(BaseView):
         )
 
 
-def _public_space_view(space: Space, member_count: int) -> dict:
+def _public_space_view(
+    space: Space, member_count: int | None, follower_count: int | None
+) -> dict:
     """What ``GET /api/spaces/{id}`` shows a caller with no seat in a
     discoverable (public / global) space: the directory-entry fields its
     landing page renders — never the members' config (retention, bots,
@@ -302,8 +305,10 @@ def _public_space_view(space: Space, member_count: int) -> dict:
             # Readability (may I follow it?) is the one feature flag the
             # landing page reads — the directory ships it too.
             "features": {"allow_subscribers": space.features.allow_subscribers},
-            # The seat count the peer directory publishes for it too.
+            # The space's listing counts (``SpaceListingCountsService``);
+            # null = no number.
             "member_count": member_count,
+            "follower_count": follower_count,
             # A local community's area — shown before joining, to this
             # household's own people only (this API is the host's).
             "local_area": _local_area_view(space),
@@ -336,8 +341,13 @@ class SpaceDetailView(BaseView):
             # No seat: the caller opened a discoverable space's landing
             # page — the fields a directory entry already publishes, none
             # of the members' config.
-            count = await self.svc(space_repo_key).count_members(space.id)
-            return web.json_response(_public_space_view(space, count))
+            members, followers = await self.svc(
+                space_listing_counts_service_key
+            ).shown_counts(space)
+            return web.json_response(_public_space_view(space, members, followers))
+        members, followers = await self.svc(
+            space_listing_counts_service_key
+        ).shown_counts(space)
         gfs_servers, gfs_unlisted = await self._gfs_listing(space)
         cover_url = (
             f"api/spaces/{space.id}/cover?v={space.cover_hash}"
@@ -361,9 +371,12 @@ class SpaceDetailView(BaseView):
                 # The caller's own role here — the SPA's admin / follower
                 # UI reads it (a follower is not listed in ``/members``).
                 "my_role": member.role,
-                # Members, never followers — the one count every surface
-                # shows (``space_repo.MEMBER_COUNT_SQL``).
-                "member_count": await self.svc(space_repo_key).count_members(space.id),
+                # Members (never followers) and followers: the roster's own
+                # counts when this household holds it (a member seat here),
+                # else what the host shared in its listing; null = no number
+                # (``SpaceListingCountsService.shown_counts``).
+                "member_count": members,
+                "follower_count": followers,
                 "features": space.features.to_wire_dict(),
                 "retention_days": space.retention_days,
                 "retention_exempt_types": list(space.retention_exempt_types),

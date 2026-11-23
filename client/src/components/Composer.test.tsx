@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent } from '@testing-library/preact'
+import { render, fireEvent, waitFor } from '@testing-library/preact'
 
 beforeEach(() => {
   vi.resetModules()
@@ -268,5 +268,41 @@ describe('Composer — audience chip mark', () => {
     expect(contextIcon('Space', 'global')).toBe('🌐')
     expect(contextIcon('Space', null)).toBe('👥')
     expect(contextIcon('Household')).toBe('🏠')
+  })
+})
+
+describe('Composer drafts and emoji', () => {
+  async function load() {
+    commonMocks()
+    localStorage.clear()
+    return (await import('./Composer')).Composer
+  }
+
+  it('a post typed in one space does not show in another space or the household feed', async () => {
+    const Composer = await load()
+    const view = render(<Composer onSubmit={vi.fn()} context="Space" spaceId="s-a" />)
+    const ta = () => view.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.input(ta(), { target: { value: 'for space A' } })
+    view.rerender(<Composer onSubmit={vi.fn()} context="Space" spaceId="s-b" />)
+    expect(ta().value).toBe('')
+    view.rerender(<Composer onSubmit={vi.fn()} context="Household" />)
+    expect(ta().value).toBe('')
+    view.rerender(<Composer onSubmit={vi.fn()} context="Space" spaceId="s-a" />)
+    expect(ta().value).toBe('for space A')
+    view.unmount()
+  })
+
+  it('a picked emoji goes in at the caret and the caret comes back after it', async () => {
+    const Composer = await load()
+    const view = render(<Composer onSubmit={vi.fn()} context="Household" />)
+    const ta = view.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.input(ta, { target: { value: 'hello big world' } })
+    ta.setSelectionRange(6, 9)
+    fireEvent.click(view.container.querySelector('.sh-emoji-pick-btn')!)
+    fireEvent.click(view.container.querySelector('.sh-reaction-frequent .sh-emoji-btn')!)
+    await waitFor(() => expect(ta.value).toBe('hello 👍 world'))
+    await waitFor(() => expect(document.activeElement).toBe(ta))
+    expect(ta.selectionStart).toBe('hello 👍'.length)
+    view.unmount()
   })
 })

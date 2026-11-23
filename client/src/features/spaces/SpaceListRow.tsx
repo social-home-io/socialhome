@@ -35,6 +35,21 @@ export function membersLabel(n: number, viewerIsMember: boolean): string {
   return t(isOne(n) ? 'space.members.count_one' : 'space.members.count', { n: String(n) })
 }
 
+/** "12 followers" / "1 follower". */
+export function followersLabel(n: number): string {
+  return t(isOne(n) ? 'space.followers.count_one' : 'space.followers.count', { n: String(n) })
+}
+
+/** Does a space's follower count belong on screen? Only a number the host
+ *  declared, and "0 followers" only for a space that takes followers
+ *  (``allow_subscribers``) — one that takes none never says it. */
+export function followersShown(
+  count: number | null | undefined,
+  allowSubscribers: boolean | null | undefined,
+): count is number {
+  return typeof count === 'number' && (count > 0 || allowSubscribers === true)
+}
+
 /** "8 members · active 2 h ago" — either part may be missing. */
 export function activityMeta(
   memberCount: number | null | undefined,

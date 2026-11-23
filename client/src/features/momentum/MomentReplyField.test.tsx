@@ -19,6 +19,7 @@ import { api } from '@/api'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
 import { registrations } from '@/store/momentPublic'
+import { clearTextDraft } from '@/store/textDrafts'
 import type { Moment } from '@/types'
 import { gfsNames, _resetGfsNamesForTests } from './gfsNames'
 import { MomentReplyField } from './MomentReplyField'
@@ -45,6 +46,7 @@ describe('MomentReplyField', () => {
     currentUser.value = { user_id: 'u-me', username: 'me', display_name: 'Me' } as never
     registrations.value = []
     _resetGfsNamesForTests()
+    for (const id of ['m-1', 'm-2']) clearTextDraft(`moment:${id}:reply`)
     vi.mocked(api.post).mockReset()
     vi.mocked(showToast).mockClear()
   })
@@ -74,6 +76,17 @@ describe('MomentReplyField', () => {
     await waitFor(() => expect(onPosted).toHaveBeenCalledWith(posted))
     expect(api.post).toHaveBeenCalledWith('/api/moments', { content: 'Im Schrank', parent_moment_id: 'm-1' })
     expect(field.value).toBe('')
+  })
+
+  it('each moment keeps its own unsent reply', () => {
+    const ref = createRef<HTMLTextAreaElement>()
+    const view = render(<MomentReplyField parent={parent()} inputRef={ref} onPosted={vi.fn()} />)
+    const field = () => view.getByRole('textbox', { name: 'Write a reply' }) as HTMLTextAreaElement
+    fireEvent.input(field(), { target: { value: 'for m-1' } })
+    view.rerender(<MomentReplyField parent={parent({ id: 'm-2' })} inputRef={ref} onPosted={vi.fn()} />)
+    expect(field().value).toBe('')
+    view.rerender(<MomentReplyField parent={parent()} inputRef={ref} onPosted={vi.fn()} />)
+    expect(field().value).toBe('for m-1')
   })
 
   it('Ctrl+Enter sends', async () => {
