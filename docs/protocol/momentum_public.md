@@ -1249,10 +1249,10 @@ identical bytes-for-bytes to the sender's canonical encoding.
   redirects), linked from Momentum › Yours, the composer's public row and
   the pairing screen. Signing up is each person's own choice (no admin
   needed). The composer's public row says why it can't be switched on
-  instead of hiding: the household is on an active GFS but the person
-  isn't signed up → "Sign up in Settings"; signed up only on GFSs that
-  haven't proved `encrypted_moments` → says so, no link, and the moment
-  goes out as not public. No GFS, a protected account or a reply under a
+  instead of hiding: the household is on an active GFS the person isn't
+  signed up on → "Sign up in Settings"; signed up on every one and none
+  has proved `encrypted_moments` → says so, no link, and the moment goes
+  out as not public. A sign-out forgets a draft put aside. No GFS, a protected account or a reply under a
   private moment: no row. Following either link puts a new moment's draft
   aside (in memory) instead of asking to discard it; "Back to your
   moment" in the panel, or the next "Share a moment", brings it back.

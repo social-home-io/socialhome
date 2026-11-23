@@ -3400,7 +3400,7 @@
   "moment.composer.public_unavailable_any": "Öffentlich auf deinem GFS: nicht verfügbar",
   "moment.composer.public_signup_hint": "Du bist dort noch nicht angemeldet. Dein Moment wartet hier, bis du zurück bist.",
   "moment.composer.public_signup_link": "In den Einstellungen anmelden",
-  "moment.composer.public_unsupported": "Dein GFS kann noch keine verschlüsselten Momente übertragen, darum bleibt dieser Moment bei deinen gekoppelten Haushalten.",
+  "moment.composer.public_unsupported": "Dein GFS kann noch keine verschlüsselten Momente übertragen, darum wird dieser Moment nicht öffentlich.",
   "apps.host.load_failed": "Die App konnte nicht geladen werden.",
   "apps.host.loading": "App wird geladen…",
   "apps.host.age_restricted": "Diese App ist für dein Konto nicht verfügbar.",

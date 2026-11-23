@@ -3400,7 +3400,7 @@
   "moment.composer.public_unavailable_any": "Openbaar op je GFS: niet beschikbaar",
   "moment.composer.public_signup_hint": "Je bent daar nog niet aangemeld. Je moment wacht hier tot je terug bent.",
   "moment.composer.public_signup_link": "Aanmelden in Instellingen",
-  "moment.composer.public_unsupported": "Je GFS kan nog geen versleutelde momenten doorgeven, dus dit moment blijft bij je gekoppelde huishoudens.",
+  "moment.composer.public_unsupported": "Je GFS kan nog geen versleutelde momenten doorgeven, dus dit moment wordt niet openbaar.",
   "apps.host.load_failed": "Kon de app niet laden.",
   "apps.host.loading": "App wordt geladen…",
   "apps.host.age_restricted": "Deze app is niet beschikbaar voor je account.",

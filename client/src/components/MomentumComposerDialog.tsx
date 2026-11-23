@@ -21,10 +21,10 @@
  *   once the person flips it, a late registrations load never overwrites
  *   that (B25). When it's on the button reads "Post publicly".
  *   Where the switch can't be, the row still says why, so public sharing
- *   is never a secret: the household is on a GFS but the person isn't
- *   signed up there → "Sign up in Settings" (anyone can, for themselves);
- *   signed up only on GFSs that can't carry encrypted moments → says so,
- *   no link (nothing in Settings helps). No GFS at all, or a protected
+ *   is never a secret: the household is on a GFS the person isn't
+ *   signed up on → "Sign up in Settings" (anyone can, for themselves);
+ *   signed up on every GFS but none can carry encrypted moments → says
+ *   so, no link (nothing in Settings helps). No GFS at all, or a protected
  *   account: no row.
  *   Both links put a new moment aside instead of asking to discard it;
  *   the next "Share a moment" (and the panel's "Back to your moment")
@@ -58,7 +58,7 @@ import { UploadProgressBar } from './UploadProgress'
 import { MOMENT_MAX_VIDEO_MS, prepareMomentMedia } from '@/features/momentum/momentMedia'
 import { getMomentsPreferences, momentRetentionLabel } from '@/utils/preferences'
 import { localClockTime } from '@/utils/relativeTime'
-import { currentUser, onLogout } from '@/store/auth'
+import { currentUser } from '@/store/auth'
 import { namedPersonLabel } from '@/store/householdUsers'
 import {
   canCarryPublicMoments,
@@ -104,8 +104,9 @@ const reachInfoOpen = signal<boolean>(false)
 let openSeq = 0
 
 /** Start a new compose: a fresh sequence (late answers and uploads from
- *  the last one are dropped) and every field empty. The one reset, for an
- *  open and for sign-out. */
+ *  the last one are dropped) and every field empty. Only a parked moment
+ *  is ever resumed, and sign-out clears ``parkedMoment``
+ *  (``resetMomentPublic``), so the next account always starts here. */
 function newCompose(): number {
   const seq = ++openSeq
   parentId.value = null
@@ -125,14 +126,6 @@ function newCompose(): number {
   return seq
 }
 
-/** Sign-out: close and forget the compose, so the next account in this
- *  tab never resumes it. Registered here because this module loads lazily
- *  (no Momentum visited, nothing to forget); ``parkedMoment`` itself is
- *  cleared by the store's own reset. */
-onLogout(() => {
-  newCompose()
-  open.value = false
-})
 
 function setNextAllowed(iso: unknown): void {
   now.value = Date.now()
@@ -242,9 +235,15 @@ type PublicRow = 'switch' | 'unsupported' | 'signup' | null
 function publicRow(): PublicRow {
   if (!publicApplies()) return null
   if (carriers().length > 0) return 'switch'
+  if (unjoined().length > 0) return 'signup'
   if (registrations.value.length > 0) return 'unsupported'
-  if ((gfsConnections.value?.length ?? 0) > 0) return 'signup'
   return null
+}
+
+/** Active GFSs of the household the person hasn't signed up on. */
+function unjoined(): string[] {
+  const mine = new Set(registrations.value.map((r) => r.gfs_id))
+  return (gfsConnections.value ?? []).map((g) => g.id).filter((id) => !mine.has(id))
 }
 
 /** Top-level and the next allowed time is still ahead. */
@@ -635,7 +634,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
             <span class="sh-momentum-composer-public__text">
               <strong>
                 {unavailableTitle(row === 'signup'
-                  ? (gfsConnections.value ?? []).map((g) => g.id)
+                  ? unjoined()
                   : registrations.value.map((r) => r.gfs_id))}
               </strong>
               <span id="sh-momentum-composer-public-hint">

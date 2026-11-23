@@ -100,8 +100,7 @@ const _logoutHooks = new Set<() => void>()
 
 /** Run ``fn`` on every logout — feature stores clear the signed-out
  *  household's data with it (wired in ``main.tsx`` so this module stays
- *  import-pure, or by a lazily loaded module that owns its own state, like
- *  the Momentum composer). Returns an unsubscribe. */
+ *  import-pure). Returns an unsubscribe. */
 export function onLogout(fn: () => void): () => void {
   _logoutHooks.add(fn)
   return () => { _logoutHooks.delete(fn) }

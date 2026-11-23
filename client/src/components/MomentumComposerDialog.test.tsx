@@ -5,11 +5,12 @@ import {
   openMomentumComposer,
 } from './MomentumComposerDialog'
 import { ApiError } from '@/api'
-import { currentUser, logout } from '@/store/auth'
+import { currentUser, logout, onLogout } from '@/store/auth'
 import {
   _resetGfsConnectionsForTests,
   parkedMoment,
   registrations,
+  resetMomentPublic,
 } from '@/store/momentPublic'
 import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
@@ -209,7 +210,10 @@ describe('MomentumComposerDialog', () => {
     const link = await waitFor(() => container.querySelector('a.sh-momentum-composer-public-signup') as HTMLAnchorElement)
     fireEvent.input(container.querySelector('textarea')!, { target: { value: 'Private words' } })
     await act(async () => { fireEvent.click(link) })
+    // As main.tsx wires it.
+    const off = onLogout(resetMomentPublic)
     act(() => { logout() })
+    off()
     currentUser.value = { user_id: 'u2', username: 'next', display_name: 'Next' } as User
     await openAndSettle()
     expect(container.querySelector('textarea')!.value).toBe('')
@@ -341,6 +345,19 @@ describe('MomentumComposerDialog', () => {
     fireEvent.submit(container.querySelector('form')!)
     await waitFor(() => expect(mockApi.post).toHaveBeenCalled())
     expect((mockApi.post.mock.calls[0][1] as Record<string, unknown>).is_public).toBe(false)
+  })
+
+  it('signed up only where it can\'t go, but another GFS is open: points there', async () => {
+    regs = [{ ...REG, delivery: 'unsupported_server' }]
+    conns = [DEMO_GFS, { id: 'g2', display_name: 'Second GFS', status: 'active' }]
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const row = await waitFor(() => {
+      const r = container.querySelector('.sh-momentum-composer-public.is-unavailable')
+      expect(r?.textContent).toContain('Public on Second GFS: not available')
+      return r!
+    })
+    expect(row.querySelector('a.sh-momentum-composer-public-signup')).not.toBeNull()
   })
 
   it('one GFS that can carry it is enough for the switch', async () => {

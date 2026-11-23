@@ -3436,7 +3436,7 @@
   "moment.composer.public_unavailable_any": "Public on your GFS: not available",
   "moment.composer.public_signup_hint": "You’re not signed up there yet. Your moment waits here while you do.",
   "moment.composer.public_signup_link": "Sign up in Settings",
-  "moment.composer.public_unsupported": "Your GFS can’t carry encrypted moments yet, so this moment stays with your paired households.",
+  "moment.composer.public_unsupported": "Your GFS can’t carry encrypted moments yet, so this moment won’t be public.",
   "apps.host.load_failed": "Could not load app.",
   "apps.host.loading": "Loading app…",
   "apps.host.age_restricted": "This app isn't available for your account.",

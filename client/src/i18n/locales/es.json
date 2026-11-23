@@ -3427,7 +3427,7 @@
   "moment.composer.public_unavailable_any": "Público en tu GFS: no disponible",
   "moment.composer.public_signup_hint": "Aún no te has registrado allí. Tu momento te espera aquí hasta que vuelvas.",
   "moment.composer.public_signup_link": "Registrarse en Ajustes",
-  "moment.composer.public_unsupported": "Tu GFS aún no puede transmitir momentos cifrados, así que este momento se queda con tus hogares vinculados.",
+  "moment.composer.public_unsupported": "Tu GFS aún no puede transmitir momentos cifrados, así que este momento no será público.",
   "apps.host.load_failed": "No se pudo cargar la app.",
   "apps.host.loading": "Cargando app…",
   "apps.host.age_restricted": "Esta app no está disponible para tu cuenta.",

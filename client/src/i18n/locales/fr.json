@@ -3400,7 +3400,7 @@
   "moment.composer.public_unavailable_any": "Public sur votre GFS : indisponible",
   "moment.composer.public_signup_hint": "Vous n’y êtes pas encore inscrit. Votre moment vous attend ici jusqu’à votre retour.",
   "moment.composer.public_signup_link": "S’inscrire dans les Réglages",
-  "moment.composer.public_unsupported": "Votre GFS ne peut pas encore transmettre de moments chiffrés : ce moment reste donc avec vos foyers jumelés.",
+  "moment.composer.public_unsupported": "Votre GFS ne peut pas encore transmettre de moments chiffrés : ce moment ne sera donc pas public.",
   "apps.host.load_failed": "Impossible de charger l’app.",
   "apps.host.loading": "Chargement de l’app…",
   "apps.host.age_restricted": "Cette app n’est pas disponible pour votre compte.",
