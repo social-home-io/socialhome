@@ -3256,11 +3256,6 @@ class GfsConnectionService:
             return ()
         return _contact_capabilities(await self._space_repo.get(space_id))
 
-    async def _wants_join_contact(self, space_id: str) -> bool:
-        """Would *space_id*'s listing carry a join contact (to a GFS that
-        proves what it needs)?"""
-        return bool(await self._join_contact_needs(space_id))
-
     async def _gfs_proves_all(
         self, conn: GfsConnection, names: tuple[str, ...]
     ) -> bool:

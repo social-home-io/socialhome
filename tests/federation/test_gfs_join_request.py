@@ -727,9 +727,9 @@ async def test_only_a_space_that_takes_requests_lists_a_contact(households, gfs)
         join_mode=JoinMode.INVITE_ONLY,
     )
     assert "join_contact" not in await _listing_item(b, closed)
-    assert not await b.gfsjoin.gfs._wants_join_contact(closed.id)
+    assert not await b.gfsjoin.gfs._join_contact_needs(closed.id)
     asking = await _global_space(b, gfs, a)
-    assert await b.gfsjoin.gfs._wants_join_contact(asking.id)
+    assert await b.gfsjoin.gfs._join_contact_needs(asking.id)
 
 
 async def test_invite_only_space_files_nothing_and_says_nothing(households, gfs):

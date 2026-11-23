@@ -15,7 +15,6 @@ the admin UI sees pending work. Also emits a local
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ...domain.events import (
@@ -27,9 +26,11 @@ from ...domain.federation import FederationEventType
 from ...domain.local_community import Eligibility, parse_join_location
 from ...domain.space import (
     PUBLIC_SPACE_TIERS,
+    FollowApprover,
     JoinMode,
     SpacePermissionError,
     SpaceRole,
+    takes_follows,
 )
 from ...infrastructure.event_bus import EventBus
 from ..local_community import (
@@ -56,12 +57,6 @@ _HOST_ANSWERS = frozenset({"approved", "denied", "expired"})
 #: The answer only the APPLICANT household gives. It lands on the host's
 #: copy of a request that household filed.
 _APPLICANT_ANSWERS = frozenset({"withdrawn"})
-
-#: The host's automatic approval of a follow (v_96) —
-#: ``SpaceService.approve_remote_follow``: keyword-only ``space_id``,
-#: ``instance_id``, ``user_id``, ``request_id``, ``applicant_pk``,
-#: ``area_verdict``; ``True`` when it approved.
-FollowApprover = Callable[..., Awaitable[bool]]
 
 
 class SpaceInviteInboundHandlers:
@@ -271,13 +266,14 @@ class SpaceInviteInboundHandlers:
     ) -> None:
         """A remote user wants to follow a local space (v_96): the join path
         with the read-only role, approved on its own while the space takes
-        followers — whatever its join mode. Banned, already asked or
-        outside a local community: dropped. Near a local community's edge:
-        an ordinary request for the admins, as a local follow near the edge
-        is. Everything else is re-checked by the approver."""
+        followers — whatever its join mode. Banned, already asked, or not
+        inside a local community (outside, near the edge or without a
+        location): dropped — following a local community is inside only
+        (owner 2026-11-23), with no admin review. Everything else is
+        re-checked by the approver."""
         space = await self._space_repo.get(space_id)
-        if not self._takes_remote_follows(space):
-            log.warning(
+        if not takes_follows(space, self._own_instance_id):
+            log.info(
                 "follow from %s for space %s refused: not a public / global "
                 "space this household hosts that takes followers",
                 event.from_instance,
@@ -350,20 +346,6 @@ class SpaceInviteInboundHandlers:
             request_id=str(request_id),
             applicant_pk=str(applicant_pk) if applicant_pk else None,
             area_verdict=verdict,
-        )
-
-    def _takes_remote_follows(self, space: Space | None) -> bool:
-        """May another household's user follow ``space``? Only a live
-        ``public`` / ``global`` space THIS household hosts with
-        ``allow_subscribers`` on (the join mode does not matter)."""
-        return (
-            space is not None
-            and not space.dissolved
-            and not space.archived
-            and bool(self._own_instance_id)
-            and space.owner_instance_id == self._own_instance_id
-            and space.space_type in PUBLIC_SPACE_TIERS
-            and space.features.allow_subscribers
         )
 
     def _takes_remote_join_requests(self, space: Space | None) -> bool:

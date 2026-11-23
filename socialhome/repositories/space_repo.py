@@ -419,7 +419,7 @@ class AbstractSpaceRepo(Protocol):
         user_id: str,
         *,
         message: str | None = None,
-        ttl_days: int = 7,
+        ttl_days: float = 7,
         remote_applicant_instance_id: str | None = None,
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
@@ -429,6 +429,13 @@ class AbstractSpaceRepo(Protocol):
     ) -> str: ...
     async def get_join_request(self, request_id: str) -> dict | None: ...
     async def list_pending_join_requests(self, space_id: str) -> list[dict]: ...
+    async def has_live_pending_join_request(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        remote_applicant_instance_id: str,
+    ) -> bool: ...
     async def has_approved_join_request(
         self,
         space_id: str,
@@ -2664,7 +2671,8 @@ class SqliteSpaceRepo:
 
         Expired and exhausted tokens are excluded: they are not links any
         more, and listing them would invite an owner to "revoke" rows that
-        already grant nothing. The expiry comparison wraps both sides in
+        already grant nothing. So are tokens bound to one household and
+        person — an approval's answer, never a link. The expiry comparison wraps both sides in
         ``datetime()`` for the same reason
         :meth:`consume_invite_token` does — the two stored shapes
         (``…T…+00:00`` and ``… …``) do not compare lexically.
@@ -2681,6 +2689,9 @@ class SqliteSpaceRepo:
                     expires_at IS NULL
                     OR datetime(expires_at) > datetime('now')
                )
+               -- A bound token answers one approval (an admin's or a
+               -- follow's, v_96); it is not a link the admins share.
+               AND bound_instance_id IS NULL
              ORDER BY created_at DESC, token DESC
             """,
             (space_id,),
@@ -3027,7 +3038,7 @@ class SqliteSpaceRepo:
         user_id: str,
         *,
         message: str | None = None,
-        ttl_days: int = 7,
+        ttl_days: float = 7,
         remote_applicant_instance_id: str | None = None,
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
@@ -3100,6 +3111,33 @@ class SqliteSpaceRepo:
                 return str(row["id"])
         return rid
 
+    async def has_live_pending_join_request(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        remote_applicant_instance_id: str,
+    ) -> bool:
+        """Is ``user_id``'s request to the household
+        ``remote_applicant_instance_id`` for ``space_id`` still pending AND
+        not past its ``expires_at``? The applicant's "already asked" check
+        for a follow (v_96): a request the host dropped without a word is
+        asked again once it expired, before the sweep marks it. A pending
+        admin elevation is not a join request."""
+        row = await self._db.fetchone(
+            """
+            SELECT 1 FROM space_join_requests
+             WHERE space_id=? AND user_id=?
+               AND remote_applicant_instance_id=?
+               AND status='pending'
+               AND IFNULL(requested_role, '') != 'admin'
+               AND datetime(expires_at) > datetime('now')
+             LIMIT 1
+            """,
+            (space_id, user_id, remote_applicant_instance_id),
+        )
+        return row is not None
+
     async def has_approved_join_request(
         self,
         space_id: str,
@@ -3113,8 +3151,9 @@ class SqliteSpaceRepo:
         community seats such a person on their redeem without another
         check: the approval was the decision.) An auto-approved follow
         (v_96, ``reviewed_by`` NULL) counts too: it is approved only after
-        the same area check said inside (an edge follow goes to the
-        admins), so it stands for that decision."""
+        the same area check said inside (an edge or outside follow is
+        refused — following a local community is inside only), so it
+        stands for that decision."""
         row = await self._db.fetchone(
             """
             SELECT 1 FROM space_join_requests

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from socialhome.domain.errors import CodedError
@@ -24,11 +26,13 @@ from socialhome.domain.space import (
     JoinMode,
     RemoteAdminOutcome,
     ReviewRequiredError,
+    Space,
     SpaceConfigGapError,
     SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
     SpaceRole,
+    SpaceType,
     SpaceZone,
     join_request_flags,
     mirrorable_remote_role,
@@ -40,6 +44,7 @@ from socialhome.domain.space import (
     parse_have_seq,
     restricted_access_changes,
     role_change_allowed,
+    takes_follows,
     validate_space_link_url,
     validate_zone_color,
     validate_zone_coord,
@@ -985,3 +990,46 @@ def test_normalize_allowed_apps_strict_and_lenient():
 def test_an_unreadable_column_reads_as_no_games():
     assert SpaceFeatures.from_row({"allowed_apps": "not json"}).allowed_apps == ()
     assert SpaceFeatures.from_row({}).allowed_apps == ()
+
+
+# ── takes_follows (v_96) ─────────────────────────────────────────────────
+
+
+def _followable(**change) -> Space:
+    base = Space(
+        id="sp-1",
+        name="Followable",
+        owner_instance_id="home",
+        owner_username="owner",
+        identity_public_key="ab" * 32,
+        config_sequence=0,
+        features=SpaceFeatures(allow_subscribers=True),
+        space_type=SpaceType.GLOBAL,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    return replace(base, **change)
+
+
+def test_a_live_public_or_global_space_hosted_here_with_followers_takes_follows():
+    assert takes_follows(_followable(), "home") is True
+    assert takes_follows(_followable(space_type=SpaceType.PUBLIC), "home") is True
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"features": SpaceFeatures(allow_subscribers=False)},
+        {"dissolved": True},
+        {"archived": True},
+        {"space_type": SpaceType.PRIVATE},
+        {"space_type": SpaceType.HOUSEHOLD},
+        {"owner_instance_id": "elsewhere"},
+    ],
+)
+def test_a_space_that_takes_no_follows(change):
+    assert takes_follows(_followable(**change), "home") is False
+
+
+def test_no_space_or_no_own_id_takes_no_follows():
+    assert takes_follows(None, "home") is False
+    assert takes_follows(_followable(owner_instance_id=""), "") is False

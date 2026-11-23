@@ -443,7 +443,9 @@ redeems it automatically (§D2 / §D2b), and the seat role comes from the
 token, never from the applicant. The host re-checks at approval
 (`approve_remote_follow`, fail closed): a live (not dissolved, not archived)
 `public` / `global` space it hosts, `allow_subscribers` on, the person not
-banned, no live seat of theirs from that household already (a member who
+banned, the user id not one of the host's own people nor seated (now or
+before) under another household, inside the area for a local community,
+no live seat of theirs from that household already (a member who
 follows keeps the member seat), the request id unused. At seat time the
 redeem re-checks the ban and, for the follow's own token (bound, role
 `subscriber`), `allow_subscribers` — off by then on a public / global space
@@ -455,7 +457,7 @@ The age gate runs on the applicant household when it opens the ACK
 | Where the follower is | Path |
 |---|---|
 | The host household | The local gates (ban, age gate, `allow_subscribers`, the local-community check) and then the members' seating path (`_seat_local_member`) with role `subscriber`: the row, the roster gossip, the audit. No federation beyond the gossip. |
-| A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role: "subscriber"` inside the encrypted payload (needs a host at v_96, else `409 HOST_TOO_OLD`, `feature: "follow"`) → auto-approved → `SPACE_JOIN_REQUEST_APPROVED` with the bound token → §D2 redeem, seated with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. |
+| A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role: "subscriber"` inside the encrypted payload (needs a host at v_96, else `409 HOST_TOO_OLD`, `feature: "follow"`) → auto-approved → `SPACE_JOIN_REQUEST_APPROVED` with the bound token → §D2 redeem, seated with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. The host is read off this household's stub, else the paired households' directory (§D1a, `peer_space_directory`), else the GFS directory cache. The applicant's row waits 15 minutes (`FOLLOW_REQUEST_TTL`): the host answers at once or drops the follow without a word, so after that a new follow asks again. |
 | Reached only through a GFS | The v_84 bootstrap: `join_contact` from the polled listing (published while the space takes requests or followers — the GFS now serves the contact on an invite-only listing with followers on; for such a follow-only space, only to a GFS that proves `subscriber_seats`, which until the channel phase means "relays the v_96 follow bootstrap"), `SPACE_JOIN_REQUEST_BOOTSTRAP` with `requested_role: "subscriber"` in the sealed body, the host auto-answers with a bound subscriber token (48 h), the applicant auto-redeems over §D2b and is seated as a `space_session` subscriber. The bootstrap budgets (120/h per space, 10/h per sender, 200 pending → "busy") apply unchanged and before the approval. |
 
 **A local community: following is inside only** (owner decision
@@ -488,15 +490,22 @@ within seconds).
   `space_keys.created_at` (one query, persisted by construction). Any
   rotation pays it; otherwise a sweep run by the owner or a seed-holding
   acting host rotates a space whose debt is 24 h old.
-  Built so far: a follower's own leave (local seat: `remove_member` of
-  oneself; remote seat: the host's `on_remote_member_left` when every
-  ending seat is `subscriber`) rotates nothing; an admin removing a
-  follower still rotates at once until the owed-rotation sweep lands.
-  A member's leave — including a member who leaves and then follows —
-  rotates as before, so no writer key survives a move from a writer seat
-  to a follower seat.
+  Built so far: a local follower's own leave (`remove_member` of
+  oneself, `unfollow_space`) rotates nothing — its household keeps the
+  key anyway. On the host, a remote household's leave
+  (`on_remote_member_left`) rotates exactly when that household's writer
+  scope weakened (`rotate_if_writer_scope_weakened`): a read-only
+  follower (comment and react off, so no writer cert) leaves without a
+  rotation; a follower that held a `reader` comment cert rotates at once
+  until the owed-rotation sweep lands. An admin removing a follower still
+  rotates at once. A member's leave — including a member who leaves and
+  then follows — rotates as before, so no writer key survives a move from
+  a writer seat to a follower seat.
 - **At once:** a follower ban, `allow_subscribers` turned off, or the
-  comment / react switch turned off.
+  comment / react switch turned off. Built so far for `allow_subscribers`
+  turned off: this household's own followers' seats end (their own leave,
+  no rotation). Remote follower seats are ended and the key rotated by
+  the owed-rotation phase (P5), not yet built.
 - **Rekey to followers:** the ordinary member rekey; GFS-reached
   households take it in one multi upload per GFS.
 - **Order:** the channel epoch notice first, then the rekey.

@@ -71,11 +71,13 @@ from ..domain.events import (
 )
 from ..domain.federation_capabilities import OURS
 from ..domain.space import (
+    FollowApprover,
     HostNotReachableError,
     JoinMode,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
+    takes_follows,
 )
 from ..services.local_community import (
     file_remote_join_request,
@@ -153,12 +155,6 @@ ANSWER_BUSY: str = "busy"
 #: Seats the approved person: ``(token, user_id, issuer, bootstrap)`` →
 #: ``{space_id, role}`` (:meth:`SpaceService.redeem_invite_token`).
 Redeem = Callable[..., Awaitable[dict]]
-
-#: The host's automatic approval of a follow (v_96) —
-#: :meth:`SpaceService.approve_remote_follow`: keyword-only ``space_id``,
-#: ``instance_id``, ``user_id``, ``request_id``, ``applicant_pk``,
-#: ``area_verdict``, ``gfs_relay``; ``True`` when it approved.
-FollowApprover = Callable[..., Awaitable[bool]]
 
 #: The one role a request may ask for (v_96): a follow. Rides as
 #: ``requested_role`` inside the sealed body, the same field the paired
@@ -510,16 +506,19 @@ class GfsJoinRequestCoordinator:
             raise ValueError("gfs join request asks for an unknown requested_role")
         follow = role == _FOLLOW_ROLE
         space = await self._spaces.get(space_id)
+        own = self._federation.own_instance_id
         if (
             space is None
             or space.dissolved
-            or space.owner_instance_id != self._federation.own_instance_id
+            or space.owner_instance_id != own
+            # Only a global space is listed on a GFS (a local community,
+            # being public, never is).
             or space.space_type is not SpaceType.GLOBAL
             # A follow (v_96) is a join for the read-only role: it needs a
             # space that takes followers, whatever its join mode; a request
             # to join as a member needs one that takes requests.
             or (
-                (space.archived or not space.features.allow_subscribers)
+                not takes_follows(space, own)
                 if follow
                 else space.join_mode is JoinMode.INVITE_ONLY
             )

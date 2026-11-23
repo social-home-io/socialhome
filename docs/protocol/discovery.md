@@ -4438,7 +4438,7 @@ reaches the host only through a GFS follows over the same sealed leg as
    one more field **inside the sealed body**: `requested_role:
    "subscriber"` (the same field name the paired `SPACE_JOIN_REQUEST`
    carries in its encrypted payload; `kind` stays `join_request`). The GFS
-   sees nothing new. The applicant's pending row reads "Following…".
+   sees nothing new.
 3. **The host.** Every gate of step 5 runs unchanged and in the same order
    — the 200-pending cap and the per-space budget (120 / hour; "busy"
    past either), per sender (10 / hour), ban, repeat, request-id reuse —

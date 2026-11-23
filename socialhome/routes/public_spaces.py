@@ -46,12 +46,13 @@ class PublicSpaceCollectionView(BaseView):
             limit=limit,
             max_min_age=max_min_age,
         )
-        # v_84 — the pinned join contact (its own table, outlives the row).
-        askable = {
+        # v_84 — the pinned join contact (its own table, outlives the row),
+        # read for the listings that take requests or followers.
+        contact = {
             lst.space_id: usable_contact(await discovery._repo.get_pin(lst.space_id))
             is not None
             for lst in listings
-            if lst.join_mode == "request"
+            if lst.join_mode == "request" or lst.allow_subscribers
         }
         federation_repo = self.svc(K.federation_repo_key)
         unique_instances = {lst.instance_id for lst in listings}
@@ -100,7 +101,13 @@ class PublicSpaceCollectionView(BaseView):
                     # v_84 — the listing carries a verified, pinned join
                     # contact for its host: an "Ask to join" can go through
                     # the GFS without a pairing.
-                    "gfs_askable": askable.get(lst.space_id, False),
+                    "gfs_askable": lst.join_mode == "request"
+                    and contact.get(lst.space_id, False),
+                    # v_96 — a follow (a join for the read-only role) can go
+                    # through the GFS the same way: followers on and a
+                    # verified, pinned contact, whatever the join mode.
+                    "gfs_followable": bool(lst.allow_subscribers)
+                    and contact.get(lst.space_id, False),
                 }
                 for lst in listings
             ]

@@ -2465,8 +2465,8 @@ signed by the space authority key) — the GFS is asked for nothing.
 
 Part of ``all`` (after ``space-chat``). Prereqs: ``up`` + ``pair``. a creates
 a ``public`` ``invite_only`` space and turns ``allow_subscribers`` on (join
-mode does not matter for a follow). b finds it in its paired directory and
-``POST /subscribe`` → ``{pending: true}``; a auto-approves (no admin step).
+mode does not matter for a follow). b finds it in its paired directory (``GET /api/peer_spaces``) and
+``POST /subscribe`` → ``{pending: true, subscribed: false}``; a auto-approves (no admin step).
 b then holds a ``subscriber`` seat in ``space_members`` and a holds it in
 ``space_remote_members``; a's post reaches b; b's post is refused (403).
 ``DELETE /subscribe`` is b's own leave: a tombstones the seat and the
@@ -2477,8 +2477,8 @@ content-key epoch (``space_keys``) does not move.
 Part of ``all`` (right after ``gfs-join-request``). Prereqs: ``gfs-up`` +
 ``gfs-pair``. a creates a global ``invite_only`` space with followers on,
 listed on the GFS (our GFS proves ``subscriber_seats``, so the listing carries
-a ``join_contact``). e (paired with nobody) sees it ``gfs_askable``,
-``POST /subscribe`` → ``{pending: true}`` through the sealed bootstrap with
+a ``join_contact``). e (paired with nobody) sees it ``gfs_followable``,
+``POST /subscribe`` → ``{pending: true, subscribed: false}`` through the sealed bootstrap with
 ``requested_role: subscriber``; no approval by a. e is seated as
 ``subscriber`` (a's ``space_remote_members`` too), reads a's post, cannot post
 (403), and holds only a ``space_session`` row for a.

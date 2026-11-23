@@ -32,11 +32,14 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.local_community import Eligibility
 from socialhome.domain.public_space import PublicSpaceListing
 from socialhome.domain.space import (
+    AgeRestrictedError,
     HostTooOldError,
     JoinMode,
     SpaceFeatures,
+    SpaceMember,
     SpaceRole,
     SpaceType,
     SubscribeNotAllowedError,
@@ -47,6 +50,10 @@ from socialhome.federation.invite_token_redeem import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.peer_space_directory_repo import (
+    PeerSpaceDirectoryEntry,
+    SqlitePeerSpaceDirectoryRepo,
+)
 from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
@@ -55,6 +62,7 @@ from socialhome.repositories.space_remote_member_repo import (
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_service import SpaceService, stub_space_from_metadata
+from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.services.user_service import UserService
 
 PEER = "peer-house"
@@ -270,6 +278,66 @@ async def test_a_follow_without_the_seat_store_fails_closed(stack):
     assert _approved_sends(stack) == []
 
 
+async def test_a_follow_naming_a_local_user_is_refused(stack, caplog):
+    """The applicant picks ``user_id``: one of THIS household's people is
+    never seated as another household's follower."""
+    space = await _hosted(stack)
+    local = await stack.provision("local")
+    with caplog.at_level("INFO"):
+        assert await _approve_follow(stack, space.id, user_id=local.user_id) is False
+    assert _approved_sends(stack) == []
+    assert await stack.spaces.get_join_request("rq-1") is None
+
+
+@pytest.mark.parametrize("tombstoned", [False, True])
+async def test_a_follow_naming_another_households_user_is_refused(stack, tombstoned):
+    """A user id seated (or once seated) under another household is not
+    this applicant's to claim."""
+    space = await _hosted(stack)
+    await stack.remote.add(
+        space_id=space.id,
+        instance_id="other-house",
+        user_id="u-fan",
+        user_pk=None,
+        display_name="Fan",
+        role=SpaceRole.MEMBER.value,
+    )
+    if tombstoned:
+        await stack.remote.remove(space.id, "other-house", "u-fan")
+    assert await _approve_follow(stack, space.id) is False
+    assert _approved_sends(stack) == []
+
+
+async def _hosted_local_community(stack):
+    space = await _hosted(stack)
+    community = replace(
+        space, space_type=SpaceType.PUBLIC, lat=47.37, lon=8.54, radius_km=5.0
+    )
+    await stack.spaces.save(community)
+    return community
+
+
+@pytest.mark.parametrize(
+    ("verdict", "approved"),
+    [(None, False), (Eligibility.EDGE, False), (Eligibility.INSIDE, True)],
+)
+async def test_a_local_community_follow_needs_the_inside_verdict(
+    stack, verdict, approved
+):
+    """Following a local community is inside only: the approver itself
+    refuses anything but an INSIDE verdict (a GFS follow passes none)."""
+    space = await _hosted_local_community(stack)
+    got = await stack.svc.approve_remote_follow(
+        space_id=space.id,
+        instance_id=PEER,
+        user_id="u-fan",
+        request_id="rq-1",
+        area_verdict=verdict,
+    )
+    assert got is approved
+    assert len(_approved_sends(stack)) == (1 if approved else 0)
+
+
 async def test_a_reused_request_id_is_refused(stack):
     space = await _hosted(stack)
     assert await _approve_follow(stack, space.id) is True
@@ -447,6 +515,29 @@ async def test_following_a_space_hosted_elsewhere_sends_a_follow_request(stack):
     assert len(_join_request_sends(stack)) == 1
 
 
+async def test_a_paired_follow_waits_briefly_then_asks_again(stack):
+    """The host answers a follow on its own, at once — or drops it without
+    a word (ban, outside the area, followers off …). The applicant's row
+    lives 15 minutes, so a dropped follow is not stuck "pending" for days:
+    after that a new follow asks again."""
+    await _remote_stub(stack)
+    fan = await stack.provision("fan")
+    await stack.svc.follow_space(fan.user_id, "sp-remote")
+    (sent,) = _join_request_sends(stack)
+    row = await stack.spaces.get_join_request(sent["payload"]["request_id"])
+    assert row is not None
+    expires = datetime.fromisoformat(row["expires_at"])
+    assert timedelta(minutes=14) < expires - datetime.now(UTC) <= timedelta(minutes=15)
+
+    await stack.db.enqueue(
+        "UPDATE space_join_requests SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), row["id"]),
+    )
+    again = await stack.svc.follow_space(fan.user_id, "sp-remote")
+    assert again == {"subscribed": False, "pending": True}
+    assert len(_join_request_sends(stack)) == 2
+
+
 async def test_following_a_stub_without_followers_is_refused(stack):
     await _remote_stub(stack, allow_subscribers=False)
     fan = await stack.provision("fan")
@@ -473,6 +564,27 @@ async def test_following_a_listed_space_asks_the_listings_host(stack):
     assert sent["to_instance_id"] == HOST
 
 
+async def test_following_a_space_a_paired_household_lists_asks_that_host(stack):
+    """A paired household's public spaces arrive in its directory
+    (SPACE_DIRECTORY_SYNC), not in the GFS cache: a follow of one asks the
+    household that lists it. The directory carries no ``allow_subscribers``
+    — the host decides."""
+    fan = await stack.provision("fan")
+    peers = SqlitePeerSpaceDirectoryRepo(stack.db)
+    await peers.replace_snapshot(
+        HOST,
+        [PeerSpaceDirectoryEntry(instance_id=HOST, space_id="sp-peer", name="P")],
+    )
+    stack.svc.attach_public_space_directory(
+        SqlitePublicSpaceRepo(stack.db), peer_directory=peers
+    )
+    got = await stack.svc.follow_space(fan.user_id, "sp-peer")
+    assert got == {"subscribed": False, "pending": True}
+    (sent,) = _join_request_sends(stack)
+    assert sent["to_instance_id"] == HOST
+    assert sent["payload"]["requested_role"] == "subscriber"
+
+
 async def test_following_a_listing_without_followers_is_refused(stack):
     fan = await stack.provision("fan")
     listings = SqlitePublicSpaceRepo(stack.db)
@@ -493,7 +605,9 @@ async def test_following_a_space_only_a_gfs_lists_asks_through_the_gfs(stack):
     stack.svc._gfs_join = gfs_join
     got = await stack.svc.follow_space(fan.user_id, "sp-gfs")
     assert got == {"subscribed": False, "pending": True}
-    assert gfs_join.request_join.await_args.kwargs["host_instance_id"] == HOST
+    kwargs = gfs_join.request_join.await_args.kwargs
+    assert kwargs["host_instance_id"] == HOST
+    assert kwargs["requested_role"] is SpaceRole.SUBSCRIBER
 
 
 async def test_following_an_unknown_space_is_not_found(stack):
@@ -592,6 +706,70 @@ async def test_a_followers_leave_space_does_not_rotate_but_a_members_does(stack)
         rotate.assert_awaited_once_with(space.id)
 
 
+async def test_turning_followers_off_drops_only_this_households_followers(stack):
+    """Followers off: our own people's follower seats end (their own
+    leave, without a rotation); a mirrored row of another household's
+    person is never "left" in their name."""
+    space = await _hosted(stack)
+    fan = await stack.provision("fan")
+    await stack.svc.follow_space(fan.user_id, space.id)
+    await stack.spaces.save_member(
+        SpaceMember(
+            space_id=space.id,
+            user_id="u-mirror",
+            role=SpaceRole.SUBSCRIBER.value,
+            joined_at="2026-11-01T00:00:00+00:00",
+        )
+    )
+    real_unfollow = SpaceService.unfollow_space
+    with (
+        patch.object(
+            SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
+        ) as rotate,
+        patch.object(SpaceService, "unfollow_space", autospec=True) as unfollow,
+    ):
+        unfollow.side_effect = real_unfollow
+        await stack.svc.update_config(
+            space.id,
+            actor_username="owner",
+            features=replace(space.features, allow_subscribers=False),
+        )
+    assert [c.args[1] for c in unfollow.await_args_list] == [fan.user_id]
+    rotate.assert_not_awaited()
+    assert await stack.spaces.get_member(space.id, fan.user_id) is None
+    assert await stack.spaces.get_member(space.id, "u-mirror") is not None
+
+
+async def test_an_admin_removing_a_local_follower_still_rotates(stack):
+    """Only a follower's OWN leave skips the rotation; a removal by an
+    admin rotates at once (until the owed-rotation sweep exists)."""
+    space = await _hosted(stack)
+    fan = await stack.provision("fan")
+    await stack.svc.follow_space(fan.user_id, space.id)
+    with patch.object(
+        SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
+    ) as rotate:
+        await stack.svc.remove_member(
+            space.id, actor_username="owner", user_id=fan.user_id
+        )
+    rotate.assert_awaited_once_with(space.id)
+    assert await stack.spaces.get_member(space.id, fan.user_id) is None
+
+
+async def test_following_a_stub_runs_the_age_gate(stack):
+    """A protected minor below the space's ``min_age`` is refused before
+    any request leaves this household."""
+    await _remote_stub(stack)
+    fan = await stack.provision("fan")
+    gate = MagicMock()
+    gate.check_space_age_gate = AsyncMock(side_effect=AgeRestrictedError(16))
+    stack.svc.attach_child_protection(gate)
+    with pytest.raises(AgeRestrictedError):
+        await stack.svc.follow_space(fan.user_id, "sp-remote")
+    gate.check_space_age_gate.assert_awaited_once_with("sp-remote", fan.user_id)
+    assert _join_request_sends(stack) == []
+
+
 # ── Host: a remote household's leave ─────────────────────────────────────
 
 
@@ -607,11 +785,28 @@ async def _seat_remote(stack, space_id, user_id, role):
     await stack.spaces.add_space_instance(space_id, PEER)
 
 
-async def test_a_remote_followers_leave_does_not_rotate(stack):
+def _attach_writer_certs(stack) -> None:
+    """The real writer-scope comparison: a household rotates on leave only
+    when its writer scope weakened."""
+    stack.svc.attach_writer_certs(
+        SpaceWriterCertService(
+            space_repo=stack.spaces,
+            remote_member_repo=stack.remote,
+            space_key_repo=MagicMock(),
+            own_instance_id=stack.iid,
+            own_identity_pk=b"\x11" * 32,
+        )
+    )
+
+
+async def test_a_read_only_remote_followers_leave_does_not_rotate(stack):
+    """A follower without the comment / react switches held no writer
+    cert: its leave weakens nothing, so nothing rotates."""
     space = await _hosted(stack)
+    _attach_writer_certs(stack)
     await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
     with patch.object(
-        SpaceService, "rotate_if_writer_scope_weakened", AsyncMock()
+        SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
     ) as rotate:
         assert await stack.svc.on_remote_member_left(space.id, PEER, "u-fan")
     rotate.assert_not_awaited()
@@ -619,15 +814,36 @@ async def test_a_remote_followers_leave_does_not_rotate(stack):
     assert PEER not in await stack.spaces.list_member_instances(space.id)
 
 
+async def test_a_commenting_remote_followers_leave_rotates(stack):
+    """A follower that may comment / react held a ``reader`` writer cert:
+    its leave rotates at once (until the owed-rotation sweep exists), so
+    that cert dies with the epoch."""
+    space = await _hosted(stack)
+    await stack.spaces.save(
+        replace(
+            space,
+            features=replace(space.features, allow_subscriber_comment=True),
+        )
+    )
+    _attach_writer_certs(stack)
+    await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
+    with patch.object(
+        SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
+    ) as rotate:
+        assert await stack.svc.on_remote_member_left(space.id, PEER, "u-fan")
+    rotate.assert_awaited_once_with(space.id)
+
+
 async def test_a_mixed_member_and_follower_leave_rotates(stack):
     space = await _hosted(stack)
+    _attach_writer_certs(stack)
     await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
     await _seat_remote(stack, space.id, "u-mem", SpaceRole.MEMBER)
     with patch.object(
-        SpaceService, "rotate_if_writer_scope_weakened", AsyncMock()
+        SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
     ) as rotate:
         assert await stack.svc.on_remote_member_left(space.id, PEER, None)
-    rotate.assert_awaited_once()
+    rotate.assert_awaited_once_with(space.id)
 
 
 # ── F3: leave as a member, come back as a follower ───────────────────────

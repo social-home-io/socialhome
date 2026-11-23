@@ -4015,22 +4015,25 @@ def cmd_space_follow_paired() -> None:
     _must("space-follow-paired: a enables followers", s, patched, ok=(200,))
     print(f"  a: public invite-only space {space_id[:8]}…, followers on")
 
-    # b learns a's public spaces through the paired directory (the admin
-    # refresh re-polls it); poll the listing before following.
+    # b learns a's public spaces through the PAIRED directory (§D1a,
+    # SPACE_DIRECTORY_SYNC on a's config change) — never the GFS. Poll it
+    # before following: the follow finds its host there.
     entry: dict | None = None
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline and entry is None:
-        _as(state, "b", "POST", "/api/public_spaces/refresh")
-        time.sleep(1.0)
-        s, rows = _as(state, "b", "GET", "/api/public_spaces?limit=200")
+        s, rows = _as(state, "b", "GET", "/api/peer_spaces")
         if s == 200 and isinstance(rows, list):
             entry = next((r for r in rows if r.get("space_id") == space_id), None)
+        if entry is None:
+            time.sleep(1.0)
     if entry is None:
         raise SystemExit(
             "space-follow-paired: b never listed a's public space in its "
-            "directory within 30 s"
+            "paired directory (/api/peer_spaces) within 30 s"
         )
-    print("  b lists it in its directory ✓")
+    if entry.get("host_instance_id") != state["instances"]["a"]["instance_id"]:
+        raise SystemExit(f"space-follow-paired: directory names {entry!r}")
+    print("  b lists it in its paired directory ✓")
 
     def seat_on_b() -> list[tuple]:
         return _rows(
@@ -4049,7 +4052,8 @@ def cmd_space_follow_paired() -> None:
 
     s, body = _as(state, "b", "POST", f"/api/spaces/{space_id}/subscribe", {})
     body = _must("space-follow-paired: b follows", s, body, ok=(200,))
-    if not (body.get("pending") or body.get("subscribed")):
+    # A host elsewhere: a follow request, seated only by the host's answer.
+    if body.get("pending") is not True or body.get("subscribed") is not False:
         raise SystemExit(f"space-follow-paired: follow answered {body!r}")
     print(f"  b followed → {body!r} (no admin step on a)")
 
@@ -4120,7 +4124,7 @@ def cmd_gfs_space_follow() -> None:
     a creates a global ``invite_only`` space with ``allow_subscribers`` on,
     listed on the GFS (the listing carries a ``join_contact`` because our
     GFS proves ``subscriber_seats``). e (paired with nobody) lists it
-    ``gfs_askable`` and ``POST /subscribe`` → ``{pending: true}``; a
+    ``gfs_followable`` and ``POST /subscribe`` → ``{pending: true}``; a
     auto-approves — NO admin step — and e is seated as a ``subscriber``
     (e's ``space_members``, a's ``space_remote_members``). e holds only a
     ``space_session`` row for a, reads a's post and cannot post.
@@ -4170,7 +4174,7 @@ def cmd_gfs_space_follow() -> None:
                 (
                     r
                     for r in rows
-                    if r.get("space_id") == space_id and r.get("gfs_askable")
+                    if r.get("space_id") == space_id and r.get("gfs_followable")
                 ),
                 None,
             )
@@ -4188,7 +4192,7 @@ def cmd_gfs_space_follow() -> None:
         timeout=30.0,
     )
     body = _must("gfs-space-follow: e follows", s, body, ok=(200,))
-    if not (body.get("pending") or body.get("subscribed")):
+    if body.get("pending") is not True or body.get("subscribed") is not False:
         raise SystemExit(f"gfs-space-follow: follow answered {body!r}")
     print(f"  e followed → {body!r} (no approval by a)")
 

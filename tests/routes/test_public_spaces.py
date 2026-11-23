@@ -7,6 +7,7 @@ from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,
     SqlitePublicSpaceRepo,
 )
+from socialhome.routes import public_spaces as public_spaces_routes
 
 from .conftest import _auth
 
@@ -427,3 +428,39 @@ async def test_list_names_a_paired_host_and_never_an_unnamed_one_by_id(client):
     assert rows["sp-keller"]["host_is_paired"] is True
     assert rows["sp-blank"]["host_display_name"] is None
     assert rows["sp-blank"]["host_is_paired"] is True
+
+
+async def test_list_says_which_listings_can_be_asked_or_followed_through_the_gfs(
+    client, monkeypatch
+):
+    """``gfs_askable`` (v_84): a request-mode listing with a usable pinned
+    contact. ``gfs_followable`` (v_96): a listing that takes followers with
+    a usable pinned contact, whatever its join mode."""
+    monkeypatch.setattr(
+        public_spaces_routes,
+        "usable_contact",
+        lambda raw: ({"instance_id": "h"}, "https://gfs") if raw == "ok" else None,
+    )
+    repo = SqlitePublicSpaceRepo(client._db)
+    cases = {
+        "sp-ask": ("request", False, "ok"),
+        "sp-follow": ("invite_only", True, "ok"),
+        "sp-both": ("request", True, "ok"),
+        "sp-no-contact": ("request", True, "bad"),
+        "sp-closed": ("invite_only", False, "ok"),
+    }
+    for sid, (mode, subs, pin) in cases.items():
+        await _seed(client, space_id=sid, join_mode=mode, allow_subscribers=subs)
+        await repo.set_pin(sid, pin)
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    rows = {s["space_id"]: s for s in await r.json()}
+    got = {
+        sid: (rows[sid]["gfs_askable"], rows[sid]["gfs_followable"]) for sid in cases
+    }
+    assert got == {
+        "sp-ask": (True, False),
+        "sp-follow": (False, True),
+        "sp-both": (True, True),
+        "sp-no-contact": (False, False),
+        "sp-closed": (False, False),
+    }

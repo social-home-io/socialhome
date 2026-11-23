@@ -22,7 +22,7 @@ import copy
 import math
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -1738,6 +1738,30 @@ class Space:
     #: canonical JSON text — relayed in the snapshots this household sends.
     #: Never written by ``save`` — only by ``set_owner_statement``.
     owner_statement: str | None = None
+
+
+def takes_follows(space: Space | None, own_instance_id: str) -> bool:
+    """May another household's person follow ``space`` here (v_96)? Only a
+    live (not dissolved, not archived) ``public`` / ``global`` space THIS
+    household hosts with ``allow_subscribers`` on — whatever its join mode.
+    The one gate every remote follow path checks (paired / mesh inbound, the
+    GFS bootstrap, the approver)."""
+    return (
+        space is not None
+        and bool(own_instance_id)
+        and space.owner_instance_id == own_instance_id
+        and not space.dissolved
+        and not space.archived
+        and space.space_type in PUBLIC_SPACE_TIERS
+        and space.features.allow_subscribers
+    )
+
+
+#: The host's automatic approval of a remote follow (v_96) —
+#: ``SpaceService.approve_remote_follow``: keyword-only ``space_id``,
+#: ``instance_id``, ``user_id``, ``request_id``, ``applicant_pk``,
+#: ``area_verdict``, ``gfs_relay``; ``True`` when it approved.
+FollowApprover = Callable[..., Awaitable[bool]]
 
 
 @dataclass(slots=True, frozen=True)

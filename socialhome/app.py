@@ -5020,9 +5020,11 @@ def create_app(config: Config | None = None) -> web.Application:
         # §CP.F1 age gate on add_member + §CP.R public-tier gate.
         real_space_service.attach_child_protection(child_protection_service)
         real_space_service.attach_local_area_budget(local_area_budget)
-        # A follow of a space we hold no row for finds its host on the
-        # cached directory listing (v_96).
-        real_space_service.attach_public_space_directory(repos.public_space)
+        # A follow of a space we hold no row for finds its host in a paired
+        # household's directory or the cached GFS listing (v_96).
+        real_space_service.attach_public_space_directory(
+            repos.public_space, peer_directory=repos.peer_space_directory
+        )
         # A new local user becomes a member of every household space we host.
         # Only this service knows our real instance id — the placeholder
         # built at wiring time is never subscribed.

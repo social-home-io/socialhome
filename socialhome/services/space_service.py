@@ -107,6 +107,9 @@ if TYPE_CHECKING:
     from ..federation.invite_bootstrap import InviteBootstrapHint
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
+    from ..repositories.peer_space_directory_repo import (
+        AbstractPeerSpaceDirectoryRepo,
+    )
     from ..repositories.public_space_repo import AbstractPublicSpaceRepo
     from .gfs_mailbox_service import GfsMailboxService
     from .link_preview_service import LinkPreviewService
@@ -273,6 +276,7 @@ from ..domain.space import (
     restricted_access_changes,
     role_change_allowed,
     role_change_event_type,
+    takes_follows,
     validate_space_link_url,
 )
 from ..domain.space_app_table import SpaceAppNotAllowedError
@@ -434,6 +438,14 @@ MAX_PUBLIC_SPACES = 5
 #: ``invite_remote_user`` / remote join approval go through the repo
 #: directly and keep their own, much shorter, expiry.
 DEFAULT_INVITE_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
+
+#: How long the applicant's row of a paired / mesh follow (v_96) waits for
+#: the host's answer. The host answers a follow on its own, at once, or
+#: drops it without a word (ban, outside the area, followers off): after
+#: this the person's next follow asks again instead of reading "pending"
+#: for days. A follow through the GFS keeps the long wait (the relay queue
+#: may hold the answer for 24 h).
+FOLLOW_REQUEST_TTL = timedelta(minutes=15)
 
 #: Post content caps — matches FeedService values.
 MAX_POST_LENGTH = 10_000
@@ -725,6 +737,7 @@ class SpaceService(
         "_mirror_locks",
         "_moderation",
         "_own_instance_id",
+        "_peer_spaces",
         "_pictures",
         "_post_attachments",
         "_posts",
@@ -827,9 +840,10 @@ class SpaceService(
         #: "Ask to join" through the GFS (v_84) — both ends; unwired, an
         #: unpaired host answers ``NOT_PAIRED`` as before.
         self._gfs_join: GfsJoinRequestCoordinator | None = None
-        #: The cached directory listings (paired and GFS discovery) — where a
-        #: follow of a space we hold no row for finds its host
-        #: (:meth:`attach_public_space_directory`).
+        #: The directories a follow of a space we hold no row for finds its
+        #: host in (:meth:`attach_public_space_directory`): paired households'
+        #: public spaces (§D1a) and the GFS directory cache.
+        self._peer_spaces: AbstractPeerSpaceDirectoryRepo | None = None
         self._public_spaces: AbstractPublicSpaceRepo | None = None
         #: v_89 — our GFS mailboxes, released when no seat needs them.
         self._mailboxes: GfsMailboxService | None = None
@@ -1056,11 +1070,20 @@ class SpaceService(
         (:meth:`revoke_space_session_if_orphaned`)."""
         self._mailboxes = mailboxes
 
-    def attach_public_space_directory(self, repo: AbstractPublicSpaceRepo) -> None:
-        """Wire the cached directory listings: a follow of a space this
-        household holds no row for reads its host and its ``allow_subscribers``
-        off the listing (:meth:`follow_space`)."""
+    def attach_public_space_directory(
+        self,
+        repo: AbstractPublicSpaceRepo,
+        *,
+        peer_directory: AbstractPeerSpaceDirectoryRepo | None = None,
+    ) -> None:
+        """Wire the directories a follow of a space this household holds no
+        row for finds its host in (:meth:`follow_space`): ``peer_directory``
+        — the public spaces paired households list (§D1a, no
+        ``allow_subscribers``: the host decides) — and ``repo``, the GFS
+        directory cache (``public_space_cache``), whose listing also says
+        whether the space takes followers."""
         self._public_spaces = repo
+        self._peer_spaces = peer_directory
 
     def attach_gfs_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
         """Wire "Ask to join" through the GFS (v_84): a request to a global
@@ -3884,9 +3907,13 @@ class SpaceService(
             # space out of the local DB forever with no way to notice. Drop
             # them (they can subscribe again if the owner turns it back on) —
             # real members are untouched, since ``unfollow_space`` refuses
-            # to end anything but a subscriber seat.
+            # to end anything but a subscriber seat. Only OUR people: a
+            # self-leave (gossip, SPACE_INSTANCE_LEFT) is never run in the
+            # name of another household's mirrored person. Remote follower
+            # seats are ended by the owed-rotation phase (P5).
+            local_ids = set(await self._spaces.list_local_member_user_ids(space_id))
             for member in await self._spaces.list_members(space_id):
-                if member.role == SpaceRole.SUBSCRIBER:
+                if member.user_id in local_ids and member.role == SpaceRole.SUBSCRIBER:
                     await self.unfollow_space(member.user_id, space_id)
         if location_mode_changed:
             # §23.8.6: refire latest presence so receivers see the new
@@ -4798,15 +4825,16 @@ class SpaceService(
         follows = admin_ended and await self._authority_rotation_follows(
             space, instance_id
         )
-        if any(r.role != SpaceRole.SUBSCRIBER for r in ending):
-            # Only followers leaving: no rotation at once — it is owed and
-            # batched (v_96). Any other seat ending rotates as before.
-            await self.rotate_if_writer_scope_weakened(
-                space_id,
-                instance_id,
-                scope_before,
-                authority_rotation_follows=follows,
-            )
+        # Rotates only when the household's writer scope weakened: a
+        # read-only follower (no writer cert) leaves without a rotation; a
+        # follower holding a ``reader`` comment cert rotates at once until
+        # the owed-rotation sweep exists (v_96).
+        await self.rotate_if_writer_scope_weakened(
+            space_id,
+            instance_id,
+            scope_before,
+            authority_rotation_follows=follows,
+        )
         if admin_ended:
             await self._publish_admin_revoked(
                 space_id,
@@ -8638,8 +8666,11 @@ class SpaceService(
 
         Everything is re-checked here, failing closed (``False``, logged,
         nothing stored or sent): a live (not dissolved / archived) public or
-        global space this household hosts, ``allow_subscribers`` on, the
-        person not banned, no live seat of theirs from that household already
+        global space this household hosts, ``allow_subscribers`` on
+        (:func:`takes_follows`), an ``INSIDE`` ``area_verdict`` for a local
+        community, the person not banned, a ``user_id`` that is neither one
+        of our own people nor seated (now or before) under another
+        household, no live seat of theirs from that household already
         (a member who follows keeps their seat), and ``request_id`` not used
         before. The join mode does not matter — following is not joining as
         a member. The request is kept (approved; no admin bell — a follow
@@ -8651,15 +8682,16 @@ class SpaceService(
         if self._federation is None or not self._own_instance_id:
             log.warning("follow from %s: federation not attached", instance_id)
             return False
+        if self._remote_members is None:
+            # "Not seated already" cannot be proved: never approve blind.
+            log.warning(
+                "follow from %s for space %s dropped: remote seat store not wired",
+                instance_id,
+                space_id,
+            )
+            return False
         space = await self._spaces.get(space_id)
-        if (
-            space is None
-            or space.dissolved
-            or space.archived
-            or space.owner_instance_id != self._own_instance_id
-            or space.space_type not in PUBLIC_SPACE_TIERS
-            or not space.features.allow_subscribers
-        ):
+        if space is None or not takes_follows(space, self._own_instance_id):
             log.info(
                 "follow from %s for space %s refused: not a live public / "
                 "global space hosted here that takes followers",
@@ -8667,12 +8699,35 @@ class SpaceService(
                 space_id,
             )
             return False
+        if (
+            hosted_local_area(space, self._own_instance_id) is not None
+            and area_verdict is not Eligibility.INSIDE
+        ):
+            # Following a local community is inside only (owner 2026-11-23);
+            # the callers check it too — this is the last word.
+            log.info(
+                "follow from %s refused: not inside the local community %s",
+                instance_id,
+                space_id,
+            )
+            return False
         if await self._spaces.is_banned(space_id, user_id):
             log.info("follow from %s refused: banned from %s", instance_id, space_id)
             return False
-        if self._remote_members is None or (
-            await self._remote_members.get(space_id, instance_id, user_id) is not None
+        # The applicant picks ``user_id``: never one of our own people, nor
+        # one seated (now or before) under another household.
+        if await self._users.get_by_user_id(user_id) is not None or (
+            await self._remote_members.list_instances_of_user(space_id, user_id)
+            - {instance_id}
         ):
+            log.info(
+                "follow from %s for space %s refused: the user id belongs to "
+                "another household",
+                instance_id,
+                space_id,
+            )
+            return False
+        if await self._remote_members.get(space_id, instance_id, user_id) is not None:
             log.info(
                 "follow from %s for space %s: already seated — nothing to do",
                 instance_id,
@@ -8843,7 +8898,9 @@ class SpaceService(
             space_id,
             applicant_user_id,
             message=message,
-            ttl_days=7,
+            # A follow is answered at once or dropped without a word: a
+            # short wait, so a dropped one is asked again (follow_space).
+            ttl_days=FOLLOW_REQUEST_TTL / timedelta(days=1) if follow else 7,
             remote_applicant_instance_id=host_instance_id,
         )
         await self._federation.send_event(
@@ -9787,9 +9844,11 @@ class SpaceService(
           demoted.
         * A space hosted elsewhere: a join request with
           ``requested_role = subscriber`` to its host — read off our stub,
-          else the cached directory listing, else a GFS listing's join
-          contact (:meth:`request_join_remote`). The host's approval seats
-          the person through the redeem, so the answer is ``pending``.
+          else a paired household's directory (§D1a), else the GFS
+          directory cache, else a GFS listing's join contact
+          (:meth:`request_join_remote`). The host's approval seats the
+          person through the redeem, so the answer is ``pending`` (asked
+          again once a paired request's short wait has passed unanswered).
           ``share_location`` — the person agreed to send this household's
           home (~1 km) for a local community's host to decide on.
         """
@@ -9828,13 +9887,12 @@ class SpaceService(
         host = await self._follow_host(space, space_id)
         if host is None:
             raise NotFoundError(f"space {space_id!r} not found")
-        if (
-            await pending_join_request_id(
-                self._spaces, space_id, user_id, household_instance_id=host
-            )
-            is not None
+        if await self._spaces.has_live_pending_join_request(
+            space_id, user_id, remote_applicant_instance_id=host
         ):
-            # Already asked — the host's answer is on its way.
+            # Already asked — the host's answer is on its way. A request
+            # past its expiry was dropped by the host without a word (ban,
+            # area, followers off): asked again below.
             return {"subscribed": False, "pending": True}
         if space is not None and self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
@@ -9878,6 +9936,11 @@ class SpaceService(
             if not space.features.allow_subscribers:
                 raise SubscribeNotAllowedError()
             return space.owner_instance_id or None
+        if self._peer_spaces is not None:
+            entry = await self._peer_spaces.get(space_id)
+            if entry is not None:
+                # No ``allow_subscribers`` here: the host refuses when off.
+                return entry.instance_id or None
         listing = (
             await self._public_spaces.get(space_id)
             if self._public_spaces is not None

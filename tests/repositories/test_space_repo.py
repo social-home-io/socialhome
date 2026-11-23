@@ -1423,6 +1423,51 @@ async def test_list_live_invite_tokens_excludes_spent_links(env):
     assert [r["token"] for r in rows] == [live]
 
 
+async def test_list_live_invite_tokens_leaves_out_bound_approval_tokens(env):
+    """A token bound to one household and person is an approval's answer
+    (an admin's or a follow's, v_96), not a link the admins share."""
+    await env.repo.save(_space("sp-bound"))
+    link = await env.repo.create_invite_token("sp-bound", "uid-alice")
+    await env.repo.create_invite_token(
+        "sp-bound",
+        "uid-alice",
+        role="subscriber",
+        bound_instance_id="peer",
+        bound_user_id="uid-bob",
+    )
+    rows = await env.repo.list_live_invite_tokens("sp-bound")
+    assert [r["token"] for r in rows] == [link]
+
+
+async def test_has_live_pending_join_request_ignores_an_expired_row(env):
+    """An applicant's own request past its ``expires_at`` is not "already
+    asked" even before the sweep marks it expired (v_96 follow retry)."""
+    kw = {"remote_applicant_instance_id": "host"}
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    rid = await env.repo.save_join_request(
+        "sp-x", "uid-bob", ttl_days=15 / (24 * 60), **kw
+    )
+    assert await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # Another household, another person: no.
+    assert not await env.repo.has_live_pending_join_request(
+        "sp-x", "uid-bob", remote_applicant_instance_id="other"
+    )
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-x", **kw)
+    await env.db.enqueue(
+        "UPDATE space_join_requests SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), rid),
+    )
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # An answered one is not pending either.
+    rid2 = await env.repo.save_join_request("sp-x", "uid-bob", **kw)
+    assert await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    await env.repo.update_join_request_status(rid2, "denied")
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # A pending admin elevation is not a join request.
+    await env.repo.save_join_request("sp-x", "uid-bob", requested_role="admin", **kw)
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+
+
 async def test_list_live_invite_tokens_never_leaks_another_space(env):
     await env.repo.save(_space("sp-mine"))
     await env.repo.save(_space("sp-theirs"))

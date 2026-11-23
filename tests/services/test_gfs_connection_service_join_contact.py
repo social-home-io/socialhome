@@ -106,7 +106,7 @@ async def test_a_space_that_only_takes_follows_lists_a_contact_to_a_v96_gfs(
         allow_subscribers=True,
         caps=BOTH,
     )
-    assert await svc._wants_join_contact("sp-c")
+    assert await svc._join_contact_needs("sp-c")
     await svc.publish_space("sp-c", "gfs-c")
     assert session._last_body["join_contact"]["instance_id"] == "alpha.home"  # type: ignore[attr-defined]
     assert set(probed) >= BOTH
@@ -141,7 +141,7 @@ async def test_a_space_that_takes_neither_sends_none_and_probes_nothing(
         allow_subscribers=False,
         caps=BOTH,
     )
-    assert not await svc._wants_join_contact("sp-c")
+    assert not await svc._join_contact_needs("sp-c")
     await svc.publish_space("sp-c", "gfs-c")
     assert "join_contact" not in session._last_body  # type: ignore[attr-defined]
     assert "join_contact" not in probed
