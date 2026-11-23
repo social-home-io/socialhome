@@ -40,6 +40,7 @@ import { showToast } from './Toast'
 import { UploadProgressBar, uploadProgress, uploadWithProgress } from './UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
+import { clearTextDraft, textDraft } from '@/store/textDrafts'
 import { useLinkPreview } from '@/hooks/useLinkPreview'
 import { isOne, t } from '@/i18n/i18n'
 import { tierIcon } from '@/features/spaces/spaceGlyph'
@@ -103,9 +104,7 @@ interface ComposerProps {
   bazaarEnabled?: boolean
 }
 
-const content = signal('')
 const postType = signal('text')
-const submitting = signal(false)
 
 // bazaar listings are space-scoped — they only make sense inside a
 // space feed where buyers see them. The household feed composer omits
@@ -212,6 +211,11 @@ function contextLabel(context: string): string {
 export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowedTypes, bazaarEnabled }: ComposerProps) {
   const user = currentUser.value
   const TYPE_ICONS = spaceId ? TYPE_ICONS_SPACE : TYPE_ICONS_HOUSEHOLD
+  // One draft per place a post goes to — the household feed, each space —
+  // so text typed in one space never shows up (or gets posted) in another.
+  // The in-memory text and the localStorage auto-save share the key.
+  const draftKey = spaceId ? `composer:space:${spaceId}` : `composer:${context}`
+  const { text: content, sending: submitting } = textDraft(draftKey)
   // Restrict the picker to the space's allowed post types when supplied.
   // ``allowedTypes`` may list types with no composer button (transcript,
   // event, highlight_share) — the intersection with TYPE_ICONS is what
@@ -258,11 +262,10 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
 
   // Draft persistence: text content auto-saves to localStorage so a
   // tab close / accidental nav doesn't lose what the user was typing.
-  // Keyed by ``context`` so the household feed and a per-space feed
-  // don't clobber each other's drafts. Attached media isn't part of
-  // the draft (uploads have already landed on the server, but their
-  // canonical URLs aren't worth re-attaching after a session reset).
-  const draftKey = `composer:${context}`
+  // Keyed per space (``draftKey`` above) so the household feed and each
+  // space feed don't clobber each other's drafts. Attached media isn't
+  // part of the draft (uploads have already landed on the server, but
+  // their canonical URLs aren't worth re-attaching after a session reset).
   // Banner only shows once per mount: if the user dismisses it, we
   // don't want it to come back on the next keystroke as the auto-save
   // re-populates localStorage.
@@ -387,10 +390,11 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
       }
     })
   }
+  /** Picker-button entry point — at the caret, replacing a selection. */
   const insertEmojiAtCursor = (emoji: string) => {
     const ta = textareaRef.current
-    const pos = ta ? ta.selectionStart : content.value.length
-    spliceEmoji(emoji, [pos, pos])
+    const start = ta?.selectionStart ?? content.value.length
+    spliceEmoji(emoji, [start, ta?.selectionEnd ?? start])
   }
 
   const handleSubmit = async (e: Event) => {
@@ -400,7 +404,8 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
     // carry it in the upload. Only "text" requires a body in the
     // textarea before we'll submit.
     const needsText = !typeAcceptsMedia(postType.value) && !typeUsesBuilder(postType.value)
-    const hasBody = content.value.trim().length > 0
+    const sentText = content.value
+    const hasBody = sentText.trim().length > 0
     const isImage = postType.value === 'image'
     if (needsText && !hasBody) return
     // Image posts need at least one uploaded image; video/file posts
@@ -476,7 +481,7 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
           )
         }
       }
-      content.value = ''
+      clearTextDraft(draftKey, sentText)
       resetAttached()
       setPendingSchedule(null)
       setPendingPoll(null)

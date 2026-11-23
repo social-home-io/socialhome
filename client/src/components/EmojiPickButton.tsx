@@ -4,14 +4,17 @@
  *
  * Two flavours:
  *
- * 1. Signal-target — pass ``target: Signal<string>`` and the chosen
- *    emoji is appended to the signal value. Used by :mod:`CommentThread`
- *    where the input is bound to a module-level signal.
+ * 1. Signal-target — pass ``target: Signal<string>`` plus the ``field``
+ *    bound to it. The chosen emoji goes in at the field's caret
+ *    (replacing a selection, like typing would), and focus and the caret
+ *    — right after the emoji — go back to the field. Used by
+ *    :mod:`CommentThread`.
  *
  * 2. Callback-target — pass ``onInsert: (emoji) => void`` for owners
- *    that need to splice into a richer state shape (e.g. the
- *    composer's textarea ref + ``content`` signal, where insertion
- *    should land at the caret rather than at the end).
+ *    that splice into a richer state shape (the post composer, the DM
+ *    composer, a Highlight caption). Each inserts at the caret, replacing
+ *    a selection, and hands focus and the caret back the same way (their
+ *    splice is shared with their ``:emoji`` autocomplete).
  *
  * The picker hangs off the button with ``position: fixed`` (see
  * ``ReactionPicker``'s ``anchor``): it opens on whichever side has room
@@ -23,11 +26,38 @@
  * other inputs.
  */
 import { signal, type Signal } from '@preact/signals'
+import type { RefObject } from 'preact'
 import { useEffect, useRef } from 'preact/hooks'
 import { ReactionPicker } from './ReactionPicker'
 import { t } from '@/i18n/i18n'
 
 const openFor = signal<string | null>(null)
+
+type TextField = HTMLTextAreaElement | HTMLInputElement
+
+/**
+ * ``text`` with ``insert`` at ``field``'s caret (replacing its selection)
+ * — at the end when there is no field. Returns the new text and where
+ * the caret goes: right after the insert.
+ */
+export function spliceAtCaret(
+  text: string, insert: string, field: TextField | null | undefined,
+): { text: string, caret: number } {
+  const start = field?.selectionStart ?? text.length
+  const end = field?.selectionEnd ?? start
+  const before = text.slice(0, start) + insert
+  return { text: before + text.slice(end), caret: before.length }
+}
+
+/** Focus ``field`` with the caret at ``caret`` once the new text has
+ *  rendered (setting the value earlier would move the caret to the end). */
+function restoreCaret(field: TextField | null | undefined, caret: number): void {
+  if (!field) return
+  requestAnimationFrame(() => {
+    field.focus()
+    field.setSelectionRange(caret, caret)
+  })
+}
 
 interface BaseProps {
   /** Unique-per-page key identifying this picker instance. Re-used
@@ -41,11 +71,14 @@ interface BaseProps {
 
 interface SignalTargetProps extends BaseProps {
   target: Signal<string>
+  /** The text field bound to ``target``: the emoji lands at its caret. */
+  field: RefObject<TextField | null>
   onInsert?: never
 }
 
 interface CallbackTargetProps extends BaseProps {
   target?: never
+  field?: never
   onInsert: (emoji: string) => void
 }
 
@@ -66,7 +99,10 @@ export function EmojiPickButton(props: EmojiPickButtonProps) {
   }, [key])
   const insert = (emoji: string) => {
     if (props.target) {
-      props.target.value = props.target.value + emoji
+      const el = props.field.current
+      const next = spliceAtCaret(props.target.value, emoji, el)
+      props.target.value = next.text
+      restoreCaret(el, next.caret)
     } else {
       props.onInsert(emoji)
     }

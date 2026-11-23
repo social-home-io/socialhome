@@ -2,15 +2,16 @@
  * CommentThread — threaded comment display (§23.46).
  *
  * Renders a nested comment tree with inline reply / edit / delete
- * affordances. The two distinct draft surfaces — the inline "Reply
- * to {author}…" form and the always-visible "Add a comment…" input
- * at the bottom — keep their own module-level signals so typing in
- * one doesn't echo into the other when both are on screen at the
- * same time. Edit uses local component state (multiple can coexist).
+ * affordances. The two draft surfaces — the inline "Reply to {author}…"
+ * form and the always-visible "Add a comment…" field at the bottom —
+ * each keep their own draft per post (``textDraft``): the comment sheet
+ * is reused from post to post, and text typed under one post must never
+ * show up, or go out, under another. A send in flight blocks only its
+ * own draft. Edit uses local component state (multiple can coexist).
  */
 import { canModerate } from '@/features/spaces/spaceRoles'
-import { signal, type Signal } from '@preact/signals'
-import type { TextareaHTMLAttributes } from 'preact'
+import type { Signal } from '@preact/signals'
+import type { RefObject, TextareaHTMLAttributes } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { Avatar } from './Avatar'
 import { Button } from './Button'
@@ -30,6 +31,7 @@ import {
 } from './MentionAutocomplete'
 import { TypingIndicator, sendTyping } from './TypingIndicator'
 import { currentUser } from '@/store/auth'
+import { clearTextDraft, textDraft } from '@/store/textDrafts'
 import { spaceMentionRender, viewerSpaceRole } from '@/store/spaceMembers'
 import { MentionText } from './MentionText'
 import { PersonButton, openSpaceMention } from './PersonButton'
@@ -62,14 +64,12 @@ interface CommentThreadProps {
   pickedId?: string | null
 }
 
-const replyTo = signal<string | null>(null)
-// Inline "Reply to …" form — bound only to the open reply, of which
-// there is at most one at a time.
-const replyContent = signal('')
-// Bottom "Add a comment…" input — separate signal so it can stay
-// drafted while the user opens a reply form on a sibling comment.
-const newCommentContent = signal('')
-const submitting = signal(false)
+/** Draft key of a post's "Add a comment…" field; a reply's adds
+ *  ``:reply:{commentId}``. */
+function commentDraftKey(postId: string | undefined, replyTo: string | null): string {
+  const base = `comment:${postId ?? ''}`
+  return replyTo ? `${base}:reply:${replyTo}` : base
+}
 
 /** The server's comment limit (``MAX_COMMENT_LENGTH``). */
 const MAX_COMMENT_LENGTH = 2000
@@ -93,13 +93,17 @@ type CommentFieldProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'valu
   onSend: () => void
   /** Other keys — return ``true`` when consumed (autocomplete). */
   onKey?: (e: KeyboardEvent) => boolean
+  /** The field element, for an owner that needs it (the emoji button
+   *  inserts at its caret). */
+  fieldRef?: RefObject<HTMLTextAreaElement | null>
 }
 
 /** A comment's text field: one line to start, grows with the text up to
  *  ~40 % of the visible height, then scrolls inside; shrinks back when
  *  the text is sent or deleted. */
-function CommentField({ value, onSend, onKey, autoFocus, ...rest }: CommentFieldProps) {
-  const ref = useRef<HTMLTextAreaElement | null>(null)
+function CommentField({ value, onSend, onKey, autoFocus, fieldRef, ...rest }: CommentFieldProps) {
+  const ownRef = useRef<HTMLTextAreaElement | null>(null)
+  const ref = fieldRef ?? ownRef
   // ``autofocus`` only works once per page load; focus on mount so
   // "Reply" / "Edit" leave the caret in the field, ready to type.
   // The caret goes to the end, after the text being edited.
@@ -186,10 +190,13 @@ function bindEmojiAwareInput(target: Signal<string>, spaceId?: string | null) {
   }
 }
 
-/** Autocomplete keys first (mention, then emoji); ``true`` = consumed. */
+/** Autocomplete keys first (mention, then emoji); ``true`` = consumed.
+ *  An Escape that closes a list stops there: the comment sheet around
+ *  the field (which closes on Escape) stays open. */
 function autocompleteKey(e: KeyboardEvent): boolean {
   if (handleMentionAutocompleteKey(e) || handleEmojiAutocompleteKey(e)) {
     e.preventDefault()
+    if (e.key === 'Escape') e.stopPropagation()
     return true
   }
   return false
@@ -226,19 +233,29 @@ export function CommentThread(
   const topLevel = comments.filter(c => !c.parent_id)
   const replies = (parentId: string) =>
     comments.filter(c => c.parent_id === parentId)
+  // The comment whose "Reply to …" form is open (at most one).
+  const [replyTo, setReplyTo] = useState<string | null>(null)
+  const newDraft = textDraft(commentDraftKey(postId, null))
+  const replyDraft = replyTo ? textDraft(commentDraftKey(postId, replyTo)) : null
+  const newField = useRef<HTMLTextAreaElement | null>(null)
+  const replyField = useRef<HTMLTextAreaElement | null>(null)
 
   const handleSubmit = async (parentId: string | null) => {
-    const draft = parentId ? replyContent : newCommentContent
-    if (!draft.value.trim() || submitting.value) return
-    submitting.value = true
+    // Bound to this post (and comment) now: whatever the sheet shows by
+    // the time the server answers, only this draft is cleared.
+    const key = commentDraftKey(postId, parentId)
+    const draft = textDraft(key)
+    const text = draft.text.value
+    if (!text.trim() || draft.sending.value) return
+    draft.sending.value = true
     try {
-      await onReply(parentId, draft.value)
-      draft.value = ''
-      if (parentId) replyTo.value = null
+      await onReply(parentId, text)
+      clearTextDraft(key, text)
+      if (parentId) setReplyTo(cur => (cur === parentId ? null : cur))
     } catch {
       // The owner showed the error; the text stays to send again.
     } finally {
-      submitting.value = false
+      draft.sending.value = false
     }
   }
 
@@ -246,21 +263,22 @@ export function CommentThread(
   // full one.
   const newCommentRow = (
     <div class="sh-comment-new">
-      <CommentField placeholder={t('comments.placeholder')} value={newCommentContent.value}
+      <CommentField placeholder={t('comments.placeholder')} value={newDraft.text.value}
         id="sh-comment-new-input"
+        fieldRef={newField}
         {...mentionAria('sh-comment-new-input', spaceId)}
         onInput={(e) => {
-          bindEmojiAwareInput(newCommentContent, spaceId)(e)
+          bindEmojiAwareInput(newDraft.text, spaceId)(e)
           fireTyping()
         }}
         onKey={autocompleteKey}
         onSend={() => void handleSubmit(null)}
         onBlur={closeAutocompletes}
         aria-label={t('comments.new_aria')} />
-      <CommentCount text={newCommentContent.value} />
-      <EmojiPickButton target={newCommentContent} openKey="comment-new" />
-      <Button onClick={() => handleSubmit(null)} loading={submitting.value}
-              disabled={!newCommentContent.value.trim()}>
+      <CommentCount text={newDraft.text.value} />
+      <EmojiPickButton target={newDraft.text} field={newField} openKey={`comment-new-${postId ?? ''}`} />
+      <Button onClick={() => handleSubmit(null)} loading={newDraft.sending.value}
+              disabled={!newDraft.text.value.trim()}>
         {t('comments.post')}
       </Button>
     </div>
@@ -288,8 +306,7 @@ export function CommentThread(
         <div key={c.id} class="sh-comment">
           <CommentItem comment={c} spaceId={spaceId}
             onDelete={onDelete} onEdit={onEdit} picked={c.id === pickedId}
-            onReplyClick={() =>
-              replyTo.value = replyTo.value === c.id ? null : c.id} />
+            onReplyClick={() => setReplyTo(cur => (cur === c.id ? null : c.id))} />
           {replies(c.id).length > 0 && (
             <div class="sh-comment-replies">
               {replies(c.id).map(r => (
@@ -298,29 +315,35 @@ export function CommentThread(
               ))}
             </div>
           )}
-          {replyTo.value === c.id && (
+          {replyTo === c.id && replyDraft && (
             <div class="sh-comment-reply-form">
               <CommentField placeholder={t('comments.reply_placeholder', { name: c.author })}
                 id="sh-comment-reply-input"
                 {...mentionAria('sh-comment-reply-input', spaceId)}
-                value={replyContent.value} autoFocus
+                fieldRef={replyField}
+                value={replyDraft.text.value} autoFocus
                 aria-label={t('comments.reply_aria', { name: c.author })}
                 onInput={(e) => {
-                  bindEmojiAwareInput(replyContent, spaceId)(e)
+                  bindEmojiAwareInput(replyDraft.text, spaceId)(e)
                   fireTyping()
                 }}
                 onKey={autocompleteKey}
                 onSend={() => void handleSubmit(c.id)}
                 onBlur={closeAutocompletes} />
-              <CommentCount text={replyContent.value} />
-              <EmojiPickButton target={replyContent} openKey={`reply-${c.id}`} />
+              <CommentCount text={replyDraft.text.value} />
+              <EmojiPickButton target={replyDraft.text} field={replyField}
+                openKey={`reply-${postId ?? ''}-${c.id}`} />
               <Button variant="secondary"
-                      onClick={() => { replyTo.value = null; replyContent.value = '' }}>
+                      onClick={() => {
+                        // Cancel discards this reply's text.
+                        clearTextDraft(commentDraftKey(postId, c.id))
+                        setReplyTo(null)
+                      }}>
                 {t('common.cancel')}
               </Button>
               <Button onClick={() => handleSubmit(c.id)}
-                      loading={submitting.value}
-                      disabled={!replyContent.value.trim()}>
+                      loading={replyDraft.sending.value}
+                      disabled={!replyDraft.text.value.trim()}>
                 {t('comments.reply')}
               </Button>
             </div>
@@ -332,7 +355,7 @@ export function CommentThread(
       )}
       {newCommentRow}
       {/* Mounted once for the whole thread; module-level state keeps it
-          singleton across all three input surfaces. Each input
+          singleton across both input surfaces. Each input
           registers its own splice target via :func:`checkForEmojiTrigger`
           / :func:`checkForMentionTrigger`. */}
       <EmojiAutocomplete />
