@@ -434,6 +434,10 @@ class MomentReactionCounts(ProtectionGateMixin):
         """Sign the totals and hand them to every v_69 peer (a peer offline
         gets them from the outbox). ``False`` when that failed — the
         checkpoint stays due and is tried again next tick."""
+        # A row written before v_96 reads as reach 3 even when its author
+        # was protected (its create went ``no_relay``): protection still
+        # means one hop.
+        reach = 1 if await self._is_protected(moment.author_user_id) else moment.reach
         try:
             payload = sign_counts(
                 seed=self._federation.own_identity_seed,
@@ -444,12 +448,13 @@ class MomentReactionCounts(ProtectionGateMixin):
                 rev=self._next_rev(),
                 counts=counts,
                 total=total,
-                # §CP.R: a protected account's moment went to paired
+                # v_96: as far as the moment went (its row's reach) — reach 1
+                # (a protected account's, §CP.R, or chosen) went to paired
                 # households only; its totals do too, never relayed.
-                no_relay=await self._is_protected(moment.author_user_id),
+                no_relay=reach == 1,
             )
             await self._outbound.fan_counts(
-                payload, author_user_id=moment.author_user_id
+                payload, author_user_id=moment.author_user_id, reach=reach
             )
         except Exception as exc:  # noqa: BLE001 — retried, never kills the tick
             log.warning(
@@ -575,9 +580,13 @@ class MomentReactionCounts(ProtectionGateMixin):
                 event_type=FET.MOMENT_REACTIONS_COUNTED,
                 payload=p,
                 from_instance=event.from_instance,
+                # v_96: a holder passes totals on only while the moment
+                # itself would still be passed on from here (hop < reach).
                 holds_moment=held
                 and moment is not None
-                and moment.received_via == "household",
+                and moment.received_via == "household"
+                and moment.hop_count < moment.reach,
+                held_reach=moment.reach if moment is not None else None,
                 now_ms=now,
             )
         except Exception as exc:  # pragma: no cover — defensive

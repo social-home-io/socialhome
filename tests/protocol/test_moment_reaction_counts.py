@@ -58,6 +58,7 @@ from socialhome.crypto import (
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.federation_retention import relayed_moment_key
 from socialhome.federation.federation_service import FederationService
 from socialhome.global_server import moment_public_registry as registry_mod
 from socialhome.global_server.app_keys import (
@@ -353,9 +354,11 @@ async def test_receiver_keeps_genuine_totals_and_relays_them(env):
         "counts": {"🔥": 2, "👏": 1},
         "total": 3,
     }
-    # Relayed one hop on, to the other v_69 peer only.
-    assert [(s[0], s[2]["hop_count"]) for s in sent] == [(OTHER, 2)]
-    assert sent[0][3]["outbox_key"] == "moment-counts:m-noor"
+    # Relayed one hop on, to the other v_69 peer only — from a neighbour
+    # that isn't the origin, so at least hop 2 here (the v_96 relay clamp),
+    # queued under the relayed key (evicted first, v_96).
+    assert [(s[0], s[2]["hop_count"]) for s in sent] == [(OTHER, 3)]
+    assert sent[0][3]["outbox_key"] == relayed_moment_key("counts", ORIGIN, "m-noor")
 
 
 @pytest.fixture
@@ -502,7 +505,7 @@ async def test_a_household_that_relayed_the_create_relays_the_totals(env):
     app, _db, sent, *_ = env
     outbound = app[federation_service_key]  # noqa: F841 — keeps the app alive
     counts = app[moment_reaction_counts_key]
-    counts._outbound._remember_relay(("origin", "m-noor", ORIGIN), 1)
+    counts._outbound._remember_relay(("origin", "m-noor", ORIGIN), 1, 3)
     payload = _signed()
     await _dispatch(app, payload)
     assert [s[0] for s in sent] == [OTHER]
@@ -519,7 +522,7 @@ async def test_totals_for_another_origins_moment_are_neither_kept_nor_relayed(en
     m_origin = derive_instance_id(mallory.public_key)
     counts = app[moment_reaction_counts_key]
     # Relayed: we passed on ORIGIN's create, not Mallory's.
-    counts._outbound._remember_relay(("origin", "m-noor", ORIGIN), 1)
+    counts._outbound._remember_relay(("origin", "m-noor", ORIGIN), 1, 3)
     await _dispatch(app, _signed(key=mallory, origin=m_origin))
     assert sent == []
     # Held: the moment is ORIGIN's.
@@ -1153,7 +1156,7 @@ async def test_a_mesh_send_that_fails_is_retried_next_tick(env, monkeypatch):
     real = cls.fan_counts
     calls = []
 
-    async def _boom(_self, payload, *, author_user_id):
+    async def _boom(_self, payload, *, author_user_id, **_kw):
         calls.append(payload)
         raise RuntimeError("database is locked")
 

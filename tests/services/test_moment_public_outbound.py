@@ -446,6 +446,36 @@ async def test_a_delete_certificate_goes_only_where_the_log_is_proven(
     assert sum(u.endswith("/gfs/moments/delete") for u, _ in s["session"].posts) == 2
 
 
+@pytest.mark.parametrize("reach", [1, 2, 5])
+async def test_a_delete_certificate_keeps_the_v1_bytes_whatever_the_reach(
+    outbound_setup, reach
+):
+    """v_96: the mesh delete carries the moment's reach (v2 / v3 bytes), but
+    the GFS certificate keeps its fixed v1 field set — the origin signs it
+    separately, so it still verifies and names no reach."""
+    s = outbound_setup
+    s["gfs"].delete_log = {"g1"}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    seed = b"\x02" * 32
+    pk = ed25519_public_key(seed)
+    s["sub"].attach_identity(own_instance_id=derive_instance_id(pk), signing_key=seed)
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="ignored",
+            is_public=True,
+            reach=reach,
+        )
+    )
+    certs = [b for u, b in s["session"].posts if u.endswith("/delete_cert")]
+    assert len(certs) == 1
+    cert = certs[0]["cert"]
+    assert set(cert) == DELETE_CERT_FIELDS
+    assert "reach" not in cert and "no_relay" not in cert
+    assert delete_cert_refusal(cert, identity_pk_hex=pk.hex()) is None
+
+
 async def test_outbound_used_before_attach_skips_silently(db):
     """Bus event that fires before ``attach_session`` shouldn't crash."""
     bus = EventBus()
