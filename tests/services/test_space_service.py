@@ -35,6 +35,7 @@ from socialhome.domain.errors import (
     TierChangeRequiredError,
 )
 from socialhome.domain.events import (
+    CommentDeleted,
     PeerProtoVersionRaised,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
@@ -2481,15 +2482,12 @@ async def _follower_with_a_comment(stack):
     return s, anna, fan, c
 
 
-async def test_a_follower_edits_or_deletes_its_comment_only_under_the_switch(stack):
-    """One rule for a comment, its edit and its delete: the author's seat
-    must hold the comment right (a follower's is the space's switch). The
-    local path let a follower edit or delete its own comment with the switch
-    off — every other household refuses that change, so the copies diverged
-    (and on the host it went out as the host's). A moderator's delete is
-    content authority and still works."""
+async def test_a_follower_edits_its_comment_only_under_the_switch(stack):
+    """One rule for a comment and its edit: the author's seat must hold the
+    comment right (a follower's is the space's switch) — every other
+    household refuses the edit otherwise, so the copies would diverge. A
+    moderator's delete is content authority and still works."""
     s, anna, fan, c = await _follower_with_a_comment(stack)
-    # Switch on: both work for the follower's own comment.
     edited = await stack.space_svc.edit_comment(
         c.id, editor_user_id=fan.user_id, new_content="hello"
     )
@@ -2501,14 +2499,33 @@ async def test_a_follower_edits_or_deletes_its_comment_only_under_the_switch(sta
         await stack.space_svc.edit_comment(
             c.id, editor_user_id=fan.user_id, new_content="again"
         )
-    with pytest.raises(SpacePermissionError):
-        await stack.space_svc.delete_comment(c.id, actor_user_id=fan.user_id)
     held = await stack.space_post_repo.get_comment(c.id)
     assert held is not None and not held.deleted and held.content == "hello"
     # The owner still removes it.
     await stack.space_svc.delete_comment(c.id, actor_user_id=anna.user_id)
     held = await stack.space_post_repo.get_comment(c.id)
     assert held is not None and held.deleted
+
+
+async def test_a_follower_deletes_its_own_comment_with_the_switch_off(stack):
+    """Owner decision F6 (2026-11-23): an author may ALWAYS delete their own
+    comment, a follower included, with the comment switch off — the same
+    rule every other household applies (authorship, not the switch). The
+    delete goes out bound to the author, like a member's."""
+    s, _anna, fan, c = await _follower_with_a_comment(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=0, allow_subscriber_react=0 "
+        "WHERE id=?",
+        (s.id,),
+    )
+    seen: list[CommentDeleted] = []
+    stack.bus.subscribe(CommentDeleted, seen.append)
+    await stack.space_svc.delete_comment(c.id, actor_user_id=fan.user_id)
+    held = await stack.space_post_repo.get_comment(c.id)
+    assert held is not None and held.deleted
+    assert [(e.actor_user_id, e.author_user_id) for e in seen] == [
+        (fan.user_id, fan.user_id)
+    ]
 
 
 async def test_an_author_without_a_seat_cannot_change_their_comment(stack):

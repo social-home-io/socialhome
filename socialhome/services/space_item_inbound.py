@@ -18,8 +18,10 @@ with the same rules as the federated ``SPACE_COMMENT_*`` /
 * **Member households also check the roster** — the author's live seat on
   the origin household (:meth:`SpaceAuthorship.item_seat_admits`; a
   follower seat only where the space lets followers comment / react — an
-  edit or delete of its own comment needs the comment right like the
-  comment itself); a post delete runs the ``posts`` access level
+  edit of its own comment needs the comment right like the comment
+  itself, while deleting its own comment needs only the seat: an author
+  may always delete their own comment, owner decision F6); a post delete
+  runs the ``posts`` access level
   (:meth:`SpaceAuthorship.item_access_admits`), matching the ``write`` scope
   the cert already proves. A household without the roster (a GFS
   subscriber) relies on the cert scope plus the user binding.
@@ -603,9 +605,9 @@ class SpaceItemInbound:
             return False
         if comment.deleted:
             return False
-        if not await self._seat_ok(
-            item, subscriber_ok=item.space.features.allow_subscriber_comment
-        ):
+        # The author's own delete: a follower seat is enough, switch or not
+        # (owner decision F6, 2026-11-23) — authorship decided it above.
+        if not await self._seat_ok(item, subscriber_ok=True):
             return False
         if not await self._posts.soft_delete_comment(cid, space_id=item.space.id):
             return False
@@ -635,9 +637,13 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        await self._await_post(
-            item, subscriber_ok=item.space.features.allow_subscriber_comment
-        )
+        # Unlike the delete of a HELD comment (:meth:`_comment_delete`), a
+        # tombstone for a comment we never saw follows the comment switch:
+        # with it off a follower could plant unbounded permanent rows on
+        # every household (any id it mints is bound to itself), and the
+        # comment it pre-empts could not land with the switch off anyway.
+        subscriber_ok = item.space.features.allow_subscriber_comment
+        await self._await_post(item, subscriber_ok=subscriber_ok)
         post = await self._post_here(item.post_id, item)
         if post is None:
             log.info(
@@ -646,9 +652,7 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        if not await self._seat_ok(
-            item, subscriber_ok=item.space.features.allow_subscriber_comment
-        ):
+        if not await self._seat_ok(item, subscriber_ok=subscriber_ok):
             return False
         tombstone = Comment(
             id=cid,

@@ -108,6 +108,7 @@ from ..services.space_media_names import (
     feature_media_urls,
     renamed_media,
 )
+from ..services.space_member_guard import user_id_of_another_household
 from ..services.space_writer_households import holds_member_seat
 from .host_equivalence import acts_as_host
 from .moderation_approval import (
@@ -237,6 +238,12 @@ class SpaceAuthorship:
 
         ``any_role`` also accepts a read-only ``subscriber`` seat — for a
         change to a row that user already owns, never for a new write.
+
+        The seat must be the user's own household's: never one of OUR
+        people, nor a user also seated (now or before) under another
+        household. A user id belongs to one household; a seat taken under
+        somebody else's id is no proof of acting for them (P4 adversarial
+        review — the own-comment delete needs no switch, owner decision F6).
         """
         sender = str(event.from_instance or "")
         if not user_id or not sender or not space_id:
@@ -244,7 +251,32 @@ class SpaceAuthorship:
         seat = await self._seats.get(space_id, sender, user_id)
         if seat is None:
             return False
-        return any_role or seat.role in _WRITER_ROLES
+        if not (any_role or seat.role in _WRITER_ROLES):
+            return False
+        return await self._users_own_household(space_id, sender, user_id)
+
+    async def _users_own_household(
+        self, space_id: str, sender: str, user_id: str
+    ) -> bool:
+        """``user_id`` is not one of our people and holds no seat in
+        ``space_id`` under any household but ``sender`` — see
+        :meth:`acts_for`."""
+        if await user_id_of_another_household(
+            seats=self._seats,
+            users=self._users,
+            space_id=space_id,
+            instance_id=sender,
+            user_id=user_id,
+        ):
+            log.warning(
+                "space %s: %s holds a seat for %s, which is one of our people "
+                "or seated under another household — not its own; refusing",
+                space_id,
+                sender,
+                user_id,
+            )
+            return False
+        return True
 
     async def item_access_admits(
         self,
@@ -301,9 +333,11 @@ class SpaceAuthorship:
         A live writer seat (``member`` / ``moderator`` / ``admin``) — the
         :meth:`acts_for` rule of every federated create — or, with
         ``subscriber_ok``, a live ``subscriber`` seat: a follower's comment
-        (or an edit / delete of its own comment) while
-        ``allow_subscriber_comment`` is on, a follower's reaction while
-        ``allow_subscriber_react`` is on. Banned users, removed seats and unknown users hold nothing.
+        (or an edit of its own comment) while ``allow_subscriber_comment``
+        is on, a follower's reaction while ``allow_subscriber_react`` is on,
+        and a follower's delete of its own comment always (the caller passes
+        ``subscriber_ok=True``: owner decision F6). Banned users, removed
+        seats and unknown users hold nothing.
         Never the host leniency of :meth:`may_author`: a member-published
         item is the author's own, never relayed for someone else."""
         if not author_user_id or not origin_instance_id or not space_id:
@@ -313,9 +347,14 @@ class SpaceAuthorship:
         seat = await self._seats.get(space_id, origin_instance_id, author_user_id)
         if seat is None:
             return False
-        if seat.role in _WRITER_ROLES:
-            return True
-        return subscriber_ok and seat.role == SpaceRole.SUBSCRIBER.value
+        if not (
+            seat.role in _WRITER_ROLES
+            or (subscriber_ok and seat.role == SpaceRole.SUBSCRIBER.value)
+        ):
+            return False
+        return await self._users_own_household(
+            space_id, origin_instance_id, author_user_id
+        )
 
     async def known_follower_refused(
         self,
@@ -338,10 +377,13 @@ class SpaceAuthorship:
         if await self._spaces.is_banned(space_id, author_user_id):
             return True
         seat = await self._seats.get(space_id, origin_instance_id, author_user_id)
-        return (
-            seat is not None
-            and seat.role == SpaceRole.SUBSCRIBER.value
-            and not subscriber_ok
+        if seat is None:
+            return False
+        if seat.role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
+            return True
+        # A seat under somebody else's id is refused too (see acts_for).
+        return not await self._users_own_household(
+            space_id, origin_instance_id, author_user_id
         )
 
     async def is_host(self, event: FederationEvent, space_id: str) -> bool:

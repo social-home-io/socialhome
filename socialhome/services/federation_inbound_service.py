@@ -145,6 +145,8 @@ from ..federation.owner_bound_id import (
     MOMENT_KIND,
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
     is_owner_bound,
     owner_bound_id_refused,
 )
@@ -3145,7 +3147,9 @@ class FederationInboundService(ProtectionGateMixin):
         space_id = resolve_space_id(event)
         if not space_id:
             return
-        if not await self._owned_comment_mutation_allowed(event, space_id, comment_id):
+        if not await self._owned_comment_mutation_allowed(
+            event, space_id, comment_id, edit=True
+        ):
             return
         # The body this edit replaces — only mentions it newly adds notify.
         prior = await self._space_post_repo.get_comment(comment_id)
@@ -3395,15 +3399,25 @@ class FederationInboundService(ProtectionGateMixin):
         event: FederationEvent,
         space_id: str,
         comment_id: str,
+        *,
+        edit: bool = False,
     ) -> bool:
         """Edit / delete of a comment: the author's household or a
-        moderator (``SpaceService.edit_comment`` / ``delete_comment``)."""
+        moderator (``SpaceService.edit_comment`` / ``delete_comment``).
+
+        ``edit``: a follower's edit of its own comment needs the comment
+        switch (``allow_subscriber_comment``) — also from a household that
+        passed the §24.11 gate on another, writer seat, the rule the channel
+        applies (``SpaceItemInbound._comment_edit``). Its delete never does
+        (owner decision F6)."""
         authorship = self._space_authorship(event)
         if authorship is None:
             return False
         comment = await self._space_post_repo.get_comment(comment_id)
         if comment is None:
-            if not self._hold_for_parent(
+            if not await self._may_hold_comment_mutation(
+                event, space_id, comment_id, authorship
+            ) or not self._hold_for_parent(
                 event,
                 space_id,
                 PARENT_COMMENT,
@@ -3435,7 +3449,65 @@ class FederationInboundService(ProtectionGateMixin):
                 user_id=comment.author,
             )
             return False
+        if edit and not await self._follower_edit_allowed(
+            event, space_id, comment.author, authorship
+        ):
+            log_not_applied(
+                event,
+                what="comment",
+                row_id=comment_id,
+                reason="a follower's edit with the comment switch off",
+            )
+            return False
         return True
+
+    async def _follower_edit_allowed(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        author: str,
+        authorship: SpaceAuthorship,
+    ) -> bool:
+        """An edit by the author's own household whose seat for the author
+        is a follower's needs ``allow_subscriber_comment`` in OUR config;
+        content authority (host / admin / moderator) edits regardless."""
+        seat = await authorship.seat_repo.get(
+            space_id, str(event.from_instance or ""), author
+        )
+        if seat is None or seat.role != SpaceRole.SUBSCRIBER.value:
+            return True
+        if await authorship.has_content_authority(event, space_id):
+            return True
+        space = await self._space_repo.get(space_id)
+        return bool(space is not None and space.features.allow_subscriber_comment)
+
+    async def _may_hold_comment_mutation(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        comment_id: str,
+        authorship: SpaceAuthorship,
+    ) -> bool:
+        """Whether an edit / delete of a comment not held here may wait in
+        the parent buffer. A writer household (or the host) may; a
+        follower-only household only for its own comment — the id bound to
+        the payload's author — and only while the comment switch is on, the
+        rule of the comment it overtook. Else a follower with every switch
+        off could fill the buffer's slots for ids it does not own (P4
+        adversarial review)."""
+        if await authorship.writes_here(event, space_id):
+            return True
+        space = await self._space_repo.get(space_id)
+        if space is None or not space.features.allow_subscriber_comment:
+            return False
+        author = str((event.payload or {}).get("author") or "")
+        return (
+            bool(author)
+            and check_owner_bound_id(
+                SPACE_COMMENT_KIND, comment_id, space_id=space_id, owner_user_id=author
+            )
+            is OwnerBinding.VALID
+        )
 
     # ── Report handler ─────────────────────────────────────────────────
 

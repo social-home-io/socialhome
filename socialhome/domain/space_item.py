@@ -132,7 +132,7 @@ def required_scope(item_type: str) -> str:
 #: v_96 — what a follower's ``reader`` cert may carry, by the follower switch
 #: that must be on in the RECEIVER's pinned space config.
 _READER_COMMENT_TYPES: frozenset[str] = frozenset(
-    {ITEM_TYPE_COMMENT, ITEM_TYPE_COMMENT_EDIT, ITEM_TYPE_COMMENT_DELETE}
+    {ITEM_TYPE_COMMENT, ITEM_TYPE_COMMENT_EDIT}
 )
 _READER_REACTION_TYPES: frozenset[str] = frozenset(
     {ITEM_TYPE_REACTION_ADD, ITEM_TYPE_REACTION_REMOVE}
@@ -146,13 +146,18 @@ def reader_cert_permits(
     receiver's pinned ``features`` (v_96), on top of its scope.
 
     A non-reader cert → ``True`` (its scope decides). A follower's
-    ``reader`` cert carries comments (and their edits / deletes) only while
+    ``reader`` cert carries comments (and their edits) only while
     ``allow_subscriber_comment`` is on, reactions only while
     ``allow_subscriber_react`` is on, the author's ``author_profile`` while
-    either is; anything else — posts and their edits / deletes, any type
-    this build does not know — is refused. Fail closed: the flags are read
-    from the receiver's own copy, never from the item."""
+    either is, and the author's delete of their own comment always (owner
+    decision F6, 2026-11-23: the receiver decides that one on authorship —
+    the stored comment's author — not on a switch); anything else — posts
+    and their edits / deletes, any type this build does not know — is
+    refused. Fail closed: the flags are read from the receiver's own copy,
+    never from the item."""
     if not cert.reader:
+        return True
+    if item_type == ITEM_TYPE_COMMENT_DELETE:
         return True
     if item_type in _READER_COMMENT_TYPES:
         return bool(features.allow_subscriber_comment)

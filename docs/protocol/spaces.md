@@ -595,14 +595,47 @@ switches there either. Both hold on every path, `SPACE_ROUTED` included.
   Turning a switch on rotates nothing; each follower household that can be
   issued a cert gets it at once (credentials only).
 - **An author may always delete their own comment** (owner decision
-  2026-11-23), a follower included: deleting one's own comment never needs
-  `allow_subscriber_comment`, and a cert the rotation retired does not block
-  it. The receiver decides on authorship (the stored comment's author is the
-  deleting person), not on the switch.
+  F6, 2026-11-23), a follower included: deleting one's own comment never
+  needs `allow_subscriber_comment`, and a cert the rotation retired does
+  not block it. The receiver decides on authorship — the stored comment's
+  author is the deleting person, bound to a live seat of the sending
+  household — not on the switch, on every path:
+  - **federation, mesh (`SPACE_ROUTED`) and the GFS relay:** the household's
+    signed envelope and the author's live `subscriber` seat are the proof
+    (the §24.11 writer gate admits `SPACE_COMMENT_DELETED` for it with no
+    switch; the handler deletes only a comment that author wrote). No cert
+    is needed, so this works after the rotation that retired it;
+  - **the channel:** a `reader` cert still held (comment off, react on)
+    carries `comment_delete` whatever the switches say
+    (`reader_cert_permits`); a follower holding no cert any more reaches
+    the members over federation, and the owner relays the removal onto
+    the channel as it does every applied removal;
+  - **sync:** a streamed `comments_deleted` record is the live delete's
+    rule (the author's household, any live seat);
+  - **locally:** `DELETE …/comments/{cid}` needs a seat of any role for
+    the author's own comment.
+  A left (tombstoned) follower deletes nothing over federation, like any
+  former member. Editing stays behind the switch, and so does a delete
+  of a comment the receiver never held (the early-delete tombstone, and
+  the parent hold of a federated delete): with the switch off a follower
+  could otherwise plant unbounded rows on every household. Every
+  receiver also refuses an authorship claim for one of its own people or
+  for a user seated under another household, and a redeem never seats a
+  user id that belongs to another household (the follow path's rule,
+  `user_id_of_another_household`; a private invitation's accept too).
+  Residual: the rule is first come, first served — a household that
+  redeems a link under someone's id before they join blocks their own
+  redeem (the follow path had this already). The proper fix is to prove
+  the claim (`derive_user_id(instance_pk, anchor)` against the pinned
+  household key, as the public author check does), a version-gated
+  redeem field — a follow-up.
 
-Names: a follower that comments publishes its users' v_60 `author_profile`
-(scope `comment`) like any member; members also know its people from the
-roster. The app may group followers as "Followers".
+Names: a follower's people reach members through the roster like any
+member's (the roster entry's display name, role `subscriber`), so a
+follower's comment needs no v_60 `author_profile` item — and a follower
+never publishes one (the item goes out only on a member's post, for the
+pre-v_96 GFS followers that hold no roster). The app may group followers as
+"Followers".
 
 ### Who sees the roster
 
@@ -684,10 +717,11 @@ The rule, precisely:
   editing or deleting somebody else's row is a write. The classification
   is exhaustive over the enum and pinned by a test, so a new space event
   type is refused-by-default until somebody classifies it.
-- **Two opt-ins:** `SPACE_COMMENT_CREATED` and the author's own
-  `SPACE_COMMENT_UPDATED` / `SPACE_COMMENT_DELETED`, when the space has
-  `allow_subscriber_comment` on, and (v_93) `SPACE_POST_REACTION`, when it
-  has `allow_subscriber_react` on — each only when the payload's acting
+- **The opt-ins:** `SPACE_COMMENT_CREATED` and the author's own
+  `SPACE_COMMENT_UPDATED`, when the space has `allow_subscriber_comment`
+  on, (v_93) `SPACE_POST_REACTION`, when it has `allow_subscriber_react`
+  on, and (v_96, owner decision F6) the author's own
+  `SPACE_COMMENT_DELETED` always — each only when the payload's acting
   user (`author` / `user_id`) names a live `subscriber` seat of that same
   household (an edit / delete carries the comment's `author` for this; the
   handler still checks the row is that author's). Neither flag covers the
@@ -774,9 +808,10 @@ the v_34 and v_36 rows in [`capabilities.md`](./capabilities.md)).
 A **read-only (`subscriber`) seat authors nothing**, with the two opt-ins
 the Follower gate already has: a comment, when the space turned
 `allow_subscriber_comment` on, and a reaction on a post (v_93), when it
-turned `allow_subscriber_react` on. Editing or deleting its own comment
-needs the same comment right as writing one — see "Followers are members
-with a read-only role".
+turned `allow_subscriber_react` on. Editing its own comment needs the
+same comment right as writing one; deleting its own comment needs only the
+seat (v_96, owner decision F6) — see [Comments and
+reactions](#comments-and-reactions).
 
 **A reaction is the reactor's own** (`SPACE_POST_REACTION`, v_93): the
 named `user_id` must hold a live seat on the sending household — a writer

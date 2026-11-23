@@ -7,6 +7,7 @@ from socialhome.services.space_member_guard import (
     NOT_A_SPACE_MEMBER,
     SpaceMemberGuardMixin,
     require_seat,
+    user_id_of_another_household,
 )
 
 
@@ -134,3 +135,44 @@ async def test_require_seat_refuses_a_banned_user_with_a_leftover_seat():
     spaces.banned = {("s1", "u1")}
     with pytest.raises(SpacePermissionError, match=NOT_A_SPACE_MEMBER):
         await require_seat(spaces, "s1", "u1")
+
+
+class _Roster:
+    def __init__(self, rows: set[tuple[str, str, str]]) -> None:
+        self.rows = rows  # (space, instance, user), tombstones included
+
+    async def list_instances_of_user(self, space_id, user_id):
+        return {i for s, i, u in self.rows if (s, u) == (space_id, user_id)}
+
+
+class _LocalUsers:
+    def __init__(self, ids: set[str]) -> None:
+        self.ids = ids
+
+    async def get_by_user_id(self, user_id):
+        return object() if user_id in self.ids else None
+
+
+@pytest.mark.parametrize(
+    ("rows", "local", "users_wired", "taken"),
+    [
+        (set(), set(), True, False),  # nobody holds it
+        ({("s1", "home-a", "u1")}, set(), True, False),  # its own household
+        ({("s1", "home-b", "u1")}, set(), True, True),  # another household
+        ({("s2", "home-b", "u1")}, set(), True, False),  # another space only
+        (set(), {"u1"}, True, True),  # one of our people
+        (set(), {"u1"}, False, False),  # no user repo: the roster alone
+    ],
+)
+async def test_a_user_id_belongs_to_one_household(rows, local, users_wired, taken):
+    """P4 adversarial review: the one rule every seat and authorship check
+    shares — a user id is not household ``home-a``'s to claim when it is
+    one of our people or holds (or held) a seat under another household."""
+    got = await user_id_of_another_household(
+        seats=_Roster(rows),
+        users=_LocalUsers(local) if users_wired else None,
+        space_id="s1",
+        instance_id="home-a",
+        user_id="u1",
+    )
+    assert got is taken

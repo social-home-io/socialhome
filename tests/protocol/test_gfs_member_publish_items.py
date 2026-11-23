@@ -643,6 +643,9 @@ class _HostSeats:
     def __init__(self, rows) -> None:
         self.rows = rows
 
+    async def list_instances_of_user(self, space_id, user_id):
+        return {r.instance_id for r in self.rows if r.user_id == user_id}
+
     async def list_for_instance(
         self, space_id, instance_id, *, include_tombstoned=True
     ):

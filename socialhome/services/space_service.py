@@ -344,6 +344,7 @@ from .space_member_guard import (
     SpaceMemberGuardMixin,
     require_seat,
     seat_of,
+    user_id_of_another_household,
 )
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
@@ -8716,9 +8717,12 @@ class SpaceService(
             return False
         # The applicant picks ``user_id``: never one of our own people, nor
         # one seated (now or before) under another household.
-        if await self._users.get_by_user_id(user_id) is not None or (
-            await self._remote_members.list_instances_of_user(space_id, user_id)
-            - {instance_id}
+        if await user_id_of_another_household(
+            seats=self._remote_members,
+            users=self._users,
+            space_id=space_id,
+            instance_id=instance_id,
+            user_id=user_id,
         ):
             log.info(
                 "follow from %s for space %s refused: the user id belongs to "
@@ -9583,7 +9587,11 @@ class SpaceService(
                     "only the author or a space moderator can delete this comment"
                 )
         else:
-            await self._require_comment_right(space_id, actor_user_id)
+            # The author's own delete needs a seat of any role, never the
+            # comment right: an author may always delete their own comment,
+            # a follower included with its switch off (owner decision F6,
+            # 2026-11-23) — the rule every other household applies.
+            await require_seat(self._spaces, space_id, actor_user_id)
         await self._posts.soft_delete_comment(comment_id, space_id=space_id)
         await self._posts.decrement_comment_count(comment.post_id, space_id=space_id)
         await self._bus.publish(
@@ -9597,7 +9605,8 @@ class SpaceService(
         )
 
     async def _require_comment_right(self, space_id: str, user_id: str) -> None:
-        """The one rule for writing, editing and deleting one's OWN comment:
+        """The one rule for writing and editing one's OWN comment (deleting it
+        needs only a seat — owner decision F6):
         a seat whose role may comment — every writer role, and
         ``subscriber`` while the space's "followers may comment" switch is
         on. The same right every other household checks (the §24.11 writer

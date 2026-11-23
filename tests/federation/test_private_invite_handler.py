@@ -127,6 +127,8 @@ def handler():
     # refuses to re-seat a household that already holds one with a
     # different role.
     remote_members.get = AsyncMock(return_value=None)
+    # The invitee is seated under no other household by default.
+    remote_members.list_instances_of_user = AsyncMock(return_value=set())
     cover_repo = AsyncMock()
     cover_repo.set = AsyncMock()
     icon_repo = AsyncMock()
@@ -248,6 +250,20 @@ async def test_accept_happy_path(handler):
     # The bell goes to the one who sent the invitation, naming the invitee.
     assert accepted.inviter_user_id == "u-inviter"
     assert accepted.invitee_display_name == "Bob"
+
+
+async def test_accept_never_seats_a_user_id_of_another_household(handler):
+    """P4 adversarial review: a user id belongs to one household — an accept
+    naming a user seated (now or before) under another household is refused,
+    or the accepting household could act as that person's own."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
+    handler.remote_members.list_instances_of_user.return_value = {"victim-home"}
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1", "invitee_public_key": "pk"},
+    )
+    await handler.h._on_accept(ev)
+    handler.remote_members.add.assert_not_awaited()
 
 
 def _local_community(owner="host-self"):

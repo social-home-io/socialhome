@@ -499,6 +499,13 @@ SPACE_ARCHIVED`).
 `GET /api/spaces/{id}/posts/{pid}/comments` needs a seat in the **path**
 space (`403` otherwise) and a `{pid}` of that space (another space's post is
 **404**) — a seat in one space never reads another space's thread.
+`PATCH {content}` / `DELETE …/comments/{cid}` edit / soft-delete a comment:
+the author's own, or content authority's (owner / admin / moderator) on
+somebody else's. Writing and editing one's own comment needs the comment
+right (a follower's: `allow_subscriber_comment`, else `403
+SUBSCRIBER_READ_ONLY`); **deleting one's own comment needs only a seat** of
+any role — a follower may always delete their own comment, with the switch
+off too (v_96, owner decision F6). `DELETE` answers 204.
 
 `GET /api/spaces/{id}/posts/{pid}` is the post's permalink (a notification
 opens `/spaces/{id}?post={pid}`): one post in the feed's shape, behind the

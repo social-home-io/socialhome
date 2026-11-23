@@ -338,6 +338,16 @@ class _FakeRemoteMemberRepo:
     async def list_for_space(self, space_id):
         return []
 
+    async def list_instances_of_user(self, space_id, user_id):
+        return {
+            inst
+            for (sid, inst, uid) in [
+                (a["space_id"], a["instance_id"], a["user_id"]) for a in self.added
+            ]
+            + list(self.live)
+            if sid == space_id and uid == user_id
+        }
+
 
 class _FakeFederationService:
     """Captures outbound ``send_event`` calls for assertion."""
@@ -578,6 +588,7 @@ def _wire_pair(
         federation=issuer_fed,
         space_repo=issuer_repo,
         remote_members=issuer_members,
+        user_repo=_FakeUserRepo({}),
     )
     sender.attach_to(sender_fed)
     issuer.attach_to(issuer_fed)
@@ -1423,6 +1434,7 @@ async def test_redeem_round_trip_via_mesh_routing():
         federation=issuer_fed,
         space_repo=issuer_repo,
         remote_members=issuer_members,
+        user_repo=_FakeUserRepo({}),
     )
     issuer._route_service = issuer_route_svc
     issuer._routed_handler = issuer_routed
@@ -1762,6 +1774,8 @@ def _bootstrap_pair(
         federation_repo=i_repo,
         space_repo=i_spaces,
         remote_members=i_members,
+        # The redeemer's user is not one of the issuer's own people.
+        user_repo=_FakeUserRepo({}),
     )
     for coord, party in ((redeemer, redeemer_party), (issuer, issuer_party)):
         coord.attach_bootstrap(
@@ -3005,6 +3019,63 @@ async def test_a_moderator_re_redeeming_the_link_keeps_their_seat():
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 0
     assert len(env.issuer_members.added) == 1
     assert env.issuer_members.live[key]["role"] == SpaceRole.MODERATOR.value
+
+
+async def test_a_member_redeeming_a_follower_link_keeps_the_member_seat():
+    """P1 F3 (v_96): no path moves a live writer seat to a follower seat —
+    so none needs a rotation for it. A member household redeeming a
+    ``subscriber`` link is answered from the seat it holds; nothing is
+    consumed, re-seated or demoted."""
+    env = _atomic_pair()
+    await _redeem(env)
+    key = ("space-1", env.redeemer_party.instance_id, "u-local")
+    assert env.issuer_members.live[key]["role"] == SpaceRole.MEMBER.value
+    env.issuer_spaces.tokens["tok-2"] = {
+        **env.issuer_spaces.tokens["tok-1"],
+        "uses_remaining": 1,
+        "role": SpaceRole.SUBSCRIBER.value,
+    }
+    ack, reason, reservation = await env.issuer._consume_seat_and_build_ack(
+        token="tok-2",
+        redeemer_instance_id=env.redeemer_party.instance_id,
+        redeemer_user_id="u-local",
+        redeemer_pk=None,
+        redeemer_display=None,
+        bootstrap=True,
+    )
+    assert reason is None and reservation is None
+    assert ack is not None and ack["role"] == SpaceRole.MEMBER.value
+    assert len(env.issuer_members.added) == 1
+    assert env.issuer_members.live[key]["role"] == SpaceRole.MEMBER.value
+    assert env.issuer_spaces.tokens["tok-2"]["uses_remaining"] == 1
+
+
+@pytest.mark.parametrize("taken_by", ["another-household", "issuer-local"])
+async def test_a_redeem_never_seats_a_user_id_of_another_household(taken_by):
+    """P4 adversarial review: the redeemer names its own user id, so a
+    household must not take a seat under somebody else's — one of the
+    issuer's own people, or a user seated (now or before) under another
+    household — and then act as that person's household (delete their
+    comments: the own-comment delete needs no switch since owner decision
+    F6). The use is handed back; nothing is seated."""
+    env = _atomic_pair()
+    if taken_by == "issuer-local":
+        env.issuer._users = _FakeUserRepo({"u-local": _make_user()})
+    else:
+        await env.issuer_members.add(
+            space_id="space-1",
+            instance_id="victim-household",
+            user_id="u-local",
+            user_pk=None,
+            display_name=None,
+            role=SpaceRole.MEMBER.value,
+        )
+    with pytest.raises(SpacePermissionError):
+        await _redeem(env)
+    assert [
+        k for k in env.issuer_members.live if k[1] == env.redeemer_party.instance_id
+    ] == []
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
 
 
 async def test_a_re_ack_that_is_refused_rolls_nothing_back():

@@ -133,9 +133,17 @@ async def test_every_write_type_is_refused_from_a_follower_household(gate):
     added tomorrow is covered the moment it is classified as a write."""
     step, members, _ = gate
     await _seat(members, FOLLOWER, "u-follower", SpaceRole.SUBSCRIBER.value)
-    for event_type in SPACE_WRITE_EVENT_TYPES:
+    for event_type in SPACE_WRITE_EVENT_TYPES - {_OWN_DELETE}:
         refused = await _run(step, _write(event_type))
         assert refused == REFUSED, event_type
+    # The author's own comment delete is the one write a follower seat
+    # makes with every switch off (owner decision F6) — bound to that seat.
+    assert await _run(step, _write(_OWN_DELETE)) is None
+    assert await _run(step, _write(_OWN_DELETE, {"author": "u-other"})) == REFUSED
+
+
+#: The one write a follower makes whatever the switches say (owner F6).
+_OWN_DELETE = FederationEventType.SPACE_COMMENT_DELETED
 
 
 async def test_a_member_household_writes_every_type_freely(gate):
