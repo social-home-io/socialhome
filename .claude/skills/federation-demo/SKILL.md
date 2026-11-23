@@ -786,7 +786,8 @@ admin-revoke-rotation → rotation-offline-catchup → space-chat → space-foll
 space-reaction → space-poll-vote → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
-gfs-moment-late-delete → gfs-join-request → gfs-space-follow → verify``
+gfs-moment-late-delete → gfs-join-request → gfs-space-follow →
+gfs-global-channel → gfs-follower-comment → members-page-catchup → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
@@ -1057,7 +1058,6 @@ python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
-python .claude/skills/federation-demo/harness.py gfs-follower-comment
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after members-mesh-restart (needs them unpaired), before gfs-multi-listing (needs them paired). By now a and d share a GFS-reached space and hold a space seat for each other: the step proves a seat is not "already paired" (202, then a source=manual row on both sides)
 python .claude/skills/federation-demo/harness.py gfs-b-up
@@ -1098,37 +1098,14 @@ bytes. The GFS log (from the step's start) and its envelope queue never carry
 her name or bio, and c (no member, no follower) holds no profile.
 ``verify`` (13y) re-checks d's view of Erin.
 
-### ``gfs-space-follower-names`` — a new follower is named at once (v_61)
+### ``gfs-space-follower-names`` / ``gfs-space-follower-reconnect`` — retired (v_96, P4)
 
-Needs ``gfs-space-author-profile``; run it **last in its own chain**
-(``up → pair → traffic → calendar → gfs-up → gfs-pair → gfs-traffic →
-gfs-space-subscribe → gfs-space-post → gfs-space-author-profile →
-gfs-space-follower-names → gfs-space-follower-reconnect → verify``) — it
-makes **e** a follower of a's
-global space, which the ``gfs-invite-link*`` steps must not find. e
-subscribes; the GFS notifies a, which seals the content key to e and then
-ONE bundle of its cached, author-signed profiles — both targeted at e alone
-(``POST /gfs/publish`` with ``to``, the GFS's ``targeted_publish``). e must
-name Erin, with her bio, within 30 s without a new post, and then get her
-picture (names come first; the picture follows in a later bundle part,
-checked against the hash she signed). From the subscribe
-on, every ``/gfs/publish`` the GFS took must be targeted with exactly one
-subscriber reached and no member may publish (no ``/gfs/member-publish*``):
-the other follower, d, is sent nothing for e's subscribe. The GFS log never
-carries her name or bio. ``verify`` (13x) re-checks.
-
-### ``gfs-space-follower-reconnect`` — a reconnect never re-sends the bundle (v_61)
-
-Needs ``gfs-space-follower-names``; runs right after it. Restarts **a** (the
-host, so no in-memory "already sent" record survives) and then **e** (the
-follower: its GFS socket reconnects, the GFS sends ``new_subscriber`` with
-``reason: "reconnect"``, and e re-subscribes a seat it already holds, which
-at most repeats that key repair). Between the two restarts Erin posts on a:
-her profile is unchanged, so a must not re-publish it (her own
-``space_author_profiles`` row on a keeps its ``ts``; the dedupe is that
-persisted row, so neither a restart nor a key rotation re-sends a profile). From e's restart on, the GFS log must show at least one
-targeted ``space_subscriber_key_handoff`` reaching e's one socket and **no**
-``space_author_profiles_bundle``; e still names Erin.
+They proved the v_61 new-follower profile bundle and its reconnect rule on
+the legacy GFS subscription (``/gfs/subscribe`` + ``new_subscriber``), which a
+follow no longer uses since v_96 P2. A follower is a roster member now: its
+name, and the members' names, come from the roster like any member's —
+``gfs-follower-comment`` asserts that a and b name the GFS follower e from
+their roster.
 
 ### ``gfs-member-publish`` — a member posts with the host offline (v_49)
 
@@ -1177,20 +1154,24 @@ older follower: it clears bits 2 and 4 of d's seat (``space_subscribers
 the compressed item (e logs ``refused a compressed item``), e sent JSON
 (``suite=json``) and d still got the post. The bit is restored afterwards.
 
-### ``gfs-follower-comment`` — a follower comments like a comment-only member
+### ``gfs-follower-comment`` — a GFS follower comments like a member (v_96, P4)
 
-Needs ``gfs-invite-link`` (e holds a link-joined FOLLOWER seat on a's third,
-global space). a opens the space to readers (``allow_subscribers``, left
-on: only a publicly readable space is published over a GFS), d subscribes to
-it over the GFS (left subscribed), and a turns
-``allow_subscriber_comment`` on: e gets its credentials alone — the same
-``comment`` cert and writer group key a comment-only member holds (e's
-``space_keys``). a posts; e (the follower) comments on the normal member
-path: a holds the comment, the GFS accepted e's anonymous publish (``POST
-/gfs/member-publish-anon`` 200) and d, a GFS subscriber, holds it too. a
-turns the switch off: exactly one rotation (a's content epoch + 1), and e's
-next comment is refused. The comment switch is left off (its default). Reads
-a's / e's DB (no REST bucket).
+Part of ``all`` (right after ``gfs-global-channel``). Prereqs:
+``gfs-global-channel`` (a's global space: b a member paired with a, e a
+follower reached only through the GFS, both on the space's channel). b posts;
+then a turns ``allow_subscriber_comment`` on: e stores a ``reader`` comment
+cert. e comments: a and b hold it — b over the channel (the GFS accepted e's
+``POST /gfs/channels/publish-anon``) — and both name e from their roster
+(role ``subscriber``). a turns the switch off: exactly one rotation (a's
+content epoch + 1); once e holds the change, its next comment answers 403.
+e deletes its first comment with the switch off (204, owner decision F6): a
+and b drop it. The GFS log never holds the comment's text.
+
+``space-follow-paired`` runs the same round on the paired path (follower b,
+host a) before b unfollows.
+
+Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-global-channel,
+gfs-follower-comment, verify, down``.
 
 ### ``gfs-member-publish-strict`` — anonymous member publish (v_50; the one mode since v_90)
 
@@ -2469,6 +2450,10 @@ mode does not matter for a follow). b finds it in its paired directory (``GET /a
 ``POST /subscribe`` → ``{pending: true, subscribed: false}``; a auto-approves (no admin step).
 b then holds a ``subscriber`` seat in ``space_members`` and a holds it in
 ``space_remote_members``; a's post reaches b; b's post is refused (403).
+Then the follower comment round (v_96 P4, shared with ``gfs-follower-comment``):
+a turns follower comments on, b's reader-cert comment reaches a (named from
+a's roster), the switch off rotates once and refuses b's next comment (403),
+and b's delete of its own comment with the switch off reaches a.
 ``DELETE /subscribe`` is b's own leave: a tombstones the seat and the
 content-key epoch (``space_keys``) does not move.
 
