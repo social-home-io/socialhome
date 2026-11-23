@@ -30,9 +30,9 @@ dependencies = [
     # ``cannot identify image file`` and the upload 422s.
     "pillow-heif==1.8.1",
     "av==19.0.2",
-    "python-multipart==0.0.33",
+    "python-multipart==0.0.34",
     "jinja2==3.1.6",
-    "icalendar==7.3.0",
+    "icalendar==7.3.2",
     # WebRTC DataChannel transport (§4.2.3, §24.12). Primary SH-to-SH
     # transport — inbox is only the fallback for peers that can't
     # open a direct peer connection. Also mandatory for GFS relay
