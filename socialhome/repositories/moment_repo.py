@@ -182,13 +182,13 @@ _READABLE_SQL = f"""
 
 #: One person's ``moments.max_hops`` (``u`` = their ``users`` row) as the
 #: parser reads it (:func:`~socialhome.services.user_preferences
-#: .parse_moment_preferences`): a number clamped to ``[1, MOMENT_MAX_HOPS]``,
-#: anything else — missing, not a number, a blob that isn't JSON — the
-#: default. Bind :data:`_VIEWER_HOPS_PARAMS`.
+#: .parse_moment_preferences`): an integer clamped to
+#: ``[1, MOMENT_MAX_HOPS]``, anything else — missing, a bool, a string, a
+#: fraction, a blob that isn't JSON — the default. Bind
+#: :data:`_VIEWER_HOPS_PARAMS`.
 _VIEWER_HOPS_SQL = """
     (CASE WHEN json_valid(u.preferences_json)
-           AND json_type(u.preferences_json, '$.moments.max_hops')
-               IN ('integer', 'real')
+           AND json_type(u.preferences_json, '$.moments.max_hops') = 'integer'
           THEN MAX(1, MIN(CAST(json_extract(
                    u.preferences_json, '$.moments.max_hops') AS INTEGER), ?))
           ELSE ? END)
@@ -276,7 +276,7 @@ class AbstractMomentRepo(Protocol):
         before: str | None = None,
         limit: int = 50,
         tag: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
         top_level: bool = False,
     ) -> list[Moment]: ...
     async def latest_replies(
@@ -284,7 +284,7 @@ class AbstractMomentRepo(Protocol):
         parent_ids: list[str],
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, Moment]: ...
     async def list_public_for(
         self,
@@ -297,14 +297,14 @@ class AbstractMomentRepo(Protocol):
         parent_moment_id: str,
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[Moment]: ...
     async def get_readable(
         self,
         moment_id: str,
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> Moment | None: ...
     async def mark_public(self, moment_id: str) -> None: ...
     async def latest_top_level_at(
@@ -382,7 +382,7 @@ class AbstractMomentRepo(Protocol):
         moment_ids: list[str],
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, dict[str, int]]: ...
 
     # Hashtags ------------------------------------------------------------
@@ -392,7 +392,7 @@ class AbstractMomentRepo(Protocol):
         viewer_user_id: str,
         *,
         limit: int = 20,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[tuple[str, int]]: ...
 
     # Retention -----------------------------------------------------------
@@ -420,7 +420,7 @@ class AbstractMomentRepo(Protocol):
         *,
         before: str | None = None,
         limit: int = 50,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[SavedMoment]: ...
     async def list_saved_media(
         self, user_id: str | None = None
@@ -600,7 +600,7 @@ class SqliteMomentRepo:
         before: str | None = None,
         limit: int = 50,
         tag: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
         top_level: bool = False,
     ) -> list[Moment]:
         """One query covers blocks, retention, hop visibility, and
@@ -759,7 +759,7 @@ class SqliteMomentRepo:
         moment_id: str,
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> Moment | None:
         """``moment_id`` iff *viewer_user_id* may read it: its author (while
         it is live, or from their archive once expired), or anyone the inbox
@@ -777,7 +777,7 @@ class SqliteMomentRepo:
         parent_moment_id: str,
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[Moment]:
         """Replies in chronological order so the thread reads top-down.
 
@@ -805,7 +805,7 @@ class SqliteMomentRepo:
         parent_ids: list[str],
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, Moment]:
         """``{root id: its newest reply}`` that *viewer_user_id* may read
         (:data:`_THREAD_READABLE_SQL`, the rule :meth:`list_replies` and the
@@ -1132,7 +1132,7 @@ class SqliteMomentRepo:
         moment_ids: list[str],
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, dict[str, int]]:
         """Aggregate reactions + replies for the given moment ids.
 
@@ -1197,7 +1197,7 @@ class SqliteMomentRepo:
         viewer_user_id: str,
         *,
         limit: int = 20,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[tuple[str, int]]:
         """Return ``[(tag, n), …]`` of the most-used tags inside the
         viewer's visible window.
@@ -1371,7 +1371,7 @@ class SqliteMomentRepo:
         *,
         before: str | None = None,
         limit: int = 50,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[SavedMoment]:
         """*user_id*'s saved moments they may still read
         (:data:`_SAVED_READABLE_SQL`), newest save first. ``before`` is the

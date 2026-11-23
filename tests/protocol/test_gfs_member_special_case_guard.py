@@ -317,9 +317,9 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "non-space exclusion",
             "confirmed-peer broadcasts",
         ),
-        "socialhome/services/resync_on_upgrade.py": (
+        "socialhome/services/capability_resync.py": (
             "non-space exclusion",
-            "capability re-ask on upgrade",
+            "capability re-sync at startup",
         ),
     },
 }
@@ -409,7 +409,7 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/services/online_status_service.py": 3,
         "socialhome/services/peer_directory_service.py": 1,
         "socialhome/services/peer_outbound.py": 1,
-        "socialhome/services/resync_on_upgrade.py": 1,
+        "socialhome/services/capability_resync.py": 1,
     },
 }
 

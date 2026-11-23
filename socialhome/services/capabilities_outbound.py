@@ -54,7 +54,6 @@ from ..domain.events import (
     CpProtectionDisabled,
     CpProtectionEnabled,
     PairingConfirmed,
-    PeerProtoVersionRaised,
     UserDeprovisioned,
     UserPreferencesPatched,
     UserProfileUpdated,
@@ -68,6 +67,7 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import OURS as OUR_PROTO_VERSION
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.moment import MOMENT_UNGATED_HOPS
 from ..federation.keywrap_seal import keywrap_wire_fields
 from ..federation.mesh_member_claim import mesh_member_claim
 from .peer_outbound import ConfirmedPeerBroadcaster
@@ -79,6 +79,19 @@ if TYPE_CHECKING:
     from ..repositories.moment_repo import AbstractMomentRepo
 
 log = logging.getLogger(__name__)
+
+#: The latest-only outbox key of every capabilities send to a peer (local,
+#: never on the wire): an offline peer keeps one queued row — the newest —
+#: so an older envelope never lands after a newer look.
+CAPABILITIES_OUTBOX_KEY: str = "capabilities"
+
+
+def advertised_look(look: int) -> int:
+    """How far our people look for moments, as we say it (v_96 decision C):
+    never below :data:`MOMENT_UNGATED_HOPS` — a relay only uses a look past
+    it (hops 1–3 go to every household), so a smaller one would reveal what
+    our people chose (or that they are protected) for nothing."""
+    return max(look, MOMENT_UNGATED_HOPS)
 
 
 class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
@@ -194,7 +207,6 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
             CpProtectionDisabled,
         ):
             self._bus.subscribe(look_input, self._on_look_input)
-        self._bus.subscribe(PeerProtoVersionRaised, self._on_peer_raised)
 
     async def _on_pairing_confirmed(self, event: PairingConfirmed) -> None:
         """A new peer just became CONFIRMED — send our version to them.
@@ -255,6 +267,7 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
             to_instance_id=instance_id,
             event_type=FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
             payload=payload,
+            outbox_key=CAPABILITIES_OUTBOX_KEY,
         )
         log.info(
             "capabilities-outbound: sent proto_version=%d to %s",
@@ -279,18 +292,22 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         ):
             return {}
         if look is None:
-            look = await self._moment_repo.moment_look_hops()
+            look = advertised_look(await self._moment_repo.moment_look_hops())
         return {"moment_look_hops": look}
 
     async def refresh_moment_look(self) -> int:
         """Recompute how far our people look for moments and, when the
         number changed since we last advertised it, re-send our capabilities
-        to every paired v_96 household (an older one ignores the field; it
-        is told again when it reaches v_96, :meth:`_on_peer_raised`).
-        Returns how many households were told (0: nothing changed)."""
-        if self._moment_repo is None:
+        to every paired v_96 household (an older one ignores the field;
+        once it reaches v_96 its startup capability resync asks us again).
+        Only the advertised value counts (:func:`advertised_look`): a change
+        below :data:`MOMENT_UNGATED_HOPS` sends nothing. Before the startup
+        :meth:`publish` (``_look`` unset) nothing is sent — it carries the
+        current value. Returns how many households were told (0: nothing
+        changed)."""
+        if self._moment_repo is None or self._look is None:
             return 0
-        look = await self._moment_repo.moment_look_hops()
+        look = advertised_look(await self._moment_repo.moment_look_hops())
         if look == self._look:
             return 0
         self._look = look
@@ -324,25 +341,6 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         if isinstance(event, UserPreferencesPatched) and "moments" not in event.keys:
             return
         await self.refresh_moment_look()
-
-    async def _on_peer_raised(self, event: PeerProtoVersionRaised) -> None:
-        """A paired household just reached v_96: the look we sent while it
-        was older was ignored there — tell it once, now (one envelope)."""
-        if (
-            self._moment_repo is None
-            or event.old_version >= FederationCapability.MIN_FOR_MOMENT_REACH
-            or event.new_version < FederationCapability.MIN_FOR_MOMENT_REACH
-        ):
-            return
-        try:
-            await self._send_to(event.instance_id)
-        except Exception as exc:  # pragma: no cover — defensive
-            log.debug(
-                "capabilities-outbound: send to upgraded %s failed: %s",
-                event.instance_id,
-                exc,
-                exc_info=True,
-            )
 
     def _relay_fields_for(self, peer: RemoteInstance | None) -> dict[str, object]:
         """Our GFS-relay fields for *peer*, or ``{}`` (v_54).
@@ -424,7 +422,7 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         sent = 0
         if self._moment_repo is not None:
             # v_96: the startup announcement carries how far we look now.
-            self._look = await self._moment_repo.moment_look_hops()
+            self._look = advertised_look(await self._moment_repo.moment_look_hops())
         for instance_id in await self.list_confirmed_peer_ids():
             try:
                 if await self._send_to(instance_id, look=self._look):

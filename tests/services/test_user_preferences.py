@@ -11,12 +11,12 @@ from socialhome.domain.gallery import (
     OnThisDaySettings,
 )
 from socialhome.domain.highlight import HighlightAudience
+from socialhome.domain.moment import MOMENT_DEFAULT_MAX_HOPS
 from socialhome.domain.notification_kinds import NotifDelivery, NotifKind
 from socialhome.services import user_preferences as user_preferences_mod
 from socialhome.services.user_preferences import (
     DEFAULT_HIGHLIGHTS_MAX_COUNT,
     DEFAULT_HIGHLIGHTS_RETENTION_DAYS,
-    DEFAULT_MOMENT_MAX_HOPS,
     GALLERY_ON_THIS_DAY_KEY,
     GALLERY_SEEN_KEY,
     HA_AUTOMATION_EVENTS_KEY,
@@ -146,13 +146,27 @@ def test_moment_max_hops_is_capped_at_the_wire_cap(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("raw", "hops"), [(1, 1), (3, 3), (4, 4), (5, 5), (6, 5), (0, 1), ("x", 3)]
+    ("raw", "hops"),
+    [
+        (1, 1),
+        (3, 3),
+        (4, 4),
+        (5, 5),
+        (6, 5),
+        (0, 1),
+        ("x", 3),
+        # Fable #11: only a real integer, as the look SQL reads it.
+        (True, 3),
+        ("5", 3),
+        (4.0, 3),
+        (4.5, 3),
+    ],
 )
 def test_moment_max_hops_takes_1_to_5(raw, hops):
     """v_96: a viewer may look up to 5 hops (the wire cap); 3 by default."""
     blob = orjson.dumps({"moments": {"max_hops": raw}}).decode()
     assert parse_moment_preferences(blob).max_hops == hops
-    assert DEFAULT_MOMENT_MAX_HOPS == 3
+    assert MOMENT_DEFAULT_MAX_HOPS == 3
 
 
 def test_moment_preferences_keep_max_hops_beside_retention():
@@ -175,6 +189,8 @@ def test_moment_preferences_keep_max_hops_beside_retention():
         ('{"moments": {"reach": -4}}', 1),
         ('{"moments": {"reach": "far"}}', 3),
         ('{"moments": {"reach": null}}', 3),
+        ('{"moments": {"reach": true}}', 3),
+        ('{"moments": {"reach": "5"}}', 3),
     ],
 )
 def test_moment_reach(blob, reach):

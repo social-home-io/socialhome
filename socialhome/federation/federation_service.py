@@ -610,7 +610,7 @@ class FederationService:
         #: moments (``moment_look_hops``, 1–5), as it last advertised in
         #: ``INSTANCE_CAPABILITIES_UPDATED``. In memory only: re-learned
         #: after our restart through the startup capabilities resync
-        #: (:func:`~socialhome.services.resync_on_upgrade
+        #: (:func:`~socialhome.services.capability_resync
         #: .request_capability_resync`); forgotten on unpair
         #: (:meth:`note_unpaired`). Bounded by the number of paired peers.
         self._moment_looks: dict[str, int] = {}

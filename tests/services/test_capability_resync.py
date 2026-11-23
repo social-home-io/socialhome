@@ -1,4 +1,4 @@
-"""Tests for socialhome.services.resync_on_upgrade.
+"""Tests for socialhome.services.capability_resync.
 
 The capability resync asks every peer with the handler once per OURS bump,
 asks only confirmed peers that support v_19+ to re-advertise capabilities,
@@ -12,7 +12,8 @@ from socialhome.domain.federation_capabilities import (
     OURS,
     FederationCapability,
 )
-from socialhome.services.resync_on_upgrade import (
+from socialhome.services.capability_resync import (
+    RESYNC_CAPABILITIES_OUTBOX_KEY,
     request_capability_resync,
 )
 
@@ -65,12 +66,13 @@ class FakeFederation:
         self.asked.append(min_version)
         return self._versions.get(instance_id, 0) >= min_version
 
-    async def send_event(self, *, to_instance_id, event_type, payload):
+    async def send_event(self, *, to_instance_id, event_type, payload, **kw):
         self.sends.append(
             {
                 "to": to_instance_id,
                 "event_type": event_type,
                 "payload": payload,
+                **kw,
             }
         )
 
@@ -213,3 +215,17 @@ async def test_an_unchanged_restart_without_v96_peers_sends_nothing():
         assert sent == 0
         assert fed.sends == []
         assert ident.set_calls == []
+
+
+async def test_the_request_is_latest_only_per_peer():
+    """Fable #3: one queued request per offline peer, however many restarts
+    pass before it comes back."""
+    ident = FakeIdentityRepo(last=OURS)
+    fed = FakeFederation({"p96": 96})
+    await request_capability_resync(
+        federation=fed,
+        federation_repo=FakeFederationRepo([FakePeer("p96")]),
+        identity_repo=ident,
+    )
+    assert [s["outbox_key"] for s in fed.sends] == [RESYNC_CAPABILITIES_OUTBOX_KEY]
+    assert RESYNC_CAPABILITIES_OUTBOX_KEY == "resync:capabilities"

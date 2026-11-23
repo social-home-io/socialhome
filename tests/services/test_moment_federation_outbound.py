@@ -805,7 +805,7 @@ class _FakeRouter:
         return {"origin_keywrap_pk": "kw", "origin_keywrap_suite": "x25519"}
 
     def stamp_relayed_create(
-        self, payload, *, received_hop, from_instance, to_instance
+        self, payload, *, received_hop, reach, from_instance, to_instance
     ):
         self.stamped.append(to_instance)
         return {**payload, "rt": [f"tok-for-{to_instance}"]}
@@ -1301,16 +1301,58 @@ async def test_a_relayed_copy_carrying_reach_goes_only_to_v96(stack, reach, targ
 
 
 async def test_a_closer_copy_is_relayed_again_at_most_once(stack):
-    """F8: a relay claiming hops 4, 3, 2 gets one extra wave, not two."""
+    """F8: a relay claiming hops 4, 3, 2, 2 gets one extra gated wave (toward
+    who looks past 3) and one ungated one — a gated wave never uses up the
+    ungated one — then nothing more."""
     out, fed, fed_repo, _ = stack
     _versioned(fed, fed_repo, {"p96": 96}, looks={"p96": 5})
-    for hop in (4, 3, 2):
+    for hop in (4, 3, 2, 2):
         await out.relay_inbound(
             event_type=FET.MOMENT_CREATED,
             payload=_hop_payload(5, hop),
             from_instance="peer-sender",
         )
-    assert [c["payload"]["hop_count"] for c in _sent(fed)] == [5, 4]
+    assert [c["payload"]["hop_count"] for c in _sent(fed)] == [5, 4, 3]
+
+
+@pytest.mark.parametrize("kind", ["create", "delete", "totals"])
+async def test_far_copies_never_stop_the_closer_one_reaching_default_lookers(
+    stack, kind
+):
+    """Fable #1: copies claiming hops 4 then 3 go only to who looks past 3
+    (here nobody) — the genuine hop-2 copy still reaches every default-look
+    household at hop 3 (create, delete and totals alike)."""
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"pd": 96, "pe": 96})
+    event_type = {
+        "create": FET.MOMENT_CREATED,
+        "delete": FET.MOMENT_DELETED,
+        "totals": FET.MOMENT_REACTIONS_COUNTED,
+    }[kind]
+    if kind == "totals":
+        # Totals go on only for a create relayed here.
+        await out.relay_inbound(
+            event_type=FET.MOMENT_CREATED,
+            payload=_hop_payload(5, 1),
+            from_instance="peer-origin",
+        )
+        fed.send_event.reset_mock()
+    for hop in (4, 3, 2):
+        if kind == "totals":
+            await _relay_counts(
+                out,
+                over={"hop_count": hop, REACH_FIELD: 5},
+                from_instance="peer-sender",
+            )
+        else:
+            await out.relay_inbound(
+                event_type=event_type,
+                payload=_hop_payload(5, hop),
+                from_instance="peer-sender",
+            )
+    sent = _sent(fed)
+    assert {c["to_instance_id"] for c in sent} == {"pd", "pe"}
+    assert {c["payload"]["hop_count"] for c in sent} == {3}
 
 
 async def test_the_origins_own_copy_is_relayed_even_after_the_re_relay(stack):

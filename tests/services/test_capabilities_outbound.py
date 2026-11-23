@@ -36,7 +36,10 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import OURS as OUR_PROTO_VERSION
-from socialhome.services.capabilities_outbound import CapabilitiesOutbound
+from socialhome.services.capabilities_outbound import (
+    CAPABILITIES_OUTBOX_KEY,
+    CapabilitiesOutbound,
+)
 
 
 def _peer(instance_id: str, *, proto_version: int = 1) -> RemoteInstance:
@@ -464,7 +467,9 @@ async def test_a_changed_look_is_re_sent_to_v96_paired_households_only():
 
 @pytest.mark.asyncio
 async def test_only_a_moments_patch_recomputes_the_look():
-    out, _fed, _bus, moments = _look_outbound([_V96], [3, 3])
+    out, _fed, _bus, moments = _look_outbound([_V96], [3, 3, 3])
+    await out.publish()
+    moments.moment_look_hops.reset_mock()
     await out._on_look_input(
         UserPreferencesPatched(user_id="u", keys=frozenset({"locale"}))
     )
@@ -489,8 +494,9 @@ async def test_wire_listens_to_whatever_may_change_the_look():
         UserDeprovisioned,
         CpProtectionEnabled,
         CpProtectionDisabled,
-        PeerProtoVersionRaised,
     } <= kinds
+    # An upgraded peer asks us itself (its startup capability resync).
+    assert PeerProtoVersionRaised not in kinds
 
 
 @pytest.mark.asyncio
@@ -511,13 +517,44 @@ async def test_without_a_moment_repo_no_look_is_sent_or_listened_for():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("old", "new", "told"),
-    [(95, 96, True), (94, 97, True), (96, 97, False), (90, 95, False)],
-)
-async def test_a_peer_reaching_v96_is_told_our_look_once(old, new, told):
-    out, fed, _bus, _moments = _look_outbound([_V96], [2])
-    await out._on_peer_raised(
-        PeerProtoVersionRaised(instance_id="inst-96", old_version=old, new_version=new)
-    )
-    assert _looks_sent(fed) == ({"inst-96": 2} if told else {})
+async def test_a_look_below_the_ungated_hops_is_advertised_as_3():
+    """Fable #4: a look under 3 is never used by a relay (hops 1–3 go to
+    everyone) — say 3, so it reveals nothing."""
+    out, fed, _bus, _moments = _look_outbound([_V96], [1])
+    await out.publish()
+    assert _looks_sent(fed) == {"inst-96": 3}
+
+
+@pytest.mark.asyncio
+async def test_a_change_below_3_is_not_re_sent():
+    """Fable #4: only a change of the advertised value is sent — a
+    protection toggle moving the look between 1 and 3 sends nothing."""
+    out, fed, _bus, _moments = _look_outbound([_V96], [3, 1, 2, 4])
+    await out.publish()
+    fed.send_event.reset_mock()
+    assert await out.refresh_moment_look() == 0  # 3 → 1: still says 3
+    assert await out.refresh_moment_look() == 0  # 1 → 2: still says 3
+    assert await out.refresh_moment_look() == 1  # → 4
+    assert _looks_sent(fed) == {"inst-96": 4}
+
+
+@pytest.mark.asyncio
+async def test_no_look_refresh_before_the_startup_publish():
+    """Fable #12: the startup publish carries the look — a refresh before
+    it sends nothing (and reads nothing)."""
+    out, fed, _bus, moments = _look_outbound([_V96], [5])
+    assert await out.refresh_moment_look() == 0
+    fed.send_event.assert_not_awaited()
+    moments.moment_look_hops.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capabilities_sends_are_latest_only_per_peer():
+    """Fable #3: every capabilities send carries one outbox key, so an
+    offline peer keeps one queued row — the newest look."""
+    out, fed, _bus, _moments = _look_outbound([_V96], [3, 3, 5])
+    await out.publish()
+    await out.resend_to("inst-96")
+    await out.refresh_moment_look()
+    keys = {c.kwargs.get("outbox_key") for c in fed.send_event.await_args_list}
+    assert keys == {CAPABILITIES_OUTBOX_KEY} == {"capabilities"}

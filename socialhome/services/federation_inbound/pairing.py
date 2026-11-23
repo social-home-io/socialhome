@@ -394,6 +394,10 @@ class PairingInboundHandlers:
         narrows) what we relay to it."""
         if "moment_look_hops" not in payload or self._federation is None:
             return
+        if instance.source is not InstanceSource.MANUAL:
+            # Only a directly paired household gets moments (a household
+            # seated from an invite link does not), as ``URL_UPDATED``.
+            return
         look = payload["moment_look_hops"]
         if (
             not isinstance(look, int)

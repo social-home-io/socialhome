@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.domain.moment import Moment
 from socialhome.repositories.moment_repo import SqliteMomentRepo
+from socialhome.services.user_preferences import parse_moment_preferences
 
 
 def _moment(*, moment_id: str, hop_count: int, author_id: str = "u-author") -> Moment:
@@ -226,3 +227,15 @@ async def test_has_visible_recipient_true_when_other_user_can_see(db, repo):
     assert (
         await repo.has_visible_recipient(author_user_id="u-author", hop_count=1) is True
     )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["4", '"5"', '"far"', "true", "4.5", "4.0", "null", "0", "9", "2", "[4]"],
+)
+async def test_the_sql_and_the_parser_read_max_hops_the_same_way(db, repo, raw):
+    """Fable #11: the look query and the preference parser agree — only a
+    real integer counts (a bool, a string or a fraction is the default)."""
+    blob = '{"moments":{"max_hops":' + raw + "}}"
+    await _prefs(db, "u-self", blob)
+    assert await repo.moment_look_hops() == parse_moment_preferences(blob).max_hops

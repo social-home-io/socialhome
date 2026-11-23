@@ -131,9 +131,14 @@ def _coerce_int(value: Any, default: int, lo: int, hi: int) -> int:
 # ─── Momentum visibility prefs (§Momentum-relay-policy) ─────────────────────
 
 
-#: Default per-user max-hops visibility (3; the wire cap is 5 since v_96 —
-#: looking further is an opt-in, ``docs/protocol/momentum.md`` § Reach).
-DEFAULT_MOMENT_MAX_HOPS: int = MOMENT_DEFAULT_MAX_HOPS
+def _strict_int(value: Any, default: int, lo: int, hi: int) -> int:
+    """A ``moments`` number: only a real JSON integer counts (a bool, a
+    string or a fraction is *default*), clamped to ``[lo, hi]`` — the way
+    the moment repo's SQL reads ``max_hops`` (``_VIEWER_HOPS_SQL``), so the
+    feed and the advertised look agree."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return default
+    return min(max(value, lo), hi)
 
 
 @dataclass(slots=True, frozen=True)
@@ -172,16 +177,16 @@ def parse_moment_preferences(preferences_json: str | None) -> MomentPreferences:
     raw = blob.get("moments")
     if not isinstance(raw, dict):
         raw = {}
-    max_hops = _coerce_int(
-        raw.get("max_hops"), DEFAULT_MOMENT_MAX_HOPS, 1, MOMENT_MAX_HOPS
+    max_hops = _strict_int(
+        raw.get("max_hops"), MOMENT_DEFAULT_MAX_HOPS, 1, MOMENT_MAX_HOPS
     )
-    retention = _coerce_int(
+    retention = _strict_int(
         raw.get("follower_retention_days"),
         MOMENT_DEFAULT_RETENTION_DAYS,
         MOMENT_MIN_RETENTION_DAYS,
         MOMENT_MAX_LIFETIME_DAYS,
     )
-    reach = _coerce_int(raw.get("reach"), MOMENT_DEFAULT_REACH, 1, MOMENT_MAX_REACH)
+    reach = _strict_int(raw.get("reach"), MOMENT_DEFAULT_REACH, 1, MOMENT_MAX_REACH)
     return MomentPreferences(
         max_hops=max_hops, follower_retention_days=retention, reach=reach
     )
@@ -338,7 +343,6 @@ def parse_gallery_seen(preferences_json: str | None) -> GallerySeen:
 __all__ = [
     "DEFAULT_HIGHLIGHTS_MAX_COUNT",
     "DEFAULT_HIGHLIGHTS_RETENTION_DAYS",
-    "DEFAULT_MOMENT_MAX_HOPS",
     "GALLERY_ON_THIS_DAY_KEY",
     "GALLERY_SEEN_KEY",
     "HA_AUTOMATION_EVENTS_KEY",

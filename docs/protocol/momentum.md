@@ -176,7 +176,11 @@ One **top-level** moment per author per 15 minutes.
 ``parent_moment_id IS NOT NULL`` so back-and-forth replies are
 unconstrained. Reactions are exempt.
 
-## 3-hop relay
+## Mesh relay
+
+Up to `MOMENT_MAX_HOPS` (5) hops, bounded by the moment's signed reach
+(default 3); hops 4–5 only toward households that look that far
+(decision C, below).
 
 ```
               hop=1                 hop=2                 hop=3
@@ -198,8 +202,14 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
 * **Once per moment.** The relay remembers, per (event type,
   ``moment_id``), the lowest hop it relayed at (in memory, 48 h,
   at most 50 000 entries). A later copy is relayed only when it arrives
-  at a lower hop — relayed on, that one reaches further. Creates and
-  deletes are tracked apart.
+  at a lower hop — relayed on, that one reaches further — and at most once
+  (v_96 F8), except the origin's own copy and the first copy forwarded at
+  a hop ≤ 3 after only copies forwarded past 3 (``MOMENT_UNGATED_HOPS``):
+  a wave toward lookers only (hops 4–5) never uses up the wave to every
+  household, so copies claiming hops 4 then 3 can't stop the genuine
+  hop-2 copy reaching the default-look peers. A relay sends at most two
+  gated and two ungated waves per moment. Creates, deletes and totals are
+  tracked apart.
 * **Creates relay for 48 h** (v_65). A ``MOMENT_CREATED`` whose signed
   ``occurred_at`` is more than 48 h ago (``MOMENT_RELAY_MAX_AGE_HOURS``),
   or missing, is still stored here but not passed on. Mesh copies travel
@@ -222,7 +232,7 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
   the retention sweep ends it. It is still evictable under the per-peer
   cap (1 000 pending), unlike ``NEVER_DROP`` — and a delete we only relay
   is evicted before anything of our own. Every hop queues its own
-  copy, so a delete crosses all three hops even when the households between
+  copy, so a delete crosses every hop the moment went even when the households between
   were offline for weeks; a pure pass-through household relays it as
   before, only when it changed something there.
 * **A relayed household's deletes are capped per origin** (adversarial
@@ -233,7 +243,8 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
   holds at most ``MAX_LONG_LIVED_RELAYED_PER_ORIGIN`` (100) long-lived
   deletes relayed for one origin — past that, a relayed delete is queued in
   the ordinary class (7 days, given up after ~10 h). Our own deletes are
-  never capped. **Cost:** per delete, the same ≤ 3-hop fan-out as before; a
+  never capped. **Cost:** per delete, the same fan-out as the moment (up to
+  `MOMENT_MAX_HOPS`, bounded by the signed reach); a
   peer that stays offline costs at most ~180 extra delivery attempts over
   30 days per queued delete (one per 4 h, ±30 % jitter), each a re-signed
   envelope of < 1 KB. A household offline for 30 days with 1 000 of our own
@@ -361,12 +372,16 @@ neither raise it, strip it nor splice it onto another moment:
   Deletes never depend on the seen-map — they stay tombstone-gated.
 * **Return tokens** follow the cap: ``MAX_RETURN_TOKENS = MOMENT_MAX_HOPS − 1
   = 4``. A routed reaction drops a token at every relay on its way back,
-  so an older relay on the path only parses ≤ 2. A reactor at hop *k*
-  sends *k* − 1 tokens — the same count a relay at hop *k* passes on from
-  beyond it — so only ``len(tokens) == MAX_RETURN_TOKENS`` proves the
-  neighbour's own reactions (nobody sits beyond hop 5): the per-source
-  rate limit (``moment_reaction_router``; ``≥ 2`` while the cap was 3)
-  applies there, shorter envelopes take the mixed bucket. An older relay
+  so an older relay on the path only parses ≤ 2. Each relay keeps, inside
+  the token it mints (sealed, opened only by itself — no new wire field,
+  ``rt_suite`` unchanged), the hop it had the moment at and the moment's
+  reach. A reaction coming back must carry exactly that many tokens (a
+  truncated chain dies at the first relay), and the neighbour is held to
+  the per-source rate (``moment_reaction_router``) when it sits on the
+  moment's last hop (our hop + 1 ≥ ``min(reach, MOMENT_MAX_HOPS)`` — nobody
+  beyond it relays); otherwise the mixed bucket. A token minted before
+  (no hop inside, ≤ 48 h) falls back to ``len(tokens) ==
+  MAX_RETURN_TOKENS``. An older relay
   at hop 2 still applies its own source bucket to two-token envelopes from
   a v_96 hop-3 relay that aggregates hops 3–5 behind it — reactions from
   hops 4–5 past an older relay may be throttled (documented degradation).
@@ -491,8 +506,8 @@ household. Hence decision C.
 ### Bound for hops 4–5: only toward who looks (decision C)
 
 A v_96 household tells its paired peers one number, ``moment_look_hops``
-— the largest ``max_hops`` among its non-protected people (1–5) — in
-``INSTANCE_CAPABILITIES_UPDATED``, sent when it changes. A relay sends a
+— the largest ``max_hops`` among its non-protected people, never said
+below 3 — in ``INSTANCE_CAPABILITIES_UPDATED``, sent when it changes. A relay sends a
 hop-4 or hop-5 copy only to a peer whose ``moment_look_hops`` is at least
 that hop (as built: a peer not heard from since our start — older, or its
 answer still on the way — gets none). Hops 1–3 are unchanged.
@@ -501,26 +516,38 @@ As built:
 
 * **Computed** by ``SqliteMomentRepo.moment_look_hops``: the widest
   ``moments.max_hops`` among active, non-protected people (a missing or
-  non-numeric value counts as 3, a number is clamped to 1–5); a household
-  of only protected people says 1 (they see hop 1 only).
+  integer value — a bool, a string, a fraction — counts as 3, exactly as
+  the preference parser reads it; an integer is clamped to 1–5); a
+  household of only protected people computes 1. **Advertised as
+  ``max(look, 3)``** (``MOMENT_UNGATED_HOPS``): a relay only uses a look
+  past 3, so a smaller one would reveal what people chose, or that a
+  household is only protected people, for nothing.
 * **Sent** in every startup announcement to directly paired households
   (``source = manual``) — never to a household seated from an invite link,
   never over the mesh or to a GFS — and re-sent to every paired v_96
-  household when it changes (a ``moments`` preferences patch, a person
-  added, removed or reactivated, child protection on or off; the last
-  advertised value is kept in memory), and once to a household that just
-  reached v_96 (it ignored the field while older).
+  household when the *advertised* value changes (a ``moments``
+  preferences patch, a person added, removed or reactivated, child
+  protection on or off — a change below 3 sends nothing; the last
+  advertised value is kept in memory, and nothing is re-sent before the
+  startup announcement). A household that just reached v_96 learns it by
+  asking: its upgrade resync asks every peer for capabilities.
+  Capabilities sends are latest-only in the outbox (key
+  ``capabilities``): an offline peer keeps one queued row, the newest, so
+  an older look never lands after a newer one.
 * **Kept** by the receiver in memory (``FederationService``, one int per
-  peer — no table, no migration) only when it is an integer 1–5 (not a
-  bool); anything else, or a missing field, leaves the kept value. An
+  peer — no table, no migration) only from a directly paired household
+  (``source = manual``, as ``URL_UPDATED``) and only when it is an integer
+  1–5 (not a bool); anything else, or a missing field, leaves the kept
+  value. An
   unpair forgets it (a new pairing sends our capabilities again).
 * **Re-learned after our restart** with the existing resync primitive:
   at every startup we send ``INSTANCE_RESYNC_REQUEST`` ``{scope:
   "capabilities"}`` to every confirmed social peer at v_96
   (``request_capability_resync``; after an upgrade, to every peer with
   the handler, as before). Each answers with its capabilities, which
-  carry the value; the outbox retries the request, so a peer offline at
-  our start answers once it is back. Older peers are not asked (they
+  carry the value; the outbox retries the request (latest-only, key
+  ``resync:capabilities`` — one queued per peer however often we restart),
+  so a peer offline at our start answers once it is back. Older peers are not asked (they
   never send the field). Until a peer answers it gets no hop-4–5 copy.
   Cost: one request (≈ 0.3 KB) plus one reply (≈ 0.5 KB) per v_96 peer
   per restart — d = 10: ≈ 8 KB per restart.
@@ -530,6 +557,12 @@ As built:
   Accepted edge: a household that looked further when a moment reached it
   and looks less now may miss that moment's delete or totals; its people
   can no longer see the row anyway (their ``max_hops``), and it expires.
+  Accepted edge (Fable #7): a copy relayed while a peer's look is still
+  unknown here (after our restart, before its answer) is remembered in the
+  seen-map, so that peer misses that one moment's hop-4–5 copy through us
+  even once its look arrives — unless a closer copy re-opens the slot
+  (the gated/ungated rule above). It may still get it through another
+  relay; the window is one round trip per peer after a restart.
 
 Trade-offs (accepted by the owner):
 
@@ -796,7 +829,7 @@ The same rule applies to public moments received through the GFS.
 ## Routed reactions (v_67)
 
 Owner decision 9, sign-off 2 (2026-10-25). A moment reaches households up to
-three hops from its author, but a reaction used to go back only to an
+`MOMENT_MAX_HOPS` hops from its author (bounded by the signed reach), but a reaction used to go back only to an
 author's household **paired** with the reactor's (the household had to hold
 the author in its roster); anyone further away reacted into the void. Now a
 reaction goes back along the path the moment came.
@@ -871,14 +904,18 @@ reaction goes back along the path the moment came.
   minute and ≤ 30 a minute per moment — 3× one household's own rate, since
   the neighbour may be a relay carrying several households' reactions, so
   one household behind it sending junk at the full source rate leaves the
-  others room. Inside that budget, envelopes still carrying **two** return
-  tokens — no relay sits beyond two, so they are the neighbour's own
-  reactions — are held to the *source* rate: ≤ 60 a minute, ≤ 10 per
-  moment. Those are the real totals: one neighbour gets ≤ 180 forwards a
+  others room. Inside that budget, a neighbour on the moment's **last
+  hop** — the relay's own return token says the hop it had the moment at
+  and the moment's reach (v_96), so nobody beyond that neighbour relays —
+  hands over only its own reactions and is held to the *source* rate:
+  ≤ 60 a minute, ≤ 10 per moment. The same token pins the token count
+  (exactly the relay's hop), so a truncated chain is refused at the first
+  relay. Those are the real totals: one neighbour gets ≤ 180 forwards a
   minute however its envelopes mix, and an envelope the relay refuses is
-  not charged (#1197 review). A reactor two hops from the origin hands its
-  relay one-token envelopes, so the source sub-limit covers only reactors
-  three hops out; the 180 covers everyone.
+  not charged (#1197 review). The mixed budget is one size whatever the
+  levels beyond the neighbour (not scaled); a token minted before (no hop
+  inside, ≤ 48 h) falls back to counting tokens (source rate for
+  `MAX_RETURN_TOKENS`).
 
   The origin keeps four budgets. Before any crypto, per neighbour handing
   reactions over: a copy of a reaction it already took (the expected second
@@ -924,8 +961,9 @@ reaction goes back along the path the moment came.
   not with what.
 
 **Cost.** One reaction is one envelope of ~1.6 KB per hop of a route
-(hop-encrypted sealed reaction + up to two tokens; ≤ 3 hops) and goes
-along at most two routes: ≤ 6 envelopes, ~10 KB — the same order as the
+(hop-encrypted sealed reaction + up to `MAX_RETURN_TOKENS` tokens; up to
+`MOMENT_MAX_HOPS`, bounded by the signed reach) and goes along at most two
+routes: ≤ 10 envelopes, ~16 KB (≤ 6, ~10 KB at the default reach 3) — the same order as the
 create it answers. Two routes is the **typical** case, not the exception:
 any reactor with two or more neighbours that hold the moment keeps two (up
 to three) routes, so expect 2× the envelopes of a single path. The origin
@@ -1036,7 +1074,7 @@ moment on has nobody downstream who holds it; totals signed by another
 household for that moment id are refused outright) — only while `rev` is
 under 25 h old and newer than the last one it passed on, never a `no_relay` one
 (a protected account's moment — its totals go to paired households only and
-a receiver refuses one relayed), only below hop 3, and **only to v_69 peers**
+a receiver refuses one relayed), only below `min(reach, MOMENT_MAX_HOPS)`, and **only to v_69 peers**
 (`peer_supports(…, MIN_FOR_MOMENT_REACTION_COUNTS)`) under the same hide
 list, guardian blocks and relay policy as the moment. A copy that came only
 through a GFS is never relayed to the mesh.
@@ -1204,7 +1242,7 @@ the one place a reply is written.
   ``socialhome/services/federation_inbound_service.py`` (registered
   by ``attach_to`` for the four ``MOMENT_*`` event types;
   ``MOMENT_REACTION_ROUTED`` is registered by ``MomentReactionRouter``). Calls
-  ``moment_outbound.relay_inbound`` for the 3-hop relay step.
+  ``moment_outbound.relay_inbound`` for the relay step.
 - Realtime push:
   ``socialhome/services/realtime_service.py`` — broadcasts
   ``moment.created`` / ``moment.deleted`` to the household and

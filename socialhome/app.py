@@ -339,6 +339,7 @@ from .services.calendar_service import (
 )
 from .services.call_service import CallSignalingService, StaleCallCleanupScheduler
 from .services.capabilities_outbound import CapabilitiesOutbound
+from .services.capability_resync import request_capability_resync
 from .services.child_protection_service import ChildProtectionService
 from .services.corner_service import CornerService
 from .services.dashboard_display_service import DashboardDisplayService
@@ -437,7 +438,6 @@ from .services.recovery_reconnect_service import RecoveryReconnectService
 from .services.relay_policy import RelayPolicy
 from .services.report_scope import ReportScope
 from .services.report_service import ReportService
-from .services.resync_on_upgrade import request_capability_resync
 from .services.schedule_calendar_bridge import ScheduleCalendarBridge
 from .services.schedule_federation_outbound import ScheduleFederationOutbound
 from .services.search_service import SearchService

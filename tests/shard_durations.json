@@ -710,7 +710,7 @@
  "tests/services/test_report_scope.py": 0.02,
  "tests/services/test_report_service.py": 0.76,
  "tests/services/test_report_service_space.py": 2.63,
- "tests/services/test_resync_on_upgrade.py": 0.01,
+ "tests/services/test_capability_resync.py": 0.01,
  "tests/services/test_schedule_calendar_bridge.py": 0.01,
  "tests/services/test_schedule_federation_outbound.py": 0.01,
  "tests/services/test_search_service.py": 0.29,

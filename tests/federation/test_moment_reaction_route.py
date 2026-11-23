@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from socialhome.crypto import (
     b64url_encode,
@@ -16,12 +19,14 @@ from socialhome.crypto import (
 )
 from socialhome.federation.keywrap_seal import UnsupportedKemSuite
 from socialhome.federation.moment_reaction_route import (
+    MAX_RETURN_TOKEN_CHARS,
     MAX_RETURN_TOKENS,
     PAD_BUCKET,
     REACTION_SIG_SUITE_ED25519,
     RETURN_TOKEN_SUITE_AESGCM_256,
     SUPPORTED_REACTION_SIG_SUITES,
     SUPPORTED_RETURN_TOKEN_SUITES,
+    OpenedReturnToken,
     ReturnTokenRefused,
     UnsupportedReactionSigSuite,
     UnsupportedReturnTokenSuite,
@@ -162,18 +167,56 @@ def _token(**over) -> str:
         "next_hop": "peer-next",
         "prev_hop": "peer-prev",
         "expires_at_s": 2_000_000_000,
+        "hop": 2,
+        "reach": 5,
     }
     args.update(over)
     return mint_return_token(**args)
 
 
 def test_a_token_opens_to_its_previous_hop():
-    assert (
-        open_return_token(
-            key=KEY, token=_token(), moment_id="m-1", from_instance="peer-next", now_s=1
-        )
-        == "peer-prev"
+    assert open_return_token(
+        key=KEY, token=_token(), moment_id="m-1", from_instance="peer-next", now_s=1
+    ) == OpenedReturnToken(prev_hop="peer-prev", hop=2, reach=5)
+
+
+def test_a_token_keeps_the_relays_hop_and_the_moments_reach():
+    """Fable #2: the relay records its own hop and the moment's reach inside
+    the token it mints — sealed, opened only by itself, so nobody else sees
+    a new field (``rt_suite`` and the size bound stay as they were)."""
+    longest = "x" * 52
+    token = _token(hop=4, reach=5, prev_hop=longest)
+    assert len(token) <= MAX_RETURN_TOKEN_CHARS
+    opened = open_return_token(
+        key=KEY, token=token, moment_id="m-1", from_instance="peer-next", now_s=1
     )
+    assert (opened.prev_hop, opened.hop, opened.reach) == (longest, 4, 5)
+
+
+def _legacy_token(prev_hop: str = "peer-prev") -> str:
+    """A token minted before v_96 P2: ``exp ‖ prev_hop``, no hop or reach."""
+    nonce = os.urandom(12)
+    plain = (2_000_000_000).to_bytes(8, "big") + prev_hop.encode()
+    ct = AESGCM(KEY).encrypt(nonce, plain, b"moment-return:v1|m-1|peer-next")
+    return b64url_encode(nonce + ct)
+
+
+def test_a_token_minted_before_it_opens_without_hop_or_reach():
+    """Tokens already out (≤ 48 h) still open; the relay then falls back to
+    counting tokens."""
+    assert open_return_token(
+        key=KEY,
+        token=_legacy_token(),
+        moment_id="m-1",
+        from_instance="peer-next",
+        now_s=1,
+    ) == OpenedReturnToken(prev_hop="peer-prev", hop=None, reach=None)
+
+
+@pytest.mark.parametrize(("hop", "reach"), [(0, 5), (5, 5), (2, 0), (2, 6)])
+def test_a_token_is_never_minted_outside_the_hop_bounds(hop, reach):
+    with pytest.raises(ValueError):
+        _token(hop=hop, reach=reach)
 
 
 @pytest.mark.parametrize(

@@ -240,6 +240,7 @@ async def test_nothing_routes_before_the_identity_is_attached():
     stamped = r.stamp_relayed_create(
         {"origin_keywrap_pk": "aa", "rt": ["x"], "rt_suite": "aesgcm-256"},
         received_hop=1,
+        reach=5,
         from_instance="a",
         to_instance="b",
     )
@@ -276,16 +277,17 @@ def _create(**over):
 
 def test_a_relay_appends_one_token_per_peer(router):
     first = router.r.stamp_relayed_create(
-        _create(), received_hop=1, from_instance="origin", to_instance="b"
+        _create(), received_hop=1, reach=5, from_instance="origin", to_instance="b"
     )
     second = router.r.stamp_relayed_create(
-        _create(), received_hop=1, from_instance="origin", to_instance="c"
+        _create(), received_hop=1, reach=5, from_instance="origin", to_instance="c"
     )
     assert len(first["rt"]) == 1 and first["rt_suite"] == "aesgcm-256"
     assert first["rt"] != second["rt"]
     onward = router.r.stamp_relayed_create(
         _create(rt=first["rt"], rt_suite="aesgcm-256"),
         received_hop=2,
+        reach=5,
         from_instance="b",
         to_instance="d",
     )
@@ -299,6 +301,7 @@ def test_a_hop_5_copy_carries_four_tokens(router):
         stamped = router.r.stamp_relayed_create(
             _create(**({"rt": tokens, "rt_suite": "aesgcm-256"} if tokens else {})),
             received_hop=hop,
+            reach=5,
             from_instance=f"h{hop}",
             to_instance=f"h{hop + 1}",
         )
@@ -350,7 +353,7 @@ async def test_a_route_up_to_hop_5_is_kept(router, hop, tokens, kept):
 )
 def test_a_broken_chain_is_stripped(router, payload, hop):
     stamped = router.r.stamp_relayed_create(
-        payload, received_hop=hop, from_instance="a", to_instance="b"
+        payload, received_hop=hop, reach=5, from_instance="a", to_instance="b"
     )
     assert "rt" not in stamped and "rt_suite" not in stamped
 

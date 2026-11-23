@@ -716,6 +716,24 @@ async def test_capabilities_updated_keeps_a_valid_moment_look(
     assert handlers._federation.moment_looks == {"peer-a": kept}
 
 
+async def test_a_moment_look_from_a_link_seated_household_is_ignored(repo, handlers):
+    """Fable #5: only a directly paired household (``manual``) says how far
+    its people look — a household seated from an invite link gets no moments
+    and its look is never kept (as ``URL_UPDATED``)."""
+    repo.instances["peer-a"] = replace(
+        _sample_instance("peer-a", PairingStatus.CONFIRMED),
+        source=InstanceSource.SPACE_SESSION,
+        relay_via="https://gfs.example",
+    )
+    await handlers._on_capabilities_updated(
+        _event(
+            FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+            {"proto_version": 1, "moment_look_hops": 5},
+        )
+    )
+    assert handlers._federation.moment_looks == {}
+
+
 async def test_capabilities_updated_unknown_instance_is_noop(repo, handlers):
     """Announcement from a peer we don't have a row for is dropped —
     we have no row to attach the version to and don't want to

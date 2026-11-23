@@ -21,7 +21,10 @@ Three pieces, all built from keys households already hold — no new key type:
    See :func:`verified_origin_keywrap`.
 
 2. **Return tokens.** A v_67 relay forwarding a create to its peer X appends
-   ``rt = b64url(nonce ‖ AES-256-GCM(k, exp ‖ prev_hop_id))`` with
+   ``rt = b64url(nonce ‖ AES-256-GCM(k, exp ‖ 0x01 ‖ hop ‖ reach ‖
+   prev_hop_id))`` (v_96: the relay's own hop and the moment's reach, for
+   its own rate limits — a token minted before carries ``exp ‖ prev_hop_id``
+   and still opens, without them) with
    ``k = HKDF(routing_secret, "moment-return:v1")`` (the household's existing
    ``instance_identity.routing_secret``) and AAD
    ``"moment-return:v1|" + moment_id + "|" + X``. Only that relay can open
@@ -50,6 +53,7 @@ canonical-JSON helpers. No I/O.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import orjson
@@ -151,7 +155,7 @@ PAD_BUCKET: int = 1024
 #: Most return tokens a create or a routed reaction carries: one per relay.
 MAX_RETURN_TOKENS: int = MOMENT_MAX_HOPS - 1
 
-#: Longest return token (b64url of 12 + 8 + id + 16 bytes is ~110 chars).
+#: Longest return token (b64url of 12 + 8 + 3 + id + 16 bytes is ~115 chars).
 MAX_RETURN_TOKEN_CHARS: int = 256
 
 #: Longest ``sealed.ciphertext`` a relay forwards — one bucket plus the
@@ -167,6 +171,12 @@ MAX_DISPLAY_NAME_CHARS: int = 64
 _SIG_DOMAIN = b"moment-reaction:v1:"
 _TOKEN_INFO = b"moment-return:v1"
 _TOKEN_AAD_PREFIX = b"moment-return:v1|"
+#: First plaintext byte after the expiry of a token that records the relay's
+#: hop and the moment's reach (v_96). Never the first byte of an instance id
+#: (printable), so a token minted before (``exp ‖ prev_hop``) is told apart.
+#: Local to the minting household — the token is opened only where it was
+#: minted, so this is no wire shape and ``rt_suite`` is unchanged.
+_TOKEN_LAYOUT_HOP_REACH = 0x01
 
 
 # ── 1. The origin's key-wrap key on the create ─────────────────────────────
@@ -268,6 +278,17 @@ def _token_aad(moment_id: str, next_hop: str) -> bytes:
     return _TOKEN_AAD_PREFIX + f"{moment_id}|{next_hop}".encode()
 
 
+@dataclass(slots=True, frozen=True)
+class OpenedReturnToken:
+    """What a return token opened to: the previous hop, and — for a token
+    minted since v_96 — the hop this relay had the moment at and the
+    moment's reach (``None``: a token minted before)."""
+
+    prev_hop: str
+    hop: int | None
+    reach: int | None
+
+
 def mint_return_token(
     *,
     key: bytes,
@@ -275,12 +296,23 @@ def mint_return_token(
     next_hop: str,
     prev_hop: str,
     expires_at_s: int,
+    hop: int,
+    reach: int,
 ) -> str:
     """A return token for the copy of *moment_id* sent to *next_hop*: it
     opens (here only) to *prev_hop*, the household the moment came from,
-    until ``expires_at_s`` (epoch seconds)."""
+    until ``expires_at_s`` (epoch seconds). It also keeps *hop* — the hop
+    this relay had the moment at (1 … ``MOMENT_MAX_HOPS`` − 1) — and the
+    moment's *reach* (1 … ``MOMENT_MAX_HOPS``), for this relay's own rate
+    limits when a reaction comes back."""
+    if not 1 <= hop < MOMENT_MAX_HOPS or not 1 <= reach <= MOMENT_MAX_HOPS:
+        raise ValueError(f"return token for hop {hop}, reach {reach}")
     nonce = os.urandom(12)
-    plain = int(expires_at_s).to_bytes(8, "big", signed=False) + prev_hop.encode()
+    plain = (
+        int(expires_at_s).to_bytes(8, "big", signed=False)
+        + bytes((_TOKEN_LAYOUT_HOP_REACH, hop, reach))
+        + prev_hop.encode()
+    )
     ct = AESGCM(key).encrypt(nonce, plain, _token_aad(moment_id, next_hop))
     return b64url_encode(nonce + ct)
 
@@ -292,8 +324,9 @@ def open_return_token(
     moment_id: str,
     from_instance: str,
     now_s: int,
-) -> str:
-    """The previous hop a return token names, or :class:`ReturnTokenRefused`.
+) -> OpenedReturnToken:
+    """What a return token names (:class:`OpenedReturnToken`), or
+    :class:`ReturnTokenRefused`.
 
     The AAD names the moment and *from_instance* — the neighbour handing the
     reaction back must be the one this household gave the moment to — so a
@@ -311,13 +344,20 @@ def open_return_token(
         raise ReturnTokenRefused("return token does not open here") from exc
     if int.from_bytes(plain[:8], "big") <= now_s:
         raise ReturnTokenRefused("return token expired")
+    body = plain[8:]
+    hop: int | None = None
+    reach: int | None = None
+    if body[:1] == bytes((_TOKEN_LAYOUT_HOP_REACH,)):
+        if len(body) < 3:  # pragma: no cover — we minted it
+            raise ReturnTokenRefused("malformed return token")
+        hop, reach, body = body[1], body[2], body[3:]
     try:
-        prev = plain[8:].decode()
+        prev = body.decode()
     except UnicodeDecodeError as exc:  # pragma: no cover — we minted it
         raise ReturnTokenRefused("malformed return token") from exc
     if not prev:  # pragma: no cover — we minted it
         raise ReturnTokenRefused("malformed return token")
-    return prev
+    return OpenedReturnToken(prev_hop=prev, hop=hop, reach=reach)
 
 
 # ── 3. The sealed reaction ─────────────────────────────────────────────────
@@ -512,6 +552,7 @@ __all__ = [
     "RETURN_TOKEN_SUITE_FIELD",
     "SUPPORTED_REACTION_SIG_SUITES",
     "SUPPORTED_RETURN_TOKEN_SUITES",
+    "OpenedReturnToken",
     "ReturnTokenRefused",
     "UnsupportedReactionSigSuite",
     "UnsupportedReturnTokenSuite",

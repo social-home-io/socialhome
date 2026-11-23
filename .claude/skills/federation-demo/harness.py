@@ -12773,6 +12773,16 @@ def cmd_verify() -> None:
     else:
         print("  v_95 sync pages gate in place ✓")
     failures.extend(_verify_sync_page(state))
+    # v_96 — moment reach: signed reach, the relay clamp, hops 4–5 only
+    # toward households that look that far (moment_look_hops, in memory,
+    # re-learned by the startup capability resync).
+    if int(_Cap.MIN_FOR_MOMENT_REACH) != 96 or _OURS < 96:
+        failures.append(
+            "MIN_FOR_MOMENT_REACH moved off v_96 (or OURS fell below it) — "
+            "a moment's reach and the hop-4–5 look gate would reach older peers"
+        )
+    else:
+        print("  v_96 moment reach gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key

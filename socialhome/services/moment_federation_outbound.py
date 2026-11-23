@@ -73,10 +73,10 @@ from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import relayed_moment_key
 from ..domain.moment import (
-    MOMENT_DEFAULT_MAX_HOPS,
     MOMENT_DEFAULT_REACH,
     MOMENT_MAX_HOPS,
     MOMENT_RELAY_MAX_AGE_HOURS,
+    MOMENT_UNGATED_HOPS,
     moment_too_old_to_relay,
 )
 from ..infrastructure.event_bus import EventBus
@@ -533,7 +533,7 @@ class MomentFederationOutbound(
             self._remember_relay(("origin", moment_id, origin), hop, reach=reach)
         next_hop = hop + 1
         look_hop: int | None = None
-        if next_hop > MOMENT_DEFAULT_MAX_HOPS:
+        if next_hop > MOMENT_UNGATED_HOPS:
             # v_96 decision C: a hop-4 / hop-5 copy (create, delete or
             # totals) goes only to a household that looks that far — and is
             # v_96 (an older one refuses a hop above 3), whatever its marks.
@@ -551,6 +551,7 @@ class MomentFederationOutbound(
                 return router.stamp_relayed_create(
                     next_payload,
                     received_hop=hop,  # clamped: tokens must match the hop
+                    reach=reach,
                     from_instance=from_instance,
                     to_instance=peer_id,
                 )
@@ -623,14 +624,22 @@ class MomentFederationOutbound(
         or :attr:`_Copy.SEEN`. v_96 (F8): a closer copy is relayed again at
         most once — a relay claiming hops 4, 3, 2 … gets one extra wave, not
         r − 1 — except one the origin itself sent (envelope-authenticated
-        hop 1), which can't be faked and so can't burn the slot."""
+        hop 1), which can't be faked and so can't burn the slot, and the
+        first copy that reaches every household (forwarded at a hop up to
+        :data:`MOMENT_UNGATED_HOPS`) after only gated ones (forwarded past
+        it, to who looks that far): a gated wave never uses up the ungated
+        one. So a relay sends at most two gated and two ungated waves."""
         held = self._relayed.get(key)
         if held is None:
             return _Copy.FIRST
         if monotonic() - held.at > RELAY_SEEN_TTL_S:
             del self._relayed[key]
             return _Copy.FIRST
-        if hop < held.hop and (from_origin or not held.re_relayed):
+        if hop >= held.hop:
+            return _Copy.SEEN
+        if from_origin or not held.re_relayed:
+            return _Copy.CLOSER
+        if hop + 1 <= MOMENT_UNGATED_HOPS < held.hop + 1:
             return _Copy.CLOSER
         return _Copy.SEEN
 

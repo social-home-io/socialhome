@@ -1621,16 +1621,20 @@ from __future__ import annotations
 #:   same mark (a protected account's delete is now ``no_relay``, never
 #:   relayed). Relays forward only while ``hop < reach`` (at most
 #:   ``MOMENT_MAX_HOPS`` = 5, also the viewer's ``moments.max_hops`` 1–5,
-#:   default 3; ``MAX_RETURN_TOKENS`` = 4, the per-source reaction rate on
-#:   four-token envelopes only); a hop-4 / hop-5 copy (create, delete, totals)
+#:   default 3; ``MAX_RETURN_TOKENS`` = 4; a relay's return token keeps its
+#:   own hop and the moment's reach, so the per-source reaction rate applies
+#:   to a last-hop neighbour and a truncated chain dies at the first relay);
+#:   a hop-4 / hop-5 copy (create, delete, totals)
 #:   goes only to a v_96 household that looks that far — the additive
 #:   ``moment_look_hops`` field of ``INSTANCE_CAPABILITIES_UPDATED`` (the
-#:   widest ``max_hops`` of its non-protected people, re-sent on change, kept
+#:   widest ``max_hops`` of its non-protected people, said as at least 3,
+#:   re-sent on change, from a directly paired household only, kept
 #:   in memory by the receiver and re-learned after its restart by asking
 #:   every v_96 peer for its capabilities, ``INSTANCE_RESYNC_REQUEST``
 #:   scope ``capabilities``; not heard = no hop-4–5 copy, decision C).
 #:   Relays clamp a relayed copy's hop to ≥ 2, relay a closer
-#:   copy at most once more, pass totals on only for a moment they relayed
+#:   copy at most once more (a wave toward lookers never uses up the wave
+#:   to every household), pass totals on only for a moment they relayed
 #:   or hold within its reach, and queue relayed creates / totals under an
 #:   outbox key evicted first. No new event type, no record change, no
 #:   ``SYNC_RECORD_LINES`` entry (no sync stream carries moments).
@@ -1639,8 +1643,8 @@ from __future__ import annotations
 #:   1 keeps the v_38 ``no_relay`` gate; reach 4–5 goes to every paired
 #:   household (an older one relays it verbatim up to hop 3; an older one
 #:   further away can't verify the v3 bytes and drops it); an older
-#:   household gets no hop-4–5 copy and ignores ``moment_look_hops`` (told
-#:   again once it reaches v_96). Not space-scoped. Labelled "Choose how far
+#:   household gets no hop-4–5 copy and ignores ``moment_look_hops`` (its
+#:   upgrade resync asks for it once it reaches v_96). Not space-scoped. Labelled "Choose how far
 #:   your moments go".
 OURS: int = 96
 

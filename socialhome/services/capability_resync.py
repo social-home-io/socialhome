@@ -43,6 +43,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: The latest-only outbox key of the request (local, never on the wire): a
+#: peer offline across several of our restarts keeps one queued request.
+RESYNC_CAPABILITIES_OUTBOX_KEY: str = "resync:capabilities"
+
 
 async def request_capability_resync(
     *,
@@ -88,6 +92,7 @@ async def request_capability_resync(
             to_instance_id=peer.id,
             event_type=FederationEventType.INSTANCE_RESYNC_REQUEST,
             payload={"scope": "capabilities"},
+            outbox_key=RESYNC_CAPABILITIES_OUTBOX_KEY,
         )
         sent += 1
 

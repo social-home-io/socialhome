@@ -86,6 +86,7 @@ from ..federation.moment_reaction_route import (
     RETURN_TOKEN_SUITE_FIELD,
     RETURN_TOKENS_FIELD,
     SUPPORTED_RETURN_TOKEN_SUITES,
+    OpenedReturnToken,
     ReturnTokenRefused,
     UnsupportedReactionSigSuite,
     UnsupportedReturnTokenSuite,
@@ -148,18 +149,21 @@ MAX_KEPT_ROUTES: int = 3
 #: Relay limits on what one downstream neighbour hands over (#1178 F14,
 #: #1197 review). Every envelope from it counts against one budget: 180 a
 #: minute, 30 a minute on one moment — 3× one household's own rate, since
-#: a one-token envelope may come from a relay carrying several households'
+#: an envelope may come from a relay carrying several households'
 #: reactions, so one household behind it sending junk at the full source
-#: rate leaves room for the others. Inside that budget, envelopes carrying
-#: **:data:`MAX_RETURN_TOKENS` tokens** (4 since v_96: one per relay of a
-#: hop-5 copy) are the neighbour's own reactions (the *source* rate) — a
-#: relay drops a token per hop and nobody sits beyond the last hop, so no
-#: relay can hand on that many — and are held to 60 a minute and 10 a
-#: minute on one moment. A shorter envelope may be the neighbour's own or
-#: relayed from further out (a reactor at hop *k* sends *k* − 1 tokens, the
-#: same count a relay at hop *k* passes on from beyond it): the mixed budget.
-#: Until v_96 (cap 3) two tokens were the most. Older-relay degradation: an
-#: older relay at hop 2 still applies its own source bucket to two-token
+#: rate leaves room for the others. Inside that budget, a neighbour on the
+#: moment's **last hop** — nobody beyond it relays, so whatever it hands
+#: over is its own household's — is held to the *source* rate: 60 a minute
+#: and 10 a minute on one moment. The relay knows from its own return token
+#: (v_96: the token keeps the hop the relay had the moment at and the
+#: moment's reach): the neighbour sits on the last hop when that hop + 1
+#: reaches ``min(reach, MOMENT_MAX_HOPS)``. The same token pins how many
+#: tokens the envelope carries (exactly that hop), so a truncated chain
+#: dies at the first relay. Not scaled by how many levels lie beyond the
+#: neighbour — the mixed budget is one size for all. A token minted before
+#: (no hop inside, ≤ 48 h old) falls back to counting tokens: the source
+#: rate for :data:`MAX_RETURN_TOKENS`. Older-relay degradation: an older
+#: relay at hop 2 still applies its own source bucket to two-token
 #: envelopes, so a v_96 neighbour at hop 3 that aggregates reactions from
 #: hops 3–5 behind it is held to the source rate there. An envelope the
 #: relay refuses is not charged.
@@ -346,14 +350,16 @@ class MomentReactionRouter(ProtectionGateMixin):
         payload: dict[str, Any],
         *,
         received_hop: int,
+        reach: int,
         from_instance: str,
         to_instance: str,
     ) -> dict[str, Any]:
         """The create *payload* (already at the next hop) as sent to
         *to_instance*: with this relay's return token appended — opening to
-        *from_instance* — when the origin shipped its key-wrap key and every
-        relay so far added one; otherwise without any tokens (a reactor
-        could not use a broken chain)."""
+        *from_instance*, and keeping *received_hop* and the moment's *reach*
+        for this relay's rate limits (v_96) — when the origin shipped its
+        key-wrap key and every relay so far added one; otherwise without any
+        tokens (a reactor could not use a broken chain)."""
         out = dict(payload)
         if self._token_key is None or not payload.get("origin_keywrap_pk"):
             out.pop(RETURN_TOKENS_FIELD, None)
@@ -382,6 +388,8 @@ class MomentReactionRouter(ProtectionGateMixin):
                 next_hop=to_instance,
                 prev_hop=from_instance,
                 expires_at_s=expires,
+                hop=received_hop,
+                reach=min(reach, MOMENT_MAX_HOPS),
             ),
         ]
         out[RETURN_TOKEN_SUITE_FIELD] = RETURN_TOKEN_SUITE_AESGCM_256
@@ -808,15 +816,26 @@ class MomentReactionRouter(ProtectionGateMixin):
                 return
             await self._accept_at_origin(event, moment_id, p["sealed"])
             return
-        # One budget per neighbour; the most tokens a moment carries (the
-        # neighbour's own reactions — nobody sits beyond the last hop) also
-        # hold to the source rate inside it (#1178 F14, #1197, v_96).
-        # Checked in full before anything is charged.
+        # One budget per neighbour (the mixed one: what it hands over may
+        # be its own or relayed from further out) — checked before any
+        # crypto. Charged only once the envelope passed every check.
         buckets = [
             (f"rn:{neighbour}", RELAY_PER_NEIGHBOUR_PER_MIN, "routed-reaction"),
             (f"rm:{neighbour}:{moment_id}", RELAY_PER_MOMENT_PER_MIN, "per-moment"),
         ]
-        if len(tokens) == MAX_RETURN_TOKENS:
+        if not self._buckets_have_room(event, buckets):
+            return
+        opened = self._open_own_token(event, moment_id, tokens)
+        if opened is None:
+            return
+        if opened.hop is not None and len(tokens) != opened.hop:
+            # A reactor at hop k + 1 holds exactly k tokens, and every relay
+            # in between drops one: a truncated chain dies here (v_96).
+            self._refuse(event, "return tokens do not match this relay's hop")
+            return
+        if self._from_last_hop(opened, len(tokens)):
+            # Nobody beyond the neighbour relays this moment: everything it
+            # hands over is its own household's — the source rate (F14).
             buckets += [
                 (f"rs:{neighbour}", RELAY_SOURCE_PER_MIN, "routed-reaction"),
                 (
@@ -825,26 +844,43 @@ class MomentReactionRouter(ProtectionGateMixin):
                     "per-moment",
                 ),
             ]
-        for key, limit, what in buckets:
-            if not self._limiter.has_room(key, limit=limit, window_s=_WINDOW_S):
-                self._refuse(event, f"neighbour over its {what} rate")
+            if not self._buckets_have_room(event, buckets):
                 return
         for key, limit, _what in buckets:
             self._limiter.is_allowed(key, limit=limit, window_s=_WINDOW_S)
-        await self._forward(event, moment_id, origin, tokens)
+        await self._forward(event, moment_id, origin, tokens, opened.prev_hop)
 
-    async def _forward(
-        self,
-        event: FederationEvent,
-        moment_id: str,
-        origin: str,
-        tokens: list[str],
-    ) -> None:
+    def _buckets_have_room(
+        self, event: FederationEvent, buckets: list[tuple[str, int, str]]
+    ) -> bool:
+        for key, limit, what in buckets:
+            if not self._limiter.has_room(key, limit=limit, window_s=_WINDOW_S):
+                self._refuse(event, f"neighbour over its {what} rate")
+                return False
+        return True
+
+    @staticmethod
+    def _from_last_hop(opened: OpenedReturnToken, tokens: int) -> bool:
+        """Whether the neighbour handing a reaction back sits on the moment's
+        last hop — nobody beyond it relays, so it hands over only its own
+        household's reactions. From our token (v_96): it got the moment at
+        our hop + 1, the last one when that reaches ``min(reach,
+        MOMENT_MAX_HOPS)``. A token minted before carries no hop: then only
+        the most tokens a moment carries (:data:`MAX_RETURN_TOKENS`) — as
+        before, until those tokens expire (≤ 48 h)."""
+        if opened.hop is None or opened.reach is None:
+            return tokens == MAX_RETURN_TOKENS
+        return opened.hop + 1 >= min(opened.reach, MOMENT_MAX_HOPS)
+
+    def _open_own_token(
+        self, event: FederationEvent, moment_id: str, tokens: list[str]
+    ) -> OpenedReturnToken | None:
+        """Our token (the last), opened — or ``None``, refused."""
         if self._token_key is None or not tokens:
             self._refuse(event, "no return token for this household")
-            return
+            return None
         try:
-            prev = open_return_token(
+            return open_return_token(
                 key=self._token_key,
                 token=tokens[-1],
                 moment_id=moment_id,
@@ -853,7 +889,16 @@ class MomentReactionRouter(ProtectionGateMixin):
             )
         except ReturnTokenRefused as exc:
             self._refuse(event, str(exc))
-            return
+            return None
+
+    async def _forward(
+        self,
+        event: FederationEvent,
+        moment_id: str,
+        origin: str,
+        tokens: list[str],
+        prev: str,
+    ) -> None:
         remaining = tokens[:-1]
         if (prev == origin) != (not remaining):
             self._refuse(event, "return tokens do not lead to the origin")

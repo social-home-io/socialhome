@@ -31,12 +31,14 @@ rules these tests encode, against the real application registry and SQLite:
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import orjson
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from socialhome.app import create_app
 from socialhome.app_keys import (
@@ -472,16 +474,30 @@ async def test_origin_rate_limits_one_reactor_household(env):
 # ── Relay: forwards only its own, valid, unexpired token ──────────────────
 
 
-def _token(router, *, to=NEIGHBOUR, prev=OTHER, moment_id="m-far", expires=EXPIRES):
+def _token(
+    router,
+    *,
+    to=NEIGHBOUR,
+    prev=OTHER,
+    moment_id="m-far",
+    expires=EXPIRES,
+    hop: int = 1,
+    reach: int = 3,
+):
+    """Our return token on the copy we relayed (we had it at *hop*) to *to*
+    of a moment going *reach* hops."""
     create = {
         "moment_id": moment_id,
         "occurred_at": datetime.now(UTC).isoformat(),
         "expires_at": expires,
         "origin_keywrap_pk": "00" * 32,
-        "hop_count": 2,
+        "hop_count": hop + 1,
     }
+    if hop > 1:
+        create["rt"] = [f"up-{i}" for i in range(hop - 1)]
+        create["rt_suite"] = RETURN_TOKEN_SUITE_AESGCM_256
     stamped = router.stamp_relayed_create(
-        create, received_hop=1, from_instance=prev, to_instance=to
+        create, received_hop=hop, reach=reach, from_instance=prev, to_instance=to
     )
     return stamped["rt"][-1]
 
@@ -945,16 +961,27 @@ async def test_the_origin_still_bounds_junk_from_one_neighbour(env):
 
 
 def _source_payload(
-    router, moment_id: str = "m-far", tokens: int = MAX_RETURN_TOKENS
+    router,
+    moment_id: str = "m-far",
+    tokens: int = MAX_RETURN_TOKENS,
+    *,
+    reach: int = 5,
+    hop: int | None = None,
 ) -> dict:
-    """An envelope of *tokens* tokens whose last is ours — with
-    :data:`MAX_RETURN_TOKENS` (4), what a reactor five hops from the origin
-    hands its first relay."""
+    """An envelope of *tokens* tokens whose last is ours, minted when we had
+    a *reach*-hop moment at hop *hop* (default: *tokens* — a complete
+    chain). With :data:`MAX_RETURN_TOKENS` (4) and reach 5, what a reactor
+    five hops from the origin hands its first relay."""
     return {
         **_relay_payload("x", origin="peer-elsewhere", moment_id=moment_id),
         "rt": [
             *(f"tok-{i}" for i in range(tokens - 1)),
-            _token(router, moment_id=moment_id),
+            _token(
+                router,
+                moment_id=moment_id,
+                hop=tokens if hop is None else hop,
+                reach=reach,
+            ),
         ],
     }
 
@@ -994,9 +1021,58 @@ async def test_fewer_tokens_may_be_relayed_from_further_out(env, tokens):
     assert len(sent) == RELAY_PER_MOMENT_PER_MIN
 
 
+async def test_a_truncated_chain_dies_at_the_first_relay(env):
+    """Fable #2: a household five hops out that drops tokens can't send junk
+    three relays deep — the relay's token says the hop it had the moment
+    at, and an envelope must carry exactly that many tokens."""
+    app, _db, sent, _own, _anna, router, _c = env
+    for tokens, hop in ((3, 4), (2, 4), (4, 3)):
+        await _dispatch(
+            app,
+            FET.MOMENT_REACTION_ROUTED,
+            _source_payload(router, tokens=tokens, hop=hop),
+        )
+    assert sent == []
+
+
+async def test_a_last_hop_reactor_on_a_reach_3_moment_takes_the_source_rate(env):
+    """Fable #2: on a reach-3 moment a reactor at hop 3 hands its relay (at
+    hop 2) two tokens — nobody beyond it relays, so the relay holds it to
+    the source rate (≤ 10 a minute on one moment), not the mixed one."""
+    app, _db, sent, _own, _anna, router, _c = env
+    payload = _source_payload(router, tokens=2, reach=3)
+    for _ in range(RELAY_PER_MOMENT_PER_MIN):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
+    assert len(sent) == RELAY_SOURCE_PER_MOMENT_PER_MIN
+
+
+async def test_a_token_minted_before_falls_back_to_counting_tokens(env):
+    """A token minted before the hop was kept in it (≤ 48 h old) is still
+    honoured: the most tokens a moment carries take the source rate, as
+    before."""
+    app, _db, sent, _own, _anna, router, _c = env
+    legacy = _legacy_token(router)
+    payload = {
+        **_relay_payload("x", origin="peer-elsewhere"),
+        "rt": [*(f"tok-{i}" for i in range(MAX_RETURN_TOKENS - 1)), legacy],
+    }
+    for _ in range(RELAY_PER_MOMENT_PER_MIN):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
+    assert len(sent) == RELAY_SOURCE_PER_MOMENT_PER_MIN
+
+
+def _legacy_token(router, *, to=NEIGHBOUR, prev=OTHER, moment_id="m-far") -> str:
+    """``exp ‖ prev_hop`` — the plaintext before v_96 P2."""
+    nonce = os.urandom(12)
+    expires = int(datetime.fromisoformat(EXPIRES).timestamp())
+    plain = expires.to_bytes(8, "big") + prev.encode()
+    aad = f"moment-return:v1|{moment_id}|{to}".encode()
+    return b64url_encode(nonce + AESGCM(router._token_key).encrypt(nonce, plain, aad))
+
+
 async def test_more_than_max_return_tokens_is_refused(env):
     app, _db, sent, _own, _anna, router, _c = env
-    payload = _source_payload(router, tokens=MAX_RETURN_TOKENS + 1)
+    payload = _source_payload(router, tokens=MAX_RETURN_TOKENS + 1, hop=4)
     await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
     assert sent == []
 

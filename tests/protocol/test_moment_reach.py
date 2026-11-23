@@ -47,7 +47,7 @@ from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.moment import MOMENT_MAX_HOPS
 from socialhome.federation.federation_service import FederationService
 from socialhome.moment_origin import NO_RELAY_FIELD, REACH_FIELD, sign_moment_origin
-from socialhome.services.resync_on_upgrade import request_capability_resync
+from socialhome.services.capability_resync import request_capability_resync
 
 pytestmark = pytest.mark.security
 
@@ -650,11 +650,20 @@ async def test_the_look_never_goes_to_a_household_seated_from_an_invite_link(env
     assert caps[NEW]["moment_look_hops"] == 3
 
 
-async def test_an_upgraded_peer_is_told_how_far_we_look(env):
+async def test_an_upgraded_peer_learns_our_look_by_asking(env):
     """A household that just reached v_96 never kept the look we sent while
-    it was older — it is told again, once, right away."""
+    it was older: we don't push it again on its version rising — its own
+    startup capability resync (an upgrade asks every peer) asks us, and the
+    answer carries it."""
     app, _db, sent = env
     await _deliver(app, FET.INSTANCE_CAPABILITIES_UPDATED, _caps(), from_instance=OLD95)
+    assert _look_sends(sent) == {}
+    await _deliver(
+        app,
+        FET.INSTANCE_RESYNC_REQUEST,
+        {"scope": "capabilities"},
+        from_instance=OLD95,
+    )
     assert _look_sends(sent) == {OLD95: 3}
 
 

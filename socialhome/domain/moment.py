@@ -41,10 +41,13 @@ MOMENT_MAX_HOPS: int = 5
 MOMENT_DEFAULT_REACH: int = 3
 
 #: How far a viewer looks when they chose nothing (``moments.max_hops``).
-#: Also the hops every paired household gets a relayed copy at: a hop-4 or
-#: hop-5 copy goes only to a household that said it looks that far
-#: (``moment_look_hops``, decision C).
 MOMENT_DEFAULT_MAX_HOPS: int = 3
+
+#: v_96 decision C — the hops every paired household gets a relayed copy
+#: at. A hop-4 or hop-5 copy (one past this) goes only to a household that
+#: said it looks that far (``moment_look_hops``). The relay's look gate;
+#: equal to the viewer default today but a different rule.
+MOMENT_UNGATED_HOPS: int = 3
 
 #: The most a person may choose (``moments.reach``) and a household allow
 #: (``moments.reach_max``) — the wire cap itself: one global cap for reach
