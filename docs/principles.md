@@ -184,7 +184,8 @@ host and its admins know who follows (v_96)" a global space's items reach
 members and followers over the space's opaque channel
 (`/gfs/channels/publish-anon`, below), and the space-id-keyed
 `POST /gfs/publish`, `POST /gfs/subscribe` and `space_subscribers` are
-removed. The paragraphs below describe the relay as it worked until then;
+removed. The paragraphs above and below describe the relay as it worked
+until then;
 the anonymity rules (no `from_instance`, cookie-less session, capability
 proof, fail closed) carry over unchanged to the channel publish. The GFS
 still holds the follower graph — now as the channel's identified seats,
@@ -1189,8 +1190,8 @@ that concedes, exactly:
 1. **The host and its delegated admins store who follows.** The acting host
    (owner or the delegated admin household that seated it) and every
    delegated-admin household hold the follower roster: the follower
-   household's id, its following users and their seats, and they see a
-   follower's catch-up and its comments. That is wider than before, when a
+   household's id, its following users and their seats, and they see its
+   comments; the acting host also sees its catch-up. That is wider than before, when a
    GFS follower was unknown to the host. Nobody else learns it: roster
    gossip, the roster snapshot, the mailbox directory and
    `GET /api/spaces/{id}/members` carry follower seats only to admin
@@ -1205,7 +1206,8 @@ that concedes, exactly:
 3. **The owner publishes into its own channel** (relaxes the v_51 rule that
    the owner never publishes there). It sends its own household's items,
    moderation outcomes and items whose author could not reach the channel,
-   anonymously like any member, into every channel of the space. A GFS can
+   anonymously like any member, into every channel of the space — global
+   spaces and private spaces with `private_gfs` on alike. A GFS can
    link channel and space by the owner's IP and timing; it already could,
    by the link-pair residual above.
 4. **The follower TOFU re-pin exception is removed.** There is no
@@ -1221,8 +1223,8 @@ that concedes, exactly:
    right.
 
 What does not change: the GFS reads nothing it relays and still cannot
-forge an item; the follower set it sees is the channel's seats, without the
-space id, as for any private channel; households met through a GFS still
+forge an item; the follower set it sees is the channel's seats (the channel carries no
+space id on the wire); households met through a GFS still
 never talk directly; non-member households on the mesh still see only
 `SPACE_ROUTED` ciphertext. Anything that shows follower households to
 non-admin members, or followers to each other, is a §2-principle change
