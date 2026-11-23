@@ -12,18 +12,23 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from socialhome.domain.events import MomentCreated, MomentDeleted
 from socialhome.domain.moment import (
     MOMENT_COUNTS_MAX_EMOJIS,
     MOMENT_COUNTS_MAX_TOTAL,
+    MOMENT_DEFAULT_REACH,
     MOMENT_DEFAULT_RETENTION_DAYS,
     MOMENT_MAX_HASHTAG_LEN,
     MOMENT_MAX_HASHTAGS_PER_POST,
+    MOMENT_MAX_HOPS,
     MOMENT_MAX_LIFETIME_DAYS,
+    MOMENT_MAX_REACH,
     MOMENT_MIN_RETENTION_DAYS,
     MOMENT_REACTION_MAX_EMOJI_BYTES,
     MOMENT_RELAY_MAX_AGE_HOURS,
     REACTION_REACH_AUTHOR,
     REACTION_REACH_HOUSEHOLD,
+    Moment,
     MomentReactionInvalidError,
     MomentReactionSummary,
     MomentTombstone,
@@ -225,3 +230,40 @@ def test_merged_reaction_view():
         5,
         1_000,
     )
+
+
+def test_reach_defaults_and_bounds():
+    """v_96: a moment goes 3 hops unless its author chose otherwise; a
+    person may choose up to 5, relays still stop at the wire cap (3 for
+    now)."""
+    assert MOMENT_DEFAULT_REACH == 3
+    assert MOMENT_MAX_REACH == 5
+    assert MOMENT_MAX_HOPS == 3
+    moment = Moment(
+        id="m",
+        author_user_id="u",
+        content="c",
+        media_url=None,
+        media_type=None,
+        duration_ms=None,
+        parent_moment_id=None,
+        origin_instance_id="o",
+        created_at="t",
+        expires_at="t",
+    )
+    assert moment.reach == MOMENT_DEFAULT_REACH
+    created = MomentCreated(
+        moment_id="m",
+        author_user_id="u",
+        content="c",
+        media_url=None,
+        media_type=None,
+        duration_ms=None,
+        parent_moment_id=None,
+        parent_author_user_id=None,
+        origin_instance_id="o",
+        expires_at="t",
+    )
+    assert created.reach == 3
+    deleted = MomentDeleted(moment_id="m", author_user_id="u", origin_instance_id="o")
+    assert deleted.reach == 3

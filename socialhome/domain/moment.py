@@ -34,6 +34,14 @@ MOMENT_MAX_VIDEO_MS: int = 15_000
 #: receiver bumps and re-fans up to ``MAX_HOPS - 1``.
 MOMENT_MAX_HOPS: int = 3
 
+#: v_96 — how far a moment goes when its author chose nothing (hops).
+MOMENT_DEFAULT_REACH: int = 3
+
+#: The most a person may choose (``moments.reach``) and a household allow
+#: (``moments.reach_max``). Relays still stop at :data:`MOMENT_MAX_HOPS`:
+#: a household forwards only while ``hop < min(reach, MOMENT_MAX_HOPS)``.
+MOMENT_MAX_REACH: int = 5
+
 #: How long people who follow an author keep the author's moments when the
 #: author chose nothing (``moments.follower_retention_days``, decision 6d).
 #: Everyone else sees a moment for 24 hours.
@@ -168,6 +176,10 @@ class Moment:
     #: tombstone until ``expires_at`` so a replayed or late-arriving create
     #: for the same id is refused. Ordinary reads never return tombstones.
     deleted_at: str | None = None
+    #: v_96 — how many hops the moment goes (1–5), as its origin signed it:
+    #: computed when it is written (``moments.reach``, NULL = 3), so a later
+    #: settings change never moves where its delete or totals go.
+    reach: int = MOMENT_DEFAULT_REACH
 
 
 @dataclass(slots=True, frozen=True)

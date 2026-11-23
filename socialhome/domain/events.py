@@ -3143,6 +3143,8 @@ class MomentCreated(DomainEvent):
     #: when relayed. A protected account gets no frame (nor a reply
     #: notification) for one from 2+ hops away (§CP.R, decision 14).
     hop_count: int = 1
+    #: v_96 — how many hops the moment goes (1–5, the row's ``reach``).
+    reach: int = 3
 
 
 @dataclass(slots=True, frozen=True)
@@ -3158,6 +3160,9 @@ class MomentDeleted(DomainEvent):
     origin_instance_id: str
     occurred_at: datetime = field(default_factory=_now)
     is_public: bool = False
+    #: v_96 — the deleted moment's reach (its row's): the delete goes as far
+    #: as the moment did, under the same signed mark.
+    reach: int = 3
 
 
 @dataclass(slots=True, frozen=True)
