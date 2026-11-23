@@ -12777,6 +12777,17 @@ def cmd_verify() -> None:
     else:
         print("  v_95 sync pages gate in place ✓")
     failures.extend(_verify_sync_page(state))
+    # v_96 — subscriber seats: a follow is an auto-approved join with role
+    # subscriber, and the reader cert / subscriber grant go only to a
+    # household at >= v_96, so the OURS round-trip above is what proves
+    # every pair can follow.
+    if int(_Cap.MIN_FOR_SUBSCRIBER_SEATS) != 96 or _OURS < 96:
+        failures.append(
+            "MIN_FOR_SUBSCRIBER_SEATS moved off v_96 (or OURS fell below it) — "
+            "no household could follow a space with one seat on every path"
+        )
+    else:
+        print("  v_96 subscriber seats gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key

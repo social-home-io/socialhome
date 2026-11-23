@@ -60,6 +60,7 @@ from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.services.gfs_member_publish_service import (
     ANON_TS_JITTER_S,
     GfsMemberPublishService,
+    _cert_lets,
     build_item_plaintext,
     parse_item_plaintext,
 )
@@ -2012,3 +2013,38 @@ async def test_an_old_node_refusing_both_suites_ends_on_json(world):
         (conn.id, SPACE_ID, "zlib1+dict1"),
         (conn.id, SPACE_ID, "zlib1"),
     }
+
+
+@pytest.mark.parametrize(
+    ("item_type", "comment", "react", "ok"),
+    [
+        ("comment", True, False, True),
+        ("comment", False, True, False),
+        ("reaction_add", False, True, True),
+        ("reaction_add", True, False, False),
+        ("post", True, True, False),
+    ],
+)
+def test_a_reader_cert_publishes_only_what_the_follower_switches_allow(
+    item_type, comment, react, ok
+):
+    """v_96 — our follower household's reader cert is not used for an item
+    the receivers would refuse under the space's follower switches."""
+    seed = os.urandom(32)
+    cert = bind_writer_users(
+        sign_writer_cert(
+            space_seed=seed,
+            space_id=SPACE_ID,
+            epoch=1,
+            instance_pk=ed25519_public_key(os.urandom(32)),
+            scope="comment",
+            reader=True,
+        ),
+        space_seed=seed,
+        user_ids=[AUTHOR],
+    ).to_wire()
+    features = SpaceFeatures(
+        allow_subscriber_comment=comment, allow_subscriber_react=react
+    )
+    assert _cert_lets(cert, AUTHOR, item_type, features) is ok
+    assert not _cert_lets({"scope": "comment"}, AUTHOR, "comment", features)

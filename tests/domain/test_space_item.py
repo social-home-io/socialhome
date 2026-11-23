@@ -11,6 +11,8 @@ import pytest
 from orjson import dumps as orjson_dumps
 
 from socialhome.domain.item_zdict import ZDICT_V1 as ZDICT
+from socialhome.domain.space import SpaceFeatures
+from socialhome.domain.space_item import _REQUIRED_SCOPE as REQUIRED_SCOPE_TABLE
 from socialhome.domain.space_item import (
     AUTHORITY_KIND_APPROVED_POST,
     AUTHORITY_KIND_FIELD,
@@ -46,13 +48,67 @@ from socialhome.domain.space_item import (
     pad_json_object,
     payload_suite_of,
     reaction_emoji_ok,
+    reader_cert_permits,
     required_scope,
     seal_item_plaintext,
     stamp_to_db,
     stored_stamp,
     zlib_item_plaintext,
 )
-from socialhome.domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
+from socialhome.domain.writer_cert import (
+    WRITER_SCOPE_COMMENT,
+    WRITER_SCOPE_WRITE,
+    WriterCert,
+)
+
+
+def _reader_cert(*, reader: bool) -> WriterCert:
+    return WriterCert(
+        cert_suite="ed25519",
+        space_id="sp-1",
+        epoch=1,
+        instance_pk="A" * 43,
+        scope=WRITER_SCOPE_COMMENT,
+        issued_at=1,
+        cert_sig="sig",
+        reader=reader,
+    )
+
+
+#: What a reader cert may carry, per flag pair (comment, react).
+_READER_ALLOWED: dict[str, tuple[bool, bool]] = {
+    ITEM_TYPE_COMMENT: (True, False),
+    ITEM_TYPE_COMMENT_EDIT: (True, False),
+    ITEM_TYPE_COMMENT_DELETE: (True, False),
+    ITEM_TYPE_REACTION_ADD: (False, True),
+    ITEM_TYPE_REACTION_REMOVE: (False, True),
+}
+
+
+@pytest.mark.parametrize("item_type", sorted(REQUIRED_SCOPE_TABLE))
+@pytest.mark.parametrize("comment", [False, True])
+@pytest.mark.parametrize("react", [False, True])
+def test_reader_cert_permits_every_item_type(item_type, comment, react):
+    features = SpaceFeatures(
+        allow_subscriber_comment=comment, allow_subscriber_react=react
+    )
+    # A non-reader cert is never narrowed by the follower switches.
+    assert reader_cert_permits(_reader_cert(reader=False), item_type, features)
+    if item_type == "author_profile":
+        expected = comment or react
+    elif item_type in _READER_ALLOWED:
+        needs_comment, needs_react = _READER_ALLOWED[item_type]
+        expected = (needs_comment and comment) or (needs_react and react)
+    else:
+        expected = False  # posts and their edits / deletes: never a reader
+    assert reader_cert_permits(_reader_cert(reader=True), item_type, features) is (
+        expected
+    )
+
+
+def test_reader_cert_refuses_an_unknown_item_type():
+    features = SpaceFeatures(allow_subscriber_comment=True, allow_subscriber_react=True)
+    assert not reader_cert_permits(_reader_cert(reader=True), "bogus", features)
 
 
 def test_the_two_inner_shapes_partition_the_supported_types():

@@ -224,7 +224,7 @@ class _Certs:
     async def verified_instance_pk(self, instance_id, *, claimed=None):
         return self.peers.get(instance_id)
 
-    async def entitlement_for_instance(self, space, instance_id):
+    async def issuable_entitlement(self, space, instance_id):
         return WriterEntitlement("write", frozenset({AUTHOR}))
 
 

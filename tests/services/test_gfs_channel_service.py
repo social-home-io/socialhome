@@ -163,12 +163,20 @@ class _Certs:
     def __init__(self) -> None:
         self.pks: dict[str, bytes] = {}
         self.scopes: dict[str, str | None] = {}
+        #: What a cert may carry, where it differs from the entitlement (a
+        #: follower household below v_96 is issued nothing).
+        self.issuable: dict[str, str | None] = {}
 
     async def verified_instance_pk(self, instance_id, *, claimed=None):
         return self.pks.get(instance_id)
 
     async def entitlement_for_instance(self, space, instance_id):
         return WriterEntitlement(self.scopes.get(instance_id, "write"))
+
+    async def issuable_entitlement(self, space, instance_id):
+        if instance_id in self.issuable:
+            return WriterEntitlement(self.issuable[instance_id])
+        return await self.entitlement_for_instance(space, instance_id)
 
 
 class _Federation:
@@ -686,6 +694,18 @@ async def test_a_reader_gets_a_pass_but_no_writer_key(env):
     assert grant is not None
     assert "channel_pass" in grant and "channel_cert" not in grant
     assert "writer_key" not in grant
+
+
+async def test_a_follower_issued_no_cert_gets_no_channel_writer_key(env):
+    """M2 (v_96): the channel writer key follows the cert's issuance rules —
+    a follower household below v_96 is entitled to comment but issued no
+    cert, so it reads (a pass) but gets no writer key."""
+    await _channel_ready(env)
+    env.owner.certs.scopes[env.member.h.instance_id] = "comment"
+    env.owner.certs.issuable[env.member.h.instance_id] = None
+    grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert grant is not None
+    assert "channel_pass" in grant and "writer_key" not in grant
 
 
 @pytest.mark.security

@@ -114,16 +114,17 @@ from ..domain.gfs_member_publish import (
     MemberPublishAnonRequest,
     owner_epoch_notice_signing_payload,
 )
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, SpaceType
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatures, SpaceRole, SpaceType
 from ..domain.space_item import (
     ITEM_TYPE_POST,
     PAYLOAD_SUITE_JSON,
     SUPPORTED_ITEM_TYPES,
     compressed_item_plaintexts,
+    reader_cert_permits,
     required_scope,
     seal_item_plaintext,
 )
-from ..domain.writer_cert import scope_permits
+from ..domain.writer_cert import WriterCert, scope_permits
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..outbound_fetch import OutboundFetchRefused
 from ..task_drain import wait_tasks_done
@@ -170,19 +171,28 @@ _COMPRESSED_KEY = "compressed_payloads"
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
-def _cert_lets(cert: dict, author_user_id: str, item_type: str) -> bool:
+def _cert_lets(
+    cert: dict, author_user_id: str, item_type: str, features: SpaceFeatures
+) -> bool:
     """Whether our wire cert lets ``author_user_id`` publish ``item_type``:
     the scope the type needs (:func:`required_scope` — ``write`` for a post
     and its edit / delete, ``comment`` for comments and reactions) and a v2
     user binding naming them. The binding names the users holding the
     cert's scope, so a comment-only user of a household holding a ``write``
-    cert is not bound and keeps the host path."""
+    cert is not bound and keeps the host path. A follower's ``reader`` cert
+    (v_96) also needs the matching follower switch in our pinned config
+    (:func:`reader_cert_permits`) — receivers refuse it otherwise."""
     users = cert.get("writer_user_ids")
+    try:
+        parsed = WriterCert.from_wire(cert)
+    except ValueError:
+        return False
     return (
-        scope_permits(str(cert.get("scope") or ""), required_scope(item_type))
-        and bool(cert.get("users_sig"))
+        scope_permits(parsed.scope, required_scope(item_type))
+        and bool(parsed.users_sig)
         and isinstance(users, list)
         and author_user_id in users
+        and reader_cert_permits(parsed, item_type, features)
     )
 
 
@@ -472,7 +482,9 @@ class GfsMemberPublishService:
             # channel, and only when our cert lets THIS author post THIS type
             # (the cert rides inside the ciphertext, as always).
             cert = await self._writer_certs.current_own_cert_wire(space_id)
-            if cert is None or not _cert_lets(cert, author_user_id, item_type):
+            if cert is None or not _cert_lets(
+                cert, author_user_id, item_type, space.features
+            ):
                 return []
             return await self._channels.plan(space_id)
         if not self._publicly_readable(space):
@@ -481,7 +493,9 @@ class GfsMemberPublishService:
         if item_type == ITEM_TYPE_POST and await self._relays_as_owner(space):
             return []
         cert = await self._writer_certs.current_own_cert_wire(space_id)
-        if cert is None or not _cert_lets(cert, author_user_id, item_type):
+        if cert is None or not _cert_lets(
+            cert, author_user_id, item_type, space.features
+        ):
             return []
         epoch = await self._crypto.get_current_epoch(space_id)
         if epoch is None or (

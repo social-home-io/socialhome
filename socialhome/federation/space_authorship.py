@@ -317,6 +317,33 @@ class SpaceAuthorship:
             return True
         return subscriber_ok and seat.role == SpaceRole.SUBSCRIBER.value
 
+    async def known_follower_refused(
+        self,
+        *,
+        origin_instance_id: str,
+        space_id: str,
+        author_user_id: str,
+        subscriber_ok: bool,
+    ) -> bool:
+        """Whether THIS household's roster refuses a member-published comment
+        or reaction because ``author_user_id`` is a follower here and the
+        matching switch is off (``subscriber_ok`` false), or is banned.
+
+        For a follower-only household, which takes an author it does not
+        know on the cert alone: since v_96 it holds the same roster as a
+        member, so a known follower is held to the switches even under a
+        plain comment cert issued before v_96 (no ``reader`` flag)."""
+        if not author_user_id or not space_id:
+            return False
+        if await self._spaces.is_banned(space_id, author_user_id):
+            return True
+        seat = await self._seats.get(space_id, origin_instance_id, author_user_id)
+        return (
+            seat is not None
+            and seat.role == SpaceRole.SUBSCRIBER.value
+            and not subscriber_ok
+        )
+
     async def is_host(self, event: FederationEvent, space_id: str) -> bool:
         """The sender hosts ``space_id`` here: its owner, or the delegated
         admin household that invited us while delegation is on

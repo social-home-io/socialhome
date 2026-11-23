@@ -66,9 +66,14 @@ class _Seats:
     """A stand-in for ``SpaceAuthorship.item_seat_admits`` /
     ``item_access_admits`` recording what it was asked."""
 
-    def __init__(self, admits: bool = True) -> None:
+    def __init__(self, admits: bool = True, follower_blocked: bool = False) -> None:
         self.admits = admits
+        self.follower_blocked = follower_blocked
         self.calls: list[tuple[str, dict]] = []
+
+    async def known_follower_refused(self, **kw):
+        self.calls.append(("follower", kw))
+        return self.follower_blocked
 
     async def item_seat_admits(self, **kw):
         self.calls.append(("seat", kw))
@@ -278,12 +283,37 @@ async def test_a_member_household_checks_the_comment_seat(env):
     assert await env["posts"].get_comment(cid) is None
 
 
-async def test_a_follower_household_relies_on_the_cert(env):
+async def test_a_follower_household_takes_an_unknown_author_on_the_cert(env):
+    """A follower-only household holds no access levels of its own: an
+    author it does not know as a follower is decided by the cert alone."""
     seats = _Seats(admits=False)
     assert await _apply(
         env, "comment", _comment(env, _cid()), member=False, authorship=seats
     )
-    assert seats.calls == []
+    assert [kind for kind, _ in seats.calls] == ["follower"]
+
+
+async def test_a_follower_household_applies_the_switches_to_a_known_follower(env):
+    """v_96 — a follower household holds the roster too: a comment whose
+    author it knows as a follower is refused while the switch is off, even
+    under a plain (non-reader) cert issued before v_96."""
+    seats = _Seats(admits=True, follower_blocked=True)
+    cid = _cid()
+    assert not await _apply(
+        env, "comment", _comment(env, cid), member=False, authorship=seats
+    )
+    assert seats.calls == [
+        (
+            "follower",
+            {
+                "origin_instance_id": ORIGIN,
+                "space_id": SPACE,
+                "author_user_id": AUTHOR,
+                "subscriber_ok": False,
+            },
+        )
+    ]
+    assert await env["posts"].get_comment(cid) is None
 
 
 # ── comment_edit ─────────────────────────────────────────────────────────

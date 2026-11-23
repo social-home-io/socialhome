@@ -840,3 +840,11 @@ def test_v92_content_names_on_every_path_is_a_sync_line():
     stream."""
     assert FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED in SYNC_RECORD_LINES
     assert _shape(92) != _shape(91)
+
+
+def test_v96_subscriber_seats_is_not_a_sync_line():
+    """v_96: a follower is a member with the read-only role on every path —
+    the same roster and the existing role-based subset — so no record
+    changes shape and every sync watermark is kept."""
+    assert FederationCapability.MIN_FOR_SUBSCRIBER_SEATS not in SYNC_RECORD_LINES
+    assert _shape(96) == _shape(95)

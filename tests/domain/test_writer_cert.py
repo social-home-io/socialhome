@@ -112,3 +112,78 @@ def test_strongest_scope():
         strongest_scope([WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE])
         == WRITER_SCOPE_WRITE
     )
+
+
+# ── v_96 reader flag ──────────────────────────────────────────────────────
+
+
+def test_reader_defaults_off_and_stays_off_the_wire():
+    cert = _cert()
+    assert cert.reader is False
+    assert "reader" not in cert.to_wire()
+    assert "reader" not in cert.signing_body()
+
+
+def test_reader_cert_round_trips_and_is_signed():
+    cert = _cert(scope=WRITER_SCOPE_COMMENT, reader=True)
+    wire = cert.to_wire()
+    assert wire["reader"] is True
+    assert cert.signing_body()["reader"] is True
+    assert WriterCert.from_wire(wire) == cert
+
+
+@pytest.mark.parametrize("value", [False, 1, 0, "true", None, [True]])
+def test_reader_has_one_encoding(value):
+    wire = {**_cert(scope=WRITER_SCOPE_COMMENT).to_wire(), "reader": value}
+    with pytest.raises(ValueError):
+        WriterCert.from_wire(wire)
+
+
+def test_reader_needs_comment_scope():
+    wire = {**_cert(scope=WRITER_SCOPE_WRITE).to_wire(), "reader": True}
+    with pytest.raises(ValueError):
+        WriterCert.from_wire(wire)
+
+
+@pytest.mark.parametrize("key", ["readers", "role", "expires_at", "extra"])
+def test_unknown_field_is_refused(key):
+    wire = {**_cert().to_wire(), key: 1}
+    with pytest.raises(ValueError):
+        WriterCert.from_wire(wire)
+
+
+def test_every_known_field_parses():
+    wire = {
+        **_cert(scope=WRITER_SCOPE_COMMENT, reader=True).to_wire(),
+        "writer_user_ids": ["u-1"],
+        "users_sig": "x",
+        "users_sig_suite": "ed25519",
+    }
+    cert = WriterCert.from_wire(wire)
+    assert cert.reader is True
+    assert cert.writer_user_ids == ("u-1",)
+
+
+@pytest.mark.parametrize("scope", [["comment"], {"write": 1}, {"comment"}])
+def test_an_unhashable_scope_is_a_value_error(scope):
+    """A list / dict scope must be refused as malformed (ValueError), never
+    escape as a TypeError past every ``except ValueError`` receiver."""
+    wire = {**_cert().to_wire(), "scope": scope}
+    with pytest.raises(ValueError):
+        WriterCert.from_wire(wire)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"writer_user_ids": ["u-1"]},
+        {"users_sig_suite": "ed25519"},
+        {"writer_user_ids": ["u-1"], "users_sig": "", "users_sig_suite": "ed25519"},
+        {"users_sig": ""},
+    ],
+)
+def test_a_user_binding_field_without_its_signature_is_refused(extra):
+    """One canonical encoding: the binding's fields travel only with a
+    non-empty ``users_sig`` (exactly what ``to_wire`` emits)."""
+    with pytest.raises(ValueError):
+        WriterCert.from_wire({**_cert().to_wire(), **extra})

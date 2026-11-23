@@ -29,6 +29,7 @@ from .crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
 from .domain.writer_cert import (
     MAX_WRITER_CERT_EPOCH,
     MAX_WRITER_USERS,
+    WRITER_SCOPE_COMMENT,
     WRITER_SCOPES,
     WriterCert,
     scope_permits,
@@ -126,11 +127,16 @@ def sign_writer_cert(
     instance_pk: bytes,
     scope: str,
     issued_at: int | None = None,
+    reader: bool = False,
 ) -> WriterCert:
     """Issue a writer cert for household ``instance_pk`` (32-byte Ed25519
-    identity public key), signed with the space authority seed."""
+    identity public key), signed with the space authority seed. ``reader``
+    (v_96) marks a follower's cert — ``comment`` scope only — and is signed
+    with the rest."""
     if scope not in WRITER_SCOPES:
         raise ValueError(f"unknown writer scope {scope!r}")
+    if reader and scope != WRITER_SCOPE_COMMENT:
+        raise ValueError("a reader cert is comment-only")
     if len(instance_pk) != 32:
         raise ValueError("instance_pk must be a 32-byte Ed25519 public key")
     if isinstance(epoch, bool) or not 0 <= int(epoch) <= MAX_WRITER_CERT_EPOCH:
@@ -143,17 +149,10 @@ def sign_writer_cert(
         scope=scope,
         issued_at=int(time.time()) if issued_at is None else int(issued_at),
         cert_sig="",
+        reader=bool(reader),
     )
     sig = sign_ed25519(space_seed, writer_cert_signing_bytes(unsigned))
-    return WriterCert(
-        cert_suite=unsigned.cert_suite,
-        space_id=unsigned.space_id,
-        epoch=unsigned.epoch,
-        instance_pk=unsigned.instance_pk,
-        scope=unsigned.scope,
-        issued_at=unsigned.issued_at,
-        cert_sig=b64url_encode(sig),
-    )
+    return replace(unsigned, cert_sig=b64url_encode(sig))
 
 
 def verify_writer_cert(

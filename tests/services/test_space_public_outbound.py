@@ -869,6 +869,9 @@ class _PeerKeys:
             return True
         return self.versions.get(iid, 0) >= min_version
 
+    async def space_member_supports(self, iid, *, min_version):
+        return await self.peer_supports(iid, min_version=min_version)
+
 
 async def _with_certs(env, *, seats=None, pks=None, versions=None):
     certs = SpaceWriterCertService(
@@ -1376,6 +1379,78 @@ async def test_an_approved_remote_post_is_relayed_under_its_authors_signature(en
         author_pk=author_kp.public_key,
         required_scope="comment",
     )
+
+
+async def test_an_approved_post_of_a_mixed_household_carries_a_plain_cert(env):
+    """I3 — members equal on any path: a household with a plain member next
+    to a follower holds ONE reader cert (its comment set binds the
+    follower), which no receiver accepts on a post. The approved re-stamp is
+    issued without follower seats: a plain cert binding only the member."""
+    skp, author_kp, _iid, post, relay = await _approved_env(
+        env, seats=("subscriber", "member")
+    )
+    space = await env["space_repo"].get("sp-pub")
+    space = dataclasses.replace(
+        space,
+        features=dataclasses.replace(space.features, allow_subscriber_react=True),
+    )
+    await env["space_repo"].save(space)
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=post, space_id="sp-pub", approved_by="mod", public_relay=relay
+        )
+    )
+    assert len(env["gfs"].calls) == 1
+    inner = await _removal_inner(env, skp)
+    cert = WriterCert.from_wire(inner["writer_cert"])
+    assert cert.reader is False
+    assert cert.writer_user_ids == (f"{_iid}-u1",)
+    assert SpaceWriterCertService.check_item_cert(
+        await env["space_repo"].get("sp-pub"),
+        inner["writer_cert"],
+        epoch=env["gfs"].calls[0]["payload"]["epoch"],
+        author_pk=author_kp.public_key,
+        required_scope="comment",
+        item_type="post",
+    )
+
+
+async def test_a_reader_cert_is_never_stamped_on_a_post(env):
+    """Hardening: whatever path asks, ``_encrypt_with_cert`` refuses to put
+    a follower's reader cert on an item type it may not carry."""
+    _skp, author_kp, iid, _post, relay = await _approved_env(env, seats=("subscriber",))
+    space = await env["space_repo"].get("sp-pub")
+    await env["space_repo"].save(
+        dataclasses.replace(
+            space,
+            features=dataclasses.replace(
+                space.features,
+                allow_subscriber_comment=True,
+                allow_subscriber_react=True,
+            ),
+        )
+    )
+    sub = env["sub"]
+    with pytest.raises(space_public_outbound._NoWriterCert):
+        await sub._encrypt_with_cert(
+            "sp-pub",
+            relay,
+            iid,
+            expect_pk=author_kp.public_key.hex(),
+            required=True,
+            required_scope="comment",
+        )
+    # The same cert on a comment is fine.
+    sealed = await sub._encrypt_with_cert(
+        "sp-pub",
+        relay,
+        iid,
+        expect_pk=author_kp.public_key.hex(),
+        required=True,
+        required_scope="comment",
+        item_type="comment",
+    )
+    assert sealed.ct
 
 
 async def test_an_approved_post_without_a_signed_copy_is_not_relayed(env, caplog):

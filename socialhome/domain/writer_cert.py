@@ -18,6 +18,12 @@ Wire shape (every field always present, never positional)::
      "instance_pk": <b64url Ed25519 household identity pubkey>,
      "scope": "write" | "comment", "issued_at": <unix seconds>,
      "cert_sig": <b64url>}
+
+plus, since v_96, ``"reader": true`` on a follower's cert (scope
+``comment`` only; absent — never ``false`` — on every other cert, so a
+pre-v_96 cert keeps byte-identical signing bytes), and the v2 user binding
+(``writer_user_ids``, ``users_sig``, ``users_sig_suite``). Any other key is
+refused.
 """
 
 from __future__ import annotations
@@ -49,6 +55,30 @@ MAX_WRITER_CERT_EPOCH: int = 2**63 - 1
 MAX_WRITER_USERS: int = 64
 MAX_WRITER_USER_ID_CHARS: int = 128
 
+#: Every key a wire cert may carry. Anything else is refused, so a field a
+#: newer issuer signs can never be silently dropped by this parser.
+_WIRE_KEYS: frozenset[str] = frozenset(
+    {
+        "cert_suite",
+        "space_id",
+        "epoch",
+        "instance_pk",
+        "scope",
+        "issued_at",
+        "cert_sig",
+        "writer_user_ids",
+        "users_sig",
+        "users_sig_suite",
+        "reader",
+    }
+)
+
+
+#: The v2 user binding's keys — present only together with ``users_sig``.
+_BINDING_KEYS: frozenset[str] = frozenset(
+    {"writer_user_ids", "users_sig", "users_sig_suite"}
+)
+
 
 def scope_permits(held: str, required: str) -> bool:
     """True iff a cert of scope ``held`` authorizes a ``required`` action."""
@@ -72,10 +102,13 @@ def strongest_scope(scopes: Iterable[str]) -> str | None:
 class WriterEntitlement:
     """What one household may do in a space, as its issuer derives it: the
     strongest ``scope`` and the users holding that right (the v2 user
-    binding). A cert is re-issued at a new epoch whenever either shrinks."""
+    binding). ``reader`` (v_96) marks a ``comment`` entitlement that binds a
+    follower: its cert is flag-gated at the receivers. A cert is re-issued at
+    a new epoch whenever any of them narrows."""
 
     scope: str | None
     user_ids: frozenset[str] = frozenset()
+    reader: bool = False
 
 
 def _is_int(value: object) -> bool:
@@ -101,11 +134,18 @@ class WriterCert:
     writer_user_ids: tuple[str, ...] = ()
     users_sig: str = ""
     users_sig_suite: str = ""
+    #: v_96 — a follower's (subscriber seat's) cert: scope ``comment`` only,
+    #: and receivers apply the space's follower switches to it
+    #: (:func:`socialhome.domain.space_item.reader_cert_permits`). Signed by
+    #: ``cert_sig``; absent from the wire and the signing body when false.
+    reader: bool = False
 
     def signing_body(self) -> dict:
         """Every signed field — the cert minus ``cert_sig``. The suite tag is
-        inside the signature so it can't be swapped in transit."""
-        return {
+        inside the signature so it can't be swapped in transit. ``reader``
+        is in it only when set: a non-reader cert signs exactly the v_49
+        bytes, and stripping ``reader`` from a reader cert breaks it."""
+        body: dict = {
             "cert_suite": self.cert_suite,
             "space_id": self.space_id,
             "epoch": self.epoch,
@@ -113,11 +153,16 @@ class WriterCert:
             "scope": self.scope,
             "issued_at": self.issued_at,
         }
+        if self.reader:
+            body["reader"] = True
+        return body
 
     def users_signing_body(self) -> dict:
         """What the v2 user-binding signature covers: the cert's own
         signature (so it binds exactly this cert), its routing fields, the
-        sorted user ids and the binding's suite."""
+        sorted user ids and the binding's suite. ``reader`` is not repeated
+        here: ``cert_sig`` already signs it, and this binding signs
+        ``cert_sig``."""
         return {
             "cert_sig": self.cert_sig,
             "space_id": self.space_id,
@@ -140,9 +185,17 @@ class WriterCert:
         """Parse a wire dict; ``ValueError`` on any malformed / missing field.
 
         An unknown ``cert_suite`` STRING parses (the verifier rejects it with
-        ``UnsupportedWriterCertSuite``); an unknown ``scope`` does not."""
+        ``UnsupportedWriterCertSuite``); an unknown ``scope`` does not, nor
+        an unknown key, nor a ``reader`` that is not exactly ``true`` or sits
+        on a ``write`` cert."""
         if not isinstance(raw, dict):
             raise WrongTypeError("writer cert is not an object")
+        unknown = set(raw) - _WIRE_KEYS
+        if unknown:
+            raise ValueError(f"writer cert: unknown fields {sorted(unknown)}")
+        reader = "reader" in raw
+        if reader and raw["reader"] is not True:
+            raise ValueError("writer cert: bad reader")
         suite = raw.get("cert_suite")
         space_id = raw.get("space_id")
         epoch = raw.get("epoch")
@@ -158,15 +211,23 @@ class WriterCert:
             raise ValueError("writer cert: bad epoch")
         if not isinstance(instance_pk, str) or not instance_pk:
             raise ValueError("writer cert: bad instance_pk")
-        if scope not in WRITER_SCOPES:
+        # isinstance first: an unhashable scope (a list / dict) must be a
+        # ValueError like every other malformed field, not a TypeError.
+        if not isinstance(scope, str) or scope not in WRITER_SCOPES:
             raise ValueError("writer cert: bad scope")
         if not _is_int(issued_at):
             raise ValueError("writer cert: bad issued_at")
         if not isinstance(sig, str) or not sig:
             raise ValueError("writer cert: bad cert_sig")
+        if reader and scope != WRITER_SCOPE_COMMENT:
+            raise ValueError("writer cert: a reader cert is comment-only")
         users: tuple[str, ...] = ()
         users_sig = raw.get("users_sig", "")
         users_suite = raw.get("users_sig_suite", "")
+        # One canonical encoding: the binding's fields travel together with a
+        # non-empty ``users_sig`` (what :meth:`to_wire` emits) or not at all.
+        if _BINDING_KEYS & set(raw) and not (isinstance(users_sig, str) and users_sig):
+            raise ValueError("writer cert: user binding without users_sig")
         if users_sig:
             raw_users = raw.get("writer_user_ids")
             if (
@@ -193,4 +254,5 @@ class WriterCert:
             writer_user_ids=users,
             users_sig=str(users_sig) if users else "",
             users_sig_suite=str(users_suite) if users else "",
+            reader=reader,
         )

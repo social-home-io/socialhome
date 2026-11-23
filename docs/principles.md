@@ -66,8 +66,8 @@ the old space key. A receiver re-pins only when that certificate
   registered key when there is one — and
 - carries a strictly HIGHER `key_epoch` than the one it holds.
 
-**Removed in v_96** (see "Sign-off: a space's host and its admins know who
-follows (v_96)", point 4). Until v_96 there was one deliberate exception, for
+**Removed in v_96** (see "Sign-off: members know who follows
+(v_96)", point 4). Until v_96 there was one deliberate exception, for
 a household that merely FOLLOWED a public / global space through a
 connection server (no real seat): it re-pinned from
 the directory listing of the ONE GFS that seated its mirror — the key that
@@ -110,9 +110,9 @@ nothing it did not already. A protected (child) account's profile carries
 its name only. Since v_96 those items ride the space's opaque channel like
 every other item, a new follower gets the members roster in its seat ACK
 instead of the v_61 host bundle (which is gone), and a follower who comments
-publishes its own `author_profile` the same way, so members see its name —
-never its household id (see "Sign-off: a space's host and its admins know
-who follows (v_96)").
+publishes its own `author_profile` the same way; members also know its
+people from the roster, as they know any member's (see "Sign-off: members know who follows
+(v_96)").
 
 **Public moments are encrypted from the GFS too (v_62, owner decision
 2026-10-20).** The former "public Momentum is the one plaintext exception"
@@ -179,8 +179,8 @@ authorized purely by the space-authority signature sealed inside the
 opaque payload; the fan-out frame to subscribers is identity-free too. The relaying household's
 identity is not **required, stored, logged or forwarded**.
 
-**v_96 retires this relay for space content.** Since "Sign-off: a space's
-host and its admins know who follows (v_96)" a global space's items reach
+**v_96 retires this relay for space content.** Since "Sign-off: members know who
+follows (v_96)" a global space's items reach
 members and followers over the space's opaque channel
 (`/gfs/channels/publish-anon`, below), and the space-id-keyed
 `POST /gfs/publish`, `POST /gfs/subscribe` and `space_subscribers` are
@@ -495,8 +495,8 @@ relay keeps: **the GFS must not learn which household published.**
   `/gfs/channels/publish-anon` with the same writer group key, and
   `/gfs/member-publish-anon` and the space-keyed subscribe are removed. A
   follower allowed to comment or react holds the same writer key, so its
-  publishes look exactly like a member's (see "Sign-off: a space's host and
-  its admins know who follows (v_96)").
+  publishes look exactly like a member's (see "Sign-off: members know who
+  follows (v_96)").
 - **It learns when the space content key rotates** — from the owner's
   (household-signed) and delegated admins' (authority-signed) epoch notices
   — as it already could from the `epoch` of authority-signed post relays.
@@ -633,8 +633,8 @@ turned OFF or the last remote member leaves. **What it concedes, exactly:**
   and never subscribes; its registration and notices are anonymous. (Until
   v_96 it never published into the channel either; since v_96 it publishes
   its own household's items, moderation outcomes and items a member could
-  not get to the channel — see "Sign-off: a space's host and its admins
-  know who follows (v_96)", point 3.) But the server already sees the owner's instance id as the
+  not get to the channel — see "Sign-off: members know who
+  follows (v_96)", point 3.) But the server already sees the owner's instance id as the
   recipient of every link-joined member's `/gfs/envelope` (the signed-off
   link-pair residual above), the owner registers and announces from the
   same IP as its authenticated WebSocket, and a member's channel publish
@@ -1174,60 +1174,50 @@ network address and timing, as for every envelope it relays (see the
 link-joined pair sign-off above) — the lookup that would have told it
 directly is gone.
 
-### Sign-off: a space's host and its admins know who follows (v_96)
+### Sign-off: members know who follows (v_96)
 
-**Signed off by the owner on 2026-11-23.** Until v_96 a household could
-follow a public or global space two ways: as a GFS subscriber the host never
-saw (the GFS held the subscription), or through a follower invite link with
-a real seat that every member household learned from roster gossip. v_96
-makes it one seat on every path: **a follow is a join with role
-`subscriber`**, auto-approved while the space has `allow_subscribers` on
-(ban, age gate and the local-community edge rule still apply), and a global
-space's content reaches members and followers over the space's opaque
-channel ([`protocol/spaces.md`](./protocol/spaces.md#followers-v_96)). What
-that concedes, exactly:
+**Signed off by the owner on 2026-11-23** (revised the same day: followers
+take the members' path, owner decision "avoid having followers use a
+completely different path"). Until v_96 a household could follow a public
+or global space two ways: as a GFS subscriber the host never saw (the GFS
+held the subscription), or through a follower invite link with a real seat.
+v_96 makes it one seat on every path: **a follower is a member with the
+read-only `subscriber` role** — auto-approved while the space has
+`allow_subscribers` on (ban, age gate and the local-community edge rule
+still apply), on the same roster, reached the same way, and a global space's
+content reaches members and followers alike over the space's opaque channel
+([`protocol/spaces.md`](./protocol/spaces.md#followers-v_96)). What that
+concedes, exactly:
 
-1. **The host and its delegated admins store who follows.** The acting host
-   (owner or the delegated admin household that seated it) and every
-   delegated-admin household hold the follower roster: the follower
-   household's id, its following users and their seats, and they see its
-   comments; the acting host also sees its catch-up. That is wider than before, when a
-   GFS follower was unknown to the host. Nobody else learns it: roster
-   gossip, the roster snapshot, the mailbox directory and
-   `GET /api/spaces/{id}/members` carry follower seats only to admin
-   households and admin callers. Every other member — of the host household
-   or another — sees a **follower count** only, plus the name (never the
-   household) of a follower who comments.
-2. **A follower learns the members roster.** A follower who came through a
-   GFS now gets the members snapshot in its seat ACK, exactly as a
-   link-joined member does: member household ids, member names. It never
-   learns other followers, gets no live roster gossip and no mailbox
-   directory beyond the host's card.
+1. **Every household of the space knows who follows.** The host, the
+   admins, the members and the other followers hold follower seats like
+   any seat: the follower household's id, its following users and their
+   role. Until v_96 a GFS follower was unknown to the host and to members.
+   The app may show them grouped as "Followers".
+2. **A follower learns the roster.** A follower that came through a GFS
+   gets the roster in its seat ACK and the live gossip, exactly as a
+   link-joined member does: member and follower household ids and names.
 3. **The owner publishes into its own channel** (relaxes the v_51 rule that
    the owner never publishes there). It sends its own household's items,
    moderation outcomes and items whose author could not reach the channel,
    anonymously like any member, into every channel of the space — global
-   spaces and private spaces with `private_gfs` on alike. A GFS can
-   link channel and space by the owner's IP and timing; it already could,
-   by the link-pair residual above.
+   spaces and private spaces with `private_gfs` on alike. A GFS can link
+   channel and space by the owner's IP and timing; it already could, by the
+   link-pair residual above.
 4. **The follower TOFU re-pin exception is removed.** There is no
    follow-only mirror any more, so no household ever takes an authority pin
    from a GFS listing; the v_44 owner certificate is the only way a pin
    moves.
-5. **A local follower depends on the host for live content.** A follower
-   household that is paired with the host (or reached over the mesh) and
-   has no seat on a channel server gets each item from the acting host's
-   forward, never from other members (members never send to followers), so
-   it sees nothing new while that host is offline and catches up when it
-   returns. Members keep every path they had: no member loses content or a
-   right.
 
-What does not change: the GFS reads nothing it relays and still cannot
-forge an item; the follower set it sees is the channel's seats (the channel carries no
-space id on the wire); households met through a GFS still
-never talk directly; non-member households on the mesh still see only
-`SPACE_ROUTED` ciphertext. Anything that shows follower households to
-non-admin members, or followers to each other, is a §2-principle change
+What does not change: a follower writes only comments and reactions, only
+through a signed `reader` cert and only while the space allows them, and it
+receives none of the member-only data (zones, location, chat, proposals,
+sync pages) the existing role checks keep from it; the GFS reads nothing it
+relays and still cannot forge an item; the follower set it sees is the
+channel's seats (the channel carries no space id on the wire); households
+met through a GFS still never talk directly; non-member households on the
+mesh still see only `SPACE_ROUTED` ciphertext. Anything that lets a
+follower write more, or read member-only data, is a §2-principle change
 needing a new sign-off.
 
 ### Mailbox tickets hide a household among its epoch's households

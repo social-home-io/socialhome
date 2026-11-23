@@ -180,6 +180,11 @@ That single command runs the full sequence:
      attempt on) and the sealed redeem body carries the redeemer's (what
      the issuer stamps on the seat). Both land on the seats, so the seats
      are where the round-trip is provable.
+   - **v_96 subscriber seats.** ``verify`` pins
+     ``MIN_FOR_SUBSCRIBER_SEATS`` = 96: a follow (an auto-approved join with
+     role ``subscriber``) and its reader cert / subscriber grant go only to
+     a household at v_96, so the ``OURS`` round-trip above is what proves
+     every pair can follow.
    - **Sync status (migration 0150).** Beta reads its own space
      ``up_to_date`` (``GET /api/spaces/{id}`` ``sync``), and so must Alpha
      and Gamma — their host answered a sync with ``ok``. A member that

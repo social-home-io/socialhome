@@ -3915,6 +3915,7 @@ class SpaceService(
             features.posts_access != space.features.posts_access
             or features.allow_subscriber_comment
             != space.features.allow_subscriber_comment
+            or features.allow_subscriber_react != space.features.allow_subscriber_react
         ):
             await self._writer_certs_after_rights_change(space, updated)
         if (
@@ -4130,18 +4131,37 @@ class SpaceService(
         self, before: Space, after: Space
     ) -> None:
         """v_49 — a setting that decides a seat's write rights changed: the
-        ``posts`` access level (who posts directly) or "followers may
-        comment" (the ``subscriber`` role's comment right). One rule for
-        every role: any household whose entitlement shrank (scope, or the
-        users it covers) → rotate once, so the old certs and writer key die
-        with the epoch; otherwise each household that gained gets its new
-        credentials now, alone (:meth:`_send_credentials`)."""
+        ``posts`` access level (who posts directly) or a follower switch
+        ("followers may comment" / "may react", v_96: either puts the
+        ``subscriber`` role in the comment set). One rule for every role:
+        any household whose entitlement shrank (scope, or the users it
+        covers) → rotate once, so the old certs and writer key die with the
+        epoch; otherwise each household that gained, and can be issued a
+        cert, gets its new credentials now, alone (:meth:`_send_credentials`).
+
+        A follower switch turning OFF also rotates whenever a household's
+        comment set bound a follower — even if its entitlement looks the
+        same (comment off, react still on): a plain comment cert issued to
+        that follower before v_96, or by a v_95 delegated admin, carries no
+        ``reader`` flag, so only the epoch ending retires it (owner design,
+        spaces.md "Followers (v_96)")."""
         if self._writer_certs is None or self._remote_members is None:
             return
-        instances = {
-            r.instance_id
-            for r in await self._remote_members.list_for_space(after.id)
-            if r.instance_id
+        follower_switch_off = (
+            before.features.allow_subscriber_comment
+            and not after.features.allow_subscriber_comment
+        ) or (
+            before.features.allow_subscriber_react
+            and not after.features.allow_subscriber_react
+        )
+        seats = await self._remote_members.list_for_space(after.id)
+        instances = {r.instance_id for r in seats if r.instance_id}
+        # Households holding a follower seat, whatever else they hold: a
+        # plain comment cert may have bound that follower earlier in the
+        # epoch (while the household only followed), so a switch turning off
+        # rotates for it even when its cert now is a write cert.
+        with_followers = {
+            r.instance_id for r in seats if r.role == SpaceRole.SUBSCRIBER.value
         }
         if self._own_instance_id:
             instances.add(self._own_instance_id)
@@ -4149,7 +4169,9 @@ class SpaceService(
         for instance_id in sorted(instances):
             was = await self._writer_certs.entitlement_for_instance(before, instance_id)
             now = await self._writer_certs.entitlement_for_instance(after, instance_id)
-            if scope_weakened(was, now):
+            if scope_weakened(was, now) or (
+                follower_switch_off and (was.reader or instance_id in with_followers)
+            ):
                 log.info(
                     "space %s: a rights change narrows household %s's writers "
                     "— rotating the content key",
@@ -4158,7 +4180,13 @@ class SpaceService(
                 )
                 await self._rotate_and_distribute_space_key(after.id)
                 return
-            if now != was:
+            if (
+                now != was
+                and (
+                    await self._writer_certs.issuable_entitlement(after, instance_id)
+                ).scope
+                is not None
+            ):
                 gained.append(instance_id)
         for instance_id in gained:
             if instance_id != self._own_instance_id:

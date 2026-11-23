@@ -109,7 +109,7 @@ from ..domain.space_author_profile_bundle import (
     BundleEntry,
     build_bundle_parts,
 )
-from ..domain.space_item import ITEM_TYPE_AUTHOR_PROFILE, required_scope
+from ..domain.space_item import ITEM_TYPE_AUTHOR_PROFILE
 from ..domain.subscriber_accepts import ACCEPTS_AUTHOR_PROFILES_BUNDLE
 from ..federation.keywrap_seal import seal_to_keywrap, verify_keywrap_binding
 from ..services.space_crypto_service import KEY_SUITE_AESGCM_256
@@ -258,11 +258,10 @@ class SpaceSubscriberKeyOutbound:
         (its author left, or we are no seed holder) is left out."""
         if self._writer_certs is None:
             return entries
-        scope = required_scope(ITEM_TYPE_AUTHOR_PROFILE)
         out: list[BundleEntry] = []
         for entry in entries:
             cert = await self._writer_certs.current_item_cert(
-                space, entry.item, epoch=entry.epoch, required_scope=scope
+                space, entry.item, epoch=entry.epoch, item_type=ITEM_TYPE_AUTHOR_PROFILE
             )
             if cert is None:
                 log.info(
