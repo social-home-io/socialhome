@@ -103,15 +103,14 @@ const reachInfoOpen = signal<boolean>(false)
 /** Bumped per open so late answers from an earlier compose are dropped. */
 let openSeq = 0
 
-/** Sign-out: close and forget the compose, so the next account in this
- *  tab never resumes it. Registered here because this module loads lazily
- *  (no Momentum visited, nothing to forget); ``parkedMoment`` itself is
- *  cleared by the store's own reset. */
-function forgetCompose(): void {
-  openSeq++
-  open.value = false
+/** Start a new compose: a fresh sequence (late answers and uploads from
+ *  the last one are dropped) and every field empty. The one reset, for an
+ *  open and for sign-out. */
+function newCompose(): number {
+  const seq = ++openSeq
   parentId.value = null
   parent.value = null
+  parentIsPublic.value = false
   content.value = ''
   mediaUrl.value = null
   mediaPreviewUrl.value = null
@@ -121,8 +120,19 @@ function forgetCompose(): void {
   submitting.value = false
   isPublic.value = false
   publicTouched.value = false
+  reachInfoOpen.value = false
+  nextAllowedAt.value = null
+  return seq
 }
-onLogout(forgetCompose)
+
+/** Sign-out: close and forget the compose, so the next account in this
+ *  tab never resumes it. Registered here because this module loads lazily
+ *  (no Momentum visited, nothing to forget); ``parkedMoment`` itself is
+ *  cleared by the store's own reset. */
+onLogout(() => {
+  newCompose()
+  open.value = false
+})
 
 function setNextAllowed(iso: unknown): void {
   now.value = Date.now()
@@ -158,15 +168,16 @@ function loadParent(seq: number, id: string): void {
  *  hidden. "Make new moments public" applies to new top-level moments
  *  only.
  *
- *  A new moment put aside for Settings comes back as it was, once. */
+ *  A new moment put aside for Settings comes back as it was, once;
+ *  opening a reply meanwhile drops it (one compose at a time). */
 export function openMomentumComposer(
   parentMomentId: string | null = null,
   opts: { parentIsPublic?: boolean; parent?: Moment } = {},
 ): void {
   // Who the public row names, and whether a sign-up hint applies.
   void loadGfsConnections()
-  const resume = parkedMoment.value && parentMomentId === null && parentId.value === null
-    && hasDraft()
+  // Only a new moment is ever put aside (``putAside``).
+  const resume = parkedMoment.value && parentMomentId === null && hasDraft()
   parkedMoment.value = false
   if (resume) {
     // Same compose as before: keep its sequence, so an upload still on
@@ -184,21 +195,11 @@ export function openMomentumComposer(
     loadLimits(seq)
     return
   }
-  const seq = ++openSeq
+  const seq = newCompose()
   parentId.value = parentMomentId
   parent.value = parentMomentId !== null ? opts.parent ?? null : null
   parentIsPublic.value = parentMomentId !== null
     && (opts.parentIsPublic === true || opts.parent?.is_public === true)
-  content.value = ''
-  mediaUrl.value = null
-  mediaPreviewUrl.value = null
-  mediaType.value = null
-  durationMs.value = null
-  mediaBusy.value = false
-  submitting.value = false
-  publicTouched.value = false
-  reachInfoOpen.value = false
-  nextAllowedAt.value = null
   // Cached registrations show the right state at once; the reload below
   // only fills in what the person hasn't decided themselves.
   isPublic.value = parentMomentId === null && sharesByDefault()
