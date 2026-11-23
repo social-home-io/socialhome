@@ -56,6 +56,13 @@ from socialhome.global_server.channels import (
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.member_publish import (
+    MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP,
+    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP,
+    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE,
+    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
+    MemberPublishRateLimited,
+)
 from socialhome.global_server.server import create_gfs_app
 
 GFS_ID = "gfs-node-a"
@@ -650,6 +657,110 @@ async def test_anonymous_publish_refusals(gfs) -> None:
     body["instance_id"] = gfs.member.instance_id
     resp = await gfs.post("/gfs/channels/publish-anon", json=body)
     assert resp.status == 400
+
+
+# ── F5: a follower holding the writer key cannot flood a channel ─────────
+
+
+def _anon_req(ch: _Channel, epoch: int = 3) -> ChannelPublishAnonRequest:
+    """A fresh, validly signed request (new nonce, so never a replay)."""
+    return ChannelPublishAnonRequest.from_wire(_anon_body(ch, epoch))
+
+
+@pytest.mark.security
+async def test_one_address_is_bounded_per_channel(gfs) -> None:
+    """One client address gets MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
+    publishes a minute into a channel; another address still gets through."""
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    cap = MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
+    for _ in range(cap):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    with pytest.raises(MemberPublishRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.9")
+    assert cap < MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
+
+
+@pytest.mark.security
+async def test_one_key_holder_spreading_over_addresses_cannot_exceed_the_channel_cap(
+    gfs,
+) -> None:
+    """The channel as a whole takes MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE a
+    minute whatever the addresses; another channel is unaffected."""
+    await _ready(gfs, epoch=3)
+    first = gfs.ch
+    gfs.ch = _Channel()
+    await _ready(gfs, epoch=3)
+    second = gfs.ch
+    svc = gfs.app_[gfs_channel_service_key]
+    cap = MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
+    per_ip = MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
+    for i in range(cap):
+        # Every address stays under its own per-address bound.
+        await svc.publish_anon(
+            _anon_req(first), client_ip=f"10.{i // per_ip}.0.{i % per_ip}"
+        )
+    with pytest.raises(MemberPublishRateLimited):
+        await svc.publish_anon(_anon_req(first), client_ip="192.0.2.250")
+    await svc.publish_anon(_anon_req(second), client_ip="192.0.2.250")
+
+
+@pytest.mark.security
+async def test_the_writer_key_bound_is_per_channel_and_epoch(gfs) -> None:
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    # Lift the aggregate / address bounds so only the key bound can answer.
+    svc._channel_limiter._limit = 10 * MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+    svc._anon_ip_limiter._limit = 10 * MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+    for _ in range(MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    with pytest.raises(MemberPublishRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+
+
+@pytest.mark.security
+async def test_a_refused_writer_signature_costs_no_budget(gfs) -> None:
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    cap = MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
+    for _ in range(cap + 5):
+        bad = ChannelPublishAnonRequest.from_wire(
+            _anon_body(gfs.ch, 3, writer_seed=os.urandom(32))
+        )
+        with pytest.raises(PermissionError):
+            await svc.publish_anon(bad, client_ip="203.0.113.7")
+    # The address still has its whole budget.
+    for _ in range(cap):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    with pytest.raises(MemberPublishRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+
+
+@pytest.mark.security
+async def test_the_route_answers_429_past_the_address_bound(gfs) -> None:
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    svc._anon_ip_limiter._limit = 1
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
+    assert resp.status == 200, await resp.text()
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
+    assert resp.status == 429
+
+
+@pytest.mark.security
+async def test_the_per_ip_route_limiter_covers_every_channel_route(gfs) -> None:
+    assert CHANNEL_ROUTES
+    for path in CHANNEL_ROUTES:
+        assert _is_channel_path(path), path
+    assert _is_channel_path("/gfs/channels/publish-anon")
+    # Wired into the real app: past the per-IP budget the route sheds a
+    # flood with 429 before any signature work.
+    last = 0
+    for _ in range(MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP + 1):
+        resp = await gfs.post("/gfs/channels/publish-anon", json={})
+        last = resp.status
+    assert last == 429
 
 
 # ── Unregister ───────────────────────────────────────────────────────────
