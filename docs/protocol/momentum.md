@@ -254,8 +254,15 @@ copy cost (n−1) + (n−1)(n−2) + (n−1)(n−2)(n−3) envelopes per moment
 
 ## Reach — how far a person's moments go (v_96, design)
 
-Owner decisions 2026-11-23. Status: **design, being built** — the sections above
-still describe what ships until the phases below land.
+Owner decisions 2026-11-23. Status: **being built**. Phase 1 (v_96) has
+landed: the signed wire shape (creates and deletes), the receiver refusals,
+the relay rules (``hop < min(reach, MOMENT_MAX_HOPS)``, the relay clamp, one
+closer re-relay, reach-carrying copies only to v_96), the totals gate, the
+relayed outbox key, the ``moments.reach`` column and the person / household
+reach (``moments.reach`` / ``moments.reach_max``, no route or UI yet). Still
+to come: ``MOMENT_MAX_HOPS`` 5 with the viewer's ``max_hops`` 1–5,
+``MAX_RETURN_TOKENS``, ``moment_look_hops``, the storage rule, the routes
+and the UI — until then relays still stop at hop 3.
 
 ### Rules
 
