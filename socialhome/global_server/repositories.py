@@ -2109,21 +2109,19 @@ class SqliteGfsUserRegistrationRepo:
 
     async def most_followed_ids(self, *, limit: int = 200) -> list[str]:
         """The ids of the active authors followed by the most households
-        (then by most followers, then newest) — at most *limit*, at most 200.
-        Households, not follower ids: a follow's ``follower_user_id`` is
-        whatever the signed household says, so one household could make up
-        followers; it counts once here. One count over the follow graph per
-        call — the registry keeps the answer for a while."""
+        (ties newest first) — at most *limit*, at most 200. Households, not
+        follower ids: a follow's ``follower_user_id`` is whatever the signed
+        household says, so one household could make up followers; it counts
+        once here, and follower ids never break a tie either. One count over
+        the follow graph per call — the registry keeps the answer a while."""
         clamped = max(1, min(int(limit), 200))
         rows = await self._db.fetchall(
             "SELECT r.user_id FROM gfs_user_registrations r LEFT JOIN ("
-            "  SELECT followed_user_id,"
-            "         COUNT(DISTINCT follower_instance_id) AS h, COUNT(*) AS c"
+            "  SELECT followed_user_id, COUNT(DISTINCT follower_instance_id) AS h"
             "    FROM gfs_moment_follows GROUP BY followed_user_id"
             ") f ON f.followed_user_id = r.user_id "
             "WHERE r.status='active' "
-            "ORDER BY COALESCE(f.h, 0) DESC, COALESCE(f.c, 0) DESC, "
-            "r.registered_at DESC LIMIT ?",
+            "ORDER BY COALESCE(f.h, 0) DESC, r.registered_at DESC LIMIT ?",
             (clamped,),
         )
         return [str((_dict(r) or {})["user_id"]) for r in rows]

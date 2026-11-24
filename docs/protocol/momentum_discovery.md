@@ -74,17 +74,19 @@ search, and a search is never ranked (`sort=followers` with `q` is
 `422 search_not_ranked` — ranking it would recount on every request).
 
 * `sort=followers` — the 200 active authors **followed by the most
-  households**, then by most followers, then newest. Households, not
-  follower ids: a follow's `follower_user_id` is whatever the signed
-  household says, so one household could make up any number of followers
-  — it counts once toward the order. (The label stays the public follower
-  count, so an author with many followers in few households may sit below
-  one with fewer.) The order is one grouped count over
-  `gfs_moment_follows`; each node keeps only the ordered ids for
+  households**, ties newest first. Households, not follower ids: a
+  follow's `follower_user_id` is whatever the signed household says, so
+  one household could make up any number of followers — it counts once
+  toward the order, and follower ids never break a tie. (The label stays
+  the public follower count, so an author with many followers in few
+  households may sit below one with fewer.) The order is one grouped count
+  over `gfs_moment_follows`; each node keeps only the ordered ids for
   `RANKED_DIRECTORY_TTL_S` (5 minutes), recounted by one request at a time
   while the others wait for it — visitors can't make it recount. The rows
   and counts are read live (≤ 200 by primary key, one indexed `IN` count),
-  so an author who leaves or is suspended is gone at once.
+  so an author who leaves or is suspended is gone at once; one who just
+  signed up joins the order at the next recount (≤ 5 minutes) and shows
+  under Newest at once.
 * `sort=new` — newest registration first, with the counts of those ≤ 200
   rows (one indexed `IN` count).
 

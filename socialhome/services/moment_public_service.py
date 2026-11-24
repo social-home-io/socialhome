@@ -25,6 +25,7 @@ from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..domain.moment_public import (
+    DIRECTORY_SORT_FOLLOWERS,
     DIRECTORY_SORTS,
     MomentPublicDirectoryPage,
     MomentPublicFollow,
@@ -51,6 +52,11 @@ if TYPE_CHECKING:
     from .moment_public_key_outbound import MomentPublicKeyOutbound
 
 log = logging.getLogger(__name__)
+
+#: Directory row fields the page shows and searches — kept only as text.
+_DIRECTORY_TEXT_FIELDS = ("display_name", "username", "bio")
+#: A GFS directory answer holds at most this many rows; more are dropped.
+DIRECTORY_MAX_ROWS = 200
 
 
 class MomentPublicError(Exception):
@@ -499,6 +505,8 @@ class MomentPublicService(ProtectionGateMixin):
         """
         if sort is not None and sort not in DIRECTORY_SORTS:
             raise ValueError(f"unknown directory sort {sort!r}")
+        if q and sort == DIRECTORY_SORT_FOLLOWERS:
+            raise ValueError("a search is listed newest first, not ranked")
         if viewer_user_id is not None:
             # §CP.R: a protected account never browses a GFS, even with a
             # stale client that still offers it.
@@ -555,7 +563,18 @@ class MomentPublicService(ProtectionGateMixin):
             if not isinstance(iid, str) or iid in instance_ids:
                 continue
             seen.add(uid)
-            out.append(row)
+            # The text the page shows and searches is text, or nothing.
+            out.append(
+                {
+                    **row,
+                    **{
+                        k: (row[k] if isinstance(row.get(k), str) else None)
+                        for k in _DIRECTORY_TEXT_FIELDS
+                    },
+                }
+            )
+            if len(out) >= DIRECTORY_MAX_ROWS:
+                break
         return out
 
     async def _people_at_home(self) -> tuple[set[str], set[str]]:

@@ -195,6 +195,7 @@ export default function PublicDiscoveryPage() {
     // Fresh per visit and per account: a list read for someone who signed
     // out since is never shown, not even while this one loads.
     friends.value = null
+    searchQuery.value = ''
     void loadFriends()
     void loadHouseholdFollows()
     void loadBlocks()

@@ -248,8 +248,40 @@ async def test_fetch_directory_returns_users_list(repos):
     )
     users = list((await svc.fetch_directory("g1")).users)
     assert users == [
-        {"user_id": "u-remote", "instance_id": "i-b", "display_name": "Bob"}
+        {
+            "user_id": "u-remote",
+            "instance_id": "i-b",
+            "display_name": "Bob",
+            "username": None,
+            "bio": None,
+        }
     ]
+
+
+async def test_fetch_directory_keeps_text_fields_text_and_at_most_200_rows(repos):
+    """The GFS chose every field: what the page shows and searches is text
+    or nothing, and an answer holds at most 200 rows."""
+    rows = [
+        {"user_id": f"x{i}", "instance_id": f"i{i}", "display_name": f"P{i}"}
+        for i in range(250)
+    ]
+    rows[0] = {
+        "user_id": "x0",
+        "instance_id": "i0",
+        "display_name": {"evil": 1},
+        "username": ["a"],
+        "bio": 7,
+    }
+    sess = _StubSession(status=200, body={"users": rows})
+    svc = _make_service(repos, session=sess)
+    users = (await svc.fetch_directory("g1")).users
+    assert len(users) == 200
+    assert (users[0]["display_name"], users[0]["username"], users[0]["bio"]) == (
+        None,
+        None,
+        None,
+    )
+    assert users[1]["display_name"] == "P1"
 
 
 def _ranked_body(sort, counts):
@@ -289,6 +321,9 @@ async def test_fetch_directory_refuses_an_unknown_sort(repos):
     svc = _make_service(repos, session=sess)
     with pytest.raises(ValueError):
         await svc.fetch_directory("g1", sort="recent")
+    # A search is never ranked (the GFS refuses it too): ours to refuse, 422.
+    with pytest.raises(ValueError):
+        await svc.fetch_directory("g1", q="bern", sort="followers")
     assert sess.gets == []
 
 

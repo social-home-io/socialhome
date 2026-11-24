@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from ..domain.moment_public import DIRECTORY_SORT_FOLLOWERS, DIRECTORY_SORT_NEW
 from ..moment_public_seal import (
     FRAME_MOMENT,
     FRAME_MOMENT_COUNTS,
@@ -133,16 +134,8 @@ MOMENT_SEEN_TTL_S: float = float(RATCHET_STEP_S + MOMENT_STEP_SLACK_S)
 #: early — and a forgotten one can be re-posted only until its step ends.
 MOMENT_SEEN_MAX: int = 200_000
 
-#: The directory's orders (``GET /gfs/moments/users?sort=``): newest
-#: registration first (the default), or most followed first.
-DIRECTORY_SORT_NEW = "new"
-DIRECTORY_SORT_FOLLOWERS = "followers"
-DIRECTORY_SORTS: frozenset[str] = frozenset(
-    {DIRECTORY_SORT_NEW, DIRECTORY_SORT_FOLLOWERS}
-)
-
 #: How long a node keeps the most-followed list (one count over the whole
-#: follow graph — ~0.2–0.5 s at 1 M follows) before counting again.
+#: follow graph — ~0.05–0.5 s at 1 M follows) before counting again.
 RANKED_DIRECTORY_TTL_S: float = 300.0
 
 

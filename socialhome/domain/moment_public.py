@@ -127,9 +127,14 @@ def gfs_picture_proxy_url(gfs_id: str, user_id: str, digest: str | None) -> str 
     )
 
 
-#: The GFS directory's orders a household may ask for
-#: (``GET /gfs/moments/users?sort=``): newest first, most followed first.
-DIRECTORY_SORTS: frozenset[str] = frozenset({"new", "followers"})
+#: The GFS directory's orders (``GET /gfs/moments/users?sort=``): newest
+#: registration first (the default), or most followed first. One list for
+#: the GFS and the households that ask it.
+DIRECTORY_SORT_NEW = "new"
+DIRECTORY_SORT_FOLLOWERS = "followers"
+DIRECTORY_SORTS: frozenset[str] = frozenset(
+    {DIRECTORY_SORT_NEW, DIRECTORY_SORT_FOLLOWERS}
+)
 
 #: The largest follower count shown. A GFS's counts are display data; one
 #: past this (or not a non-negative integer) is dropped, not shown.

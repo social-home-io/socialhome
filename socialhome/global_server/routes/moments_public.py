@@ -45,6 +45,11 @@ import orjson
 from aiohttp import web
 
 from ...csp import media_response_headers
+from ...domain.moment_public import (
+    DIRECTORY_SORT_FOLLOWERS,
+    DIRECTORY_SORT_NEW,
+    DIRECTORY_SORTS,
+)
 from ...moment_origin import delete_cert_refusal
 from ...moment_public_media import MAX_BLOB_BYTES
 from ...moment_public_seal import (
@@ -65,12 +70,7 @@ from ..domain import GfsUserPicture
 from ..html_page import html_response
 from ..link_preview import person_handoff
 from ..moment_media import MediaRefused
-from ..moment_public_registry import (
-    DIRECTORY_SORT_FOLLOWERS,
-    DIRECTORY_SORT_NEW,
-    DIRECTORY_SORTS,
-    envelope_step_current,
-)
+from ..moment_public_registry import envelope_step_current
 from ..page_models import load_person_page
 from .base import GfsBaseView
 from .rtc import RELAY_AUTH_MAX_SKEW_SECONDS, _rtc_authenticate
