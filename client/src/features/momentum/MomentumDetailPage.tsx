@@ -417,7 +417,9 @@ function StatusBand({ m, ended }: { m: Moment; ended: boolean }) {
   } else if (isPublic) {
     title = publicOnLabel(registrations.value)
     sub = t(reachKey('moment.detail.status_public_also', hops), { days, n: String(hops) })
-  } else if (isProtected) {
+  } else if (isProtected && m.reach == null) {
+    // Only a moment without its own reach falls back to the viewer's
+    // protection; one with a reach says how far it really went.
     title = t('moment.detail.status_reach_protected')
     sub = t('moment.detail.status_until_protected', { time })
   } else {

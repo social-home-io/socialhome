@@ -316,7 +316,10 @@ export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
       {mine && !page && (
         <Modal open={whoSees.value} onClose={() => { whoSees.value = false }}
           title={t('moment.card.who_sees')}>
-          <p>{currentUser.value?.protected
+          {/* The moment's own reach (v_96) says how far it went; the
+              viewer's protection now only stands in for a moment without
+              one — protecting the account later doesn't pull it back. */}
+          <p>{m.reach == null && currentUser.value?.protected
             ? t('moment.card.who_sees_protected')
             : t(reachKey('moment.card.who_sees_body', m.reach ?? MOMENT_DEFAULT_REACH),
               { n: String(m.reach ?? MOMENT_DEFAULT_REACH) })}</p>

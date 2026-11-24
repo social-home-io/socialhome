@@ -220,6 +220,27 @@ describe('MomentumDetailPage status of your own moment', () => {
     expect(band.textContent).not.toContain('followers')
   })
 
+  it('a reach-3 moment shown to a now-protected author still says 3 hops', async () => {
+    // The moment went 3 hops when it was written; protecting the account
+    // later doesn't pull it back, so the band must not understate it.
+    currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
+    asAuthor({ is_public: false, reach: 3 })
+    const { findByRole } = render(<MomentumDetailPage />)
+    const band = await findByRole('group', { name: 'Who sees this' })
+    expect(band.querySelector('.sh-moment-status__title')!.textContent)
+      .toBe('Paired households and beyond, up to 3 hops')
+  })
+
+  it('a reach-1 moment says household and paired households for a protected author', async () => {
+    currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
+    asAuthor({ is_public: false, reach: 1 })
+    const { findByRole } = render(<MomentumDetailPage />)
+    const band = await findByRole('group', { name: 'Who sees this' })
+    expect(band.querySelector('.sh-moment-status__title')!.textContent)
+      .toBe('Your household and your paired households')
+    expect(band.textContent).not.toContain('hops')
+  })
+
   it('a public moment names its GFS and copies the share link — never "Stop sharing"', async () => {
     asAuthor({ is_public: true }, true)
     vi.mocked(api.post).mockResolvedValue({ url: 'https://viewer.example/v/x/#m=m-amaka' })

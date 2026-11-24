@@ -205,7 +205,7 @@ describe('MomentumComposerDialog', () => {
   })
 
   it.each([
-    [1, 'Your household and paired households · 24 h', /and no further \(your setting\)/],
+    [1, 'Your household and paired households · 24 h', /and no further\. They see it/],
     [3, 'Paired households and beyond, up to 3 hops · 24 h', /up to 3 hops away; each person there decides how far they look/],
     [5, 'Paired households and beyond, up to 5 hops · 24 h', /up to 5 hops away; each person there decides how far they look/],
   ])('reach %i: says how far the caller\'s moments really go', async (n, line, more) => {

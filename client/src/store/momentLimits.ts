@@ -6,8 +6,9 @@
  * ``reach`` is the caller's effective reach for a new moment (1–5: 1 for a
  * protected account, else their "How far my moments go" within the
  * household maximum); ``reach_max`` is that maximum. Both are ``null``
- * until read (or on an older server) — the text then says the default, 3
- * hops, and the server clamps whatever is picked.
+ * until read (or on an older server) — the text then says the person's
+ * own reach setting (see ``shownReach``), and the server clamps whatever
+ * is picked.
  *
  * The composer, the inbox's "Share a moment" line, the reply field and
  * Settings › Momentum read the same signals, so a setting changed in one
@@ -15,6 +16,8 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { currentUser } from '@/store/auth'
+import { getMomentsPreferences } from '@/utils/preferences'
 
 /** Server: ``MOMENT_DEFAULT_REACH``. */
 export const MOMENT_DEFAULT_REACH = 3
@@ -53,9 +56,14 @@ export async function loadMomentLimits(): Promise<MomentLimits | null> {
 }
 
 /** How far a new moment of the caller's goes, for the text: the read
- *  reach, or the default while unknown. */
+ *  reach, or — until the limits are read (or when the read failed) — the
+ *  person's own "How far my moments go" (1 for a protected account). That
+ *  fallback is an upper bound (the household maximum can only lower it),
+ *  so the text never says less than a moment may really go. */
 export function shownReach(): number {
-  return myMomentReach.value ?? MOMENT_DEFAULT_REACH
+  if (myMomentReach.value != null) return myMomentReach.value
+  if (currentUser.value?.protected) return 1
+  return getMomentsPreferences().reach
 }
 
 /** How far a reply goes: no further than the caller's reach, nor than the
@@ -73,5 +81,7 @@ export function replyReach(parentReach: number | null | undefined): number {
  *  moment.detail.status_reach_one, moment.detail.status_public_also_one,
  *  moment.card.who_sees_body_one, settings.momentum.reach_household_max_one. */
 export function reachKey(base: string, n: number): string {
+  // Not i18n isOne(): the _one keys are a different sentence, not a plural
+  // form, and isOne() would also pick it for French 0.
   return n === 1 ? `${base}_one` : base
 }

@@ -97,6 +97,9 @@ export function MomentumPreferencesPanel() {
     : [...MOMENT_RETENTION_CHOICES, retention.value].sort((a, b) => a - b)
 
   const householdMax = momentReachMax.value
+  // A stored reach above the household maximum shows as what applies (a
+  // disabled option is never the selected one); nothing is saved for it.
+  const shownReachValue = householdMax !== null ? Math.min(reach.value, householdMax) : reach.value
   // settings.momentum.hop_1 … hop_5
   const hopLabel = (n: number) => t(`settings.momentum.hop_${n}`)
 
@@ -150,7 +153,7 @@ export function MomentumPreferencesPanel() {
             {t('settings.momentum.reach_label')}
             <select
               id="sh-momentum-reach"
-              value={String(reach.value)}
+              value={String(shownReachValue)}
               aria-describedby="sh-momentum-reach-hint"
               onChange={e => {
                 reach.value = Number((e.target as HTMLSelectElement).value) as MomentsHops

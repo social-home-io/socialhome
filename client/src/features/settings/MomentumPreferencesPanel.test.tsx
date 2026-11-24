@@ -157,6 +157,16 @@ describe('Settings › Momentum — how far my moments go', () => {
     expect([...reach.options].map(o => o.disabled)).toEqual([false, false, true, true, true])
   })
 
+  it('a stored reach above the household maximum shows the maximum, saving nothing', async () => {
+    reset({ next_allowed_at: null, reach: 3, reach_max: 3 })
+    me({ reach: 5 })
+    const { container, findByText } = render(<MomentumPreferencesPanel />)
+    expect(await findByText('Your household allows up to 3 steps.')).toBeTruthy()
+    // A disabled option must never show as the selected value.
+    expect(reachSelect(container).value).toBe('3')
+    expect(apiMock.patch).not.toHaveBeenCalled()
+  })
+
   it('a household maximum of 1 reads naturally', async () => {
     reset({ next_allowed_at: null, reach: 1, reach_max: 1 })
     me(null)

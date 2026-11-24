@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const { apiMock } = vi.hoisted(() => ({ apiMock: { get: vi.fn() } }))
 vi.mock('@/api', () => ({ api: apiMock }))
 
+import { currentUser } from '@/store/auth'
 import {
   loadMomentLimits,
   momentReachMax,
@@ -17,6 +18,7 @@ describe('momentLimits — how far the caller\'s moments go', () => {
     apiMock.get.mockReset()
     myMomentReach.value = null
     momentReachMax.value = null
+    currentUser.value = null
   })
 
   it('reads reach and the household maximum from GET /api/moments/limits', async () => {
@@ -42,10 +44,31 @@ describe('momentLimits — how far the caller\'s moments go', () => {
     expect(myMomentReach.value).toBe(2)
   })
 
-  it('shows 3 hops while the reach is unknown', () => {
+  it('shows 3 hops while the reach and the person are unknown', () => {
     expect(shownReach()).toBe(3)
     myMomentReach.value = 5
     expect(shownReach()).toBe(5)
+  })
+
+  it('falls back to the person’s own reach setting, never 3, while unread', () => {
+    // An upper bound: the household maximum can only lower it.
+    currentUser.value = {
+      user_id: 'u', username: 'u', preferences_json: JSON.stringify({ moments: { reach: 5 } }),
+    } as never
+    expect(shownReach()).toBe(5)
+    currentUser.value = {
+      user_id: 'u', username: 'u', preferences_json: JSON.stringify({ moments: { reach: 1 } }),
+    } as never
+    expect(shownReach()).toBe(1)
+    expect(replyReach(4)).toBe(1)
+  })
+
+  it('a protected account falls back to 1 while unread', () => {
+    currentUser.value = {
+      user_id: 'u', username: 'u', protected: true,
+      preferences_json: JSON.stringify({ moments: { reach: 4 } }),
+    } as never
+    expect(shownReach()).toBe(1)
   })
 
   it('a reply goes no further than the moment it answers', () => {

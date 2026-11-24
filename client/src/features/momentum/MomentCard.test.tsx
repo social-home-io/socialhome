@@ -13,6 +13,7 @@ const openReport = vi.hoisted(() => vi.fn())
 vi.mock('@/components/ReportDialog', () => ({ openReport }))
 
 import { api } from '@/api'
+import { currentUser } from '@/store/auth'
 import type { Moment } from '@/types'
 import { MomentCard, clipLength, reactionMode } from './MomentCard'
 
@@ -111,6 +112,37 @@ describe('MomentCard', () => {
     const dialog = await findByRole('dialog')
     expect(dialog.querySelector('p')!.textContent).toMatch(body)
     expect(dialog.textContent).not.toContain('up to 1 hops')
+  })
+
+  it.each([
+    [3, /up to 3 hops away/],
+    [1, /^Your household and your paired households, no further\./],
+  ])('Who sees this for a now-protected author follows the moment’s reach %i', async (reach, body) => {
+    currentUser.value = { user_id: ME, username: 'me', protected: true } as never
+    try {
+      const { getByRole, findByRole } = renderCard(moment({ author_user_id: ME, reach }))
+      fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
+      await findByRole('menu')
+      fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
+      const dialog = await findByRole('dialog')
+      expect(dialog.querySelector('p')!.textContent).toMatch(body)
+    } finally {
+      currentUser.value = null
+    }
+  })
+
+  it('Who sees this for a protected author’s moment without a reach keeps the protected text', async () => {
+    currentUser.value = { user_id: ME, username: 'me', protected: true } as never
+    try {
+      const { getByRole, findByRole } = renderCard(moment({ author_user_id: ME }))
+      fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
+      await findByRole('menu')
+      fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
+      const dialog = await findByRole('dialog')
+      expect(dialog.querySelector('p')!.textContent).toMatch(/It isn't passed on further\./)
+    } finally {
+      currentUser.value = null
+    }
   })
 
   it('provenance: paired household, hops away, via GFS — nothing for your own household', () => {
