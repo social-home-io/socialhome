@@ -35,6 +35,15 @@ from tests.services.test_space_public_inbound import (  # noqa: F401
 pytestmark = pytest.mark.security
 
 
+async def _relay(inbound, frame: dict) -> None:
+    """Hand an item to the reader the way it arrives since v_96: through the
+    space's opaque channel (the channel id already mapped to the space
+    locally). Space-keyed relay frames are no longer taken."""
+    await inbound.handle_channel_item(
+        frame["space_id"], epoch=frame["epoch"], payload=frame["payload"]
+    )
+
+
 class _IssuerSpaces:
     """The issuer's view: the space row, its seed, no local seats."""
 
@@ -105,7 +114,7 @@ async def _set_posts(item_env, level: SpaceFeatureAccess) -> None:  # noqa: F811
 
 async def test_an_open_space_member_publish_is_accepted(item_env):  # noqa: F811
     cert = await _issued_cert(item_env, role="member")
-    await item_env["inbound"].handle(await _item_frame(item_env, cert=cert))
+    await _relay(item_env["inbound"], await _item_frame(item_env, cert=cert))
     assert await item_env["post_repo"].get("post-1") is not None
 
 
@@ -119,14 +128,14 @@ async def test_p1_p2_a_plain_member_cannot_member_publish_past_the_level(
     await _set_posts(item_env, level)
     cert = await _issued_cert(item_env, role="member")
     assert cert["scope"] == "comment"
-    await item_env["inbound"].handle(await _item_frame(item_env, cert=cert))
+    await _relay(item_env["inbound"], await _item_frame(item_env, cert=cert))
     assert await item_env["post_repo"].get("post-1") is None
 
 
 async def test_p1_an_admin_may_still_member_publish_under_admin_only(item_env):  # noqa: F811
     await _set_posts(item_env, SpaceFeatureAccess.ADMIN_ONLY)
     cert = await _issued_cert(item_env, role="admin")
-    await item_env["inbound"].handle(await _item_frame(item_env, cert=cert))
+    await _relay(item_env["inbound"], await _item_frame(item_env, cert=cert))
     assert await item_env["post_repo"].get("post-1") is not None
 
 
@@ -135,14 +144,14 @@ async def test_p3_a_seatless_user_of_a_writer_household_is_refused(item_env):  #
     author holds no seat, so its post is refused even though the household
     may write."""
     cert = await _issued_cert(item_env, role="member", user_id="u-seated")
-    await item_env["inbound"].handle(await _item_frame(item_env, cert=cert))
+    await _relay(item_env["inbound"], await _item_frame(item_env, cert=cert))
     assert await item_env["post_repo"].get("post-1") is None
 
 
 async def test_p4_an_origin_not_derived_from_the_author_key_is_refused(item_env):  # noqa: F811
     cert = await _issued_cert(item_env, role="member")
     inner = _signed_inner(item_env, origin="victim.home")
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=inner, cert=cert)
+    await _relay(
+        item_env["inbound"], await _item_frame(item_env, inner=inner, cert=cert)
     )
     assert item_env["events"] == []

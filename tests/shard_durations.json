@@ -630,7 +630,6 @@
  "tests/services/test_gfs_connection_open_signup.py": 2.69,
  "tests/services/test_gfs_connection_proof.py": 9.1,
  "tests/services/test_gfs_connection_service.py": 10.98,
- "tests/services/test_gfs_directory.py": 0.06,
  "tests/services/test_gfs_envelope_sender.py": 0.08,
  "tests/services/test_gfs_http.py": 0.04,
  "tests/services/test_gfs_member_publish_service.py": 48.04,

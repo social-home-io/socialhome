@@ -1,8 +1,8 @@
-"""Bounded, in-memory retry queue for ``POST /gfs/publish``.
+"""Bounded, in-memory retry queue for anonymous GFS publishes.
 
-:meth:`GfsConnectionService.publish_space_event` relays a public/global
-space event to every connection server the space is published on. Before
-this queue a failed POST — the GFS restarting, a network blip, a 5xx, the
+Born for the space-keyed ``POST /gfs/publish`` relay (removed in v_96); the
+opaque channel service (:mod:`.gfs_channel_service`) and the moment senders
+reuse it. Before this queue a failed POST — the GFS restarting, a network blip, a 5xx, the
 GFS's per-IP limiter answering 429 — lost the event for every subscriber
 on that server. Now a *transient* failure (transport error, timeout, 408,
 429, 5xx) is queued per connection and re-POSTed with backoff, honouring a

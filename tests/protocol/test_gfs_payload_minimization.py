@@ -1,42 +1,40 @@
 """§27.9 release blocker: the GFS learns neither the content nor the
-*relaying household* of a public/global space event.
+*relaying household* of a space-keyed relay event — GFS side.
 
-This exercises the LIVE relay path end to end with real crypto and no
-mocked verification:
+Since v_96 the household no longer sends the space-keyed relay
+(``POST /gfs/publish``, ``space_post_public``): a global space's content and
+its authority items ride the opaque channel, whose blindness is pinned by
+``test_gfs_global_channel_blind`` / ``test_gfs_private_channel_blind``, and
+the household-sender removal by ``test_gfs_multi_listing_blind``. What stays
+here, until the GFS drops the legacy route, is the GFS side of it, driven
+with real crypto and no mocked verification:
 
-    SpacePublicOutbound (real encrypt + authority-sign)
-        → GfsConnectionService.publish_space_event (real HTTP body)
-            → GfsFederationService.publish_event (real SQLite, real verify)
-                → fan-out frame to every subscriber
+    an authority-signed, encrypted ``space_post_public`` envelope
+        → GfsFederationService.publish_event (real SQLite, real verify)
+            → fan-out frame to every subscriber
 
-The sibling ``space_subscriber_key_handoff`` producer is gone (v_96: a
-follower is a member and gets the key by federation); a guard below proves
-no household module produces or opens one any more.
+— the frame is identity-free and byte-identical, the publisher is not
+excluded, only the authority signature authorizes. Plus two guards: no
+household module produces or opens a subscriber key handoff (v_96), and the
+v_44 authority cert names no member and no reason.
 
-Every assertion here is one that FAILS against the pre-change code — the
-old sender put ``from_instance`` + a household transport ``signature`` in
-the publish body, the old GFS authorized on that identity and excluded the
-publisher from the fan-out (so ``from_instance`` reached the frame too).
-Each test names the old behaviour it guards.
-
-It replaces an earlier version of this file that asserted properties of a
-standalone sealed-sender primitive with no production importer, so the
-§27.9 gate was vacuous (that module has since been deleted). The real wire
-shape is the one below.
+Dropped with the household sender (v_96): the publish-body checks
+(``{space_id, event_type, payload}`` only, never an identity field whatever
+the GFS advertises, no marker in the body) and the producer's cleartext-key
+set — there is no household publish body or producer any more.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 
-import aiohttp
 import pytest
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+    sign_authority_event,
+    strip_authority_sig_fields,
 )
 from socialhome.crypto import (
     derive_instance_id,
@@ -45,28 +43,23 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import SpacePostCreated
 from socialhome.domain.federation import GfsConnection
-from socialhome.domain.link_preview import LinkPreview
-from socialhome.domain.post import LocationData, Post, PostType
 from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
     SpaceType,
 )
+from socialhome.domain.space_item import pad_json_object
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
-from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
-from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.space_crypto_service import SpaceContentEncryption
-from socialhome.services.space_public_outbound import SpacePublicOutbound
 
 pytestmark = pytest.mark.security
 
@@ -130,7 +123,7 @@ class _RecordingResp:
 
 
 class _RecordingSession:
-    """Records the exact JSON body the household POSTs to ``/gfs/publish``."""
+    """Records the exact JSON body the household POSTs."""
 
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
@@ -151,48 +144,19 @@ class _RecordingWsRegistry:
         return True
 
 
-class _CaptureGfs:
-    """Captures what a producer hands to ``publish_space_event``."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    async def publish_space_event(
-        self, *, space_id, event_type, payload, skip=None, compressed_payloads=None
-    ) -> int:
-        self.calls.append(
-            {
-                "space_id": space_id,
-                "event_type": event_type,
-                "payload": payload,
-            }
-        )
-        return 1
-
-
 # ─── Fixtures: the real producers ────────────────────────────────────────
 
 
 @pytest.fixture
 async def household(tmp_dir):
-    """A real seed-holding household: SQLite, KEK, space repo, content
-    encryption, and both GFS-relay producers wired to a capturing GFS."""
+    """A seed-holding household's space: its authority key pair, its content
+    key and an author identity."""
     db = AsyncDatabase(tmp_dir / "hfs.db", batch_timeout_ms=10)
     await db.startup()
     own_kp = generate_identity_keypair()
     space_kp = generate_space_keypair()
-    author_user_id = derive_user_id(own_kp.public_key, AUTHOR_USERNAME)
-    await db.enqueue(
-        "INSERT INTO users(user_id, username, display_name, state) "
-        "VALUES(?, ?, 'Aurelia', 'active')",
-        (author_user_id, AUTHOR_USERNAME),
-    )
     kek = KeyManager.from_data_dir(tmp_dir)
-    space_repo = SqliteSpaceRepo(db, key_manager=kek)
-    crypto = SpaceContentEncryption(
-        SqliteSpaceKeyRepo(db), kek, own_instance_id=PUBLISHER_INSTANCE
-    )
-    await space_repo.save(
+    await SqliteSpaceRepo(db, key_manager=kek).save(
         Space(
             id=SPACE_ID,
             name="Minimization",
@@ -205,56 +169,51 @@ async def household(tmp_dir):
             join_mode=JoinMode.OPEN,
         )
     )
-    await space_repo.set_space_seed(SPACE_ID, space_kp.private_key)
+    crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(db), kek, own_instance_id=PUBLISHER_INSTANCE
+    )
     await crypto.initialise_for_space(SPACE_ID)
-
-    bus = EventBus()
-    gfs = _CaptureGfs()
-    post_producer = SpacePublicOutbound(
-        bus=bus,
-        space_repo=space_repo,
-        space_crypto=crypto,
-        user_repo=SqliteUserRepo(db),
-        gfs_service=gfs,
-    )
-    post_producer.attach_identity(
-        own_instance_id=PUBLISHER_INSTANCE,
-        own_instance_public_key=own_kp.public_key,
-        own_identity_seed=own_kp.private_key,
-    )
-    post_producer.wire()
     yield {
         "db": db,
-        "bus": bus,
-        "gfs": gfs,
         "crypto": crypto,
+        "space_seed": space_kp.private_key,
         "space_pk": space_kp.public_key,
-        "author_user_id": author_user_id,
+        "author_user_id": derive_user_id(own_kp.public_key, AUTHOR_USERNAME),
     }
     await db.shutdown()
 
 
 @pytest.fixture
 async def post_payload(household):
-    """The REAL ``space_post_public`` relay payload for a post carrying every
-    distinctive marker — produced by the production encrypt + authority-sign
-    path, not hand-rolled."""
-    post = Post(
-        id=POST_ID,
-        author=household["author_user_id"],
-        type=PostType.TEXT,
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
-        content=POST_TEXT,
-        location=LocationData(lat=52.1234, lon=13.4321, label=LOCATION_LABEL),
-        link_preview=LinkPreview(
-            url=PREVIEW_URL, title=PREVIEW_TITLE, thumbnail_url=PREVIEW_IMAGE
-        ),
+    """A ``space_post_public`` envelope for a post carrying every distinctive
+    marker: the padded inner encrypted under the real content key, the
+    envelope authority-signed with the real space seed (the shape the
+    removed host relay produced)."""
+    inner = {
+        "post_id": POST_ID,
+        "space_id": SPACE_ID,
+        "author_user_id": household["author_user_id"],
+        "author_username": AUTHOR_USERNAME,
+        "origin_instance_id": PUBLISHER_INSTANCE,
+        "content": POST_TEXT,
+        "location": {"lat": 52.1234, "lon": 13.4321, "label": LOCATION_LABEL},
+        "link_preview": {
+            "url": PREVIEW_URL,
+            "title": PREVIEW_TITLE,
+            "thumbnail_url": PREVIEW_IMAGE,
+        },
+    }
+    epoch, ct = await household["crypto"].encrypt(SPACE_ID, pad_json_object(inner))
+    envelope = {"space_id": SPACE_ID, "epoch": epoch, "encrypted_payload": ct}
+    envelope.update(
+        sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            space_id=SPACE_ID,
+            payload=strip_authority_sig_fields(envelope),
+            space_seed=household["space_seed"],
+        )
     )
-    await household["bus"].publish(SpacePostCreated(post=post, space_id=SPACE_ID))
-    calls = household["gfs"].calls
-    assert len(calls) == 1
-    assert calls[0]["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    return calls[0]["payload"]
+    return envelope
 
 
 # ─── Fixtures: the real GFS ──────────────────────────────────────────────
@@ -340,189 +299,6 @@ def _assert_no_identity_or_content(blob: str, *, author_user_id: str) -> None:
         assert f'"{key}"' not in blob, (
             f"identity/transport field back on the wire: {key}"
         )
-
-
-async def _publish_anonymously(tmp_dir, payload: dict, event_type: str) -> dict:
-    """Run *payload* through the REAL household sender and return the exact
-    JSON body it POSTed to ``/gfs/publish``."""
-    db = AsyncDatabase(tmp_dir / "conn.db", batch_timeout_ms=10)
-    await db.startup()
-    try:
-        repo = SqliteGfsConnectionRepo(db)
-        await repo.save(
-            GfsConnection(
-                id="gfs-1",
-                gfs_instance_id="gfs-inst",
-                display_name="GFS",
-                public_key="ab" * 32,
-                inbox_url="https://gfs.example",
-                status="active",
-                paired_at="2026-01-01T00:00:00+00:00",
-            )
-        )
-        await repo.publish_space(SPACE_ID, "gfs-1")
-        session = _RecordingSession()
-        svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-        svc.attach_publish_context(
-            space_repo=None,
-            own_instance_id=PUBLISHER_INSTANCE,
-            own_signing_key=generate_identity_keypair().private_key,
-        )
-        # Pin the capability: this GFS advertised ``anonymous_publish: true``.
-        svc._anon_publish["gfs-1"] = True
-        delivered = await svc.publish_space_event(
-            space_id=SPACE_ID,
-            event_type=event_type,
-            payload=payload,
-        )
-        assert delivered == 1
-        assert len(session.posts) == 1
-        url, body = session.posts[0]
-        assert url == "https://gfs.example/gfs/publish"
-        return body
-    finally:
-        await db.shutdown()
-
-
-# ─── The publish body the household sends ────────────────────────────────
-
-
-async def test_publish_body_is_exactly_the_three_anonymous_keys(tmp_dir, post_payload):
-    """The household POSTs ``{space_id, event_type, payload}`` and nothing
-    else. Guards: the old sender added ``from_instance`` + a household
-    transport ``signature`` to every publish body."""
-    body = await _publish_anonymously(
-        tmp_dir, post_payload, AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    )
-    assert set(body) == {"space_id", "event_type", "payload"}
-
-
-class _CapabilitySession:
-    """A GFS whose ``/gfs/info`` is in one of the capability states a
-    household can meet: ``old`` (no capability block), ``stripped`` (the
-    bare flag without its signature), ``down`` (unreachable, then back as
-    ``old``). Records every ``/gfs/publish`` body."""
-
-    def __init__(self, state: str) -> None:
-        self.state = state
-        self.posts: list[dict] = []
-
-    def get(self, url, **_kw):
-        if self.state == "down":
-            raise aiohttp.ClientError("gfs down")
-        info = {"server_name": "GFS"}
-        if self.state == "stripped":
-            info["anonymous_publish"] = True
-        return _InfoResp(info)
-
-    def post(self, url, *, json=None, **_kw):
-        self.posts.append(json or {})
-        return _RecordingResp()
-
-
-class _InfoResp(_RecordingResp):
-    def __init__(self, body: dict) -> None:
-        super().__init__()
-        self._body = body
-
-    async def json(self, **_kw):
-        return self._body
-
-
-_IDENTITY_KEYS = frozenset({"from_instance", "signature", "ts", "instance_id"})
-
-
-@pytest.mark.parametrize("state", ["old", "stripped", "down", "anonymous"])
-async def test_no_publish_body_ever_carries_identity(
-    tmp_dir, post_payload, monkeypatch, state
-):
-    """Whatever the GFS advertises — nothing, a stripped flag, an
-    unreachable ``/gfs/info``, or the signed capability — no
-    ``/gfs/publish`` body the household sends, first attempt or retry,
-    carries ``from_instance``, a household signature or any other identity
-    field. There is no identified fallback left to reach."""
-    from socialhome.services import gfs_publish_retry
-
-    monkeypatch.setattr(
-        gfs_publish_retry, "GFS_PUBLISH_RETRY_BACKOFF_S", (0.0, 0.0, 0.0, 0.0)
-    )
-    db = AsyncDatabase(tmp_dir / "caps.db", batch_timeout_ms=10)
-    await db.startup()
-    try:
-        repo = SqliteGfsConnectionRepo(db)
-        await repo.save(
-            GfsConnection(
-                id="gfs-1",
-                gfs_instance_id="gfs-inst",
-                display_name="GFS",
-                public_key="ab" * 32,
-                inbox_url="https://gfs.example",
-                status="active",
-                paired_at="2026-01-01T00:00:00+00:00",
-            )
-        )
-        await repo.publish_space(SPACE_ID, "gfs-1")
-        session = _CapabilitySession(state)
-        svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-        svc.attach_publish_context(
-            space_repo=None,
-            own_instance_id=PUBLISHER_INSTANCE,
-            own_signing_key=generate_identity_keypair().private_key,
-        )
-        if state == "anonymous":
-            svc._anon_publish["gfs-1"] = True
-        await svc.start()
-        await svc.publish_space_event(
-            space_id=SPACE_ID,
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            payload=post_payload,
-        )
-        if state == "down":
-            session.state = "old"  # back, but still without the capability
-            svc._info_failed_at.clear()
-        for _ in range(100):
-            if not svc._publish_retry._queues:
-                break
-            await asyncio.sleep(0.01)
-        await svc.stop()
-    finally:
-        await db.shutdown()
-
-    if state == "anonymous":
-        assert len(session.posts) == 1
-    else:
-        assert session.posts == []
-    for body in session.posts:
-        assert set(body) == {"space_id", "event_type", "payload"}
-        assert not _IDENTITY_KEYS & set(body)
-        assert PUBLISHER_INSTANCE not in json.dumps(body)
-
-
-async def test_publish_body_leaks_no_identity_or_content(
-    tmp_dir, household, post_payload
-):
-    """No marker — publisher id, subscriber id, author username/user id, post
-    text, location label — survives into the serialized body. Guards: the old
-    body named the relaying household in the clear."""
-    body = await _publish_anonymously(
-        tmp_dir, post_payload, AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    )
-    _assert_no_identity_or_content(
-        json.dumps(body), author_user_id=household["author_user_id"]
-    )
-
-
-async def test_relay_payload_cleartext_keys_are_exactly_the_routing_set(post_payload):
-    """Set equality, not containment: a new cleartext field on the relay
-    envelope must consciously extend :data:`POST_PUBLIC_CLEARTEXT_KEYS`."""
-    assert set(post_payload) == POST_PUBLIC_CLEARTEXT_KEYS
-
-
-async def test_routing_fields_remain_in_clear(post_payload):
-    """``space_id`` + ``epoch`` stay plaintext — the GFS routes on the first
-    and the receiver selects the content key with the second."""
-    assert post_payload["space_id"] == SPACE_ID
-    assert isinstance(post_payload["epoch"], int)
 
 
 # ─── The frame the GFS fans out ──────────────────────────────────────────

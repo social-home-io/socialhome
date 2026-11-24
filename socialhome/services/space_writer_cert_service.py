@@ -59,7 +59,7 @@ from ..crypto import b64url_decode, derive_instance_id, ed25519_public_key
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import GFS_CHANNEL_FIELD
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatureAccess, SpaceRole
-from ..domain.space_item import reader_cert_permits, required_scope
+from ..domain.space_item import reader_cert_permits
 from ..domain.writer_cert import (
     MAX_WRITER_USERS,
     WRITER_SCOPE_COMMENT,
@@ -876,57 +876,6 @@ class SpaceWriterCertService:
             )
             return False
         return True
-
-    async def current_item_cert(
-        self, space: Space, item: dict, *, epoch: int, item_type: str
-    ) -> dict | None:
-        """A cert for a cached, author-signed ``item`` of ``item_type``
-        (published at ``epoch``) that verifies against the space's CURRENT
-        pin and that receivers would accept on that type.
-
-        The item's own cert while it still verifies; after an authority
-        rotation (v_44) it was signed by the old key and no receiver accepts
-        it, so a seed holder re-issues one for the item's origin household
-        at the same epoch — the re-stamp the relay path does for a remote
-        author's post (the cert sits outside the author signature). A
-        follower's ``reader`` cert (v_96) is held to the space's follower
-        switches here too (:func:`reader_cert_permits`): every receiver
-        would refuse it otherwise. ``None`` when neither works (not a seed
-        holder, the household no longer holds a seat that permits the
-        type, the author is no longer one of its writers, or a follower
-        switch is off): such an item would be refused anyway."""
-        try:
-            author_pk = bytes.fromhex(str(item.get("author_pk") or ""))
-        except ValueError:
-            return None
-        scope = required_scope(item_type)
-        raw = item.get(WRITER_CERT_FIELD)
-        try:
-            held = WriterCert.from_wire(raw)
-            verify_writer_cert(
-                held,
-                space_pubkey=bytes.fromhex(space.identity_public_key),
-                space_id=space.id,
-                epoch=epoch,
-                author_pk=author_pk,
-                required_scope=scope,
-            )
-            if reader_cert_permits(held, item_type, space.features):
-                return raw if isinstance(raw, dict) else None
-        except ValueError:
-            pass
-        origin = str(item.get("origin_instance_id") or "")
-        cert = await self.issue_for_instance(
-            space.id, origin, epoch=epoch, instance_pk_hint=author_pk
-        )
-        if (
-            cert is None
-            or not scope_permits(cert.scope, scope)
-            or str(item.get("author_user_id") or "") not in cert.writer_user_ids
-            or not reader_cert_permits(cert, item_type, space.features)
-        ):
-            return None
-        return cert.to_wire()
 
     async def epoch_is_fresh(
         self, space_id: str, epoch: int, *, now: datetime | None = None

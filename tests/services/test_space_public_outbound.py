@@ -1,16 +1,18 @@
-"""Tests for :class:`SpacePublicOutbound` (Phase 5a2 producer).
+"""Tests for :class:`SpacePublicOutbound` — the host's authority items in a
+global space's opaque channel (v_96).
 
-A seed-holding household relays a PUBLIC/GLOBAL space post to the GFS as
-an *encrypted, authority-signed* envelope — the GFS (and any relay) sees
-only ``{space_id, epoch, encrypted_payload, authority_sig, ...}``, never
-the post content or author. Households without the seed, non-public
-spaces, and inbound-driven (loop) events do not relay.
+The space's OWNER (seed holder) puts into the channel what only the seed can
+sign: a remote member's post its author did not put there itself, an
+approved post from the moderation queue, and removals — each as a channel
+authority item (the inner signed by the space authority, binding the epoch,
+sealed under the content key). A space with no channel here gets nothing:
+the space-keyed ``/gfs/publish`` relay is gone, and our own authors' posts
+go into the channel through the member publisher.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -19,11 +21,6 @@ from unittest.mock import patch
 
 import pytest
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    strip_authority_sig_fields,
-    verify_authority_event,
-)
 from socialhome.crypto import (
     b64url_decode,
     derive_instance_id,
@@ -34,7 +31,6 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import CommentDeleted, PostDeleted, SpacePostCreated
-from socialhome.domain.file_hashes import FileHash
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
     JoinMode,
@@ -50,8 +46,6 @@ from socialhome.domain.space_item import (
     CHANNEL_SENT_FIELD,
     ITEM_SIZE_BUCKETS,
     PAD_FIELD,
-    open_item_plaintext,
-    zlib_item_plaintext,
 )
 from socialhome.domain.writer_cert import WriterCert
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
@@ -62,13 +56,10 @@ from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import space_public_outbound
-from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_author import (
     author_signing_bytes,
     build_signed_author_inner,
-    signed_media_refs,
-    verified_file_hashes,
     verify_signed_author_inner,
 )
 from socialhome.services.space_public_authority import (
@@ -78,7 +69,6 @@ from socialhome.services.space_public_authority import (
 from socialhome.services.space_public_outbound import SpacePublicOutbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import sign_writer_cert, verify_writer_cert
-from tests.services.test_space_public_author import _v25_author_signing_bytes
 
 
 def _unpadded(inner: dict) -> dict:
@@ -86,24 +76,22 @@ def _unpadded(inner: dict) -> dict:
     return {k: v for k, v in inner.items() if k != PAD_FIELD}
 
 
-class _CaptureGfs:
-    """Stub for gfs_connection_service.publish_space_event — records calls."""
+class _CaptureChannel:
+    """The channel service as the outbound sees it: which spaces run a
+    channel here (``spaces``), and what went into it (``calls``)."""
 
     def __init__(self) -> None:
+        self.spaces: set[str] = set()
         self.calls: list[dict] = []
+        self.fail = False
 
-    async def publish_space_event(
-        self, *, space_id, event_type, payload, skip=None, compressed_payloads=None
-    ) -> int:
-        self.calls.append(
-            {
-                "space_id": space_id,
-                "event_type": event_type,
-                "payload": payload,
-                "skip": skip,
-                "compressed_payloads": compressed_payloads,
-            }
-        )
+    async def has_channel(self, space_id):
+        return space_id in self.spaces
+
+    async def publish_current(self, space_id, epoch, ciphertext):
+        if self.fail:
+            raise RuntimeError("gfs down")
+        self.calls.append({"space_id": space_id, "epoch": epoch, "ct": ciphertext})
         return 1
 
 
@@ -126,7 +114,8 @@ async def env(tmp_dir):
     crypto = SpaceContentEncryption(key_repo, kek)
     user_repo = SqliteUserRepo(db)
     bus = EventBus()
-    gfs = _CaptureGfs()
+    gfs = _CaptureChannel()
+    skps: dict = {}
 
     async def _make_space(
         space_id: str,
@@ -136,6 +125,7 @@ async def env(tmp_dir):
         join_mode: JoinMode = JoinMode.OPEN,
         allow_subscribers: bool = True,
         owner: str = own_iid,
+        channel: bool = True,
     ):
         skp = generate_space_keypair()
         await space_repo.save(
@@ -154,6 +144,9 @@ async def env(tmp_dir):
         if with_seed:
             await space_repo.set_space_seed(space_id, skp.private_key)
         await crypto.initialise_for_space(space_id)
+        skps[space_id] = skp
+        if channel and stype is SpaceType.GLOBAL:
+            gfs.spaces.add(space_id)
         return skp
 
     sub = SpacePublicOutbound(
@@ -161,18 +154,15 @@ async def env(tmp_dir):
         space_repo=space_repo,
         space_crypto=crypto,
         user_repo=user_repo,
-        gfs_service=gfs,
     )
-    sub.attach_identity(
-        own_instance_id=own_iid,
-        own_instance_public_key=own_kp.public_key,
-        own_identity_seed=own_kp.private_key,
-    )
+    sub.attach_identity(own_instance_id=own_iid)
+    sub.attach_channels(gfs)
     sub.wire()
     yield {
         "db": db,
         "bus": bus,
         "gfs": gfs,
+        "skps": skps,
         "crypto": crypto,
         "space_repo": space_repo,
         "make_space": _make_space,
@@ -195,185 +185,8 @@ def _post(author: str) -> Post:
     )
 
 
-async def test_public_post_relayed_encrypted_and_authority_signed(env):
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
-    )
-    assert len(env["gfs"].calls) == 1
-    call = env["gfs"].calls[0]
-    assert call["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    assert "from_instance" not in call
-    envelope = call["payload"]
-    # GFS-blind: wire envelope carries ONLY routing + ciphertext + sig.
-    assert set(envelope) == {
-        "space_id",
-        "epoch",
-        "encrypted_payload",
-        "authority_sig",
-        "authority_sig_suite",
-    }
-    # No plaintext content / author leaks into the envelope.
-    blob = json.dumps(envelope)
-    assert "hello public space" not in blob
-    assert env["author_user_id"] not in blob
-    # Authority signature verifies against the space public key.
-    assert verify_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        space_id="sp-pub",
-        payload=strip_authority_sig_fields(envelope),
-        authority_sig=envelope["authority_sig"],
-        authority_sig_suite=envelope["authority_sig_suite"],
-        space_public_key=skp.public_key,
-    )
-    # Decrypt the inner payload and confirm author_pk + post_id present.
-    pt = await env["crypto"].decrypt(
-        "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
-    )
-    inner = json.loads(pt)
-    assert inner["post_id"] == "post-1"
-    assert inner["author_user_id"] == env["author_user_id"]
-    assert inner["author_pk"] == env["own_pk"].hex()
-    assert inner["content"] == "hello public space"
-    # Per-author signature is present INSIDE the encrypted inner payload and
-    # verifies against author_pk over the canonical signing bytes.
-    assert "author_sig" in inner
-    assert verify_ed25519(
-        env["own_pk"],
-        author_signing_bytes(inner),
-        b64url_decode(inner["author_sig"]),
-    )
-    # GFS-blind: author_sig must NOT leak onto the wire envelope (it's inside
-    # the ciphertext, never a plaintext field).
-    assert "author_sig" not in envelope
-    assert inner["author_sig"] not in blob
-
-
-async def test_the_post_also_travels_as_a_signed_compressed_copy(env):
-    """Next to the JSON envelope every follower reads, a zlib copy
-    (``payload_suite: "zlib1"``, under the same authority signature) for the
-    servers that take it — a smaller size bucket, the same inner."""
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    # Long enough that its JSON needs the 4 KiB bucket; it compresses to 1 KiB.
-    post = dataclasses.replace(
-        _post(env["author_user_id"]), content="hello public space, " * 60
-    )
-    await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
-    call = env["gfs"].calls[0]
-    plain, copies = call["payload"], call["compressed_payloads"]
-    # The dictionary copy goes too (no larger; its label must not hint at the
-    # content), next to the zlib1 one a server without the dictionary gets.
-    assert set(copies) == {"zlib1", "zlib1+dict1"}
-    zipped = copies["zlib1"]
-    assert zipped is not None
-    assert set(zipped) == set(plain) | {"payload_suite"}
-    assert zipped["payload_suite"] == "zlib1"
-    assert zipped["epoch"] == plain["epoch"]
-    assert verify_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        space_id="sp-pub",
-        payload=strip_authority_sig_fields(zipped),
-        authority_sig=zipped["authority_sig"],
-        authority_sig_suite=zipped["authority_sig_suite"],
-        space_public_key=skp.public_key,
-    )
-    # Stripping the label breaks the signature: a relay can't relabel it.
-    assert not verify_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        space_id="sp-pub",
-        payload={
-            k: v
-            for k, v in strip_authority_sig_fields(zipped).items()
-            if k != "payload_suite"
-        },
-        authority_sig=zipped["authority_sig"],
-        authority_sig_suite=zipped["authority_sig_suite"],
-        space_public_key=skp.public_key,
-    )
-    json_pt = await env["crypto"].decrypt(
-        "sp-pub", plain["epoch"], plain["encrypted_payload"]
-    )
-    zlib_pt = await env["crypto"].decrypt(
-        "sp-pub", zipped["epoch"], zipped["encrypted_payload"]
-    )
-    assert len(zlib_pt) < len(json_pt)
-    assert len(zlib_pt) in ITEM_SIZE_BUCKETS
-    inner = json.loads(open_item_plaintext(zlib_pt, "zlib1"))
-    assert inner == {k: v for k, v in json.loads(json_pt).items() if k != "_pad"}
-
-
-async def test_every_worthwhile_copy_travels_signed_under_its_suite(env):
-    """Where both compressed copies save a bucket, both go along — each
-    sealed under the same epoch and authority-signed with its own suite
-    tag — and each opens to the same inner."""
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    real = space_public_outbound.compressed_item_plaintexts
-
-    def both(body, *, json_len):
-        dict_pt = zlib_item_plaintext(body, suite="zlib1+dict1")
-        plain_pt = zlib_item_plaintext(body)
-        assert dict_pt is not None and plain_pt is not None
-        assert real(body, json_len=json_len)  # it does compress
-        return {"zlib1": plain_pt, "zlib1+dict1": dict_pt}
-
-    post = dataclasses.replace(
-        _post(env["author_user_id"]), content="hello public space, " * 60
-    )
-    with patch.object(space_public_outbound, "compressed_item_plaintexts", both):
-        await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
-    call = env["gfs"].calls[0]
-    copies = call["compressed_payloads"]
-    assert set(copies) == {"zlib1", "zlib1+dict1"}
-    json_pt = await env["crypto"].decrypt(
-        "sp-pub", call["payload"]["epoch"], call["payload"]["encrypted_payload"]
-    )
-    want = {k: v for k, v in json.loads(json_pt).items() if k != "_pad"}
-    for suite, env_ in copies.items():
-        assert env_["payload_suite"] == suite
-        assert verify_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id="sp-pub",
-            payload=strip_authority_sig_fields(env_),
-            authority_sig=env_["authority_sig"],
-            authority_sig_suite=env_["authority_sig_suite"],
-            space_public_key=skp.public_key,
-        )
-        pt = await env["crypto"].decrypt(
-            "sp-pub", env_["epoch"], env_["encrypted_payload"]
-        )
-        assert json.loads(open_item_plaintext(pt, suite)) == want
-
-
-@pytest.mark.security
-async def test_a_short_post_carries_the_same_suites_as_a_long_one(env):
-    """Short items already sit in the smallest bucket, so compression saves
-    no byte there — yet they carry the same compressed copies a long post
-    does: the routing-visible label must not tell the GFS which items
-    compressed past a bucket edge."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
-    )
-    long_post = dataclasses.replace(
-        _post(env["author_user_id"]),
-        id="post-2",
-        content="hello public space, " * 60,
-    )
-    await env["bus"].publish(SpacePostCreated(post=long_post, space_id="sp-pub"))
-    short, long_ = (set(c["compressed_payloads"]) for c in env["gfs"].calls[:2])
-    assert short == long_ == {"zlib1", "zlib1+dict1"}
-
-
-async def test_global_space_also_relays(env):
-    await env["make_space"]("sp-glob", SpaceType.GLOBAL, with_seed=True)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-glob")
-    )
-    assert len(env["gfs"].calls) == 1
-
-
 async def test_no_seed_no_relay(env):
-    await env["make_space"]("sp-noseed", SpaceType.PUBLIC, with_seed=False)
+    await env["make_space"]("sp-noseed", SpaceType.GLOBAL, with_seed=False)
     await env["bus"].publish(
         SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-noseed")
     )
@@ -397,7 +210,7 @@ async def test_household_space_no_relay(env):
 
 
 async def test_inbound_origin_post_not_relayed_loop_guard(env):
-    await env["make_space"]("sp-loop", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-loop", SpaceType.GLOBAL, with_seed=True)
     await env["bus"].publish(
         SpacePostCreated(
             post=_post(env["author_user_id"]),
@@ -432,7 +245,7 @@ def _remote_relay(*, post_id="rpost-1", content="remote authored", space_id="sp-
 
 
 async def test_remote_authored_relay_happy_path(env):
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     author_kp, author_user_id, relay = _remote_relay()
     await env["bus"].publish(
         SpacePostCreated(
@@ -443,34 +256,11 @@ async def test_remote_authored_relay_happy_path(env):
         )
     )
     assert len(env["gfs"].calls) == 1
-    call = env["gfs"].calls[0]
-    assert call["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    assert "from_instance" not in call
-    envelope = call["payload"]
-    assert set(envelope) == {
-        "space_id",
-        "epoch",
-        "encrypted_payload",
-        "authority_sig",
-        "authority_sig_suite",
-    }
-    # GFS-blind: no plaintext content leaks.
-    blob = json.dumps(envelope)
-    assert "remote authored" not in blob
-    # Authority signature is THIS seed-holder's, verifiable against space pubkey.
-    assert verify_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        space_id="sp-pub",
-        payload=strip_authority_sig_fields(envelope),
-        authority_sig=envelope["authority_sig"],
-        authority_sig_suite=envelope["authority_sig_suite"],
-        space_public_key=skp.public_key,
-    )
-    # Decrypts to the ORIGINAL inner — author_sig intact, author_pk = original.
-    pt = await env["crypto"].decrypt(
-        "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
-    )
-    inner = json.loads(pt)
+    # Into the channel as ciphertext: no plaintext content leaks.
+    assert "remote authored" not in json.dumps(env["gfs"].calls[0])
+    # The inner carries THIS seed holder's authority signature (verified by
+    # ``_decrypted``) and is the ORIGINAL inner — author_sig intact.
+    _frame, inner = await _decrypted(env, "sp-pub")
     assert _unpadded(inner) == relay
     assert inner["author_pk"] == author_kp.public_key.hex()
     assert inner["author_user_id"] == author_user_id
@@ -494,27 +284,8 @@ class _Coverage:
         return _skip
 
 
-async def test_a_remote_authored_relay_asks_where_its_copy_is_redundant(env):
-    """Step 12: the relay of a remote member's post carries the per-server
-    skip test for its author household; a local author's post never does."""
-    await env["make_space"]("sp-cov", SpaceType.PUBLIC, with_seed=True)
-    coverage = _Coverage()
-    env["sub"].attach_relay_coverage(coverage)
-    _author_kp, author_user_id, relay = _remote_relay(space_id="sp-cov")
-    await env["bus"].publish(
-        SpacePostCreated(
-            post=_post(author_user_id),
-            space_id="sp-cov",
-            origin_instance_id="beta.home",
-            public_relay=relay,
-        )
-    )
-    assert coverage.asked == [("sp-cov", "beta.home")]
-    assert env["gfs"].calls[-1]["skip"] is not None
-
-
 async def test_remote_authored_not_seed_holder_not_relayed(env):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=False)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=False)
     _kp, author_user_id, relay = _remote_relay()
     await env["bus"].publish(
         SpacePostCreated(
@@ -528,7 +299,7 @@ async def test_remote_authored_not_seed_holder_not_relayed(env):
 
 
 async def test_remote_authored_forged_relay_not_relayed(env):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     _kp, author_user_id, relay = _remote_relay()
     # Tamper a signed field AFTER signing → author_sig no longer verifies.
     relay["content"] = "tampered after signing"
@@ -544,7 +315,7 @@ async def test_remote_authored_forged_relay_not_relayed(env):
 
 
 async def test_remote_authored_self_cert_mismatch_not_relayed(env):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     _kp, author_user_id, relay = _remote_relay()
     # author_user_id no longer derives from (author_pk, author_username).
     relay["author_user_id"] = "not-the-derived-id"
@@ -564,7 +335,7 @@ async def test_remote_authored_cross_space_inner_not_relayed(env):
     space Y's envelope — cross-space injection. The inner's signed
     ``space_id`` ("sp-other") differs from the broadcast space ("sp-pub"),
     so the relay is refused (GFS never called)."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     # Inner is validly signed FOR a different space ("sp-other").
     _kp, author_user_id, relay = _remote_relay(space_id="sp-other")
     await env["bus"].publish(
@@ -595,7 +366,7 @@ async def test_remote_authored_private_space_not_relayed(env):
 async def test_inbound_no_public_relay_not_relayed(env):
     """An inbound event with no public_relay is the pure loop guard — never
     re-fan, no crash."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     await env["bus"].publish(
         SpacePostCreated(
             post=_post(env["author_user_id"]),
@@ -610,7 +381,7 @@ async def test_inbound_no_public_relay_not_relayed(env):
 async def test_calendar_event_post_not_relayed(env):
     """A calendar-derived post (linked_event_id set) is derived locally on
     every household — relaying it would double up. Skip."""
-    await env["make_space"]("sp-cal", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-cal", SpaceType.GLOBAL, with_seed=True)
     post = Post(
         id="post-cal",
         author=env["author_user_id"],
@@ -623,162 +394,14 @@ async def test_calendar_event_post_not_relayed(env):
     assert env["gfs"].calls == []
 
 
-async def test_anchor_authored_post_carries_signed_anchor(env):
-    """A local author whose ``user_id`` derives from a uuid ``identity_anchor``
-    (not the username) relays an inner that carries the anchor, and the inner
-    self-certifies via the anchor (the subscriber-side check accepts it)."""
-    db = env["db"]
-    # Insert a local user whose user_id derives from a uuid anchor, NOT username.
-    anchor = "2f3c9d1e4b5a6789abcdef0123456789"
-    anchored_user_id = derive_user_id(env["own_pk"], anchor)
-    await db.enqueue(
-        "INSERT INTO users(user_id, username, display_name, state, identity_anchor) "
-        "VALUES(?, 'carol', 'Carol', 'active', ?)",
-        (anchored_user_id, anchor),
-    )
-    skp = await env["make_space"]("sp-anchor", SpaceType.PUBLIC, with_seed=True)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(anchored_user_id), space_id="sp-anchor")
-    )
-    assert len(env["gfs"].calls) == 1
-    envelope = env["gfs"].calls[0]["payload"]
-    pt = await env["crypto"].decrypt(
-        "sp-anchor", envelope["epoch"], envelope["encrypted_payload"]
-    )
-    inner = json.loads(pt)
-    assert inner["identity_anchor"] == anchor
-    assert inner["author_user_id"] == anchored_user_id
-    # The relayed inner self-certifies via the anchor — username derivation
-    # would NOT match, proving the anchor is the derivation input on the wire.
-    assert derive_user_id(env["own_pk"], "carol") != anchored_user_id
-    assert verify_signed_author_inner(inner) is True
-    _ = skp
-
-
-async def test_legacy_username_anchored_author_relays_v25_compatible_inner(env):
-    """REGRESSION (live cross-version bug): in production EVERY user row has a
-    non-NULL ``identity_anchor`` (migration 0041 backfilled ``= username``), so
-    the producer always passes an anchor. A legacy, username-anchored author
-    MUST still relay an inner with NO ``identity_anchor`` key whose author_sig
-    verifies over the 13-field v_25 layout — otherwise a not-yet-upgraded
-    subscriber (June 2026 builds, ``OURS=24``) drops every public post."""
-    db = env["db"]
-    # Mirror the 0041 backfill: anchor == username.
-    await db.enqueue(
-        "UPDATE users SET identity_anchor = username WHERE user_id = ?",
-        (env["author_user_id"],),
-    )
-    row = await db.fetchone(
-        "SELECT identity_anchor FROM users WHERE user_id = ?",
-        (env["author_user_id"],),
-    )
-    assert row[0] == "alice"
-    await env["make_space"]("sp-legacy", SpaceType.PUBLIC, with_seed=True)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-legacy")
-    )
-    assert len(env["gfs"].calls) == 1
-    envelope = env["gfs"].calls[0]["payload"]
-    pt = await env["crypto"].decrypt(
-        "sp-legacy", envelope["epoch"], envelope["encrypted_payload"]
-    )
-    inner = json.loads(pt)
-    assert "identity_anchor" not in inner
-    # A v_25 verifier (13-field layout) accepts the emitted signature...
-    assert verify_ed25519(
-        env["own_pk"],
-        _v25_author_signing_bytes(inner),
-        b64url_decode(inner["author_sig"]),
-    )
-    # ...and so does a v_26+ verifier.
-    assert verify_signed_author_inner(inner) is True
-
-
-async def test_space_service_created_global_space_can_relay(env):
-    """Regression (#gfs-space-key): a GLOBAL space created through
-    ``SpaceService.create_space`` — the real production path, with nobody ever
-    invited cross-household — must already hold a content key, so the producer
-    reaches the relay instead of the "no content key … cannot relay" branch.
-    """
-    from socialhome.domain.space import SpaceType as _SpaceType
-    from socialhome.infrastructure.event_bus import EventBus as _EventBus
-    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
-    from socialhome.repositories.user_repo import SqliteUserRepo as _UserRepo
-    from socialhome.services.space_service import SpaceService
-
-    db = env["db"]
-    svc = SpaceService(
-        env["space_repo"],
-        SqliteSpacePostRepo(db),
-        _UserRepo(db),
-        _EventBus(),
-        own_instance_id=env["own_iid"],
-    )
-    svc.attach_space_crypto_service(env["crypto"])
-    # Readability is the ``allow_subscribers`` opt-in and it defaults OFF, so
-    # a freshly created space relays nothing. This regression is about the
-    # content key existing at create time, so opt in explicitly.
-    space = await svc.create_space(
-        owner_username="alice",
-        name="World",
-        space_type=_SpaceType.GLOBAL,
-        features=SpaceFeatures(allow_subscribers=True),
-    )
-
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id=space.id)
-    )
-
-    assert len(env["gfs"].calls) == 1
-    envelope = env["gfs"].calls[0]["payload"]
-    assert envelope["space_id"] == space.id
-    pt = await env["crypto"].decrypt(
-        space.id, envelope["epoch"], envelope["encrypted_payload"]
-    )
-    assert json.loads(pt)["post_id"] == "post-1"
-
-
 # ─── allow_subscribers OFF: listed for discovery, never publicly readable ──
 
 
-async def test_global_space_without_subscribers_post_not_relayed(env):
-    """A GLOBAL space whose owner has NOT opted into subscribers is
-    discoverable (its metadata is published to the GFS) but NOT publicly
-    readable: no post of it is ever relayed to the GFS subscribers."""
+async def test_a_remote_post_goes_into_the_channel_with_subscribers_off(env):
+    """v_96 — the channel carries the members' content whatever
+    ``allow_subscribers`` says (followers off means no follower seats)."""
     await env["make_space"](
-        "sp-inv",
-        SpaceType.GLOBAL,
-        with_seed=True,
-        allow_subscribers=False,
-    )
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-inv")
-    )
-    assert env["gfs"].calls == []
-
-
-async def test_public_space_without_subscribers_post_not_relayed(env):
-    await env["make_space"](
-        "sp-inv-pub",
-        SpaceType.PUBLIC,
-        with_seed=True,
-        allow_subscribers=False,
-    )
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-inv-pub")
-    )
-    assert env["gfs"].calls == []
-
-
-async def test_remote_authored_post_not_relayed_without_subscribers(env):
-    """The owner-offline remote-author relay is gated the same way — a
-    seed-holder must not launder another member's post into the (nonexistent)
-    public stream of a space that takes no followers."""
-    await env["make_space"](
-        "sp-pub",
-        SpaceType.GLOBAL,
-        with_seed=True,
-        allow_subscribers=False,
+        "sp-pub", SpaceType.GLOBAL, with_seed=True, allow_subscribers=False
     )
     _kp, author_user_id, relay = _remote_relay()
     await env["bus"].publish(
@@ -789,57 +412,42 @@ async def test_remote_authored_post_not_relayed_without_subscribers(env):
             public_relay=relay,
         )
     )
+    assert len(env["gfs"].calls) == 1
+
+
+@pytest.mark.security
+async def test_a_space_without_a_channel_gets_nothing_at_all(env):
+    """v_96 — no channel here, no GFS path: no remote-author copy, no
+    approved post, no removal (the space-keyed relay is gone; members are
+    reached by federation and catch up from the host)."""
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True, channel=False)
+    _kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    await env["bus"].publish(PostDeleted(post_id="post-7", space_id="sp-pub"))
+    await env["bus"].publish(
+        CommentDeleted(post_id="post-7", comment_id="c-7", space_id="sp-pub")
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_our_own_authors_post_gets_no_authority_copy(env):
+    """Our own author's post goes into the channel through the member
+    publisher — never as an authority item here."""
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
     assert env["gfs"].calls == []
 
 
 # ─── the two dials are independent ────────────────────────────────────────
-
-
-async def test_invite_only_space_with_subscribers_on_still_relays(env):
-    """``invite_only`` + subscribers-ON is a legitimate BROADCAST space: only
-    invited people post, but anyone may follow. The join mode must not gate
-    the relay — that was the old, wrong model."""
-    await env["make_space"](
-        "sp-broadcast",
-        SpaceType.GLOBAL,
-        with_seed=True,
-        join_mode=JoinMode.INVITE_ONLY,
-        allow_subscribers=True,
-    )
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-broadcast")
-    )
-    assert len(env["gfs"].calls) == 1
-
-
-async def test_request_join_mode_with_subscribers_on_still_relays(env):
-    await env["make_space"](
-        "sp-req-open",
-        SpaceType.GLOBAL,
-        with_seed=True,
-        join_mode=JoinMode.REQUEST,
-        allow_subscribers=True,
-    )
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-req-open")
-    )
-    assert len(env["gfs"].calls) == 1
-
-
-async def test_open_to_join_space_with_subscribers_off_does_not_relay(env):
-    """…and the mirror image: ``open`` says anyone may JOIN, not that anyone
-    may READ. With subscribers off the content stream stays dead."""
-    await env["make_space"](
-        "sp-open-private",
-        SpaceType.GLOBAL,
-        with_seed=True,
-        join_mode=JoinMode.OPEN,
-        allow_subscribers=False,
-    )
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-open-private")
-    )
-    assert env["gfs"].calls == []
 
 
 # ─── v_49: the relayed inner carries the author household's writer cert ──
@@ -891,40 +499,19 @@ async def _with_certs(env, *, seats=None, pks=None, versions=None):
 
 
 async def _decrypted(env, space_id):
-    envelope = env["gfs"].calls[-1]["payload"]
-    pt = await env["crypto"].decrypt(
-        space_id, envelope["epoch"], envelope["encrypted_payload"]
+    """The last channel item: ``(frame, authority inner)`` — the inner's
+    space-authority signature verified against the pin, padding checked."""
+    frame = env["gfs"].calls[-1]
+    opened = await env["crypto"].decrypt(space_id, frame["epoch"], frame["ct"])
+    assert len(opened) in ITEM_SIZE_BUCKETS
+    inner = open_channel_authority(
+        opened,
+        space_id=space_id,
+        epoch=frame["epoch"],
+        space_pubkey_hex=env["skps"][space_id].public_key.hex(),
     )
-    return envelope, json.loads(pt)
-
-
-async def test_local_author_inner_carries_our_writer_cert(env):
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    await env["space_repo"].save_member(
-        SpaceMember(
-            space_id="sp-pub",
-            user_id=env["author_user_id"],
-            role="owner",
-            joined_at="2026-01-01T00:00:00+00:00",
-        )
-    )
-    await _with_certs(env)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
-    )
-    envelope, inner = await _decrypted(env, "sp-pub")
-    # Never on the wire in plaintext.
-    assert "writer_cert" not in envelope
-    verify_writer_cert(
-        WriterCert.from_wire(inner["writer_cert"]),
-        space_pubkey=skp.public_key,
-        space_id="sp-pub",
-        epoch=envelope["epoch"],
-        author_pk=env["own_pk"],
-        required_scope="write",
-    )
-    # The author signature still verifies — the cert is outside it.
-    assert verify_signed_author_inner(inner)
+    assert inner is not None
+    return frame, inner
 
 
 async def _remote_cert(skp, author_pk, *, epoch, space_id="sp-pub", scope="write"):
@@ -938,7 +525,7 @@ async def _remote_cert(skp, author_pk, *, epoch, space_id="sp-pub", scope="write
 
 
 async def test_remote_author_cert_is_restamped_for_the_current_epoch(env):
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     author_kp, author_user_id, relay = _remote_relay()
     await _with_certs(
         env, seats={"beta.home": ["member"]}, pks={"beta.home": author_kp.public_key}
@@ -974,7 +561,7 @@ async def test_remote_author_cert_is_restamped_for_the_current_epoch(env):
     ["forged", "other_household", "comment_scope", "other_space"],
 )
 async def test_remote_author_with_a_bad_cert_is_not_relayed(env, mutate, caplog):
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     author_kp, author_user_id, relay = _remote_relay()
     await _with_certs(
         env, seats={"beta.home": ["member"]}, pks={"beta.home": author_kp.public_key}
@@ -1011,7 +598,7 @@ async def test_remote_author_with_a_bad_cert_is_not_relayed(env, mutate, caplog)
 async def test_remote_author_whose_seat_is_gone_is_not_relayed(env, caplog):
     """A valid cert from an earlier epoch no longer counts once the
     household holds no writer seat — the host re-stamps only live writers."""
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     author_kp, author_user_id, relay = _remote_relay()
     await _with_certs(env, seats={}, pks={"beta.home": author_kp.public_key})
     epoch = await env["crypto"].get_current_epoch("sp-pub")
@@ -1031,7 +618,7 @@ async def test_remote_author_whose_seat_is_gone_is_not_relayed(env, caplog):
 async def test_pre_v49_author_without_a_cert_keeps_the_host_path(env):
     """The migration tripwire: no cert from a pre-v49 origin whose pinned
     key is the inner's author key → today's host-signed relay."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     author_kp, author_user_id, relay = _remote_relay()
     await _with_certs(
         env, pks={"beta.home": author_kp.public_key}, versions={"beta.home": 48}
@@ -1051,7 +638,7 @@ async def test_pre_v49_author_without_a_cert_keeps_the_host_path(env):
 async def test_v49_origin_without_a_cert_is_not_relayed(env, caplog):
     """A v49 household always attaches its cert; a hint without one is a
     stripped cert, not an older author."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     author_kp, author_user_id, relay = _remote_relay()
     await _with_certs(
         env, pks={"beta.home": author_kp.public_key}, versions={"beta.home": 49}
@@ -1069,7 +656,7 @@ async def test_v49_origin_without_a_cert_is_not_relayed(env, caplog):
 
 
 async def test_legacy_hint_naming_another_key_is_not_relayed(env, caplog):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     _author_kp, author_user_id, relay = _remote_relay()
     await _with_certs(
         env,
@@ -1095,7 +682,7 @@ async def test_a_member_published_post_is_still_relayed_by_the_host(env):
     """The author also publishes the post over the GFS itself, but the host
     keeps relaying it: followers on an older build ignore ``space_item``,
     and receivers that read both dedupe by post id."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     _kp, author_user_id, relay = _remote_relay()
     await env["bus"].publish(
         SpacePostCreated(
@@ -1111,24 +698,10 @@ async def test_a_member_published_post_is_still_relayed_by_the_host(env):
 # ─── Size padding: every host-relay plaintext lands on a bucket ─────────
 
 
-async def test_relayed_post_plaintext_is_padded_to_a_bucket(env):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
-    )
-    envelope = env["gfs"].calls[-1]["payload"]
-    pt = await env["crypto"].decrypt(
-        "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
-    )
-    assert len(pt) in ITEM_SIZE_BUCKETS
-    # The padding sits outside the author signature.
-    assert verify_signed_author_inner(json.loads(pt))
-
-
 async def test_a_member_hint_carrying_an_authority_kind_is_not_relayed(env, caplog):
     """A member's own pre-signed inner must never look like an authority
     notice on the follower side — the seed holder refuses it outright."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     _kp, author_user_id, relay = _remote_relay()
     relay[AUTHORITY_KIND_FIELD] = AUTHORITY_KIND_REMOVAL
     await env["bus"].publish(
@@ -1156,28 +729,12 @@ _ENVELOPE_KEYS = {
 
 
 async def _removal_inner(env, skp, space_id="sp-pub") -> dict:
-    call = env["gfs"].calls[-1]
-    assert call["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    envelope = call["payload"]
-    assert set(envelope) == _ENVELOPE_KEYS
-    assert verify_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        space_id=space_id,
-        payload=strip_authority_sig_fields(envelope),
-        authority_sig=envelope["authority_sig"],
-        authority_sig_suite=envelope["authority_sig_suite"],
-        space_public_key=skp.public_key,
-    )
-    pt = await env["crypto"].decrypt(
-        space_id, envelope["epoch"], envelope["encrypted_payload"]
-    )
-    # Padded like every other relay item: a removal looks like a short post.
-    assert len(pt) in ITEM_SIZE_BUCKETS
-    return json.loads(pt)
+    _frame, inner = await _decrypted(env, space_id)
+    return inner
 
 
 async def test_a_moderator_post_removal_is_relayed_without_who_removed_it(env):
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     await env["bus"].publish(
         PostDeleted(
             post_id="post-9",
@@ -1230,7 +787,7 @@ async def test_a_comment_removal_is_relayed(env):
 async def test_a_federated_delete_applied_here_is_relayed_too(env):
     """A moderator on another household removes the post; the host applies
     the federated delete and relays the removal on its authority."""
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     await env["bus"].publish(
         PostDeleted(post_id="post-2", space_id="sp-pub", origin_instance_id="m.home")
     )
@@ -1238,18 +795,18 @@ async def test_a_federated_delete_applied_here_is_relayed_too(env):
     assert inner["item_id"] == "post-2"
 
 
-@pytest.mark.parametrize("case", ["no_seed", "private", "no_subscribers", "feed"])
+@pytest.mark.parametrize("case", ["no_seed", "private", "no_channel", "feed"])
 async def test_removal_is_not_relayed_where_nothing_was(env, case):
     if case == "no_seed":
-        await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=False)
+        await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=False)
     elif case == "private":
         await env["make_space"]("sp-pub", SpaceType.PRIVATE, with_seed=True)
-    elif case == "no_subscribers":
+    elif case == "no_channel":
         await env["make_space"](
-            "sp-pub", SpaceType.PUBLIC, with_seed=True, allow_subscribers=False
+            "sp-pub", SpaceType.GLOBAL, with_seed=True, channel=False
         )
     else:
-        await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+        await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     await env["bus"].publish(
         PostDeleted(post_id="post-3", space_id=None if case == "feed" else "sp-pub")
     )
@@ -1265,7 +822,7 @@ async def test_removal_is_not_relayed_where_nothing_was(env, case):
 
 async def test_a_calendar_post_removal_is_not_relayed(env):
     """Calendar-derived posts are never relayed, so neither is their removal."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
 
     class _Posts:
         async def get(self, post_id):
@@ -1285,13 +842,13 @@ async def test_a_calendar_post_removal_is_not_relayed(env):
 
 
 async def test_a_removal_with_an_unusable_id_is_not_relayed(env):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     await env["bus"].publish(PostDeleted(post_id="x" * 500, space_id="sp-pub"))
     assert env["gfs"].calls == []
 
 
 async def test_a_removal_without_a_content_key_is_dropped(env, caplog):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
 
     async def _no_key(*_a, **_k):
         raise RuntimeError("no key")
@@ -1305,7 +862,7 @@ async def test_a_removal_without_a_content_key_is_dropped(env, caplog):
 # ─── Approved moderated posts: relayed under the author's signature ─────
 
 
-async def _approved_env(env, *, seats=("member",), owner=None, stype=SpaceType.PUBLIC):
+async def _approved_env(env, *, seats=("member",), owner=None, stype=SpaceType.GLOBAL):
     """A remote author household whose instance id is its key fingerprint,
     a MODERATED public space, and the post the host just published from the
     queue with the submitter's signed copy."""
@@ -1374,7 +931,7 @@ async def test_an_approved_remote_post_is_relayed_under_its_authors_signature(en
     assert inner["post_id"] == post.id
     assert inner["origin_instance_id"] == author_iid
     assert "the-moderator" not in json.dumps(inner)
-    envelope = env["gfs"].calls[0]["payload"]
+    envelope = env["gfs"].calls[0]
     verify_writer_cert(
         WriterCert.from_wire(inner["writer_cert"]),
         space_pubkey=skp.public_key,
@@ -1412,7 +969,7 @@ async def test_an_approved_post_of_a_mixed_household_carries_a_plain_cert(env):
     assert SpaceWriterCertService.check_item_cert(
         await env["space_repo"].get("sp-pub"),
         inner["writer_cert"],
-        epoch=env["gfs"].calls[0]["payload"]["epoch"],
+        epoch=env["gfs"].calls[0]["epoch"],
         author_pk=author_kp.public_key,
         required_scope="comment",
         item_type="post",
@@ -1521,14 +1078,11 @@ async def test_an_approved_post_without_a_content_key_is_dropped(env, caplog):
 
 
 async def test_a_failed_gfs_publish_is_logged_not_raised(env, caplog):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
 
-    async def _boom(**_kw):
-        raise RuntimeError("gfs down")
-
-    env["gfs"].publish_space_event = _boom
+    env["gfs"].fail = True
     await env["bus"].publish(PostDeleted(post_id="post-5", space_id="sp-pub"))
-    assert "post removal relay failed" in caplog.text
+    assert "post removal channel publish failed" in caplog.text
 
 
 async def _posts_env(env):
@@ -1538,7 +1092,7 @@ async def _posts_env(env):
 
 
 async def test_a_federated_delete_carries_the_author_from_the_held_row(env):
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     posts = await _posts_env(env)
     await posts.save("sp-pub", _post("row-author"))
     await env["bus"].publish(
@@ -1549,7 +1103,7 @@ async def test_a_federated_delete_carries_the_author_from_the_held_row(env):
 
 
 async def test_a_removal_of_an_item_never_held_here_is_not_relayed(env):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     await _posts_env(env)
     await env["bus"].publish(PostDeleted(post_id="ghost", space_id="sp-pub"))
     await env["bus"].publish(
@@ -1559,7 +1113,7 @@ async def test_a_removal_of_an_item_never_held_here_is_not_relayed(env):
 
 
 async def test_a_comment_removal_carries_the_author_from_the_held_row(env):
-    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     posts = await _posts_env(env)
     await posts.save("sp-pub", _post("post-author"))
     await posts.add_comment(
@@ -1581,7 +1135,7 @@ async def test_a_comment_removal_carries_the_author_from_the_held_row(env):
 
 
 async def test_a_removal_in_an_archived_space_is_not_relayed(env):
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
     space = await env["space_repo"].get("sp-pub")
     await env["space_repo"].save(dataclasses.replace(space, archived=True))
     await env["bus"].publish(PostDeleted(post_id="post-1", space_id="sp-pub"))
@@ -1612,78 +1166,6 @@ class _MediaGfs:
 
     def upload(self, plan):
         self.uploaded.append(plan)
-
-
-async def test_a_seed_holders_picture_post_carries_media_refs_for_followers(env):
-    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
-    media = _MediaGfs()
-    env["sub"].attach_media_gfs(media)
-    post = dataclasses.replace(
-        _post(env["author_user_id"]),
-        type=PostType.IMAGE,
-        image_urls=("api/media/a.webp",),
-    )
-    await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
-    envelope = env["gfs"].calls[0]["payload"]
-    inner = json.loads(
-        await env["crypto"].decrypt(
-            "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
-        )
-    )
-    assert inner["media_refs"] == _MediaPlan().wire()
-    assert verify_signed_author_inner(_unpadded(inner))
-    # Signed by the author (#1309 round 3): a re-publisher can't swap it.
-    assert signed_media_refs(_unpadded(inner)) == _MediaPlan().wire()
-    assert media.planned == [("sp-pub", ["api/media/a.webp"], True)]
-    assert media.items == [post.id]  # sealed for the post
-    assert len(media.uploaded) == 1
-
-
-async def test_a_text_post_carries_no_media_refs(env):
-    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
-    media = _MediaGfs()
-    env["sub"].attach_media_gfs(media)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
-    )
-    envelope = env["gfs"].calls[0]["payload"]
-    inner = json.loads(
-        await env["crypto"].decrypt(
-            "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
-        )
-    )
-    assert "media_refs" not in inner
-    assert media.planned == []
-
-
-async def test_a_relayed_picture_post_carries_its_signed_file_hashes(env, tmp_dir):
-    """v_92 — one name on every path: the relayed inner carries the post's
-    file hashes under the author's signature, so a member that gets this
-    copy first names the file by content, as the host's direct copy does."""
-    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
-    env["sub"].attach_media_gfs(_MediaGfs())
-    media_dir = tmp_dir / "hashed-media"
-    media_dir.mkdir()
-    (media_dir / "a.webp").write_bytes(b"picture-bytes")
-    env["sub"].attach_file_hasher(MediaFileHasher(media_dir))
-    post = dataclasses.replace(
-        _post(env["author_user_id"]),
-        type=PostType.IMAGE,
-        image_urls=("api/media/a.webp",),
-    )
-    await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
-    envelope = env["gfs"].calls[0]["payload"]
-    inner = _unpadded(
-        json.loads(
-            await env["crypto"].decrypt(
-                "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
-            )
-        )
-    )
-    assert verify_signed_author_inner(inner)
-    assert verified_file_hashes(inner) == {
-        "a.webp": FileHash(hashlib.sha256(b"picture-bytes").hexdigest())
-    }
 
 
 # ─── A delegated admin: only what the seed alone can say ───────────────────
@@ -1785,11 +1267,15 @@ async def test_a_delegated_admin_answers_no_removal_it_only_received(env, origin
 async def test_the_owner_without_an_identity_still_warns(env, caplog):
     """The owner gate must not swallow the wiring warning."""
     await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
-    env["sub"].attach_identity(
-        own_instance_id="", own_instance_public_key=b"", own_identity_seed=b""
-    )
+    env["sub"].attach_identity(own_instance_id="")
+    _kp, author_user_id, relay = _remote_relay()
     await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
     )
     assert env["gfs"].calls == []
     assert "identity not attached" in caplog.text
@@ -1838,9 +1324,7 @@ async def test_the_owner_still_relays_a_removal_that_reached_it(env):
 
 async def test_a_removal_without_an_identity_warns(env, caplog):
     await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
-    env["sub"].attach_identity(
-        own_instance_id="", own_instance_public_key=b"", own_identity_seed=b""
-    )
+    env["sub"].attach_identity(own_instance_id="")
     await env["bus"].publish(
         PostDeleted(post_id="post-9", space_id="sp-pub", origin_instance_id="m.home")
     )
@@ -1937,26 +1421,6 @@ async def test_a_member_post_marked_channel_sent_gets_no_host_copy(env):
     assert env["gfs"].calls == []
 
 
-async def test_the_channel_sent_mark_is_never_relayed_on(env):
-    """Without a channel the mark means nothing: the space-keyed relay runs
-    as before and the mark does not travel."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    _author_kp, author_user_id, relay = _remote_relay()
-    await env["bus"].publish(
-        SpacePostCreated(
-            post=_post(author_user_id),
-            space_id="sp-pub",
-            origin_instance_id="beta.home",
-            public_relay={**relay, CHANNEL_SENT_FIELD: True},
-        )
-    )
-    envelope = env["gfs"].calls[0]["payload"]
-    pt = await env["crypto"].decrypt(
-        "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
-    )
-    assert CHANNEL_SENT_FIELD not in json.loads(pt)
-
-
 @pytest.mark.security
 @pytest.mark.parametrize("allow_subscribers", [True, False])
 async def test_a_removal_goes_into_the_channel_signed_inside(env, allow_subscribers):
@@ -1976,17 +1440,6 @@ async def test_a_removal_goes_into_the_channel_signed_inside(env, allow_subscrib
     inner = await _channel_inner(env, skp, channels)
     assert inner[AUTHORITY_KIND_FIELD] == AUTHORITY_KIND_REMOVAL
     assert inner["item_id"] == "post-9"
-
-
-async def test_a_global_space_without_a_channel_keeps_the_space_keyed_relay(env):
-    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
-    channels = _Channels(set())
-    env["sub"].attach_channels(channels)
-    await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
-    )
-    assert len(env["gfs"].calls) == 1
-    assert channels.published == []
 
 
 @pytest.mark.security

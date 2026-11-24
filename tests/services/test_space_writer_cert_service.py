@@ -39,7 +39,6 @@ from socialhome.services.space_writer_cert_service import (
 )
 from socialhome.writer_cert import (
     InvalidWriterCert,
-    bind_writer_users,
     sign_writer_cert,
     verify_writer_cert,
     verify_writer_users,
@@ -1126,165 +1125,9 @@ async def test_pinned_key_wins_over_a_mesh_claim():
     assert await svc.verified_instance_pk("peer") == PEER_PK
 
 
-# ── A cached item's cert after an authority rotation ─────────────────────
-
-
-def _profile_item(cert: WriterCert, *, author: str = "u@peer") -> dict:
-    return {
-        "item_type": "author_profile",
-        "author_user_id": author,
-        "author_pk": PEER_PK.hex(),
-        "origin_instance_id": "peer",
-        "writer_cert": cert.to_wire(),
-    }
-
-
-async def test_a_cached_item_keeps_its_cert_while_it_verifies():
-    svc, _ = _svc(remote_rows=[_remote("peer", "member")])
-    cert = await svc.issue_for_instance("sp-1", "peer", epoch=2)
-    item = _profile_item(cert)
-    got = await svc.current_item_cert(
-        _space(), item, epoch=2, item_type="author_profile"
-    )
-    assert got is item["writer_cert"]
-
-
-async def test_a_cert_from_before_an_authority_rotation_is_re_stamped():
-    """v_44: the old key signed the cached item's cert, so a new follower
-    pinned to the new key refuses it. The seed holder re-issues one for the
-    same household and epoch under the current key."""
-    old_seed = os.urandom(32)
-    old = bind_writer_users(
-        sign_writer_cert(
-            space_seed=old_seed,
-            space_id="sp-1",
-            epoch=2,
-            instance_pk=PEER_PK,
-            scope=WRITER_SCOPE_WRITE,
-        ),
-        space_seed=old_seed,
-        user_ids=["u@peer"],
-    )
-    svc, _ = _svc(remote_rows=[_remote("peer", "member")])
-    got = await svc.current_item_cert(
-        _space(), _profile_item(old), epoch=2, item_type="author_profile"
-    )
-    assert got is not None and got != old.to_wire()
-    cert = WriterCert.from_wire(got)
-    _check(cert, PEER_PK, WRITER_SCOPE_COMMENT, epoch=2)
-    verify_writer_users(cert, space_pubkey=SPACE_PK, author_user_id="u@peer")
-
-
-async def test_no_current_cert_for_an_author_who_left_or_without_the_seed():
-    old = sign_writer_cert(
-        space_seed=os.urandom(32),
-        space_id="sp-1",
-        epoch=2,
-        instance_pk=PEER_PK,
-        scope=WRITER_SCOPE_WRITE,
-    )
-    svc, _ = _svc(remote_rows=[_remote("peer", "member")])
-    # The household still writes, but this author is not one of its writers.
-    assert (
-        await svc.current_item_cert(
-            _space(),
-            _profile_item(old, author="gone@peer"),
-            epoch=2,
-            item_type="author_profile",
-        )
-        is None
-    )
-    # Not a seed holder: nothing to re-stamp with.
-    no_seed, _ = _svc(seed=None, remote_rows=[_remote("peer", "member")])
-    assert (
-        await no_seed.current_item_cert(
-            _space(), _profile_item(old), epoch=2, item_type="author_profile"
-        )
-        is None
-    )
-    bad = {**_profile_item(old), "author_pk": "zz"}
-    assert (
-        await svc.current_item_cert(_space(), bad, epoch=2, item_type="author_profile")
-        is None
-    )
-
-
 # ── v_96: followers get a reader cert ────────────────────────────────────
 
 _SUB = SpaceRole.SUBSCRIBER.value
-
-
-def _follower_profile_item(cert: WriterCert) -> dict:
-    return {
-        "item_type": "author_profile",
-        "author_user_id": "u@fol",
-        "author_pk": FOLLOWER_PK.hex(),
-        "origin_instance_id": "fol",
-        "writer_cert": cert.to_wire(),
-    }
-
-
-@pytest.mark.parametrize(
-    ("comment", "react", "kept"),
-    [(False, False, False), (True, False, True), (False, True, True)],
-)
-async def test_current_item_cert_applies_the_follower_switches(comment, react, kept):
-    """A follower's cached profile re-stamped for a new follower bundle: a
-    reader cert travels only while a follower switch the receivers check is
-    on — the sender drops what every receiver would refuse."""
-    reader = bind_writer_users(
-        sign_writer_cert(
-            space_seed=SEED,
-            space_id="sp-1",
-            epoch=2,
-            instance_pk=FOLLOWER_PK,
-            scope=WRITER_SCOPE_COMMENT,
-            reader=True,
-        ),
-        space_seed=SEED,
-        user_ids=["u@fol"],
-    )
-    space = _space(allow_subscriber_comment=comment, allow_subscriber_react=react)
-    svc, _ = _svc(space=space, remote_rows=[_remote("fol", _SUB)])
-    got = await svc.current_item_cert(
-        space, _follower_profile_item(reader), epoch=2, item_type="author_profile"
-    )
-    assert (got is not None) is kept
-    # After an authority rotation the re-issued cert is gated the same way.
-    old = bind_writer_users(
-        sign_writer_cert(
-            space_seed=os.urandom(32),
-            space_id="sp-1",
-            epoch=2,
-            instance_pk=FOLLOWER_PK,
-            scope=WRITER_SCOPE_COMMENT,
-            reader=True,
-        ),
-        space_seed=SEED,
-        user_ids=["u@fol"],
-    )
-    got = await svc.current_item_cert(
-        space, _follower_profile_item(old), epoch=2, item_type="author_profile"
-    )
-    assert (got is not None) is kept
-
-
-async def test_current_item_cert_refuses_a_reader_cert_on_a_type_it_cannot_carry():
-    """A reader cert is never handed out for a post-type item, whatever the
-    switches say."""
-    space = _space(allow_subscriber_comment=True, allow_subscriber_react=True)
-    svc, _ = _svc(space=space, remote_rows=[_remote("fol", _SUB)])
-    cert = await svc.issue_for_instance("sp-1", "fol", epoch=2)
-    assert cert is not None and cert.reader
-    item = {**_follower_profile_item(cert), "item_type": "comment"}
-    assert (
-        await svc.current_item_cert(space, item, epoch=2, item_type="comment")
-        is not None
-    )
-    assert (
-        await svc.current_item_cert(space, item, epoch=2, item_type="post_delete")
-        is None
-    )
 
 
 def test_gaining_a_follower_into_the_comment_set_is_not_weakened():
@@ -1514,8 +1357,8 @@ async def test_accept_prefers_a_non_reader_cert_on_a_tie():
 
 
 #: Which follower switch a reader cert's item type needs: "comment", "react",
-#: "either" (author_profile), "always" (the own-comment delete, owner F6) or
-#: None (never — posts and their edits/deletes).
+#: "always" (the own-comment delete, owner F6) or None (never — posts and
+#: their edits/deletes, and since v_96 the author profile).
 _READER_NEEDS: dict[str, str | None] = {
     "post": None,
     "post_edit": None,
@@ -1525,7 +1368,7 @@ _READER_NEEDS: dict[str, str | None] = {
     "comment_delete": "always",
     "reaction_add": "react",
     "reaction_remove": "react",
-    "author_profile": "either",
+    "author_profile": None,
 }
 
 
@@ -1535,11 +1378,7 @@ def _reader_ok(item_type: str, comment: bool, react: bool) -> bool:
         return comment
     if needs == "react":
         return react
-    if needs == "always":
-        return True
-    if needs == "either":
-        return comment or react
-    return False
+    return needs == "always"
 
 
 def test_the_reader_matrix_covers_every_item_type():

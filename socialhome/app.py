@@ -68,7 +68,6 @@ from .domain.federation import (
     PairingStatus,
 )
 from .domain.gfs_channel import InvalidChannelWire, valid_channel_id
-from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from .domain.gfs_server import MAX_GFS_SERVERS
 from .domain.space import ContentAction
 from .exception_text import describe_exception
@@ -370,7 +369,6 @@ from .services.gallery_share_service import GalleryShareService
 from .services.gallery_upload_batcher import GalleryUploadBatcher
 from .services.gfs_channel_service import GfsChannelService
 from .services.gfs_connection_service import GfsConnectionService
-from .services.gfs_directory import GfsDirectoryCache
 from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_mailbox_service import GfsMailboxService
 from .services.gfs_member_publish_service import GfsMemberPublishService
@@ -456,7 +454,6 @@ from .services.space_chat_outbound import SpaceChatOutbound
 from .services.space_chat_service import SpaceChatService
 from .services.space_config_outbound import SpaceConfigOutbound
 from .services.space_crypto_service import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     SpaceContentEncryption,
 )
 from .services.space_gfs_needed_service import SpaceGfsNeededService
@@ -483,7 +480,6 @@ from .services.space_public_inbound import (
     SpacePublicInbound,
 )
 from .services.space_public_outbound import SpacePublicOutbound
-from .services.space_relay_coverage import SpaceRelayCoverage
 from .services.space_rsvp_mirror_bridge import SpaceRsvpMirrorBridge
 from .services.space_service import own_inviter_proof
 from .services.space_summary_service import SpaceSummaryService
@@ -1425,53 +1421,38 @@ def _gfs_channel_budget(limiter: RateLimiter, channel_id: object) -> bool:
 async def dispatch_gfs_relay_frame(
     frame: dict,
     *,
-    space_public_inbound: SpacePublicInbound | None,
     gfs_channels: GfsChannelService | None = None,
     inbound_limiter: RateLimiter | None = None,
 ) -> None:
     """Route one inbound GFS fan-out frame to its consumer.
 
-    The frame is identity-free — ``{type, space_id, event_type, payload}``:
-    the GFS can no longer tell which household relayed an event, so nothing
-    here reads (or logs) a household id. An older GFS may still ship an outer
-    ``from_instance``; it is ignored — attribution comes from the encrypted,
-    authority-signed inner alone.
+    The only space content a GFS relays to a household is an opaque channel
+    frame (v_51 private, v_96 global): it names a channel, never a space or
+    a household, and the channel service maps it locally. A channel frame
+    first spends the channel budget on *inbound_limiter* (the federation
+    inbound limiter): over it, it is dropped before any decrypt or signature
+    check.
 
-    A channel frame first spends the channel budget on *inbound_limiter*
-    (the federation inbound limiter): over it, it is dropped before any
-    decrypt or signature check.
+    Any other relay frame — the space-keyed ``space_post_public`` /
+    ``space_item`` / key handoff / profiles bundle a GFS running the legacy
+    code may still send — is dropped at DEBUG without being parsed further
+    (nothing from it, an outer ``from_instance`` included, is logged).
     """
-    # v_51 — a private space's opaque channel: the frame names a channel,
-    # never a space; the channel service maps it locally.
-    if "channel_id" in frame:
-        log.info(
-            "gfs.relay.received: channel=%s event=%s",
-            frame.get("channel_id"),
-            frame.get("event_type"),
-        )
-        if gfs_channels is None:
-            return
-        if inbound_limiter is not None and not _gfs_channel_budget(
-            inbound_limiter, frame.get("channel_id")
-        ):
-            return
-        await gfs_channels.handle_frame(frame)
+    if "channel_id" not in frame:
+        log.debug("gfs.relay: dropping a non-channel relay frame (legacy GFS)")
         return
     log.info(
-        "gfs.relay.received: space=%s event=%s",
-        frame.get("space_id"),
+        "gfs.relay.received: channel=%s event=%s",
+        frame.get("channel_id"),
         frame.get("event_type"),
     )
-    # Public space-content relay (Phase 5a2): a ``space_post_public`` frame
-    # carries an encrypted, authority-signed post envelope. The inbound
-    # consumer verifies + decrypts + dedupes; other event types remain
-    # logged-only until their consumers land.
-    if (
-        frame.get("event_type")
-        in (AUTHORITY_EVENT_SPACE_POST_PUBLIC, SPACE_ITEM_EVENT_TYPE)
-        and space_public_inbound is not None
+    if gfs_channels is None:
+        return
+    if inbound_limiter is not None and not _gfs_channel_budget(
+        inbound_limiter, frame.get("channel_id")
     ):
-        await space_public_inbound.handle(frame)
+        return
+    await gfs_channels.handle_frame(frame)
 
 
 def _default_ice_servers(
@@ -3895,11 +3876,6 @@ def create_app(config: Config | None = None) -> web.Application:
     space_service.attach_gfs_connection_service(gfs_connection_service)
     space_service.attach_gfs_server_selection(gfs_server_selection)
 
-    # Every paired server's WHOLE directory (``GET /gfs/spaces``), read over
-    # the cookie-less publish session; member publish gates its
-    # space-specific requests on it.
-    gfs_directories = GfsDirectoryCache(lambda: gfs_connection_service.publish_client())
-
     # ── Public space discovery (GFS poll) ────────────────────────────────
     public_space_discovery = PublicSpaceDiscoveryService(
         repos.public_space,
@@ -4854,7 +4830,7 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         app[K.http_session_key] = http_session
         gfs_connection_service.attach_session(http_session)
-        # ``POST /gfs/publish`` rides its own cookie-less session, so no
+        # Anonymous publishes ride their own cookie-less session, so no
         # cookie from the household's authenticated GFS calls can link an
         # anonymous publish back to it. Closed in _on_cleanup.
         gfs_connection_service.attach_publish_session(
@@ -5131,18 +5107,14 @@ def create_app(config: Config | None = None) -> web.Application:
         # ``space_crypto``, which only exists once the seed/KEK are wired.
         nonlocal space_public_outbound, space_public_inbound
         nonlocal gfs_member_publish, gfs_channels
-        # v_49 member publish (household side, anonymous since v_90): our
-        # own items to each capable GFS, epoch notices on rotation, member
-        # subscriptions.
+        # Member publish (household side): our own items into a space's
+        # opaque channel, epoch notices there on rotation.
         gfs_member_publish = GfsMemberPublishService(
-            gfs=gfs_connection_service,
             conn_repo=repos.gfs_connection,
             space_repo=space_repo,
             space_crypto=space_crypto,
             writer_certs=writer_certs,
             own_instance_id=real_instance_id,
-            own_identity_seed=identity_seed,
-            directories=gfs_directories,
         )
         real_space_service.attach_member_gfs(gfs_member_publish)
         _member = gfs_member_publish
@@ -5151,7 +5123,6 @@ def create_app(config: Config | None = None) -> web.Application:
             return await _member.announce_epoch(space_id, only=gfs_id)
 
         gfs_connection_service.attach_on_repinned(_announce_after_repin)
-        gfs_member_publish.wire(bus)
         # v_51 — opaque connection-server channels for PRIVATE spaces with
         # link-joined members: created by the owner, grants ride the writer
         # cert channels, members subscribe and publish through them.
@@ -5192,23 +5163,11 @@ def create_app(config: Config | None = None) -> web.Application:
             space_repo=space_repo,
             space_crypto=space_crypto,
             user_repo=user_repo,
-            gfs_service=gfs_connection_service,
         )
-        space_public_outbound.attach_identity(
-            own_instance_id=real_instance_id,
-            own_instance_public_key=identity_pk,
-            own_identity_seed=identity_seed,
-        )
+        space_public_outbound.attach_identity(own_instance_id=real_instance_id)
         space_public_outbound.attach_writer_certs(writer_certs)
         space_public_outbound.attach_channels(gfs_channels)
         space_public_outbound.attach_posts(space_post_repo)
-        # Step 12 — a remote member's post skips the GFSs where every
-        # follower reads the author's own ``space_item`` (the author's
-        # version is wired with the federation stack below).
-        relay_coverage = SpaceRelayCoverage(
-            space_repo=space_repo, gfs_service=gfs_connection_service
-        )
-        space_public_outbound.attach_relay_coverage(relay_coverage)
         space_public_outbound.wire()
         space_public_inbound = SpacePublicInbound(
             bus=bus,
@@ -5336,7 +5295,6 @@ def create_app(config: Config | None = None) -> web.Application:
             remote_member_repo=repos.space_remote_member,
         )
         writer_certs.attach_federation(federation_service)
-        relay_coverage.attach_peer_supports(federation_service.space_member_supports)
         if gfs_channels is not None:
             gfs_channels.attach_federation(federation_service)
             gfs_channels.attach_sync_scheduler(app[K.space_sync_scheduler_key])
@@ -5853,10 +5811,6 @@ def create_app(config: Config | None = None) -> web.Application:
             # holds on the asking GFS.
             app[K.space_media_gfs_responder_key].attach_channels(gfs_channels)
         space_post_outbound.attach_media_gfs(space_media_uploader)
-        if space_public_outbound is not None:
-            space_public_outbound.attach_media_gfs(space_media_uploader)
-            # v_92 — the relayed post carries its author-signed file hashes.
-            space_public_outbound.attach_file_hasher(file_hasher)
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
         fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
@@ -6118,7 +6072,6 @@ def create_app(config: Config | None = None) -> web.Application:
         async def _on_gfs_relay(frame: dict) -> None:
             await dispatch_gfs_relay_frame(
                 frame,
-                space_public_inbound=space_public_inbound,
                 gfs_channels=gfs_channels,
                 inbound_limiter=federation_service.inbound_limiter,
             )
@@ -6354,8 +6307,7 @@ def create_app(config: Config | None = None) -> web.Application:
         if gfs_route_discovery_scheduler is not None:
             await gfs_route_discovery_scheduler.start()
 
-        # Failed GFS publishes (``POST /gfs/publish``) wait in an in-memory,
-        # bounded retry queue owned by the connection service.
+        # The connection service re-asks pending approvals.
         await gfs_connection_service.start()
         if gfs_member_publish is not None:
             await gfs_member_publish.start()
