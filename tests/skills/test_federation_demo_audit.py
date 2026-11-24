@@ -24,15 +24,10 @@ import importlib.util
 import ipaddress
 import sys
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from socialhome import outbound_fetch, peer_url
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-    verify_authority_event,
-)
 from socialhome.crypto import ed25519_public_key
 from socialhome.domain import gfs_server
 
@@ -301,48 +296,32 @@ def test_admin_seed_check_flags_a_stale_pin_and_a_working_old_seed(
         lambda st: [(name, f"http://{name}", name) for name in pins],
     )
     monkeypatch.setattr(harness, "_gfs_pin", lambda rows_of, sid: pins[rows_of])
-    answers = {"http://A": 200, "http://B (withdrawn)": 403}
+    answers = {"A": 200, "B (withdrawn)": 403}
     monkeypatch.setattr(
-        harness, "_authority_probe", lambda url, sid, seed: answers[url]
+        harness, "_authority_probe", lambda rows_of, sid, seed: answers[rows_of]
     )
     failures: list[str] = []
     harness._check_gfs_admin_seed(state, failures)
     assert len(failures) == 2
     assert "GFS B (withdrawn) pins" in failures[1]
-    assert "GFS A answered HTTP 200" in failures[0]
+    assert "GFS A takes a seed of the removed admin" in failures[0]
     pins["B (withdrawn)"] = ("k3", True, True)
-    answers["http://A"] = 403
+    answers["A"] = 403
     failures.clear()
     harness._check_gfs_admin_seed(state, failures)
     assert failures == []
 
 
-def test_authority_probe_signs_what_the_gfs_verifies(harness, monkeypatch):
-    """The pin probe is the subscribers query a seed holder sends: the
-    signature it carries verifies under the seed's key, over the space id
-    and the timestamp in the query."""
-    asked: list[str] = []
-    monkeypatch.setattr(
-        harness, "_request", lambda url, **kw: asked.append(url) or (403, {})
-    )
-    seed = bytes(range(32))
-    assert harness._authority_probe("http://gfs", "sp-1", seed) == 403
-    url = urlsplit(asked[0])
-    assert url.path == "/gfs/spaces/sp-1/subscribers"
-    query = {k: v[0] for k, v in parse_qs(url.query).items()}
-    assert query["summary"] == "1"
-    assert verify_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-        space_id="sp-1",
-        payload={"space_id": "sp-1", "ts": query["ts"]},
-        authority_sig=query["authority_sig"],
-        authority_sig_suite=query["authority_sig_suite"],
-        space_public_key=ed25519_public_key(seed),
-    )
-    assert harness._seed_pin(seed) == ed25519_public_key(seed).hex()
-
-
-# ── v_57 gfs-private-channel-multi ────────────────────────────────────
+def test_authority_probe_reads_the_gfs_pin(harness, monkeypatch):
+    """v_96 (P7) — no GFS route takes a space-authority-signed request, so
+    the probe is the pin itself: 200 for the seed of the pinned key, 403
+    for any other seed or no pin at all."""
+    seed, other = bytes(range(32)), bytes(range(1, 33))
+    pk = ed25519_public_key(seed).hex()
+    monkeypatch.setattr(harness, "_gfs_pin", lambda rows_of, sid: rows_of)
+    assert harness._authority_probe((pk, True, False), "sp-1", seed) == 200
+    assert harness._authority_probe((pk, True, False), "sp-1", other) == 403
+    assert harness._authority_probe(None, "sp-1", seed) == 403
 
 
 def test_private_channel_multi_step_is_wired(harness):

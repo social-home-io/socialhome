@@ -16,9 +16,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from socialhome.canonical_json import canonical_bytes
 from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from socialhome.domain.gfs_space_media import (
-    AUTH_AUTHORITY,
+    AUTH_CHANNEL,
     SCOPE_CHANNEL,
-    SCOPE_SPACE,
     SPACE_MEDIA_AUTH_HEADER,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
@@ -36,12 +35,11 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.blob_store import BLOB_OVERHEAD
 from socialhome.global_server.config import GfsConfig, SpaceMediaOnDemandConfig
-from socialhome.global_server.domain import ClientInstance, GfsSpaceMedia, GlobalSpace
+from socialhome.global_server.domain import ClientInstance, GfsSpaceMedia
 from socialhome.global_server.server import create_gfs_app
 from socialhome.moment_public_media import PAD_BUCKETS
 from socialhome.space_media_hint import SpaceMediaLocator, seal_space_media_hint
 
-SPACE = "sp-od"
 SEED = os.urandom(32)
 PK = ed25519_public_key(SEED)
 HOST_SEED = os.urandom(32)
@@ -50,7 +48,13 @@ HOST = "host"
 SEAT = "seat"
 OTHER = "other"
 CHANNEL = "1e" * 16
+CHANNEL2 = "2e" * 16
 CHANNEL_SEED = os.urandom(32)
+#: Since v_96 the one media scope is a space's channel (owner decision Q5):
+#: the tests' default scope is the channel, whose seat (HOST) is the holder
+#: this server may ask.
+SPACE = CHANNEL
+SCOPE_SPACE = SCOPE_CHANNEL
 SMALL = PAD_BUCKETS[1] + BLOB_OVERHEAD
 
 
@@ -107,14 +111,6 @@ async def gfs(tmp_dir, request):
                     status="active",
                 )
             )
-        await fed.upsert_space(
-            GlobalSpace(
-                space_id=SPACE,
-                owning_instance=HOST,
-                status="active",
-                identity_public_key=PK.hex(),
-            )
-        )
         channels = app[gfs_channel_repo_key]
         now = int(time.time())
         await channels.register(
@@ -124,7 +120,16 @@ async def gfs(tmp_dir, request):
             now=now,
         )
         await channels.set_epoch(CHANNEL, 3, expected=None, now=now)
-        await channels.add_subscriber(CHANNEL, SEAT, pass_epoch=3, now=now)
+        await channels.add_subscriber(CHANNEL, HOST, pass_epoch=3, now=now)
+        # A second channel, where only SEAT holds a seat.
+        await channels.register(
+            CHANNEL2,
+            channel_suite="ed25519",
+            channel_pk=channel_pk_of(CHANNEL_SEED),
+            now=now,
+        )
+        await channels.set_epoch(CHANNEL2, 3, expected=None, now=now)
+        await channels.add_subscriber(CHANNEL2, SEAT, pass_epoch=3, now=now)
         tc.app_ = app
         yield tc
 
@@ -181,9 +186,9 @@ def _auth(blob: bytes, blob_id: str) -> str:
         expires_at=now + 86_400,
         ts=now,
     )
-    sig = sign_ed25519(SEED, claim.authority_signing_bytes())
+    sig = sign_ed25519(CHANNEL_SEED, claim.channel_signing_bytes())
     return SpaceMediaUploadAuth(
-        claim=claim, kind=AUTH_AUTHORITY, sig=b64url_encode(sig), sig_suite="ed25519"
+        claim=claim, kind=AUTH_CHANNEL, sig=b64url_encode(sig), sig_suite="ed25519"
     ).to_header()
 
 
@@ -480,22 +485,22 @@ async def test_only_the_household_asked_may_serve(gfs):
 # ── Scopes ───────────────────────────────────────────────────────────────
 
 
-async def test_a_private_channel_is_served_by_its_seated_key_holders_only(gfs):
-    data, bid = _blob(SCOPE_CHANNEL, CHANNEL)
+async def test_a_channel_is_served_by_its_seated_key_holders_only(gfs):
+    data, bid = _blob(SCOPE_CHANNEL, CHANNEL2)
     host_ws = await _connect(gfs, HOST)
     other_ws = await _connect(gfs, OTHER)
     seat_ws = await _connect(gfs, SEAT)
-    reader = asyncio.create_task(_want(gfs, bid, SCOPE_CHANNEL, CHANNEL))
+    reader = asyncio.create_task(_want(gfs, bid, SCOPE_CHANNEL, CHANNEL2))
     frame, status, _ = await _answer(gfs, seat_ws, SEAT, SEAT_SEED, data)
-    assert (frame["scope"], frame["scope_id"], status) == (SCOPE_CHANNEL, CHANNEL, 200)
+    assert (frame["scope"], frame["scope_id"], status) == (SCOPE_CHANNEL, CHANNEL2, 200)
     assert await (await reader).read() == data
     assert host_ws.count == 0 and other_ws.count == 0
 
 
 async def test_an_unlisted_scope_or_bad_body_asks_nobody(gfs):
     ws = await _connect(gfs, HOST)
-    _, bid = _blob(scope_id="sp-unknown")
-    assert (await _want(gfs, bid, SCOPE_SPACE, "sp-unknown")).status == 404
+    _, bid = _blob(scope_id="3e" * 16)
+    assert (await _want(gfs, bid, SCOPE_CHANNEL, "3e" * 16)).status == 404
     resp = await gfs.post(f"/gfs/media/{bid}/wanted", json={"scope": "space"})
     assert resp.status == 422
     assert ws.count == 0

@@ -20,12 +20,14 @@ from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
 )
+from socialhome.global_server.channels import (
+    CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP as PUBLISH_MAX_PER_MINUTE,
+)
 from socialhome.global_server.cluster import ClusterService
 from socialhome.global_server.config import DEFAULT_TRUSTED_PROXIES, GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.public import (
     LISTING_MAX_PER_MINUTE,
-    PUBLISH_MAX_PER_MINUTE,
     RATE_LIMIT_MAX_TRACKED_IPS,
     ClientIpResolver,
     SlidingWindowCounter,
@@ -1022,14 +1024,13 @@ async def test_publish_limiter_cannot_be_bypassed_by_spoofed_forwarded_for(
     app = create_gfs_app(cfg)
     async with TestClient(TestServer(app)) as tc:
         body = {
-            "space_id": "sp-spoof",
-            "event_type": "space_post_public",
-            "payload": {"authority_sig": "x"},
+            "channel_id": "0f" * 16,
+            "payload": "x",
         }
         statuses = []
         for i in range(PUBLISH_MAX_PER_MINUTE + 5):
             resp = await tc.post(
-                "/gfs/publish",
+                "/gfs/channels/publish-anon",
                 json=body,
                 headers={"X-Forwarded-For": f"10.9.{i // 256}.{i % 256}"},
             )
@@ -1046,27 +1047,26 @@ async def test_publish_limiter_buckets_per_client_behind_a_trusted_proxy(
     app = create_gfs_app(_config(tmp_dir))
     async with TestClient(TestServer(app)) as tc:
         body = {
-            "space_id": "sp-proxy",
-            "event_type": "space_post_public",
-            "payload": {"authority_sig": "x"},
+            "channel_id": "0f" * 16,
+            "payload": "x",
         }
         for _ in range(PUBLISH_MAX_PER_MINUTE):
             resp = await tc.post(
-                "/gfs/publish",
+                "/gfs/channels/publish-anon",
                 json=body,
                 headers={"X-Forwarded-For": "198.51.100.1"},
             )
             assert resp.status != 429
         # Same client → shed.
         resp = await tc.post(
-            "/gfs/publish",
+            "/gfs/channels/publish-anon",
             json=body,
             headers={"X-Forwarded-For": "198.51.100.1"},
         )
         assert resp.status == 429
         # A DIFFERENT client behind the same proxy is unaffected.
         resp = await tc.post(
-            "/gfs/publish",
+            "/gfs/channels/publish-anon",
             json=body,
             headers={"X-Forwarded-For": "198.51.100.2"},
         )
@@ -1074,7 +1074,7 @@ async def test_publish_limiter_buckets_per_client_behind_a_trusted_proxy(
         # A client-supplied prefix does not buy a fresh bucket — the proxy's
         # appended last entry is what counts.
         resp = await tc.post(
-            "/gfs/publish",
+            "/gfs/channels/publish-anon",
             json=body,
             headers={"X-Forwarded-For": "1.1.1.1, 198.51.100.1"},
         )
@@ -1115,14 +1115,13 @@ async def test_publish_limiter_buckets_ipv6_clients_by_64(tmp_dir):
     app = create_gfs_app(_config(tmp_dir))
     async with TestClient(TestServer(app)) as tc:
         body = {
-            "space_id": "sp-v6",
-            "event_type": "space_post_public",
-            "payload": {"authority_sig": "x"},
+            "channel_id": "0f" * 16,
+            "payload": "x",
         }
         statuses = []
         for i in range(PUBLISH_MAX_PER_MINUTE + 1):
             resp = await tc.post(
-                "/gfs/publish",
+                "/gfs/channels/publish-anon",
                 json=body,
                 headers={"X-Forwarded-For": f"2001:db8:9:9::{i + 1:x}"},
             )
@@ -1130,7 +1129,7 @@ async def test_publish_limiter_buckets_ipv6_clients_by_64(tmp_dir):
         assert 429 not in statuses[:-1]
         assert statuses[-1] == 429
         resp = await tc.post(
-            "/gfs/publish",
+            "/gfs/channels/publish-anon",
             json=body,
             headers={"X-Forwarded-For": "2001:db8:9:a::1"},
         )

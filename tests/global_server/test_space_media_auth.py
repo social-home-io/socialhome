@@ -1,12 +1,9 @@
-"""Who may put a blob into the space media cache — per scope, the checks the
-GFS already makes for that scope, reused. Every refusal is a
-``PermissionError``.
+"""Who may put a blob into the space media cache — the checks the GFS
+already makes for a channel, reused. Every refusal is a ``PermissionError``.
 
-* space: a space-authority signature, a trusted-mode writer cert (signed by
-  the household key it names) or a strict-mode writer group key;
-* channel (a private space's opaque v_51 channel): the channel key, a
-  channel cert (signed by the household key it names) or the channel writer
-  key."""
+Since v_96 (P7, owner decision Q5) the one scope is a space's opaque
+channel: the channel key or the channel writer key. The ``space`` scope
+(space authority, space writer group key) is refused."""
 
 from __future__ import annotations
 
@@ -15,12 +12,7 @@ import time
 
 import pytest
 from aiohttp import web
-from socialhome.global_server.member_publish import GfsMemberPublishService
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
-    sign_authority_event,
-)
 from socialhome.crypto import (
     b64url_encode,
     counting_ed25519_verifies,
@@ -28,12 +20,10 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.domain.gfs_space_media import (
-    AUTH_AUTHORITY,
     AUTH_CHANNEL,
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_DELETE_PREFIX,
     SCOPE_CHANNEL,
-    SCOPE_SPACE,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
     media_delete_payload,
@@ -41,11 +31,11 @@ from socialhome.domain.gfs_space_media import (
 from socialhome.gfs_channel import channel_pk_of, signing_bytes
 from socialhome.global_server.channels import GfsChannelService
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
+from socialhome.global_server.fan_out_workers import GfsFanOutWorkers
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.repositories import (
     SqliteGfsChannelRepo,
     SqliteGfsFederationRepo,
-    SqliteGfsSpaceEpochRepo,
 )
 from socialhome.global_server.space_media_auth import (
     SPACE_MEDIA_MAX_PER_MINUTE_PER_IP,
@@ -54,7 +44,7 @@ from socialhome.global_server.space_media_auth import (
     build_space_media_rate_limit,
     is_space_media_write,
 )
-from socialhome.writer_key import derive_writer_seed, sign_with_writer_key
+from socialhome.writer_key import sign_with_writer_key
 
 SPACE = "sp-1"
 SEED = os.urandom(32)
@@ -76,7 +66,6 @@ class _Clock:
 @pytest.fixture
 async def env(gfs_db):
     fed_repo = SqliteGfsFederationRepo(gfs_db)
-    epoch_repo = SqliteGfsSpaceEpochRepo(gfs_db)
     channel_repo = SqliteGfsChannelRepo(gfs_db)
     await fed_repo.upsert_instance(
         ClientInstance(
@@ -114,30 +103,21 @@ async def env(gfs_db):
     )
     await channel_repo.add_subscriber(CHANNEL, "owner", pass_epoch=3, now=NOW)
     await channel_repo.add_subscriber(CHANNEL, "member2", pass_epoch=3, now=NOW)
-    federation = GfsFederationService(fed_repo, epoch_repo=epoch_repo)
+    federation = GfsFederationService(fed_repo)
     clock = _Clock()
-    member = GfsMemberPublishService(
-        federation=federation,
-        fed_repo=fed_repo,
-        epoch_repo=epoch_repo,
-        relay=None,  # type: ignore[arg-type]  # never reached by these checks
-        gfs_instance_id="gfs-test",
-        clock=clock,
-    )
     channels = GfsChannelService(
         federation=federation,
         channel_repo=channel_repo,
-        member_publish=member,
+        # Never reached by these checks.
+        fan_out=GfsFanOutWorkers(relay=None),  # type: ignore[arg-type]
         gfs_instance_id="gfs-test",
         clock=clock,
     )
-    auth = GfsSpaceMediaAuth(
-        federation=federation, member_publish=member, channels=channels, clock=clock
-    )
-    return auth, epoch_repo, channel_repo
+    auth = GfsSpaceMediaAuth(channels=channels, clock=clock)
+    return auth, None, channel_repo
 
 
-def _claim(scope_id=SPACE, ts=NOW, scope=SCOPE_SPACE, **over) -> SpaceMediaClaim:
+def _claim(scope_id=CHANNEL, ts=NOW, scope=SCOPE_CHANNEL, **over) -> SpaceMediaClaim:
     return SpaceMediaClaim(
         scope=scope,
         scope_id=scope_id,
@@ -158,13 +138,6 @@ async def _upload(auth, a: SpaceMediaUploadAuth) -> None:
     )
 
 
-def _authority(claim: SpaceMediaClaim, seed: bytes = SEED) -> SpaceMediaUploadAuth:
-    sig = sign_ed25519(seed, claim.authority_signing_bytes())
-    return SpaceMediaUploadAuth(
-        claim=claim, kind=AUTH_AUTHORITY, sig=b64url_encode(sig), sig_suite="ed25519"
-    )
-
-
 def _channel_key(
     claim: SpaceMediaClaim, seed: bytes = CHANNEL_SEED, suite: str = "ed25519"
 ) -> SpaceMediaUploadAuth:
@@ -172,15 +145,6 @@ def _channel_key(
     return SpaceMediaUploadAuth(
         claim=claim, kind=AUTH_CHANNEL, sig=b64url_encode(sig), sig_suite=suite
     )
-
-
-async def _pin_writer_key(epoch_repo, epoch: int = 3) -> bytes:
-    writer_seed = derive_writer_seed(SEED, SPACE, epoch)
-    await epoch_repo.confirm(SPACE, epoch, now=NOW)
-    await epoch_repo.pin_writer_key(
-        SPACE, epoch, b64url_encode(ed25519_public_key(writer_seed)), replace=True
-    )
-    return writer_seed
 
 
 async def _pin_channel_writer_key(channel_repo, epoch: int = 3) -> bytes:
@@ -198,135 +162,55 @@ def _writer_key(claim, writer_seed: bytes, *, epoch=3, suite="ed25519"):
     )
 
 
-# ── Space scope: authority ───────────────────────────────────────────────
-
-
-async def test_an_authority_signed_upload_is_authorized(env):
-    auth, _, _ = env
-    await _upload(auth, _authority(_claim()))
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "wrong_key",
-        "unknown_space",
-        "banned",
-        "no_pinned_key",
-        "path_space",
-        "path_blob",
-    ],
-)
-async def test_authority_refusals(env, case):
-    auth, _, _ = env
-    scope_id, blob = SPACE, BID
-    if case == "wrong_key":
-        a = _authority(_claim(), seed=os.urandom(32))
-    elif case == "unknown_space":
-        a, scope_id = _authority(_claim("sp-nope")), "sp-nope"
-    elif case == "banned":
-        a, scope_id = _authority(_claim("sp-banned")), "sp-banned"
-    elif case == "no_pinned_key":
-        a, scope_id = _authority(_claim("sp-nokey")), "sp-nokey"
-    elif case == "path_space":
-        a, scope_id = _authority(_claim()), "sp-banned"
-    else:
-        a, blob = _authority(_claim()), "ef" * 32
-    with pytest.raises(PermissionError):
-        await auth.authorize_upload(
-            a, scope_kind=SCOPE_SPACE, scope_id=scope_id, blob_id=blob
-        )
-
-
 @pytest.mark.parametrize(
     "skew", [SPACE_MEDIA_TS_SKEW_S + 1, -SPACE_MEDIA_TS_SKEW_S - 1]
 )
 async def test_a_stale_or_future_timestamp_is_refused(env, skew):
     auth, _, _ = env
     with pytest.raises(PermissionError):
-        await _upload(auth, _authority(_claim(ts=NOW + skew)))
-    with pytest.raises(PermissionError):
         await _upload(auth, _channel_key(_ch_claim(ts=NOW + skew)))
 
 
 async def test_a_signature_for_another_claim_does_not_carry_over(env):
     auth, _, _ = env
-    a = _authority(_claim())
+    a = _channel_key(_ch_claim())
     forged = SpaceMediaUploadAuth(
-        claim=_claim(size=131_100), kind=a.kind, sig=a.sig, sig_suite=a.sig_suite
+        claim=_ch_claim(size=131_100), kind=a.kind, sig=a.sig, sig_suite=a.sig_suite
     )
     with pytest.raises(PermissionError):
         await _upload(auth, forged)
 
 
-async def test_an_unknown_authority_suite_is_refused(env):
+@pytest.mark.parametrize("kind", ["authority", "writer_cert", "channel_cert"])
+async def test_a_retired_kind_is_refused(env, kind):
+    """The space authority kind left with the ``space`` scope (v_96), the
+    writer-cert / channel-cert kinds with the identified member publish
+    (v_90): a header naming one never authorizes."""
     auth, _, _ = env
-    a = _authority(_claim())
-    odd = SpaceMediaUploadAuth(
-        claim=a.claim, kind=a.kind, sig=a.sig, sig_suite="ed25519+mldsa65"
-    )
-    with pytest.raises(PermissionError):
-        await _upload(auth, odd)
-
-
-async def test_a_kind_from_the_other_scope_is_refused(env):
-    """A channel-key upload sent to a space path (or the reverse) never
-    authorizes: each scope takes only its own kinds."""
-    auth, _, _ = env
-    a = _channel_key(_ch_claim())
-    with pytest.raises(PermissionError):
-        await auth.authorize_upload(
-            a, scope_kind=SCOPE_SPACE, scope_id=CHANNEL, blob_id=BID
-        )
-
-
-# ── Space scope: no identified kind (v_90) ───────────────────────────────
-
-
-@pytest.mark.parametrize("scope", [SCOPE_SPACE, SCOPE_CHANNEL])
-@pytest.mark.parametrize("kind", ["writer_cert", "channel_cert"])
-async def test_an_identified_kind_is_refused(env, scope, kind):
-    """The writer-cert / channel-cert kinds left with the identified member
-    publish: a header naming one never authorizes."""
-    auth, _, _ = env
-    claim = _claim() if scope == SCOPE_SPACE else _ch_claim()
     a = SpaceMediaUploadAuth(
-        claim=claim, kind=kind, sig="x" * 86, sig_suite="ed25519", epoch=3
+        claim=_ch_claim(), kind=kind, sig="x" * 86, sig_suite="ed25519", epoch=3
     )
     with pytest.raises(PermissionError):
         await _upload(auth, a)
 
 
-# ── Space scope: writer key ──────────────────────────────────────────────
-
-
-async def test_a_writer_key_holder_is_authorized(env):
-    auth, epoch_repo, _ = env
-    writer_seed = await _pin_writer_key(epoch_repo)
-    await _upload(auth, _writer_key(_claim(), writer_seed))
-
-
-@pytest.mark.parametrize(
-    "case", ["no_pin", "wrong_key", "wrong_epoch", "suite", "banned"]
-)
-async def test_writer_key_refusals(env, case):
-    auth, epoch_repo, _ = env
-    writer_seed = os.urandom(32)
-    if case != "no_pin":
-        writer_seed = await _pin_writer_key(epoch_repo)
-    claim = _claim()
-    if case == "wrong_key":
-        a = _writer_key(claim, os.urandom(32))
-    elif case == "wrong_epoch":
-        a = _writer_key(claim, writer_seed, epoch=4)
-    elif case == "suite":
-        a = _writer_key(claim, writer_seed, suite="ed25519+mldsa65")
-    elif case == "banned":
-        a = _writer_key(_claim("sp-banned"), writer_seed)
-    else:
-        a = _writer_key(claim, writer_seed)
+async def test_the_space_scope_is_refused(env):
+    """v_96 (P7) — a claim naming the retired ``space`` scope never
+    authorizes an upload or a delete, whatever it carries."""
+    auth, _, _ = env
+    claim = _claim(scope_id="sp-1", scope="space")
+    for kind in ("channel", "writer_key", "authority"):
+        a = SpaceMediaUploadAuth(
+            claim=claim, kind=kind, sig="x" * 86, sig_suite="ed25519", epoch=3
+        )
+        with pytest.raises(PermissionError):
+            await auth.authorize_upload(
+                a, scope_kind="space", scope_id="sp-1", blob_id=BID
+            )
     with pytest.raises(PermissionError):
-        await _upload(auth, a)
+        await auth.authorize_delete(
+            "space", "sp-1", BID, ts=NOW, sig="x" * 86, sig_suite="ed25519"
+        )
 
 
 # ── Channel scope: channel key ───────────────────────────────────────────
@@ -380,27 +264,16 @@ async def test_channel_writer_key_refusals(env, case):
 # ── Delete (the scope's seed holder only) ────────────────────────────────
 
 
-def _space_delete_sig(ts: int, seed: bytes = SEED, blob_id: str = BID) -> dict:
-    signed = sign_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
-        space_id=SPACE,
-        payload=media_delete_payload(SCOPE_SPACE, SPACE, blob_id, ts),
-        space_seed=seed,
-    )
-    return {"sig": signed["authority_sig"], "sig_suite": signed["authority_sig_suite"]}
-
-
-def _channel_delete_sig(ts: int, seed: bytes = CHANNEL_SEED) -> dict:
-    body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, BID, ts)
+def _channel_delete_sig(
+    ts: int, seed: bytes = CHANNEL_SEED, blob_id: str = BID
+) -> dict:
+    body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, blob_id, ts)
     sig = sign_ed25519(seed, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, body))
     return {"sig": b64url_encode(sig), "sig_suite": "ed25519"}
 
 
 async def test_the_scope_seed_holder_may_delete(env):
     auth, _, _ = env
-    await auth.authorize_delete(
-        SCOPE_SPACE, SPACE, BID, ts=NOW, **_space_delete_sig(NOW)
-    )
     await auth.authorize_delete(
         SCOPE_CHANNEL, CHANNEL, BID, ts=NOW, **_channel_delete_sig(NOW)
     )
@@ -411,41 +284,38 @@ async def test_a_replayed_delete_is_refused_at_one_verification(env):
     window is refused (it could otherwise drop a claim the scope made again
     since) — after its signature verified, so it costs what a success does."""
     auth, _, _ = env
-    sig = _space_delete_sig(NOW)
-    await auth.authorize_delete(SCOPE_SPACE, SPACE, BID, ts=NOW, **sig)
+    sig = _channel_delete_sig(NOW)
+    await auth.authorize_delete(SCOPE_CHANNEL, CHANNEL, BID, ts=NOW, **sig)
     with counting_ed25519_verifies() as done, pytest.raises(PermissionError):
-        await auth.authorize_delete(SCOPE_SPACE, SPACE, BID, ts=NOW, **sig)
+        await auth.authorize_delete(SCOPE_CHANNEL, CHANNEL, BID, ts=NOW, **sig)
     assert done[0] == 1
     # A fresh one (another ts) still goes through.
     await auth.authorize_delete(
-        SCOPE_SPACE, SPACE, BID, ts=NOW + 1, **_space_delete_sig(NOW + 1)
+        SCOPE_CHANNEL, CHANNEL, BID, ts=NOW + 1, **_channel_delete_sig(NOW + 1)
     )
 
 
 @pytest.mark.parametrize(
     "case",
-    ["stale", "wrong_key", "other_blob", "bad_ts", "bad_sig", "channel_key", "scope"],
+    ["stale", "wrong_key", "other_blob", "bad_ts", "bad_sig", "scope"],
 )
 async def test_delete_refusals(env, case):
     auth, _, _ = env
     ts: object = NOW
-    scope, scope_id = SCOPE_SPACE, SPACE
+    scope, scope_id = SCOPE_CHANNEL, CHANNEL
     if case == "stale":
         ts = NOW - SPACE_MEDIA_TS_SKEW_S - 1
-        sig = _space_delete_sig(ts)
+        sig = _channel_delete_sig(ts)
     elif case == "wrong_key":
-        sig = _space_delete_sig(NOW, seed=os.urandom(32))
+        sig = _channel_delete_sig(NOW, seed=os.urandom(32))
     elif case == "other_blob":
-        sig = _space_delete_sig(NOW, blob_id="ef" * 32)
+        sig = _channel_delete_sig(NOW, blob_id="ef" * 32)
     elif case == "bad_ts":
-        ts, sig = "now", _space_delete_sig(NOW)
+        ts, sig = "now", _channel_delete_sig(NOW)
     elif case == "bad_sig":
         sig = {"sig": 5, "sig_suite": "ed25519"}
-    elif case == "channel_key":
-        scope, scope_id = SCOPE_CHANNEL, CHANNEL
-        sig = _channel_delete_sig(NOW, seed=os.urandom(32))
     else:
-        scope, sig = "room", _space_delete_sig(NOW)
+        scope, sig = "room", _channel_delete_sig(NOW)
     with pytest.raises(PermissionError):
         await auth.authorize_delete(scope, scope_id, BID, ts=ts, **sig)
 
@@ -507,8 +377,6 @@ def test_the_real_clock_is_the_default():
 
 #: Ed25519 verifications a successful upload of each kind makes.
 _VERIFIES = {
-    "authority": 1,
-    "writer_key": 1,
     "channel": 1,
     "channel_writer_key": 1,
 }
@@ -516,41 +384,8 @@ _VERIFIES = {
 
 async def _case(env, kind: str, case: str) -> SpaceMediaUploadAuth:
     """Build the upload for (*kind*, *case*), setting up state as needed."""
-    _, epoch_repo, channel_repo = env
+    _, _, channel_repo = env
     other = "1e" * 16
-    if kind == "authority":
-        return {
-            "ok": lambda: _authority(_claim()),
-            "wrong_key": lambda: _authority(_claim(), seed=os.urandom(32)),
-            "unlisted": lambda: _authority(_claim("sp-nope")),
-            "banned": lambda: _authority(_claim("sp-banned")),
-            "no_pinned_key": lambda: _authority(_claim("sp-nokey")),
-            "suite": lambda: SpaceMediaUploadAuth(
-                claim=_claim(), kind=AUTH_AUTHORITY, sig="x" * 86, sig_suite="pq"
-            ),
-        }[case]()
-    if kind == "writer_key":
-        seed = os.urandom(32)
-        if case in ("ok", "wrong_key", "wrong_epoch", "suite", "bad_sig_encoding"):
-            seed = await _pin_writer_key(epoch_repo)
-        if case == "bad_sig_encoding":
-            good = _writer_key(_claim(), seed)
-            return SpaceMediaUploadAuth(
-                claim=good.claim,
-                kind=good.kind,
-                sig="!!!",
-                sig_suite="ed25519",
-                epoch=3,
-            )
-        return {
-            "ok": lambda: _writer_key(_claim(), seed),
-            "no_pin": lambda: _writer_key(_claim(), seed),
-            "wrong_key": lambda: _writer_key(_claim(), os.urandom(32)),
-            "wrong_epoch": lambda: _writer_key(_claim(), seed, epoch=4),
-            "suite": lambda: _writer_key(_claim(), seed, suite="pq"),
-            "unlisted": lambda: _writer_key(_claim("sp-nope"), seed),
-            "banned": lambda: _writer_key(_claim("sp-banned"), seed),
-        }[case]()
     if kind == "channel":
         return {
             "ok": lambda: _channel_key(_ch_claim()),
@@ -572,30 +407,10 @@ async def _case(env, kind: str, case: str) -> SpaceMediaUploadAuth:
     }[case]()
 
 
-_CASES = (
-    [
-        ("authority", c)
-        for c in ("ok", "wrong_key", "unlisted", "banned", "no_pinned_key", "suite")
-    ]
-    + [
-        ("writer_key", c)
-        for c in (
-            "ok",
-            "no_pin",
-            "wrong_key",
-            "wrong_epoch",
-            "suite",
-            "bad_sig_encoding",
-            "unlisted",
-            "banned",
-        )
-    ]
-    + [("channel", c) for c in ("ok", "wrong_key", "unknown", "suite")]
-    + [
-        ("channel_writer_key", c)
-        for c in ("ok", "no_pin", "wrong_key", "wrong_epoch", "suite", "unknown")
-    ]
-)
+_CASES = [("channel", c) for c in ("ok", "wrong_key", "unknown", "suite")] + [
+    ("channel_writer_key", c)
+    for c in ("ok", "no_pin", "wrong_key", "wrong_epoch", "suite", "unknown")
+]
 
 
 @pytest.mark.parametrize(("kind", "case"), _CASES, ids=[f"{k}-{c}" for k, c in _CASES])
@@ -631,10 +446,9 @@ async def test_every_outcome_of_a_delete_costs_one_verification(env, scope, case
     auth, _, _ = env
     ts = NOW - SPACE_MEDIA_TS_SKEW_S - 1 if case == "stale" else NOW
     if scope == "space":
+        # v_96 — the retired scope is refused, at the cost of a success.
         scope_id = "sp-nope" if case == "unlisted" else SPACE
-        sig = _space_delete_sig(
-            ts, seed=os.urandom(32) if case == "wrong_key" else SEED
-        )
+        sig = _channel_delete_sig(ts)
     else:
         scope_id = "1e" * 16 if case == "unknown" else CHANNEL
         sig = _channel_delete_sig(

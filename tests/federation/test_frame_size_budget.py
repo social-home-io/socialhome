@@ -1,23 +1,19 @@
-"""Frame-size budget: what one public post costs per follower.
+"""Frame-size budget: what one space item costs per channel seat.
 
-The GFS sends one frame per follower per item, so a byte here is multiplied
-by every follower (10 000 followers × 400 posts a day is the planning case
-in ``docs/protocol/discovery.md``). This test builds the real frames — the
-production signers, writer certs, size padding and the GFS fan-out shape —
-for realistic items on both delivery paths and pins their sizes:
-
-* **relay** — the space's seed holder relays a member's post: the
-  author-signed inner (with its re-stamped writer cert) padded, encrypted
-  under the space content key, authority-signed, fanned out by the GFS as
-  ``{"type": "relay", "space_id", "event_type": "space_post_public",
-  "payload": {...}}``.
-* **member** — the author's household publishes the item itself
-  (anonymously, the one mode since v_90): ``{"type": "relay", "space_id",
-  "event_type": "space_item", "epoch", "payload"}`` — no frame cert, the
-  writer cert rides inside the ciphertext.
+The GFS sends one frame per seat per item, so a byte here is multiplied by
+every member and follower (10 000 followers × 400 posts a day is the
+planning case in ``docs/protocol/discovery.md``). This test builds the real
+frames — the production signers, writer certs, size padding and the GFS
+fan-out shape — for realistic items and pins their sizes. Since v_96 a
+space's content reaches a GFS only through its opaque channel: the author's
+household publishes the item into the channel and every seat gets
+``{"type": "relay", "channel_id", "event_type": "space_item", "epoch",
+"payload"}`` — no frame cert, the writer cert rides inside the ciphertext.
+(The space-keyed host relay and its ``payload_suite`` compression went with
+the GFS's space-keyed routes in P7.)
 
 Run with ``-s`` to print the table. The numbers are the regression guard
-for the payload-size work (canonical suite, compression, binary frames).
+for the payload-size work (canonical suite, binary frames).
 """
 
 from __future__ import annotations
@@ -31,30 +27,17 @@ from datetime import UTC, datetime
 import orjson
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from socialhome.domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-    strip_authority_sig_fields,
-)
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
     derive_user_id,
     ed25519_public_key,
 )
+from socialhome.domain.gfs_channel import SPACE_ITEM_EVENT_TYPE
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Post, PostType
-from socialhome.domain.space_item import (
-    ITEM_SIZE_BUCKETS,
-    PAYLOAD_SUITE_JSON,
-    PAYLOAD_SUITE_ZLIB,
-    PAYLOAD_SUITE_ZLIB_DICT1,
-    compressed_item_plaintexts,
-    open_item_plaintext,
-    seal_item_plaintext,
-)
+from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
 from socialhome.domain.ws_binary_frame import encode_binary_frame
 from socialhome.services.gfs_member_publish_service import build_item_plaintext
 from socialhome.services.space_item_author import build_signed_item_inner
@@ -95,6 +78,7 @@ TEXT_CJK_LONG = (
 TEXT_CJK = TEXT_CJK_LONG[:300]
 
 SPACE_ID = "a3f1c2d4e5b60718293a4b5c6d7e8f90"
+CHANNEL_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 EPOCH = 7
 
 
@@ -208,334 +192,127 @@ def _comment_inner(world: _World, text: str) -> dict:
     )
 
 
-def relay_frame(
-    world: _World, inner: dict, suite: str = PAYLOAD_SUITE_JSON
-) -> tuple[bytes, int]:
-    """``(follower frame bytes, plaintext bucket)`` on the seed-holder relay."""
-    body = dict(inner)
-    body[WRITER_CERT_FIELD] = _cert(world).to_wire()
-    plaintext = seal_item_plaintext(body, suite=suite)
-    assert plaintext is not None
-    envelope: dict = {
-        "space_id": SPACE_ID,
-        "epoch": EPOCH,
-        "encrypted_payload": _encrypt(world, plaintext),
-    }
-    if suite != PAYLOAD_SUITE_JSON:
-        envelope["payload_suite"] = suite
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=SPACE_ID,
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=world.space_seed,
-        )
-    )
-    frame = {
-        "type": "relay",
-        "space_id": SPACE_ID,
-        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        "payload": envelope,
-    }
-    return orjson.dumps(frame), len(plaintext)
-
-
-def member_frame(
-    world: _World, item_type: str, inner: dict, suite: str = PAYLOAD_SUITE_JSON
-) -> tuple[bytes, int]:
-    """``(follower frame bytes, plaintext bucket)`` on the member publish."""
+def channel_frame(world: _World, item_type: str, inner: dict) -> tuple[bytes, int]:
+    """``(seat frame bytes, plaintext bucket)`` of a channel item."""
     cert = _cert(world, "write" if item_type == "post" else "comment")
     plaintext = build_item_plaintext(
-        item_type, {**inner, WRITER_CERT_FIELD: cert.to_wire()}, suite=suite
+        item_type, {**inner, WRITER_CERT_FIELD: cert.to_wire()}
     )
-    assert plaintext is not None
     frame: dict = {
         "type": "relay",
-        "space_id": SPACE_ID,
+        "channel_id": CHANNEL_ID,
         "event_type": SPACE_ITEM_EVENT_TYPE,
         "epoch": EPOCH,
         "payload": _encrypt(world, plaintext),
     }
-    if suite != PAYLOAD_SUITE_JSON:
-        frame["payload_suite"] = suite
     return orjson.dumps(frame), len(plaintext)
 
 
-def size_table(
-    suite: str = PAYLOAD_SUITE_JSON, *, binary: bool = False
-) -> list[tuple[str, str, int, int]]:
-    """``(case, path, bucket, frame bytes)`` for every fixture, under
-    ``suite`` — as the JSON text frame, or with ``binary`` the ``ws_binary1``
-    frame a socket that asked for one receives."""
-    rows = _size_table(suite)
+def size_table(*, binary: bool = False) -> list[tuple[str, int, int]]:
+    """``(case, bucket, frame bytes)`` for every fixture — as the JSON text
+    frame, or with ``binary`` the ``ws_binary1`` frame a socket that asked
+    for one receives."""
+    rows = _size_table()
     if not binary:
-        return [(c, p, b, len(f)) for c, p, b, f in rows]
+        return [(c, b, len(f)) for c, b, f in rows]
     out = []
-    for case, path, bucket, frame in rows:
+    for case, bucket, frame in rows:
         raw = encode_binary_frame(orjson.loads(frame))
-        assert raw is not None, (case, path)
-        out.append((case, path, bucket, len(raw)))
+        assert raw is not None, case
+        out.append((case, bucket, len(raw)))
     return out
 
 
-def _size_table(suite: str) -> list[tuple[str, str, int, bytes]]:
+def _size_table() -> list[tuple[str, int, bytes]]:
     w = _world()
-    rows: list[tuple[str, str, int, bytes]] = []
+    rows: list[tuple[str, int, bytes]] = []
     for label, text in (
         ("post en", TEXT_EN),
         ("post de", TEXT_DE),
         ("post cjk", TEXT_CJK),
         ("post cjk 600", TEXT_CJK_LONG),
     ):
-        frame, bucket = relay_frame(w, _post_inner(w, text, member=False), suite)
-        rows.append((label, "relay", bucket, frame))
-        frame, bucket = member_frame(
-            w, "post", _post_inner(w, text, member=True), suite
-        )
-        rows.append((label, "member", bucket, frame))
-    frame, bucket = relay_frame(
-        w, _post_inner(w, TEXT_EN, member=False, preview=True), suite
+        frame, bucket = channel_frame(w, "post", _post_inner(w, text, member=True))
+        rows.append((label, bucket, frame))
+    frame, bucket = channel_frame(
+        w, "post", _post_inner(w, TEXT_EN, member=True, preview=True)
     )
-    rows.append(("post en + link preview", "relay", bucket, frame))
-    frame, bucket = member_frame(
-        w, "post", _post_inner(w, TEXT_EN, member=True, preview=True), suite
+    rows.append(("post en + link preview", bucket, frame))
+    frame, bucket = channel_frame(
+        w, "comment", _comment_inner(w, "Count me in, I'll bring a plum cake!")
     )
-    rows.append(("post en + link preview", "member", bucket, frame))
-    frame, bucket = member_frame(
-        w,
-        "comment",
-        _comment_inner(w, "Count me in, I'll bring a plum cake!"),
-        suite,
-    )
-    rows.append(("comment", "member", bucket, frame))
+    rows.append(("comment", bucket, frame))
     return rows
 
 
-def _print_table(rows: list[tuple[str, str, int, int]]) -> None:
+def _print_table(rows: list[tuple[str, int, int]]) -> None:
     print()
-    print(f"{'case':<26}{'path':<8}{'bucket':>8}{'frame B':>9}")
-    for case, path, bucket, size in rows:
-        print(f"{case:<26}{path:<8}{bucket:>8}{size:>9}")
+    print(f"{'case':<26}{'bucket':>8}{'frame B':>9}")
+    for case, bucket, size in rows:
+        print(f"{case:<26}{bucket:>8}{size:>9}")
 
 
-#: ``(case, path) → (padding bucket, max frame bytes)``. The frame size of a
-#: fixed bucket only moves with the fixed fields (ids, signatures, the
-#: writer cert), so the ceiling is tight; a change that grows a frame past
-#: it — or that pushes a case into a bigger bucket — fails here first.
-BUDGET: dict[tuple[str, str], tuple[int, int]] = {
-    ("post en", "relay"): (4096, 5840),
-    ("post en", "member"): (4096, 5630),
-    ("post de", "relay"): (4096, 5840),
-    ("post de", "member"): (4096, 5630),
-    ("post cjk", "relay"): (4096, 5840),
-    ("post cjk", "member"): (4096, 5630),
-    ("post cjk 600", "relay"): (4096, 5840),
-    ("post cjk 600", "member"): (4096, 5630),
-    ("post en + link preview", "relay"): (4096, 5840),
-    ("post en + link preview", "member"): (4096, 5630),
-    ("comment", "member"): (4096, 5630),
+#: ``case → (padding bucket, max frame bytes)``. The frame size of a fixed
+#: bucket only moves with the fixed fields (ids, the epoch), so the ceiling
+#: is tight; a change that grows a frame past it — or that pushes a case
+#: into a bigger bucket — fails here first.
+BUDGET: dict[str, tuple[int, int]] = {
+    "post en": (4096, 5640),
+    "post de": (4096, 5640),
+    "post cjk": (4096, 5640),
+    "post cjk 600": (4096, 5640),
+    "post en + link preview": (4096, 5640),
+    "comment": (4096, 5640),
 }
 
 
 def test_frame_sizes_stay_within_budget() -> None:
     rows = size_table()
     _print_table(rows)
-    assert {(case, path) for case, path, _b, _s in rows} == set(BUDGET)
-    for case, path, bucket, size in rows:
-        want_bucket, max_bytes = BUDGET[(case, path)]
-        assert bucket in ITEM_SIZE_BUCKETS, (case, path, bucket)
-        assert bucket == want_bucket, (case, path, bucket)
-        assert size <= max_bytes, (case, path, size)
+    assert {case for case, _b, _s in rows} == set(BUDGET)
+    for case, bucket, size in rows:
+        want_bucket, max_bytes = BUDGET[case]
+        assert bucket in ITEM_SIZE_BUCKETS, (case, bucket)
+        assert bucket == want_bucket, (case, bucket)
+        assert size <= max_bytes, (case, size)
 
 
-#: The same cases under ``payload_suite: "zlib1"`` — what a server that
-#: proved ``payload_zlib1`` fans out once every follower there reads it. A
-#: 300-character Latin-script post drops from the 4 KiB to the 1 KiB bucket
-#: (~5.8 KB → ~1.75 KB per follower). Chinese text compresses far less
-#: (each character is three UTF-8 bytes of near-random data to zlib): a
-#: 300-character post stays in 4 KiB, as does a post with a link preview —
-#: the publisher then sends no compressed copy at all.
-BUDGET_ZLIB: dict[tuple[str, str], tuple[int, int]] = {
-    ("post en", "relay"): (1024, 1760),
-    ("post en", "member"): (1024, 1560),
-    ("post de", "relay"): (1024, 1760),
-    ("post de", "member"): (1024, 1560),
-    ("post cjk", "relay"): (4096, 5860),
-    ("post cjk", "member"): (4096, 5655),
-    ("post cjk 600", "relay"): (4096, 5860),
-    ("post cjk 600", "member"): (4096, 5655),
-    ("post en + link preview", "relay"): (4096, 5860),
-    ("post en + link preview", "member"): (4096, 5655),
-    ("comment", "member"): (1024, 1560),
-}
-
-
-def test_compressed_frame_sizes_stay_within_budget() -> None:
-    rows = size_table(PAYLOAD_SUITE_ZLIB)
-    _print_table(rows)
-    assert {(case, path) for case, path, _b, _s in rows} == set(BUDGET_ZLIB)
-    for case, path, bucket, size in rows:
-        want_bucket, max_bytes = BUDGET_ZLIB[(case, path)]
-        assert bucket == want_bucket, (case, path, bucket)
-        assert size <= max_bytes, (case, path, size)
-
-
-#: ``ws_binary1`` frames of the compressed items (what a follower whose
-#: socket asked for binary frames receives): the ciphertext travels raw
-#: instead of base64: ~17 % off a 1 KiB-bucket frame (1 751 → 1 450 B) and
-#: ~22 % off a 4 KiB one (5 823 → 4 522 B) — the rest is the JSON header.
-BUDGET_BINARY: dict[tuple[str, str], int] = {
-    ("post en", "relay"): 1460,
-    ("post en", "member"): 1230,
-    ("post de", "relay"): 1460,
-    ("post de", "member"): 1230,
-    ("post cjk", "relay"): 4530,
-    ("post cjk", "member"): 4300,
-    ("post cjk 600", "relay"): 4530,
-    ("post cjk 600", "member"): 4300,
-    ("post en + link preview", "relay"): 4530,
-    ("post en + link preview", "member"): 4300,
-    ("comment", "member"): 1230,
-}
+#: ``ws_binary1`` frames (what a seat whose socket asked for binary frames
+#: receives): the ciphertext travels raw instead of base64 — ~22 % off a
+#: 4 KiB-bucket frame; the rest is the JSON header.
+BUDGET_BINARY: dict[str, int] = dict.fromkeys(BUDGET, 4310)
 
 
 def test_binary_frame_sizes_stay_within_budget() -> None:
-    rows = size_table(PAYLOAD_SUITE_ZLIB, binary=True)
+    rows = size_table(binary=True)
     _print_table(rows)
-    text = {(c, p): s for c, p, _b, s in size_table(PAYLOAD_SUITE_ZLIB)}
-    assert {(case, path) for case, path, _b, _s in rows} == set(BUDGET_BINARY)
-    for case, path, _bucket, size in rows:
-        assert size <= BUDGET_BINARY[(case, path)], (case, path, size)
-        assert size < text[(case, path)] * 0.85, (case, path)
+    text = {c: s for c, _b, s in size_table()}
+    assert {case for case, _b, _s in rows} == set(BUDGET_BINARY)
+    for case, _bucket, size in rows:
+        assert size <= BUDGET_BINARY[case], (case, size)
+        assert size < text[case] * 0.85, case
 
 
-def test_member_frames_carry_no_frame_cert() -> None:
-    """v_90 — the member frame never carries a plaintext writer cert (it
-    rides inside the ciphertext): ~290 B less per follower than the
-    identified publish's frame used to cost."""
-    for _case, path, _bucket, frame in _size_table(PAYLOAD_SUITE_ZLIB):
-        if path == "member":
-            assert "writer_cert" not in orjson.loads(frame)
-
-
-#: ``zlib1+dict1`` (preset dictionary ``domain/item_zdict.ZDICT_V1``):
-#: ``(bucket, binary frame bytes)`` — member frames carry no plaintext
-#: writer cert. The
-#: link-preview post drops from the 4 KiB to the 1 KiB bucket; items already
-#: in 1 KiB stay there (the bucket floor).
-BUDGET_DICT: dict[tuple[str, str], tuple[int, int]] = {
-    ("post en", "relay"): (1024, 1460),
-    ("post en", "member"): (1024, 1230),
-    ("post de", "relay"): (1024, 1460),
-    ("post de", "member"): (1024, 1230),
-    ("post cjk", "relay"): (4096, 4530),
-    ("post cjk", "member"): (4096, 4310),
-    ("post cjk 600", "relay"): (4096, 4530),
-    ("post cjk 600", "member"): (4096, 4310),
-    ("post en + link preview", "relay"): (1024, 1460),
-    ("post en + link preview", "member"): (1024, 1230),
-    ("comment", "member"): (1024, 1230),
-}
-
-
-def _lean_binary(frame: bytes) -> int:
-    parsed = orjson.loads(frame)
-    parsed.pop("writer_cert", None)
-    raw = encode_binary_frame(parsed)
-    assert raw is not None
-    return len(raw)
-
-
-def test_dictionary_frame_sizes_stay_within_budget() -> None:
-    rows = _size_table(PAYLOAD_SUITE_ZLIB_DICT1)
-    zlib = {(c, p): b for c, p, b, _f in _size_table(PAYLOAD_SUITE_ZLIB)}
-    print()
-    for case, path, bucket, frame in rows:
-        size = _lean_binary(frame)
-        print(f"{case:<26}{path:<8}{zlib[(case, path)]:>6} → {bucket:>6}{size:>7}")
-        want_bucket, max_bytes = BUDGET_DICT[(case, path)]
-        assert bucket == want_bucket, (case, path, bucket)
-        assert bucket <= zlib[(case, path)], (case, path)
-        assert size <= max_bytes, (case, path, size)
-    assert {(c, p) for c, p, _b, _f in rows} == set(BUDGET_DICT)
-
-
-def _copies(case: str, path: str) -> tuple[set[str], dict[str, int], int]:
-    """``(suites sealed, their buckets, JSON bucket)`` for a fixture item."""
-    w = _world()
-    text, preview = {
-        "post en": (TEXT_EN, False),
-        "post en + link preview": (TEXT_EN, True),
-        "post cjk": (TEXT_CJK, False),
-        "post cjk 600": (TEXT_CJK_LONG, False),
-    }[case]
-    inner = _post_inner(w, text, member=path == "member", preview=preview)
-    inner = {**inner, WRITER_CERT_FIELD: _cert(w).to_wire()}
-    body = {"item_type": "post", "inner": inner} if path == "member" else inner
-    json_len = len(seal_item_plaintext(body) or b"")
-    copies = compressed_item_plaintexts(body, json_len=json_len)
-    return set(copies), {s: len(pt) for s, pt in copies.items()}, json_len
-
-
-_CASES = [
-    (case, path)
-    for case in ("post en", "post en + link preview", "post cjk", "post cjk 600")
-    for path in ("member", "relay")
-]
-
-
-@pytest.mark.security
-def test_the_suites_sent_never_depend_on_whether_compression_saves_a_bucket():
-    """The suite label is routing-visible. Items where compression saves a
-    bucket (a Latin post: 4 KiB JSON → 1 KiB; a link preview with the
-    dictionary) and items where it saves none (CJK: 4 KiB either way) get
-    the SAME labels, so the GFS learns nothing about how compressible the
-    content is or what it carries."""
-    saves, saves_none = set(), set()
-    for case, path in _CASES:
-        suites, buckets, json_len = _copies(case, path)
-        assert suites == {"zlib1", "zlib1+dict1"}, (case, path, suites)
-        if min(buckets.values()) < json_len:
-            saves.add((case, path))
-        else:
-            saves_none.add((case, path))
-    # The fixtures really cover both kinds.
-    assert saves and saves_none, (saves, saves_none)
-
-
-def test_a_compressed_copy_is_never_larger_than_its_fallback():
-    for case, path in _CASES:
-        _suites, buckets, json_len = _copies(case, path)
-        assert buckets["zlib1"] <= json_len, (case, path)
-        assert buckets["zlib1+dict1"] <= buckets["zlib1"], (case, path)
-
-
-def test_compression_never_needs_a_bigger_bucket() -> None:
-    plain = {(c, p): b for c, p, b, _s in size_table()}
-    for case, path, bucket, _size in size_table(PAYLOAD_SUITE_ZLIB):
-        assert bucket <= plain[(case, path)], (case, path)
-
-
-def test_a_compressed_frame_opens_to_the_same_item() -> None:
-    w = _world()
-    inner = _post_inner(w, TEXT_DE, member=True)
-    cert = _cert(w)
-    body = {"item_type": "post", "inner": {**inner, WRITER_CERT_FIELD: cert.to_wire()}}
-    sealed = seal_item_plaintext(body, suite=PAYLOAD_SUITE_ZLIB)
-    assert sealed is not None
-    assert orjson.loads(open_item_plaintext(sealed, PAYLOAD_SUITE_ZLIB)) == body
+def test_channel_frames_carry_no_frame_cert_and_no_space() -> None:
+    """The channel frame names no space and carries no plaintext writer
+    cert (it rides inside the ciphertext)."""
+    for _case, _bucket, frame in _size_table():
+        parsed = orjson.loads(frame)
+        assert "writer_cert" not in parsed
+        assert "space_id" not in parsed
+        assert "payload_suite" not in parsed
+        assert SPACE_ID.encode() not in frame
 
 
 @pytest.mark.parametrize("bucket", ITEM_SIZE_BUCKETS[:2])
 def test_a_frame_costs_its_bucket_plus_a_fixed_overhead(bucket: int) -> None:
-    """Base64 (×4/3) of the padded ciphertext plus the routing and
-    signature fields: the frame grows with the bucket, never with the text
-    inside it."""
+    """Base64 (×4/3) of the padded ciphertext plus the routing fields: the
+    frame grows with the bucket, never with the text inside it."""
     w = _world()
     sizes = set()
     for text in ("short", TEXT_EN[:120]):
         inner = _post_inner(w, text, member=True)
-        frame, got = member_frame(w, "post", inner)
+        frame, got = channel_frame(w, "post", inner)
         if got == bucket:
             sizes.add(len(frame))
     assert len(sizes) <= 1

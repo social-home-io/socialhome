@@ -25571,28 +25571,15 @@ def _seed_pin(seed: bytes | None) -> str | None:
     return ed25519_public_key(seed).hex() if seed else None
 
 
-def _authority_probe(gfs_url: str, space_id: str, seed: bytes) -> int:
-    """Ask the GFS at ``gfs_url`` something only the space key may ask:
-    ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh authority
-    signature made with ``seed``. 200 — that GFS takes this key as the
-    space authority (the same pin its relay, epoch notices and media
-    uploads are checked against); 403 — it does not. Read-only: nothing is
-    relayed to anybody."""
-    from socialhome.authority_sig import (
-        AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-        sign_authority_event,
-    )
-
-    ts = datetime.now(timezone.utc).isoformat()
-    sig = sign_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-        space_id=space_id,
-        payload={"space_id": space_id, "ts": ts},
-        space_seed=seed,
-    )
-    query = urllib.parse.urlencode({"ts": ts, "summary": "1", **sig})
-    status, _body = _request(f"{gfs_url}/gfs/spaces/{space_id}/subscribers?{query}")
-    return status
+def _authority_probe(rows_of: Any, space_id: str, seed: bytes) -> int:
+    """Whether a GFS (its rows, ``rows_of``: :func:`_gfs_rows` or
+    :func:`_gfs_b_rows`) takes ``seed`` as the space authority: 200 when it
+    pins the key that seed signs for, 403 when it does not. Since v_96 (P7)
+    no GFS route takes a space-authority-signed request any more (the
+    subscriber roster read, the relay, the epoch notice and the space-scope
+    media upload are gone), so the pin is the whole question."""
+    held = _gfs_pin(rows_of, space_id)
+    return 200 if held is not None and held[0] == _seed_pin(seed) else 403
 
 
 def _gfs_pin(rows_of: Any, space_id: str) -> tuple[str, bool, bool] | None:
@@ -25793,16 +25780,16 @@ def _admin_seed_probe(
 ) -> None:
     """``seed`` is taken (``want`` 200) or refused (403) as the space
     authority by every GFS that holds a pin for the space."""
-    for name, url, _rows_of in _admin_seed_servers(state):
-        got = _authority_probe(url, space_id, seed)
+    for name, _url, rows_of in _admin_seed_servers(state):
+        got = _authority_probe(rows_of, space_id, seed)
         if got != want:
             raise SystemExit(
-                f"{step}: GFS {name} answered HTTP {got} to a request signed "
-                f"with {whose} (expected {want})"
+                f"{step}: GFS {name} pin answers {got} for {whose} "
+                f"(expected {want})"
             )
     names = " + ".join(n for n, _u, _r in _admin_seed_servers(state))
     verdict = "takes" if want == 200 else "refuses"
-    print(f"  GFS {names} {verdict} a request signed with {whose} ✓")
+    print(f"  GFS {names} {verdict} {whose} as the space authority ✓")
 
 
 def _admin_seed_seat_gone(state: dict, space_id: str, step: str) -> None:
@@ -26569,11 +26556,11 @@ def _check_gfs_admin_seed(state: dict, failures: list[str]) -> None:
                 f"gfs-admin-seed: GFS {name} pins {held!r}, a pins {str(pin)[:12]}…"
             )
         for seed_hex in info["retired_seeds"]:
-            got = _authority_probe(url, space_id, bytes.fromhex(seed_hex))
+            got = _authority_probe(rows_of, space_id, bytes.fromhex(seed_hex))
             if got != 403:
                 failures.append(
-                    f"gfs-admin-seed: GFS {name} answered HTTP {got} to a "
-                    "request signed with a seed of the removed admin"
+                    f"gfs-admin-seed: GFS {name} takes a seed of the removed "
+                    f"admin as the space authority ({got})"
                 )
 
 

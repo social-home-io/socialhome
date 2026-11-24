@@ -486,13 +486,12 @@ CHANNEL_UNUSED_TTL_SECONDS: int = 24 * 60 * 60
 
 @dataclass(slots=True, frozen=True)
 class GfsChannel:
-    """One opaque channel (v_51, migration 0016) — a PRIVATE space's member
-    relay, keyed by a random id. Nothing here names a space, a space key or
-    an owner household.
+    """One opaque channel (v_51, migration 0016) — a space's member and
+    follower relay (private since v_51, global since v_96), keyed by a random
+    id. Nothing here names a space, a space key or an owner household.
 
-    The content epoch has ONE tier (unlike :class:`GfsSpaceEpoch`): this
-    server cannot tell an owner from a delegated admin without learning who
-    owns the channel, so every channel-key-signed notice is equal and
+    The content epoch has ONE tier: this server cannot tell an owner from a
+    delegated admin without learning who owns the channel, so every channel-key-signed notice is equal and
     inflation is bounded by time instead — :meth:`step_allowance`."""
 
     channel_id: str

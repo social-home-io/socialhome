@@ -16,12 +16,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from socialhome.global_server.member_publish import (
-    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP,
-    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE,
-    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
-    MemberPublishRateLimited,
-)
 
 from socialhome.crypto import (
     b64url_decode,
@@ -54,13 +48,17 @@ from socialhome.global_server.app_keys import (
     gfs_channel_service_key,
     gfs_db_key,
     gfs_envelope_queue_repo_key,
+    gfs_fan_out_key,
     gfs_fed_repo_key,
-    gfs_member_publish_key,
     gfs_ws_registry_key,
 )
 from socialhome.global_server.channels import (
     CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS,
+    CHANNEL_PUBLISH_MAX_PER_MINUTE,
+    CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
     CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP,
+    CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP,
+    ChannelRateLimited,
     _is_channel_path,
 )
 from socialhome.global_server.config import GfsConfig
@@ -231,7 +229,7 @@ async def _wait_connected(app, instance_id: str) -> None:
 
 
 async def _queued(gfs, h: _Household) -> list:
-    await gfs.app_[gfs_member_publish_key].wait_idle()
+    await gfs.app_[gfs_fan_out_key].wait_idle()
     return await gfs.app_[gfs_envelope_queue_repo_key].list_for(h.instance_id, now=0)
 
 
@@ -678,17 +676,17 @@ async def test_one_address_is_bounded_per_channel(gfs) -> None:
     cap = CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
     for _ in range(cap):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
-    with pytest.raises(MemberPublishRateLimited):
+    with pytest.raises(ChannelRateLimited):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
     await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.9")
-    assert cap < MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
+    assert cap < CHANNEL_PUBLISH_MAX_PER_MINUTE
 
 
 @pytest.mark.security
 async def test_one_key_holder_spreading_over_addresses_cannot_exceed_the_channel_cap(
     gfs,
 ) -> None:
-    """The channel as a whole takes MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE a
+    """The channel as a whole takes CHANNEL_PUBLISH_MAX_PER_MINUTE a
     minute whatever the addresses; another channel is unaffected."""
     await _ready(gfs, epoch=3)
     first = gfs.ch
@@ -696,14 +694,14 @@ async def test_one_key_holder_spreading_over_addresses_cannot_exceed_the_channel
     await _ready(gfs, epoch=3)
     second = gfs.ch
     svc = gfs.app_[gfs_channel_service_key]
-    cap = MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
+    cap = CHANNEL_PUBLISH_MAX_PER_MINUTE
     per_ip = CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
     for i in range(cap):
         # Every address stays under its own per-address bound.
         await svc.publish_anon(
             _anon_req(first), client_ip=f"10.{i // per_ip}.0.{i % per_ip}"
         )
-    with pytest.raises(MemberPublishRateLimited):
+    with pytest.raises(ChannelRateLimited):
         await svc.publish_anon(_anon_req(first), client_ip="192.0.2.250")
     await svc.publish_anon(_anon_req(second), client_ip="192.0.2.250")
 
@@ -717,17 +715,17 @@ async def test_one_key_holder_needs_eight_addresses_to_fill_the_channel(gfs) -> 
     await _ready(gfs, epoch=3)
     svc = gfs.app_[gfs_channel_service_key]
     per_addr = CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
-    cap = MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
+    cap = CHANNEL_PUBLISH_MAX_PER_MINUTE
     assert per_addr * 8 == cap
     for a in range(7):
         for _ in range(per_addr):
             await svc.publish_anon(_anon_req(gfs.ch), client_ip=f"10.0.0.{a}")
-        with pytest.raises(MemberPublishRateLimited):
+        with pytest.raises(ChannelRateLimited):
             await svc.publish_anon(_anon_req(gfs.ch), client_ip=f"10.0.0.{a}")
     # The honest writer still gets its full share.
     for _ in range(per_addr):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.9")
-    with pytest.raises(MemberPublishRateLimited):
+    with pytest.raises(ChannelRateLimited):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.10")
 
 
@@ -742,10 +740,10 @@ async def test_channel_limits_are_cluster_wide(gfs) -> None:
     per_addr = -(-CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS // 4)
     for _ in range(per_addr):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
-    with pytest.raises(MemberPublishRateLimited):
+    with pytest.raises(ChannelRateLimited):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
     # The channel's own budget: this node's quarter of 120.
-    channel_share = MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE // 4
+    channel_share = CHANNEL_PUBLISH_MAX_PER_MINUTE // 4
     admitted = per_addr
     a = 0
     while admitted < channel_share:
@@ -753,7 +751,7 @@ async def test_channel_limits_are_cluster_wide(gfs) -> None:
         for _ in range(min(per_addr, channel_share - admitted)):
             await svc.publish_anon(_anon_req(gfs.ch), client_ip=f"10.1.0.{a}")
             admitted += 1
-    with pytest.raises(MemberPublishRateLimited):
+    with pytest.raises(ChannelRateLimited):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="192.0.2.250")
 
 
@@ -762,11 +760,11 @@ async def test_the_writer_key_bound_is_per_channel_and_epoch(gfs) -> None:
     await _ready(gfs, epoch=3)
     svc = gfs.app_[gfs_channel_service_key]
     # Lift the aggregate / address bounds so only the key bound can answer.
-    svc._channel_limiter._limit = 10 * MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
-    svc._anon_ip_limiter._limit = 10 * MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
-    for _ in range(MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY):
+    svc._channel_limiter._limit = 10 * CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+    svc._anon_ip_limiter._limit = 10 * CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+    for _ in range(CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
-    with pytest.raises(MemberPublishRateLimited):
+    with pytest.raises(ChannelRateLimited):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
 
 
@@ -784,7 +782,7 @@ async def test_a_refused_writer_signature_costs_no_budget(gfs) -> None:
     # The address still has its whole budget.
     for _ in range(cap):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
-    with pytest.raises(MemberPublishRateLimited):
+    with pytest.raises(ChannelRateLimited):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
 
 
@@ -808,7 +806,7 @@ async def test_the_per_ip_route_limiter_covers_every_channel_route(gfs) -> None:
     # Wired into the real app: past the per-IP budget the route sheds a
     # flood with 429 before any signature work.
     last = 0
-    for _ in range(MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP + 1):
+    for _ in range(CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP + 1):
         resp = await gfs.post("/gfs/channels/publish-anon", json={})
         last = resp.status
     assert last == 429
@@ -852,7 +850,7 @@ async def test_the_server_stores_nothing_that_names_the_space(gfs, tmp_dir) -> N
     await _seat(gfs, gfs.other)
     resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
     assert resp.status == 200
-    await gfs.app_[gfs_member_publish_key].wait_idle()
+    await gfs.app_[gfs_fan_out_key].wait_idle()
     dump = (tmp_dir / "gfs.db").read_bytes()
     for wal in tmp_dir.glob("gfs.db*"):
         dump += wal.read_bytes()
@@ -947,7 +945,7 @@ async def _publish_and_wait(gfs) -> float:
     started = time.monotonic()
     resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
     assert resp.status == 200, await resp.text()
-    await gfs.app_[gfs_member_publish_key].wait_idle()
+    await gfs.app_[gfs_fan_out_key].wait_idle()
     return time.monotonic() - started
 
 
