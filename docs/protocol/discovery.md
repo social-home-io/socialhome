@@ -2342,7 +2342,7 @@ the routes below, the capability, the sweep and the admin counts.
 
 | Method | Path | |
 |---|---|---|
-| `PUT` | `/gfs/media/{blob_id}` | One encrypted blob, the raw body, for the scope the signed claim names — a listed space, or a private space's opaque channel (`channel_id` = 32 hex). The scope never rides in the URL (security review F3: a channel id must not land in an access log or a proxy). `blob_id` = the scope-bound address of the body (above; `422 blob_id_mismatch` otherwise), size = a padded bucket + 28 bytes (`moment_public_media.PAD_BUCKETS`, ≤ 8 MiB + overhead). `201 {stored: true}`; the scope's retry is `200 {stored: false, status: "already_stored"}`, never an error. **`already_stored` does not extend the blob's expiry** (it keeps the expiry of the scope's first upload): a household must not assume a fresh TTL from it. `503 space_media_disabled` while the operator has the cache off. |
+| `PUT` | `/gfs/media/{blob_id}` | One encrypted blob, the raw body, for the scope the signed claim names — a space's opaque channel (`channel_id` = 32 hex; the only scope since v_96). The scope never rides in the URL (security review F3: a channel id must not land in an access log or a proxy). `blob_id` = the scope-bound address of the body (above; `422 blob_id_mismatch` otherwise), size = a padded bucket + 28 bytes (`moment_public_media.PAD_BUCKETS`, ≤ 8 MiB + overhead). `201 {stored: true}`; the scope's retry is `200 {stored: false, status: "already_stored"}`, never an error. **`already_stored` does not extend the blob's expiry** (it keeps the expiry of the scope's first upload): a household must not assume a fresh TTL from it. `503 space_media_disabled` while the operator has the cache off. |
 | `GET` | `/gfs/media/{blob_id}` | Anyone, no credentials: the ciphertext, `application/octet-stream`, `nosniff`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=3600, immutable`; `404` with `no-store` for unknown, expired, evicted or a banned space's blob. |
 | `POST` | `/gfs/media/{blob_id}/delete` | The scope's seed holder deletes one of the scope's blobs: `{scope, scope_id, ts, sig, sig_suite}` (the signature covers scope, scope id, blob and `ts`); `{deleted}` (`false` for another scope's blob). Taken once: an exact replay is the uniform 403. |
 
@@ -2405,14 +2405,11 @@ codec refuses it (`MEDIA_SCOPES = {"channel"}`) and GFS migration 0033
 deleted its rows. The identified kinds `writer_cert` and `channel_cert` are gone since v_90
 (a header naming one is a 400): no upload names a household.
 
-A `space` must be listed and **active** (not pending, not moderator-banned),
-with a pinned authority key; a `channel` must be registered and in use.
+A `channel` must be registered and in use.
 **Every outcome of a kind costs the same Ed25519 verifications** as a
-success of that kind (authority, channel key and writer key: 1; the two cert
-kinds: 2 — the holder's signature and the cert's; a delete: 1): a refusal at
+success of that kind (channel key and writer key: 1; a delete: 1): a refusal at
 any step is topped up with verifications against a fixed dummy key, so its
-timing doesn't tell which spaces are listed or banned, which channels exist,
-which writer keys are pinned or which mode a space or channel is in. Every
+timing doesn't tell which channels exist or which writer keys are pinned. Every
 failure is one `403 {"error": "not authorized for this scope"}` (reason at
 DEBUG); a malformed header is `400`. The header is checked **before** the
 body is read, and so are the signed `size` (a padded bucket, `422`
@@ -2440,9 +2437,8 @@ so neither an unauthorized caller nor a scope over its rate makes the server
 buffer a byte. A captured upload replayed within the ±300 s
 window is harmless: it is the same blob of the same scope (a no-op), or
 lands on another GFS serving the same scope, inside that scope's caps there.
-A delete is the scope's seed holder's alone: the space authority over
-`{scope, scope_id, blob_id, ts}` under `space_media_delete`, or the channel
-key over the same after `b"gfs-channel-media-delete:v1:"`.
+A delete is the scope's seed holder's alone: the channel key over
+`{scope, scope_id, blob_id, ts}` after `b"gfs-channel-media-delete:v1:"`.
 
 **Caps, eviction, TTL** (`[space_media]` in the GFS config, env
 `GFS_SPACE_MEDIA_*`, `global_server/space_media.py`). The cache favours new

@@ -1048,8 +1048,8 @@ anyway.
 **Deferred.** Files over 8 MiB (long videos). A blob the cache evicted or
 expired comes back on view since v_83 (below). Tracked follow-ups: **comment media** and **a seed holder's
 relayed copy of an approved post** carry no descriptor yet. A private space whose owner left `private_gfs`
-off has no channel: since v_96 (no `space` scope) its link-joined members
-get the files by the push (`SPACE_MEDIA_BLOB`), not through a GFS cache.
+off has no channel: its link-joined members get the files by the push
+(`SPACE_MEDIA_BLOB`), not through a GFS cache.
 
 ## Space media on demand (v_83)
 
@@ -1128,7 +1128,7 @@ was at least 1 MiB was described but uploaded only on demand — and only by
 the household that **owned** the listed space, because the GFS asked a
 `space`-scope blob's owner. Under the channel scope the owner holds no
 seat, so the GFS never asks it; the lazy path went with the `space` scope
-(P7 decision, recorded in the plan): every file of a space with a channel
+(decided with the GFS removal in v_96): every file of a space with a channel
 is uploaded eagerly (≤ 8 MiB), pictures and videos alike, and a blob that
 later leaves the cache comes back from a seated holder below.
 

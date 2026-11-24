@@ -5361,8 +5361,8 @@ def _wait_for_gfs_ws(instance_id: str, *, timeout: float = 60.0) -> None:
 
     ``GfsWebSocketSupervisor`` opens the socket from a background reconcile
     loop, so a household that paired seconds ago may not be connected yet.
-    Every GFS→household push (relay frames, ``new_subscriber`` notifies,
-    sealed key handoffs) needs it, and the HTTPS-inbox fallback the GFS uses
+    Every GFS→household push (channel relay frames, envelopes,
+    moment frames) needs it, and the HTTPS-inbox fallback the GFS uses
     when the socket is missing is not an authenticated path for relay frames
     (it answers 401), so a frame sent too early is simply lost.
     """

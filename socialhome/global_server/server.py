@@ -232,8 +232,8 @@ def load_or_create_signing_seed(
         "0600). If this server was previously running a build that DERIVED "
         "its key from the instance id, the identity just changed: already "
         "paired households must re-pair before they can verify this server's "
-        "signed capability block, and until then they keep relaying with the "
-        "identified (legacy) publish body. Back this file up with the "
+        "signed capability block, and until then they use none of its "
+        "signed capabilities. Back this file up with the "
         "database — losing it forces a re-pair of every household.",
         path,
     )
