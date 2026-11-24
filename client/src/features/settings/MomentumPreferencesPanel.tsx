@@ -16,7 +16,10 @@
  * with a line saying so. When the limits can't be read all five stay on
  * offer — the server clamps. Admins also get the household maximum itself
  * (``PUT /api/admin/moments/reach-max``, instant save, put back on a
- * failure).
+ * failure); that control is hidden while the limits can't be read, since
+ * there is no current value to show. After a successful save of either,
+ * the limits are read again so every reach text says what the server now
+ * applies.
  *
  * A protected account sees moments from its household and directly paired
  * households only (#1185), and its own go to the same households, whatever
@@ -32,8 +35,7 @@ import {
   loadMomentLimits,
   MOMENT_MAX_REACH,
   momentReachMax,
-  myMomentReach,
-  reachKey,
+  reachText,
 } from '@/store/momentLimits'
 import {
   getMomentsPreferences,
@@ -66,9 +68,9 @@ export function MomentumPreferencesPanel() {
         reach: reach.value,
       })
       status.value = 'saved'
-      if (!isProtected) {
-        myMomentReach.value = Math.min(reach.value, momentReachMax.value ?? MOMENT_MAX_REACH)
-      }
+      // What applies now (the household maximum, protection) is the
+      // server's to say.
+      void loadMomentLimits({ fresh: true })
     } catch {
       status.value = 'failed'
     }
@@ -81,7 +83,7 @@ export function MomentumPreferencesPanel() {
     try {
       await api.put('/api/admin/moments/reach-max', { reach_max: next })
       status.value = 'saved'
-      if (!isProtected) myMomentReach.value = Math.min(reach.value, next)
+      void loadMomentLimits({ fresh: true })
     } catch {
       momentReachMax.value = prev
       status.value = 'max_failed'
@@ -171,8 +173,7 @@ export function MomentumPreferencesPanel() {
           <div id="sh-momentum-reach-hint" class="sh-muted">
             {householdMax !== null && householdMax < MOMENT_MAX_REACH && (
               <p class="sh-settings-momentum-household-max">
-                {t(reachKey('settings.momentum.reach_household_max', householdMax),
-                  { n: String(householdMax) })}
+                {reachText('settings.momentum.reach_household_max', householdMax)}
               </p>
             )}
             <p>{t('settings.momentum.reach_hint')}</p>

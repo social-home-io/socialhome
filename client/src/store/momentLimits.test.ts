@@ -3,12 +3,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const { apiMock } = vi.hoisted(() => ({ apiMock: { get: vi.fn() } }))
 vi.mock('@/api', () => ({ api: apiMock }))
 
+import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
+import type { Moment } from '@/types'
 import {
   loadMomentLimits,
+  momentReach,
   momentReachMax,
   myMomentReach,
-  reachKey,
+  reachText,
   replyReach,
   shownReach,
 } from './momentLimits'
@@ -30,7 +33,7 @@ describe('momentLimits — how far the caller\'s moments go', () => {
     expect(momentReachMax.value).toBe(4)
   })
 
-  it('an older server without the fields leaves them unknown', async () => {
+  it('a response without the fields leaves them unknown', async () => {
     apiMock.get.mockResolvedValue({ next_allowed_at: null })
     await loadMomentLimits()
     expect(myMomentReach.value).toBeNull()
@@ -60,7 +63,7 @@ describe('momentLimits — how far the caller\'s moments go', () => {
       user_id: 'u', username: 'u', preferences_json: JSON.stringify({ moments: { reach: 1 } }),
     } as never
     expect(shownReach()).toBe(1)
-    expect(replyReach(4)).toBe(1)
+    expect(replyReach({ reach: 4 })).toBe(1)
   })
 
   it('a protected account falls back to 1 while unread', () => {
@@ -73,15 +76,58 @@ describe('momentLimits — how far the caller\'s moments go', () => {
 
   it('a reply goes no further than the moment it answers', () => {
     myMomentReach.value = 5
-    expect(replyReach(2)).toBe(2)
-    expect(replyReach(undefined)).toBe(3)
+    expect(replyReach({ reach: 2 })).toBe(2)
+    expect(replyReach(null)).toBe(3)
     myMomentReach.value = 1
-    expect(replyReach(4)).toBe(1)
+    expect(replyReach({ reach: 4 })).toBe(1)
+  })
+
+  it.each([
+    [1, 1], [3, 3], [5, 5],
+    [0, 3], [6, 3], [2.5, 3], ['4', 3], [undefined, 3], [null, 3],
+  ])('a moment with reach %j reads as %i hops', (reach, want) => {
+    expect(momentReach({ reach } as unknown as Pick<Moment, 'reach'>)).toBe(want)
+  })
+
+  it('loads share one in-flight read', async () => {
+    let resolve!: (v: unknown) => void
+    apiMock.get.mockReturnValue(new Promise((r) => { resolve = r }))
+    const a = loadMomentLimits()
+    const b = loadMomentLimits()
+    expect(apiMock.get).toHaveBeenCalledTimes(1)
+    resolve({ next_allowed_at: null, reach: 2, reach_max: 4 })
+    expect(await a).toEqual(await b)
+    expect(myMomentReach.value).toBe(2)
+    // Once settled, the next load reads again.
+    apiMock.get.mockResolvedValue({ next_allowed_at: null, reach: 3, reach_max: 4 })
+    await loadMomentLimits()
+    expect(apiMock.get).toHaveBeenCalledTimes(2)
+    expect(myMomentReach.value).toBe(3)
+  })
+
+  it('a fresh read after a save is not answered by an older read', async () => {
+    let resolveOld!: (v: unknown) => void
+    apiMock.get.mockReturnValueOnce(new Promise((r) => { resolveOld = r }))
+    const old = loadMomentLimits()
+    apiMock.get.mockResolvedValueOnce({ next_allowed_at: null, reach: 1, reach_max: 1 })
+    await loadMomentLimits({ fresh: true })
+    expect(apiMock.get).toHaveBeenCalledTimes(2)
+    expect(myMomentReach.value).toBe(1)
+    // The older read lands late: it must not put back what it saw.
+    resolveOld({ next_allowed_at: null, reach: 5, reach_max: 5 })
+    await old
+    expect(myMomentReach.value).toBe(1)
+    expect(momentReachMax.value).toBe(1)
   })
 
   it('reach 1 reads as its own sentence (the _one key)', () => {
-    expect(reachKey('moment.entry.reach', 1)).toBe('moment.entry.reach_one')
-    expect(reachKey('moment.entry.reach', 2)).toBe('moment.entry.reach')
-    expect(reachKey('moment.entry.reach', 5)).toBe('moment.entry.reach')
+    expect(reachText('moment.entry.reach', 1)).toBe(t('moment.entry.reach_one'))
+    expect(reachText('moment.entry.reach', 2)).toBe(t('moment.entry.reach', { n: '2' }))
+    expect(reachText('moment.entry.reach', 5)).toContain('5')
+  })
+
+  it('reach texts take extra parameters beside n', () => {
+    expect(reachText('moment.composer.reach_more', 4, { days: '7 days' }))
+      .toBe(t('moment.composer.reach_more', { n: '4', days: '7 days' }))
   })
 })

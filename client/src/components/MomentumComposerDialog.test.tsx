@@ -54,8 +54,8 @@ const REG_OFF: MomentPublicRegistration = { ...REG, default_share: false }
 
 let regs: MomentPublicRegistration[] = [REG]
 let nextAllowed: string | null = null
-/** The caller's reach from ``/api/moments/limits`` (``undefined`` = an
- *  older server that doesn't say). */
+/** The caller's reach from ``/api/moments/limits`` (``undefined`` = a
+ *  response that doesn't say). */
 let limitReach: number | undefined
 
 function routeGet(path: string) {

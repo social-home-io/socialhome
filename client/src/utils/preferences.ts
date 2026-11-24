@@ -27,11 +27,17 @@ export interface MomentsPreferences {
   reach?: MomentsHops
 }
 
+/** Server: ``MOMENT_DEFAULT_REACH``. */
+export const MOMENT_DEFAULT_REACH = 3
+/** Server: ``MOMENT_MAX_REACH`` (= ``MOMENT_MAX_HOPS``). */
+export const MOMENT_MAX_REACH = 5
+
 /** A ``moments`` hop count as the server reads it (``_strict_int``): a
- *  whole number clamps to 1–5, anything else is the default 3. */
+ *  whole number clamps to 1–``MOMENT_MAX_REACH``, anything else is
+ *  the default ``MOMENT_DEFAULT_REACH``. */
 function hopsOf(v: unknown): MomentsHops {
-  if (typeof v !== 'number' || !Number.isInteger(v)) return 3
-  return Math.min(5, Math.max(1, v)) as MomentsHops
+  if (typeof v !== 'number' || !Number.isInteger(v)) return MOMENT_DEFAULT_REACH
+  return Math.min(MOMENT_MAX_REACH, Math.max(1, v)) as MomentsHops
 }
 
 /** Server: ``MOMENT_DEFAULT_RETENTION_DAYS``. */

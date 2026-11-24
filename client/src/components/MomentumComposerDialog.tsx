@@ -53,7 +53,7 @@ import { getMomentsPreferences, momentRetentionLabel } from '@/utils/preferences
 import { localClockTime } from '@/utils/relativeTime'
 import { currentUser } from '@/store/auth'
 import { namedPersonLabel } from '@/store/householdUsers'
-import { loadMomentLimits, reachKey, replyReach, shownReach } from '@/store/momentLimits'
+import { loadMomentLimits, reachText, replyReach, shownReach } from '@/store/momentLimits'
 import {
   loadRegistrations,
   registrations,
@@ -102,7 +102,7 @@ function setNextAllowed(iso: unknown): void {
 
 function loadLimits(seq: number, isReply: boolean): void {
   // Unreadable: the 429 still says the time at Post, and the reach line
-  // says the default 3 hops (the server goes by the real one).
+  // says the person's own reach setting (the server goes by the real one).
   void loadMomentLimits().then((r) => {
     if (r && seq === openSeq && !isReply) setNextAllowed(r.next_allowed_at ?? null)
   })
@@ -361,17 +361,15 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
 
   // How far it goes: the caller's reach, and a reply no further than the
   // moment it answers (v_96).
-  const hops = isReply ? replyReach(parent.value?.reach) : shownReach()
-  const n = { n: String(hops) }
+  const hops = isReply ? replyReach(parent.value) : shownReach()
   const reachLine = isProtected
     ? t(isReply ? 'moment.composer.reach_reply_protected' : 'moment.entry.reach_protected')
-    : t(reachKey(isReply ? 'moment.composer.reach_reply' : 'moment.entry.reach', hops), n)
+    : reachText(isReply ? 'moment.composer.reach_reply' : 'moment.entry.reach', hops)
   const reachMore = isProtected
     ? t('moment.composer.reach_more_protected')
     : isReply
-      ? t(reachKey('moment.composer.reach_more_reply', hops), n)
-      : t(reachKey('moment.composer.reach_more', hops), {
-        ...n,
+      ? reachText('moment.composer.reach_more_reply', hops)
+      : reachText('moment.composer.reach_more', hops, {
         days: momentRetentionLabel(getMomentsPreferences().follower_retention_days),
       })
 

@@ -25,7 +25,7 @@ function moment(id: string, author: string, extra: Partial<Moment> = {}): Moment
     media_url: null, media_type: null, duration_ms: null, parent_moment_id: null,
     origin_instance_id: 'peer-o', created_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    reaction_count: 0, reply_count: 0, ...extra,
+    reaction_count: 0, reply_count: 0, reach: 3, ...extra,
   }
 }
 

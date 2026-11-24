@@ -26,7 +26,7 @@ import { showToast } from '@/components/Toast'
 import { UploadProgressBar } from '@/components/UploadProgress'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
-import { loadMomentLimits, reachKey, replyReach } from '@/store/momentLimits'
+import { loadMomentLimits, reachText, replyReach } from '@/store/momentLimits'
 import { registrations } from '@/store/momentPublic'
 import { clearTextDraft, textDraft } from '@/store/textDrafts'
 import type { Moment } from '@/types'
@@ -60,7 +60,7 @@ export function MomentReplyField({ parent, inputRef, onPosted }: Props) {
   const registered = registrations.value.length > 0
   const showPublic = registered && !isRestricted('public_moments') && parent.is_public === true
   // No further than the caller's reach, nor than the moment it answers.
-  const hops = replyReach(parent.reach)
+  const hops = replyReach(parent)
 
   useEffect(() => { void loadMomentLimits() }, [])
 
@@ -176,7 +176,7 @@ export function MomentReplyField({ parent, inputRef, onPosted }: Props) {
       <p id={hintId} class="sh-moment-replyfield__hint">
         {isProtected
           ? t('moment.composer.reach_reply_protected')
-          : t(reachKey('moment.composer.reach_reply', hops), { n: String(hops) })}
+          : reachText('moment.composer.reach_reply', hops)}
       </p>
       {showPublic && (
         <label class="sh-moment-replyfield__public">

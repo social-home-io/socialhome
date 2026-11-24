@@ -52,7 +52,7 @@ import {
   namedPersonLabel,
   namedPersonPicture,
 } from '@/store/householdUsers'
-import { MOMENT_DEFAULT_REACH, reachKey } from '@/store/momentLimits'
+import { momentReach, reachText } from '@/store/momentLimits'
 import { loadRegistrations, registrations } from '@/store/momentPublic'
 import { markSeen } from '@/store/notifications'
 import { useTitle } from '@/store/pageTitle'
@@ -389,7 +389,7 @@ function StatusBand({ m, ended }: { m: Moment; ended: boolean }) {
   const days = momentRetentionLabel(getMomentsPreferences().follower_retention_days)
   const time = untilTime(m.expires_at)
   // How far this moment went (v_96), fixed when it was written.
-  const hops = m.reach ?? MOMENT_DEFAULT_REACH
+  const hops = momentReach(m)
 
   const copyShareLink = async () => {
     // A link that opens THIS moment for anyone who has it — the key is in
@@ -416,14 +416,14 @@ function StatusBand({ m, ended }: { m: Moment; ended: boolean }) {
     sub = null
   } else if (isPublic) {
     title = publicOnLabel(registrations.value)
-    sub = t(reachKey('moment.detail.status_public_also', hops), { days, n: String(hops) })
-  } else if (isProtected && m.reach == null) {
-    // Only a moment without its own reach falls back to the viewer's
-    // protection; one with a reach says how far it really went.
+    sub = reachText('moment.detail.status_public_also', hops, { days })
+  } else if (isProtected && hops === 1) {
+    // A protected author's reach-1 moment keeps the protected wording; one
+    // written before the protection (reach > 1) says how far it really went.
     title = t('moment.detail.status_reach_protected')
     sub = t('moment.detail.status_until_protected', { time })
   } else {
-    title = t(reachKey('moment.detail.status_reach', hops), { n: String(hops) })
+    title = reachText('moment.detail.status_reach', hops)
     sub = t('moment.detail.status_until', { time, days })
   }
 

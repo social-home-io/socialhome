@@ -46,7 +46,7 @@ function moment(id: string, author: string, extra: Partial<Moment> = {}): Moment
     media_url: null, media_type: null, duration_ms: null, parent_moment_id: null,
     origin_instance_id: 'peer-o', created_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    reaction_count: 0, reply_count: 0, ...extra,
+    reaction_count: 0, reply_count: 0, reach: 3, ...extra,
   }
 }
 
@@ -211,12 +211,17 @@ describe('MomentumDetailPage status of your own moment', () => {
   })
 
   it('a protected account’s moment stays with its household and paired households', async () => {
+    // reach 1 is what the server sends for a protected author: the band
+    // keeps the protected wording, like the composer — no followers line.
     currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
-    asAuthor({ is_public: false })
+    asAuthor({ is_public: false, reach: 1 })
     const { findByRole } = render(<MomentumDetailPage />)
     const band = await findByRole('group', { name: 'Who sees this' })
-    expect(band.textContent).toContain('Your household and your paired households')
-    expect(band.textContent).not.toContain('3 hops')
+    expect(band.querySelector('.sh-moment-status__title')!.textContent)
+      .toBe('Your household and your paired households')
+    expect(band.querySelector('.sh-moment-status__sub')!.textContent)
+      .toMatch(/^They see it until /)
+    expect(band.textContent).not.toContain('hops')
     expect(band.textContent).not.toContain('followers')
   })
 
@@ -231,14 +236,13 @@ describe('MomentumDetailPage status of your own moment', () => {
       .toBe('Paired households and beyond, up to 3 hops')
   })
 
-  it('a reach-1 moment says household and paired households for a protected author', async () => {
-    currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
+  it('a reach-1 moment of an unprotected author says how long followers keep it', async () => {
     asAuthor({ is_public: false, reach: 1 })
     const { findByRole } = render(<MomentumDetailPage />)
     const band = await findByRole('group', { name: 'Who sees this' })
     expect(band.querySelector('.sh-moment-status__title')!.textContent)
       .toBe('Your household and your paired households')
-    expect(band.textContent).not.toContain('hops')
+    expect(band.querySelector('.sh-moment-status__sub')!.textContent).toContain('followers keep it')
   })
 
   it('a public moment names its GFS and copies the share link — never "Stop sharing"', async () => {

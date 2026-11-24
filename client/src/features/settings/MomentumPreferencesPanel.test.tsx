@@ -139,13 +139,27 @@ describe('Settings › Momentum — how far my moments go', () => {
   it('saves reach in the same moments block as the other two', async () => {
     me({ max_hops: 2, follower_retention_days: 14 })
     const { container, getByRole } = render(<MomentumPreferencesPanel />)
+    await waitFor(() => expect(myMomentReach.value).toBe(3))
+    apiMock.get.mockResolvedValue({ next_allowed_at: null, reach: 5, reach_max: 5 })
     fireEvent.change(reachSelect(container), { target: { value: '5' } })
     await waitFor(() => expect(lastSaved()).toEqual({
       max_hops: 2, follower_retention_days: 14, reach: 5,
     }))
     expect(getByRole('status').textContent).toBe('Saved')
-    // The composer and inbox read the new reach at once.
-    expect(myMomentReach.value).toBe(5)
+    // The server says what now applies; the composer and inbox read it.
+    await waitFor(() => expect(myMomentReach.value).toBe(5))
+    expect(apiMock.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('a failed reach save reads nothing again', async () => {
+    me(null)
+    apiMock.patch.mockRejectedValue(new Error('offline'))
+    const { container, getByRole } = render(<MomentumPreferencesPanel />)
+    await waitFor(() => expect(myMomentReach.value).toBe(3))
+    fireEvent.change(reachSelect(container), { target: { value: '5' } })
+    await waitFor(() => expect(getByRole('status').textContent).toMatch(/Couldn't save/))
+    expect(apiMock.get).toHaveBeenCalledTimes(1)
+    expect(myMomentReach.value).toBe(3)
   })
 
   it('options above the household maximum are disabled, with a line saying so', async () => {
@@ -212,6 +226,7 @@ describe('Settings › Momentum — the household maximum (admins)', () => {
     const max = maxSelect(container)
     expect([...max.options].map(o => o.value)).toEqual(['1', '2', '3', '4', '5'])
     expect(max.selectedOptions[0].textContent).toBe('5 steps (default, no limit)')
+    apiMock.get.mockResolvedValue({ next_allowed_at: null, reach: 2, reach_max: 2 })
     fireEvent.change(max, { target: { value: '2' } })
     await waitFor(() => expect(apiMock.put).toHaveBeenCalledWith(
       '/api/admin/moments/reach-max', { reach_max: 2 },
@@ -221,6 +236,8 @@ describe('Settings › Momentum — the household maximum (admins)', () => {
     const reach = container.querySelector('#sh-momentum-reach') as HTMLSelectElement
     await waitFor(() => expect([...reach.options].map(o => o.disabled))
       .toEqual([false, false, true, true, true]))
+    // …and the reach the server now applies is read again.
+    await waitFor(() => expect(myMomentReach.value).toBe(2))
     // Never a moments-preferences write for the household setting.
     expect(apiMock.patch).not.toHaveBeenCalled()
   })

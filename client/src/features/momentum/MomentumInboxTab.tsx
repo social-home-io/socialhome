@@ -29,7 +29,7 @@ import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } f
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import { householdDisplayName, householdPictureUrl, loadHouseholdUsers } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
-import { loadMomentLimits, reachKey, shownReach } from '@/store/momentLimits'
+import { loadMomentLimits, reachText, shownReach } from '@/store/momentLimits'
 import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { t } from '@/i18n/i18n'
@@ -150,7 +150,7 @@ export default function MomentumInboxTab({ tag }: { tag: string | null }) {
           <span id="sh-momentum-entry-reach" class="sh-momentum-entry__reach">
             {currentUser.value?.protected
               ? t('moment.entry.reach_protected')
-              : t(reachKey('moment.entry.reach', shownReach()), { n: String(shownReach()) })}
+              : reachText('moment.entry.reach', shownReach())}
           </span>
         </span>
         <svg class="sh-momentum-entry__icon" width="22" height="22" viewBox="0 0 24 24" fill="none"

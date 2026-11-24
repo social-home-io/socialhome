@@ -25,7 +25,7 @@ function moment(extra: Partial<Moment> = {}): Moment {
     media_url: null, media_type: null, duration_ms: null, parent_moment_id: null,
     origin_instance_id: 'peer-o', created_at: new Date(Date.now() - 3_600_000).toISOString(),
     expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    reaction_count: 0, reply_count: 0, received_via: 'self', hop_count: 1,
+    reaction_count: 0, reply_count: 0, reach: 3, received_via: 'self', hop_count: 1,
     reactions_reach: 'author', reaction_counts: {}, reaction_totals_at: null, my_reaction: null,
     author: { display_name: 'Bob Berger', picture_url: null, household: 'Berger' },
     ...extra,
@@ -115,9 +115,11 @@ describe('MomentCard', () => {
   })
 
   it.each([
+    // Written before the protection: it says how far it really went.
     [3, /up to 3 hops away/],
-    [1, /^Your household and your paired households, no further\./],
-  ])('Who sees this for a now-protected author follows the moment’s reach %i', async (reach, body) => {
+    // What the server sends for a protected author: the protected text.
+    [1, /^Your household and your paired households\. It isn't passed on further\./],
+  ])('Who sees this for a protected author’s moment with reach %i', async (reach, body) => {
     currentUser.value = { user_id: ME, username: 'me', protected: true } as never
     try {
       const { getByRole, findByRole } = renderCard(moment({ author_user_id: ME, reach }))
@@ -126,20 +128,6 @@ describe('MomentCard', () => {
       fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
       const dialog = await findByRole('dialog')
       expect(dialog.querySelector('p')!.textContent).toMatch(body)
-    } finally {
-      currentUser.value = null
-    }
-  })
-
-  it('Who sees this for a protected author’s moment without a reach keeps the protected text', async () => {
-    currentUser.value = { user_id: ME, username: 'me', protected: true } as never
-    try {
-      const { getByRole, findByRole } = renderCard(moment({ author_user_id: ME }))
-      fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
-      await findByRole('menu')
-      fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
-      const dialog = await findByRole('dialog')
-      expect(dialog.querySelector('p')!.textContent).toMatch(/It isn't passed on further\./)
     } finally {
       currentUser.value = null
     }
