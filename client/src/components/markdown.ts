@@ -8,8 +8,9 @@
  * the output is XSS-safe by construction. Link hrefs are filtered to
  * ``http:`` / ``https:`` / ``mailto:`` / an app path (``/…``) —
  * ``javascript:``, data URLs and protocol-relative ``//host`` are
- * stripped. Links open in a new tab with ``rel="noopener noreferrer"`` so
- * the household's origin never reaches the target as a Referer. There is
+ * stripped. Links open in a new tab with ``rel="noopener noreferrer
+ * nofollow ugc"`` so the household's origin never reaches the target as
+ * a Referer. There is
  * deliberately no image grammar: ``![alt](url)`` stays a link, so showing
  * a post never makes the viewer's browser fetch from a third party.
  *
@@ -17,6 +18,7 @@
  * or embed syntax we'll swap for ``marked`` + ``DOMPurify``.
  */
 
+import { t } from '@/i18n/i18n'
 import { splitMentions } from '@/utils/mentions'
 
 const _SAFE_SCHEMES = /^(https?:|mailto:|\/)/i
@@ -62,55 +64,152 @@ function _mapText(
   }).join('')
 }
 
-// A web link typed as plain text: ``http(s)://…`` or ``www.…``, after a
-// start / space / punctuation that is not part of a host, path or address
-// (so ``foo.www.x`` and ``mail@www.x`` stay text; ``Link:https://…``
-// links, as the server's ``first_url`` finds it). It runs on ESCAPED
-// text, so ``&`` only ever starts an entity: ``&amp;`` (a literal ``&``,
-// part of a query) continues the link, every other entity (``&lt;``,
-// ``&gt;``, ``&quot;``, ``&#39;`` — a ``<>"'`` in the source) ends it,
-// as do whitespace, control characters (which the server refuses anyway) and ``()[]{}`` / backtick — the same stop set as the
-// server's ``domain.link_preview.first_url``, so the link and its card
-// agree on where the URL ends.
+// A web link typed as plain text: ``http(s)://…`` or ``www.…``, not right
+// after a character that belongs to a host, path or address (so
+// ``foo.www.x`` and ``mail@www.x`` stay text; ``Link:https://…`` links,
+// as the server's ``first_url`` finds it). It runs on RAW text (the
+// renderer unescapes its own escaping first) and stops at whitespace,
+// control characters, ``<>"'``, ``[]{}`` and backtick. Parentheses are
+// part of a link while they balance — the GFM rule, so
+// ``…/wiki/Mercury_(planet)`` links in full and ``(see https://x/y)``
+// ends before the ``)``.
 // eslint-disable-next-line no-control-regex
-const _BARE_LINK = /(^|[^\w/.@-])((?:https?:\/\/|www\.)(?:[^\s\u0000-\u001f\u007f&<>"'()[\]{}`]|&amp;)+)/gi
+const _BARE_LINK = /(?<![\w/.@-])(?:https?:\/\/|www\.)[^\s\u0000-\u001f\u007f<>"'[\]{}`]+/gi
 // Punctuation that ends a sentence, not a URL (as the server trims it).
 const _TRAILING_PUNCT = /[.,;:!?*_~]$/
-
-/** *raw* (escaped) without trailing sentence punctuation. The ``;`` that
- *  closes an ``&amp;`` is part of the escaped ``&``, never punctuation. */
-function _trimTrailing(raw: string): string {
-  let url = raw
-  while (_TRAILING_PUNCT.test(url) && !url.endsWith('&amp;')) url = url.slice(0, -1)
-  return url
-}
 // A ``www.`` link needs one more label (``www.example.org``); a scheme
 // link needs a host.
 const _LINK_HAS_HOST = /^(?:https?:\/\/[^/]|www\.[^./]+\.[^./])/i
+
+/** *raw* without trailing sentence punctuation and without a closing
+ *  ``)`` that has no ``(`` inside the link. */
+function _trimTrailing(raw: string): string {
+  let url = raw
+  for (;;) {
+    if (_TRAILING_PUNCT.test(url)) {
+      url = url.slice(0, -1)
+    } else if (
+      url.endsWith(')')
+      && url.split('(').length < url.split(')').length
+    ) {
+      url = url.slice(0, -1)
+    } else {
+      return url
+    }
+  }
+}
 
 /** ``https://name@host`` — refused like ``safeWebUrl`` and the server's
  *  fetcher do: the text before the ``@`` only disguises the real host. */
 function _hasUserinfo(href: string): boolean {
   try {
-    const u = new URL(href.replace(/&amp;/g, '&'))
+    const u = new URL(href)
     return u.username !== '' || u.password !== ''
   } catch {
     return true
   }
 }
 
-/** Turn plain-text web links in escaped text into safe anchors. A
- *  ``www.`` link opens over ``https``. Never inside an existing link. */
+/** A plain-text web link found by :func:`splitLinks`. */
+export interface TextLink {
+  /** Safe ``http(s)`` href (a ``www.`` link opens over ``https``). */
+  href: string
+  /** The link as the author wrote it. */
+  text: string
+}
+
+/** Split RAW text into plain strings and web links — the one link
+ *  grammar for every place that shows user text (post bodies through
+ *  :func:`renderMarkdown`, comments, DMs, moments, calendar, bazaar…).
+ *  Only ``http``/``https`` hrefs come out (``_safeHref``), never one with
+ *  user-info or control characters. */
+export function splitLinks(text: string): Array<string | TextLink> {
+  const out: Array<string | TextLink> = []
+  let last = 0
+  for (const m of text.matchAll(_BARE_LINK)) {
+    const url = _trimTrailing(m[0])
+    if (!_LINK_HAS_HOST.test(url)) continue
+    const href = _safeHref(/^www\./i.test(url) ? `https://${url}` : url)
+    if (href === null || _hasUserinfo(href)) continue
+    const at = m.index ?? 0
+    if (at > last) out.push(text.slice(last, at))
+    out.push({ href, text: url })
+    last = at + url.length
+  }
+  if (last < text.length) out.push(text.slice(last))
+  return out
+}
+
+/** Where to cut *text* for a "show more" preview at about *at*: never
+ *  inside a link (a cut link would open a different page) — the cut
+ *  moves back to the link's start. */
+export function cutOutsideLinks(text: string, at: number): number {
+  let pos = 0
+  for (const p of splitLinks(text)) {
+    const len = typeof p === 'string' ? p.length : p.text.length
+    if (typeof p !== 'string' && pos < at && at < pos + len) return pos
+    pos += len
+    if (pos >= at) break
+  }
+  return at
+}
+
+/** ``rel`` of every link to another site, inline and on the link card:
+ *  no ``window.opener``, no Referer, and no endorsement of user links. */
+export const EXTERNAL_LINK_REL = 'noopener noreferrer nofollow ugc'
+
+/** Longest link text shown in full; a longer one shows host + path cut
+ *  to :data:`_LABEL_CUT` characters and ``…`` (the full URL stays the
+ *  ``href`` and the ``title``). */
+const _LABEL_MAX = 48
+const _LABEL_CUT = 40
+
+/** The visible text of a link: as written when short, else host + path
+ *  (no scheme) shortened with ``…``. */
+export function linkLabel(text: string): string {
+  if (text.length <= _LABEL_MAX) return text
+  const bare = text.replace(/^https?:\/\//i, '')
+  return bare.length <= _LABEL_CUT ? bare : `${bare.slice(0, _LABEL_CUT)}…`
+}
+
+function _unescape(html: string): string {
+  return html
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
+/** One external link as HTML (see :func:`splitLinks`): new tab,
+ *  :data:`EXTERNAL_LINK_REL`, a decorative ``↗`` and a hidden "(opens in a
+ *  new tab)" for screen readers; long links shortened, the full URL in
+ *  ``title``. */
+function _linkHtml(link: TextLink): string {
+  const label = linkLabel(link.text)
+  const title = label === link.text ? '' : ` title="${_escape(link.text)}"`
+  return `<a href="${_escape(link.href)}"${title} target="_blank" rel="${EXTERNAL_LINK_REL}">`
+    + `${_escape(label)}<span class="sh-ext-link__icon" aria-hidden="true">↗</span>`
+    + `<span class="sr-only">${_escape(t('link.new_tab'))}</span></a>`
+}
+
+/** Turn plain-text web links in escaped text into safe anchors. Never
+ *  inside an existing link. */
 function _autolink(text: string, inLink: boolean): string {
   if (inLink) return text
-  return text.replace(_BARE_LINK, (m, lead: string, raw: string) => {
-    const url = _trimTrailing(raw)
-    if (!_LINK_HAS_HOST.test(url)) return m
-    const href = _safeHref(/^www\./i.test(url) ? `https://${url}` : url)
-    if (href === null || _hasUserinfo(href)) return m
-    const rest = raw.slice(url.length)
-    return `${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>${rest}`
-  })
+  const parts = splitLinks(_unescape(text))
+  if (parts.length === 1 && typeof parts[0] === 'string') return text
+  return parts.map((p) => (typeof p === 'string' ? _escape(p) : _linkHtml(p))).join('')
+}
+
+/** The hrefs of every link :func:`renderMarkdown` makes from *input*, in
+ *  order — markdown links and plain-text links alike. */
+export function linkHrefs(input: string): string[] {
+  const out: string[] = []
+  for (const m of renderMarkdown(input).matchAll(/<a href="([^"]*)"/g)) {
+    out.push(_unescape(m[1]))
+  }
+  return out
 }
 
 /** Wrap known @-mentions in the already-escaped HTML ``html``.
@@ -190,7 +289,7 @@ export function renderMarkdown(input: string, opts: RenderOptions = {}): string 
     (_m, text, href) => {
       const safe = _safeHref(href)
       if (safe === null) return _escape(text)
-      return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${text}</a>`
+      return `<a href="${safe}" target="_blank" rel="${EXTERNAL_LINK_REL}">${text}</a>`
     },
   )
   // Bold **…** (must come before italic so ** doesn't eat * greedily).

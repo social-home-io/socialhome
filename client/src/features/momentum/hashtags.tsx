@@ -12,6 +12,8 @@
  */
 import type { ComponentChildren, MouseEventHandler } from 'preact'
 import { addBase } from '@/baseUrl'
+import { ExternalLink } from '@/components/LinkifiedText'
+import { splitLinks } from '@/components/markdown'
 
 /** Server: ``MOMENT_MAX_HASHTAG_LEN`` (code points). */
 const MAX_TAG_LEN = 32
@@ -22,6 +24,9 @@ export function normalizeHashtag(tag: string): string {
   return tag.trim().replace(/^#+/, '').normalize('NFC').toLowerCase()
 }
 
+/** *content* with its web links clickable (``splitLinks``, the one link
+ *  grammar) and its ``#tags`` as chips. A ``#`` inside a link (a URL
+ *  fragment) is part of the link, never a tag. */
 export function renderHashtagged(
   content: string,
   onClick: (tag: string, ev: MouseEvent) => void,
@@ -29,6 +34,22 @@ export function renderHashtagged(
   if (!content) return content
   // NFC first, like the server, so a decomposed "ü" is one tag char.
   content = content.normalize('NFC')
+  const parts = splitLinks(content)
+  if (parts.length === 1 && typeof parts[0] === 'string') {
+    return _hashtagged(content, onClick, '')
+  }
+  return parts.map((p, i) => (
+    typeof p === 'string'
+      ? _hashtagged(p, onClick, `${i}:`)
+      : <ExternalLink key={`l${i}`} link={p} />
+  ))
+}
+
+function _hashtagged(
+  content: string,
+  onClick: (tag: string, ev: MouseEvent) => void,
+  keyPrefix: string,
+): ComponentChildren {
   const out: ComponentChildren[] = []
   let last = 0
   let match: RegExpExecArray | null
@@ -46,7 +67,7 @@ export function renderHashtagged(
     }
     out.push(
       <a
-        key={`${match.index}-${tag}`}
+        key={`${keyPrefix}${match.index}-${tag}`}
         href={addBase(`/momentum?tag=${encodeURIComponent(tag)}`)}
         class="sh-hashtag"
         onClick={onClickHandler}

@@ -3,7 +3,7 @@
  * Renders in household feed, space feeds, search results.
  */
 import type { ComponentChildren } from 'preact'
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useId, useRef, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Avatar } from './Avatar'
 import { OnlinePill } from './OnlinePill'
@@ -15,7 +15,8 @@ import { HighlightShareCard } from './HighlightShareCard'
 import { FileRenderer, VideoRenderer, ImageRenderer } from './FileRenderer'
 import { LinkPreviewCard } from './LinkPreviewCard'
 import { LocationPostCard } from './LocationPostCard'
-import { renderMarkdown } from './markdown'
+import { linkHrefs, renderMarkdown } from './markdown'
+import { cardFitsText } from '@/utils/linkPreview'
 import { openReport } from './ReportDialog'
 import { PollUI } from './PollUI'
 import { ReactionPicker } from './ReactionPicker'
@@ -301,7 +302,10 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
               <PostBody content={post.content} spaceId={scopedSpaceId}
                 authorId={post.author} />
             )}
-            {post.link_preview && <LinkPreviewCard preview={post.link_preview} />}
+            {/* Only when the card opens the page the text links — see
+                ``cardFitsText`` (a ``…_(planet)`` link, say). */}
+            {post.link_preview && cardFitsText(post.content)
+              && <LinkPreviewCard preview={post.link_preview} />}
             {post.type === 'file' && post.file_meta && <FileRenderer file={post.file_meta} />}
             {post.type === 'video' && post.media_url && (
               <VideoRenderer src={post.media_url} poster={post.media_thumbnail_url} mediaStatus={post.media_status} />
@@ -549,6 +553,11 @@ function PostEditForm({ draft, setDraft, original, requireText, onSave, onDone }
   }, [])
   const unchanged = draft === original
   const empty = requireText && !draft.trim()
+  // A link the edit adds gets no card (cards are built once, when the
+  // post is written) — say so instead of leaving the author waiting.
+  const before = linkHrefs(original)
+  const addsLink = requireText && linkHrefs(draft).some((h) => !before.includes(h))
+  const hintId = `sh-post-edit-hint-${useId()}`
   const save = async () => {
     if (busy || unchanged || empty) return
     setBusy(true)
@@ -567,6 +576,7 @@ function PostEditForm({ draft, setDraft, original, requireText, onSave, onDone }
         ref={ref}
         class="sh-post-edit-input"
         aria-label={t('post.edit.label')}
+        aria-describedby={addsLink ? hintId : undefined}
         value={draft}
         maxLength={MAX_POST_LENGTH}
         rows={Math.min(12, Math.max(3, draft.split('\n').length + 1))}
@@ -577,6 +587,9 @@ function PostEditForm({ draft, setDraft, original, requireText, onSave, onDone }
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void save() }
         }}
       />
+      {addsLink && (
+        <p id={hintId} class="sh-muted sh-post-edit-hint">{t('post.edit.link_card_hint')}</p>
+      )}
       <div class="sh-post-edit-actions">
         <Button variant="secondary" type="button" onClick={onDone} disabled={busy}>
           {t('common.cancel')}

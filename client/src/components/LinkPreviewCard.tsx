@@ -10,13 +10,22 @@
  *
  * The link is rebuilt with ``safeWebUrl`` — only ``http(s)`` URLs become an
  * ``href``; anything else renders the card without a link. It opens in a new
- * tab with ``noopener noreferrer`` so the site learns neither the referrer
- * nor gets a handle on this window.
+ * tab with the same ``rel`` as inline links (``EXTERNAL_LINK_REL``) so the
+ * site learns neither the referrer nor gets a handle on this window. Its
+ * accessible name is "{title} – {site}, opens in a new tab".
+ *
+ * Layout: a landscape picture (YouTube, most og:images — 1.91:1) sits on
+ * top at full width; a square or portrait one stays a side thumbnail. A
+ * card with neither picture nor description is a compact one-line card.
  */
 import { useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import type { LinkPreview } from '@/types'
 import { linkDomain, safeWebUrl } from '@/utils/linkPreview'
+import { EXTERNAL_LINK_REL } from './markdown'
+
+/** Wider than this (width / height) and the picture goes on top. */
+const LANDSCAPE_RATIO = 1.3
 
 interface LinkPreviewCardProps {
   preview: LinkPreview
@@ -26,6 +35,7 @@ interface LinkPreviewCardProps {
 
 export function LinkPreviewCard({ preview, onRemove }: LinkPreviewCardProps) {
   const [imageFailed, setImageFailed] = useState(false)
+  const [landscape, setLandscape] = useState(false)
   const href = safeWebUrl(preview.url)
   const domain = linkDomain(preview.url)
   const showImage = !!preview.thumbnail_url && !imageFailed
@@ -39,6 +49,11 @@ export function LinkPreviewCard({ preview, onRemove }: LinkPreviewCardProps) {
           loading="lazy"
           decoding="async"
           onError={() => setImageFailed(true)}
+          onLoad={(e) => {
+            const img = e.currentTarget as HTMLImageElement
+            setLandscape(img.naturalHeight > 0
+              && img.naturalWidth / img.naturalHeight >= LANDSCAPE_RATIO)
+          }}
         />
       )}
       <span class="sh-link-preview-text">
@@ -55,15 +70,22 @@ export function LinkPreviewCard({ preview, onRemove }: LinkPreviewCardProps) {
       </span>
     </>
   )
+  const site = preview.site_name || domain || href || ''
+  const cls = ['sh-link-preview']
+  if (!showImage) cls.push('sh-link-preview--no-image')
+  if (showImage && landscape) cls.push('sh-link-preview--landscape')
+  if (!showImage && !preview.description) cls.push('sh-link-preview--compact')
   return (
-    <div class={`sh-link-preview${showImage ? '' : ' sh-link-preview--no-image'}`}>
+    <div class={cls.join(' ')}>
       {href ? (
         <a
           class="sh-link-preview-link"
           href={href}
           target="_blank"
-          rel="noopener noreferrer nofollow ugc"
-          aria-label={t('link_preview.open', { site: domain || href })}
+          rel={EXTERNAL_LINK_REL}
+          aria-label={preview.title
+            ? t('link_preview.open_titled', { title: preview.title, site })
+            : t('link_preview.open', { site })}
         >
           {body}
         </a>

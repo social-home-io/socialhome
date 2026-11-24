@@ -49,6 +49,7 @@ import { OrganizeSectionHeader } from '@/features/organize/shared/OrganizeSectio
 import { useNarrow } from '@/features/timetable/useNarrow'
 import { inkClass, stickyBackground } from './ink'
 import { BOARD_H, BOARD_W, NOTE_H, NOTE_W, displayPositions, freeSpot } from './layout'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 /** Normalised board space (positions are stored in these units). */
 export { BOARD_W, BOARD_H }
@@ -318,7 +319,7 @@ function StaticNoteBody({ sticky, scope }: { sticky: StickyRow; scope: string | 
   return (
     <>
       <div class={`sh-sticky__body sh-sticky__body--static${reportable ? ' sh-sticky__body--reportable' : ''}`}>
-        <span class="sh-sticky__text">{sticky.content}</span>
+        <span class="sh-sticky__text"><LinkifiedText text={sticky.content} /></span>
       </div>
       {reportable && (
         <button

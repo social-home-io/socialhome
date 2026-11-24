@@ -43,6 +43,7 @@ import { currentUser } from '@/store/auth'
 import { namedPersonLabel, namedPersonPicture } from '@/store/householdUsers'
 import { formatLocale, isOne, t } from '@/i18n/i18n'
 import type { Moment } from '@/types'
+import { cutOutsideLinks } from '@/components/markdown'
 import { renderHashtagged } from './hashtags'
 import { setMomentSaved } from './MomentSaveToggle'
 
@@ -178,7 +179,7 @@ export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
   const mode: ReactionMode = page && listMode === 'own' ? 'counted' : listMode
   const longContent = m.content.length > CONTENT_TRUNCATE_AT
   const text = longContent && !expanded.value
-    ? m.content.slice(0, CONTENT_TRUNCATE_AT) + '…'
+    ? m.content.slice(0, cutOutsideLinks(m.content, CONTENT_TRUNCATE_AT)) + '…'
     : m.content
   const openTag = (tag: string, ev: MouseEvent) => {
     ev.preventDefault()

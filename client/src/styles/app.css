@@ -16213,6 +16213,43 @@ a.sh-link-preview-link:focus-visible {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* A landscape picture (og:image, YouTube…: 1.91:1) reads on top, full
+   width, capped so a card never dominates the feed. */
+.sh-link-preview--landscape .sh-link-preview-link {
+  flex-direction: column;
+}
+.sh-link-preview--landscape .sh-link-preview-image {
+  width: 100%;
+  min-height: 0;
+  max-height: 280px;
+  aspect-ratio: 1.91 / 1;
+}
+/* No picture, no description: a compact one-block card. */
+.sh-link-preview--compact .sh-link-preview-link {
+  min-height: 0;
+}
+.sh-link-preview--compact .sh-link-preview-text {
+  padding-block: var(--sh-space-xs);
+}
+/* Links in user text: a small ↗ after an external link (decorative —
+   screen readers read the hidden "(opens in a new tab)" instead). */
+.sh-ext-link__icon {
+  display: inline-block;
+  margin-inline-start: 0.15em;
+  font-size: 0.8em;
+  text-decoration: none;
+}
+a.sh-ext-link {
+  color: var(--sh-primary-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.sh-post-edit-hint,
+.sh-composer-link-hint {
+  margin: var(--sh-space-xs) 0 0;
+  font-size: var(--sh-font-size-sm);
+}
 /* Room for the composer's remove button so it never covers the text. */
 .sh-link-preview:has(.sh-link-preview-remove) .sh-link-preview-text {
   padding-inline-end: calc(var(--sh-space-md) + 36px);

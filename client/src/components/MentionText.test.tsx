@@ -58,3 +58,53 @@ describe('MentionText', () => {
     expect(container.querySelector('button')).toBeNull()
   })
 })
+
+describe('MentionText — links', () => {
+  it('links web links with the shared grammar; mentions keep working', () => {
+    const onMention = vi.fn()
+    const { container } = render(
+      <MentionText
+        text="@anna see https://example.org/a?b=1&c=2. and www.example.com"
+        mentions={new Set(['anna'])}
+        onMention={onMention}
+      />,
+    )
+    const links = [...container.querySelectorAll('a')]
+    expect(links.map(a => [a.getAttribute('href'), a.getAttribute('rel'), a.target])).toEqual([
+      ['https://example.org/a?b=1&c=2', 'noopener noreferrer nofollow ugc', '_blank'],
+      ['https://www.example.com', 'noopener noreferrer nofollow ugc', '_blank'],
+    ])
+    expect(links[0].querySelector('[aria-hidden="true"]')!.textContent).toBe('↗')
+    expect(links[0].querySelector('.sr-only')!.textContent).toBe('(opens in a new tab)')
+    fireEvent.click(container.querySelector('button[data-mention="anna"]')!)
+    expect(onMention).toHaveBeenCalledWith('anna')
+  })
+
+  it('a mention inside a link is part of the link, not a button', () => {
+    const { container } = render(
+      <MentionText text="https://social.example/@anna" mentions={new Set(['anna'])}
+        onMention={() => {}} />,
+    )
+    expect(container.querySelector('button')).toBeNull()
+    expect(container.querySelector('a')!.getAttribute('href')).toBe('https://social.example/@anna')
+  })
+
+  it('never links javascript: or data:', () => {
+    const { container } = render(
+      <MentionText text="javascript:alert(1) data:text/html,x" mentions={new Set()} />,
+    )
+    expect(container.querySelector('a')).toBeNull()
+  })
+
+  it('a link click does not reach the bubble', () => {
+    const onBubble = vi.fn()
+    const { container } = render(
+      <div onClick={onBubble}>
+        <MentionText text="https://example.org" mentions={new Set()} />
+      </div>,
+    )
+    container.querySelector('a')!.addEventListener('click', (e) => e.preventDefault())
+    fireEvent.click(container.querySelector('a')!)
+    expect(onBubble).not.toHaveBeenCalled()
+  })
+})

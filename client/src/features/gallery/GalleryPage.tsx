@@ -79,6 +79,7 @@ import { TRASH_PATH, favouritesPath } from './galleryRoutes'
 import { AudienceChooser, AudienceSheet, type AudienceChoice } from './AudienceSheet'
 import { loadGallerySettings, mayAddToGallery } from './gallerySettings'
 import { GallerySearchField, GallerySearchResults } from './GallerySearch'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 interface Album {
   id: string
@@ -983,7 +984,7 @@ function AlbumDetail({
 
       {/* The system album's description is the server's English constant;
         * its translated hint below says the same thing. */}
-      {album.description && !album.is_system && <p class="sh-muted">{album.description}</p>}
+      {album.description && !album.is_system && <p class="sh-muted"><LinkifiedText text={album.description} /></p>}
 
       {album.is_system && (
         <div class="sh-album-system-hint">

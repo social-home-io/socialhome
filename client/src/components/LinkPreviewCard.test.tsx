@@ -23,9 +23,43 @@ describe('LinkPreviewCard', () => {
     const a = container.querySelector('a') as HTMLAnchorElement
     expect(a.href).toBe('https://www.example.com/story')
     expect(a.target).toBe('_blank')
-    expect(a.rel).toContain('noopener')
-    expect(a.rel).toContain('noreferrer')
-    expect(a.getAttribute('aria-label')).toBe('Open example.com in a new tab')
+    // The same rel as inline links in the post text.
+    expect(a.rel).toBe('noopener noreferrer nofollow ugc')
+    // UX review: the card's name says what it opens and how.
+    expect(a.getAttribute('aria-label')).toBe(
+      'A <b>title</b> – Example News, opens in a new tab',
+    )
+  })
+
+  it('names a card without a title by its site', () => {
+    const { container } = render(
+      <LinkPreviewCard preview={{ ...CARD, title: null, site_name: null }} />,
+    )
+    expect(container.querySelector('a')!.getAttribute('aria-label'))
+      .toBe('Open example.com in a new tab')
+  })
+
+  it.each([
+    [1200, 630, true],
+    [1280, 720, true],
+    [400, 400, false],
+    [300, 500, false],
+  ])('a %ix%i picture is landscape: %s', (w, h, landscape) => {
+    const { container } = render(<LinkPreviewCard preview={CARD} />)
+    const img = container.querySelector('img')!
+    Object.defineProperty(img, 'naturalWidth', { value: w })
+    Object.defineProperty(img, 'naturalHeight', { value: h })
+    fireEvent.load(img)
+    expect(!!container.querySelector('.sh-link-preview--landscape')).toBe(landscape)
+  })
+
+  it('is compact with neither picture nor description', () => {
+    const { container } = render(
+      <LinkPreviewCard preview={{ ...CARD, thumbnail_url: null, description: null }} />,
+    )
+    expect(container.querySelector('.sh-link-preview--compact')).toBeTruthy()
+    const full = render(<LinkPreviewCard preview={{ ...CARD, thumbnail_url: null }} />)
+    expect(full.container.querySelector('.sh-link-preview--compact')).toBeNull()
   })
 
   it('loads the image from local media relative to the document base', () => {

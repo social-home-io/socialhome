@@ -170,7 +170,10 @@ describe('Composer link preview', () => {
     thumbnail_url: null,
   }
 
-  async function typeLink(post: ReturnType<typeof vi.fn>) {
+  async function typeLink(
+    post: ReturnType<typeof vi.fn>,
+    text = 'read https://example.com/story',
+  ) {
     vi.doMock('@/api', () => ({ api: { get: vi.fn(), post } }))
     vi.doMock('@/store/auth', () => ({
       currentUser: { value: { username: 'pascal', display_name: 'Pascal' } },
@@ -180,7 +183,7 @@ describe('Composer link preview', () => {
     const onSubmit = vi.fn(async () => 'new-id')
     const view = render(<Composer onSubmit={onSubmit} />)
     const ta = view.container.querySelector('textarea') as HTMLTextAreaElement
-    fireEvent.input(ta, { target: { value: 'read https://example.com/story' } })
+    fireEvent.input(ta, { target: { value: text } })
     await new Promise((r) => setTimeout(r, 750))
     return { ...view, onSubmit }
   }
@@ -199,6 +202,27 @@ describe('Composer link preview', () => {
       | { noLinkPreview?: boolean }
       | undefined
     expect(extras?.noLinkPreview).toBeUndefined()
+  })
+
+  it('a link the card would get wrong asks for no card and opts out', async () => {
+    const post = vi.fn(async () => ({ preview: CARD }))
+    const { container, onSubmit } = await typeLink(
+      post, 'see https://en.wikipedia.org/wiki/Mercury_(planet)',
+    )
+    expect(post).not.toHaveBeenCalled()
+    expect(container.querySelector('.sh-link-preview')).toBeNull()
+    fireEvent.submit(container.querySelector('form')!)
+    await new Promise((r) => setTimeout(r, 20))
+    const extras = (onSubmit.mock.calls[0] as unknown[])[3] as { noLinkPreview?: boolean }
+    expect(extras.noLinkPreview).toBe(true)
+  })
+
+  it('a www. link gets a hint how to show a card', async () => {
+    const post = vi.fn(async () => ({ preview: CARD }))
+    const { container } = await typeLink(post, 'see www.example.com')
+    expect(post).not.toHaveBeenCalled()
+    expect(container.querySelector('.sh-composer-link-hint')!.textContent)
+      .toBe('Start the link with https:// to show a link preview.')
   })
 
   it('remove (×) opts the post out, and can be undone', async () => {

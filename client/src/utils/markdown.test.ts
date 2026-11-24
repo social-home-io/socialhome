@@ -372,3 +372,15 @@ describe('renderMarkdown — no third-party image fetches', () => {
     expect(d.querySelector('a')?.getAttribute('href')).toBe('https://img.example.net/x.png')
   })
 })
+
+describe('renderMarkdown (pages) — plain-text links', () => {
+  it('links pasted http(s) and www. links (GFM autolinks), external rel', () => {
+    const html = renderMarkdown('See https://example.org/a and www.example.com.')
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    const links = [...doc.querySelectorAll('a')]
+    expect(links.map(a => a.getAttribute('href'))).toEqual([
+      'https://example.org/a', 'http://www.example.com',
+    ])
+    for (const a of links) expect(a.getAttribute('rel')).toContain('noopener')
+  })
+})

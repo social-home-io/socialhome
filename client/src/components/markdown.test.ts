@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'vitest'
-import { renderMarkdown } from './markdown'
+import { cutOutsideLinks, linkHrefs, linkLabel, renderMarkdown, splitLinks } from './markdown'
+
+/** A link's text without its decorative ↗ and screen-reader suffix. */
+function visibleText(a: Element): string {
+  const copy = a.cloneNode(true) as Element
+  copy.querySelectorAll('.sh-ext-link__icon, .sr-only').forEach(n => n.remove())
+  return copy.textContent ?? ''
+}
 
 describe('renderMarkdown', () => {
   test('escapes HTML to prevent XSS', () => {
@@ -31,7 +38,7 @@ describe('renderMarkdown', () => {
   test('renders safe links', () => {
     const out = renderMarkdown('[home](https://example.com)')
     expect(out).toContain('<a href="https://example.com"')
-    expect(out).toContain('rel="noopener noreferrer"')
+    expect(out).toContain('rel="noopener noreferrer nofollow ugc"')
     expect(out).toContain('target="_blank"')
   })
 
@@ -142,7 +149,7 @@ describe('renderMarkdown — no Referer to third parties', () => {
   test('links open in a new tab with rel="noopener noreferrer"', () => {
     const html = renderMarkdown('[site](https://example.org/x)')
     expect(html).toContain('target="_blank"')
-    expect(html).toContain('rel="noopener noreferrer"')
+    expect(html).toContain('rel="noopener noreferrer nofollow ugc"')
   })
 
   test('image syntax never produces an <img> (no third-party fetch on view)', () => {
@@ -151,7 +158,7 @@ describe('renderMarkdown — no Referer to third parties', () => {
     // third party (and leak the household origin) just by being shown.
     const html = renderMarkdown('![cat](https://img.example.net/cat.png)')
     expect(html).not.toMatch(/<img\b/i)
-    expect(html).toContain('rel="noopener noreferrer"')
+    expect(html).toContain('rel="noopener noreferrer nofollow ugc"')
   })
 })
 
@@ -207,7 +214,7 @@ describe('renderMarkdown — bare links are clickable', () => {
     const doc = new DOMParser().parseFromString(html, 'text/html')
     return [...doc.querySelectorAll('a')].map(a => ({
       href: a.getAttribute('href'),
-      text: a.textContent,
+      text: visibleText(a),
       rel: a.getAttribute('rel'),
       target: a.getAttribute('target'),
     }))
@@ -217,7 +224,7 @@ describe('renderMarkdown — bare links are clickable', () => {
     expect(links(renderMarkdown('https://www.home-assistant.io/'))).toEqual([{
       href: 'https://www.home-assistant.io/',
       text: 'https://www.home-assistant.io/',
-      rel: 'noopener noreferrer',
+      rel: 'noopener noreferrer nofollow ugc',
       target: '_blank',
     }])
   })
@@ -233,7 +240,7 @@ describe('renderMarkdown — bare links are clickable', () => {
     expect(links(renderMarkdown('Our site www.home-assistant.io is it'))).toEqual([{
       href: 'https://www.home-assistant.io',
       text: 'www.home-assistant.io',
-      rel: 'noopener noreferrer',
+      rel: 'noopener noreferrer nofollow ugc',
       target: '_blank',
     }])
   })
@@ -271,7 +278,7 @@ describe('renderMarkdown — bare links are clickable', () => {
     expect(links(html)).toEqual([{
       href: 'https://x.example/home',
       text: 'markdown link',
-      rel: 'noopener noreferrer',
+      rel: 'noopener noreferrer nofollow ugc',
       target: '_blank',
     }])
   })
@@ -327,7 +334,7 @@ describe('renderMarkdown — bare links are clickable', () => {
     const html = renderMarkdown('[x](https://evil.example/`b`)')
     const doc = new DOMParser().parseFromString(html, 'text/html')
     for (const a of doc.querySelectorAll('a')) {
-      expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+      expect(a.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
       expect(a.getAttribute('href')).not.toMatch(/[<>"]/)
     }
   })
@@ -341,7 +348,7 @@ describe('renderMarkdown — bare links are clickable', () => {
     const doc = new DOMParser().parseFromString(html, 'text/html')
     for (const a of doc.querySelectorAll('a')) {
       expect(a.getAttributeNames().sort()).toEqual(['href', 'rel', 'target'])
-      expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+      expect(a.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
     }
   })
 
@@ -352,5 +359,78 @@ describe('renderMarkdown — bare links are clickable', () => {
     const doc = new DOMParser().parseFromString(html, 'text/html')
     expect(doc.querySelectorAll('button')).toHaveLength(0)
     expect(links(html).map(l => l.href)).toEqual(['https://social.example/@anna'])
+  })
+})
+
+// UX review 2026-11-24 on #1431.
+describe('links — parentheses, labels, a11y', () => {
+  const anchors = (html: string) =>
+    [...new DOMParser().parseFromString(html, 'text/html').querySelectorAll('a')]
+
+  test.each([
+    ['Planet: https://en.wikipedia.org/wiki/Mercury_(planet) is hot.',
+      'https://en.wikipedia.org/wiki/Mercury_(planet)'],
+    ['(see https://en.wikipedia.org/wiki/Mercury_(planet))',
+      'https://en.wikipedia.org/wiki/Mercury_(planet)'],
+    ['https://x.example/a_(b)_(c).', 'https://x.example/a_(b)_(c)'],
+    ['(https://x.example/y)', 'https://x.example/y'],
+    ['https://x.example/q)', 'https://x.example/q'],
+  ])('balanced parentheses stay in the link: %s', (src, href) => {
+    expect(anchors(renderMarkdown(src)).map(a => a.getAttribute('href'))).toEqual([href])
+  })
+
+  test('a long link shows host + path shortened, the full URL in title', () => {
+    const url = 'https://www.home-assistant.io/integrations/mqtt/?utm_source=newsletter&utm_medium=email'
+    const [a] = anchors(renderMarkdown(`Long one: ${url}`))
+    expect(a.getAttribute('href')).toBe(url)
+    expect(a.getAttribute('title')).toBe(url)
+    expect(visibleText(a)).toBe('www.home-assistant.io/integrations/mqtt/…')
+  })
+
+  test('a short link keeps its text and gets no title', () => {
+    const [a] = anchors(renderMarkdown('https://example.org/a'))
+    expect(visibleText(a)).toBe('https://example.org/a')
+    expect(a.hasAttribute('title')).toBe(false)
+  })
+
+  test('↗ is hidden from screen readers; "(opens in a new tab)" is read', () => {
+    const [a] = anchors(renderMarkdown('https://example.org/a'))
+    expect(a.querySelector('.sh-ext-link__icon')?.getAttribute('aria-hidden')).toBe('true')
+    expect(a.querySelector('.sr-only')?.textContent).toBe('(opens in a new tab)')
+  })
+
+  test('linkLabel', () => {
+    expect(linkLabel('https://a.example/x')).toBe('https://a.example/x')
+    expect(linkLabel('https://a.example/' + 'p'.repeat(60))).toBe(`a.example/${'p'.repeat(30)}…`)
+  })
+
+  test('splitLinks gives plain strings and safe links', () => {
+    expect(splitLinks('see www.a.example/x, and https://b.example/?q=1&r=2.')).toEqual([
+      'see ',
+      { href: 'https://www.a.example/x', text: 'www.a.example/x' },
+      ', and ',
+      { href: 'https://b.example/?q=1&r=2', text: 'https://b.example/?q=1&r=2' },
+      '.',
+    ])
+    expect(splitLinks('javascript:alert(1) data:x https://u@evil.example')).toEqual([
+      'javascript:alert(1) data:x https://u@evil.example',
+    ])
+    expect(splitLinks('no links here')).toEqual(['no links here'])
+  })
+
+  test('linkHrefs lists markdown and plain links in order', () => {
+    expect(linkHrefs('[a](https://a.example/) then https://b.example/x?y=1&z=2')).toEqual([
+      'https://a.example/', 'https://b.example/x?y=1&z=2',
+    ])
+  })
+})
+
+describe('cutOutsideLinks', () => {
+  test('never cuts inside a link', () => {
+    const text = 'see https://example.org/long/path more'
+    expect(cutOutsideLinks(text, 10)).toBe(4)
+    expect(cutOutsideLinks(text, 2)).toBe(2)
+    expect(cutOutsideLinks(text, 36)).toBe(36)
+    expect(cutOutsideLinks('no links at all', 5)).toBe(5)
   })
 })

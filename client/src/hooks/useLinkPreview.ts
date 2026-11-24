@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import type { LinkPreview } from '@/types'
-import { firstUrl } from '@/utils/linkPreview'
+import { cardFitsText, firstUrl } from '@/utils/linkPreview'
 
 /** Pause after the last keystroke before asking for a card. */
 export const LINK_PREVIEW_DEBOUNCE_MS = 600
@@ -35,12 +35,17 @@ export interface LinkPreviewState {
   loading: boolean
   /** The author removed the card for ``url``. */
   dismissed: boolean
+  /** The text has a first link, but its card would open a different
+   *  page than the link (``cardFitsText``) — the post asks for none. */
+  mismatch: boolean
   dismiss: () => void
   restore: () => void
 }
 
 export function useLinkPreview(text: string): LinkPreviewState {
-  const url = disabledForSession ? null : firstUrl(text)
+  // A link the card would get wrong (``cardFitsText``) gets no card.
+  const fits = cardFitsText(text)
+  const url = disabledForSession || !fits ? null : firstUrl(text)
   const [preview, setPreview] = useState<LinkPreview | null>(null)
   const [previewFor, setPreviewFor] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -83,6 +88,7 @@ export function useLinkPreview(text: string): LinkPreviewState {
     preview: current,
     loading: !!url && loading,
     dismissed: !!url && dismissedUrl === url,
+    mismatch: !fits && firstUrl(text) !== null,
     dismiss: () => setDismissedUrl(url),
     restore: () => setDismissedUrl(null),
   }
