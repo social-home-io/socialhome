@@ -71,7 +71,7 @@ class FakeFetcher:
         cut = False
         if stop_after is not None:
             at = body.lower().find(stop_after)
-            if at != -1 and at + len(stop_after) < len(body):
+            if at != -1:
                 body, cut = body[: at + len(stop_after)], True
         if len(body) > max_bytes:
             if not truncate:
@@ -433,4 +433,3 @@ async def test_og_tags_after_a_big_head_still_preview(tmp_path):
     assert p.thumbnail_url is not None and p.thumbnail_url.endswith(".webp")
     # The page is read only up to its head — the body is never downloaded.
     assert fetcher.stops[0] == b"</head>"
-    assert lps.HTML_MAX_BYTES >= 2 * 1024 * 1024

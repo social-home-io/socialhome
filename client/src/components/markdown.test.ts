@@ -252,6 +252,9 @@ describe('renderMarkdown — bare links are clickable', () => {
     ['<https://example.org/z>', 'https://example.org/z'],
     ['https://example.org/end,', 'https://example.org/end'],
     ['go: http://example.org:', 'http://example.org'],
+    ['Link:https://example.org/l', 'https://example.org/l'],
+    ['see https://example.org/a?b&', 'https://example.org/a?b&'],
+    ['see https://example.org/a?b&.', 'https://example.org/a?b&'],
   ])('%s links %s only', (src, href) => {
     expect(links(renderMarkdown(src)).map(l => l.href)).toEqual([href])
   })

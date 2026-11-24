@@ -64,16 +64,25 @@ function _mapText(
 
 // A web link typed as plain text: ``http(s)://…`` or ``www.…``, after a
 // start / space / punctuation that is not part of a host, path or address
-// (so ``foo.www.x`` and ``mail@www.x`` stay text). It runs on ESCAPED
+// (so ``foo.www.x`` and ``mail@www.x`` stay text; ``Link:https://…``
+// links, as the server's ``first_url`` finds it). It runs on ESCAPED
 // text, so ``&`` only ever starts an entity: ``&amp;`` (a literal ``&``,
 // part of a query) continues the link, every other entity (``&lt;``,
 // ``&gt;``, ``&quot;``, ``&#39;`` — a ``<>"'`` in the source) ends it,
 // as do whitespace and ``()[]{}`` / backtick — the same stop set as the
 // server's ``domain.link_preview.first_url``, so the link and its card
 // agree on where the URL ends.
-const _BARE_LINK = /(^|[^\w/.@:-])((?:https?:\/\/|www\.)(?:[^\s&<>"'()[\]{}`]|&amp;)+)/gi
+const _BARE_LINK = /(^|[^\w/.@-])((?:https?:\/\/|www\.)(?:[^\s&<>"'()[\]{}`]|&amp;)+)/gi
 // Punctuation that ends a sentence, not a URL (as the server trims it).
-const _TRAILING_PUNCT = /[.,;:!?*_~]+$/
+const _TRAILING_PUNCT = /[.,;:!?*_~]$/
+
+/** *raw* (escaped) without trailing sentence punctuation. The ``;`` that
+ *  closes an ``&amp;`` is part of the escaped ``&``, never punctuation. */
+function _trimTrailing(raw: string): string {
+  let url = raw
+  while (_TRAILING_PUNCT.test(url) && !url.endsWith('&amp;')) url = url.slice(0, -1)
+  return url
+}
 // A ``www.`` link needs one more label (``www.example.org``); a scheme
 // link needs a host.
 const _LINK_HAS_HOST = /^(?:https?:\/\/[^/]|www\.[^./]+\.[^./])/i
@@ -83,7 +92,7 @@ const _LINK_HAS_HOST = /^(?:https?:\/\/[^/]|www\.[^./]+\.[^./])/i
 function _autolink(text: string, inLink: boolean): string {
   if (inLink) return text
   return text.replace(_BARE_LINK, (m, lead: string, raw: string) => {
-    const url = raw.replace(_TRAILING_PUNCT, '')
+    const url = _trimTrailing(raw)
     if (!_LINK_HAS_HOST.test(url)) return m
     const href = _safeHref(/^www\./i.test(url) ? `https://${url}` : url)
     if (href === null) return m

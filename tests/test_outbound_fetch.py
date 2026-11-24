@@ -570,6 +570,65 @@ async def test_stop_after_ends_the_read_at_the_marker(loopback_is_public) -> Non
         await server.close()
 
 
+class _ChunkStream:
+    """A stream that hands out fixed chunks (``read`` ignores its size)."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = list(chunks)
+        self.reads = 0
+
+    async def read(self, _n: int) -> bytes:
+        self.reads += 1
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+@pytest.mark.parametrize(
+    ("chunks", "max_bytes", "body", "cut", "reads"),
+    [
+        # Marker split exactly across two chunks; the third is never read.
+        ([b"aa</he", b"ad>bb", b"cc"], 100, b"aa</head>", True, 2),
+        # Marker split one byte from the start of the next chunk.
+        ([b"aa<", b"/HEAD>bb"], 100, b"aa</HEAD>", True, 2),
+        # Marker is the last bytes of the stream.
+        ([b"aa", b"</head>"], 100, b"aa</head>", True, 2),
+        # Marker ends past the cap: the cap cut wins.
+        ([b"aaaaaa", b"</head>"], 8, b"aaaaaa</", True, 2),
+        # No marker at all: the whole (short) body.
+        ([b"aa", b"bb"], 100, b"aabb", False, 3),
+    ],
+)
+async def test_read_capped_stop_after(chunks, max_bytes, body, cut, reads) -> None:
+    stream = _ChunkStream(chunks)
+    got, was_cut = await outbound_fetch.read_capped(
+        stream,  # type: ignore[arg-type]
+        max_bytes=max_bytes,
+        truncate=True,
+        stop_after=b"</head>",
+    )
+    assert (got, was_cut, stream.reads) == (body, cut, reads)
+
+
+async def test_stop_after_any_case_marker(loopback_is_public) -> None:
+    async def page(request: web.Request) -> web.Response:
+        return web.Response(
+            body=b"<head>x</head><body>" + b"b" * 5000, content_type="text/html"
+        )
+
+    server = await _serve([web.get("/", page)])
+    try:
+        fetcher, _ = _fetcher_for(server, loopback_is_public)
+        res = await fetcher.fetch(
+            f"http://site.test:{server.port}/",
+            accept=HTML,
+            max_bytes=100_000,
+            truncate=True,
+            stop_after=b"</HEAD>",
+        )
+    finally:
+        await server.close()
+    assert res.body == b"<head>x</head>"
+
+
 async def test_stop_after_needs_truncate() -> None:
     """Stopping early is a cut body — only allowed where cutting is."""
     with pytest.raises(ValueError):

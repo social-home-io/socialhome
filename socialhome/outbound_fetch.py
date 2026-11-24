@@ -353,14 +353,16 @@ class OutboundFetcher:
         ``accept`` lists the media types the answer may carry (anything
         else is refused). A body longer than ``max_bytes`` is refused, or —
         with ``truncate=True`` (HTML, whose ``<head>`` comes first) — cut
-        at ``max_bytes`` and returned. ``stop_after`` (lower-case bytes,
-        ``truncate=True`` only) ends the read right after the first
-        case-insensitive occurrence of that marker — the rest of the body
-        is never downloaded. ``timeout_s`` can only shorten the fetcher's
+        at ``max_bytes`` and returned. ``stop_after`` (``truncate=True``
+        only) ends the read right after the first case-insensitive
+        occurrence of that marker — the rest of the body is never
+        downloaded, and the result counts as ``truncated``. ``timeout_s`` can only shorten the fetcher's
         total deadline (a caller sharing one budget across fetches).
         """
         if stop_after is not None and (not truncate or not stop_after):
             raise ValueError("stop_after needs truncate=True and a marker")
+        if stop_after is not None:
+            stop_after = stop_after.lower()
         budget = self._total_timeout
         if timeout_s is not None:
             budget = min(budget, timeout_s)
