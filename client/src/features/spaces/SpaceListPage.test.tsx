@@ -77,6 +77,9 @@ const PAIRED = [
 /** A test's own paired rows, in place of ``PAIRED``. */
 const PAIRED_EXTRA: { value: unknown[] | null } = { value: null }
 
+/** A test's own household rows, in place of ``HOUSEHOLD``. */
+const HOUSEHOLD_EXTRA: { value: unknown[] | null } = { value: null }
+
 interface Wire {
   spaces?: unknown
   unread?: Record<string, unknown>
@@ -91,7 +94,7 @@ function wire({ spaces = SPACES, unread = {}, gfs = [], global = [] }: Wire = {}
       return spaces
     }
     if (url === '/api/spaces/chat-unread') return { spaces: unread }
-    if (url === '/api/household/spaces') return HOUSEHOLD
+    if (url === '/api/household/spaces') return HOUSEHOLD_EXTRA.value ?? HOUSEHOLD
     if (url === '/api/peer_spaces') return PAIRED_EXTRA.value ?? PAIRED
     if (url === '/api/public_spaces') return global
     if (url === '/api/gfs/connections') return gfs
@@ -501,6 +504,22 @@ describe('SpaceListPage — Discover', () => {
       expect(await meta('Hottingen bike repair')).toBe('Keller household · 12 members · open')
     } finally {
       PAIRED_EXTRA.value = null
+    }
+  })
+
+  it('a household row: followers only for a space that takes them, "0 followers" included', async () => {
+    HOUSEHOLD_EXTRA.value = [
+      { ...HOUSEHOLD[0], member_count: 4, follower_count: null },
+      { ...HOUSEHOLD[0], space_id: 'hRead', name: 'Read along', allow_subscribers: true, member_count: 2, follower_count: 0 },
+    ]
+    try {
+      const r = await renderPage('/spaces?discover=household')
+      const meta = async (name: string) =>
+        (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
+      expect(await meta('Hottingen Community Choir')).toBe('4 members · anyone at home can join')
+      expect(await meta('Read along')).toBe('2 members · 0 followers · anyone at home can join')
+    } finally {
+      HOUSEHOLD_EXTRA.value = null
     }
   })
 
