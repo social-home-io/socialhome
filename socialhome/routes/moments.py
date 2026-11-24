@@ -17,8 +17,10 @@ Routes:
   ``?scope=saved`` — the moments the caller saved (decision 6b)
 * ``GET    /api/moments/archive/usage``       — the caller's archived media vs. the household cap
 * ``PUT    /api/admin/moments/archive-cap``   — admin sets the per-person archive cap
-* ``GET    /api/moments/limits``              — ``{next_allowed_at}``: when the caller's next
-  top-level moment can go (``null`` = now; the 429 carries the same field)
+* ``PUT    /api/admin/moments/reach-max``     — admin sets the household's maximum reach (v_96)
+* ``GET    /api/moments/limits``              — ``{next_allowed_at, reach, reach_max}``: when the
+  caller's next top-level moment can go (``null`` = now; the 429 carries the same field), how
+  far a new moment of theirs goes and the household's maximum
 * ``GET    /api/moments/{id}``                — detail incl. replies + reactions
 * ``DELETE /api/moments/{id}``                — author / admin delete
 * ``PUT    /api/moments/{id}/reaction``       — set / change reaction
@@ -120,6 +122,9 @@ def _moment_dict(
         # How far away it was written: 1 = this household or a paired one,
         # 2–3 = relayed (the card's provenance line, "2 hops away").
         "hop_count": m.hop_count,
+        # v_96: how many hops it goes (1–5) — fixed when it was written, so
+        # the SPA can say how far a moment (and a reply's parent) went.
+        "reach": m.effective_reach,
     }
     if counts is not None:
         base["reaction_count"] = counts.get("reaction_count", 0)
@@ -410,18 +415,43 @@ class MomentArchiveCapView(BaseView):
         return self._json({"cap_bytes": cap})
 
 
+class MomentReachMaxView(BaseView):
+    """``PUT /api/admin/moments/reach-max`` — body ``{reach_max: int}``
+    (1–5; 5 = no limit): the household's maximum reach (v_96). Admins only
+    (403 otherwise); 422 for anything but a whole number 1–5. Returns
+    ``{reach_max}``."""
+
+    async def put(self) -> web.Response:
+        ctx = self.user
+        if ctx is None:
+            return error_response(401, "UNAUTHENTICATED", "Login required.")
+        body = await self.body()
+        value = await self.svc(moment_service_key).set_reach_max(
+            body.get("reach_max"), actor_is_admin=ctx.is_admin
+        )
+        return self._json({"reach_max": value})
+
+
 class MomentLimitsView(BaseView):
-    """``GET /api/moments/limits`` — ``{next_allowed_at}``: when the caller
-    may post their next top-level moment (UTC ISO 8601), ``null`` when they
-    may post now. The composer reads it before writing (decision 13); the
-    ``429 MOMENT_RATE_LIMIT`` carries the same field."""
+    """``GET /api/moments/limits`` — ``{next_allowed_at, reach, reach_max}``:
+    when the caller may post their next top-level moment (UTC ISO 8601),
+    ``null`` when they may post now (decision 13; the ``429
+    MOMENT_RATE_LIMIT`` carries the same field); how many hops a new moment
+    of theirs goes (``reach``, 1–5; 1 for a protected account) and the
+    household's maximum (``reach_max``, 1–5)."""
 
     async def get(self) -> web.Response:
         ctx = self.user
         if ctx is None:
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         svc = self.svc(moment_service_key)
-        return self._json({"next_allowed_at": await svc.next_allowed_at(ctx.user_id)})
+        return self._json(
+            {
+                "next_allowed_at": await svc.next_allowed_at(ctx.user_id),
+                "reach": await svc.effective_reach(ctx.user_id),
+                "reach_max": await svc.household_reach_max(),
+            }
+        )
 
 
 class MomentHashtagsView(BaseView):

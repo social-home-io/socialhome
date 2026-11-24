@@ -1131,3 +1131,47 @@ async def test_a_delete_carries_the_rows_reach(stack):
     stack.bus.subscribe(MomentDeleted, deleted.append)
     await svc.delete_moment(m.id, actor_user_id=a.user_id)
     assert [d.reach for d in deleted] == [2]
+
+
+async def test_effective_reach_and_household_maximum_are_public(stack):
+    """``GET /api/moments/limits`` reads them (v_96 P4)."""
+    a = await stack.provision("alice")
+    kid = await stack.provision("kid")
+    await stack.user_svc.patch_preferences("alice", {"moments": {"reach": 4}})
+    svc = _reach_svc(stack, protected={kid.user_id})
+    assert await svc.household_reach_max() == 5
+    assert await svc.effective_reach(a.user_id) == 4
+    assert await svc.effective_reach(kid.user_id) == 1
+    await svc.set_reach_max(2, actor_is_admin=True)
+    assert await svc.household_reach_max() == 2
+    assert await svc.effective_reach(a.user_id) == 2
+
+
+async def test_set_reach_max_is_admin_only(stack):
+    svc = _reach_svc(stack)
+    with pytest.raises(PermissionError):
+        await svc.set_reach_max(2, actor_is_admin=False)
+    assert await svc.household_reach_max() == 5
+
+
+@pytest.mark.parametrize("bad", [0, 6, -1, True, False, "3", 2.0, None])
+async def test_set_reach_max_rejects_anything_but_1_to_5(stack, bad):
+    svc = _reach_svc(stack)
+    with pytest.raises(ValueError):
+        await svc.set_reach_max(bad, actor_is_admin=True)
+    assert await svc.household_reach_max() == 5
+
+
+@pytest.mark.parametrize("value", [1, 3, 5])
+async def test_set_reach_max_stores_and_returns_the_value(stack, value):
+    svc = _reach_svc(stack)
+    assert await svc.set_reach_max(value, actor_is_admin=True) == value
+    assert await SqliteInstanceConfigRepo(stack.db).get("moments.reach_max") == str(
+        value
+    )
+
+
+async def test_set_reach_max_without_a_config_store_fails_loudly(stack):
+    svc = MomentService(stack.moment_repo, SqliteUserRepo(stack.db), stack.bus)
+    with pytest.raises(RuntimeError):
+        await svc.set_reach_max(2, actor_is_admin=True)

@@ -300,7 +300,7 @@ class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
             # A reply never outlives its thread: once the root is gone from
             # the households that hold it, the reply would stand alone.
             expires_at = min(expires_at, root.expires_at, key=_expiry_key)
-        reach = await self._effective_reach(author_user_id)
+        reach = await self.effective_reach(author_user_id)
         # v_96: nor goes further than what it answers (the moment replied
         # to and its thread's root, as held here).
         for held in (replied_to, root):
@@ -461,7 +461,7 @@ class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
         )
         return prefs.follower_retention_days
 
-    async def _effective_reach(self, author_user_id: str) -> int:
+    async def effective_reach(self, author_user_id: str) -> int:
         """How many hops a new moment of *author_user_id* goes (v_96): one
         for a protected account (§CP.R, never raised), else the person's
         ``moments.reach`` within the household's ``moments.reach_max``."""
@@ -471,9 +471,9 @@ class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
         prefs = parse_moment_preferences(
             author.preferences_json if author is not None else None
         )
-        return min(prefs.reach, await self._household_reach_max())
+        return min(prefs.reach, await self.household_reach_max())
 
-    async def _household_reach_max(self) -> int:
+    async def household_reach_max(self) -> int:
         """The household's maximum reach (``moments.reach_max``, 1–5)."""
         raw = await self._config.get(REACH_MAX_KEY) if self._config else None
         if raw is None:
@@ -484,6 +484,25 @@ class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
             log.warning("moment reach maximum %r is not a number — no limit", raw)
             return MOMENT_MAX_REACH
         return max(1, min(value, MOMENT_MAX_REACH))
+
+    async def set_reach_max(self, value: object, *, actor_is_admin: bool) -> int:
+        """Set the household's maximum reach (admins only): a whole number
+        1–:data:`MOMENT_MAX_REACH` (the top = no limit). Moments already
+        written keep the reach on their row."""
+        if not actor_is_admin:
+            raise PermissionError("Only household admins can set the moment reach.")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= MOMENT_MAX_REACH
+        ):
+            raise ValueError(
+                f"reach_max must be a whole number from 1 to {MOMENT_MAX_REACH}."
+            )
+        if self._config is None:
+            raise RuntimeError("MomentService has no instance config wired.")
+        await self._config.set(REACH_MAX_KEY, str(value))
+        return value
 
     async def _max_hops(self, viewer_user_id: str) -> int:
         """The viewer's ``moments.max_hops`` preference (§Momentum-relay-policy)."""
