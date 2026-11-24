@@ -69,7 +69,7 @@ from ..domain.events import (
     MomentDeleted,
     MomentReactionChanged,
 )
-from ..domain.federation import FederationEventType
+from ..domain.federation import FederationEventType, InstanceSource
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import relayed_moment_key
 from ..domain.moment import (
@@ -533,11 +533,19 @@ class MomentFederationOutbound(
             self._remember_relay(("origin", moment_id, origin), hop, reach=reach)
         next_hop = hop + 1
         look_hop: int | None = None
+        unknown_look_sends = False
         if next_hop > MOMENT_UNGATED_HOPS:
             # v_96 decision C: a hop-4 / hop-5 copy (create, delete or
             # totals) goes only to a household that looks that far — and is
             # v_96 (an older one refuses a hop above 3), whatever its marks.
             look_hop = next_hop
+            # A delete also goes to a directly paired household whose look
+            # we don't know yet (after our restart, before its capabilities
+            # answer lands): the tombstone held here stops every later copy,
+            # so skipping it would leave that household holding the deleted
+            # moment for up to 30 days. Deletes are small and content-free,
+            # and this only widens the restart window.
+            unknown_look_sends = event_type == FederationEventType.MOMENT_DELETED
             min_version = max(
                 min_version or 0, FederationCapability.MIN_FOR_MOMENT_REACH
             )
@@ -566,6 +574,7 @@ class MomentFederationOutbound(
             min_version=min_version,
             outbox_key=outbox_key,
             look_hop=look_hop,
+            unknown_look_sends=unknown_look_sends,
         )
 
     def _counts_reach(
@@ -694,12 +703,15 @@ class MomentFederationOutbound(
         payload_for: Callable[[str], dict] | None = None,
         outbox_key: str | None = None,
         look_hop: int | None = None,
+        unknown_look_sends: bool = False,
     ) -> int:
         """Send to every confirmed peer but *exclude_instances* and the
         origin; returns how many it was handed to. With *look_hop* (a relayed
         copy at hop 4 or 5, v_96 decision C) only to a peer whose people look
         at least that far (``FederationService.peer_moment_look_hops``; a peer
-        not heard from since our start gets none)."""
+        not heard from since our start gets none — unless
+        *unknown_look_sends*, a delete: then a directly paired one whose look
+        is still unknown gets it, the households a look is learned from)."""
         # ``confirmed_peers`` already drops our own instance + null ids;
         # the relay/origin skip set adds the origin + the immediate sender.
         skip = exclude_instances | {origin_instance_id}
@@ -711,7 +723,12 @@ class MomentFederationOutbound(
                 continue
             if look_hop is not None:
                 look = self._federation.peer_moment_look_hops(instance_id)
-                if look is None or look < look_hop:
+                if look is None:
+                    if not (
+                        unknown_look_sends and peer.source is InstanceSource.MANUAL
+                    ):
+                        continue
+                elif look < look_hop:
                     continue
             if min_version is not None and not await self._federation.peer_supports(
                 instance_id, min_version=min_version

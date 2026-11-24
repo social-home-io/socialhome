@@ -731,3 +731,64 @@ async def test_an_unpaired_household_is_forgotten_with_its_look(env):
     assert fed.peer_moment_look_hops(NEW) == 5
     await app[peer_unpair_service_key].purge(NEW)
     assert fed.peer_moment_look_hops(NEW) is None
+
+
+@pytest.mark.parametrize(
+    ("look", "expected"),
+    [(None, [(NEW, 4)]), (3, []), (4, [(NEW, 4)])],
+)
+async def test_a_hop_4_delete_goes_to_a_peer_whose_look_is_unknown(env, look, expected):
+    """After our restart a peer's look is unknown until its capabilities
+    answer lands. A delete in that window still goes to a v_96 directly
+    paired household at hop 4–5 — once its tombstone is held here every later
+    copy stops, so skipping would leave the peer holding the deleted moment
+    for up to 30 days. A known look below the hop still skips; the older
+    households (v_38, v_95) never get it."""
+    app, _db, sent = env
+    fed = app[federation_service_key]
+    fed._moment_looks.clear()  # our restart
+    if look is not None:
+        fed.set_peer_moment_look_hops(NEW, look)
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-del-unknown", hop=3, reach=5),
+        from_instance=RELAY,
+    )
+    assert _relayed(sent, "m-del-unknown") == expected
+
+
+async def test_a_hop_4_create_still_skips_a_peer_whose_look_is_unknown(env):
+    """Only deletes (small, content-free, tombstone-gated) go to an unknown
+    look: a create in the same window does not."""
+    app, _db, sent = env
+    app[federation_service_key]._moment_looks.clear()  # our restart
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _signed(FET.MOMENT_CREATED, "m-create-unknown", hop=3, reach=5),
+        from_instance=RELAY,
+    )
+    assert _relayed(sent, "m-create-unknown") == []
+
+
+async def test_a_hop_4_delete_skips_a_household_seated_from_an_invite_link(env):
+    """The unknown-look send reaches directly paired households only — the
+    same households the look is ever learned from."""
+    app, db, sent = env
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source, proto_version, relay_via)"
+        " VALUES('seat', 'Seat', ?, 'k1', 'k2', '', 'wh-seat', 'confirmed',"
+        " 'space_session', 96, 'https://gfs.example')",
+        (generate_identity_keypair().public_key.hex(),),
+    )
+    app[federation_service_key]._moment_looks.clear()
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-del-seat", hop=3, reach=5),
+        from_instance=RELAY,
+    )
+    assert _relayed(sent, "m-del-seat") == [(NEW, 4)]

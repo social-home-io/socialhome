@@ -104,7 +104,7 @@ what, and no protocol version changes.
   protected-account (§CP.R — only moments from its household and paired
   households, see [Protected accounts](#protected-accounts-cpr)) and
   ``max_hops`` filters still apply (a protected account's save made before
-  protection was turned on stays hidden; saving a 2–3-hop moment is the
+  protection was turned on stays hidden; saving a 2–5-hop moment is the
   unknown-id 404), so a blocked author's saved moment is
   hidden (and back on unblock). Replies still close at expiry.
 * **Offered only where a delete can still reach the copy** — the server
@@ -400,8 +400,11 @@ neither raise it, strip it nor splice it onto another moment:
   a v_96 hop-3 relay that aggregates hops 3–5 behind it — reactions from
   hops 4–5 past an older relay may be throttled (documented degradation).
 * **Replies** go ``min(own reach, parent's reach)`` when the parent is held
-  here (the row keeps its reach), so a reply never travels further than
-  what it answers.
+  here (the row keeps its reach). The bound counts hops from the
+  replier's own household, not from the parent's author: a reply never
+  goes more hops from its author than the parent may go from its own, but
+  a reply from a household 2 hops out to a reach-2 moment can land 4 hops
+  from the parent's author.
 * **Public moments** (``is_public``, through the owner's GFSs) are a
   separate path and unchanged: reach governs only the household mesh.
 
@@ -465,6 +468,27 @@ neither raise it, strip it nor splice it onto another moment:
   toward a household that does not look that far. Owner-accepted
   trade-off — following someone far away and seeing all of them means
   raising "Show moments up to".
+
+Accepted residuals (final review, P5):
+
+* **A pre-0154 row deleted after protection was lifted.** A row written
+  before migration ``0154`` has no ``reach`` (NULL = 3). If its author was
+  protected when it was posted (it went out ``no_relay``, one hop) and the
+  protection was lifted before the delete, the delete goes unmarked and
+  is relayed 3 hops — the inverse of the documented edge where a moment
+  posted before protection is deleted as far as it went. It only leaves a
+  content-free tombstone of the moment id at households 2–3 hops out, and
+  ages out: such rows expire within 30 days of the upgrade.
+* **The ``moment.created`` WebSocket refresh hint** goes to every
+  household member's sockets, including one whose ``max_hops`` hides a row
+  kept only for a follower (protected accounts and people who blocked the
+  author are skipped). The frame is a refresh hint; the read that follows
+  applies the per-viewer rule, so nobody sees the row — they only learn
+  that a moment (its id and author id) arrived. Same class as before v_96.
+* **A reply notification can reach a parent author whose ``max_hops``
+  hides the reply** (pre-existing): the bell row names the reply, the
+  thread read does not show it. Protected parent authors are still not
+  notified from outside their circle.
 
 Release-blocker tests: ``tests/protocol/test_moment_forward_only.py``
 (forward within reach and keep nothing — no row, route, hashtag or media
@@ -571,7 +595,8 @@ A v_96 household tells its paired peers one number, ``moment_look_hops``
 below 3 — in ``INSTANCE_CAPABILITIES_UPDATED``, sent when it changes. A relay sends a
 hop-4 or hop-5 copy only to a peer whose ``moment_look_hops`` is at least
 that hop (a peer not heard from since our start — older, or its answer
-still on the way — gets none). Hops 1–3 are unchanged.
+still on the way — gets none, except a delete: see *Applied* below). Hops
+1–3 are unchanged.
 
 In detail:
 
@@ -609,16 +634,27 @@ In detail:
   carry the value; the outbox retries the request (latest-only, key
   ``resync:capabilities`` — one queued per peer however often we restart),
   so a peer offline at our start answers once it is back. Older peers are not asked (they
-  never send the field). Until a peer answers it gets no hop-4–5 copy.
+  never send the field). Until a peer answers it gets no hop-4–5 create
+  or totals (a delete still goes, below).
   Cost: one request (≈ 0.3 KB) plus one reply (≈ 0.5 KB) per v_96 peer
   per restart — d = 10: ≈ 8 KB per restart.
 * **Applied** to every relayed copy at hop 4 or 5 — create, delete and
   totals alike, read from that in-memory value — together
   with the v_96 version gate (an older household refuses a hop above 3).
+  **A delete also goes to an unknown look:** a hop-4–5 delete goes to
+  every directly paired (``source = manual``) v_96 peer whose look is not
+  known here yet (after our restart, before its answer lands); a known
+  look below the hop still skips it. Otherwise the delete would be lost
+  for good: once its tombstone is held here every later copy of it stops,
+  so a peer that holds the moment through us would keep it up to 30
+  days. Cost: a delete is < 1 KB and content-free, and the extra sends
+  happen only in the restart window — at most one per v_96 paired peer
+  per delete relayed then (d = 10: < 10 KB per delete), and none once the
+  looks are back. Creates and totals still skip an unknown look.
   Accepted edge: a household that looked further when a moment reached it
   and looks less now may miss that moment's delete or totals; its people
   can no longer see the row anyway (their ``max_hops``), and it expires.
-  Accepted edge (Fable #7): a copy relayed while a peer's look is still
+  Accepted edge (Fable #7): a create or totals relayed while a peer's look is still
   unknown here (after our restart, before its answer) is remembered in the
   seen-map, so that peer misses that one moment's hop-4–5 copy through us
   even once its look arrives — unless a closer copy re-opens the slot
@@ -1079,7 +1115,7 @@ sequenceDiagram
 
 Owner decision 10 (2026-10-25): **everyone sees the full reaction count.**
 Since v_67 / v_68 a reaction reaches the author's household from paired,
-2–3-hop and GFS followers alike — so only that household holds a moment's
+2–5-hop and GFS followers alike — so only that household holds a moment's
 full count; every other household holds only its own people's reactions.
 The author's household therefore re-broadcasts the **totals**: per-emoji
 counts (the 8 most used) and the total over every emoji — **never who
@@ -1224,7 +1260,7 @@ sequenceDiagram
     participant B as Peer HFS B
     participant SB as MomentService<br/>(B)
     participant C as Peer HFS C<br/>(B's peer)
-    participant D as Peer HFS D<br/>(C's peer, 4 hops<br/>from A at reach 5)
+    participant D as Peer HFS D<br/>(4–5 hops from A,<br/>reach 5)
 
     U->>SA: POST /api/moments<br/>{content, media?, parent_moment_id?}
     SA->>SA: 15-min rate-limit check<br/>effective reach = protected ? 1 :<br/>min(person reach, household reach_max)<br/>(reply: min(own, parent's))<br/>persist row with ``reach``
@@ -1236,7 +1272,7 @@ sequenceDiagram
     SB-->>Fed: relay_inbound if hop < min(reach, 5)<br/>→ fan hop=2 to B's peers (skip A)<br/>reach-carrying copy only to ≥ v_96
     Fed->>C: encrypted MOMENT_CREATED (hop=2, origin=A, origin_sig verbatim)
     Note over C: sender B ≠ origin A → verify origin_sig<br/>against A pinned key (or derived pk);<br/>refuse if clamped hop max(hop,2) > reach<br/>then store-if-seen + relay at max(hop,2)+1
-    C->>D: hop ≥ 4 only if D advertised<br/>moment_look_hops ≥ that hop (v_96)
+    C-->>D: … via further relays (hop 3 → 4 → 5):<br/>a hop-4–5 copy only if D advertised<br/>moment_look_hops ≥ that hop (v_96; a delete<br/>also to a v_96 peer whose look is unknown)
     Note over D: nobody here looks 4 hops<br/>and nobody follows the author?<br/>→ forward within reach, keep nothing
 ```
 
