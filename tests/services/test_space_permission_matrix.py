@@ -160,6 +160,10 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_joining_space_ids",  # caller's own approved-and-joining GFS requests
         "list_busy_join_request_space_ids",  # caller's own GFS requests answered "busy"
         "expire_due_join_requests",  # system sweep, no actor
+        # The owed-rotation sweep (system, no actor) and its reads.
+        "list_spaces_owing_rotation",
+        "pay_owed_rotation",
+        "rotation_owed",
         "is_subscribed",
         # Self-service joins / leaves — gate is on the *invite* / *request*,
         # not the join action itself.
