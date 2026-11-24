@@ -38,7 +38,6 @@ from socialhome.domain.federation import (
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.space_item import _REQUIRED_SCOPE as REQUIRED_SCOPE_TABLE
 from socialhome.domain.space_item import (
-    ITEM_TYPE_AUTHOR_PROFILE,
     ITEM_TYPE_COMMENT,
     ITEM_TYPE_COMMENT_DELETE,
     ITEM_TYPE_COMMENT_EDIT,
@@ -380,7 +379,6 @@ _READER_NEEDS: dict[str, str | None] = {
     ITEM_TYPE_COMMENT_DELETE: None,
     ITEM_TYPE_REACTION_ADD: "react",
     ITEM_TYPE_REACTION_REMOVE: "react",
-    ITEM_TYPE_AUTHOR_PROFILE: "either",
 }
 
 
@@ -408,13 +406,14 @@ def test_a_reader_cert_on_the_channel_carries_only_its_switches(
         item_type=item_type,
     )
     if item_type not in _READER_NEEDS:
-        expected = False  # posts and their edits / deletes: never
+        # Posts and their edits / deletes, and (v_96) the author profile
+        # under either switch: never.
+        expected = False
     else:
         need = _READER_NEEDS[item_type]
         expected = {
             None: True,
             "comment": comment,
             "react": react,
-            "either": comment or react,
         }[need]
     assert accepted is expected, (item_type, comment, react)

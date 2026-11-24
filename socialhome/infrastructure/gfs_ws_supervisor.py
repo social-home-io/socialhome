@@ -46,9 +46,7 @@ class GfsWebSocketSupervisor:
         "_on_follow_changed",
         "_on_highlight_signal",
         "_on_moment_public",
-        "_on_new_subscriber",
         "_on_relay",
-        "_on_relay_seen",
         "_on_space_media_request",
         "_repo",
         "_session_factory",
@@ -65,11 +63,9 @@ class GfsWebSocketSupervisor:
         signing_key: bytes,
         session_factory: Callable[[], aiohttp.ClientSession],
         on_relay: Callable[[dict], Awaitable[None]],
-        on_relay_seen: Callable[..., Awaitable[None]] | None = None,
         on_highlight_signal: Callable[[dict], Awaitable[None]] | None = None,
         on_moment_public: Callable[..., Awaitable[None]] | None = None,
         on_follow_changed: Callable[..., Awaitable[object]] | None = None,
-        on_new_subscriber: Callable[..., Awaitable[None]] | None = None,
         on_envelope: Callable[..., Awaitable[None]] | None = None,
         on_connected: Callable[[str], Awaitable[None]] | None = None,
         reconcile_interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS,
@@ -79,13 +75,9 @@ class GfsWebSocketSupervisor:
         self._signing_key = signing_key
         self._session_factory = session_factory
         self._on_relay = on_relay
-        # ``(frame, *, gfs_id)`` — told which server pushed each relay frame,
-        # after ``on_relay`` (the seat self-heal; fail-soft).
-        self._on_relay_seen = on_relay_seen
         self._on_highlight_signal = on_highlight_signal
         self._on_moment_public = on_moment_public
         self._on_follow_changed = on_follow_changed
-        self._on_new_subscriber = on_new_subscriber
         self._on_envelope = on_envelope
         self._on_connected = on_connected
         #: v_83 — ``(frame, *, gfs_id)``: a GFS asks for a space blob.
@@ -144,17 +136,6 @@ class GfsWebSocketSupervisor:
         self._on_follow_changed = handler
         for conn_id, client in list(self._clients.items()):
             client.attach_follow_changed_handler(_bind_gfs_id(handler, conn_id))
-
-    def attach_new_subscriber_handler(
-        self,
-        handler: Callable[..., Awaitable[None]],
-    ) -> None:
-        """Late-bound — attaches the Phase-5b subscriber key-handoff producer
-        to every running client and to clients started later by the
-        reconciler, each told the connection it serves (``gfs_id``)."""
-        self._on_new_subscriber = handler
-        for conn_id, client in list(self._clients.items()):
-            client.attach_new_subscriber_handler(_bind_gfs_id(handler, conn_id))
 
     def attach_envelope_handler(
         self,
@@ -290,7 +271,7 @@ class GfsWebSocketSupervisor:
             instance_id=self._instance_id,
             signing_key=self._signing_key,
             session_factory=self._session_factory,
-            on_relay=_relay_for(self._on_relay, self._on_relay_seen, conn.id),
+            on_relay=self._on_relay,
             on_highlight_signal=self._on_highlight_signal,
             on_moment_public=wrapped_moment_public,
             # The follower lives on THIS connection: the sealed moment key
@@ -298,13 +279,6 @@ class GfsWebSocketSupervisor:
             on_follow_changed=(
                 _bind_gfs_id(self._on_follow_changed, conn.id)
                 if self._on_follow_changed is not None
-                else None
-            ),
-            # The subscriber lives on THIS connection: a targeted handoff and
-            # the profiles bundle (v_61) go back through it.
-            on_new_subscriber=(
-                _bind_gfs_id(self._on_new_subscriber, conn.id)
-                if self._on_new_subscriber is not None
                 else None
             ),
             on_envelope=(
@@ -366,29 +340,6 @@ class GfsWebSocketSupervisor:
         if client is not None:
             await client.stop()
             log.info("gfs.ws.supervisor: stopped client gfs_id=%s", gfs_id)
-
-
-def _relay_for(
-    on_relay: Callable[[dict], Awaitable[None]],
-    on_seen: Callable[..., Awaitable[None]] | None,
-    gfs_id: str,
-) -> Callable[[dict], Awaitable[None]]:
-    """The client's ``on_relay``: the shared consumer, then — only when it
-    returned normally, and fail-soft so a bug there never costs the frame —
-    the per-server observer."""
-    if on_seen is None:
-        return on_relay
-
-    async def _wrapped(frame: dict) -> None:
-        await on_relay(frame)
-        try:
-            await on_seen(frame, gfs_id=gfs_id)
-        except Exception:
-            log.exception(
-                "gfs.ws.supervisor: relay observer failed for gfs_id=%s", gfs_id
-            )
-
-    return _wrapped
 
 
 def _bind_gfs_url(

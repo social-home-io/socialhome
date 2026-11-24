@@ -1,8 +1,7 @@
 """Bounded retry of the GFS reconnect reconcile behind the possession gate.
 
 On each GFS WebSocket (re)connect the household runs an identity-bound
-reconcile (pin heal, seat re-subscribe, epoch notices, name push, content-key
-reconcile) — for a connection whose server once proved possession of its key
+reconcile (pin heal, epoch notices, name push) — for a connection whose server once proved possession of its key
 (the ratchet) only after a fresh proof
 (:meth:`~socialhome.services.gfs_connection_service.GfsConnectionService
 .possession_gate`). A RETRYABLE answer to that proof — a rolling deploy's

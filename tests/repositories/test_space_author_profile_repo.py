@@ -5,11 +5,9 @@ from __future__ import annotations
 from dataclasses import replace
 
 from socialhome.domain.space_author_profile import (
-    PROFILE_PICTURE_FIELD,
     CachedAuthorProfile,
     SpaceAuthorProfile,
 )
-from socialhome.domain.space_author_profile_bundle import BundleEntry
 from socialhome.repositories.space_author_profile_repo import (
     SqliteSpaceAuthorProfileRepo,
 )
@@ -69,51 +67,21 @@ async def test_deleting_the_space_deletes_its_profiles(db):
     assert await repo.list_for_space("sp") == []
 
 
-async def test_signed_items_of_any_epoch_newest_first(db):
-    """What a host's new-follower bundle forwards: the author-signed items
-    held for the space, newest first, each with ITS OWN epoch and signed
-    picture hash (a rotation never forces a republish)."""
+async def test_a_newer_profile_clears_a_legacy_signed_item(db):
+    """v_96 — the v_61 bundle copy (``signed_item`` / ``item_epoch``) is
+    no longer written, and a row still holding one from before drops it on
+    its next update (the bytes at rest go with the bundle)."""
     repo = await _repo(db)
-    item_a = {"item_type": "author_profile", "author_user_id": "u-noor"}
-    item_b = {"item_type": "author_profile", "author_user_id": "u-erin"}
-    await repo.upsert_if_newer(P, picture_webp=None, signed_item=item_a, item_epoch=3)
-    erin = replace(
-        P,
-        author_user_id="u-erin",
-        picture_hash=None,
-        ts="2026-10-20T09:00:00.000000+00:00",
+    await repo.upsert_if_newer(P, picture_webp=None)
+    row = await db.fetchone("SELECT signed_item, item_epoch FROM space_author_profiles")
+    assert (row["signed_item"], row["item_epoch"]) == (None, None)
+    await db.enqueue(
+        "UPDATE space_author_profiles SET signed_item='{\"v\": 1}', item_epoch=3"
     )
-    await repo.upsert_if_newer(
-        erin, picture_webp=None, signed_item=item_b, item_epoch=5
-    )
-    bare = replace(P, author_user_id="u-bare", ts="2026-10-20T10:00:00.000000+00:00")
-    await repo.upsert_if_newer(bare, picture_webp=None)  # no signed item kept
-    assert await repo.list_signed_items("sp", limit=10) == [
-        BundleEntry(epoch=5, item=item_b, picture_hash=None),
-        BundleEntry(epoch=3, item=item_a, picture_hash="0123456789abcdef"),
-    ]
-    assert [e.epoch for e in await repo.list_signed_items("sp", limit=1)] == [5]
-
-
-async def test_a_newer_profile_replaces_the_signed_item(db):
-    repo = await _repo(db)
-    await repo.upsert_if_newer(P, picture_webp=None, signed_item={"v": 1}, item_epoch=3)
     newer = replace(P, ts="2026-10-20T09:00:00.000000+00:00")
-    await repo.upsert_if_newer(
-        newer, picture_webp=None, signed_item={"v": 2}, item_epoch=4
-    )
-    assert [(e.epoch, e.item) for e in await repo.list_signed_items("sp", limit=5)] == [
-        (4, {"v": 2})
-    ]
-
-
-async def test_an_unreadable_signed_item_is_skipped(db):
-    repo = await _repo(db)
-    await repo.upsert_if_newer(P, picture_webp=None, signed_item={"v": 1}, item_epoch=3)
-    await db.enqueue("UPDATE space_author_profiles SET signed_item='not json'")
-    assert await repo.list_signed_items("sp", limit=5) == []
-    await db.enqueue("UPDATE space_author_profiles SET signed_item='[1]'")
-    assert await repo.list_signed_items("sp", limit=5) == []
+    assert await repo.upsert_if_newer(newer, picture_webp=None)
+    row = await db.fetchone("SELECT signed_item, item_epoch FROM space_author_profiles")
+    assert (row["signed_item"], row["item_epoch"]) == (None, None)
 
 
 async def test_a_newer_profile_with_the_same_picture_keeps_the_held_bytes(db):
@@ -134,26 +102,12 @@ async def test_a_newer_profile_with_the_same_picture_keeps_the_held_bytes(db):
     assert await repo.get_picture("sp", "u-noor") is None
 
 
-async def test_a_picture_attaches_only_to_its_signed_hash(db):
-    repo = await _repo(db)
-    await repo.upsert_if_newer(P, picture_webp=None)
-    assert not await repo.set_picture("sp", "u-noor", "fedcba9876543210", b"X")
-    assert await repo.set_picture("sp", "u-noor", "0123456789abcdef", b"RIFFokWEBP")
-    assert await repo.get_picture("sp", "u-noor") == (b"RIFFokWEBP", "0123456789abcdef")
-    assert not await repo.set_picture("sp", "nobody", "0123456789abcdef", b"X")
-
-
-async def test_get_reports_the_row_its_picture_and_sidecar(db):
+async def test_get_reports_the_row_and_its_picture(db):
     repo = await _repo(db)
     assert await repo.get("sp", "u-noor") is None
-    item = {"author_user_id": "u-noor", PROFILE_PICTURE_FIELD: "UklGRg=="}
-    await repo.upsert_if_newer(
-        P, picture_webp=b"RIFF..WEBP", signed_item=item, item_epoch=2
-    )
+    await repo.upsert_if_newer(P, picture_webp=b"RIFF..WEBP")
     got = await repo.get("sp", "u-noor")
-    assert got == CachedAuthorProfile(
-        profile=P, has_picture=True, picture_sidecar="UklGRg=="
-    )
+    assert got == CachedAuthorProfile(profile=P, has_picture=True)
 
 
 async def test_the_cache_keeps_the_newest_authors_per_space(db, monkeypatch):
@@ -194,9 +148,9 @@ async def test_spaces_an_author_has_a_profile_in(db):
 
 
 async def test_display_reads_name_a_picture_only_once_its_bytes_are_held(db):
-    """A bundle's names part brings the signed hash before the picture part
-    brings the bytes: until then the display reads give no hash (no URL that
-    would 404); ``get`` still reports the signed hash."""
+    """A row whose picture bytes are not held (the sidecar was refused or
+    never came) gives the display reads no hash (no URL that would 404);
+    ``get`` still reports the signed hash."""
     repo = await _repo(db)
     await repo.upsert_if_newer(P, picture_webp=None)
     [row] = await repo.list_for("sp", ["u-noor"])
@@ -204,7 +158,8 @@ async def test_display_reads_name_a_picture_only_once_its_bytes_are_held(db):
     assert [p.picture_hash for p in await repo.list_for_space("sp")] == [None]
     held = await repo.get("sp", "u-noor")
     assert held is not None and held.profile.picture_hash == "0123456789abcdef"
-    await repo.set_picture("sp", "u-noor", "0123456789abcdef", b"RIFFokWEBP")
+    newer = replace(P, ts="2026-10-20T09:00:00.000000+00:00")
+    await repo.upsert_if_newer(newer, picture_webp=b"RIFFokWEBP")
     [row] = await repo.list_for("sp", ["u-noor"])
     assert row.picture_hash == "0123456789abcdef"
 

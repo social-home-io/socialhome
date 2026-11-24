@@ -379,18 +379,11 @@ See [media.md](./media.md#older-files-on-view--space_media_wanted-v_92).
 **GFS public-content relay (Phase 5)** — removed in v_96: a global space's
 content rides its opaque channel, see [Followers (v_96)](#followers-v_96).
 
-`SPACE_SUBSCRIBER_KEY_HANDOFF` (`space_subscriber_key_handoff`). These ride the
-**content-blind GFS relay** (not a direct peer event), authorized by the
-space-authority signature rather than `proto_version`, so they carry **no
-`OURS` bump** — a non-subscriber simply never receives the frame.
-`space_post_public` relays a public/global post (encrypted under the space
-content key); `space_subscriber_key_handoff` (Phase 5b-b) delivers that content
-key to a new GFS subscriber, **sealed** to the subscriber's published X25519
-key-wrap pubkey (binding verified end-to-end before sealing — anti-GFS-
-substitution) so the GFS never learns the key. The receiver re-verifies the
-authority signature against its locally-pinned `spaces.identity_public_key`,
-unseals with its key-wrap private key, and imports the key. Full flow:
-[discovery.md](./discovery.md#subscriber-content-key-handoff-phase-5b-b).
+`SPACE_SUBSCRIBER_KEY_HANDOFF` (`space_subscriber_key_handoff`) is gone from
+`FederationEventType` (P6): a follower gets the content key by federation like
+any member, and an envelope still naming the type is refused at the §24.11
+parse step as unknown. The space-keyed `space_post_public` relay is gone with
+it; see [discovery.md](./discovery.md#since-v_96-space-content-reaches-a-gfs-only-through-a-channel).
 
 ## Flow — create + join
 
@@ -1372,18 +1365,15 @@ still listed — a global one on the GFSs its owner chose — and that listing i
 how people find the space and ask to be let in — but its **content stream
 stops at the member households**:
 
-- no post is relayed to the GFS (`services/space_public_outbound.py`, both
-  the local-author and the remote-author paths);
-- the per-space AES-256 content key is never sealed to a GFS subscriber
-  (`services/space_subscriber_key_outbound.py`, the `new_subscriber` handoff
-  and every reconcile entry point), so a subscriber cannot open even a
-  ciphertext it obtained some other way;
+- no follower seat is taken, so nobody outside the members holds the
+  content key (since v_96 every reader is a member; the space-keyed GFS
+  relay and the key handoff to GFS subscribers are gone — a global space's
+  channel carries its members' content only to member households);
 - the pre-signed `public_relay` hint is not attached to the member broadcast
   (`services/space_post_outbound.py`) — it exists only to let a seed-holding
   member run the GFS relay, which is dead for this space;
 - `SpaceService.subscribe_to_space` refuses outright
-  (`this space does not allow subscribers`), and so does the connection
-  server's `POST /gfs/subscribe` (`403`).
+  (`this space does not allow subscribers`).
 
 Because the two dials are independent, all four combinations are meaningful
 — an `invite_only` space with followers **on** is a legitimate broadcast
@@ -1943,13 +1933,13 @@ space key, and older subscribers ignore it.
 sequenceDiagram
     participant H as Host (seed holder)
     participant M as Member household
-    participant G as GFS subscribers
+    participant G as Channel readers (members, followers)
     H->>M: redeem ACK / rekey / roster snapshot {writer_cert for M only}
     M->>M: verify vs pinned space key, own pk, epoch key held → store
-    M->>H: SPACE_POST_CREATED {public_relay {…, author_sig, writer_cert}}
+    M->>H: SPACE_POST_CREATED {public_relay {…, author_sig, writer_cert, channel_sent?}}
     H->>H: verify cert (space key, author_pk, write) → re-stamp for current epoch if M still seated
-    H->>G: space_post_public (authority-signed, inner sealed under epoch key)
-    G->>G: verify authority sig → decrypt → author_sig → writer_cert (epoch, author_pk, write)
+    H->>G: channel authority item (inner signed by the space authority, sealed under epoch key) — only when M did not put it on the channel itself
+    G->>G: decrypt → authority sig (epoch-bound) → author_sig → writer_cert (epoch, author_pk, write)
 ```
 
 **Verification and the migration tripwire.** A receiver that finds a cert

@@ -38,6 +38,12 @@ Explicit non-goals:
   timing, the subscriber set (it is the directory) and source IPs. Content
   stays opaque to it.
 
+  Since v_96 (P6) the household sends a space's content to a GFS only
+  through the space's opaque channel (`/gfs/channels/*`: the frame names a
+  channel id, never the space, and `publish-anon` names no household); the
+  space-keyed relay below has no household sender any more and is kept for
+  the GFS side until its removal.
+
   Hiding the *relaying household's identity* from the GFS is **a goal, and
   it is now met on the wire**: `POST /gfs/publish` carries
   `{space_id, event_type, payload}` and nothing else, and the fan-out frame
@@ -269,6 +275,10 @@ GFS — verified, then discarded: it never
 authorizes, is never forwarded and is never logged. Receivers take
 attribution (`origin_instance_id`) from the encrypted, authority-signed
 inner only; an outer `from_instance` from an old GFS is never read.
+
+**Removed in v_96 (P6):** the household neither sends nor opens the key
+handoff or the profiles bundle below (a follower is a member and gets the
+key by federation); the shapes are kept for the GFS side until its removal.
 
 The `space_subscriber_key_handoff` payload is identity-free too: it is
 exactly `{space_id, sealed, authority_sig, authority_sig_suite}` and names
@@ -523,14 +533,10 @@ registration → `instance_identity.keywrap_public_key` /
 ``space-keywrap:v1``) → AES-256-GCM, binding the ephemeral pub as AAD
 so a relay can't swap it. A fresh ephemeral per seal means no key
 reuse. Same `kem_suite` contract as the routed seal (`"x25519"` today,
-reject-unknown, PQ migration is a suite-bump). This is the channel the
-Phase-5b-b subscriber content-key handoff
-(`space_subscriber_key_handoff`, `services/space_subscriber_key_outbound.py`
-→ `space_subscriber_key_inbound.py`) uses to hand the per-space content
-key to an unpaired GFS subscriber, GFS-blind: the seed-holder seals the
-`{space_content_key:{…}}` meta to the subscriber's key-wrap pubkey and
-authority-signs the sealed envelope so the content-blind GFS relays it
-without learning the key.
+reject-unknown, PQ migration is a suite-bump). The Phase-5b-b subscriber content-key handoff
+(`space_subscriber_key_handoff`) used this channel to hand the per-space
+content key to an unpaired GFS subscriber; it was removed in v_96 (P6) — a
+follower is a member and gets the key like any member.
 
 The same seal carries a **public-moment step key** (v_62,
 `services/moment_public_key_outbound.py` → `moment_public_key_inbound.py`):
@@ -1044,7 +1050,9 @@ Suite tag `author_sig_suite` (`ITEM_AUTHOR_SIG_SUITE_ED25519 = "ed25519"`,
 author_user_id`. No new key: the household identity key every peer pins.
 
 **Member publish** (`domain/gfs_member_publish.py`,
-`global_server/member_publish.py`, v_49; one anonymous mode since v_90 — the
+`global_server/member_publish.py`, v_49; GFS side only since v_96 — the
+household publishes its items into the space's opaque channel; one
+anonymous mode since v_90 — the
 household-signed `POST /gfs/member-publish` and its `gfs-member-publish:v1`
 action are gone) — `POST /gfs/member-publish-anon`, authorized by the writer
 group key below; the GFS checks the scope `comment` at most (the item type
@@ -1118,7 +1126,10 @@ epoch), shared by every household allowed to publish anything there (both
   cert (rekey `per_peer`, roster snapshot, redeem ACK `space_meta`, v_44
   rotation bundle), only to a household holding a publishing scope, in
   every publicly readable space, at v_90 (`writer_key_min_version`). The
-  owner's epoch notice pins `writer_key_cert`. The receiver verifies the cert against its pinned space key
+  owner's epoch notice pins `writer_key_cert` (as shipped; since v_96 no
+  household sends that notice or signs a writer-key upload — a GFS no
+  longer learns the pin, so the key authorizes nothing on the household
+  side until it is retired with the GFS's legacy routes). The receiver verifies the cert against its pinned space key
   and that the seed's public half is `writer_pk`, then stores the grant
   KEK-wrapped (AES-GCM, AAD `socialhome-writer-key:<space_id>:<epoch>`) on
   that epoch's `space_keys.writer_key`. Rotates with every content epoch, so

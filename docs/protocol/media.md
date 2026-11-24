@@ -922,18 +922,21 @@ the space is ever sealed under its key, live or in a catch-up.
 **Upload** (`SpaceMediaGfsUploader`). When an item with local media is
 created in a space that has link-joined v_80 members or (for posts)
 followers, the author's household plans the GFSs those readers use — each
-link-joined member's `relay_via` connection, plus every GFS the space is
-relayed to for followers — keeps the ones whose signed block proved
+link-joined member's `relay_via` connection, plus (v_96: only for a space
+that runs an opaque channel here) every GFS its channel lives on for
+followers — keeps the ones whose signed block proved
 `space_media` (and whose `max_blob_bytes` the blob fits), seals each file
 once, computes its scope-bound address and `PUT`s it once per GFS to the one
 scope-free path `PUT /gfs/media/{blob_id}` — the scope rides only inside the
 signed claim header (`scope`, `scope_id`, `addr_suite`), never in a URL. Authorization: the
-space's owner signs as the **space authority** (its seed); every other
-household signs with the **writer group key** — a delegated admin too,
-although it holds the seed, so its uploads look like any writer's (it signs
-as the authority only where the space has no writer key). Both are
-anonymous; the
-identified writer-cert kind is gone since v_90. A **private** space that
+space's owner signs as the **space authority** (its seed); a delegated
+admin signs as the authority only where the space has no writer group key.
+Since v_96 nobody signs a space-scope upload with the writer group key (a
+GFS pinned it only from the space-keyed epoch notice, which no household
+sends any more), so a plain member of a space without a channel plans
+nothing — its link-joined readers get the files by the push
+(`SPACE_MEDIA_BLOB`). Anonymous; the identified writer-cert kind is gone
+since v_90. A **private** space that
 uses an opaque channel (v_51, `private_gfs` on) uploads under the GFS's
 **channel scope** instead (the claim names the channel), only to a GFS whose
 signed `space_media.scopes` lists `channel` — so the GFS learns the random
@@ -1026,8 +1029,8 @@ sequenceDiagram
     G-->>A: 201 stored (200 already_stored)
     A->>G: POST /gfs/envelope (sealed SPACE_POST_CREATED + media_refs)
     G->>E: relay envelope
-    A->>G: POST /gfs/publish (encrypted inner + media_refs)
-    G->>F: relay space_post_public
+    A->>G: POST /gfs/channels/publish-anon (encrypted item + media_refs, v_96)
+    G->>F: channel frame (follower's channel seat)
     E->>G: GET /gfs/media/{blob_id} (prefetch / on view)
     G-->>E: ciphertext
     Note over E: scope-bound address check, decrypt, write-once

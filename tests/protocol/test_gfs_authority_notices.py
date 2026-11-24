@@ -1,7 +1,9 @@
-"""§27.9 release blocker: moderation outcomes reach GFS followers — blind.
+"""§27.9 release blocker: moderation outcomes reach a global space's readers
+through its opaque channel — blind.
 
-Two moderation outcomes travel on the host's authority-signed
-``space_post_public`` relay (``space_public_authority``):
+Two moderation outcomes travel as the host's AUTHORITY items inside the
+space's channel (v_96, ``space_public_authority.channel_authority_plaintext``:
+the inner signed by the space authority, binding the content epoch):
 
 * a **removal** — a post or comment removed on the host path (a
   moderator's, an admin's or the author's own delete), with no author
@@ -10,39 +12,36 @@ Two moderation outcomes travel on the host's authority-signed
   moderation queue of a ``MODERATED`` space, relayed under the signature
   its author's household made when it submitted the item.
 
-Driven end to end with real crypto, real SQLite and the real GFS service:
+Driven end to end with real crypto and real SQLite:
 
-    SpacePublicOutbound (host: encrypt + pad + authority-sign)
-        → GfsFederationService.publish_event (real verify, real fan-out)
-            → SpacePublicInbound (follower: verify, decrypt, apply)
+    SpacePublicOutbound (host: seal into the channel, authority-signed inner)
+        → the channel frame (what a connection server sees and relays)
+            → SpacePublicInbound.handle_channel_item (reader: verify, apply)
 
 What is pinned here:
 
-* the follower applies a removal, keeps a tombstone, and a late create
-  does not bring the item back;
-* an approved post reaches the follower with its real author;
-* a forged notice — a household without the space seed, a notice for
-  another space, a member's author-signed inner dressed up as a notice —
-  changes nothing, and the GFS itself refuses the unsigned one;
-* the GFS sees the SAME event type and the SAME cleartext keys as for any
-  post, a ciphertext in the same size bucket as a short post, and never the
-  item id, the author, the moderator, or the content.
+* the reader applies a removal, keeps a tombstone, and a late create does
+  not bring the item back;
+* an approved post reaches the reader with its real author;
+* a forged item — one signed without the space seed, one for another space,
+  a member's author-signed inner dressed up as a notice — changes nothing;
+* what the server sees is the generic channel frame: one ciphertext in the
+  same size bucket as a short post, never the item id, the author, the
+  moderator, or the content.
+
+(Before v_96 this rode the space-keyed ``space_post_public`` relay and the
+GFS verified the authority signature itself; the channel's server sees only
+ciphertext under the channel writer key, so the reader's check is the gate.)
 """
 
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-    strip_authority_sig_fields,
-)
 from socialhome.crypto import (
     derive_instance_id,
     derive_user_id,
@@ -56,6 +55,7 @@ from socialhome.domain.events import (
     SpaceModerationRejected,
     SpacePostCreated,
 )
+from socialhome.domain.gfs_channel import CHANNEL_FRAME_KEYS
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
     JoinMode,
@@ -70,7 +70,6 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
     AuthorityRemoval,
-    pad_json_object,
 )
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -78,9 +77,6 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.federation.pending_parent_buffer import PendingParentBuffer
-from socialhome.global_server.domain import ClientInstance, GlobalSpace
-from socialhome.global_server.federation import GfsFederationService
-from socialhome.global_server.repositories import SqliteGfsFederationRepo
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
@@ -93,16 +89,12 @@ from socialhome.services.gfs_member_publish_service import (
 )
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_author import build_signed_author_inner
+from socialhome.services.space_public_authority import channel_authority_plaintext
 from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_public_outbound import SpacePublicOutbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 
 pytestmark = pytest.mark.security
-
-_GFS_MIGRATIONS = (
-    Path(__file__).resolve().parent.parent.parent
-    / "socialhome/global_server/migrations"
-)
 
 SPACE_ID = "sp-moderated-distinctive"
 #: The host household: its instance id is its key's fingerprint, as the
@@ -142,29 +134,29 @@ class _PeerKeys:
         return True
 
 
-class _ToGfs:
-    """The host's GFS connection, short-circuited onto the real GFS service
-    (the HTTP body itself is pinned by ``test_gfs_payload_minimization``)."""
+CHANNEL_ID = "c" * 32
+
+
+class _Channel:
+    """The host's channel service, recording what goes into the channel as
+    the frame a connection server relays (``CHANNEL_FRAME_KEYS``)."""
 
     def __init__(self) -> None:
-        self.svc: GfsFederationService | None = None
-        self.payloads: list[tuple[str, dict]] = []
+        self.frames: list[dict] = []
 
-    async def publish_space_event(
-        self, *, space_id, event_type, payload, skip=None, compressed_payloads=None
-    ) -> int:
-        self.payloads.append((event_type, payload))
-        assert self.svc is not None
-        return len(await self.svc.publish_event(space_id, event_type, payload))
+    async def has_channel(self, space_id: str) -> bool:
+        return space_id == SPACE_ID
 
-
-class _Ws:
-    def __init__(self) -> None:
-        self.sent: list[tuple[str, dict]] = []
-
-    async def send(self, instance_id: str, frame: dict) -> bool:
-        self.sent.append((instance_id, frame))
-        return True
+    async def publish_current(self, space_id: str, epoch: int, ct: str) -> int:
+        self.frames.append(
+            {
+                "channel_id": CHANNEL_ID,
+                "event_type": "space_item",
+                "epoch": epoch,
+                "payload": ct,
+            }
+        )
+        return 1
 
 
 def _space(space_kp) -> Space:
@@ -218,50 +210,14 @@ async def world(tmp_dir):
     )
     certs.attach_federation(_PeerKeys({member_iid: member_kp.public_key}))
     hbus = EventBus()
-    to_gfs = _ToGfs()
+    channel = _Channel()
     outbound = SpacePublicOutbound(
-        bus=hbus,
-        space_repo=hspaces,
-        space_crypto=hcrypto,
-        user_repo=husers,
-        gfs_service=to_gfs,
+        bus=hbus, space_repo=hspaces, space_crypto=hcrypto, user_repo=husers
     )
-    outbound.attach_identity(
-        own_instance_id=HOST,
-        own_instance_public_key=host_kp.public_key,
-        own_identity_seed=host_kp.private_key,
-    )
+    outbound.attach_identity(own_instance_id=HOST)
     outbound.attach_writer_certs(certs)
+    outbound.attach_channels(channel)  # type: ignore[arg-type]
     outbound.wire()
-
-    # ── GFS: real verify + fan-out ──────────────────────────────────────
-    gdb = AsyncDatabase(
-        tmp_dir / "gfs.db", migrations_dir=_GFS_MIGRATIONS, batch_timeout_ms=10
-    )
-    await gdb.startup()
-    grepo = SqliteGfsFederationRepo(gdb)
-    for iid in (HOST, FOLLOWER):
-        await grepo.upsert_instance(
-            ClientInstance(
-                instance_id=iid,
-                display_name=iid,
-                public_key=generate_identity_keypair().public_key.hex(),
-                status="active",
-                auto_accept=True,
-            )
-        )
-    await grepo.upsert_space(
-        GlobalSpace(
-            space_id=SPACE_ID,
-            owning_instance=HOST,
-            name="Reviewed",
-            status="active",
-            identity_public_key=space_kp.public_key.hex(),
-        )
-    )
-    await grepo.add_subscriber(space_id=SPACE_ID, instance_id=FOLLOWER)
-    ws = _Ws()
-    to_gfs.svc = GfsFederationService(grepo, ws_registry=ws)
 
     # ── Follower: mirrored space, the content key, the real consumer ────
     (tmp_dir / "follower").mkdir()
@@ -285,6 +241,15 @@ async def world(tmp_dir):
         space_post_repo=fposts,
     )
     inbound.attach_identity(own_instance_id=FOLLOWER)
+    inbound.attach_writer_certs(
+        SpaceWriterCertService(
+            space_repo=fspaces,
+            remote_member_repo=_Seats({}),
+            space_key_repo=SqliteSpaceKeyRepo(fdb),
+            own_instance_id=FOLLOWER,
+            own_identity_pk=generate_identity_keypair().public_key,
+        )
+    )
     # An item (a removal included) that overtakes its post waits for it.
     pending = PendingParentBuffer()
     pending.attach_bus(fbus)
@@ -297,254 +262,43 @@ async def world(tmp_dir):
         member_user=member_user,
         member_iid=member_iid,
         member_kp=member_kp,
-        to_gfs=to_gfs,
-        ws=ws,
+        channel=channel,
         inbound=inbound,
         posts=fposts,
         crypto=hcrypto,
         pending=pending,
     )
-    for db in (hdb, gdb, fdb):
+    for db in (hdb, fdb):
         await db.shutdown()
 
 
+async def _deliver(world, frame: dict) -> None:
+    await world.inbound.handle_channel_item(
+        SPACE_ID, epoch=frame["epoch"], payload=frame["payload"]
+    )
+
+
 async def _deliver_last(world) -> dict:
-    """Hand the GFS's last fan-out frame to the follower; return it."""
-    target, frame = world.ws.sent[-1]
-    assert target == FOLLOWER
-    await world.inbound.handle(frame)
+    """Hand the channel's last frame to the reader; return it."""
+    frame = world.channel.frames[-1]
+    await _deliver(world, frame)
     return frame
 
 
 def _assert_blind(frame: dict, *secrets: str) -> None:
-    assert set(frame) == {"type", "space_id", "event_type", "payload"}
-    # The same event type as any post: the GFS cannot tell a removal or an
-    # approval from a post.
-    assert frame["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    assert set(frame["payload"]) == {
-        "space_id",
-        "epoch",
-        "encrypted_payload",
-        "authority_sig",
-        "authority_sig_suite",
-    }
+    # The generic channel frame: the server cannot tell a removal or an
+    # approval from any member's item.
+    assert set(frame) == CHANNEL_FRAME_KEYS
+    assert frame["event_type"] == "space_item"
     blob = json.dumps(frame)
     for secret in secrets:
         assert secret not in blob, f"leaked to the GFS: {secret!r}"
 
 
-def _host_post(world, post_id: str = "post-host-1") -> Post:
+def _queued_post(world, post_id: str | None = None) -> Post:
     return Post(
-        id=post_id,
-        author=world.host_user,
-        type=PostType.TEXT,
-        content="short",
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
-    )
-
-
-async def test_a_moderator_removal_reaches_the_follower_blind(world):
-    await world.host_bus.publish(
-        SpacePostCreated(post=_host_post(world), space_id=SPACE_ID)
-    )
-    create_frame = await _deliver_last(world)
-    assert (await world.posts.get("post-host-1"))[1].deleted is False
-
-    await world.host_bus.publish(
-        PostDeleted(
-            post_id="post-host-1",
-            space_id=SPACE_ID,
-            actor_user_id=MODERATOR_ID,
-            author_user_id=world.host_user,
-        )
-    )
-    removal_frame = await _deliver_last(world)
-    _assert_blind(removal_frame, "post-host-1", MODERATOR_ID, world.host_user)
-    # A removal is padded into the same size bucket as a short post.
-    assert len(removal_frame["payload"]["encrypted_payload"]) == len(
-        create_frame["payload"]["encrypted_payload"]
-    )
-    _space, row = await world.posts.get("post-host-1")
-    assert row.deleted
-
-    # The create arrives again (a second GFS, a retry): still removed.
-    await world.inbound.handle(create_frame)
-    assert (await world.posts.get("post-host-1"))[1].deleted
-
-
-async def test_a_removal_that_overtakes_its_create_leaves_a_tombstone(world):
-    late = mint_owner_bound_id(
-        SPACE_POST_KIND, space_id=SPACE_ID, owner_user_id=world.host_user
-    )
-    await world.host_bus.publish(
-        SpacePostCreated(post=_host_post(world, late), space_id=SPACE_ID)
-    )
-    create_frame = world.ws.sent[-1][1]
-    await world.host_bus.publish(
-        PostDeleted(post_id=late, space_id=SPACE_ID, author_user_id=world.host_user)
-    )
-    await _deliver_last(world)  # removal first
-    await world.inbound.handle(create_frame)  # then the create
-    _space, row = await world.posts.get(late)
-    assert row.deleted
-
-
-async def test_a_comment_removal_reaches_the_follower(world):
-    await world.host_bus.publish(
-        SpacePostCreated(post=_host_post(world), space_id=SPACE_ID)
-    )
-    await _deliver_last(world)
-    await world.posts.add_comment(
-        Comment(
-            id="comment-distinctive-1",
-            post_id="post-host-1",
-            author=world.member_user,
-            type=CommentType.TEXT,
-            content="a comment",
-            created_at=datetime(2026, 6, 10, tzinfo=UTC),
-        ),
-        space_id=SPACE_ID,
-    )
-    await world.host_bus.publish(
-        CommentDeleted(
-            post_id="post-host-1",
-            comment_id="comment-distinctive-1",
-            space_id=SPACE_ID,
-            actor_user_id=MODERATOR_ID,
-            author_user_id=world.member_user,
-        )
-    )
-    frame = await _deliver_last(world)
-    _assert_blind(frame, "comment-distinctive-1", MODERATOR_ID, world.member_user)
-    assert (await world.posts.get_comment("comment-distinctive-1")).deleted
-
-
-async def test_a_comment_removal_that_overtakes_its_post_still_removes(world):
-    """The removal is held until the post lands, then leaves the tombstone —
-    so the comment, arriving after both, never shows."""
-    late = mint_owner_bound_id(
-        SPACE_POST_KIND, space_id=SPACE_ID, owner_user_id=world.host_user
-    )
-    cid = mint_owner_bound_id(
-        SPACE_COMMENT_KIND, space_id=SPACE_ID, owner_user_id=world.member_user
-    )
-    await world.host_bus.publish(
-        SpacePostCreated(post=_host_post(world, late), space_id=SPACE_ID)
-    )
-    create_frame = world.ws.sent[-1][1]
-    await world.host_bus.publish(
-        CommentDeleted(
-            post_id=late,
-            comment_id=cid,
-            space_id=SPACE_ID,
-            actor_user_id=MODERATOR_ID,
-            author_user_id=world.member_user,
-        )
-    )
-    await _deliver_last(world)  # the comment removal first
-    assert len(world.pending) == 1
-    assert await world.posts.get_comment(cid) is None
-    await world.inbound.handle(create_frame)  # then the post
-    assert len(world.pending) == 0
-    tombstone = await world.posts.get_comment(cid)
-    assert tombstone is not None and tombstone.deleted
-    # The comment itself, arriving last, is a duplicate of the tombstone.
-    assert not await world.posts.add_comment(
-        Comment(
-            id=cid,
-            post_id=late,
-            author=world.member_user,
-            type=CommentType.TEXT,
-            content="back?",
-            created_at=datetime(2026, 6, 10, tzinfo=UTC),
-        ),
-        space_id=SPACE_ID,
-    )
-    assert (await world.posts.get_comment(cid)).deleted
-
-
-async def _forged_envelope(world, inner: dict, *, seed: bytes) -> dict:
-    epoch, ct = await world.crypto.encrypt(SPACE_ID, pad_json_object(inner))
-    envelope = {"space_id": SPACE_ID, "epoch": epoch, "encrypted_payload": ct}
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=SPACE_ID,
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=seed,
-        )
-    )
-    return envelope
-
-
-async def test_a_removal_from_a_household_without_the_seed_is_refused(world):
-    """It holds the content key (a member) but not the space seed: the GFS
-    refuses to relay it, and a follower handed it anyway ignores it."""
-    await world.host_bus.publish(
-        SpacePostCreated(post=_host_post(world), space_id=SPACE_ID)
-    )
-    await _deliver_last(world)
-    removal = AuthorityRemoval(
-        space_id=SPACE_ID, target="post", item_id="post-host-1", post_id="post-host-1"
-    ).to_inner()
-    forged = await _forged_envelope(
-        world, removal, seed=generate_space_keypair().private_key
-    )
-    with pytest.raises(PermissionError):
-        await world.to_gfs.svc.publish_event(
-            SPACE_ID, AUTHORITY_EVENT_SPACE_POST_PUBLIC, forged
-        )
-    await world.inbound.handle(
-        {
-            "type": "relay",
-            "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            "payload": forged,
-        }
-    )
-    assert not (await world.posts.get("post-host-1"))[1].deleted
-
-
-@pytest.mark.parametrize("case", ["other_space", "author_signed"])
-async def test_a_misdirected_or_author_signed_notice_changes_nothing(world, case):
-    """Even under a VALID authority signature: a notice naming another space,
-    or an inner carrying an author signature (always read as a post) does
-    not remove anything."""
-    await world.host_bus.publish(
-        SpacePostCreated(post=_host_post(world), space_id=SPACE_ID)
-    )
-    await _deliver_last(world)
-    inner = {
-        AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL,
-        "space_id": SPACE_ID,
-        "target": "post",
-        "item_id": "post-host-1",
-        "post_id": "post-host-1",
-    }
-    if case == "other_space":
-        inner["space_id"] = "sp-elsewhere"
-    else:
-        inner["author_sig"] = "A" * 86
-    envelope = await _forged_envelope(world, inner, seed=world.space_kp.private_key)
-    await world.inbound.handle(
-        {
-            "type": "relay",
-            "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            "payload": envelope,
-        }
-    )
-    assert not (await world.posts.get("post-host-1"))[1].deleted
-
-
-def test_a_member_space_item_can_never_carry_a_removal():
-    """The member relay names only member item types: a ``space_item`` whose
-    real type is an authority kind is refused before anything else."""
-    pt = build_item_plaintext(AUTHORITY_KIND_REMOVAL, {"item_id": "post-host-1"})
-    assert parse_item_plaintext(pt) is None
-
-
-def _queued_post(world) -> Post:
-    return Post(
-        id=mint_owner_bound_id(
+        id=post_id
+        or mint_owner_bound_id(
             SPACE_POST_KIND, space_id=SPACE_ID, owner_user_id=world.member_user
         ),
         author=world.member_user,
@@ -566,12 +320,11 @@ def _submitters_copy(world, post: Post) -> dict:
     )
 
 
-async def test_an_approved_moderated_post_reaches_the_follower_blind(world):
-    """A plain member of a MODERATED space: the host applied the approved
-    queue item (its own copy, as the submitter's, with the signed copy the
-    member attached at submission) and relays it. The follower shows it
-    under the real author — proven by the author's own signature."""
-    post = _queued_post(world)
+async def _create(world, post_id: str | None = None) -> tuple[Post, dict]:
+    """A member's post released from the moderation queue on the host: the
+    host puts it into the channel as an approved-post authority item.
+    Returns the post and its channel frame (not yet delivered)."""
+    post = _queued_post(world, post_id)
     await world.host_bus.publish(
         SpacePostCreated(
             post=post,
@@ -580,7 +333,203 @@ async def test_an_approved_moderated_post_reaches_the_follower_blind(world):
             public_relay=_submitters_copy(world, post),
         )
     )
+    return post, world.channel.frames[-1]
+
+
+async def test_a_moderator_removal_reaches_the_follower_blind(world):
+    post, create_frame = await _create(world)
+    await _deliver(world, create_frame)
+    assert (await world.posts.get(post.id))[1].deleted is False
+
+    await world.host_bus.publish(
+        PostDeleted(
+            post_id=post.id,
+            space_id=SPACE_ID,
+            actor_user_id=MODERATOR_ID,
+            author_user_id=world.member_user,
+        )
+    )
+    removal_frame = await _deliver_last(world)
+    _assert_blind(removal_frame, post.id, MODERATOR_ID, world.member_user)
+    # A removal is padded into the same size bucket as any short member item
+    # on the channel (a reaction, a one-line comment).
+    _epoch, short_item = await world.crypto.encrypt(
+        SPACE_ID,
+        build_item_plaintext("reaction_add", {"emoji": "x", "post_id": post.id}),
+    )
+    assert len(removal_frame["payload"]) == len(short_item)
+    _space, row = await world.posts.get(post.id)
+    assert row.deleted
+
+    # The create arrives again (a second server, a retry): still removed.
+    await _deliver(world, create_frame)
+    assert (await world.posts.get(post.id))[1].deleted
+
+
+async def test_a_removal_that_overtakes_its_create_leaves_a_tombstone(world):
+    post, create_frame = await _create(world)
+    await world.host_bus.publish(
+        PostDeleted(
+            post_id=post.id, space_id=SPACE_ID, author_user_id=world.member_user
+        )
+    )
+    await _deliver_last(world)  # removal first
+    await _deliver(world, create_frame)  # then the create
+    _space, row = await world.posts.get(post.id)
+    assert row.deleted
+
+
+async def test_a_comment_removal_reaches_the_follower(world):
+    post, create_frame = await _create(world)
+    await _deliver(world, create_frame)
+    await world.posts.add_comment(
+        Comment(
+            id="comment-distinctive-1",
+            post_id=post.id,
+            author=world.member_user,
+            type=CommentType.TEXT,
+            content="a comment",
+            created_at=datetime(2026, 6, 10, tzinfo=UTC),
+        ),
+        space_id=SPACE_ID,
+    )
+    await world.host_bus.publish(
+        CommentDeleted(
+            post_id=post.id,
+            comment_id="comment-distinctive-1",
+            space_id=SPACE_ID,
+            actor_user_id=MODERATOR_ID,
+            author_user_id=world.member_user,
+        )
+    )
     frame = await _deliver_last(world)
+    _assert_blind(frame, "comment-distinctive-1", MODERATOR_ID, world.member_user)
+    assert (await world.posts.get_comment("comment-distinctive-1")).deleted
+
+
+async def test_a_comment_removal_that_overtakes_its_post_still_removes(world):
+    """The removal is held until the post lands, then leaves the tombstone —
+    so the comment, arriving after both, never shows."""
+    cid = mint_owner_bound_id(
+        SPACE_COMMENT_KIND, space_id=SPACE_ID, owner_user_id=world.member_user
+    )
+    post, create_frame = await _create(world)
+    await world.host_bus.publish(
+        CommentDeleted(
+            post_id=post.id,
+            comment_id=cid,
+            space_id=SPACE_ID,
+            actor_user_id=MODERATOR_ID,
+            author_user_id=world.member_user,
+        )
+    )
+    await _deliver_last(world)  # the comment removal first
+    assert len(world.pending) == 1
+    assert await world.posts.get_comment(cid) is None
+    await _deliver(world, create_frame)  # then the post
+    assert len(world.pending) == 0
+    tombstone = await world.posts.get_comment(cid)
+    assert tombstone is not None and tombstone.deleted
+    # The comment itself, arriving last, is a duplicate of the tombstone.
+    assert not await world.posts.add_comment(
+        Comment(
+            id=cid,
+            post_id=post.id,
+            author=world.member_user,
+            type=CommentType.TEXT,
+            content="back?",
+            created_at=datetime(2026, 6, 10, tzinfo=UTC),
+        ),
+        space_id=SPACE_ID,
+    )
+    assert (await world.posts.get_comment(cid)).deleted
+
+
+async def _forged_item(world, inner: dict, *, seed: bytes) -> dict:
+    """A channel authority item sealed under the real content key, signed
+    with *seed* (the space seed, or a forger's)."""
+    epoch = await world.crypto.get_current_epoch(SPACE_ID)
+    plain = channel_authority_plaintext(
+        inner, space_id=SPACE_ID, epoch=epoch, space_seed=seed
+    )
+    sealed_epoch, ct = await world.crypto.encrypt(SPACE_ID, plain)
+    return {"epoch": sealed_epoch, "payload": ct}
+
+
+async def test_a_removal_from_a_household_without_the_seed_is_refused(world):
+    """It holds the content key (a member) but not the space seed: a reader
+    handed its removal ignores it."""
+    post, create_frame = await _create(world)
+    await _deliver(world, create_frame)
+    removal = AuthorityRemoval(
+        space_id=SPACE_ID, target="post", item_id=post.id, post_id=post.id
+    ).to_inner()
+    forged = await _forged_item(
+        world, removal, seed=generate_space_keypair().private_key
+    )
+    await _deliver(world, forged)
+    assert not (await world.posts.get(post.id))[1].deleted
+
+
+@pytest.mark.parametrize("case", ["other_space", "author_signed"])
+async def test_a_misdirected_or_author_signed_notice_changes_nothing(world, case):
+    """Even under a VALID authority signature: a notice naming another space,
+    or an inner carrying an author signature (always read as a post) does
+    not remove anything."""
+    post, create_frame = await _create(world)
+    await _deliver(world, create_frame)
+    inner = {
+        AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL,
+        "space_id": SPACE_ID,
+        "target": "post",
+        "item_id": post.id,
+        "post_id": post.id,
+    }
+    if case == "other_space":
+        inner["space_id"] = "sp-elsewhere"
+    else:
+        inner["author_sig"] = "A" * 86
+    await _deliver(
+        world, await _forged_item(world, inner, seed=world.space_kp.private_key)
+    )
+    assert not (await world.posts.get(post.id))[1].deleted
+
+
+async def test_an_authority_item_signed_for_another_epoch_is_refused(world):
+    """The authority signature binds the content epoch the item is sealed
+    under: a removal signed for another epoch changes nothing."""
+    post, create_frame = await _create(world)
+    await _deliver(world, create_frame)
+    removal = AuthorityRemoval(
+        space_id=SPACE_ID, target="post", item_id=post.id, post_id=post.id
+    ).to_inner()
+    epoch = await world.crypto.get_current_epoch(SPACE_ID)
+    plain = channel_authority_plaintext(
+        removal,
+        space_id=SPACE_ID,
+        epoch=epoch + 7,
+        space_seed=world.space_kp.private_key,
+    )
+    sealed_epoch, ct = await world.crypto.encrypt(SPACE_ID, plain)
+    await _deliver(world, {"epoch": sealed_epoch, "payload": ct})
+    assert not (await world.posts.get(post.id))[1].deleted
+
+
+def test_a_member_space_item_can_never_carry_a_removal():
+    """The member relay names only member item types: a ``space_item`` whose
+    real type is an authority kind is refused before anything else."""
+    pt = build_item_plaintext(AUTHORITY_KIND_REMOVAL, {"item_id": "post-host-1"})
+    assert parse_item_plaintext(pt) is None
+
+
+async def test_an_approved_moderated_post_reaches_the_follower_blind(world):
+    """A plain member of a MODERATED space: the host applied the approved
+    queue item (its own copy, as the submitter's, with the signed copy the
+    member attached at submission) and puts it into the channel. The reader
+    shows it under the real author — proven by the author's own
+    signature."""
+    post, frame = await _create(world)
+    await _deliver(world, frame)
     _assert_blind(
         frame, post.id, world.member_user, MEMBER_USERNAME, MODERATOR_ID, POST_TEXT
     )
@@ -592,23 +541,18 @@ async def test_an_approved_moderated_post_reaches_the_follower_blind(world):
 
 async def test_a_seed_holder_cannot_attribute_an_approved_post_on_its_own(world):
     """Without the author's signed copy the host relays nothing — and an
-    unsigned 'approved post' a seed holder forges is dropped by followers."""
+    unsigned 'approved post' a seed holder forges is dropped by readers."""
     post = _queued_post(world)
     await world.host_bus.publish(
         SpacePostCreated(post=post, space_id=SPACE_ID, approved_by=MODERATOR_ID)
     )
-    assert world.to_gfs.payloads == []
+    assert world.channel.frames == []
     forged = {
         k: v for k, v in _submitters_copy(world, post).items() if k != "author_sig"
     }
     forged[AUTHORITY_KIND_FIELD] = AUTHORITY_KIND_APPROVED_POST
-    envelope = await _forged_envelope(world, forged, seed=world.space_kp.private_key)
-    await world.inbound.handle(
-        {
-            "type": "relay",
-            "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            "payload": envelope,
-        }
+    await _deliver(
+        world, await _forged_item(world, forged, seed=world.space_kp.private_key)
     )
     assert await world.posts.get(post.id) is None
 
@@ -633,6 +577,31 @@ async def test_an_unapproved_or_rejected_post_never_reaches_the_gfs(world):
             )
         )
     )
-    assert world.to_gfs.payloads == []
-    assert world.ws.sent == []
+    assert world.channel.frames == []
     assert await world.posts.get(post.id) is None
+
+
+async def test_a_space_without_a_channel_sends_nothing(world):
+    """v_96 — no channel, no GFS path at all: the host relays nothing (the
+    space-keyed relay is gone); members are reached by federation."""
+
+    class _NoChannel(_Channel):
+        async def has_channel(self, space_id: str) -> bool:
+            return False
+
+    world.channel.__class__ = _NoChannel
+    post = _queued_post(world)
+    await world.host_bus.publish(
+        SpacePostCreated(
+            post=post,
+            space_id=SPACE_ID,
+            approved_by=MODERATOR_ID,
+            public_relay=_submitters_copy(world, post),
+        )
+    )
+    await world.host_bus.publish(
+        PostDeleted(
+            post_id=post.id, space_id=SPACE_ID, author_user_id=world.member_user
+        )
+    )
+    assert world.channel.frames == []

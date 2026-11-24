@@ -25,9 +25,10 @@ household, and two paired households signal their WebRTC DataChannel
 with federation events inside their sealed envelopes, which a GFS may carry
 only as ciphertext (see [push-relay.md](protocol/push-relay.md)). The GFS sees
 routing metadata only — never plaintext content, and (since the
-anonymous relay) not even which household relayed a public/global space
-event: `/gfs/publish` is authorized purely by the space-authority
-signature inside the opaque payload.
+anonymous relay) not even which household relayed a space item: since
+v_96 a space's content reaches a GFS only through the space's opaque
+channel (a channel id, never the space; `publish-anon` names no
+household).
 
 For public highlights the GFS adds a **lazy-relay fallback tier**: a guest browser
 always tries a direct WebRTC DataChannel to the author's SH first, and
@@ -847,10 +848,10 @@ cleared after each pass — so the backoff is never skipped by itself. `Federati
 refuses new ones; app cleanup runs it before the routed handler and the
 transport stop. What the budget does not bridge is healed by §25.6 sync.
 
-**GFS publishes are retried in memory.** `POST /gfs/publish`
-(`GfsConnectionService.publish_space_event`, the identity-free relay of a
-public/global space event) is not a peer envelope, so the outbox does not
-carry it. A *transient* failure — transport error, timeout, 408, 429, 5xx —
+**GFS publishes are retried in memory.** An anonymous GFS publish (the
+opaque channel's requests since v_96; the space-keyed `POST /gfs/publish`
+it was built for has no household sender any more) is not a peer
+envelope, so the outbox does not carry it. A *transient* failure — transport error, timeout, 408, 429, 5xx —
 goes to `services/gfs_publish_retry.py`'s `GfsPublishRetryQueue`: a
 per-connection FIFO retried with backoff (5 s, 30 s, 2 min, 10 min — four
 retries, ~13 minutes), honouring a 429's delta-seconds `Retry-After` as the

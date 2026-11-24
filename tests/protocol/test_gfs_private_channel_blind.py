@@ -313,13 +313,10 @@ def _node(h, *, seed, session, conn, peers, seats, link, owner_id):
     )
     channels.attach_federation(_Federation())  # type: ignore[arg-type]
     member = GfsMemberPublishService(
-        gfs=gfs,  # type: ignore[arg-type]
         conn_repo=_Conns(conn),  # type: ignore[arg-type]
         space_repo=spaces,  # type: ignore[arg-type]
         space_crypto=_Crypto(),  # type: ignore[arg-type]
         writer_certs=certs,  # type: ignore[arg-type]
-        own_instance_id=h.instance_id,
-        own_identity_seed=h.seed,
     )
     member.attach_channels(channels)
     return SimpleNamespace(h=h, spaces=spaces, channels=channels, member=member)

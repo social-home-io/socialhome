@@ -297,7 +297,6 @@ _SIGNING_MODULES = (
     "services/space_public_author.py",
     "services/space_item_author.py",
     "services/gfs_connection_service.py",
-    "services/gfs_member_publish_service.py",
     "services/moment_public_service.py",
     "services/highlight_publication_service.py",
     "services/highlight_signaling_handler.py",

@@ -113,7 +113,7 @@ async def env(tmp_dir):
         PostReactionChanged,
     ):
         bus.subscribe(cls, events.append)
-    applier = SpaceItemInbound(bus=bus, space_repo=spaces, space_post_repo=posts)
+    applier = SpaceItemInbound(bus=bus, space_post_repo=posts)
     post_id = mint_owner_bound_id(SPACE_POST_KIND, space_id=SPACE, owner_user_id=AUTHOR)
     await posts.save(
         SPACE,
@@ -707,9 +707,7 @@ async def test_a_restart_does_not_let_a_queued_old_add_resurrect_a_reaction(env)
     assert await _apply(env, "reaction_add", add)
     assert await _apply(env, "reaction_remove", _react(env, "reaction_remove", "👍", 2))
     # A process restart: a fresh applier over the same database.
-    env["applier"] = SpaceItemInbound(
-        bus=EventBus(), space_repo=env["spaces"], space_post_repo=env["posts"]
-    )
+    env["applier"] = SpaceItemInbound(bus=EventBus(), space_post_repo=env["posts"])
     # Another connection server's (or the offline queue's) copy of the add.
     assert not await _apply(env, "reaction_add", add)
     assert "👍" not in await _reactions(env)

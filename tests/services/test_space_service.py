@@ -2769,7 +2769,6 @@ async def test_subscribe_public_space_adds_subscriber_member(stack):
     )
     await stack.space_svc.follow_space(fan.user_id, space.id)
 
-    assert await stack.space_svc.is_subscribed(fan.user_id, space.id) is True
     member = await stack.space_repo.get_member(space.id, fan.user_id)
     assert member is not None
     assert member.role == "subscriber"
@@ -3289,74 +3288,10 @@ async def test_ban_rotates_and_distributes_key(stack):
     )
 
 
-async def test_remove_member_reseals_key_to_gfs_subscribers(stack):
-    """REGRESSION: a rotation must also reach GFS subscribers. They aren't
-    member households (never in ``space_instances``), so the
-    ``broadcast_to_space_members`` fan-out skips them and every relayed frame
-    they get stops decrypting until the next GFS reconnect. The rotation now
-    re-runs the per-space subscriber reconcile."""
-    from unittest.mock import AsyncMock
-
-    _anna = await stack.provision_user("anna")
-    bob = await stack.provision_user("bob")
-    space = await stack.space_svc.create_space(owner_username="anna", name="S")
-    await stack.space_svc.add_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto = AsyncMock()
-    space_crypto.rotate_epoch = AsyncMock(return_value=7)
-    space_crypto.export_current_key = AsyncMock(return_value=(7, bytes(range(32))))
-    federation = AsyncMock()
-    federation.broadcast_to_space_members = AsyncMock()
-    subscriber_keys = AsyncMock()
-    stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
-    stack.space_svc._federation = federation
-
-    await stack.space_svc.remove_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto.rotate_epoch.assert_awaited_once_with(space.id)
-    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
-
-
-async def test_rotation_reseal_failure_does_not_break_removal(stack):
-    """Fail-soft: a GFS that is down must not turn a successful kick into an
-    error — the member is still removed."""
-    from unittest.mock import AsyncMock
-
-    _anna = await stack.provision_user("anna")
-    bob = await stack.provision_user("bob")
-    space = await stack.space_svc.create_space(owner_username="anna", name="S")
-    await stack.space_svc.add_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto = AsyncMock()
-    space_crypto.rotate_epoch = AsyncMock(return_value=3)
-    space_crypto.export_current_key = AsyncMock(return_value=(3, bytes(range(32))))
-    federation = AsyncMock()
-    federation.broadcast_to_space_members = AsyncMock()
-    subscriber_keys = AsyncMock()
-    subscriber_keys.reconcile_space_everywhere = AsyncMock(
-        side_effect=RuntimeError("gfs down")
-    )
-    stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
-    stack.space_svc._federation = federation
-
-    await stack.space_svc.remove_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    assert await stack.space_repo.get_member(space.id, bob.user_id) is None
-    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
-
-
-async def test_rotation_without_subscriber_outbound_attached_is_noop(stack):
-    """No GFS paired → nothing attached → rotation still completes."""
+async def test_rotation_without_a_gfs_attached_completes(stack):
+    """No GFS paired → nothing attached → rotation still completes. Since
+    v_96 there is no GFS subscriber re-seal to attach at all: followers are
+    member households and the rekey broadcast reaches them."""
     from unittest.mock import AsyncMock
 
     _anna = await stack.provision_user("anna")
@@ -3379,6 +3314,7 @@ async def test_rotation_without_subscriber_outbound_attached_is_noop(stack):
     )
 
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+    assert not hasattr(stack.space_svc, "attach_subscriber_key_outbound")
 
 
 async def test_remove_member_without_crypto_attached_is_noop(stack):
@@ -6647,95 +6583,32 @@ async def test_accept_remote_invite_kicks_mesh_catchup_sync(stack):
     )
 
 
-# ── GFS-discovered space on-ramp (mirror → subscribe) ─────────────────────
+# ── Follow / unfollow of a space hosted elsewhere ─────────────────────────
 
 
-_MIRROR_PIN = "aa" * 32
+_REMOTE_PIN = "aa" * 32
 
 
-class _FakeGfsMirror:
-    """Stand-in for :class:`GfsSpaceMirrorService` — seats a real stub row
-    (via the production helper) and records the GFS-side calls."""
+async def _seat_remote_follower(stack, user_id: str, space_id: str) -> None:
+    """A follower of a GLOBAL space hosted elsewhere: the stub row plus a
+    local ``subscriber`` seat, as the host's approval leaves them."""
+    from socialhome.services.space_service import stub_space_from_metadata
 
-    def __init__(
-        self,
-        space_repo,
-        *,
-        gfs_id: str = "gfs-1",
-        min_age: int = 0,
-        ban_user_id: str | None = None,
-        found: bool = True,
-        gfs_listed: bool = True,
-    ):
-        self._spaces = space_repo
-        self._gfs_id = gfs_id
-        self._min_age = min_age
-        self._ban_user_id = ban_user_id
-        self._found = found
-        # Mirrors ``GfsSpaceMirrorService.was_gfs_listed`` — whether a
-        # ``public_space_cache`` row proves a GFS directory advertised this
-        # space. Default True: rows this fake seats came from a GFS.
-        self._gfs_listed = gfs_listed
-        self.ensure_calls: list[str] = []
-        self.subscribes: list[tuple[str, str]] = []
-        self.unsubscribes: list[str] = []
-        # ``seat_in_grace``: a subscribe of this space is in flight.
-        self.in_grace = False
-
-    async def ensure_mirror(self, space_id):
-        from socialhome.services.space_service import stub_space_from_metadata
-
-        self.ensure_calls.append(space_id)
-        if not self._found:
-            return None
-        space = stub_space_from_metadata(
-            space_id,
-            host_instance_id="remote-host",
-            meta={
-                "name": "Remote Global",
-                "identity_public_key": _MIRROR_PIN,
-                "space_type": "global",
-                "join_mode": "invite_only",
-                # Invite-only AND readable — the two dials are independent,
-                # and this is exactly the broadcast shape a stranger
-                # subscribes to through a GFS directory.
-                "features": {"allow_subscribers": True},
-                "owner_username": "",
-                "min_age": self._min_age,
-                "category": "gaming",
-            },
-        )
-        await self._spaces.save(space)
-        # Like the real ``ensure_mirror``: remember which GFS seated it (the
-        # teardown unsubscribe targets that server only).
-        await self._spaces.set_mirror_provenance(
-            space_id, gfs_id=self._gfs_id, rotation_seq=0
-        )
-        if self._ban_user_id is not None:
-            await self._spaces.ban_member(
-                space_id, self._ban_user_id, banned_by="remote", reason="t"
-            )
-        return space, self._gfs_id
-
-    async def subscribe_to_gfs(self, space_id, gfs_id):
-        self.subscribes.append((space_id, gfs_id))
-
-    async def was_gfs_listed(self, space_id):
-        return self._gfs_listed
-
-    async def seat_in_grace(self, space_id):
-        return self.in_grace
-
-    async def unsubscribe(self, space_id):
-        self.unsubscribes.append(space_id)
-
-
-async def _seat_legacy_follower(stack, mirror, user_id: str, space_id: str) -> None:
-    """A follower row of a GFS-mirrored stub, as the legacy mirror on-ramp
-    left it (``ensure_mirror`` + a local ``subscriber`` seat). Follow no
-    longer mirrors; the teardown on unfollow still runs for such rows."""
     if await stack.space_repo.get(space_id) is None:
-        await mirror.ensure_mirror(space_id)
+        await stack.space_repo.save(
+            stub_space_from_metadata(
+                space_id,
+                host_instance_id="remote-host",
+                meta={
+                    "name": "Remote Global",
+                    "identity_public_key": _REMOTE_PIN,
+                    "space_type": "global",
+                    "join_mode": "invite_only",
+                    "features": {"allow_subscribers": True},
+                    "owner_username": "",
+                },
+            )
+        )
     await stack.space_repo.save_member(
         SpaceMember(
             space_id=space_id,
@@ -6747,178 +6620,45 @@ async def _seat_legacy_follower(stack, mirror, user_id: str, space_id: str) -> N
 
 
 async def test_follow_of_an_unknown_space_is_not_found(stack):
-    """No row, no listing, no GFS listing → 404 — and the legacy GFS
-    mirror is never asked (v_96: a follow is a join request)."""
+    """No row, no listing, no GFS listing → 404 (v_96: a follow is a join
+    request to the host, nothing is mirrored)."""
     fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
     with pytest.raises(KeyError):
         await stack.space_svc.follow_space(fan.user_id, "remote-sp")
-    assert mirror.ensure_calls == []
-    assert mirror.subscribes == []
+    assert await stack.space_repo.get("remote-sp") is None
 
 
-async def test_follow_of_a_local_space_skips_the_mirror(stack):
-    """An already-local space never triggers a GFS round-trip."""
-    await stack.provision_user("owner_m")
-    fan = await stack.provision_user("fan")
-    space = await stack.space_svc.create_space(
-        owner_username="owner_m",
-        name="P",
-        space_type=SpaceType.GLOBAL,
-        features=SpaceFeatures(allow_subscribers=True),
-    )
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-
-    await stack.space_svc.follow_space(fan.user_id, space.id)
-    assert mirror.ensure_calls == []
-    assert mirror.subscribes == []
-
-
-async def _seed_space_key(stack, space_id: str) -> None:
+async def test_unfollow_ends_the_seat_and_keeps_the_stub(stack):
+    """Unfollow is a self-leave of the read-only seat: the member row goes;
+    the space row and its content key stay (they are a member stub like
+    any other — nothing is purged and no GFS is told)."""
     from socialhome.domain.space_key import SpaceKey
     from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 
-    await SqliteSpaceKeyRepo(stack.db).save(
-        SpaceKey(space_id=space_id, epoch=1, content_key_hex="ab" * 16)
-    )
-
-
-async def test_unsubscribe_last_subscriber_purges_the_mirror(stack):
-    """Last local subscriber leaves → GFS unsubscribe + the stub row and its
-    content key are dropped."""
-    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
-
     fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
-    await _seed_space_key(stack, "remote-sp")
-
-    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == ["remote-sp"]
-    assert await stack.space_repo.get("remote-sp") is None
+    await _seat_remote_follower(stack, fan.user_id, "remote-sp")
     keys = SqliteSpaceKeyRepo(stack.db)
-    assert await keys.get_latest("remote-sp") is None
-
-
-async def test_unsubscribe_purges_the_mirror_though_the_hosts_people_stay(stack):
-    """``space_members`` may also hold the host's people, mirrored by the
-    §25.6 ``members`` sync (no ``users`` row). Our last subscriber leaving
-    still tears the mirror down: those seats are not ours."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
-    await stack.db.enqueue(
-        "INSERT INTO space_members(space_id, user_id, role)"
-        " VALUES('remote-sp', 'u-host-owner', 'owner')"
-    )
-    # Ours only: the household-wide subscription list skips the host's.
-    assert await stack.space_repo.list_subscribed_space_ids() == ["remote-sp"]
+    await keys.save(SpaceKey(space_id="remote-sp", epoch=1, content_key_hex="ab" * 16))
 
     await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
-    assert mirror.unsubscribes == ["remote-sp"]
+    assert await stack.space_repo.get_member("remote-sp", fan.user_id) is None
+    assert await stack.space_repo.get("remote-sp") is not None
+    assert await keys.get_latest("remote-sp") is not None
 
 
-async def test_the_subscription_list_counts_only_our_own_followers(stack):
-    """A mirrored host follower (members sync, no ``users`` row) is no
-    subscription of this household."""
-    await stack.provision_user("anna")
-    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
-    await stack.db.enqueue(
-        "INSERT INTO space_members(space_id, user_id, role)"
-        " VALUES(?, 'u-host-fan', 'subscriber')",
-        (space.id,),
-    )
-    assert await stack.space_repo.list_subscribed_space_ids() == []
-
-
-async def test_unsubscribe_keeps_mirror_while_a_subscribe_is_in_flight(stack):
-    """L5: another user's subscribe just took the GFS seat and has not
-    written its member row yet — no teardown pulls it out from under it."""
+async def test_unfollow_never_demotes_a_real_member(stack):
     fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
-    mirror.in_grace = True
+    await _seat_remote_follower(stack, fan.user_id, "remote-sp")
+    await stack.space_repo.set_role("remote-sp", fan.user_id, SpaceRole.MEMBER)
 
     await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
 
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("remote-sp") is not None
+    member = await stack.space_repo.get_member("remote-sp", fan.user_id)
+    assert member is not None and member.role == SpaceRole.MEMBER
 
 
-async def test_the_mirrors_post_grace_recheck_runs_the_same_teardown(stack):
-    """L3: once the seat grace has passed, the mirror asks the service to
-    tear down an unused mirror — the proven-mirror path an unsubscribe
-    takes."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
-    await stack.space_repo.delete_member("remote-sp", fan.user_id)
-
-    await stack.space_svc.release_gfs_mirror_if_unused("remote-sp")
-
-    assert mirror.unsubscribes == ["remote-sp"]
-    assert await stack.space_repo.get("remote-sp") is None
-
-
-async def test_the_mirror_teardown_waits_for_a_subscribe_in_progress(stack):
-    """L2: the teardown takes the space's subscribe lock and re-reads the
-    members inside it — a subscribe that was in progress is seen, nothing
-    is purged out from under it."""
-    fan = await stack.provision_user("fan")
-    other = await stack.provision_user("other")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
-
-    lock = stack.space_svc._mirror_lock("remote-sp")
-    await lock.acquire()  # a subscribe of `other` is in progress
-    leave = asyncio.create_task(
-        stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
-    )
-    await asyncio.sleep(0.3)  # ample time to finish, were it not waiting
-    assert not leave.done()
-    await stack.space_repo.save_member(
-        SpaceMember(
-            space_id="remote-sp",
-            user_id=other.user_id,
-            role=SpaceRole.SUBSCRIBER,
-            joined_at="2026-10-10T00:00:00+00:00",
-        )
-    )
-    lock.release()
-    await leave
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("remote-sp") is not None
-
-
-async def test_unsubscribe_keeps_mirror_while_another_member_remains(stack):
-    fan = await stack.provision_user("fan")
-    other = await stack.provision_user("other")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
-    await _seat_legacy_follower(stack, mirror, other.user_id, "remote-sp")
-    await _seed_space_key(stack, "remote-sp")
-
-    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("remote-sp") is not None
-    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
-
-    assert await SqliteSpaceKeyRepo(stack.db).get_latest("remote-sp") is not None
-
-
-async def test_unsubscribe_never_purges_an_owned_space(stack):
-    """An owned (or seed-held) space is not a mirror — never purged."""
+async def test_unfollow_of_an_owned_space_keeps_the_space(stack):
     await stack.provision_user("owner_p")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
@@ -6927,187 +6667,12 @@ async def test_unsubscribe_never_purges_an_owned_space(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
     await stack.space_svc.follow_space(fan.user_id, space.id)
 
     await stack.space_svc.unfollow_space(fan.user_id, space.id)
 
-    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get_member(space.id, fan.user_id) is None
     assert await stack.space_repo.get(space.id) is not None
-
-
-async def test_unsubscribe_leaves_a_peer_discovered_stub_alone(stack):
-    """A public/global stub learned from a **direct peer** matches every
-    structural test for a mirror (remote-owned, no seed, no members left) but
-    has nothing to do with any GFS.
-
-    Two things must therefore NOT happen: the signed, identity-bound GFS
-    unsubscribe (which would tell every paired GFS operator this household
-    had a relationship with a space they never knew about — third-party
-    metadata disclosure the user never opted into), and the purge (which
-    would destroy a space nobody asked us to forget). Only the local member
-    row goes.
-    """
-    fan = await stack.provision_user("fan")
-    # No ``public_space_cache`` row → no GFS directory ever listed this id.
-    mirror = _FakeGfsMirror(stack.space_repo, gfs_listed=False)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "peer-sp")
-
-    await stack.space_svc.unfollow_space(fan.user_id, "peer-sp")
-
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("peer-sp") is not None
-    assert await stack.space_repo.get_member("peer-sp", fan.user_id) is None
-
-
-async def test_unsubscribe_leaves_a_non_global_remote_stub_alone(stack):
-    """The mirror only ever seats ``space_type=global``; a remote PUBLIC
-    stub is some other trust path's row."""
-    from socialhome.services.space_service import stub_space_from_metadata
-
-    fan = await stack.provision_user("fan")
-    await stack.space_repo.save(
-        stub_space_from_metadata(
-            "public-sp",
-            host_instance_id="remote-host",
-            meta={
-                "name": "Peer public",
-                "identity_public_key": _MIRROR_PIN,
-                "space_type": "public",
-                "join_mode": "open",
-                "features": {"allow_subscribers": True},
-                "owner_username": "",
-            },
-        )
-    )
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "public-sp")
-
-    await stack.space_svc.unfollow_space(fan.user_id, "public-sp")
-
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("public-sp") is not None
-
-
-async def test_unsubscribe_purges_a_proven_gfs_mirror(stack):
-    """The positive case, alongside the two refusals above: a global stub a
-    GFS directory really did list is unsubscribed and purged."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo, gfs_listed=True)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
-
-    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == ["remote-sp"]
-    assert await stack.space_repo.get("remote-sp") is None
-
-
-async def test_unsubscribe_skips_the_purge_when_the_seed_is_unreadable(stack):
-    """Failing to determine whether we hold space authority must SUPPRESS
-    the purge, not permit it — the old ``except RuntimeError: pass`` failed
-    open on a destructive path."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await _seat_legacy_follower(stack, mirror, fan.user_id, "remote-sp")
-
-    async def _boom(space_id):
-        raise RuntimeError("space seed access requires a key_manager")
-
-    stack.space_repo.get_space_seed = _boom
-
-    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("remote-sp") is not None
-
-
-async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
-    """A GFS that refuses / is down must never block the local unsubscribe —
-    exercised against the REAL mirror service so the swallow is verified."""
-    from socialhome.domain.federation import GfsConnection
-    from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
-    from socialhome.services.gfs_connection_service import GfsConnectionError
-    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
-
-    fan = await stack.provision_user("fan")
-    conn_repo = SqliteGfsConnectionRepo(stack.db)
-    await conn_repo.save(
-        GfsConnection(
-            id="gfs-1",
-            gfs_instance_id="inst-1",
-            display_name="G",
-            public_key="pk",
-            inbox_url="https://gfs.test",
-            status="active",
-            paired_at="2025-01-01T00:00:00+00:00",
-        )
-    )
-
-    class _DownGfs:
-        def __init__(self):
-            self.calls = []
-
-        async def unsubscribe_from_gfs_space(self, space_id, gfs_id):
-            self.calls.append((space_id, gfs_id))
-            raise GfsConnectionError("down")
-
-    from socialhome.domain.public_space import PublicSpaceListing
-    from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
-
-    public_repo = SqlitePublicSpaceRepo(stack.db)
-    # The directory row is what proves this stub is a GFS mirror.
-    await public_repo.upsert(
-        PublicSpaceListing(
-            space_id="remote-sp",
-            instance_id="remote-host",
-            name="Remote Global",
-            description=None,
-            emoji=None,
-            lat=None,
-            lon=None,
-            radius_km=None,
-            member_count=1,
-        )
-    )
-    down = _DownGfs()
-    from socialhome.repositories.gfs_space_seat_repo import (
-        GfsSpaceSeat,
-        SqliteGfsSpaceSeatRepo,
-    )
-
-    seats = SqliteGfsSpaceSeatRepo(stack.db)
-    real_mirror = GfsSpaceMirrorService(
-        space_repo=stack.space_repo,
-        gfs_connection_repo=conn_repo,
-        gfs_connection_service=down,
-        seat_repo=seats,
-        public_space_repo=public_repo,
-    )
-    # Seat the stub the way ensure_mirror would, then subscribe locally.
-    seeder = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(seeder)
-    await _seat_legacy_follower(stack, seeder, fan.user_id, "remote-sp")
-    # What ``take_seat`` records for the GFS subscribe the fake stood in for.
-    await seats.record(
-        GfsSpaceSeat(
-            space_id="remote-sp",
-            gfs_instance_id="inst-1",
-            gfs_connection_id="gfs-1",
-            gfs_public_key="pk",
-            gfs_inbox_url="https://gfs.test",
-        )
-    )
-    stack.space_svc.attach_gfs_space_mirror(real_mirror)
-
-    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
-
-    assert down.calls == [("remote-sp", "gfs-1")]
-    assert await stack.space_repo.get("remote-sp") is None
 
 
 # ── Public-tier content key (epoch 0) at creation / tier change ────────
@@ -12561,12 +12126,6 @@ async def _removal_with_member_gfs(stack, member_gfs):
             order.append("rekey")
 
     federation.broadcast_to_space_members = AsyncMock(side_effect=_broadcast)
-    subscriber_keys = AsyncMock()
-
-    async def _reseal(space_id):
-        order.append("reseal")
-
-    subscriber_keys.reconcile_space_everywhere = AsyncMock(side_effect=_reseal)
 
     async def _announce(space_id):
         order.append("notice")
@@ -12581,7 +12140,6 @@ async def _removal_with_member_gfs(stack, member_gfs):
     gfs.announce_epoch = AsyncMock(side_effect=_announce)
     gfs.channel_rekey_sent = AsyncMock(side_effect=_seat)
     stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
     stack.space_svc.attach_member_gfs(gfs)
     stack.space_svc._federation = federation
     await stack.space_svc.remove_member(
@@ -12590,13 +12148,13 @@ async def _removal_with_member_gfs(stack, member_gfs):
     return space, bob, order, gfs
 
 
-async def test_a_rotation_sends_the_gfs_epoch_notice_before_rekey_and_reseal(stack):
+async def test_a_rotation_sends_the_gfs_epoch_notice_before_the_rekey(stack):
     space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
     gfs.announce_epoch.assert_awaited_once_with(space.id)
     # A rotating admin's own channel seat is renewed once its rekey went
     # out — when the members renew theirs — never right after the notice.
     gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
-    assert order == ["notice", "rekey", "own seat", "reseal"]
+    assert order == ["notice", "rekey", "own seat"]
 
 
 async def test_a_failing_own_seat_renewal_never_breaks_the_rotation(stack):
@@ -12605,14 +12163,14 @@ async def test_a_failing_own_seat_renewal_never_breaks_the_rotation(stack):
     order.clear()
     await stack.space_svc._rotate_and_distribute_space_key(space.id)
     gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
-    assert order == ["notice", "rekey", "reseal"]
+    assert order == ["notice", "rekey"]
 
 
 async def test_a_failing_epoch_notice_never_breaks_the_rotation(stack):
     space, bob, order, _gfs = await _removal_with_member_gfs(
         stack, RuntimeError("gfs down")
     )
-    assert order == ["notice", "rekey", "own seat", "reseal"]
+    assert order == ["notice", "rekey", "own seat"]
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
 
 

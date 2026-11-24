@@ -32,7 +32,11 @@ import orjson
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from socialhome.authority_sig import sign_authority_event, strip_authority_sig_fields
+from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+    sign_authority_event,
+    strip_authority_sig_fields,
+)
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
@@ -55,7 +59,6 @@ from socialhome.domain.ws_binary_frame import encode_binary_frame
 from socialhome.services.gfs_member_publish_service import build_item_plaintext
 from socialhome.services.space_item_author import build_signed_item_inner
 from socialhome.services.space_public_author import build_signed_author_inner
-from socialhome.services.space_public_outbound import AUTHORITY_EVENT_SPACE_POST_PUBLIC
 from socialhome.services.space_writer_cert_service import WRITER_CERT_FIELD
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 

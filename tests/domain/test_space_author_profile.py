@@ -1,4 +1,4 @@
-"""Author profile content for a space's GFS followers (v_60) — pure."""
+"""Author profile content for a space's readers (v_60) — pure."""
 
 from __future__ import annotations
 
@@ -11,9 +11,6 @@ import pytest
 from PIL import Image
 
 from socialhome.domain.space_author_profile import (
-    MAX_PROFILE_ITEM_BYTES,
-    PROFILE_ITEM_KEYS,
-    PROFILE_PICTURE_FIELD,
     PROFILE_PICTURE_MAX_BYTES,
     author_picture_url,
     decode_picture_sidecar,
@@ -22,10 +19,7 @@ from socialhome.domain.space_author_profile import (
     encode_profile_content,
     profile_picture_digest,
     profile_rev,
-    stored_profile_inner,
-    without_picture_sidecar,
 )
-from socialhome.services.space_item_author import _SIGNED_FIELDS
 
 
 def _webp() -> bytes:
@@ -97,12 +91,6 @@ def test_a_sidecar_that_does_not_match_the_signed_hash_is_refused():
     assert decode_picture_sidecar(encode_picture_sidecar(pic), None) is None
 
 
-def test_without_picture_sidecar_strips_only_the_sidecar():
-    inner = {"content": "x", PROFILE_PICTURE_FIELD: "abc", "writer_cert": {}}
-    assert without_picture_sidecar(inner) == {"content": "x", "writer_cert": {}}
-    assert PROFILE_PICTURE_FIELD in inner  # not mutated
-
-
 def test_rev_changes_with_every_part():
     base = profile_rev("A", "b", "c")
     assert (
@@ -170,26 +158,3 @@ def test_the_signed_picture_digest_is_a_full_sha256():
         display_name="Noor", bio=None, picture_hash=digest[:16]
     )
     assert decode_profile_content(short) is None
-
-
-def test_a_stored_profile_item_keeps_only_the_signed_shape():
-    """Review I5: a member could pad its own item with unsigned junk and
-    crowd every other author out of a bundle's names part."""
-    inner = {
-        "item_type": "author_profile",
-        "content": "{}",
-        "author_sig": "s",
-        "writer_cert": {"x": 1},
-        PROFILE_PICTURE_FIELD: "UklGRg==",
-        "junk": "x" * 100_000,
-    }
-    kept = stored_profile_inner(inner)
-    assert kept is not None and "junk" not in kept
-    assert kept[PROFILE_PICTURE_FIELD] == "UklGRg=="
-    assert set(kept) <= PROFILE_ITEM_KEYS
-    big = {**inner, "content": "x" * (MAX_PROFILE_ITEM_BYTES + 1)}
-    assert stored_profile_inner(big) is None
-
-
-def test_the_kept_keys_cover_every_signed_field():
-    assert set(_SIGNED_FIELDS) <= PROFILE_ITEM_KEYS

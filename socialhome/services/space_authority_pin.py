@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import orjson
 
@@ -46,17 +46,6 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
-
-
-class AuthorityPinRefresher(Protocol):
-    """Heals a subscriber's pin from a GFS listing's owner cert (v_44).
-
-    Implemented by
-    :class:`~socialhome.services.gfs_space_mirror_service.GfsSpaceMirrorService`;
-    the GFS-relay consumers call it when an authority check fails.
-    """
-
-    async def refresh_authority_pin(self, space_id: str) -> bool: ...
 
 
 def owner_authority_cert(

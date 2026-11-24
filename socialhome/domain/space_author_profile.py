@@ -1,8 +1,7 @@
-"""An author's public profile for a space's GFS followers (v_60).
+"""An author's public profile for a space's readers (v_60).
 
-A household that follows a public or global space through a GFS holds no
-roster, so every post read "Someone". An author's household now publishes
-the author's profile into the space as the generic ``author_profile`` item
+A member household publishes its author's profile into a public or global
+space as the generic ``author_profile`` item
 (:data:`~socialhome.domain.space_item.ITEM_TYPE_AUTHOR_PROFILE`): signed by
 the author's household identity key like every member item, encrypted under
 the space content key, published through the existing member-publish path.
@@ -27,9 +26,9 @@ the "sidecar" — :func:`encode_picture_sidecar`), which a receiver accepts
 only when :func:`decode_picture_sidecar` finds a WebP within the cap whose
 hash IS the signed ``picture_hash``. So the author's signature still covers
 the picture (through its hash), a name / bio change goes out without the
-bytes (an item in the 4 KiB padding bucket instead of 64 KiB), and the
-host's new-follower bundle can send every name first and the pictures in
-later parts (:mod:`socialhome.domain.space_author_profile_bundle`).
+bytes (an item in the 4 KiB padding bucket instead of 64 KiB). A follower
+(v_96) is a member with the read-only role: it reads names from the roster
+and never publishes a profile.
 
 Pure module — no I/O.
 """
@@ -65,40 +64,6 @@ PROFILE_PICTURE_FIELD: str = "picture"
 #: show different pictures through different servers.
 _PICTURE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
-#: Every key a kept (and forwarded) ``author_profile`` item may carry: the
-#: author-signed fields (``services.space_item_author._SIGNED_FIELDS``,
-#: pinned by a test), the signature, the writer cert and the picture
-#: sidecar. Anything else is unsigned padding a member could use to crowd
-#: other authors out of a bundle.
-PROFILE_ITEM_KEYS: frozenset[str] = frozenset(
-    {
-        "item_type",
-        "item_target",
-        "space_id",
-        "post_id",
-        "author_user_id",
-        "author_pk",
-        "author_username",
-        "identity_anchor",
-        "origin_instance_id",
-        "ts",
-        "comment_type",
-        "parent_id",
-        "content",
-        "media_url",
-        "created_at",
-        "emoji",
-        "author_sig_suite",
-        "author_sig",
-        "writer_cert",
-        "picture",
-    }
-)
-
-#: The most bytes a kept profile item may take without its picture (a
-#: name-and-bio item with its cert is ~1–2 KiB).
-MAX_PROFILE_ITEM_BYTES: int = 4096
-
 
 @dataclass(slots=True, frozen=True)
 class AuthorProfile:
@@ -112,12 +77,12 @@ class AuthorProfile:
 
 @dataclass(slots=True, frozen=True)
 class SpaceAuthorProfile:
-    """A follower's cached profile of one author in one space.
+    """A reader's cached profile of one author in one space.
 
     ``ts`` is the author's signed stamp (tz-aware ISO 8601): the newest
     wins. ``picture_hash`` is the author's SIGNED hash of their picture
     (what "do I already hold this picture" compares); the bytes live in the
-    repo, never here, and may arrive after the row (a later bundle part).
+    repo, never here.
     """
 
     space_id: str
@@ -133,13 +98,10 @@ class SpaceAuthorProfile:
 @dataclass(slots=True, frozen=True)
 class CachedAuthorProfile:
     """One cached profile row, as a receiver checks a new item against it:
-    the profile; whether picture bytes are held for its signed hash; and
-    the original picture sidecar of the kept signed item (a seed holder
-    only, which forwards it in a bundle)."""
+    the profile, and whether picture bytes are held for its signed hash."""
 
     profile: SpaceAuthorProfile
     has_picture: bool
-    picture_sidecar: str | None
 
 
 def author_picture_url(space_id: str, user_id: str, picture_hash: str) -> str:
@@ -218,20 +180,6 @@ def profile_picture_digest(picture_webp: bytes) -> str:
     return hashlib.sha256(picture_webp).hexdigest()
 
 
-def stored_profile_inner(inner: dict) -> dict | None:
-    """``inner`` as a cache keeps and a bundle forwards it: only
-    :data:`PROFILE_ITEM_KEYS`, and ``None`` when that is still over
-    :data:`MAX_PROFILE_ITEM_BYTES` without the picture."""
-    kept = {k: v for k, v in inner.items() if k in PROFILE_ITEM_KEYS}
-    bare = {k: v for k, v in kept.items() if k != PROFILE_PICTURE_FIELD}
-    if (
-        len(legacy_json_dumps(bare, separators=(",", ":")).encode())
-        > MAX_PROFILE_ITEM_BYTES
-    ):
-        return None
-    return kept
-
-
 def encode_picture_sidecar(picture_webp: bytes) -> str:
     """The :data:`PROFILE_PICTURE_FIELD` wire value of a picture."""
     return base64.b64encode(picture_webp).decode("ascii")
@@ -259,9 +207,3 @@ def decode_picture_sidecar(raw: object, picture_hash: str | None) -> bytes | Non
     ):
         return None
     return picture
-
-
-def without_picture_sidecar(inner: dict) -> dict:
-    """``inner`` without its picture sidecar (a copy) — what a cache keeps:
-    the author-signed item, never the bytes a second time."""
-    return {k: v for k, v in inner.items() if k != PROFILE_PICTURE_FIELD}

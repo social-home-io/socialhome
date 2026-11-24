@@ -1,70 +1,47 @@
-"""Recipient-side consumer for relayed public space posts (Phase 5a2).
+"""Recipient-side consumer for a space's opaque channel items (v_51 / v_96).
 
-Handles ``{type:"relay", event_type:"space_post_public", payload:<envelope>}``
-frames the GFS pushes over the SH↔GFS WebSocket. Mirrors
-:class:`socialhome.services.moment_public_inbound.MomentPublicInbound`.
+Since v_96 the only GFS-borne space content a household takes is what rides
+a space's opaque channel (:mod:`socialhome.services.gfs_channel_service`
+maps the channel id to a space locally and calls
+:meth:`SpacePublicInbound.handle_channel_item`). The space-keyed relay
+(``space_post_public`` / ``space_item`` frames naming a ``space_id``) is
+gone: a GFS still sending one has it dropped before parsing
+(``app.dispatch_gfs_relay_frame``).
 
-The pipeline is defence-in-depth — the GFS already verified the authority
-signature before fanning out, but the relay (and the GFS) are never
+The pipeline is defence-in-depth — the channel and the GFS are never
 trusted by the receiver:
 
-1. **Authority verify** — re-verify the space-authority Ed25519 signature
-   against the locally-mirrored ``spaces.identity_public_key``. A space we
-   don't mirror, a space with no pinned pubkey, or a failed/forged
-   signature → drop (WARNING).
-   A space that is **archived** (or dissolved) here is a read-only
-   snapshot — the relayed post is dropped before any further work, the
-   same rule every other inbound door enforces.
-2. **Decrypt** — decrypt the envelope's ``encrypted_payload`` under the
-   per-space content key for the stated epoch. If we don't hold that
-   epoch's key (subscribers receive it in Phase 5b) → drop gracefully.
-3. **Author self-cert** — verify ``derive_user_id(author_pk, username) ==
-   author_user_id`` so a relay can't forge authorship.
-4. **Self-echo guard** — the GFS can no longer identify the publisher, so it
-   no longer excludes it from its own fan-out: a household that publishes to
-   a space it also subscribes to receives its own post back. An inner
-   ``origin_instance_id`` equal to our own instance id is dropped at DEBUG
-   before any write (the dedupe below would usually catch it, but only while
-   the local row still exists — an echo arriving after a local delete would
-   otherwise resurrect the post from our own copy).
-4b. **Writer cert (v_49)** — when the inner carries the author household's
-   ``writer_cert``, it must verify against the pinned space key, name this
-   space and the envelope's epoch, name the inner's ``author_pk`` and grant
-   ``write``; otherwise the item is dropped (WARNING). No epoch freshness
-   gate here: the frame's authority signature is the authorizer and the host
-   re-stamped the cert at its own current epoch, so an old epoch is late
-   delivery (freshness applies to member-authorized items, PR 2). An inner
-   with NO cert
-   is a pre-v_49 author and keeps today's behaviour (authorized by the
-   relaying seed holder's authority signature) — the migration tripwire.
-5. **Dedupe** — the GFS relay is at-least-once and keeps no replay cache
-   (it's content-blind, it can't see the post id). Drop if a post with
-   this id already exists locally (idempotent — the content-layer replay
-   backstop the GFS relay design relies on).
-6. **Persist + publish** — save to ``space_posts`` (the same store the
-   §24.11 inbound path uses) and publish :class:`SpacePostCreated` with
-   ``origin_instance_id`` set (so the local realtime/search surfaces light
-   up AND the federation outbound bridge's loop-guard skips re-fanning).
+1. **Space + archive** — a space we hold no pinned key for is dropped; an
+   **archived** (or dissolved) space is a read-only snapshot, the item is
+   dropped before any further work.
+2. **Decrypt** — under the per-space content key for the stated epoch. An
+   epoch we hold no key for yet is HELD (:meth:`attach_key_wait`) and
+   replayed when the rekey lands by federation.
+3. **Authority items** (v_96) — an item whose plaintext is a channel
+   authority item carries the space authority signature over its inner
+   (``space_public_authority.open_channel_authority``), binding this space
+   and the frame's epoch. A **removal** is applied (soft-delete or
+   tombstone, :meth:`SpaceItemInbound.apply_authority_removal`); a
+   remote-author or ``approved_post`` copy gets every post check below,
+   its writer cert REQUIRED for an approved post (``comment`` scope may
+   do), optional for a pre-v_49 author (the migration tripwire).
+4. **Member items** — the author-signed inner, its author-bound type and
+   target, the origin being the author's household, the writer cert from
+   inside the ciphertext (against the pinned space key, this space, the
+   frame's epoch, the inner's ``author_pk``, the scope the real type needs,
+   epoch freshness, a v2 user binding naming the author; a follower's
+   ``reader`` cert only for what the receiver's own switches allow).
+5. **Self-echo guard** — an inner ``origin_instance_id`` equal to our own
+   instance id is dropped at DEBUG before any write.
+6. **Dedupe + persist** — posts dedupe by id, post edits land
+   last-writer-wins, every other type goes through
+   :class:`~socialhome.services.space_item_inbound.SpaceItemInbound`; a
+   saved post publishes :class:`SpacePostCreated` with
+   ``origin_instance_id`` set (the federation bridge's loop guard skips
+   re-fanning it).
 
-**Authority kinds** (:mod:`socialhome.services.space_public_authority`).
-A host-relay inner with NO ``author_sig`` can only be a **removal** notice,
-its envelope's authority signature (step 1) the only authorizer
-(soft-delete or tombstone, through
-:meth:`SpaceItemInbound.apply_authority_removal`); anything else unsigned is
-dropped. An author-signed post the seed holder marked ``approved_post``
-(released from the moderation queue) gets every post check, and its writer
-cert is REQUIRED but may be ``comment``-scope.
-
-Member-published ``space_item`` frames (v_49) carry posts AND comments,
-comment edits / deletes, the author's own post edits / deletes and
-reactions; :meth:`SpacePublicInbound._on_space_item` runs the checks every
-type shares and applies posts and post edits here, the rest through
-:class:`~socialhome.services.space_item_inbound.SpaceItemInbound`.
-
-Attribution comes from the **encrypted, authority-signed inner only**. The
-fan-out frame carries no household identity (the GFS never learns which
-household relayed); a frame from an older GFS may still carry an outer
-``from_instance``, and that value is ignored — never read, never logged.
+Attribution comes from the **encrypted, signed inner only**; the channel
+frame names no space and no household.
 """
 
 from __future__ import annotations
@@ -72,19 +49,13 @@ from __future__ import annotations
 import functools
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import orjson
 from cryptography.exceptions import InvalidTag
 
-from ..authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    UnsupportedAuthoritySuite,
-    strip_authority_sig_fields,
-    verify_authority_event,
-)
 from ..crypto import derive_instance_id
 from ..domain.events import PostEdited, SpacePostCreated
 from ..domain.gfs_member_publish import (
@@ -100,16 +71,12 @@ from ..domain.space import SpaceRole
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
-    ITEM_TYPE_AUTHOR_PROFILE,
     ITEM_TYPE_POST,
     ITEM_TYPE_POST_EDIT,
-    PAYLOAD_SUITE_FIELD,
     POST_SHAPED_ITEM_TYPES,
     AuthorityRemoval,
-    UnsupportedPayloadSuite,
     item_stamp,
     open_item_plaintext,
-    payload_suite_of,
     required_scope,
     stamp_to_db,
 )
@@ -162,7 +129,6 @@ if TYPE_CHECKING:
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .pending_decrypts_cache import PendingDecryptsCache
-    from .space_authority_pin import AuthorityPinRefresher
     from .space_crypto_service import SpaceContentEncryption
     from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
     from .space_mentions import SpaceMentionResolver
@@ -170,13 +136,18 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 #: The most relayed frames held for a missing space key at once (#5b),
-#: oldest dropped first. A follower needs a handful: the frames of one
-#: rotation it was offline for.
+#: oldest dropped first. A reader needs a handful: the items that beat one
+#: rekey to this household.
 RELAY_KEY_WAIT_MAX_FRAMES: int = 64
 
 
+#: How far past our newest content epoch a frame may claim to be and still
+#: be held for its key (two quick rotations in a row).
+KEY_WAIT_MAX_AHEAD: int = 2
+
+
 class SpacePublicInbound:
-    """GFS-relay → local-persist consumer for public/global space posts."""
+    """Opaque-channel item → local-persist consumer (private and global spaces)."""
 
     __slots__ = (
         "_authorship",
@@ -184,12 +155,10 @@ class SpacePublicInbound:
         "_crypto",
         "_gfs_media",
         "_items",
-        "_key_pull",
         "_mentions",
         "_own_instance_id",
         "_pending_decrypts",
         "_pending_parents",
-        "_pin_refresher",
         "_posts",
         "_spaces",
         "_writer_certs",
@@ -212,7 +181,6 @@ class SpacePublicInbound:
         #: Resolves @-mentions in the decrypted relayed post against this
         #: household's view of the space's members. ``None`` → no mentions.
         self._mentions = mention_resolver
-        self._pin_refresher: AuthorityPinRefresher | None = None
         #: v_49 — the writer-cert service. Host-signed frames (all of them
         #: today) skip its epoch-freshness gate; member-authorized items
         #: (PR 2) will run it.
@@ -223,16 +191,14 @@ class SpacePublicInbound:
         #: v_49 — applies member-published comments, deletes and reactions.
         self._items = SpaceItemInbound(
             bus=bus,
-            space_repo=space_repo,
             space_post_repo=space_post_repo,
             mention_resolver=mention_resolver,
         )
         #: Holds an item whose post (or parent comment) has not landed here
         #: yet and re-runs its frame when it does. ``None`` drops instead.
         self._pending_parents: PendingParentBuffer | None = None
-        #: #5b — asks a server that seats us for a space key we miss, and
-        #: holds the frame until that key lands. ``None``: dropped.
-        self._key_pull: Callable[[str], Awaitable[bool]] | None = None
+        #: #5b — holds a frame under an epoch we hold no key for yet until
+        #: that key lands by federation. ``None``: dropped.
         self._pending_decrypts: PendingDecryptsCache | None = None
         #: v_80 — keeps a relayed post's ``media_refs`` (its pictures in the
         #: GFS media cache, sealed under the space key) and fetches them.
@@ -242,43 +208,39 @@ class SpacePublicInbound:
         """Wire the v_80 GFS media fetcher."""
         self._gfs_media = fetcher
 
-    def attach_key_pull(
-        self,
-        pull: Callable[[str], Awaitable[bool]],
-        pending: PendingDecryptsCache,
-    ) -> None:
-        """Wire the #5b key pull: a frame under an epoch we hold no key for
-        is held in *pending* (replayed on :class:`SpaceContentKeyImported`)
-        and *pull* asks for the key (``GfsSpaceMirrorService
-        .request_space_key`` — rate-limited, only where we hold a seat)."""
-        self._key_pull = pull
+    def attach_key_wait(self, pending: PendingDecryptsCache) -> None:
+        """Wire the #5b key wait: a frame under an epoch we hold no key for
+        yet is held in *pending* and replayed on
+        :class:`SpaceContentKeyImported` — the rekey reaches every member
+        household by federation, a channel item can simply beat it here."""
         self._pending_decrypts = pending
 
     async def _await_key(
         self, space_id: str, epoch: int, replay: Callable[[], Awaitable[None]]
     ) -> None:
-        """Hold *replay* until *space_id*'s *epoch* key lands, and ask for
-        it. Fail-soft: a failed request still leaves the frame held (a key
-        that arrives another way replays it).
+        """Hold *replay* until *space_id*'s *epoch* key lands (the key
+        arrives by federation; nothing is asked for here).
 
         Only for an epoch AFTER the newest key we hold (or with none held):
-        the owner seals its current key, so an older missing epoch would
-        never come — and the frame epoch is plaintext, so a relay could
-        otherwise fill the hold with frames no key will ever open. The hold
+        a rekey delivers the new current key, so an older missing epoch would
+        never come — and at most :data:`KEY_WAIT_MAX_AHEAD` past it: the
+        frame epoch is plaintext, so a relay could otherwise fill the hold
+        with frames no key will open soon. The hold
         is this path's own bounded cache, never the sync one."""
-        if self._pending_decrypts is None or self._key_pull is None:
+        if self._pending_decrypts is None:
             return
         held = await self._crypto.get_current_epoch(space_id)
-        if held is not None and epoch <= held:
+        if held is not None and (epoch <= held or epoch > held + KEY_WAIT_MAX_AHEAD):
+            log.debug(
+                "space_public.inbound: space %s epoch %d not held (ours %d, at "
+                "most %d ahead) — sync covers it",
+                space_id,
+                epoch,
+                held,
+                KEY_WAIT_MAX_AHEAD,
+            )
             return
         self._pending_decrypts.stash(space_id, epoch, replay)
-        try:
-            await self._key_pull(space_id)
-        except Exception:
-            log.exception(
-                "space_public.inbound: asking for the key of space %s failed",
-                space_id,
-            )
 
     def attach_pending_parents(self, buffer: PendingParentBuffer) -> None:
         """Wire the parent-wait buffer (shared with the federated path)."""
@@ -296,161 +258,29 @@ class SpacePublicInbound:
         """Wire the v_49 writer-cert service."""
         self._writer_certs = writer_certs
 
-    def attach_pin_refresher(self, refresher: AuthorityPinRefresher) -> None:
-        """Wire the lazy pin heal (v_44): on an authority failure the
-        subscriber re-fetches the GFS listing's owner cert once."""
-        self._pin_refresher = refresher
-
     def attach_identity(self, *, own_instance_id: str) -> None:
         """Wire our own instance id — the self-echo guard's only input."""
         self._own_instance_id = own_instance_id
 
-    async def handle(self, frame: dict[str, Any], *, gfs_id: str | None = None) -> None:
-        """Dispatch one GFS relay frame: ``space_post_public`` (host relay)
-        or ``space_item`` (v_49 member publish). Other frames are ignored so
-        this can sit on the generic relay channel.
-
-        The frame carries no household identity — an outer ``from_instance``
-        from an older GFS is neither read nor logged.
-        """
-        if frame.get("event_type") == SPACE_ITEM_EVENT_TYPE:
-            await self._on_space_item(frame)
-            return
-        if frame.get("event_type") != AUTHORITY_EVENT_SPACE_POST_PUBLIC:
-            return
-        envelope = frame.get("payload")
-        if not isinstance(envelope, dict):
-            return
-        await self._on_relay(envelope)
-
     async def handle_channel_item(
         self, space_id: str, *, epoch: int, payload: str
     ) -> None:
-        """A member item relayed through a PRIVATE space's opaque channel
-        (v_51). The channel frame names no space — the caller mapped its
-        channel id to ``space_id`` locally — and carries no cert; the item
-        then gets exactly the checks of a ``space_item`` (the
-        writer cert from inside the ciphertext against the pinned space key,
-        the inner's signed ``space_id`` equal to this space, epoch
-        freshness, the author signature, the roster)."""
+        """An item relayed through a space's opaque channel (v_51 private,
+        v_96 global) — the only GFS-borne space content this household
+        takes. The channel frame names no space — the caller mapped its
+        channel id to ``space_id`` locally — and carries no cert; a member
+        item then gets every check of a ``space_item`` (the writer cert from
+        inside the ciphertext against the pinned space key, the inner's
+        signed ``space_id`` equal to this space, epoch freshness, the author
+        signature, the roster), an authority item the space authority
+        signature over its inner."""
         await self._on_space_item(
             {
                 "space_id": space_id,
                 "event_type": SPACE_ITEM_EVENT_TYPE,
                 "epoch": epoch,
                 "payload": payload,
-            },
-            channel=True,
-        )
-
-    async def _on_relay(self, envelope: dict) -> None:
-        space_id = str(envelope.get("space_id") or "")
-        if not space_id:
-            return
-        space = await self._spaces.get(space_id)
-        if space is None or not space.identity_public_key:
-            log.warning(
-                "space_public.inbound: no local space / pubkey for %s — dropped",
-                space_id,
-            )
-            return
-        # Read-only snapshot here, like every other inbound door. The relay
-        # frame names no household, so there is no host to exempt: ask as
-        # an anonymous sender.
-        reason = archive_refusal(space, "")
-        if reason is not None:
-            log.info(
-                "space_public.inbound: space %s is %s here (read-only) "
-                "— relayed post dropped",
-                space_id,
-                reason,
-            )
-            return
-        pinned_pk_hex = space.identity_public_key
-        if not self._verify_authority(space_id, envelope, pinned_pk_hex):
-            # v_44 — the owner may have rotated the space authority key
-            # since we pinned it: heal from the GFS listing's owner cert
-            # (rate-limited) and verify ONCE more against the new pin.
-            healed = None
-            if self._pin_refresher is not None and (
-                await self._pin_refresher.refresh_authority_pin(space_id)
-            ):
-                healed = await self._spaces.get(space_id)
-            if healed is None or not self._verify_authority(
-                space_id, envelope, healed.identity_public_key
-            ):
-                log.warning(
-                    "space_public.inbound: authority signature failed for space %s",
-                    space_id,
-                )
-                return
-            space = healed
-            pinned_pk_hex = healed.identity_public_key
-        epoch = envelope.get("epoch")
-        ciphertext = envelope.get("encrypted_payload")
-        if not isinstance(epoch, int) or not isinstance(ciphertext, str):
-            log.warning(
-                "space_public.inbound: malformed envelope for space %s", space_id
-            )
-            return
-        try:
-            # Under the authority signature verified above; an unknown suite
-            # is refused, never read as JSON.
-            suite = payload_suite_of(envelope.get(PAYLOAD_SUITE_FIELD))
-        except UnsupportedPayloadSuite as exc:
-            log.warning(
-                "space_public.inbound: unsupported payload_suite %s for space %s "
-                "— dropped",
-                exc,
-                space_id,
-            )
-            return
-        try:
-            pt = await self._crypto.decrypt(space_id, epoch, ciphertext)
-        except MissingEpochKey:
-            log.info(
-                "space_public.inbound: no key for space %s epoch %s yet — "
-                "holding the frame",
-                space_id,
-                epoch,
-            )
-            await self._await_key(
-                space_id, epoch, functools.partial(self._on_relay, envelope)
-            )
-            return
-        except (RuntimeError, ValueError, InvalidTag) as exc:
-            # No epoch key held yet (Phase 5b ships subscriber keys), a
-            # malformed ciphertext (ValueError), or a tampered-but-valid-b64
-            # ciphertext whose AEAD tag fails (InvalidTag — NOT a ValueError,
-            # so it would otherwise escape this guard). Drop gracefully, never
-            # crash, per this module's defence-in-depth contract.
-            log.info(
-                "space_public.inbound: cannot decrypt space %s epoch %s: %s",
-                space_id,
-                epoch,
-                exc,
-            )
-            return
-        try:
-            inner = orjson.loads(open_item_plaintext(pt, suite))
-        except ValueError:
-            # Not JSON, or a compressed item that is corrupt or would inflate
-            # past the cap (``open_item_plaintext``) — never a traceback.
-            log.warning(
-                "space_public.inbound: undecodable inner payload for space %s",
-                space_id,
-            )
-            return
-        if not isinstance(inner, dict):
-            return
-        await self._apply_authority_relayed(
-            space,
-            epoch=epoch,
-            inner=inner,
-            pinned_pk_hex=pinned_pk_hex,
-            token=_digest("relay", ciphertext),
-            size=_retained_bytes(envelope),
-            replay=functools.partial(self._on_relay, envelope),
+            }
         )
 
     async def _apply_authority_relayed(
@@ -464,10 +294,9 @@ class SpacePublicInbound:
         size: int,
         replay: Callable[[], Awaitable[None]],
     ) -> None:
-        """An inner a seed holder vouched for (its authority signature
-        already verified by the caller): the space-keyed relay envelope, or
-        an authority item on the space's opaque channel (v_96). Everything
-        after the decrypt is the same for both."""
+        """An inner a seed holder vouched for: an authority item on the
+        space's opaque channel (v_96), its authority signature already
+        verified by the caller."""
         space_id = space.id
         # No author signature → an authority removal notice, authorized by
         # the envelope's authority signature verified above. An inner WITH an
@@ -654,10 +483,9 @@ class SpacePublicInbound:
 
     # ── Member-published items (v_49) ────────────────────────────────────
 
-    async def _on_space_item(
-        self, frame: dict[str, Any], *, channel: bool = False
-    ) -> None:
-        """A ``space_item`` a member household published itself over the GFS.
+    async def _on_space_item(self, frame: dict[str, Any]) -> None:
+        """An item from a space's opaque channel: one a member household
+        published itself, or (v_96) an authority item.
 
         No authority signature — the authorizer is the author household's
         writer cert, checked HERE with epoch freshness and the scope the real
@@ -703,7 +531,7 @@ class SpacePublicInbound:
             await self._await_key(
                 item.space_id,
                 item.epoch,
-                functools.partial(self._on_space_item, frame, channel=channel),
+                functools.partial(self._on_space_item, frame),
             )
             return
         except (RuntimeError, ValueError, InvalidTag) as exc:
@@ -725,11 +553,10 @@ class SpacePublicInbound:
                 exc,
             )
             return
-        if channel and is_channel_authority(opened):
+        if is_channel_authority(opened):
             # v_96 — an authority item on the space's opaque channel: the
             # inner carries the space authority signature (the frame has
-            # none). Verified against the pin, then the very checks of the
-            # space-keyed host relay. Never accepted off the channel.
+            # none). Verified against the pin, then the host-relay checks.
             await self._on_channel_authority(
                 space, epoch=item.epoch, opened=opened, frame=frame
             )
@@ -783,9 +610,7 @@ class SpacePublicInbound:
                     token=_digest("item", item.payload),
                     sender=origin_instance_id,
                     size=_retained_bytes(frame),
-                    replay=functools.partial(
-                        self._on_space_item, frame, channel=channel
-                    ),
+                    replay=functools.partial(self._on_space_item, frame),
                     label=f"space_item {item_type} {item_id} from {origin_instance_id}",
                 )
             return
@@ -844,7 +669,7 @@ class SpacePublicInbound:
             pinned_pk_hex=space.identity_public_key,
             token=_digest("channel-authority", str(frame.get("payload") or "")),
             size=_retained_bytes(frame),
-            replay=functools.partial(self._on_space_item, frame, channel=True),
+            replay=functools.partial(self._on_space_item, frame),
         )
 
     async def _verified_item(
@@ -854,11 +679,9 @@ class SpacePublicInbound:
         epoch: int,
         item_type: str,
         inner: dict[str, Any],
-        fresh_epoch: bool = True,
     ) -> tuple[WriterCert, str, str, str] | None:
         """Every check a member-published item gets before it is applied
-        (see :meth:`_on_space_item`), shared with the v_61 new-follower
-        bundle (:meth:`apply_bundled_profiles`): ``(inner_cert, item_id,
+        (see :meth:`_on_space_item`): ``(inner_cert, item_id,
         author_user_id, origin_instance_id)``, or ``None`` (logged)."""
         if self._writer_certs is None:
             return None
@@ -921,28 +744,13 @@ class SpacePublicInbound:
             author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
         except ValueError:
             return None
-        # A bundled item (``fresh_epoch=False``) is checked at the epoch it
-        # was published at, with no freshness: the bundle is authority-signed
-        # and sealed to us, and its sender, a seed holder, could mint a
-        # current cert anyway. A key rotation then never forces a republish.
-        cert_ok = (
-            await self._writer_certs.check_item(
-                space,
-                raw_cert,
-                epoch=epoch,
-                author_pk=author_pk,
-                required_scope=required_scope(item_type),
-                item_type=item_type,
-            )
-            if fresh_epoch
-            else self._writer_certs.check_item_cert(
-                space,
-                raw_cert,
-                epoch=epoch,
-                author_pk=author_pk,
-                required_scope=required_scope(item_type),
-                item_type=item_type,
-            )
+        cert_ok = await self._writer_certs.check_item(
+            space,
+            raw_cert,
+            epoch=epoch,
+            author_pk=author_pk,
+            required_scope=required_scope(item_type),
+            item_type=item_type,
         )
         if not cert_ok:
             log.warning(
@@ -971,79 +779,6 @@ class SpacePublicInbound:
             )
             return None
         return inner_cert, item_id, author_user_id, origin_instance_id
-
-    async def apply_bundled_profiles(
-        self,
-        space_id: str,
-        *,
-        items: list[tuple[int, dict]],
-        pictures: Sequence[tuple[str, str, str]] = (),
-    ) -> int:
-        """Apply one opened part of a v_61 new-follower bundle. The part was
-        opened and authority-verified by
-        :class:`~socialhome.services.space_subscriber_key_inbound.SpaceSubscriberKeyInbound`.
-
-        ``items`` are ``(epoch, author-signed author_profile item)``. Each
-        gets every check a relayed item gets: author signature, author-bound
-        type, origin, and a writer cert with a v2 user binding at ITS OWN
-        epoch, though not a fresh one (see :meth:`_verified_item`). Anything
-        but a profile is refused. ``pictures`` are
-        ``(author, signed hash, base64 WebP)``, kept only when the bytes hash
-        to the held profile's signed hash. Returns how many profiles and
-        pictures were stored. Never raises."""
-        space = await self._spaces.get(space_id)
-        if space is None or not space.identity_public_key or self._writer_certs is None:
-            return 0
-        stored = 0
-        for epoch, raw in items:
-            if not isinstance(raw, dict):
-                continue
-            if raw.get("item_type") != ITEM_TYPE_AUTHOR_PROFILE:
-                log.warning(
-                    "space_public.inbound: a follower bundle for space %s carries "
-                    "a %r item — dropped",
-                    space_id,
-                    raw.get("item_type"),
-                )
-                continue
-            try:
-                verified = await self._verified_item(
-                    space,
-                    epoch=epoch,
-                    item_type=ITEM_TYPE_AUTHOR_PROFILE,
-                    inner=raw,
-                    fresh_epoch=False,
-                )
-                if verified is None:
-                    continue
-                _cert, _id, _author, origin = verified
-                if await self._items.apply(
-                    space=space,
-                    item_type=ITEM_TYPE_AUTHOR_PROFILE,
-                    inner=raw,
-                    origin_instance_id=origin,
-                    member_household=await self._holds_writer_seat(space_id),
-                    authorship=self._authorship,
-                    epoch=epoch,
-                ):
-                    stored += 1
-            except Exception:
-                log.exception(
-                    "space_public.inbound: a bundled profile for space %s failed",
-                    space_id,
-                )
-        for author, picture_hash, picture in pictures:
-            try:
-                if await self._items.attach_bundled_picture(
-                    space_id, author, picture_hash, picture
-                ):
-                    stored += 1
-            except Exception:
-                log.exception(
-                    "space_public.inbound: a bundled picture for space %s failed",
-                    space_id,
-                )
-        return stored
 
     async def _localize_media(
         self, space_id: str, post: Post, origin_instance_id: str, inner: dict
@@ -1345,23 +1080,6 @@ class SpacePublicInbound:
             item_type=item_type,
             space_pubkey_hex=pinned_pk_hex,
         )
-
-    def _verify_authority(
-        self, space_id: str, envelope: dict, space_public_key_hex: str
-    ) -> bool:
-        try:
-            return verify_authority_event(
-                event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-                space_id=space_id,
-                payload=strip_authority_sig_fields(envelope),
-                authority_sig=str(envelope.get("authority_sig") or ""),
-                authority_sig_suite=str(envelope.get("authority_sig_suite") or ""),
-                space_public_key=bytes.fromhex(space_public_key_hex),
-            )
-        except UnsupportedAuthoritySuite, ValueError:
-            # Unknown suite (no default fallback) or malformed pinned pubkey
-            # → unverifiable, fail-closed.
-            return False
 
     @staticmethod
     def _post_from_inner(post_id: str, author: str, inner: dict) -> Post:

@@ -1,5 +1,5 @@
 """Tests for :mod:`socialhome.services.gfs_publish_retry` — the bounded,
-in-memory retry queue for ``POST /gfs/publish``."""
+in-memory retry queue for anonymous GFS publishes."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from socialhome.services.gfs_publish_retry import (
     GfsPublishRetryQueue,
     PublishOutcome,
     classify_publish_status,
-    is_payload_suite_refusal,
     parse_retry_after_s,
 )
 
@@ -95,74 +94,6 @@ def test_retry_after_parsing():
 
 
 # ── payload_suite refusal ────────────────────────────────────────────────
-
-
-class _Body:
-    def __init__(self, raw: bytes) -> None:
-        self.raw = raw
-        self.asked: int | None = None
-
-    async def read(self, n: int = -1) -> bytes:
-        self.asked = n
-        if isinstance(self.raw, Exception):
-            raise self.raw
-        return self.raw
-
-
-class _Resp:
-    def __init__(self, status: int, raw) -> None:
-        self.status = status
-        self.content = _Body(raw)
-
-
-@pytest.mark.parametrize(
-    ("status", "raw", "expected"),
-    [
-        (409, b'{"error": "payload_suite_unsupported"}', True),
-        (409, b'{"error": "conflict"}', False),
-        (409, b"not json", False),
-        (409, b'["payload_suite_unsupported"]', False),
-        (409, OSError("reset"), False),
-        (400, b'{"error": "payload_suite_unsupported"}', False),
-        (200, b"{}", False),
-    ],
-)
-async def test_is_payload_suite_refusal(status, raw, expected):
-    resp = _Resp(status, raw)
-    assert await is_payload_suite_refusal(resp) is expected
-    if status == 409:
-        # A hostile server can't make us buffer a huge body.
-        assert resp.content.asked == mod._REFUSAL_BODY_MAX_BYTES
-
-
-def test_suite_refused_outcome():
-    assert PublishOutcome.suite_refused().kind == "suite_refused"
-
-
-def test_the_body_picks_the_compressed_copy_only_when_asked_and_present():
-    item = GfsPublish(
-        space_id="sp",
-        event_type="e",
-        payload={"j": 1},
-        compressed={"zlib1": {"z": 1}, "zlib1+dict1": {"d": 1}},
-    )
-    assert item.body()["payload"] == {"j": 1}
-    assert item.body(suite="zlib1")["payload"] == {"z": 1}
-    assert item.body(suite="zlib1+dict1")["payload"] == {"d": 1}
-    assert _item().body(suite="zlib1")["payload"] == _item().payload
-
-
-async def test_a_queued_item_keeps_a_private_copy_of_both_payloads(fast):
-    send = _ScriptedSend([TRANSIENT])
-    queue = GfsPublishRetryQueue(send)
-    compressed = {"zlib1": {"z": [1]}}
-    queue.enqueue(
-        "g1",
-        GfsPublish(space_id="sp", event_type="e", payload={}, compressed=compressed),
-    )
-    compressed["zlib1"]["z"].append(2)
-    queued = queue._queues["g1"].items[0]
-    assert queued.compressed == {"zlib1": {"z": [1]}}
 
 
 # ── The queue ────────────────────────────────────────────────────────────

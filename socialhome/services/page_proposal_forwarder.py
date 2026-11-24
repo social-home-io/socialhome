@@ -331,7 +331,7 @@ class PageProposalForwarder:
             if not urls:
                 return None
             if not await self._media_gfs.can_upload(space_id):
-                # No writer key, cert or channel grant: nothing would land
+                # No upload authorization (seed, channel key or grant): nothing would land
                 # on the GFS — describe nothing (the page service refuses
                 # such an edit up front: PAGE_FILES_NOT_SHAREABLE).
                 log.warning(

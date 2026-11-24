@@ -1,20 +1,20 @@
-"""Bounded, in-memory retry queue for ``POST /gfs/publish``.
+"""Bounded, in-memory retry queue for anonymous GFS publishes.
 
-:meth:`GfsConnectionService.publish_space_event` relays a public/global
-space event to every connection server the space is published on. Before
-this queue a failed POST — the GFS restarting, a network blip, a 5xx, the
-GFS's per-IP limiter answering 429 — lost the event for every subscriber
-on that server. Now a *transient* failure (transport error, timeout, 408,
+Born for the space-keyed ``POST /gfs/publish`` relay (removed in v_96);
+the opaque channel service (:mod:`.gfs_channel_service`) and the moment
+senders reuse it. Before this queue a failed POST — the GFS restarting, a
+network blip, a 5xx, the GFS's per-IP limiter answering 429 — lost the
+event for every subscriber on that server. Now a *transient* failure (transport error, timeout, 408,
 429, 5xx) is queued per connection and re-POSTed with backoff, honouring a
 429's ``Retry-After``; a *permanent* one (any other 4xx, an unfollowed
 redirect) is not retried, because the identical body gets the identical
 answer.
 
-**What is queued is only ``{space_id, event_type, payload}``** — the
-identity-free relay body (:class:`GfsPublish`). There is no slot for
-``from_instance`` or a household signature, so a retry cannot add identity
-by construction; the sender re-checks ``anonymous_publish`` before every
-retry and drops the item if the GFS cannot take the identity-free body.
+**What is queued is only ``{space_id, event_type, payload}``**
+(:class:`GfsPublish`) — what the sender rebuilds the anonymous request
+from. There is no slot for ``from_instance`` or a household signature, so a
+retry cannot add identity by construction; the sender re-checks the
+server's capability before every retry.
 
 **Why in memory, not the durable outbox or a new table.** The outbox
 (``federation_outbox``) is keyed by a recipient *instance* and stores a
@@ -45,17 +45,9 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
-
-import orjson
-
-from ..domain.space_item import PAYLOAD_SUITE_UNSUPPORTED_ERROR
+from typing import Literal
 
 log = logging.getLogger(__name__)
-
-#: Most of a 409 body read to tell a payload-suite refusal from any other
-#: conflict — the GFS answers a few dozen bytes.
-_REFUSAL_BODY_MAX_BYTES: int = 1024
 
 #: Wait before retry *n + 1* of a connection's head item; the length is the
 #: retry budget. ~5 s, 30 s, 2 min, 10 min — about 13 minutes in all, which
@@ -78,34 +70,20 @@ GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN: int = 64
 
 @dataclass(slots=True, frozen=True)
 class GfsPublish:
-    """One identity-free relay body waiting for a retry. Process-local queue
-    item, never persisted. Exactly the ``POST /gfs/publish`` body."""
+    """One anonymous publish waiting for a retry: the sender's own kind
+    (``event_type``) and what it rebuilds the request from. Process-local
+    queue item, never persisted."""
 
     space_id: str
     event_type: str
     payload: dict
-    #: The same item under compressed payload suites (``"zlib1+dict1"`` /
-    #: ``"zlib1"`` → its envelope), or ``None``. One of them is sent instead
-    #: of ``payload`` to a server that proved that suite and has not refused
-    #: it for this space lately.
-    compressed: dict[str, dict] | None = None
-
-    def body(self, *, suite: str | None = None) -> dict:
-        """The wire body — ``{space_id, event_type, payload}``, nothing else
-        (``payload`` the copy under *suite* when asked and present)."""
-        payload = (self.compressed or {}).get(suite or "") or self.payload
-        return {
-            "space_id": self.space_id,
-            "event_type": self.event_type,
-            "payload": payload,
-        }
 
 
 @dataclass(slots=True, frozen=True)
 class PublishOutcome:
-    """How one ``POST /gfs/publish`` attempt ended."""
+    """How one anonymous publish attempt ended."""
 
-    kind: Literal["delivered", "transient", "permanent", "suite_refused"]
+    kind: Literal["delivered", "transient", "permanent"]
     #: Seconds the server asked us to wait (a 429's ``Retry-After``).
     retry_after_s: float | None = None
 
@@ -120,27 +98,6 @@ class PublishOutcome:
     @classmethod
     def permanent(cls) -> PublishOutcome:
         return cls("permanent")
-
-    @classmethod
-    def suite_refused(cls) -> PublishOutcome:
-        """409 ``payload_suite_unsupported``: a follower there cannot open a
-        compressed item — send the JSON one instead."""
-        return cls("suite_refused")
-
-
-async def is_payload_suite_refusal(resp: Any) -> bool:
-    """Whether ``resp`` is the GFS's ``409 payload_suite_unsupported``.
-    Reads at most :data:`_REFUSAL_BODY_MAX_BYTES` of the body."""
-    if resp.status != 409:
-        return False
-    try:
-        raw = await resp.content.read(_REFUSAL_BODY_MAX_BYTES)
-        body = orjson.loads(raw)
-    except ValueError, OSError:
-        return False
-    return isinstance(body, dict) and body.get("error") == (
-        PAYLOAD_SUITE_UNSUPPORTED_ERROR
-    )
 
 
 def parse_retry_after_s(value: str | None) -> float | None:
@@ -161,7 +118,7 @@ def parse_retry_after_s(value: str | None) -> float | None:
 
 
 def classify_publish_status(status: int, retry_after: str | None) -> PublishOutcome:
-    """Map a ``POST /gfs/publish`` status to an outcome.
+    """Map an anonymous publish's HTTP status to an outcome.
 
     2xx delivered; 408 / 429 / 5xx transient (429 carries ``Retry-After``);
     everything else permanent — a 4xx is the same answer on every attempt,
@@ -260,7 +217,6 @@ class GfsPublishRetryQueue:
             space_id=item.space_id,
             event_type=item.event_type,
             payload=copy.deepcopy(item.payload),
-            compressed=copy.deepcopy(item.compressed),
         )
         conn = self._queues.get(conn_id)
         if conn is None:
