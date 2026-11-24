@@ -191,7 +191,7 @@ describe('MomentumComposerDialog', () => {
     const { container } = render(<MomentumComposerDialog />)
     await openAndSettle()
     const reach = container.querySelector('.sh-momentum-composer-reach')!
-    expect(reach.textContent).toContain('Paired households and beyond, up to 3 hops · 24 h')
+    expect(reach.textContent).toContain('Paired households and beyond, up to 3 steps · 24 h')
     // Never a "Change" link next to reach: max_hops only changes what you see.
     expect(reach.querySelector('a')).toBeNull()
     const info = reach.querySelector('button[aria-expanded]') as HTMLButtonElement
@@ -206,23 +206,23 @@ describe('MomentumComposerDialog', () => {
 
   it.each([
     [1, 'Your household and paired households · 24 h', /and no further\. They see it/],
-    [3, 'Paired households and beyond, up to 3 hops · 24 h', /up to 3 hops away; each person there decides how far they look/],
-    [5, 'Paired households and beyond, up to 5 hops · 24 h', /up to 5 hops away; each person there decides how far they look/],
+    [3, 'Paired households and beyond, up to 3 steps · 24 h', /up to 3 steps away; each person there decides how far they look/],
+    [5, 'Paired households and beyond, up to 5 steps · 24 h', /up to 5 steps away; each person there decides how far they look/],
   ])('reach %i: says how far the caller\'s moments really go', async (n, line, more) => {
     limitReach = n
     const { container } = render(<MomentumComposerDialog />)
     await openAndSettle()
     const reach = container.querySelector('.sh-momentum-composer-reach')!
     await waitFor(() => expect(reach.textContent).toContain(line))
-    expect(reach.textContent).not.toContain('up to 1 hops')
+    expect(reach.textContent).not.toContain('up to 1 steps')
     await act(async () => { fireEvent.click(reach.querySelector('button[aria-expanded]')!) })
     expect(container.querySelector('.sh-momentum-composer-reach-more')!.textContent).toMatch(more)
   })
 
   it.each([
     // [own reach, the parent's reach, the line]
-    [5, 2, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
-    [2, 4, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
+    [5, 2, 'Your reply goes to your paired households and beyond, up to 2 steps, like a moment.'],
+    [2, 4, 'Your reply goes to your paired households and beyond, up to 2 steps, like a moment.'],
     [5, 1, 'Your reply goes to your household and paired households only, like a moment.'],
   ])('a reply goes no further than the caller (%i) or its parent (%i)', async (own, parentReach, line) => {
     limitReach = own
@@ -241,7 +241,7 @@ describe('MomentumComposerDialog', () => {
     await openAndSettle()
     const reach = container.querySelector('.sh-momentum-composer-reach')!
     expect(reach.textContent).toContain('Your household and paired households')
-    expect(reach.textContent).not.toContain('3 hops')
+    expect(reach.textContent).not.toContain('3 steps')
   })
 
   it('shows the next allowed time before writing; drafting stays possible', async () => {
@@ -343,7 +343,7 @@ describe('MomentumComposerDialog', () => {
     expect(quote.textContent).toContain('Anna Berger')
     expect(quote.textContent).toContain('Erster Frost heute Morgen')
     expect(container.querySelector('.sh-momentum-composer-reach')!.textContent)
-      .toContain('Your reply goes to your paired households and beyond, up to 3 hops, like a moment')
+      .toContain('Your reply goes to your paired households and beyond, up to 3 steps, like a moment')
   })
 
   it('a reply to a moment that is not public offers no public toggle', async () => {

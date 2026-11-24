@@ -57,7 +57,7 @@ describe('MomentReplyField', () => {
     const field = getByRole('textbox', { name: 'Write a reply' })
     expect(ref.current).toBe(field)
     expect(field.getAttribute('dir')).toBe('auto')
-    expect(container.textContent).toContain('Your reply goes to your paired households and beyond, up to 3 hops, like a moment.')
+    expect(container.textContent).toContain('Your reply goes to your paired households and beyond, up to 3 steps, like a moment.')
     expect((getByRole('button', { name: 'Reply' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
@@ -69,9 +69,9 @@ describe('MomentReplyField', () => {
 
   it.each([
     // [what the limits read says, the parent's reach, protected, the line]
-    [5, 2, false, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
-    [2, 5, false, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
-    [4, 4, false, 'Your reply goes to your paired households and beyond, up to 4 hops, like a moment.'],
+    [5, 2, false, 'Your reply goes to your paired households and beyond, up to 2 steps, like a moment.'],
+    [2, 5, false, 'Your reply goes to your paired households and beyond, up to 2 steps, like a moment.'],
+    [4, 4, false, 'Your reply goes to your paired households and beyond, up to 4 steps, like a moment.'],
     [1, 4, false, 'Your reply goes to your household and paired households only, like a moment.'],
     [5, 1, false, 'Your reply goes to your household and paired households only, like a moment.'],
     [1, 3, true, 'Your reply goes to your household and paired households, like a moment.'],

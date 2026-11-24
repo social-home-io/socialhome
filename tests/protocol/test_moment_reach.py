@@ -792,3 +792,29 @@ async def test_a_hop_4_delete_skips_a_household_seated_from_an_invite_link(env):
         from_instance=RELAY,
     )
     assert _relayed(sent, "m-del-seat") == [(NEW, 4)]
+
+
+async def test_a_hop_4_delete_goes_to_a_peer_whose_look_has_fallen(env):
+    """Adversarial review F1: a peer that looked 5 hops when the moment
+    came may still hold it (a follower there reads it whatever its
+    max_hops). It said 3 since — the delete still goes; a create in the same
+    state does not."""
+    app, _db, sent = env
+    fed = app[federation_service_key]
+    fed._moment_looks.clear()
+    fed.set_peer_moment_look_hops(NEW, 5)
+    fed.set_peer_moment_look_hops(NEW, 3)
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _signed(FET.MOMENT_CREATED, "m-fallen-create", hop=3, reach=5),
+        from_instance=RELAY,
+    )
+    assert _relayed(sent, "m-fallen-create") == []
+    await _deliver(
+        app,
+        FET.MOMENT_DELETED,
+        _signed(FET.MOMENT_DELETED, "m-fallen", hop=3, reach=5),
+        from_instance=RELAY,
+    )
+    assert _relayed(sent, "m-fallen") == [(NEW, 4)]

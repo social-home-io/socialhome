@@ -953,14 +953,16 @@ FET = FederationEventType
 _VERSIONS = {"p37": 37, "p38": 38, "p95": 95, "p96": 96}
 
 
-def _versioned(fed, fed_repo, versions=None, looks=None) -> None:
+def _versioned(fed, fed_repo, versions=None, looks=None, highs=None) -> None:
     versions = versions or _VERSIONS
     looks = looks or {}
     fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer(iid) for iid in versions]
     )
-    # How far each peer said its people look (in memory, decision C).
+    # How far each peer said its people look (in memory, decision C), and
+    # the farthest it said since our start (deletes, review F1).
     fed.peer_moment_look_hops = looks.get
+    fed.peer_moment_look_high = (highs if highs is not None else looks).get
 
     async def _supports(instance_id, *, min_version):
         return versions.get(instance_id, 0) >= min_version
@@ -1520,3 +1522,30 @@ async def test_the_origins_totals_follow_the_moments_reach(stack, reach, targets
         _counts(origin_instance_id="self"), author_user_id="uid-author", reach=reach
     )
     assert _targets(fed) == targets
+
+
+async def test_a_hop_4_5_delete_follows_the_farthest_look_since_our_start(stack):
+    """Review F1: a peer that once looked 5 hops (since our start) may hold
+    the moment; its look fell to 3 since. The delete still goes there, totals
+    and creates follow the current look."""
+    out, fed, fed_repo, _ = stack
+    _versioned(
+        fed,
+        fed_repo,
+        {"fell": 96, "low": 96},
+        looks={"fell": 3, "low": 3},
+        highs={"fell": 5, "low": 3},
+    )
+    await out.relay_inbound(
+        event_type=FET.MOMENT_DELETED,
+        payload=_hop_payload(5, 4),
+        from_instance="peer-sender",
+    )
+    assert _targets(fed) == {"fell"}
+    fed.send_event.reset_mock()
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(5, 4),
+        from_instance="peer-sender",
+    )
+    assert _targets(fed) == set()

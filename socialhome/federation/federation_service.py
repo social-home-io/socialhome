@@ -613,7 +613,9 @@ class FederationService:
         #: (:func:`~socialhome.services.capability_resync
         #: .request_capability_resync`); forgotten on unpair
         #: (:meth:`note_unpaired`). Bounded by the number of paired peers.
-        self._moment_looks: dict[str, int] = {}
+        #: Each value is ``(look now, farthest look said since our start)``
+        #: — a delete follows the farthest (adversarial review F1).
+        self._moment_looks: dict[str, tuple[int, int]] = {}
         #: (peer instance_id, supersede key) → ticket of the newest
         #: :meth:`send_event` of that latest-only state still in flight.
         #: Only the newest send's outcome touches the outbox (an older one
@@ -1807,14 +1809,25 @@ class FederationService:
 
     def set_peer_moment_look_hops(self, instance_id: str, look: int) -> None:
         """Keep how far *instance_id*'s people look for moments (v_96,
-        decision C) — validated by the caller (an integer 1–5)."""
-        self._moment_looks[instance_id] = look
+        decision C) — validated by the caller (an integer 1–5) — and the
+        farthest it has said since our start."""
+        _, high = self._moment_looks.get(instance_id, (look, look))
+        self._moment_looks[instance_id] = (look, max(high, look))
 
     def peer_moment_look_hops(self, instance_id: str) -> int | None:
         """How far *instance_id*'s people look for moments, or ``None`` when
         it has not said since our start (older, or not heard from yet) — a
         relay then sends it no hop-4–5 copy."""
-        return self._moment_looks.get(instance_id)
+        looks = self._moment_looks.get(instance_id)
+        return None if looks is None else looks[0]
+
+    def peer_moment_look_high(self, instance_id: str) -> int | None:
+        """The farthest *instance_id*'s people said they look since our
+        start, or ``None`` when not heard. A hop-4–5 delete follows it: a
+        household that looked that far may still hold the moment (a follower
+        there reads it whatever its ``max_hops``) after its look fell."""
+        looks = self._moment_looks.get(instance_id)
+        return None if looks is None else looks[1]
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         """``True`` iff the named peer's advertised ``proto_version`` is

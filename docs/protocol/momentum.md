@@ -485,6 +485,13 @@ Accepted residuals (final review, P5):
   author are skipped). The frame is a refresh hint; the read that follows
   applies the per-viewer rule, so nobody sees the row — they only learn
   that a moment (its id and author id) arrived. Same class as before v_96.
+* **A reply to a received pre-0154 ``no_relay`` row** (final review F2).
+  A paired household that stored a protected account's moment before
+  migration ``0154`` keeps no mark on the row (NULL = 3), so a reply from
+  there goes up to ``min(own reach, 3)`` hops carrying the child's
+  ``parent_moment_id`` — as before v_96. Totals stay ``no_relay`` (the
+  signed mark rides in the counts payload). Transitional: such rows
+  expire within 30 days of the upgrade.
 * **A reply notification can reach a parent author whose ``max_hops``
   hides the reply** (pre-existing): the bell row names the reply, the
   thread read does not show it. Protected parent authors are still not
@@ -651,9 +658,15 @@ In detail:
   happen only in the restart window — at most one per v_96 paired peer
   per delete relayed then (d = 10: < 10 KB per delete), and none once the
   looks are back. Creates and totals still skip an unknown look.
-  Accepted edge: a household that looked further when a moment reached it
-  and looks less now may miss that moment's delete or totals; its people
-  can no longer see the row anyway (their ``max_hops``), and it expires.
+  **A delete follows the farthest look said since our start**
+  (``FederationService.peer_moment_look_high``, final review F1): a
+  household that looked 5 hops when a moment reached it and looks 3 now
+  may still hold it — a follower there reads it whatever its
+  ``max_hops``, and the looker may raise it again — so its delete still
+  goes there. Totals follow the current look. Residual: the farthest look
+  lives in memory, so after *our* restart (the peer's answer then makes
+  its look known and low) a household whose look fell before it may miss
+  the delete of a moment it got earlier; it expires with the row.
   Accepted edge (Fable #7): a create or totals relayed while a peer's look is still
   unknown here (after our restart, before its answer) is remembered in the
   seen-map, so that peer misses that one moment's hop-4–5 copy through us

@@ -7204,3 +7204,24 @@ async def test_peer_moment_look_is_kept_in_memory_and_forgotten_on_unpair():
     svc.note_unpaired("peer-a")
     assert svc.peer_moment_look_hops("peer-a") is None
     assert svc.peer_moment_look_hops("peer-b") == 4
+
+
+@pytest.mark.asyncio
+async def test_peer_moment_look_high_keeps_the_farthest_look_since_our_start():
+    """A delete must reach a peer that may still hold the moment: one whose
+    people looked further once since our start (adversarial review F1). The
+    high-water mark only goes up, is per peer, and is forgotten with the
+    look on unpair."""
+    svc, _ = _make_service()
+    assert svc.peer_moment_look_high("peer-a") is None
+    svc.set_peer_moment_look_hops("peer-a", 5)
+    svc.set_peer_moment_look_hops("peer-a", 3)
+    svc.set_peer_moment_look_hops("peer-b", 4)
+    assert svc.peer_moment_look_hops("peer-a") == 3
+    assert svc.peer_moment_look_high("peer-a") == 5
+    assert svc.peer_moment_look_high("peer-b") == 4
+    svc.set_peer_moment_look_hops("peer-b", 5)
+    assert svc.peer_moment_look_high("peer-b") == 5
+    svc.note_unpaired("peer-a")
+    assert svc.peer_moment_look_high("peer-a") is None
+    assert svc.peer_moment_look_hops("peer-a") is None
