@@ -3143,8 +3143,11 @@ per GFS per host item; the same deferred lever. A non-host household does
 not try a GFS-reached follower at all in a space with a channel
 (`FederationService.channel_reached_followers`: no peer row, no mesh claim,
 no writer seat — never for the content key or the roster), nor queues it
-pictures it did not ask for. Rekeys to such a follower from a delegated
-admin's rotation are P5. The `channel_sent` mark is set when the author's publisher plans the send,
+pictures it did not ask for, nor tries it in the mesh-announce sweep. A
+delegated admin's rotation reaches such a follower through the owner, which
+re-sends the admin's signed rekey to the follower-only households it holds
+a space-session row for (`SpaceService.relay_admin_rekey_to_followers`,
+see [spaces.md](./spaces.md#keys-and-rotation)). The `channel_sent` mark is set when the author's publisher plans the send,
 not when a server confirmed it: a permanently refused publish leaves
 channel-only readers to the host's catch-up.
 
