@@ -3507,7 +3507,9 @@ class SqliteSpaceRepo:
 
 
 def _opt_count(value: int | None) -> int | None:
-    """A count column that may be ``NULL`` (no number declared)."""
+    """A count column that may be ``NULL`` (no number declared). Only the
+    follower count can be (``LISTED_FOLLOWER_COUNT_SQL``); a member count
+    always has a number."""
     return None if value is None else int(value)
 
 

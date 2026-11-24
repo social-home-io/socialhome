@@ -179,7 +179,12 @@ async def test_switching_followers_off_and_on_reshares_the_counts(env, tier):
             )
         )
         await _settle(svc)
-    assert len(gfs.calls) + peer_dir.refreshes == 3
+    # A global space re-publishes its GFS listing; a public one refreshes
+    # the paired directory — once for the join, once per flip.
+    if tier is SpaceType.GLOBAL:
+        assert (gfs.calls, peer_dir.refreshes) == ([("s", False)] * 3, 0)
+    else:
+        assert (gfs.calls, peer_dir.refreshes) == ([], 3)
     assert svc._last["s"] == SpaceListingCounts(member_count=3, follower_count=0)
 
 

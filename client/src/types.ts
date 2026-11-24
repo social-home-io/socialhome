@@ -1070,7 +1070,7 @@ export interface HouseholdSpaceRow {
   category: string
   allow_subscribers: boolean
   min_age: number
-  /** Seats in the space (followers included). */
+  /** Members (local + remote, never followers). */
   member_count: number
   /** Followers of the space; ``null`` when it takes no followers. Absent
    *  from an older backend. */
