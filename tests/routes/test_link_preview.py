@@ -40,7 +40,7 @@ def fetched():
     calls: list[str] = []
 
     async def fake_fetch(
-        self, url, *, accept, max_bytes, truncate=False, timeout_s=None
+        self, url, *, accept, max_bytes, truncate=False, timeout_s=None, stop_after=None
     ):
         calls.append(url)
         if url == "https://example.com/story":
