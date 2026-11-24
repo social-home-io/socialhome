@@ -295,7 +295,7 @@ async def _follow_via_gfs(db) -> None:
         "INSERT INTO moment_public_follows(follower_user_id, followed_user_id,"
         " gfs_id, followed_instance_pk, followed_username, followed_display_name)"
         " VALUES('u-anna', ?, 'g1', ?, 'mia', 'Mia')",
-        (MIA, "bb" * 32),
+        (MIA, ORIGIN_KEY.public_key.hex()),
     )
 
 
@@ -537,3 +537,75 @@ async def test_a_mesh_moments_media_is_never_fetched(env, follows):
         assert row is not None and row["media_url"] == "api/media/far.webp"
     else:
         assert row is None
+
+
+# ═══ a follow binds the author to their household (Fable P3 #1) ════════════
+#
+# A moment's origin signature proves which household signed it, not that its
+# author lives there. A follow lifts ``max_hops``, so a household that signs a
+# moment in a followed author's name must not reach that follower. A GFS
+# follow pins the author household's key — an instance id IS
+# ``derive_instance_id(pk)`` — so a mesh moment by a GFS-followed author whose
+# home is not known here must come from that household.
+
+STAR = "u-star"  # a public author followed through a GFS; home not known here
+
+
+def _star_moment(moment_id: str, *, seed: bytes, pk: bytes, hop: int) -> dict:
+    payload = {
+        "moment_id": moment_id,
+        "author_user_id": STAR,
+        "origin_instance_id": derive_instance_id(pk),
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "hop_count": 1,
+        "content": "a star's moment",
+        "media_url": None,
+        "media_type": None,
+        "duration_ms": None,
+        "parent_moment_id": None,
+        "expires_at": EXPIRES,
+        REACH_FIELD: 5,
+    }
+    signed = sign_moment_origin(
+        seed=seed, identity_pk=pk, event_type=FET.MOMENT_CREATED, payload=payload
+    )
+    return {**signed, "hop_count": hop, "rt": [f"tok-{i}" for i in range(hop - 1)]}
+
+
+async def _follow_star_via_gfs(db) -> None:
+    await db.enqueue(
+        "INSERT INTO gfs_connections(id, gfs_instance_id, display_name,"
+        " public_key, inbox_url, status, paired_at) VALUES('g1', 'gfs-1',"
+        " 'GFS One', ?, 'https://gfs1.example', 'active', datetime('now'))",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO moment_public_follows(follower_user_id, followed_user_id,"
+        " gfs_id, followed_instance_pk, followed_username, followed_display_name)"
+        " VALUES('u-anna', ?, 'g1', ?, 'star', 'Star')",
+        (STAR, ORIGIN_KEY.public_key.hex()),
+    )
+
+
+async def test_a_household_cannot_post_as_an_author_followed_through_a_gfs(env):
+    app, db, sent, _fetched, _media = env
+    await _follow_star_via_gfs(db)
+    forger = generate_identity_keypair()
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _star_moment("m-forged", seed=forger.private_key, pk=forger.public_key, hop=4),
+    )
+    assert await _count(db, "moments", "id", "m-forged") == 0
+    assert _relayed(sent, "m-forged") == []
+    # The pinned household's own moment is kept for the follower (max_hops 1).
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _star_moment(
+            "m-genuine", seed=ORIGIN_KEY.private_key, pk=ORIGIN_KEY.public_key, hop=4
+        ),
+    )
+    assert await _count(db, "moments", "id", "m-genuine") == 1
+    inbox = await app[moment_service_key].list_inbox(viewer_user_id="u-anna")
+    assert [m.id for m in inbox] == ["m-genuine"]

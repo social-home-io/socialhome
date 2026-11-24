@@ -537,10 +537,10 @@ class MomentPublicInbound:
             hop_count=1,
             via_gfs=True,
         ):
-            # The storage rule the mesh keeps by (v_96): a follow row alone
-            # is not enough — its follower may be removed, protected (never
-            # sees a GFS moment) or block the author. Nobody here will see
-            # it: no row, no file fetched.
+            # Kept only if someone here will see it — the mesh's storage rule
+            # (v_96). The follower may be removed, protected (never sees a
+            # GFS moment) or block the author, and nobody else here may see
+            # it either: no row, no file fetched.
             log.info(
                 "moment_public.inbound: moment %s — nobody here will see it, not kept",
                 env.get("moment_id"),

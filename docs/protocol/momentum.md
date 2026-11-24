@@ -410,10 +410,29 @@ below):
   stay one rule); protected accounts still only at hop 1; only active,
   undeleted people count (the same people as ``moment_look_hops``);
 * the GFS path keeps a followed author's public moment by the same rule
-  (``has_visible_recipient(…, via_gfs=True)``, where a protected account
-  counts at no hop — it never sees a GFS moment): a follow row whose
-  follower was removed, is protected or blocks the author keeps no row and
-  fetches no file;
+  (``has_visible_recipient(…, via_gfs=True)``, asked at hop 1 — a GFS row's
+  hop — where a protected account counts at no hop, since it never sees a
+  GFS moment): it is kept when any current, unblocked adult here will see
+  it (as the reads show it to every adult for 24 h), and a follow row
+  whose follower was removed, is protected or blocks the author keeps
+  nothing — no row, no file — unless someone else here will see it;
+* **a follow is bound to the author's household** (adversarial review,
+  P3): the origin signature proves which household signed a moment, not
+  that its author lives there, and a follow lifts ``max_hops``. A mesh
+  moment whose author's home is known here (``remote_users``) must come
+  from that home (as before); one whose author is followed through a GFS
+  but whose home is not known here must come from the household that
+  follow pinned (``derive_instance_id(followed_instance_pk)`` — an
+  instance id is its key's hash), else it is refused and not relayed.
+  *Residual:* an author followed only through ``user_follows`` whose home
+  is not known here (one met 2–5 hops away, or a household since
+  unpaired) cannot be bound without a new wire field (an author anchor —
+  ``derive_user_id(origin_pk, anchor)``), so a household within reach
+  could still post in that id to its followers — as it can today to
+  anyone whose ``max_hops`` covers it. Recorded as a follow-up;
+* rows kept for a follower stay until they expire when the follow ends
+  (unfollow, block, removal): nobody can read them (the reads apply the
+  rule per viewer), and they go at ``expires_at`` (≤ 30 days);
 * otherwise the household forwards within reach and keeps nothing but the
   in-memory, id-only relay seen-map (bounded, 48 h) — and, for a delete,
   the content-free 30-day tombstone it already keeps (which is what makes a
@@ -517,7 +536,8 @@ per moment in a tree but up to *d* copies in a dense mesh — at d = 10,
 reach 5 that is up to ≈ 3 million envelopes/day per household, each a
 signature check and a replay-cache write before the seen-map drops it.
 Storage does not grow with reach (it follows local viewers' ``max_hops``,
-default 3, and their follows of authors whose moments reach the household) — unless someone here looks 5 hops, when a d = 10 tree delivers
+default 3, and their follows of authors whose moments reach the
+household) — unless someone here looks 5 hops, when a d = 10 tree delivers
 ≈ 295 000 moments/day ≈ 450 MB/day of rows. The relay seen-map
 (``RELAY_SEEN_MAX`` 50 000 entries, two per relayed create, plus deletes
 and totals revs) overflows inside its 48 h window past ≈ 12 000 relayed
