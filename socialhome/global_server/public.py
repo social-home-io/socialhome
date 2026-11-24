@@ -482,7 +482,7 @@ def build_window_limiter(
     """Build a middleware that sheds >*limit* hits/minute per client IP.
 
     One implementation for every per-IP limiter on this server (the three
-    below, ``envelope_relay`` and ``member_publish``): they differ only in
+    below and ``envelope_relay``): they differ only in
     which paths they gate (*applies*) and the *limit*. The client address comes from
     *resolver*, which is the only component allowed to look at
     ``X-Forwarded-For`` (see :class:`ClientIpResolver`). With *nodes* (the

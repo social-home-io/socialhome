@@ -40,11 +40,24 @@
 --    targeted DELETEs. The media triggers (0025) keep the totals and the
 --    per-scope / per-owner byte counters right; the files of the deleted
 --    rows are orphans the maintenance sweep removes (``sweep_orphans``).
+-- Rolling upgrade (cluster nodes share one database): the first upgraded
+-- node drops the table while an older node may still serve the legacy
+-- routes. Households upgrade first (v_96 sends nothing space-keyed), so only
+-- a not-yet-upgraded household's ``/gfs/subscribe`` / ``/gfs/publish`` and an
+-- older node's fail-soft hello key-repair pass meet the missing table (500 /
+-- a logged error) until every node runs this build — upgrade the allocs
+-- together. Accepted: keeping the table for one more release would keep the
+-- follow graph at rest that this migration exists to remove.
+--
+-- ``json_extract`` raises on malformed JSON and SQLite does not promise to
+-- evaluate ``json_valid`` first in an AND, so every extract sits behind a
+-- CASE (a non-JSON row is kept, never an error).
 DELETE FROM gfs_envelope_queue
  WHERE frame_type = 'relay'
-   AND json_valid(sealed_json)
-   AND json_extract(sealed_json, '$.space_id') IS NOT NULL
-   AND json_extract(sealed_json, '$.event_type') IN (
+   AND CASE WHEN json_valid(sealed_json)
+            THEN json_extract(sealed_json, '$.space_id') END IS NOT NULL
+   AND CASE WHEN json_valid(sealed_json)
+            THEN json_extract(sealed_json, '$.event_type') END IN (
        'space_post_public',
        'space_subscriber_key_handoff',
        'space_author_profiles_bundle',

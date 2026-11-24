@@ -2413,8 +2413,8 @@ class GfsConnectionService:
 
         One verification for every capability this household reads off
         ``/gfs/info`` — the signature discipline (and its warnings) must not
-        drift between ``anonymous_publish`` and later additions such as
-        ``envelope_relay``.
+        drift between capabilities (``private_channels``,
+        ``subscriber_seats``, ``envelope_relay`` …).
         """
         caps = info.get("capabilities")
         sig = info.get("capabilities_sig")
@@ -2656,8 +2656,7 @@ class GfsConnectionService:
 
         Two things ride the descriptor: the operator-settable ``server_name``
         (persisted as the connection's ``display_name`` when it changed) and
-        the signed ``anonymous_publish`` capability (RAM-only — see
-        :meth:`_fetch_gfs_info`). Best-effort: a transport error / missing
+        the signed capability block (RAM-only — see :meth:`_fetch_gfs_info`). Best-effort: a transport error / missing
         field is logged and ignored (the next reconnect retries). Called on
         each GFS WS (re)connect, so an operator's rename — and an operator's
         GFS upgrade — both propagate to this client.

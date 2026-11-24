@@ -509,7 +509,7 @@ class GfsSpaceMediaStore:
                     data,
                     expires_at,
                     now,
-                    owner or ("household", f"{scope_kind}:{scope_id}"),
+                    owner or ("client", f"{scope_kind}:{scope_id}"),
                 )
         except BaseException:
             await self.release_upload(slot)

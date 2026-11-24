@@ -287,7 +287,7 @@ class GfsMediaServeView(GfsBaseView):
             return False
         try:
             auth = SpaceMediaUploadAuth.from_header(raw)
-            household = await self.svc(K.gfs_space_media_auth_key).authorize_upload(
+            await self.svc(K.gfs_space_media_auth_key).authorize_upload(
                 auth,
                 scope_kind=session.scope_kind,
                 scope_id=session.scope_id,
@@ -297,11 +297,9 @@ class GfsMediaServeView(GfsBaseView):
             log.debug("space media on demand: not stored: %s", exc)
             return False
         store = self.svc(K.gfs_space_media_store_key)
-        owner = (
-            ("household", household)
-            if session.scope_kind == "space"
-            else ("client", store.prefix_key(self.client_ip()))
-        )
+        # A channel blob counts against its uploader's network prefix, as an
+        # ordinary upload does (``routes/space_media.py``).
+        owner = ("client", store.prefix_key(self.client_ip()))
         try:
             return await store.put(
                 scope_kind=session.scope_kind,

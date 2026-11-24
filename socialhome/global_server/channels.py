@@ -33,7 +33,7 @@ the reason at DEBUG, never logged with anything but the channel id:
   per epoch wins).
 * **unregister** (anonymous, channel-key-signed) — drops the channel and
   every seat.
-* **subscribe** (household-signed, identified like a follower's subscribe)
+* **subscribe** (household-signed, identified by its registered key)
   — must present a :class:`~socialhome.domain.gfs_channel.ChannelPass` the
   channel key issued to THIS household (its registered identity key) for an
   open epoch — households issue passes only to link-joined members, so only

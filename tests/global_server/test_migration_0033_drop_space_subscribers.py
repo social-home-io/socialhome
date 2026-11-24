@@ -180,3 +180,33 @@ def test_the_listing_and_its_inert_columns_stay(tmp_path):
         "SELECT space_id, content_epoch, writer_key_pk FROM global_spaces"
     ).fetchone() == ("sp-1", 7, "wk")
     c.close()
+
+
+def test_a_non_json_queue_row_is_kept_not_an_error(tmp_path):
+    c = _conn(tmp_path)
+    apply_through(c, 32, directory=_GFS_MIGRATIONS)
+    _seed(c)
+    c.execute(
+        "INSERT INTO gfs_envelope_queue(to_instance, sealed_json, created_at,"
+        " expires_at, frame_type, size_bytes)"
+        " VALUES('inst-b', 'not json {', 1, 9e9, 'relay', 10)"
+    )
+    apply_through(c, 33, directory=_GFS_MIGRATIONS)
+    rows = [r[0] for r in c.execute("SELECT sealed_json FROM gfs_envelope_queue")]
+    assert "not json {" in rows
+    assert len(rows) == 4
+    c.close()
+
+
+def test_running_the_migration_body_twice_is_harmless(tmp_path):
+    c = _conn(tmp_path)
+    apply_through(c, 32, directory=_GFS_MIGRATIONS)
+    _seed(c)
+    apply_through(c, 33, directory=_GFS_MIGRATIONS)
+    before = c.execute("SELECT COUNT(*) FROM gfs_envelope_queue").fetchone()[0]
+    sql = (_GFS_MIGRATIONS / "0033_drop_space_subscribers.sql").read_text()
+    c.executescript(sql)
+    after = c.execute("SELECT COUNT(*) FROM gfs_envelope_queue").fetchone()[0]
+    assert after == before == 3
+    assert "space_subscribers" not in _tables(c)
+    c.close()

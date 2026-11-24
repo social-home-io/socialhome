@@ -769,7 +769,7 @@ class GfsFederationService:
         owner that rotated the authority key must be able to move the pin
         here without re-listing the space — otherwise a withdrawn listing
         keeps the old pin forever, and whoever still holds the old key's seed
-        keeps relaying to the followers seated here. Signed (folded in only
+        can still sign the space's join contact here. Signed (folded in only
         when true) and it requires a fresh signed ``ts``. Such a publish
         stores NO metadata (the household sends it blank on purpose: a space
         that left the public tier must not leak its new name), never touches

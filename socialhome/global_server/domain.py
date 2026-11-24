@@ -98,16 +98,15 @@ class GlobalSpace:
     published_at: str = ""  # ISO 8601
     #: The space's Ed25519 *authority* verify key (hex), TOFU-pinned on first
     #: publish (Phase 5a); moved afterwards only by an owner-signed
-    #: ``authority_cert`` with a higher epoch (v_44). Lets the GFS authorize a relay by a space-authority
-    #: signature (any seed-holder — owner or delegated admin) without learning
-    #: the space content. Empty when an older HFS published no pubkey → such a
-    #: space can only be relayed by its owning instance.
+    #: ``authority_cert`` with a higher epoch (v_44). Verifies the space's
+    #: authority-signed ``join_contact`` (v_84); since v_96 no relay is keyed
+    #: to it. Empty when an older HFS published no pubkey.
     identity_public_key: str = ""
     #: The owner's cert for ``identity_public_key`` (v_44,
     #: :mod:`socialhome.authority_cert`) — ``None`` while the space still uses
     #: its creation-time key (epoch 0). Stored only after verifying it against
     #: the owner's registered key; served on ``GET /gfs/spaces/{id}`` so a
-    #: subscriber can heal its pin. Names no member and no reason.
+    #: reader can heal its pin. Names no member and no reason.
     authority_cert: dict | None = None
     #: This server's own count of accepted re-pins (migration 0013): +1 each
     #: time an owner cert moved the pin. The public directory serves THIS,
@@ -120,7 +119,7 @@ class GlobalSpace:
     #: is sticky against re-publish — conflating the two let an owner
     #: permanently lock itself out of its own listing. Withdrawal hides the
     #: space from DISCOVERY only (listing, detail route, public pages);
-    #: existing subscribers and the relay keep working.
+    #: the space's channels and their seats keep working.
     withdrawn: bool = False
     #: The owner's optional place pin for a global space (GFS migration
     #: 0019), 4 dp, from its signed publish body — for sorting the directory
@@ -364,14 +363,14 @@ class GfsSpaceMedia:
     expires_at: int
     #: Last fetch (the upload counts as one), moved at most once an hour.
     last_fetched_at: int
-    #: ``"space"`` (a listed space) or ``"channel"`` (a private space's
-    #: opaque v_51 channel).
-    scope_kind: str = "space"
+    #: ``"channel"`` — a space's opaque channel (v_51 private, v_96 global);
+    #: the only scope since v_96 (GFS migration 0033 deleted the ``space``
+    #: scope's rows).
+    scope_kind: str = "channel"
     scope_id: str = ""
-    #: The fairness owner it counts against: ``("household", a space's
-    #: owning instance)`` or ``("client", the uploader's keyed address-bucket
-    #: hash)`` for a channel blob.
-    owner_kind: str = "household"
+    #: The fairness owner it counts against: ``("client", the uploader's
+    #: keyed address-bucket hash)``.
+    owner_kind: str = "client"
     owner_id: str = ""
 
 

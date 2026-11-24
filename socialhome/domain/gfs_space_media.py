@@ -187,7 +187,7 @@ class SpaceMediaClaim:
         return CHANNEL_MEDIA_PUT_PREFIX + canonical_bytes(self.signing_body())
 
     def writer_signing_bytes(self, *, kind: str, epoch: int) -> bytes:
-        """The bytes the writer group key signs for :data:`AUTH_WRITER_KEY`;
+        """The bytes the channel writer key signs for :data:`AUTH_WRITER_KEY`;
         the kind and epoch are bound in, the scope is in the claim."""
         return SPACE_MEDIA_WRITER_PREFIX + canonical_bytes(
             {**self.signing_body(), "auth": kind, "epoch": epoch}
