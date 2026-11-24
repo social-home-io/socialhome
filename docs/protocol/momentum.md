@@ -493,7 +493,7 @@ seen-map remembers the create; no media fetch).
 
 * reach 2 ⇒ the moment is not sent to them at all (they would relay it
   to 3 hops). Reach 1 (protected or chosen) keeps the v_38 gate — they
-  honour the signed ``no_relay``. The setting's help text says so.
+  honour the signed ``no_relay``.
 * reach 4–5 ⇒ an older household **paired with the author** gets it (a
   direct delivery is bound by its envelope, no origin check) and relays it
   verbatim up to hop 3; an older household **further away** can't verify
@@ -668,11 +668,13 @@ outbox eviction above still hold the per-household memory bounded.
 
 * **A — one signed shape.** An older household not paired with the author
   drops a reach-4–5 moment until it updates (a reach-3 one it still gets).
-  The reach setting's help text says so.
 * **B — reach 1** uses the signed ``no_relay`` mark and goes to paired
-  households from **v_38** on; only reach 2 needs v_96. The help text says
-  older households don't get moments while the reach is 2.
+  households from **v_38** on; only reach 2 needs v_96.
 * **C — the bound above**, viewer default stays 3.
+* **The setting's help text** (owner, 2026-11-24) says only that steps 4
+  and 5 reach households where someone looks that far — not what older
+  households miss (A, B): that is a transition detail of the protocol,
+  not something a person chooses by.
 * Accepted too: the relay clamp, signed deletes (with the protected-account
   delete fix), relayed outbox rows evicted first, ``MAX_RETURN_TOKENS = 4``,
   reply reach = min(own, parent), the ``moments.reach`` column with its
