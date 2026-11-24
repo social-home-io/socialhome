@@ -115,6 +115,12 @@ _FOLLOWS_AUTHOR_SQL = """
     )
 """
 
+#: A current person of this household (``users AS u``): active and not
+#: deleted. The storage rule (:meth:`SqliteMomentRepo.has_visible_recipient`)
+#: and the look (:meth:`SqliteMomentRepo.moment_look_hops`) count the same
+#: people, so a removed person neither keeps moments here nor widens the look.
+_LOCAL_PERSON_SQL = "u.state = 'active' AND u.deleted_at IS NULL"
+
 #: Within the viewer's reach of sight: the row's ``hop_count`` is at most the
 #: viewer's ``max_hops``, or the viewer follows the author — a follow shows
 #: the author's moments whatever the viewer's ``max_hops`` (v_96; the same
@@ -681,6 +687,9 @@ class SqliteMomentRepo:
         wants the row (pure pass-through — relay continues).
 
         A user "will see" it iff:
+        * They are a current person here (:data:`_LOCAL_PERSON_SQL` —
+          active, not deleted; the same people :meth:`moment_look_hops`
+          counts).
         * No personal block (:table:`user_blocks`) and no guardian block
           (§CP.F2, either way) separates them from the author.
         * They are not a protected account (§CP.R), or the moment is from a
@@ -701,7 +710,8 @@ class SqliteMomentRepo:
         row = await self._db.fetchone(
             f"""
             SELECT 1 FROM users AS u
-             WHERE NOT EXISTS (
+             WHERE {_LOCAL_PERSON_SQL}
+               AND NOT EXISTS (
                  SELECT 1 FROM user_blocks
                   WHERE blocker_user_id = u.user_id
                     AND blocked_user_id = ?
@@ -746,7 +756,7 @@ class SqliteMomentRepo:
             f"""
             SELECT MAX({_VIEWER_HOPS_SQL}) AS look FROM users AS u
              WHERE u.child_protection_enabled = 0
-               AND u.state = 'active' AND u.deleted_at IS NULL
+               AND {_LOCAL_PERSON_SQL}
             """,
             _VIEWER_HOPS_PARAMS,
         )

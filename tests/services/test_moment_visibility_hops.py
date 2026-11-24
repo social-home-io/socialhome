@@ -230,6 +230,27 @@ async def test_has_visible_recipient_true_when_other_user_can_see(db, repo):
 
 
 @pytest.mark.parametrize(
+    "gone",
+    ["deleted_at=datetime('now'), state='inactive'", "state='inactive'"],
+)
+@pytest.mark.parametrize("follows", [False, True])
+async def test_has_visible_recipient_skips_removed_people(db, repo, gone, follows):
+    """A removed (inactive or deleted) person keeps nothing for the
+    household — the same people :meth:`moment_look_hops` counts — whether
+    their ``max_hops`` covers the hop or they follow the author."""
+    await _prefs(db, "u-self", '{"moments":{"max_hops":1}}')
+    await _add_user(db, "u-gone")
+    if follows:
+        await _prefs(db, "u-gone", '{"moments":{"max_hops":1}}')
+        await _follow(db, "u-gone")
+    else:
+        await _prefs(db, "u-gone", '{"moments":{"max_hops":5}}')
+    assert await _stored(repo, 3)
+    await db.enqueue(f"UPDATE users SET {gone} WHERE user_id='u-gone'")
+    assert not await _stored(repo, 3)
+
+
+@pytest.mark.parametrize(
     "raw",
     ["4", '"5"', '"far"', "true", "4.5", "4.0", "null", "0", "9", "2", "[4]"],
 )
