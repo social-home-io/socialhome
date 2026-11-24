@@ -523,6 +523,61 @@ async def test_oversized_bodies(loopback_is_public) -> None:
         await server.close()
 
 
+async def test_stop_after_ends_the_read_at_the_marker(loopback_is_public) -> None:
+    """A link preview needs only the page's head: the read stops right
+    after ``</head>`` (any case, even split across two chunks), and the
+    body behind it is never downloaded."""
+    head = b"<html><head>" + b"h" * 20_000 + b"</HE"
+    tail = b"AD><body>" + b"b" * 60_000
+
+    async def page(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(headers={"Content-Type": "text/html"})
+        resp.enable_chunked_encoding()
+        await resp.prepare(request)
+        await resp.write(head)
+        await asyncio.sleep(0.05)
+        await resp.write(tail)
+        await resp.write_eof()
+        return resp
+
+    async def no_marker(request: web.Request) -> web.Response:
+        return web.Response(body=b"<html>" + b"n" * 30_000, content_type="text/html")
+
+    server = await _serve([web.get("/", page), web.get("/n", no_marker)])
+    try:
+        fetcher, _ = _fetcher_for(server, loopback_is_public)
+        base = f"http://site.test:{server.port}"
+        res = await fetcher.fetch(
+            f"{base}/",
+            accept=HTML,
+            max_bytes=1_000_000,
+            truncate=True,
+            stop_after=b"</head>",
+        )
+        assert res.body == head + b"AD>"
+        assert res.truncated is True
+        # No marker: the whole body, up to the cap, as before.
+        res = await fetcher.fetch(
+            f"{base}/n",
+            accept=HTML,
+            max_bytes=10_000,
+            truncate=True,
+            stop_after=b"</head>",
+        )
+        assert len(res.body) == 10_000
+        assert res.truncated is True
+    finally:
+        await server.close()
+
+
+async def test_stop_after_needs_truncate() -> None:
+    """Stopping early is a cut body — only allowed where cutting is."""
+    with pytest.raises(ValueError):
+        await OutboundFetcher().fetch(
+            "https://site.test/", accept=HTML, max_bytes=10, stop_after=b"</head>"
+        )
+
+
 async def test_slow_loris_body_cut_off(loopback_is_public) -> None:
     async def drip(request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse(headers={"Content-Type": "text/html"})

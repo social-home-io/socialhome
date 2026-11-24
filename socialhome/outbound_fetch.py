@@ -346,15 +346,21 @@ class OutboundFetcher:
         max_bytes: int,
         truncate: bool = False,
         timeout_s: float | None = None,
+        stop_after: bytes | None = None,
     ) -> FetchResult:
         """GET *url* under every rule in the module docstring.
 
         ``accept`` lists the media types the answer may carry (anything
         else is refused). A body longer than ``max_bytes`` is refused, or —
         with ``truncate=True`` (HTML, whose ``<head>`` comes first) — cut
-        at ``max_bytes`` and returned. ``timeout_s`` can only shorten the
-        fetcher's total deadline (a caller sharing one budget across fetches).
+        at ``max_bytes`` and returned. ``stop_after`` (lower-case bytes,
+        ``truncate=True`` only) ends the read right after the first
+        case-insensitive occurrence of that marker — the rest of the body
+        is never downloaded. ``timeout_s`` can only shorten the fetcher's
+        total deadline (a caller sharing one budget across fetches).
         """
+        if stop_after is not None and (not truncate or not stop_after):
+            raise ValueError("stop_after needs truncate=True and a marker")
         budget = self._total_timeout
         if timeout_s is not None:
             budget = min(budget, timeout_s)
@@ -363,7 +369,11 @@ class OutboundFetcher:
         try:
             async with asyncio.timeout(budget):
                 return await self._fetch_hops(
-                    url, accept=accept, max_bytes=max_bytes, truncate=truncate
+                    url,
+                    accept=accept,
+                    max_bytes=max_bytes,
+                    truncate=truncate,
+                    stop_after=stop_after,
                 )
         except TimeoutError as exc:
             log.info("link fetch timed out (host=%s)", _host_for_log(url))
@@ -376,12 +386,17 @@ class OutboundFetcher:
         accept: frozenset[str],
         max_bytes: int,
         truncate: bool,
+        stop_after: bytes | None,
     ) -> FetchResult:
         current = url
         for _hop in range(MAX_REDIRECTS + 1):
             target = await self._vet(current)
             outcome = await self._get_once(
-                target, accept=accept, max_bytes=max_bytes, truncate=truncate
+                target,
+                accept=accept,
+                max_bytes=max_bytes,
+                truncate=truncate,
+                stop_after=stop_after,
             )
             if isinstance(outcome, FetchResult):
                 return outcome
@@ -400,6 +415,7 @@ class OutboundFetcher:
         accept: frozenset[str],
         max_bytes: int,
         truncate: bool,
+        stop_after: bytes | None,
     ) -> FetchResult | str:
         """One request. Returns the result, or the ``Location`` to follow."""
         connector = aiohttp.TCPConnector(
@@ -448,7 +464,10 @@ class OutboundFetcher:
                 if declared is not None and declared > max_bytes and not truncate:
                     raise OutboundFetchRefused("too_large")
                 body, cut = await read_capped(
-                    resp.content, max_bytes=max_bytes, truncate=truncate
+                    resp.content,
+                    max_bytes=max_bytes,
+                    truncate=truncate,
+                    stop_after=stop_after,
                 )
                 return FetchResult(
                     url=str(resp.url),
@@ -519,16 +538,29 @@ async def open_pinned_session(
 
 
 async def read_capped(
-    stream: aiohttp.StreamReader, *, max_bytes: int, truncate: bool
+    stream: aiohttp.StreamReader,
+    *,
+    max_bytes: int,
+    truncate: bool,
+    stop_after: bytes | None = None,
 ) -> tuple[bytes, bool]:
     """Read *stream* up to ``max_bytes``; never buffer more than one chunk
-    past the cap."""
+    past the cap. With ``stop_after`` (lower-case), stop right after the
+    first case-insensitive occurrence of it — searched only in the new
+    chunk plus a marker-long overlap, so the scan stays linear."""
     buf = bytearray()
     while True:
         chunk = await stream.read(CHUNK_BYTES)
         if not chunk:
             return bytes(buf), False
+        start = max(0, len(buf) - len(stop_after) + 1) if stop_after else 0
         buf.extend(chunk)
+        if stop_after:
+            at = bytes(buf[start:]).lower().find(stop_after)
+            if at != -1:
+                end = start + at + len(stop_after)
+                if end <= max_bytes:
+                    return bytes(buf[:end]), True
         if len(buf) > max_bytes:
             if truncate:
                 return bytes(buf[:max_bytes]), True

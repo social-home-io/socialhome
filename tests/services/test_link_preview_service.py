@@ -40,12 +40,23 @@ class FakeFetcher:
         self.pages = pages
         self.calls: list[str] = []
         self.budgets: list[float | None] = []
+        self.stops: list[bytes | None] = []
         self.on_fetch = None
         self.gate: asyncio.Event | None = None
 
-    async def fetch(self, url, *, accept, max_bytes, truncate=False, timeout_s=None):
+    async def fetch(
+        self,
+        url,
+        *,
+        accept,
+        max_bytes,
+        truncate=False,
+        timeout_s=None,
+        stop_after=None,
+    ):
         self.calls.append(url)
         self.budgets.append(timeout_s)
+        self.stops.append(stop_after)
         if self.on_fetch is not None:
             self.on_fetch()
         if self.gate is not None:
@@ -56,8 +67,18 @@ class FakeFetcher:
         if isinstance(item, Exception):
             raise item
         body, ctype, final = item  # type: ignore[misc]
+        # The real fetcher's caps: stop after the marker, cut at max_bytes.
+        cut = False
+        if stop_after is not None:
+            at = body.lower().find(stop_after)
+            if at != -1 and at + len(stop_after) < len(body):
+                body, cut = body[: at + len(stop_after)], True
+        if len(body) > max_bytes:
+            if not truncate:
+                raise OutboundFetchRefused("too_large")
+            body, cut = body[:max_bytes], True
         return FetchResult(
-            url=final, content_type=ctype, charset=None, body=body, truncated=False
+            url=final, content_type=ctype, charset=None, body=body, truncated=cut
         )
 
 
@@ -376,3 +397,40 @@ async def test_image_skipped_when_page_spent_the_budget(tmp_path):
     p = await svc.preview_for_url("https://example.com/story", user_id="u")
     assert p is not None and p.title and p.thumbnail_url is None
     assert fetcher.calls == ["https://example.com/story"]
+
+
+async def test_og_tags_after_a_big_head_still_preview(tmp_path):
+    """Owner bug 2026-11-24 (no picture): YouTube's watch page carries
+    ~850 KB of inline script BEFORE its og: tags (``</head>`` at ~866 KB),
+    so the old 512 KiB HTML cap cut the page before any tag and the post
+    got no card at all."""
+    head_script = b"<script>" + b"x" * (900 * 1024) + b"</script>"
+    page = (
+        b"<html><head><title>Video</title>"
+        + head_script
+        + b'<meta property="og:title" content="A video">'
+        + b'<meta property="og:image" content="https://i.example.com/v.png">'
+        + b"</head><body>"
+        + b"y" * (700 * 1024)
+        + b"</body></html>"
+    )
+    pages = {
+        "https://video.example.com/watch?v=1": (
+            page,
+            "text/html",
+            "https://video.example.com/watch?v=1",
+        ),
+        "https://i.example.com/v.png": (
+            _png(),
+            "image/png",
+            "https://i.example.com/v.png",
+        ),
+    }
+    svc, fetcher = _svc(tmp_path, pages)
+    p = await svc.preview_for_url("https://video.example.com/watch?v=1", user_id="u")
+    assert p is not None
+    assert p.title == "A video"
+    assert p.thumbnail_url is not None and p.thumbnail_url.endswith(".webp")
+    # The page is read only up to its head — the body is never downloaded.
+    assert fetcher.stops[0] == b"</head>"
+    assert lps.HTML_MAX_BYTES >= 2 * 1024 * 1024
