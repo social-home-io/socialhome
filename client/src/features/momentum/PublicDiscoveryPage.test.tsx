@@ -14,6 +14,12 @@ import { api } from '@/api'
 import { _resetGfsConnectionsForTests, follows } from '@/store/momentPublic'
 import PublicDiscoveryPage, { _resetDiscoverForTests } from './PublicDiscoveryPage'
 
+/** ``GET /api/friends`` for a household paired with no one. */
+const NO_FRIENDS = {
+  instance: { instance_id: 'i-own', display_name: 'Home', members: [], member_count: 0 },
+  households: [], totals: { households: 1, people: 0 },
+}
+
 describe('PublicDiscoveryPage module', () => {
   it('exports a default component', async () => {
     const m = await import('./PublicDiscoveryPage')
@@ -78,7 +84,7 @@ describe('PublicDiscoveryPage when a load fails', () => {
         return [gfs('g1', 'Demo GFS')]
       }
       if (path === '/api/gfs/g1/moments/users') return { users: [marco] }
-      return []
+      return path === '/api/friends' ? NO_FRIENDS : []
     })
     const { findByRole, container, unmount } = render(<PublicDiscoveryPage />)
     expect((await findByRole('alert')).textContent).toContain("Couldn't load your GFS connections")
@@ -93,7 +99,7 @@ describe('PublicDiscoveryPage when a load fails', () => {
     vi.mocked(api.get).mockImplementation(async (path: string) => {
       if (path === '/api/gfs/connections') return [gfs('g2', 'Quiet GFS')]
       if (path === '/api/gfs/g2/moments/users') throw new Error('offline')
-      return []
+      return path === '/api/friends' ? NO_FRIENDS : []
     })
     const { findByRole, container, unmount } = render(<PublicDiscoveryPage />)
     expect((await findByRole('alert')).textContent).toContain("Can't reach Quiet GFS.")
@@ -109,7 +115,7 @@ describe('PublicDiscoveryPage when a load fails', () => {
         if (fail) throw new Error('offline')
         return { users: [marco] }
       }
-      return []
+      return path === '/api/friends' ? NO_FRIENDS : []
     })
     const first = render(<PublicDiscoveryPage />)
     await waitFor(() => expect(first.container.textContent).toContain('Marco Rossi'))
@@ -131,6 +137,28 @@ describe('Discover tab', () => {
   const marco = person('u-marco', 'Marco Rossi', 'i-rossi', { bio: 'Pizza and bikes' })
   const sophie = person('u-sophie', 'Sophie Keller', 'i-keller')
   const lena = person('u-lena', 'Lena Berger', 'i-own')
+  const meRow = person('u-me', 'Me Myself', 'i-own')
+  const member = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+    user_id: id, username: name.toLowerCase(), remote_username: name.toLowerCase(),
+    display_name: name, picture_url: null, ...extra,
+  })
+  const friendsPayload = (withPeople = true) => ({
+    instance: {
+      instance_id: 'i-own', display_name: 'Our home', home_lat: null, home_lon: null,
+      members: withPeople ? [member('u-me', 'Me Myself'), member('u-lena', 'Lena Berger')] : [member('u-me', 'Me Myself')],
+      member_count: withPeople ? 2 : 1,
+    },
+    households: withPeople
+      ? [{
+        instance_id: 'i-keller', display_name: 'Kellers', home_lat: null, home_lon: null,
+        paired_at: null, reachable: true, member_count: 1,
+        members: [member('u-sophie', 'Sophie Keller', { instance_id: 'i-keller' })],
+      }]
+      : [],
+    totals: { households: 2, people: 3 },
+  })
+  let gfses = [gfs('g1', 'Demo GFS')]
+  let withFriends = true
 
   beforeEach(() => {
     vi.mocked(api.get).mockReset()
@@ -139,32 +167,38 @@ describe('Discover tab', () => {
     _resetGfsConnectionsForTests()
     _resetDiscoverForTests()
     follows.value = []
+    gfses = [gfs('g1', 'Demo GFS')]
+    withFriends = true
     vi.mocked(api.get).mockImplementation(async (path: string) => {
-      if (path === '/api/gfs/connections') return [gfs('g1', 'Demo GFS')]
-      if (path === '/api/gfs/g1/moments/users') return { users: [marco, sophie, lena] }
-      if (path === '/api/friends') {
-        return { instance: { instance_id: 'i-own' }, households: [{ instance_id: 'i-keller' }] }
-      }
+      if (path === '/api/gfs/connections') return gfses
+      if (path === '/api/gfs/g1/moments/users') return { users: [meRow, marco, sophie, lena] }
+      if (path === '/api/friends') return friendsPayload(withFriends)
       if (path === '/api/moments/public/follows') return []
-      return []
+      if (path === '/api/moments/follows') return { follows: [] }
+      return path === '/api/friends' ? NO_FRIENDS : []
     })
   })
 
-  it('names the GFS, marks paired and own people instead of offering a GFS follow, and says what a follow tells the GFS', async () => {
+  const headings = (c: Element) => [...c.querySelectorAll('h2')].map((h) => h.textContent)
+
+  it('lists friends first, then the GFS — each person once, with what each follow tells whom', async () => {
     const { findByRole, container, getByRole, queryAllByRole } = render(<PublicDiscoveryPage />)
-    expect((await findByRole('heading', { name: 'People sharing on Demo GFS' }))).toBeTruthy()
-    await waitFor(() => expect(container.textContent).toContain('Sophie Keller'))
-    const rows = [...container.querySelectorAll('.sh-momentum-discover-row')] as HTMLElement[]
-    const row = (name: string) => rows.find(r => r.textContent!.includes(name))!
-    expect(row('Marco Rossi').querySelector('button[aria-pressed]')?.textContent).toBe('Follow')
-    expect(row('Sophie Keller').textContent).toContain('Paired with you — you already see their moments')
-    expect(row('Sophie Keller').querySelector('button[aria-pressed]')).toBeNull()
-    expect(row('Lena Berger').textContent).toContain('In your household')
-    expect(row('Lena Berger').querySelector('button[aria-pressed]')).toBeNull()
+    const gfsList = await findByRole('list', { name: 'People sharing on Demo GFS' })
+    await waitFor(() => expect(gfsList.textContent).toContain('Marco Rossi'))
+    expect(headings(container)).toEqual(['Friends', 'People sharing on Demo GFS'])
+    // You, your own household and paired people are in Friends, not the GFS list.
+    expect(gfsList.textContent).not.toContain('Sophie Keller')
+    expect(gfsList.textContent).not.toContain('Lena Berger')
+    expect(gfsList.textContent).not.toContain('Me Myself')
+    const friendsList = getByRole('list', { name: 'Friends' })
+    expect(friendsList.textContent).toContain('Sophie Keller')
+    expect(friendsList.textContent).toContain('Lena Berger')
+    expect(friendsList.textContent).not.toContain('Me Myself')
+    expect(getByRole('button', { name: 'Follow Marco Rossi' }).getAttribute('aria-pressed')).toBe('false')
     expect(container.textContent).toContain(
       'Following someone here tells Demo GFS that your household follows them.')
-    // The search box is labelled, and filters here — the GFS never sees it.
-    const search = getByRole('searchbox', { name: 'Find people who share publicly' })
+    // One search box filters both sections here — the GFS never sees it.
+    const search = getByRole('searchbox', { name: 'Find people' })
     fireEvent.input(search, { target: { value: 'pizza' } })
     expect(queryAllByRole('button', { name: 'Marco Rossi' }).length).toBe(1)
     expect(container.textContent).not.toContain('Sophie Keller')
@@ -195,12 +229,55 @@ describe('Discover tab', () => {
     })
   })
 
-  it('a protected account sees why there is no Discover', async () => {
+  it('a protected account gets Friends only — no GFS is asked', async () => {
     me.value = { user_id: 'u-kid', restrictions: ['public_moments'] }
-    const { container } = render(<PublicDiscoveryPage />)
-    expect(container.querySelector('.sh-protected-notice, [data-testid="protected-notice"]')
-      ?? container.textContent).toBeTruthy()
+    const { findByRole, container } = render(<PublicDiscoveryPage />)
+    expect(await findByRole('list', { name: 'Friends' })).toBeTruthy()
+    expect(headings(container)).toEqual(['Friends'])
+    expect(api.get).not.toHaveBeenCalledWith('/api/gfs/connections')
     expect(api.get).not.toHaveBeenCalledWith('/api/gfs/g1/moments/users')
     me.value = { user_id: 'u-me', restrictions: [] }
+  })
+
+  it('no friends yet but a GFS: the GFS list leads, Friends is one line under it', async () => {
+    withFriends = false
+    const { findByRole, container } = render(<PublicDiscoveryPage />)
+    await findByRole('list', { name: 'People sharing on Demo GFS' })
+    await waitFor(() => expect(container.textContent).toContain('Pair with a household'))
+    expect(headings(container)).toEqual(['People sharing on Demo GFS'])
+    const text = container.textContent!
+    expect(text.indexOf('Marco Rossi')).toBeLessThan(text.indexOf('Pair with a household'))
+  })
+
+  it('no friends and no GFS: one card, not two empty states', async () => {
+    withFriends = false
+    gfses = []
+    const { findByText, container, getByRole } = render(<PublicDiscoveryPage />)
+    await findByText('Pair with a household to follow its people here.')
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/gfs/connections'))
+    await Promise.resolve()
+    expect(container.textContent).not.toContain('Connect to a GFS')
+    expect(container.querySelector('input[type="search"]')).toBeNull()
+    expect(getByRole('link', { name: 'Open Connections' }).getAttribute('href')).toBe('/connections')
+  })
+
+  it('friends that fail to load are an error in Friends only; the GFS list still shows', async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === '/api/gfs/connections') return gfses
+      if (path === '/api/gfs/g1/moments/users') return { users: [marco] }
+      if (path === '/api/friends') throw new Error('offline')
+      return []
+    })
+    const { findByRole } = render(<PublicDiscoveryPage />)
+    expect((await findByRole('alert')).textContent).toContain("Couldn't load your friends")
+    const gfsList = await findByRole('list', { name: 'People sharing on Demo GFS' })
+    await waitFor(() => expect(gfsList.textContent).toContain('Marco Rossi'))
+  })
+
+  it('friends but no GFS: Friends, then a short line about a GFS', async () => {
+    gfses = []
+    const { findByRole, findByText } = render(<PublicDiscoveryPage />)
+    expect(await findByRole('list', { name: 'Friends' })).toBeTruthy()
+    expect(await findByText('Connect to a GFS (Global Federation Server) first to find other people.')).toBeTruthy()
   })
 })

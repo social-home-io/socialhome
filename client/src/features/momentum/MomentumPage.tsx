@@ -4,10 +4,11 @@
  * Tabs are links in a ``<nav>`` with ``aria-current`` (the Spaces
  * pattern): ``/momentum`` (Moments), ``/momentum/yours`` (your own
  * moments, decision 6a) and ``/momentum/discover`` (people sharing
- * publicly on a GFS, decision 5). Discover shows only once this household
- * has an active GFS and never for a protected account (it can't follow
- * through a GFS); its own address still opens it. Next to the tabs: the ``#`` filter — a popover of trending tags,
- * never a permanent row — and the gear (Settings › Momentum).
+ * people to follow: your friends, and people sharing publicly on a GFS,
+ * decision 5). Discover is always a tab: Friends needs no GFS, and a
+ * protected account sees Friends only. Next to the tabs: the ``#`` filter
+ * — a popover of trending tags, never a permanent row — and the gear
+ * (Settings › Momentum).
  *
  * A hashtag filter is ``/momentum?tag=<name>`` and shows as one removable
  * chip above the list. Older links keep working: ``?tab=yours`` and
@@ -23,7 +24,7 @@ import { addBase } from '@/baseUrl'
 import { MomentumComposerDialog } from '@/components/MomentumComposerDialog'
 import { isRestricted } from '@/components/ProtectedNotice'
 import { t } from '@/i18n/i18n'
-import { gfsConnections, loadGfsConnections } from '@/store/momentPublic'
+import { loadGfsConnections } from '@/store/momentPublic'
 import { useTitle } from '@/store/pageTitle'
 import MomentumInboxTab from './MomentumInboxTab'
 import MomentumYoursTab from './MomentumYoursTab'
@@ -93,16 +94,12 @@ export default function MomentumPage() {
     if (view.redirect && view.redirect !== loc.url) loc.route(view.redirect, true)
   }, [view.redirect])
   useEffect(() => {
-    // Fresh per visit: a GFS connected meanwhile (pairing) shows Discover.
+    // Fresh per visit: a GFS connected meanwhile (pairing) shows in Discover.
     if (!restricted) void loadGfsConnections(true)
   }, [restricted])
 
   const { tab, tag } = view
-  // Discover: someone with a GFS to discover on (and allowed to follow
-  // through one); its own address keeps its tab in view.
-  const tabs = (Object.keys(TAB_PATH) as MomentumTab[]).filter(k =>
-    k !== 'discover' || tab === 'discover'
-    || (!restricted && (gfsConnections.value?.length ?? 0) > 0))
+  const tabs = Object.keys(TAB_PATH) as MomentumTab[]
   return (
     <div class="sh-momentum-host">
       <div class="sh-space-subheader sh-space-subheader--sections sh-momentum-subheader">

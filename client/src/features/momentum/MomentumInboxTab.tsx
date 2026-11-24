@@ -20,6 +20,7 @@
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { addBase } from '@/baseUrl'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { openMomentumComposer } from '@/components/MomentumComposerDialog'
@@ -188,6 +189,11 @@ export default function MomentumInboxTab({ tag }: { tag: string | null }) {
                 <div aria-hidden="true">🌅</div>
                 <h3>{t('moment.inbox.empty_title')}</h3>
                 <p>{t(currentUser.value?.protected ? 'moment.inbox.empty_body_protected' : 'moment.inbox.empty_body')}</p>
+                <div class="sh-empty-state__cta-row">
+                  <a class="sh-btn sh-btn--secondary" href={addBase('/momentum/discover')}>
+                    {t('moment.discover.find_people')}
+                  </a>
+                </div>
               </div>
             )
           )}
