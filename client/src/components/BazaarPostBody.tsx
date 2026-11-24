@@ -612,7 +612,7 @@ function SellerControls({
                 {formatBazaarAmount(b.amount, listing.currency)}
               </span>
               {b.message && (
-                <span class="sh-muted">— {b.message}</span>
+                <span class="sh-muted">— <LinkifiedText text={b.message} /></span>
               )}
               <div class="sh-row" style={{ marginLeft: 'auto' }}>
                 <Button variant="secondary" loading={busy}

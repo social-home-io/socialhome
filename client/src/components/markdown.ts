@@ -84,17 +84,23 @@ const _LINK_HAS_HOST = /^(?:https?:\/\/[^/]|www\.[^./]+\.[^./])/i
 /** *raw* without trailing sentence punctuation and without a closing
  *  ``)`` that has no ``(`` inside the link. */
 function _trimTrailing(raw: string): string {
-  let url = raw
+  // Counted once, then kept up to date — linear in the link's length.
+  let opens = 0
+  let closes = 0
+  for (const c of raw) {
+    if (c === '(') opens += 1
+    else if (c === ')') closes += 1
+  }
+  let end = raw.length
   for (;;) {
-    if (_TRAILING_PUNCT.test(url)) {
-      url = url.slice(0, -1)
-    } else if (
-      url.endsWith(')')
-      && url.split('(').length < url.split(')').length
-    ) {
-      url = url.slice(0, -1)
+    const last = raw[end - 1]
+    if (end > 0 && _TRAILING_PUNCT.test(last)) {
+      end -= 1
+    } else if (last === ')' && opens < closes) {
+      closes -= 1
+      end -= 1
     } else {
-      return url
+      return raw.slice(0, end)
     }
   }
 }
@@ -142,12 +148,15 @@ export function splitLinks(text: string): Array<string | TextLink> {
 
 /** Where to cut *text* for a "show more" preview at about *at*: never
  *  inside a link (a cut link would open a different page) — the cut
- *  moves back to the link's start. */
+ *  moves back to the link's start, or past its end when the text starts
+ *  with it. The caller shows its ``…`` outside the linked text. */
 export function cutOutsideLinks(text: string, at: number): number {
   let pos = 0
   for (const p of splitLinks(text)) {
     const len = typeof p === 'string' ? p.length : p.text.length
-    if (typeof p !== 'string' && pos < at && at < pos + len) return pos
+    if (typeof p !== 'string' && pos < at && at < pos + len) {
+      return pos > 0 ? pos : pos + len
+    }
     pos += len
     if (pos >= at) break
   }
@@ -157,6 +166,10 @@ export function cutOutsideLinks(text: string, at: number): number {
 /** ``rel`` of every link to another site, inline and on the link card:
  *  no ``window.opener``, no Referer, and no endorsement of user links. */
 export const EXTERNAL_LINK_REL = 'noopener noreferrer nofollow ugc'
+
+/** The decorative mark after an external link: ↗ in text presentation
+ *  (U+FE0E), so it never turns into a colour emoji. */
+export const EXTERNAL_LINK_ICON = '↗\uFE0E'
 
 /** Longest link text shown in full; a longer one shows host + path cut
  *  to :data:`_LABEL_CUT` characters and ``…`` (the full URL stays the
@@ -169,7 +182,8 @@ const _LABEL_CUT = 40
 export function linkLabel(text: string): string {
   if (text.length <= _LABEL_MAX) return text
   const bare = text.replace(/^https?:\/\//i, '')
-  return bare.length <= _LABEL_CUT ? bare : `${bare.slice(0, _LABEL_CUT)}…`
+  const chars = [...bare]  // by code point: never half an emoji
+  return chars.length <= _LABEL_CUT ? bare : `${chars.slice(0, _LABEL_CUT).join('')}…`
 }
 
 function _unescape(html: string): string {
@@ -188,8 +202,15 @@ function _unescape(html: string): string {
 function _linkHtml(link: TextLink): string {
   const label = linkLabel(link.text)
   const title = label === link.text ? '' : ` title="${_escape(link.text)}"`
-  return `<a href="${_escape(link.href)}"${title} target="_blank" rel="${EXTERNAL_LINK_REL}">`
-    + `${_escape(label)}<span class="sh-ext-link__icon" aria-hidden="true">↗</span>`
+  return _externalAnchor(_escape(link.href), _escape(label), title)
+}
+
+/** The ``<a>`` every external link in a body gets (*href* / *labelHtml* /
+ *  *titleAttr* already escaped). Reads the locale at render time — a
+ *  memo of the output must key on the locale too. */
+function _externalAnchor(href: string, labelHtml: string, titleAttr = ''): string {
+  return `<a class="sh-ext-link" href="${href}"${titleAttr} target="_blank" rel="${EXTERNAL_LINK_REL}">`
+    + `${labelHtml}<span class="sh-ext-link__icon" aria-hidden="true">${EXTERNAL_LINK_ICON}</span>`
     + `<span class="sr-only">${_escape(t('link.new_tab'))}</span></a>`
 }
 
@@ -206,7 +227,7 @@ function _autolink(text: string, inLink: boolean): string {
  *  order — markdown links and plain-text links alike. */
 export function linkHrefs(input: string): string[] {
   const out: string[] = []
-  for (const m of renderMarkdown(input).matchAll(/<a href="([^"]*)"/g)) {
+  for (const m of renderMarkdown(input).matchAll(/<a (?:class="[^"]*" )?href="([^"]*)"/g)) {
     out.push(_unescape(m[1]))
   }
   return out
@@ -284,11 +305,14 @@ export function renderMarkdown(input: string, opts: RenderOptions = {}): string 
     `<code class="sh-md-inline-code">${body}</code>`
   ))
   // Links [text](url) — reject unsafe schemes.
+  // One level of balanced parentheses in the href, so
+  // ``[x](…/wiki/Mercury_(planet))`` opens the right page.
   out = out.replace(
-    /\[([^\]]+)\]\(([^)]+)\)/g,
+    /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))+)\)/g,
     (_m, text, href) => {
       const safe = _safeHref(href)
       if (safe === null) return _escape(text)
+      if (/^https?:/i.test(safe)) return _externalAnchor(safe, text)
       return `<a href="${safe}" target="_blank" rel="${EXTERNAL_LINK_REL}">${text}</a>`
     },
   )

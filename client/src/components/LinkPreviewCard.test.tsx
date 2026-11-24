@@ -108,3 +108,10 @@ describe('LinkPreviewCard', () => {
     expect(queryByLabelText('Remove link preview')).toBeNull()
   })
 })
+
+describe('LinkPreviewCard — layout', () => {
+  it('starts landscape (no jump for the usual 1.91:1 picture)', () => {
+    const { container } = render(<LinkPreviewCard preview={CARD} />)
+    expect(container.querySelector('.sh-link-preview--landscape')).toBeTruthy()
+  })
+})

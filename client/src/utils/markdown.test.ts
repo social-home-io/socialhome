@@ -266,18 +266,18 @@ describe('renderMarkdown — no Referer to third parties', () => {
 
   it('external links carry rel="noopener noreferrer"', () => {
     const a = parse(renderMarkdown('[site](https://example.org/x)')).querySelector('a')!
-    expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
   })
 
   it('an author-supplied rel is replaced, not trusted', () => {
     const a = parse(renderMarkdown('<a href="https://e.example" rel="opener">e</a>'))
       .querySelector('a')!
-    expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
   })
 
   it('an external href with leading whitespace still gets rel', () => {
     const a = parse(renderMarkdown('<a href=" https://e.example">e</a>')).querySelector('a')!
-    expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
   })
 
   it('in-app links (wikilinks) are left without rel', () => {
@@ -308,7 +308,7 @@ describe('renderMarkdown — no third-party image fetches', () => {
     const a = d.querySelector('a')!
     expect(a.getAttribute('href')).toBe('https://img.example.net/cat.png')
     expect(a.textContent).toBe('A cat')
-    expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
     expect(a.getAttribute('target')).toBe('_blank')
   })
 
@@ -379,8 +379,10 @@ describe('renderMarkdown (pages) — plain-text links', () => {
     const doc = new DOMParser().parseFromString(html, 'text/html')
     const links = [...doc.querySelectorAll('a')]
     expect(links.map(a => a.getAttribute('href'))).toEqual([
-      'https://example.org/a', 'http://www.example.com',
+      'https://example.org/a', 'https://www.example.com',
     ])
-    for (const a of links) expect(a.getAttribute('rel')).toContain('noopener')
+    for (const a of links) {
+      expect(a.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
+    }
   })
 })

@@ -16221,7 +16221,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-link-preview--landscape .sh-link-preview-image {
   width: 100%;
   min-height: 0;
-  max-height: 280px;
+  max-height: 240px;
   aspect-ratio: 1.91 / 1;
 }
 /* No picture, no description: a compact one-block card. */

@@ -178,8 +178,10 @@ export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
   const listMode = reactionMode(m, me)
   const mode: ReactionMode = page && listMode === 'own' ? 'counted' : listMode
   const longContent = m.content.length > CONTENT_TRUNCATE_AT
-  const text = longContent && !expanded.value
-    ? m.content.slice(0, cutOutsideLinks(m.content, CONTENT_TRUNCATE_AT)) + '…'
+  const cut = longContent && !expanded.value
+  // The "…" sits outside the rendered text, so it never joins a link.
+  const text = cut
+    ? m.content.slice(0, cutOutsideLinks(m.content, CONTENT_TRUNCATE_AT))
     : m.content
   const openTag = (tag: string, ev: MouseEvent) => {
     ev.preventDefault()
@@ -267,6 +269,7 @@ export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
       {m.content && (
         <p class="sh-moment-card__text" dir="auto">
           {renderHashtagged(text, openTag)}
+          {cut && '…'}
           {longContent && !expanded.value && (
             <button type="button" class="sh-moment-card__showmore"
               onClick={() => { expanded.value = true }}>

@@ -35,7 +35,10 @@ interface LinkPreviewCardProps {
 
 export function LinkPreviewCard({ preview, onRemove }: LinkPreviewCardProps) {
   const [imageFailed, setImageFailed] = useState(false)
-  const [landscape, setLandscape] = useState(false)
+  // Most og:images are landscape (1.91:1): lay the card out that way
+  // from the start so the feed does not jump when the picture arrives; a
+  // square or portrait one switches to the side thumbnail on load.
+  const [landscape, setLandscape] = useState(true)
   const href = safeWebUrl(preview.url)
   const domain = linkDomain(preview.url)
   const showImage = !!preview.thumbnail_url && !imageFailed

@@ -620,7 +620,7 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
                   {t('link_preview.restore')}
                 </button>
               ) : linkPreview.preview ? (
-                <LinkPreviewCard preview={linkPreview.preview}
+                <LinkPreviewCard key={linkPreview.preview.url} preview={linkPreview.preview}
                                  onRemove={linkPreview.dismiss} />
               ) : linkPreview.loading ? (
                 <span class="sh-muted sh-composer-link-preview-loading">
@@ -629,7 +629,8 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
               ) : null}
             </div>
           )}
-          {postType.value === 'text' && hasOnlyWwwLinks(content.value) && (
+          {postType.value === 'text' && !linkPreview.off
+            && hasOnlyWwwLinks(content.value) && (
             <p class="sh-muted sh-composer-link-hint">{t('link_preview.www_hint')}</p>
           )}
         </>

@@ -427,6 +427,9 @@ describe('PostCard link preview', () => {
     const hint = container.querySelector('.sh-post-edit-hint')!
     expect(hint.textContent).toBe('Link previews are made when a post is first written.')
     expect(input.getAttribute('aria-describedby')).toBe(hint.id)
+    // A mailto link never gets a card: no hint.
+    fireEvent.input(input, { target: { value: 'Recipe [mail](mailto:a@b.example)' } })
+    expect(container.querySelector('.sh-post-edit-hint')).toBeNull()
     // Back to no new link: the hint goes away.
     fireEvent.input(input, { target: { value: 'Recipe for tomorrow' } })
     expect(container.querySelector('.sh-post-edit-hint')).toBeNull()

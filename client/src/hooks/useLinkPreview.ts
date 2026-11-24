@@ -35,6 +35,8 @@ export interface LinkPreviewState {
   loading: boolean
   /** The author removed the card for ``url``. */
   dismissed: boolean
+  /** Previews are off for this household (a 403 this session). */
+  off: boolean
   /** The text has a first link, but its card would open a different
    *  page than the link (``cardFitsText``) — the post asks for none. */
   mismatch: boolean
@@ -89,6 +91,7 @@ export function useLinkPreview(text: string): LinkPreviewState {
     loading: !!url && loading,
     dismissed: !!url && dismissedUrl === url,
     mismatch: !fits && firstUrl(text) !== null,
+    off: disabledForSession,
     dismiss: () => setDismissedUrl(url),
     restore: () => setDismissedUrl(null),
   }

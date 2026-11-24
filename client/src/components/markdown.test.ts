@@ -37,7 +37,7 @@ describe('renderMarkdown', () => {
 
   test('renders safe links', () => {
     const out = renderMarkdown('[home](https://example.com)')
-    expect(out).toContain('<a href="https://example.com"')
+    expect(out).toContain('href="https://example.com"')
     expect(out).toContain('rel="noopener noreferrer nofollow ugc"')
     expect(out).toContain('target="_blank"')
   })
@@ -295,7 +295,7 @@ describe('renderMarkdown — bare links are clickable', () => {
 
   test('bold links still link', () => {
     const html = renderMarkdown('**https://x.example/a**')
-    expect(html).toContain('<strong><a href="https://x.example/a"')
+    expect(html).toContain('<strong><a class="sh-ext-link" href="https://x.example/a"')
   })
 
   test.each([
@@ -347,7 +347,7 @@ describe('renderMarkdown — bare links are clickable', () => {
     const html = renderMarkdown(src, { mentions: new Set(['anna']), interactive: true })
     const doc = new DOMParser().parseFromString(html, 'text/html')
     for (const a of doc.querySelectorAll('a')) {
-      expect(a.getAttributeNames().sort()).toEqual(['href', 'rel', 'target'])
+      expect(a.getAttributeNames().sort()).toEqual(['class', 'href', 'rel', 'target'])
       expect(a.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
     }
   })
@@ -432,5 +432,47 @@ describe('cutOutsideLinks', () => {
     expect(cutOutsideLinks(text, 2)).toBe(2)
     expect(cutOutsideLinks(text, 36)).toBe(36)
     expect(cutOutsideLinks('no links at all', 5)).toBe(5)
+  })
+})
+
+describe('review round 2', () => {
+  const anchors = (html: string) =>
+    [...new DOMParser().parseFromString(html, 'text/html').querySelectorAll('a')]
+
+  test('a markdown link keeps balanced parentheses in its href', () => {
+    const html = renderMarkdown('[Mercury](https://en.wikipedia.org/wiki/Mercury_(planet)) is hot')
+    const [a] = anchors(html)
+    expect(a.getAttribute('href')).toBe('https://en.wikipedia.org/wiki/Mercury_(planet)')
+    expect(visibleText(a)).toBe('Mercury')
+    expect(html).not.toContain('</a>)')
+  })
+
+  test('an external markdown link reads like a pasted one', () => {
+    const [a] = anchors(renderMarkdown('[site](https://example.org/x)'))
+    expect(a.className).toBe('sh-ext-link')
+    expect(a.querySelector('.sh-ext-link__icon')?.getAttribute('aria-hidden')).toBe('true')
+    expect(a.querySelector('.sr-only')?.textContent).toBe('(opens in a new tab)')
+    // An in-app path is no external link.
+    const [local] = anchors(renderMarkdown('[here](/spaces/x)'))
+    expect(local.querySelector('.sr-only')).toBeNull()
+  })
+
+  test('the cut lands outside a link, never at its end', () => {
+    const text = 'see https://example.org/long/path more'
+    expect(cutOutsideLinks(text, 10)).toBe(4)
+    // A text that starts with a link keeps the whole link.
+    expect(cutOutsideLinks('https://example.org/long/path more', 10)).toBe(29)
+  })
+
+  test('trailing parentheses trim in linear time', () => {
+    const t0 = performance.now()
+    const parts = splitLinks('https://x.example/' + ')'.repeat(10000))
+    expect(performance.now() - t0).toBeLessThan(100)
+    expect(parts[0]).toEqual({ href: 'https://x.example/', text: 'https://x.example/' })
+  })
+
+  test('a long label never splits an emoji', () => {
+    const url = 'https://a.example/' + 'p'.repeat(21) + '😀' + 'q'.repeat(40)
+    expect(linkLabel(url)).toBe(`a.example/${'p'.repeat(21)}😀${'q'.repeat(8)}…`)
   })
 })

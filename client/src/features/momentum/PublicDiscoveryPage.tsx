@@ -41,6 +41,7 @@ import {
   unfollowUser,
 } from '@/store/momentPublic'
 import type { MomentPublicDirectoryUser } from '@/types'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 const selectedGfs = signal<string | null>(null)
 const directory = signal<MomentPublicDirectoryUser[]>([])
@@ -286,7 +287,7 @@ export default function PublicDiscoveryPage() {
                           : <bdi dir="auto">@{u.username}</bdi>}
                   </span>
                   {relation === 'public' && u.bio && (
-                    <p class="sh-momentum-discover-bio" dir="auto">{u.bio}</p>
+                    <p class="sh-momentum-discover-bio" dir="auto"><LinkifiedText text={u.bio} /></p>
                   )}
                 </div>
                 {relation === 'paired' && (

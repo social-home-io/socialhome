@@ -14,7 +14,7 @@
  */
 import { Fragment, type ComponentChildren } from 'preact'
 import { t } from '@/i18n/i18n'
-import { EXTERNAL_LINK_REL, linkLabel, splitLinks, type TextLink } from './markdown'
+import { EXTERNAL_LINK_ICON, EXTERNAL_LINK_REL, linkLabel, splitLinks, type TextLink } from './markdown'
 
 /** One link from :func:`splitLinks`. A click never reaches the
  *  surrounding row / bubble (those have their own tap handlers). */
@@ -30,7 +30,7 @@ export function ExternalLink({ link }: { link: TextLink }) {
       onClick={(e) => e.stopPropagation()}
     >
       {label}
-      <span class="sh-ext-link__icon" aria-hidden="true">↗</span>
+      <span class="sh-ext-link__icon" aria-hidden="true">{EXTERNAL_LINK_ICON}</span>
       <span class="sr-only">{t('link.new_tab')}</span>
     </a>
   )

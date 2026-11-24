@@ -22,6 +22,7 @@ import { formatBazaarAmount } from './bazaarFormat'
 import type { BazaarListing, BazaarOffer } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { t, tValue } from '@/i18n/i18n'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 interface Props {
   listing: BazaarListing
@@ -151,7 +152,7 @@ export function BazaarOffersPanel({
             </div>
             {o.message && (
               <div class="sh-bazaar-offers-message sh-muted">
-                “{o.message}”
+                “<LinkifiedText text={o.message} />”
               </div>
             )}
             <div class="sh-bazaar-offers-actions">

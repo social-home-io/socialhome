@@ -111,6 +111,8 @@ describe('useLinkPreview', () => {
     await settle()
     expect(post).toHaveBeenCalledTimes(1)
     expect(state.current!.url).toBeNull()
+    // The composer's www. hint must not promise a card now.
+    expect(state.current!.off).toBe(true)
     mod.resetLinkPreviewSession()
   })
 })

@@ -67,6 +67,10 @@ describe('cardFitsText', () => {
     // A link in code is no link, so no card.
     ['`https://example.com/x`', false],
     ['www.example.com only', false],
+    // The href writes "*" as %2A; the card still fits.
+    ['a https://example.com/a*b c', true],
+    // A markdown link with balanced parentheses fits too.
+    ['[M](https://en.wikipedia.org/wiki/Mercury_(planet))', false],
     ['no link', false],
     [null, false],
   ])('%s → %s', (text, fits) => {

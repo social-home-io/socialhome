@@ -26,7 +26,9 @@ export function normalizeHashtag(tag: string): string {
 
 /** *content* with its web links clickable (``splitLinks``, the one link
  *  grammar) and its ``#tags`` as chips. A ``#`` inside a link (a URL
- *  fragment) is part of the link, never a tag. */
+ *  fragment such as ``https://x.org/#top``) stays part of the link and
+ *  shows no chip — deliberately, even where the server's extractor
+ *  stores it as a tag: a chip there would cut the link in two. */
 export function renderHashtagged(
   content: string,
   onClick: (tag: string, ev: MouseEvent) => void,
