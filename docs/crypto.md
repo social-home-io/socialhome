@@ -551,7 +551,7 @@ only the latest sealed key per (author, follower household), which it can't
 open.
 
 **Moment origin signature (v_35)** (`moment_origin.py`) — a
-moment travels up to three hops, and each relay re-sends it under its own
+moment travels up to its reach (1–5 hops, default 3, v_96), and each relay re-sends it under its own
 envelope signature, so the envelope proves only the last hop. The origin
 household therefore signs every `MOMENT_CREATED` / `MOMENT_DELETED` it
 authors with its Ed25519 **identity** key (no new key), and three sibling
@@ -576,7 +576,16 @@ A `no_relay` moment (v_38 — a protected account's, delivered to the
 origin's paired households only) signs the same object plus
 `"no_relay": true` under the disjoint domain `b"moment-origin:v2:"`, so a
 relay can neither strip the mark (the v1 bytes then don't verify) nor add
-it. A moment without the mark signs exactly the v1 bytes.
+it. A moment whose reach is 2, 4 or 5 (v_96 — the person's choice within
+the household maximum) signs the v1 object plus `"reach": N` under the
+disjoint domain `b"moment-origin:v3:"`, by the same rule: a relay can
+neither raise, lower nor strip it, nor splice it onto another moment.
+Reach 3 signs exactly the v1 bytes and reach 1 is the v2 `no_relay` mark,
+so older verifiers keep working for both. A `MOMENT_DELETED` carries the
+same mark as its moment under the same domain. Receivers refuse a `reach`
+outside {2, 4, 5}, `reach` together with `no_relay`, or `reach` on a
+copy without an origin signature. Same key and same `origin_sig_suite`
+tag — no new suite.
 
 `hop_count` is outside the signature (each relay bumps it) and relays
 forward the three fields verbatim. The event type is inside the signed
@@ -600,8 +609,8 @@ follower verify it against a key they already pin. No new key, format or
 suite; an unknown `origin_sig_suite` is refused.
 
 **Routed moment reactions (v_67)** (`federation/moment_reaction_route.py`,
-`services/moment_reaction_router.py`) — a reaction from a household two or
-three hops from a moment's author travels back along the path the moment
+`services/moment_reaction_router.py`) — a reaction from a household two to
+five hops (v_96; three before) from a moment's author travels back along the path the moment
 came. Built only from keys households already hold:
 
 * **Origin key-wrap key on the create.** `MOMENT_CREATED` carries

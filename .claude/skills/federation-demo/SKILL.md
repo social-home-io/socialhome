@@ -409,6 +409,35 @@ That single command runs the full sequence:
    Gamma's ``/api/highlights``. Then flips ada back to visible and
    asserts **b** sees her again.
 
+5a. ``moment-reach`` (v_96, how far a person's moments go — needs
+   ``relay-pair``, so a↔d is paired and **c** is two hops from **d**).
+   - **Reach 1 stays with the paired households.** A fresh user on **d**
+     sets ``moments.reach`` 1 (``PATCH /api/me``, the whole ``moments``
+     block; ``GET /api/moments/limits`` then says ``reach: 1``) and posts:
+     **a** and **b** store it at hop 1, reach 1 (``moments.reach``); **c**
+     never does — polled for twice as long as the moment took to land on
+     **a** and **b** (at least 10 s), so a relay would have shown up.
+   - **A hop-4 household nobody there looks at forwards and keeps
+     nothing.** No path in the topology is 4 hops long, so the step
+     injects the copy a relay would send: a ``MOMENT_CREATED`` by the
+     **d** user at reach 5, origin-signed with **d**'s identity key (v3
+     bytes), **d**'s ``origin_keywrap_*`` fields, three return tokens (the
+     last minted with **b**'s real token key), ``hop_count`` 4, sealed
+     under **b**'s session key for **c** and signed by **b** — POSTed to
+     the inbox URL **b** holds for **c**. **c**'s people look ≤ 3 hops and
+     follow nobody on **d** (checked first). Negative control: a fresh
+     user on **a** follows the author (a follow keeps the author's moments
+     whatever ``max_hops`` says, but does not raise **a**'s advertised
+     ``moment_look_hops``) — **c** stores nothing and sends **a** no hop-5
+     copy. Then that user sets ``max_hops`` 5: **a** re-advertises
+     ``moment_look_hops`` 5 (log line, and **c**'s
+     ``capabilities_seen_at`` for **a** moves); a second injected copy
+     leaves **c** with no row and lands on **a** at hop 5, reach 5, where
+     the user sees it in ``GET /api/moments``; **b** (the sender, look 3)
+     holds none. No ``refusing`` line for either moment on **c**.
+   - Afterwards both users go back to the defaults (reach 3, max_hops 3,
+     unfollow) and **a** re-advertises ``moment_look_hops`` 3.
+
 6. ``invite-redeem`` — cross-instance space-invite token redeem
    over federation. Carol creates a private space on **c**, mints
    an invite token, Alice POSTs the token to her own
@@ -771,7 +800,7 @@ That single command runs the full sequence:
    crashed during the run.
 
 The canonical ``all`` sequence runs ``up → pair → traffic →
-calendar → verify → relay-pair → visibility → invite-redeem →
+calendar → verify → relay-pair → visibility → moment-reach → invite-redeem →
 invite-redeem-routed → remote-invite-routed → space-post-routed →
 mesh-member-cert → space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
@@ -916,7 +945,7 @@ Phases added after the initial publish are documented inline in
 
 To iterate faster you can run the steps individually (``python
 harness.py up`` / ``pair`` / ``traffic`` / ``calendar`` / ``verify``
-/ ``relay-pair`` / ``visibility`` / ``invite-redeem`` /
+/ ``relay-pair`` / ``visibility`` / ``moment-reach`` / ``invite-redeem`` /
 ``invite-redeem-routed`` / ``remote-invite-routed`` /
 ``space-post-routed`` / ``mesh-member-cert`` / ``space-media-blob`` /
 ``space-gallery-media-blob`` / ``space-sync-catchup-media`` /

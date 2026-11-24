@@ -97,13 +97,13 @@ describe('MomentCard', () => {
     const items = [...menu.querySelectorAll('[role="menuitem"]')].map(b => b.textContent)
     expect(items).toEqual(['Reply', 'Copy text', 'Who sees this', 'Delete'])
     fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
-    expect(await findByText(/up to 3 hops away/)).toBeTruthy()
+    expect(await findByText(/up to 3 steps away/)).toBeTruthy()
   })
 
   it.each([
     [1, /^Your household and your paired households, no further\./],
-    [3, /^Your paired households and the households they’re paired with, up to 3 hops away; each person there decides how far they look\./],
-    [5, /up to 5 hops away; each person there decides how far they look\./],
+    [3, /^Your paired households and the households they’re paired with, up to 3 steps away; each person there decides how far they look\./],
+    [5, /up to 5 steps away; each person there decides how far they look\./],
   ])('Who sees this says how far a moment with reach %i went', async (reach, body) => {
     const { getByRole, findByRole } = renderCard(moment({ author_user_id: ME, reach }))
     fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
@@ -111,12 +111,12 @@ describe('MomentCard', () => {
     fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
     const dialog = await findByRole('dialog')
     expect(dialog.querySelector('p')!.textContent).toMatch(body)
-    expect(dialog.textContent).not.toContain('up to 1 hops')
+    expect(dialog.textContent).not.toContain('up to 1 steps')
   })
 
   it.each([
     // Written before the protection: it says how far it really went.
-    [3, /up to 3 hops away/],
+    [3, /up to 3 steps away/],
     // What the server sends for a protected author: the protected text.
     [1, /^Your household and your paired households\. It isn't passed on further\./],
   ])('Who sees this for a protected author’s moment with reach %i', async (reach, body) => {
@@ -138,13 +138,13 @@ describe('MomentCard', () => {
     expect(paired.container.querySelector('.sh-moment-card__meta')?.textContent).toContain('Berger · paired')
     paired.unmount()
     const far = renderCard(moment({ received_via: 'household', hop_count: 2 }))
-    expect(far.container.querySelector('.sh-moment-card__meta')?.textContent).toContain('2 hops away')
+    expect(far.container.querySelector('.sh-moment-card__meta')?.textContent).toContain('2 steps away')
     far.unmount()
     const gfs = renderCard(moment({ received_via: 'gfs' }))
     expect(gfs.container.querySelector('.sh-moment-card__meta')?.textContent).toContain('via GFS')
     gfs.unmount()
     const home = renderCard(moment())
-    expect(home.container.querySelector('.sh-moment-card__meta')?.textContent).not.toMatch(/paired|hops|GFS/)
+    expect(home.container.querySelector('.sh-moment-card__meta')?.textContent).not.toMatch(/paired|hops|steps|GFS/)
   })
 
   it('counted mode: one chip per emoji, yours pressed; tapping yours clears it', async () => {

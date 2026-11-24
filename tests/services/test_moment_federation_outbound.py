@@ -13,7 +13,11 @@ from socialhome.domain.events import (
     MomentDeleted,
     MomentReactionChanged,
 )
-from socialhome.domain.federation import FederationEventType, RemoteInstance
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    RemoteInstance,
+)
 from socialhome.domain.federation_retention import relayed_moment_key
 from socialhome.moment_origin import NO_RELAY_FIELD, REACH_FIELD, verify_moment_origin
 from socialhome.services import moment_federation_outbound as outbound_mod
@@ -51,9 +55,10 @@ class _FakeVisibilityRepo:
         return frozenset(self._hidden.get(peer_id, set()))
 
 
-def _peer(iid: str) -> RemoteInstance:
+def _peer(iid: str, source: InstanceSource = InstanceSource.MANUAL) -> RemoteInstance:
     inst = MagicMock(spec=RemoteInstance)
     inst.id = iid
+    inst.source = source
     return inst
 
 
@@ -948,14 +953,16 @@ FET = FederationEventType
 _VERSIONS = {"p37": 37, "p38": 38, "p95": 95, "p96": 96}
 
 
-def _versioned(fed, fed_repo, versions=None, looks=None) -> None:
+def _versioned(fed, fed_repo, versions=None, looks=None, highs=None) -> None:
     versions = versions or _VERSIONS
     looks = looks or {}
     fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer(iid) for iid in versions]
     )
-    # How far each peer said its people look (in memory, decision C).
+    # How far each peer said its people look (in memory, decision C), and
+    # the farthest it said since our start (deletes, review F1).
     fed.peer_moment_look_hops = looks.get
+    fed.peer_moment_look_high = (highs if highs is not None else looks).get
 
     async def _supports(instance_id, *, min_version):
         return versions.get(instance_id, 0) >= min_version
@@ -1208,8 +1215,38 @@ async def test_hops_4_and_5_go_only_to_households_that_look_that_far(
         await out.relay_inbound(
             event_type=et, payload=_hop_payload(5, hop), from_instance=sender
         )
+    if et is FET.MOMENT_DELETED and hop >= 3:
+        # A delete also goes to a paired household whose look is unknown.
+        targets = targets | {"lx"}
     assert _targets(fed) == targets
     assert {c["payload"]["hop_count"] for c in _sent(fed)} == {hop + 1}
+
+
+@pytest.mark.parametrize("hop", [3, 4])
+async def test_a_hop_4_5_delete_with_an_unknown_look_goes_only_to_paired_v96(
+    stack, hop
+):
+    """After our restart a delete at hop 4–5 still reaches a directly
+    paired v_96 household whose look is unknown — not a known look below the
+    hop, not an older household, not one seated from an invite link."""
+    out, fed, fed_repo, _ = stack
+    _versioned(
+        fed, fed_repo, {"lx": 96, "l3": 96, "oldx": 95, "seat": 96}, looks={"l3": 3}
+    )
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[
+            _peer("lx"),
+            _peer("l3"),
+            _peer("oldx"),
+            _peer("seat", InstanceSource.SPACE_SESSION),
+        ]
+    )
+    await out.relay_inbound(
+        event_type=FET.MOMENT_DELETED,
+        payload=_hop_payload(5, hop),
+        from_instance="peer-sender",
+    )
+    assert _targets(fed) == {"lx"}
 
 
 async def test_a_hop_4_copy_goes_only_to_v96_whatever_its_marks(stack):
@@ -1321,9 +1358,10 @@ async def test_far_copies_never_stop_the_closer_one_reaching_default_lookers(
 ):
     """Fable #1: copies claiming hops 4 then 3 go only to who looks past 3
     (here nobody) — the genuine hop-2 copy still reaches every default-look
-    household at hop 3 (create, delete and totals alike)."""
+    household at hop 3 (create, delete and totals alike). Both said they
+    look 3 hops (a delete would also go to an unknown look)."""
     out, fed, fed_repo, _ = stack
-    _versioned(fed, fed_repo, {"pd": 96, "pe": 96})
+    _versioned(fed, fed_repo, {"pd": 96, "pe": 96}, looks={"pd": 3, "pe": 3})
     event_type = {
         "create": FET.MOMENT_CREATED,
         "delete": FET.MOMENT_DELETED,
@@ -1484,3 +1522,30 @@ async def test_the_origins_totals_follow_the_moments_reach(stack, reach, targets
         _counts(origin_instance_id="self"), author_user_id="uid-author", reach=reach
     )
     assert _targets(fed) == targets
+
+
+async def test_a_hop_4_5_delete_follows_the_farthest_look_since_our_start(stack):
+    """Review F1: a peer that once looked 5 hops (since our start) may hold
+    the moment; its look fell to 3 since. The delete still goes there, totals
+    and creates follow the current look."""
+    out, fed, fed_repo, _ = stack
+    _versioned(
+        fed,
+        fed_repo,
+        {"fell": 96, "low": 96},
+        looks={"fell": 3, "low": 3},
+        highs={"fell": 5, "low": 3},
+    )
+    await out.relay_inbound(
+        event_type=FET.MOMENT_DELETED,
+        payload=_hop_payload(5, 4),
+        from_instance="peer-sender",
+    )
+    assert _targets(fed) == {"fell"}
+    fed.send_event.reset_mock()
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(5, 4),
+        from_instance="peer-sender",
+    )
+    assert _targets(fed) == set()

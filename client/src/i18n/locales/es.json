@@ -2823,7 +2823,7 @@
   "settings.momentum.hop_5": "5 pasos",
   "settings.momentum.steps": "{n} pasos",
   "settings.momentum.reach_label": "Hasta dónde llegan mis momentos",
-  "settings.momentum.reach_hint": "Por debajo de 3 pasos, los hogares con una versión antigua de Social Home no reciben tus momentos hasta que se actualicen. Con 4 o 5, los hogares más lejanos con una versión antigua se los pierden, y los pasos 4 y 5 solo llegan a hogares donde alguien mira tan lejos.",
+  "settings.momentum.reach_hint": "Los pasos 4 y 5 solo llegan a hogares donde alguien mira tan lejos.",
   "settings.momentum.reach_household_max": "Tu hogar permite hasta {n} pasos.",
   "settings.momentum.reach_household_max_one": "Tu hogar solo permite 1 paso.",
   "settings.momentum.reach_max_label": "Máximo del hogar",

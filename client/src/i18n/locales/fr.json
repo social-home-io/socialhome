@@ -2796,7 +2796,7 @@
   "settings.momentum.hop_5": "5 étapes",
   "settings.momentum.steps": "{n} étapes",
   "settings.momentum.reach_label": "Jusqu’où vont mes moments",
-  "settings.momentum.reach_hint": "En dessous de 3 étapes, les foyers sur une ancienne version de Social Home ne reçoivent vos moments qu’après une mise à jour. À 4 ou 5, les foyers plus éloignés sur une ancienne version les manquent, et les étapes 4 et 5 n’atteignent que les foyers où quelqu’un regarde aussi loin.",
+  "settings.momentum.reach_hint": "Les étapes 4 et 5 n’atteignent que les foyers où quelqu’un regarde aussi loin.",
   "settings.momentum.reach_household_max": "Votre foyer autorise jusqu’à {n} étapes.",
   "settings.momentum.reach_household_max_one": "Votre foyer n’autorise qu’une étape.",
   "settings.momentum.reach_max_label": "Maximum du foyer",

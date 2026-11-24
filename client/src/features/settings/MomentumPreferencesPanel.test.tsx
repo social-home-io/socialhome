@@ -123,7 +123,7 @@ describe('Settings › Momentum — how far my moments go', () => {
   const reachSelect = (c: Element) =>
     c.querySelector('#sh-momentum-reach') as HTMLSelectElement
 
-  it('offers 1–5, starts at 3, and explains what older households do', () => {
+  it('offers 1–5, starts at 3, and says how far steps 4 and 5 reach', () => {
     me(null)
     const { container, getByText } = render(<MomentumPreferencesPanel />)
     const reach = reachSelect(container)
@@ -131,9 +131,9 @@ describe('Settings › Momentum — how far my moments go', () => {
     expect([...reach.options].map(o => o.value)).toEqual(['1', '2', '3', '4', '5'])
     expect(reach.value).toBe('3')
     expect([...reach.options].some(o => o.disabled)).toBe(false)
-    expect(getByText(/households on an older Social Home don't get your moments until they update/)).toBeTruthy()
-    expect(getByText(/older households further away miss them/)).toBeTruthy()
-    expect(getByText(/where someone looks that far/)).toBeTruthy()
+    expect(getByText('Steps 4 and 5 only reach households where someone looks that far.')).toBeTruthy()
+    // Owner 2026-11-24: no word about older Social Home versions here.
+    expect(container.textContent).not.toMatch(/older/i)
   })
 
   it('saves reach in the same moments block as the other two', async () => {

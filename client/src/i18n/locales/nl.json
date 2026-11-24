@@ -2796,7 +2796,7 @@
   "settings.momentum.hop_5": "5 stappen",
   "settings.momentum.steps": "{n} stappen",
   "settings.momentum.reach_label": "Hoe ver mijn momenten gaan",
-  "settings.momentum.reach_hint": "Onder 3 stappen krijgen huishoudens met een oudere Social Home je momenten pas na een update. Bij 4 of 5 missen oudere huishoudens verder weg ze, en stap 4 en 5 bereiken alleen huishoudens waar iemand zo ver kijkt.",
+  "settings.momentum.reach_hint": "Stap 4 en 5 bereiken alleen huishoudens waar iemand zo ver kijkt.",
   "settings.momentum.reach_household_max": "Je huishouden staat tot {n} stappen toe.",
   "settings.momentum.reach_household_max_one": "Je huishouden staat maar 1 stap toe.",
   "settings.momentum.reach_max_label": "Maximum voor het huishouden",
