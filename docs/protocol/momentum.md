@@ -26,9 +26,14 @@ Plaintext fields on every envelope: `event_type`, `from_instance`,
 data only — everything else (`content`, `media_url`, `media_type`,
 `duration_ms`, `parent_moment_id`, `expires_at`, `author_user_id`,
 `reactor_user_id`, `emoji`, the v_35 origin signature
-`origin_identity_pk` / `origin_sig` / `origin_sig_suite`, and the v_67
+`origin_identity_pk` / `origin_sig` / `origin_sig_suite`, the v_38
+`no_relay` and v_96 `reach` marks (signed, on creates and deletes —
+[Reach](#reach--how-far-a-persons-moments-go-v_96)), and the v_67
 `origin_keywrap_*` fields and return tokens `rt` / `rt_suite`) lives inside
-the encrypted payload (§25.8.21). A `MOMENT_REACTION_ROUTED` carries only
+the encrypted payload (§25.8.21). No new event type carries the reach: a
+v_96 household's `INSTANCE_CAPABILITIES_UPDATED` adds one field,
+`moment_look_hops` (how far its people look, said as at least 3), to its
+directly paired households only. A `MOMENT_REACTION_ROUTED` carries only
 `moment_id`, `origin_instance_id`, `rt`, `rt_suite` and an opaque `sealed`
 reaction — who reacted and with what is sealed end to end to the origin
 household; the relays between see neither. A `MOMENT_REACTIONS_COUNTED`
@@ -258,32 +263,30 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
   give up after ~10 h as before; a delete reaching a public follower
   through a GFS is covered by the GFS's certificate log
   ([`momentum_public.md`](./momentum_public.md#late-deletes-delete-certificates-v_66)).
-* When ``hop_count >= MOMENT_MAX_HOPS`` (3), the relay short-circuits.
+* When ``hop_count >= min(reach, MOMENT_MAX_HOPS)`` (the cap is 5; reach
+  defaults to 3), the relay short-circuits.
 
 **Cost.** In a fully-connected mesh of *n* households, re-relaying every
 copy cost (n−1) + (n−1)(n−2) + (n−1)(n−2)(n−3) envelopes per moment
 (25 260 for n = 31); relaying once costs (n−1) + (n−1)(n−2) (900).
 
-## Reach — how far a person's moments go (v_96, design)
+## Reach — how far a person's moments go (v_96)
 
-Owner decisions 2026-11-23. Status: **being built**. Phase 1 (v_96) has
-landed: the signed wire shape (creates and deletes), the receiver refusals,
-the relay rules (``hop < min(reach, MOMENT_MAX_HOPS)``, the relay clamp, one
-closer re-relay, reach-carrying copies only to v_96), the totals gate, the
-relayed outbox key, the ``moments.reach`` column and the person / household
-reach (``moments.reach`` / ``moments.reach_max``).
-Phase 2 (still v_96) has landed too: ``MOMENT_MAX_HOPS`` 5 with the
-viewer's ``max_hops`` 1–5 (default 3), ``MAX_RETURN_TOKENS`` 4 with the
-per-source rate on four-token reactions, ``moment_look_hops`` (decision C,
-no migration) and hop ≥ 4 copies only to v_96. Phase 3 (still v_96, no
-new wire field) has landed the storage rule's follower branch and the
-forward-only guarantees below. Phase 4 (no wire change) has landed the
-routes and the UI: ``GET /api/moments/limits`` carries the caller's
+Owner decisions 2026-11-23 (answers A/B/C below). Each person chooses how
+many hops their moments travel over the household mesh (1–5, default 3),
+under a household maximum an admin sets. The reach is signed by the origin
+on every create and delete, relays forward a copy only while
+``hop < min(reach, MOMENT_MAX_HOPS)``, hops 4–5 go only toward households
+that look that far (``moment_look_hops``, decision C), and a household keeps
+a moment only when someone there will see it — everyone else forwards it
+and stores nothing. ``GET /api/moments/limits`` carries the caller's
 ``reach`` and the household ``reach_max``, admins set the maximum with
-``PUT /api/admin/moments/reach-max``, every moment item carries its row's
-``reach``, and Settings › Momentum offers "Show moments up to" and "How
-far my moments go" 1–5 (see [api.md](../api.md)); every text that said
-"up to 3 hops" now says the moment's or the person's real reach.
+``PUT /api/admin/moments/reach-max``, a person sets theirs in the
+``moments`` block of ``PATCH /api/me`` preferences, and every moment item
+carries its row's ``reach`` (see [api.md](../api.md)). Settings › Momentum
+offers "Show moments up to" and "How far my moments go" 1–5, and every
+text about how far a moment goes says the moment's or the person's real
+reach.
 
 ### Rules
 
@@ -322,10 +325,10 @@ neither raise it, strip it nor splice it onto another moment:
 
 * **Deletes carry the same mark, signed the same way** (``reach`` or
   ``no_relay`` inside the delete's v3 / v2 bytes), so a relay can't send a
-  delete further than its moment went, or shorter. This also closes a
-  leak on main today: a protected account's delete is sent unmarked and
-  relayed 3 hops, leaving the child's id as a tombstone there; it becomes a
-  signed ``no_relay`` delete. The GFS delete certificate (v_66) keeps its
+  delete further than its moment went, or shorter. This also closed a
+  leak: before v_96 a protected account's delete was sent unmarked and
+  relayed 3 hops, leaving the child's id as a tombstone there; it is a
+  signed ``no_relay`` delete now. The GFS delete certificate (v_66) keeps its
   fixed v1 field set: for a public moment the origin signs the certificate
   separately over the v1 bytes.
 * **GFS delete certificates stay v1** (accepted residual): for a public
@@ -340,13 +343,13 @@ neither raise it, strip it nor splice it onto another moment:
   ``reach`` and ``no_relay``, or that carries ``reach`` on the legacy
   unsigned path. No ``reach`` ⇒ 3. No new crypto shape: the same Ed25519
   identity key and ``origin_sig_suite`` tag; an unknown suite is refused as
-  today.
+  before.
 * **Relays honour it**: forward only while ``hop < reach``. A
   reach-carrying copy goes only to ≥ v_96 peers — an older household
   verifies v1 bytes only and would drop it.
 * **The relay clamp** (adversarial review F1). ``hop_count`` stays outside
-  the signature (each relay bumps it). Today a relay copy not sent by its
-  origin is *stored* at hop ≥ 2 but *relayed* with the hop it claimed, so a
+  the signature (each relay bumps it). Before v_96 a relay copy not sent by
+  its origin was *stored* at hop ≥ 2 but *relayed* with the hop it claimed, so a
   malicious relay resetting it to 1 got an honest relay to pass it on as if
   it came from the origin. v_96 relays forward ``max(hop, 2) + 1`` and
   refuse a create whose (clamped) hop is above its reach. A malicious relay
@@ -404,8 +407,7 @@ neither raise it, strip it nor splice it onto another moment:
 
 ### Storage: a household keeps a moment only if someone here will see it
 
-Built (``SqliteMomentRepo.has_visible_recipient``, pure pass-through
-below):
+``SqliteMomentRepo.has_visible_recipient`` (pure pass-through below):
 
 * store when a local non-protected person's ``max_hops ≥ hop``, **or** a
   local person follows the author (``user_follows`` /
@@ -568,10 +570,10 @@ A v_96 household tells its paired peers one number, ``moment_look_hops``
 — the largest ``max_hops`` among its non-protected people, never said
 below 3 — in ``INSTANCE_CAPABILITIES_UPDATED``, sent when it changes. A relay sends a
 hop-4 or hop-5 copy only to a peer whose ``moment_look_hops`` is at least
-that hop (as built: a peer not heard from since our start — older, or its
-answer still on the way — gets none). Hops 1–3 are unchanged.
+that hop (a peer not heard from since our start — older, or its answer
+still on the way — gets none). Hops 1–3 are unchanged.
 
-As built:
+In detail:
 
 * **Computed** by ``SqliteMomentRepo.moment_look_hops``: the widest
   ``moments.max_hops`` among active, non-protected people (a missing or
@@ -674,8 +676,7 @@ outbox eviction above still hold the per-household memory bounded.
 * Accepted too: the relay clamp, signed deletes (with the protected-account
   delete fix), relayed outbox rows evicted first, ``MAX_RETURN_TOKENS = 4``,
   reply reach = min(own, parent), the ``moments.reach`` column with its
-  audit. Protocol version **v_96** on main (the follower branch
-  ``feat/subscriber-seats`` renumbers to v_97).
+  audit. Protocol version **v_96**.
 
 ## Per-user max-hops visibility (§Momentum-relay-policy)
 
@@ -716,7 +717,7 @@ by a member of a directly paired household.
 A protected (child) account sees moments from its **own household and its
 directly paired households only** — the same circle its own ``no_relay``
 moments reach (v_38; owner decision 14, 2026-10-25). Never one relayed from
-2–3 hops away (``hop_count > 1``), never one that came through a GFS
+2–5 hops away (``hop_count > 1``), never one that came through a GFS
 (``received_via='gfs'``), whatever its ``max_hops``.
 
 It is a read-time, per-viewer filter (``moment_repo._PROTECTED_CIRCLE_SQL``
@@ -1221,17 +1222,20 @@ sequenceDiagram
     participant B as Peer HFS B
     participant SB as MomentService<br/>(B)
     participant C as Peer HFS C<br/>(B's peer)
+    participant D as Peer HFS D<br/>(C's peer, 4 hops<br/>from A at reach 5)
 
     U->>SA: POST /api/moments<br/>{content, media?, parent_moment_id?}
-    SA->>SA: 15-min rate-limit check<br/>+ persist + ``moments.id`` UPSERT
+    SA->>SA: 15-min rate-limit check<br/>effective reach = protected ? 1 :<br/>min(person reach, household reach_max)<br/>(reply: min(own, parent's))<br/>persist row with ``reach``
     SA->>Bus: publish MomentCreated
-    Bus->>Fed: outbound subscriber<br/>signs origin_sig (A identity key)<br/>fans hop=1 to paired peers
-    Fed->>B: encrypted MOMENT_CREATED (hop=1, origin=A, origin_sig)
-    Note over B: §24.11 pipeline:<br/>verify, decrypt, persist
-    B->>SB: dispatch via _event_registry<br/>save + republish MomentCreated
-    SB-->>Fed: relay_inbound → fan hop=2 to B's peers (skip A)
+    Bus->>Fed: outbound subscriber<br/>signs origin_sig over v1 / v2 (no_relay) /<br/>v3 (reach) bytes (A identity key)<br/>fans hop=1 to paired peers<br/>(reach 2: only ≥ v_96, reach 1: ≥ v_38)
+    Fed->>B: encrypted MOMENT_CREATED (hop=1, origin=A, reach?, origin_sig)
+    Note over B: §24.11 pipeline:<br/>verify, decrypt; refuse a bad reach mark<br/>store only if someone here sees it<br/>(max_hops ≥ hop, or follows the author)
+    B->>SB: dispatch via _event_registry<br/>save (if kept) + republish MomentCreated
+    SB-->>Fed: relay_inbound if hop < min(reach, 5)<br/>→ fan hop=2 to B's peers (skip A)<br/>reach-carrying copy only to ≥ v_96
     Fed->>C: encrypted MOMENT_CREATED (hop=2, origin=A, origin_sig verbatim)
-    Note over C: sender B ≠ origin A → verify origin_sig<br/>against A pinned key (or derived pk)<br/>then persist + republish
+    Note over C: sender B ≠ origin A → verify origin_sig<br/>against A pinned key (or derived pk);<br/>refuse if clamped hop max(hop,2) > reach<br/>then store-if-seen + relay at max(hop,2)+1
+    C->>D: hop ≥ 4 only if D advertised<br/>moment_look_hops ≥ that hop (v_96)
+    Note over D: nobody here looks 4 hops<br/>and nobody follows the author?<br/>→ forward within reach, keep nothing
 ```
 
 ## Notifications
@@ -1291,7 +1295,27 @@ the one place a reply is written.
   (delete tombstones). `0124_moment_saves.sql` adds `moment_saves`
   (saved moments, decision 6b). `0125_moment_reaction_route.sql` adds
   `moments.reaction_route` (v_67). `0127_moment_reaction_summary.sql` adds
-  `moments.reaction_summary` (v_69).
+  `moments.reaction_summary` (v_69). `0154_moment_reach.sql` adds
+  `moments.reach` (v_96, NULL = 3).
+- Reach (v_96): signed marks and the reach of a payload
+  ``socialhome/moment_origin.py`` (``sign_moment_origin`` /
+  ``verify_moment_origin`` over the v1 / v2 / v3 bytes,
+  ``moment_reach_of``, ``reach_marks_of``, ``moment_hop_of`` — the relay
+  clamp); effective reach on create / delete and the household maximum
+  ``MomentService`` (``effective_reach``, ``set_reach_max``); person reach
+  ``services/user_preferences.py`` (``moments.reach``); relay rule
+  ``hop < min(reach, MOMENT_MAX_HOPS)``, version gates and the hop-4–5
+  look gate in ``MomentFederationOutbound.relay_inbound``; storage rule
+  ``SqliteMomentRepo.has_visible_recipient``; the look
+  ``SqliteMomentRepo.moment_look_hops``, advertised by
+  ``services/capabilities_outbound.py``, kept by
+  ``federation/federation_service.py`` (``peer_moment_look_hops``) from
+  ``services/federation_inbound/pairing.py`` and re-learned at startup by
+  ``services/capability_resync.py``; relayed outbox keys
+  ``domain/federation_retention.py`` (``moment-relay:``), evicted first by
+  ``repositories/outbox_repo.py``. Release-blocker tests
+  ``tests/protocol/test_moment_reach.py`` and
+  ``tests/protocol/test_moment_forward_only.py``.
 - Domain: `socialhome/domain/moment.py` (caps + dataclasses);
   events at `socialhome/domain/events.py`.
 - Repo: `socialhome/repositories/moment_repo.py`.
@@ -1320,7 +1344,8 @@ the one place a reply is written.
   ``moment.reaction_changed`` only to the author's WS sessions — and (v_69)
   a reactor-free ``moment.reaction_changed`` to the household when newer
   totals arrive for a moment held here.
-- Routes: `socialhome/routes/moments.py`.
+- Routes: `socialhome/routes/moments.py` (incl. `GET /api/moments/limits`
+  with `reach` / `reach_max` and `PUT /api/admin/moments/reach-max`, v_96).
 - Retention scheduler:
   `socialhome/infrastructure/moment_retention_scheduler.py`.
 - Frontend: `client/src/features/momentum/`,
@@ -1330,4 +1355,10 @@ the one place a reply is written.
 
 - §24.11 inbound validation pipeline (encryption-first applies).
 - §25.8.21 every field encrypted unless required for routing.
-- §Momentum (this page) for the retention + relay model.
+- §Momentum (this page) for the retention + relay model, and
+  [Reach](#reach--how-far-a-persons-moments-go-v_96) (owner decisions
+  2026-11-23) for the per-person reach, the household maximum, the
+  hop-4–5 look bound and the store-only-if-seen rule.
+- [`capabilities.md`](./capabilities.md) v_96
+  (`FederationCapability.MIN_FOR_MOMENT_REACH`) for the older-peer
+  fallbacks.
