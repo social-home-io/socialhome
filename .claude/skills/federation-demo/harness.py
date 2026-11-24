@@ -2742,7 +2742,7 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
     """Step 3j of ``gfs-cluster``: space media on demand (v_83) across nodes.
 
     A fake holder household (a real Ed25519 key, registered via node 0)
-    owns a listed space and holds its socket on node 0 with ``accepts:
+    holds the one seat of a channel and its socket on node 0 with ``accepts:
     ["space_media_serve"]``. Ten readers (distinct client prefixes) POST
     ``/gfs/media/{blob}/wanted`` at once, DIRECTLY to node 1, for a blob the
     cache never held: node 1 asks the holder through the cluster (the
