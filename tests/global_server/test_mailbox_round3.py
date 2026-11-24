@@ -213,8 +213,8 @@ async def test_relay_queue_drop_logs_name_no_target(gfs_db, caplog):
         ws_registry=GfsWebSocketRegistry(),
     )
     target = "t" * 32
-    huge = {"space_id": "s", "event_type": "e", "payload": "x" * (5 * 1024 * 1024)}
-    assert await relay.queue_relay(target, huge) is False
+    huge = {"channel_id": "c", "event_type": "e", "payload": "x" * (5 * 1024 * 1024)}
+    assert await relay.queue_relay_many([target], huge) == 0
     assert any("exceeds the relay queue" in r.getMessage() for r in caplog.records)
     assert all(target not in r.getMessage() for r in caplog.records)
 

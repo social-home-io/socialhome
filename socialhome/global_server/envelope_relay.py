@@ -1314,17 +1314,6 @@ class GfsEnvelopeRelay:
             )
         return written
 
-    async def queue_relay(self, target: str, frame: dict) -> bool:
-        """Queue one relay *frame* (``{space_id, event_type, payload}`` — the
-        relay push without its ``type``) for *target* and hint the cluster.
-
-        For a push that found no socket for *target* on THIS node: the node
-        that holds it drains the row on the ``NODE_DRAIN_HINT``, or the
-        target's next hello does. Same per-recipient RELAY caps, server-wide
-        cap and fair-share eviction as a member item. ``False`` when the
-        frame alone exceeds a cap (logged)."""
-        return await self._queue_relay_blob(target, orjson.dumps(frame).decode())
-
     async def _queue_relay_blob(
         self, target: str, blob: str, *, reaction: bool = False
     ) -> bool:
