@@ -188,6 +188,7 @@ from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
 from .infrastructure.notification_cleanup_scheduler import (
     NotificationCleanupScheduler,
 )
+from .infrastructure.owed_rotation_scheduler import OwedRotationScheduler
 from .infrastructure.page_lock_scheduler import PageLockExpiryScheduler
 from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionScheduler
 from .infrastructure.pairing_session_prune_scheduler import (
@@ -4665,6 +4666,7 @@ def create_app(config: Config | None = None) -> web.Application:
     routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
     gfs_cleanup_scheduler: GfsCleanupScheduler | None = None
+    owed_rotation_scheduler: OwedRotationScheduler | None = None
     gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
     moderation_expiry_scheduler: ModerationExpiryScheduler | None = None
     join_request_expiry_scheduler: JoinRequestExpiryScheduler | None = None
@@ -6499,6 +6501,12 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_connection_service, gfs_channels
         )
         await gfs_cleanup_scheduler.start()
+        # v_96 — a follower's leave owes the space a content-key rotation;
+        # the hourly sweep pays each debt once it is a day old (owner or
+        # seed-holding acting host only).
+        nonlocal owed_rotation_scheduler
+        owed_rotation_scheduler = OwedRotationScheduler(app[K.space_service_key])
+        await owed_rotation_scheduler.start()
         await push_withdraw_service.start()
         if gfs_route_discovery_scheduler is not None:
             await gfs_route_discovery_scheduler.start()
@@ -6904,6 +6912,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await replay_cache_scheduler.stop()
         if gfs_cleanup_scheduler is not None:
             await gfs_cleanup_scheduler.stop()
+        if owed_rotation_scheduler is not None:
+            await owed_rotation_scheduler.stop()
         # Before the shared HTTP session closes: pending withdraws go out.
         await push_withdraw_service.stop()
         if gfs_route_discovery_scheduler is not None:
