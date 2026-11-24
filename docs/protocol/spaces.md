@@ -488,24 +488,32 @@ within seconds).
   is **owed**. A space owes one while a tombstoned `subscriber` row of
   `space_remote_members` has a `removed_at` newer than the current epoch's
   `space_keys.created_at` (one query, persisted by construction). Any
-  rotation pays it; otherwise a sweep run by the owner or a seed-holding
-  acting host rotates a space whose debt is 24 h old.
-  Built so far: a local follower's own leave (`remove_member` of
-  oneself, `unfollow_space`) rotates nothing — its household keeps the
-  key anyway. On the host, a remote household's leave
-  (`on_remote_member_left`) rotates exactly when that household's writer
-  scope weakened (`rotate_if_writer_scope_weakened`): a read-only
-  follower (comment and react off, so no writer cert) leaves without a
-  rotation; a follower that held a `reader` comment cert rotates at once
-  until the owed-rotation sweep lands. An admin removing a follower still
-  rotates at once. A member's leave — including a member who leaves and
-  then follows — rotates as before, so no writer key survives a move from
-  a writer seat to a follower seat.
-- **At once:** a follower ban, `allow_subscribers` turned off, or the
-  comment / react switch turned off. Built so far for `allow_subscribers`
-  turned off: this household's own followers' seats end (their own leave,
-  no rotation). Remote follower seats are ended and the key rotated by
-  the owed-rotation phase (P5), not yet built.
+  rotation pays it; otherwise the hourly sweep
+  (`infrastructure/owed_rotation_scheduler.py`) asks
+  `SpaceService.pay_owed_rotation` to rotate, once, each space whose debt
+  is 24 h old — only on the owner or a seed-holding acting host (its
+  rekey is authority-signed), and with the debt re-read so a rotation
+  that ran meanwhile is not doubled. `removed_at` keeps whole seconds, so
+  a leave in the same second as the key's minting stays owed (one extra
+  rotation at worst, never a missed one).
+  What owes: a local follower's own leave or removal (`remove_member`,
+  `unfollow_space` — its household keeps the key anyway); on the host, a
+  remote household's leave that ends only follower seats
+  (`on_remote_member_left`), even a follower that held a `reader` comment
+  cert; and an admin removing a remote follower (`remove_remote_member`,
+  on the host or a seed-holding delegated admin). A member's leave or
+  removal — including a member who leaves and then follows — still
+  rotates at once when the household's writer scope weakened, so no
+  writer key survives a move from a writer seat to a follower seat.
+- **At once:** a follower ban — a seated follower's, and a follower who
+  already left while the space still owes for it; `allow_subscribers`
+  turned off — this household's own followers leave, and on the owner or
+  a seed-holding acting host EVERY remote follower seat ends the way a
+  leave does (the household told, the seat tombstoned and gossiped, its
+  `space_instances` row dropped with its last seat), whether it came from
+  a follow, a GFS or an explicit follower link (a seat is a seat), then
+  the key rotates once, which also locks out GFS subscribers; or the
+  comment / react switch turned off.
 - **Rekey to followers:** the ordinary member rekey (P5: GFS-reached
   households in one multi upload per GFS — not yet: per-peer certs and
   per-household passes make every copy unique).

@@ -1249,7 +1249,10 @@ with). No version or claim → `member` (fail closed).
 A `subscriber` link works regardless of any "strangers may subscribe"
 space setting: that setting governs people who walked up on their own,
 while an explicit invite is the owner deciding otherwise for one named
-link.
+link. Turning the setting **off** still ends every follower seat already
+taken, a link's included: a seat is a seat, and a follower is a member
+with the read-only role on every path (v_96, see
+[spaces.md › Keys and rotation](./spaces.md#keys-and-rotation)).
 
 A **follow** (v_96) is the walk-up case that setting governs. It is no
 link: the host approves the follow request on its own while
