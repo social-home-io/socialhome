@@ -3927,12 +3927,11 @@ class SpaceService(
             for member in await self._spaces.list_members(space_id):
                 if member.user_id in local_ids and member.role == SpaceRole.SUBSCRIBER:
                     await self.unfollow_space(member.user_id, space_id)
-            # On the owner (or a seed-holding acting host): every remote
-            # follower seat ends too and the key rotates at once — not owed
-            # (v_96) — which also locks out the GFS subscribers sealed to.
-            if space.owner_instance_id == self._own_instance_id or (
-                await self._executes_locally_as_delegated_admin(space)
-            ):
+            # On the owner — the switch is owner-only (``_require_owner``
+            # above), so no delegated admin gets here: every remote follower
+            # seat ends too and the key rotates at once — not owed (v_96) —
+            # which also locks out the GFS subscribers sealed to.
+            if space.owner_instance_id == self._own_instance_id:
                 await self._end_remote_follower_seats(updated)
                 rotated_for_followers = True
         if location_mode_changed:
@@ -4878,6 +4877,18 @@ class SpaceService(
         so the new key never reaches it), gossip each ended seat. The caller
         decides on the rotation and, once that went out, on the §D2b seat.
         Returns whether the household has no live seat left."""
+        orphaned = await self._tombstone_remote_seats(space, instance_id, ending)
+        await self._gossip_ended_seats(space, instance_id, ending)
+        return orphaned
+
+    async def _tombstone_remote_seats(
+        self,
+        space: Space,
+        instance_id: str,
+        ending: list[SpaceRemoteMember],
+    ) -> bool:
+        """Tombstone ``ending`` and drop the household's ``space_instances``
+        row with its last live seat. Returns whether none is left."""
         assert self._remote_members is not None
         for seat in ending:
             await self._remote_members.remove(space.id, instance_id, seat.user_id)
@@ -4886,6 +4897,16 @@ class SpaceService(
         )
         if not remaining:
             await self._spaces.remove_space_instance(space.id, instance_id)
+        return not remaining
+
+    async def _gossip_ended_seats(
+        self,
+        space: Space,
+        instance_id: str,
+        ending: list[SpaceRemoteMember],
+    ) -> None:
+        """The authority-signed LEFT gossip for each ended seat, to the
+        households still in the space."""
         for seat in ending:
             await self._emit_member_roster_gossip(
                 space,
@@ -4896,20 +4917,25 @@ class SpaceService(
                 role=seat.role,
                 tombstoned=True,
             )
-        return not remaining
 
     async def _end_remote_follower_seats(self, space: Space) -> None:
-        """``allow_subscribers`` turned off on the host: end EVERY live
+        """``allow_subscribers`` turned off on the owner: end EVERY live
         remote follower seat, then rotate the content key ONCE.
 
         A seat is a seat: a follower is a member with the read-only role on
         every path (owner rule, v_96), so the seats a follow, a GFS or an
         explicit follower link created all end — one rule, though
-        invites.md lets a follower link be minted with the switch off. Each
-        household is told (as on a kick) and its seats end on the path its
-        own leave takes (:meth:`_end_remote_seats`); the rotation follows
-        at once (no owed debt), then a household left with no shared space
-        loses its §D2b seat.
+        invites.md lets a follower link be minted with the switch off.
+
+        In three passes, so the cost stays linear: each household is told
+        (as on a kick, one notice per seat), then EVERY seat is tombstoned
+        and every follower-only household leaves ``space_instances``, and
+        only then is each ended seat gossiped — to the member households
+        left, never to the followers being removed (gossiping seat by seat
+        while they were still listed cost N²/2 sends for N followers). The
+        rotation follows at once (no owed debt), then a household left with
+        no shared space loses its §D2b seat. Cost: N notices + N × M LEFT
+        entries for M member households + M rekeys.
         """
         if self._remote_members is None:
             return
@@ -4917,15 +4943,19 @@ class SpaceService(
         for seat in await self._remote_members.list_for_space(space.id):
             if seat.role == SpaceRole.SUBSCRIBER and seat.instance_id:
                 by_household.setdefault(seat.instance_id, []).append(seat)
-        orphaned: list[str] = []
-        for instance_id, seats in sorted(by_household.items()):
-            if self._federation is not None:
+        households = sorted(by_household.items())
+        if self._federation is not None:
+            for instance_id, seats in households:
                 for seat in seats:
                     await self._tell_removed_household(
                         space.id, instance_id, seat.user_id
                     )
-            if await self._end_remote_seats(space, instance_id, seats):
+        orphaned: list[str] = []
+        for instance_id, seats in households:
+            if await self._tombstone_remote_seats(space, instance_id, seats):
                 orphaned.append(instance_id)
+        for instance_id, seats in households:
+            await self._gossip_ended_seats(space, instance_id, seats)
             for seat in seats:
                 await self._bus.publish(
                     SpaceRemoteSeatEnded(
@@ -5183,16 +5213,20 @@ class SpaceService(
     ) -> bool:
         """Rotate ``space_id``'s content key once when its owed rotation is
         at least ``min_age`` old. Only the owner or a seed-holding acting
-        host rotates (its rekey is authority-signed); the debt is re-read
-        here, so a rotation that ran meanwhile is not doubled. Returns
-        whether it rotated."""
+        host rotates (its rekey is authority-signed), the admin only once
+        the debt is ``2 × min_age`` old; the debt is re-read here, so a
+        rotation that ran meanwhile is not doubled. Returns whether it
+        rotated."""
         space = await self._spaces.get(space_id)
         if space is None or not self._own_instance_id:
             return False
-        if space.owner_instance_id != self._own_instance_id and not (
-            await self._executes_locally_as_delegated_admin(space)
-        ):
-            return False
+        if space.owner_instance_id != self._own_instance_id:
+            if not await self._executes_locally_as_delegated_admin(space):
+                return False
+            # The owner pays first: a seed-holding admin pays only a debt
+            # the owner left for a whole extra ``min_age`` (it is away), so
+            # the owner and K admins do not each rotate the same debt.
+            min_age = min_age * 2
         since = await self.rotation_owed(space_id)
         if since is None or datetime.now(UTC) - since < min_age:
             return False
@@ -7606,8 +7640,11 @@ class SpaceService(
             ) == bytes(raw_key)
         except TypeError, ValueError, binascii.Error:
             return 0
-        if not held or self._followers_rekeyed.get(space_id, -1) >= epoch:
+        previous = self._followers_rekeyed.get(space_id, -1)
+        if not held or previous >= epoch:
             return 0
+        # Marked before the awaits (a concurrent copy sends nothing), handed
+        # back when the broadcast fails so the next copy is sent.
         self._followers_rekeyed[space_id] = epoch
         targets = sorted(
             await self._federation.gfs_reached_followers(
@@ -7636,6 +7673,9 @@ class SpaceService(
                 len(targets),
                 space_id,
             )
+            if self._followers_rekeyed.get(space_id) == epoch:
+                self._followers_rekeyed[space_id] = previous
+            return 0
         return len(targets)
 
     async def invite_remote_user(
@@ -7947,7 +7987,7 @@ class SpaceService(
         if user is not None:
             display = user.display_name or user.username
             user_pk = getattr(user, "public_key", None)
-            anchor = user.identity_anchor or user.username
+            anchor = user.person_anchor
         accept_payload: dict = {
             "invite_token": token,
             "invitee_user_id": user_id,
@@ -9163,7 +9203,7 @@ class SpaceService(
                 # P5 — proves ``user_id`` against our identity key; a follow
                 # is approved on it (the redeem of the token proves again).
                 **(
-                    {"user_anchor": applicant.identity_anchor or applicant.username}
+                    {"user_anchor": applicant.person_anchor}
                     if applicant is not None
                     else {}
                 ),

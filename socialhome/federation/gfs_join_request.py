@@ -295,7 +295,7 @@ class GfsJoinRequestCoordinator:
         if user is not None:
             # P5 — proves ``user_id`` against ``identity_pk``: a follow is
             # approved on it (the redeem of the token proves again).
-            body["user_anchor"] = user.identity_anchor or user.username
+            body["user_anchor"] = user.person_anchor
         if text:
             body["message"] = text
         if requested_role is not None:

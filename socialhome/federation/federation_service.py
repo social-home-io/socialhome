@@ -1888,25 +1888,15 @@ class FederationService:
             return frozenset()
         if await self._space_repo.get_gfs_channel(space_id) is None:
             return frozenset()
-        writers: frozenset[str] | None = None
-        out: set[str] = set()
-        for iid in instance_ids:
-            if iid == self._own_instance_id:
-                continue
+
+        async def _unreached(iid: str) -> bool:
             if await self._federation_repo.get_instance(iid) is not None:
-                continue
+                return False
             claim = await self._federation_repo.get_space_member_version(iid)
-            if claim is not None and claim[0] > 0:
-                continue  # it claimed a version over the mesh: reachable
-            if writers is None:
-                writers = frozenset(
-                    await self._space_remote_member_repo.list_instances_with_roles(
-                        space_id, _WRITER_ROLE_VALUES
-                    )
-                )
-            if iid not in writers:
-                out.add(iid)
-        return frozenset(out)
+            # A version claimed over the mesh: reachable.
+            return claim is None or claim[0] <= 0
+
+        return await self._followers_where(space_id, instance_ids, _unreached)
 
     async def gfs_reached_followers(
         self, space_id: str, instance_ids: Collection[str]
@@ -1921,13 +1911,29 @@ class FederationService:
         for and ourselves are never in it."""
         if self._space_remote_member_repo is None:
             return frozenset()
+
+        async def _session_seated(iid: str) -> bool:
+            peer = await self._federation_repo.get_instance(iid)
+            return peer is not None and peer.source is InstanceSource.SPACE_SESSION
+
+        return await self._followers_where(space_id, instance_ids, _session_seated)
+
+    async def _followers_where(
+        self,
+        space_id: str,
+        instance_ids: Collection[str],
+        candidate: Callable[[str], Awaitable[bool]],
+    ) -> frozenset[str]:
+        """The households of *instance_ids* — never ourselves — that
+        ``candidate`` accepts and that hold no writer seat in ``space_id``
+        (followers only). The writer set is read once, only when a candidate
+        needs it. The one loop behind :meth:`channel_reached_followers` and
+        :meth:`gfs_reached_followers`, so their follower rule cannot drift."""
+        assert self._space_remote_member_repo is not None
         writers: frozenset[str] | None = None
         out: set[str] = set()
         for iid in instance_ids:
-            if iid == self._own_instance_id:
-                continue
-            peer = await self._federation_repo.get_instance(iid)
-            if peer is None or peer.source is not InstanceSource.SPACE_SESSION:
+            if iid == self._own_instance_id or not await candidate(iid):
                 continue
             if writers is None:
                 writers = frozenset(

@@ -1320,8 +1320,10 @@ async def test_a_household_that_does_not_host_never_pays(stack):
     rotate.assert_not_awaited()
 
 
-async def test_a_seed_holding_delegated_admin_pays(stack):
-    space = await _owing(stack, hours_ago=25)
+async def test_a_seed_holding_delegated_admin_pays_a_debt_the_owner_left(stack):
+    """The owner pays at a day; a seed-holding admin only once the debt is
+    twice that old (the owner had its day), so the two never race."""
+    space = await _owing(stack, hours_ago=49)
     await stack.db.enqueue(
         "UPDATE spaces SET owner_instance_id=? WHERE id=?", (HOST, space.id)
     )
@@ -1344,17 +1346,51 @@ async def test_nothing_owed_for_an_unknown_space(stack):
     assert await stack.svc.pay_owed_rotation("nope") is False
 
 
-async def test_followers_off_on_a_seed_holding_delegated_admin_ends_seats_too(
+async def test_followers_off_tells_the_members_only_once_every_follower_left(stack):
+    """Linear cost: every follower seat is tombstoned and every
+    follower-only household dropped from ``space_instances`` BEFORE any
+    LEFT roster event goes out, so none of it reaches a follower being
+    removed (seat by seat it cost N²/2 sends for N followers)."""
+    space = await _hosted(stack)
+    for house in ("fan-1", "fan-2", "fan-3"):
+        await stack.remote.add(
+            space_id=space.id,
+            instance_id=house,
+            user_id=f"u-{house}",
+            user_pk=None,
+            display_name=house,
+            role=SpaceRole.SUBSCRIBER.value,
+        )
+        await stack.spaces.add_space_instance(space.id, house)
+    audiences: list[set[str]] = []
+
+    async def _roster_event(*_a, **_k):
+        audiences.append(set(await stack.spaces.list_member_instances(space.id)))
+
+    with (
+        patch.object(SpaceService, "_rotate_and_distribute_space_key", AsyncMock()),
+        patch.object(
+            SpaceService,
+            "_emit_member_roster_gossip",
+            AsyncMock(side_effect=_roster_event),
+        ),
+    ):
+        await stack.svc.update_config(
+            space.id,
+            actor_username="owner",
+            features=replace(space.features, allow_subscribers=False),
+        )
+    assert len(audiences) == 3
+    assert all(not ({"fan-1", "fan-2", "fan-3"} & seen) for seen in audiences)
+
+
+async def test_a_seed_holding_delegated_admin_leaves_a_one_day_debt_to_the_owner(
     stack,
 ):
-    """The acting host that holds the seed applies the switch the way the
-    owner does: remote follower seats end, the key rotates once."""
-    space = await _hosted(stack)
-    await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
+    space = await _owing(stack, hours_ago=25)
     await stack.db.enqueue(
         "UPDATE spaces SET owner_instance_id=? WHERE id=?", (HOST, space.id)
     )
-    space = await stack.spaces.get(space.id)
     with (
         patch.object(
             SpaceService,
@@ -1365,13 +1401,8 @@ async def test_followers_off_on_a_seed_holding_delegated_admin_ends_seats_too(
             SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
         ) as rotate,
     ):
-        await stack.svc.update_config(
-            space.id,
-            actor_username="owner",
-            features=replace(space.features, allow_subscribers=False),
-        )
-    rotate.assert_awaited_once_with(space.id)
-    assert await stack.remote.get(space.id, PEER, "u-fan") is None
+        assert await stack.svc.pay_owed_rotation(space.id) is False
+    rotate.assert_not_awaited()
 
 
 # ── P5: a delegated admin's rekey reaches GFS-reached followers ───────────
@@ -1445,6 +1476,18 @@ async def test_the_owner_relays_a_delegated_admins_rekey_to_gfs_followers(stack)
     # The same epoch again (a repeat, another relay): never twice.
     assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 0
     assert stack.fed.broadcast_to_space_members.await_count == 1
+
+
+async def test_a_failed_relay_is_sent_again_on_the_next_copy(stack):
+    """The once-per-epoch mark holds only for a relay that went out: a
+    broadcast that failed leaves the epoch open for the next copy of the
+    rekey (another relay, the admin's retry)."""
+    space = await _relay_setup(stack)
+    meta = _admin_meta()
+    stack.fed.broadcast_to_space_members.side_effect = [RuntimeError("down"), None]
+    await stack.svc.relay_admin_rekey_to_followers(space.id, meta)
+    assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 1
+    assert stack.fed.broadcast_to_space_members.await_count == 2
 
 
 @pytest.mark.security

@@ -1816,7 +1816,8 @@ decryption.
     the request carries the person's anchor inside its encrypted payload /
     sealed body — `redeemer_anchor` (§D2 / mesh `SPACE_INVITE_TOKEN_REDEEM`,
     §D2b bootstrap redeem), `invitee_anchor` (`SPACE_PRIVATE_INVITE_ACCEPT`),
-    `user_anchor` (`SPACE_JOIN_REQUEST`, GFS join request; checked for a
+    `user_anchor` (`SPACE_JOIN_REQUEST`, GFS join request; a member's request
+    carries it too, its seat proven at the redeem of the answer; checked for a
     follow) — and the host checks `derive_user_id(sender_pk, anchor) ==
     user_id` (`space_member_guard.user_id_proven`, fail closed). `sender_pk`
     is a key the host already holds: the pinned `remote_instances` key, a

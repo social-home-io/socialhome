@@ -860,7 +860,7 @@ class SpaceInviteTokenRedeemCoordinator:
             # P5 — the person's identity anchor: the host seats us only when
             # ``derive_user_id(our identity key, anchor) == redeemer_user_id``.
             # Inside the encrypted payload (SPACE_ROUTED: sealed end to end).
-            "redeemer_anchor": user.identity_anchor or user.username,
+            "redeemer_anchor": user.person_anchor,
             "redeemer_display_name": (user.display_name or user.username),
             "redeemer_public_key": getattr(user, "public_key", None),
         }
@@ -2195,7 +2195,7 @@ class SpaceInviteTokenRedeemCoordinator:
             "proto_version": OURS,
             "redeemer_user_id": viewer_user_id,
             # P5 — proves ``redeemer_user_id`` against ``identity_pk``.
-            "redeemer_anchor": user.identity_anchor or user.username,
+            "redeemer_anchor": user.person_anchor,
             "redeemer_display_name": (user.display_name or user.username),
             "redeemer_public_key": getattr(user, "public_key", None),
         }

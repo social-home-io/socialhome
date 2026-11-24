@@ -475,6 +475,7 @@ def _make_user(user_id: str = U_LOCAL, *, identity_anchor: str | None = None):
         public_key="pk-alice",
         user_id=user_id,
         identity_anchor=identity_anchor,
+        person_anchor=identity_anchor or "alice",
     )
 
 

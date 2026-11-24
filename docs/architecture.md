@@ -1125,8 +1125,9 @@ unless another row still names them; spaces have no trash), and owed
 follower rotations (`owed_rotation_scheduler.py`, hourly: a follower's
 leave or removal owes its space a content-key rotation instead of making
 one, v_96; each space whose debt is 24 h old is rotated once by
-`SpaceService.pay_owed_rotation` — owner or seed-holding acting host only
-— and any rotation in between pays it first).
+`SpaceService.pay_owed_rotation` — the owner, or a seed-holding acting
+host once the debt is 48 h old — and any rotation in between pays it
+first).
 
 The GFS runs its own periodic maintenance sweep
 (`global_server/maintenance.py`, same `_stop: asyncio.Event` lifecycle as

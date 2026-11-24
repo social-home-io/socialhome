@@ -461,7 +461,7 @@ The age gate runs on the applicant household when it opens the ACK
 | Where the follower is | Path |
 |---|---|
 | The host household | The local gates (ban, age gate, `allow_subscribers`, the local-community check) and then the members' seating path (`_seat_local_member`) with role `subscriber`: the row, the roster gossip, the audit. No federation beyond the gossip. |
-| A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role: "subscriber"` inside the encrypted payload (needs a host at v_96, else `409 HOST_TOO_OLD`, `feature: "follow"`) → auto-approved → `SPACE_JOIN_REQUEST_APPROVED` with the bound token → §D2 redeem, seated with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. The host is read off this household's stub, else the paired households' directory (§D1a, `peer_space_directory`), else the GFS directory cache. The applicant's row waits 15 minutes (`FOLLOW_REQUEST_TTL`): the host answers at once or drops the follow without a word, so after that a new follow asks again. The host takes at most 10 follows per hour from one household (the bootstrap's per-sender numbers, on the shared rate limiter, `follow:sender:<household>`), counted before the approval; past it a follow is dropped without a word, like any refused one. |
+| A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role: "subscriber"` inside the encrypted payload (needs a host at v_96, else `409 HOST_TOO_OLD`, `feature: "follow"`) → auto-approved → `SPACE_JOIN_REQUEST_APPROVED` with the bound token → §D2 redeem, seated with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. The host is read off this household's stub, else the paired households' directory (§D1a, `peer_space_directory`), else the GFS directory cache. The applicant's row waits 15 minutes (`FOLLOW_REQUEST_TTL`): the host answers at once or drops the follow without a word, so after that a new follow asks again. The host takes at most 10 follows per hour from one household (the bootstrap's per-sender numbers, on the shared rate limiter, `follow:sender:<household>`), counted before the approval; past it a follow is dropped without a word, like any refused one. Its own bucket: a household reached only through a GFS is counted by the bootstrap's `gfs-join:sender:<household>` instead (10 per hour on each path). |
 | Reached only through a GFS | The v_84 bootstrap: `join_contact` from the polled listing (published while the space takes requests or followers — the GFS now serves the contact on an invite-only listing with followers on; for such a follow-only space, only to a GFS that proves `subscriber_seats`: it relays the v_96 follow bootstrap and seats a global space's members and followers on its channel), `SPACE_JOIN_REQUEST_BOOTSTRAP` with `requested_role: "subscriber"` in the sealed body, the host auto-answers with a bound subscriber token (48 h), the applicant auto-redeems over §D2b and is seated as a `space_session` subscriber. The bootstrap budgets (120/h per space, 10/h per sender, 200 pending → "busy") apply unchanged and before the approval. |
 
 **A local community: following is inside only** (owner decision
@@ -509,7 +509,9 @@ within seconds).
   (`infrastructure/owed_rotation_scheduler.py`) asks
   `SpaceService.pay_owed_rotation` to rotate, once, each space whose debt
   is 24 h old — only on the owner or a seed-holding acting host (its
-  rekey is authority-signed), and with the debt re-read so a rotation
+  rekey is authority-signed), a delegated admin only once the debt is
+  48 h old (the owner had its day, so the owner and K admins never each
+  rotate the same debt), and with the debt re-read so a rotation
   that ran meanwhile is not doubled. `removed_at` keeps whole seconds, so
   a leave in the same second as the key's minting stays owed (one extra
   rotation at worst, never a missed one).
@@ -524,13 +526,21 @@ within seconds).
   writer key survives a move from a writer seat to a follower seat.
 - **At once:** a follower ban — a seated follower's, and a follower who
   already left while the space still owes for it; `allow_subscribers`
-  turned off — this household's own followers leave, and on the owner or
-  a seed-holding acting host EVERY remote follower seat ends the way a
-  leave does (the household told, the seat tombstoned and gossiped, its
-  `space_instances` row dropped with its last seat), whether it came from
-  a follow, a GFS or an explicit follower link (a seat is a seat), then
-  the key rotates once, which also locks out GFS subscribers; or the
-  comment / react switch turned off.
+  turned off (owner-only) — this household's own followers leave, and
+  on the owner EVERY remote follower seat ends the way a leave does,
+  whether it came from a follow, a GFS or an explicit follower link (a
+  seat is a seat): each household is told, then every seat is tombstoned
+  and every follower-only household's `space_instances` row dropped, and
+  only then is each ended seat gossiped — to the member households left,
+  never to the followers being removed — then the key rotates once, which
+  also locks out GFS subscribers. Cost for N follower seats and M member
+  households: N notices + N × M small LEFT entries + M rekeys (10 000
+  followers, 20 member households ≈ 200 000 entries of ≈ 0.4 KiB ≈ 80 MiB
+  once, inline in the owner's request); gossiping seat by seat while the
+  followers were still listed would have cost N²/2. The seats end in the
+  same second as that rotation, so the space keeps owing (whole-second
+  `removed_at`): one more rotation a day later, to the M member households
+  only (no follower is left). Or the comment / react switch turned off.
 - **Rekey to followers:** the ordinary member rekey, one copy per
   household (per-peer certs and per-household passes make every copy
   unique, so a GFS multi upload cannot carry it). A seed-holding
