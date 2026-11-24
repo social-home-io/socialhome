@@ -222,7 +222,8 @@ The Social Home ↔ GFS link is split by direction:
     (last writer wins; only a publish with a signed `ts` that declares
     counts changes them — a publish without counts, e.g. one sent before the
     household had seen this server's `/gfs/info`, or a replayable no-`ts`
-    body, leaves them as they are) and serves it as `member_count` / `follower_count` on
+    body, leaves them as they are — except the follower count of a space
+    that takes no followers, which is never kept) and serves it as `member_count` / `follower_count` on
     `GET /gfs/spaces`, `GET /gfs/spaces/{id}`, its HTML pages and the viewer
     JSON. It no longer serves its own `subscriber_count` (its relay seats,
     which it showed as members — almost always 0); that stays operator
