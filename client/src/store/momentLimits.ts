@@ -66,7 +66,12 @@ export function replyReach(parentReach: number | null | undefined): number {
 }
 
 /** The i18n key for a reach: reach 1 is a sentence of its own ("your
- *  household and paired households"), never "up to 1 hops". */
+ *  household and paired households"), never "up to 1 hops".
+ *
+ *  Keys built here: moment.entry.reach_one, moment.composer.reach_reply_one,
+ *  moment.composer.reach_more_one, moment.composer.reach_more_reply_one,
+ *  moment.detail.status_reach_one, moment.detail.status_public_also_one,
+ *  moment.card.who_sees_body_one, settings.momentum.reach_household_max_one. */
 export function reachKey(base: string, n: number): string {
   return n === 1 ? `${base}_one` : base
 }

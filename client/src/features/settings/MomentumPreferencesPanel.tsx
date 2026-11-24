@@ -97,6 +97,7 @@ export function MomentumPreferencesPanel() {
     : [...MOMENT_RETENTION_CHOICES, retention.value].sort((a, b) => a - b)
 
   const householdMax = momentReachMax.value
+  // settings.momentum.hop_1 … hop_5
   const hopLabel = (n: number) => t(`settings.momentum.hop_${n}`)
 
   return (
