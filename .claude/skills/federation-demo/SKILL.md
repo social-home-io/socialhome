@@ -1234,14 +1234,17 @@ and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
    — and rotates again (K2 → K3). d holds the K3 seed; both GFS pin K3;
    a tells e, which drops its copy.
 
-**The pin probe.** "The old seed works on no GFS" is asked of each GFS
-directly: ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh
-authority signature made with the seed in question — the request only the
-space key may make, checked against the same pin as a relay, an epoch
-notice or a media upload, and read-only. e's K1 seed answers **200** on A
-and on B while e is an admin (the positive control) and **403** on both
-after step 3; after step 4 K1 and K2 answer 403 on both and d's K3 seed
-200.
+**The pin probe.** "The old seed works on no GFS" is answered from each
+GFS's own pin: the step reads the ``global_spaces`` row of A and of B and
+compares the pinned authority key with the key the seed in question signs
+for (``_authority_probe``). The **200** / **403** it prints are derived from
+that comparison, not HTTP answers — since v_96 (P7) no GFS route takes a
+space-authority-signed request any more (the subscriber roster read, the
+relay, the epoch notice and the space-scope media upload are gone), so the
+pin is the whole question and the demo no longer proves a refusal on the
+wire. e's K1 seed reads **200** on A and on B while e is an admin (the
+positive control) and **403** on both after step 3; after step 4 K1 and K2
+read 403 on both and d's K3 seed 200.
 
 ``verify`` (gated on the ``gfs_admin_seed`` state key) re-checks that every
 GFS pins the key a pins, that d holds its seed and the name e set, that
