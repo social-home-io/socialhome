@@ -549,10 +549,12 @@ comments, reactions, calendar events, location pins…):
   wrap with `SPACE_ROUTED` so the relay sees only ciphertext sealed under the
   target's ephemeral X25519 pub (`socialhome/federation/routed_crypto.py`);
   the relay can't derive the shared secret. That sealing is for the mesh, not
-  the GFS. A space's content reaches a GFS only through the space's
-  **opaque channel** (`/gfs/channels/*`, `services/gfs_channel_service.py`;
-  v_51 private, v_96 global): the GFS knows only a random channel id and the
-  keys pinned for it, never the space. Each item is encrypted under the
+  the GFS. Apart from the sealed household-to-household envelope relay
+  (`/gfs/envelope`, which names no space), a space's content reaches a GFS
+  only through the space's **opaque channel** (`/gfs/channels/*`,
+  `services/gfs_channel_service.py`; v_51 private, v_96 global): the GFS
+  knows only a random channel id and the keys pinned for it, never the
+  space. Each item is encrypted under the
   space content key, published **identity-free** with
   `POST /gfs/channels/publish-anon` (signed with the channel writer key,
   never a household key or `from_instance`), and fanned out to the channel's

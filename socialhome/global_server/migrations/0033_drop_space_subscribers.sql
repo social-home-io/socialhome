@@ -2,7 +2,8 @@
 -- Follows 0032.
 --
 -- Since v_96 a space's content reaches a GFS only through its opaque
--- channel (``/gfs/channels/*``): ``POST /gfs/publish``, ``POST
+-- channel (``/gfs/channels/*``) — apart from the sealed household-to-
+-- household envelope relay, which never names a space: ``POST /gfs/publish``, ``POST
 -- /gfs/subscribe``, ``GET /gfs/spaces/{id}/subscribers``, ``POST
 -- /gfs/spaces/{id}/key_request``, ``POST /gfs/member-publish-anon`` and
 -- ``POST /gfs/spaces/{id}/epoch`` are gone, and so is the ``space`` scope of

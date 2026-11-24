@@ -962,7 +962,7 @@ class GfsFederationService:
             pinned_pubkey = existing.identity_public_key
         if withdrawn:
             # Pin-only from here on: nothing of the (blank) metadata above is
-            # stored, the status is left alone and no seat is purged. Reached
+            # stored and the status is left alone. Reached
             # only after the signature, freshness and owner checks, so an
             # unsigned caller never learns whether the space exists.
             if existing is None:

@@ -3070,9 +3070,9 @@ class GfsConnectionService:
                 getattr(space, "join_mode", None),
             ),
             # The readability opt-in. OFF ⇒ this listing is discoverable but
-            # not publicly readable: the GFS refuses ``POST /gfs/subscribe``
-            # for it and purges any seat it already had. Signed alongside
-            # ``join_mode`` so a relay cannot flip a private space open.
+            # not publicly readable: follows are refused for it (v_96: a
+            # follow is a seat the host grants, never a GFS one). Signed
+            # alongside ``join_mode`` so a relay cannot flip a private space open.
             "allow_subscribers": bool(space.features.allow_subscribers),
             "accent_color": accent,
             "primary_color": primary,

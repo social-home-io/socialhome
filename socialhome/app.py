@@ -1354,7 +1354,7 @@ def _wire_space_authority_rotation(
 
 #: Channel frames one channel may bring this household per minute, before
 #: any decrypt / verify. A GFS admits at most 120 items a minute into a
-#: channel (cluster-wide, ``MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE`` — this
+#: channel (cluster-wide, ``CHANNEL_PUBLISH_MAX_PER_MINUTE`` — this
 #: package does not import the server's), and a household may be seated on
 #: the same channel at every server on the space's list (at most
 #: :data:`MAX_GFS_SERVERS`), each pushing its own copy: 8 × 120. A returning

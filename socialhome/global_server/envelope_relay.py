@@ -1215,9 +1215,9 @@ class GfsEnvelopeRelay:
         audience: tuple[str, str] | None = None,
         skip: str = "",
     ) -> int:
-        """Deliver a member-published space item to *targets*.
+        """Deliver a channel item to *targets* (the channel's seats).
 
-        ``frame`` is the identity-free fan-out frame (``SpaceItemFrame``
+        ``frame`` is the identity-free fan-out frame (``CHANNEL_FRAME_KEYS``
         shape); it goes out as ``{type: "relay", **frame}``. Live sockets on
         THIS node are pushed with at most :data:`RELAY_FAN_OUT_CONCURRENCY`
         sends in flight.

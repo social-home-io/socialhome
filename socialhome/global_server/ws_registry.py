@@ -291,8 +291,8 @@ class GfsWebSocketRegistry:
             )
         try:
             # Inside the guard on purpose: an unencodable frame used to escape
-            # ``send`` as a TypeError, past ``_deliver_one``, past the fan-out
-            # gather, and out of the relay handler as a 500. A frame we cannot
+            # ``send`` as a TypeError, past the fan-out gather, and out of
+            # the relay handler as a 500. A frame we cannot
             # serialise is simply undeliverable — report it like any other
             # failed push.
             raw = _dumps(payload)

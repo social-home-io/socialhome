@@ -105,7 +105,8 @@ class GfsInfoView(GfsBaseView):
     (``anonymous_publish``, ``member_publish_strict``, ``targeted_publish``,
     ``space_key_pull``, ``space_item_followers``, ``payload_zlib1*``) nor
     the ``space`` media scope: those routes are gone, and a space's content
-    reaches this server only through its opaque channel.
+    reaches this server only through its opaque channel (apart from sealed
+    household-to-household envelopes, which name no space).
     """
 
     async def get(self) -> web.Response:
@@ -702,7 +703,7 @@ class SpaceUnpublishView(GfsBaseView):
     a ``403``.
 
     The row is kept and only flagged ``withdrawn`` (so the GFS admin's audit
-    trail, the subscriber list and the pinned authority key survive) — the
+    trail and the pinned authority key survive) — the
     owner's next publish restores the listing. Both verbs are accepted since
     some HTTP clients struggle with DELETE bodies.
     """
