@@ -2,6 +2,8 @@
  * Minimal safe-subset markdown → HTML renderer (§23.43).
  *
  * Covers bold, italic, inline code, code blocks, links, line breaks.
+ * Links are ``[text](url)`` and plain-text web links (``https://…``,
+ * ``www.…`` — a pasted link is clickable, :func:`_autolink`).
  * No raw HTML passes through — every produced tag originates here, so
  * the output is XSS-safe by construction. Link hrefs are filtered to
  * ``http:`` / ``https:`` / ``mailto:`` / an app path (``/…``) —
@@ -34,20 +36,16 @@ export interface RenderOptions {
   interactive?: boolean
 }
 
-/** Wrap known @-mentions in the already-escaped HTML ``html``.
+/** Rewrite the text between tags of the already-escaped HTML ``html``.
  *
- *  Runs last, over text between tags only: every ``<…>`` in ``html`` was
- *  produced by this module (user text was escaped first), so skipping tag
- *  strings keeps attribute values (``href``) intact, and ``<code>`` /
- *  ``<pre>`` bodies stay literal. The wrapper carries no user-derived
- *  attribute but ``data-mention`` — the matched token, which is word
- *  chars / ``.`` / ``-`` / ``@`` by grammar AND one of the server-issued
- *  member tokens, escaped once more anyway. */
-function _wrapMentions(
+ *  Every ``<…>`` in ``html`` was produced by this module (user text was
+ *  escaped first), so skipping tag strings keeps attribute values
+ *  (``href``) intact; ``<code>`` / ``<pre>`` bodies are never handed to
+ *  ``fn`` and stay literal. ``inLink`` tells ``fn`` the text sits inside
+ *  an ``<a>``. */
+function _mapText(
   html: string,
-  tokens: ReadonlySet<string>,
-  self: string | null,
-  interactive: boolean,
+  fn: (text: string, inLink: boolean) => string,
 ): string {
   let codeDepth = 0
   let linkDepth = 0
@@ -60,16 +58,63 @@ function _wrapMentions(
       return part
     }
     if (codeDepth > 0 || !part) return part
+    return fn(part, linkDepth > 0)
+  }).join('')
+}
+
+// A web link typed as plain text: ``http(s)://…`` or ``www.…``, after a
+// start / space / punctuation that is not part of a host, path or address
+// (so ``foo.www.x`` and ``mail@www.x`` stay text). It runs on ESCAPED
+// text, so ``&`` only ever starts an entity: ``&amp;`` (a literal ``&``,
+// part of a query) continues the link, every other entity (``&lt;``,
+// ``&gt;``, ``&quot;``, ``&#39;`` — a ``<>"'`` in the source) ends it,
+// as do whitespace and ``()[]{}`` / backtick — the same stop set as the
+// server's ``domain.link_preview.first_url``, so the link and its card
+// agree on where the URL ends.
+const _BARE_LINK = /(^|[^\w/.@:-])((?:https?:\/\/|www\.)(?:[^\s&<>"'()[\]{}`]|&amp;)+)/gi
+// Punctuation that ends a sentence, not a URL (as the server trims it).
+const _TRAILING_PUNCT = /[.,;:!?*_~]+$/
+// A ``www.`` link needs one more label (``www.example.org``); a scheme
+// link needs a host.
+const _LINK_HAS_HOST = /^(?:https?:\/\/[^/]|www\.[^./]+\.[^./])/i
+
+/** Turn plain-text web links in escaped text into safe anchors. A
+ *  ``www.`` link opens over ``https``. Never inside an existing link. */
+function _autolink(text: string, inLink: boolean): string {
+  if (inLink) return text
+  return text.replace(_BARE_LINK, (m, lead: string, raw: string) => {
+    const url = raw.replace(_TRAILING_PUNCT, '')
+    if (!_LINK_HAS_HOST.test(url)) return m
+    const href = _safeHref(/^www\./i.test(url) ? `https://${url}` : url)
+    if (href === null) return m
+    const rest = raw.slice(url.length)
+    return `${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>${rest}`
+  })
+}
+
+/** Wrap known @-mentions in the already-escaped HTML ``html``.
+ *
+ *  Runs last, over text between tags only (:func:`_mapText`). The
+ *  wrapper carries no user-derived attribute but ``data-mention`` — the
+ *  matched token, which is word chars / ``.`` / ``-`` / ``@`` by grammar
+ *  AND one of the server-issued member tokens, escaped once more anyway. */
+function _wrapMentions(
+  html: string,
+  tokens: ReadonlySet<string>,
+  self: string | null,
+  interactive: boolean,
+): string {
+  return _mapText(html, (part, inLink) => {
     return splitMentions(part, tokens).map((p) => {
       if (typeof p === 'string') return p
       if (p.token === 'here') {
         return `<span class="sh-mention sh-mention--here">${p.raw}</span>`
       }
       const cls = p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'
-      if (!interactive || linkDepth > 0) return `<span class="${cls}">${p.raw}</span>`
+      if (!interactive || inLink) return `<span class="${cls}">${p.raw}</span>`
       return `<button type="button" class="${cls}" data-mention="${_escape(p.token)}">${p.raw}</button>`
     }).join('')
-  }).join('')
+  })
 }
 
 function _escape(raw: string): string {
@@ -126,6 +171,9 @@ export function renderMarkdown(input: string, opts: RenderOptions = {}): string 
   out = out.replace(/(^|\s)\*([^*\n]+)\*(?=\s|$)/g, '$1<em>$2</em>')
   // Soft line breaks — preserve newlines inside a single paragraph.
   out = out.replace(/\n/g, '<br>')
+  // Plain-text web links → anchors (a pasted link is clickable). After
+  // the markup above so it never lands inside a tag or a code span.
+  out = _mapText(out, _autolink)
 
   if (opts.mentions && opts.mentions.size > 0) {
     out = _wrapMentions(

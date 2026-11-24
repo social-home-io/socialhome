@@ -199,3 +199,129 @@ describe('renderMarkdown — interactive @mentions (person sheet)', () => {
     expect(buttons[0].getAttributeNames().sort()).toEqual(['class', 'data-mention', 'type'])
   })
 })
+
+// Owner bug 2026-11-24: "I made a post with a link, but the link is not
+// linked". Only ``[text](url)`` became an <a>; a pasted link stayed text.
+describe('renderMarkdown — bare links are clickable', () => {
+  const links = (html: string) => {
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    return [...doc.querySelectorAll('a')].map(a => ({
+      href: a.getAttribute('href'),
+      text: a.textContent,
+      rel: a.getAttribute('rel'),
+      target: a.getAttribute('target'),
+    }))
+  }
+
+  test('a bare URL becomes a safe link', () => {
+    expect(links(renderMarkdown('https://www.home-assistant.io/'))).toEqual([{
+      href: 'https://www.home-assistant.io/',
+      text: 'https://www.home-assistant.io/',
+      rel: 'noopener noreferrer',
+      target: '_blank',
+    }])
+  })
+
+  test('a URL inside a sentence links only the URL', () => {
+    const html = renderMarkdown('Look at https://example.org/a/b it is great')
+    expect(links(html).map(l => l.href)).toEqual(['https://example.org/a/b'])
+    expect(html.startsWith('Look at <a ')).toBe(true)
+    expect(html.endsWith('</a> it is great')).toBe(true)
+  })
+
+  test('www. without a scheme links to https', () => {
+    expect(links(renderMarkdown('Our site www.home-assistant.io is it'))).toEqual([{
+      href: 'https://www.home-assistant.io',
+      text: 'www.home-assistant.io',
+      rel: 'noopener noreferrer',
+      target: '_blank',
+    }])
+  })
+
+  test('a query string survives; trailing punctuation stays text', () => {
+    const html = renderMarkdown('Read https://example.org/?a=1&b=two_words. Now!')
+    expect(links(html).map(l => [l.href, l.text])).toEqual([
+      ['https://example.org/?a=1&b=two_words', 'https://example.org/?a=1&b=two_words'],
+    ])
+    expect(html).toContain('</a>. Now!')
+  })
+
+  test.each([
+    ['(see https://example.org/x)', 'https://example.org/x'],
+    ['"https://example.org/q"', 'https://example.org/q'],
+    ['<https://example.org/z>', 'https://example.org/z'],
+    ['https://example.org/end,', 'https://example.org/end'],
+    ['go: http://example.org:', 'http://example.org'],
+  ])('%s links %s only', (src, href) => {
+    expect(links(renderMarkdown(src)).map(l => l.href)).toEqual([href])
+  })
+
+  test('several links on several lines', () => {
+    const html = renderMarkdown('one https://a.example/1\ntwo www.b.example/2')
+    expect(links(html).map(l => l.href)).toEqual([
+      'https://a.example/1', 'https://www.b.example/2',
+    ])
+  })
+
+  test('a markdown link is not linked twice', () => {
+    const html = renderMarkdown('A [markdown link](https://x.example/home) here')
+    expect(links(html)).toEqual([{
+      href: 'https://x.example/home',
+      text: 'markdown link',
+      rel: 'noopener noreferrer',
+      target: '_blank',
+    }])
+  })
+
+  test('a markdown link whose text is the URL is one link', () => {
+    const html = renderMarkdown('[https://x.example/a](https://x.example/a)')
+    expect(links(html)).toHaveLength(1)
+  })
+
+  test('code stays code', () => {
+    const html = renderMarkdown('`https://x.example/a` and\n```\nwww.y.example\n```')
+    expect(links(html)).toHaveLength(0)
+  })
+
+  test('bold links still link', () => {
+    const html = renderMarkdown('**https://x.example/a**')
+    expect(html).toContain('<strong><a href="https://x.example/a"')
+  })
+
+  test.each([
+    ['javascript:alert(1)'],
+    ['data:text/html,<script>alert(1)</script>'],
+    ['vbscript:msgbox'],
+    ['file:///etc/passwd'],
+    ['ftp://example.org/x'],
+    ['foo.www.example.org'],
+    ['mail@www.example.org'],
+    ['https://'],
+    ['www.'],
+  ])('%s is not linked', (src) => {
+    expect(links(renderMarkdown(src))).toHaveLength(0)
+  })
+
+  test('an attribute break-out attempt stays inside the href', () => {
+    const html = renderMarkdown('https://x.example/"onmouseover="alert(1)')
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    expect(doc.querySelectorAll('[onmouseover]')).toHaveLength(0)
+    expect(links(html).map(l => l.href)).toEqual(['https://x.example/'])
+  })
+
+  test('an escaped tag in a URL never becomes markup', () => {
+    const html = renderMarkdown('https://x.example/<img src=x onerror=alert(1)>')
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    expect(doc.querySelectorAll('img, [onerror]')).toHaveLength(0)
+    expect(links(html).map(l => l.href)).toEqual(['https://x.example/'])
+  })
+
+  test('a mention inside a URL is not a button inside the link', () => {
+    const html = renderMarkdown('https://social.example/@anna', {
+      mentions: new Set(['anna']), interactive: true,
+    })
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    expect(doc.querySelectorAll('button')).toHaveLength(0)
+    expect(links(html).map(l => l.href)).toEqual(['https://social.example/@anna'])
+  })
+})
