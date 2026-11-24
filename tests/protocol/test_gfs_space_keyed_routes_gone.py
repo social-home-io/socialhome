@@ -94,9 +94,24 @@ async def gfs(tmp_dir):
 
 @pytest.mark.parametrize(("route", "body"), RETIRED_ROUTES)
 async def test_every_space_keyed_route_is_gone(gfs, route, body):
+    # 404, never 405: a 405 means the path is still registered under another
+    # verb — a half-removed view would pass.
     resp = await gfs.post(route, json=body)
-    assert resp.status in (404, 405)
-    assert (await gfs.get(route)).status in (404, 405)
+    assert resp.status == 404
+    assert (await gfs.get(route)).status == 404
+
+
+def test_no_retired_path_is_registered(gfs):
+    """The route table itself names none of the retired paths, any verb."""
+    retired = {
+        route.replace("/sp-1/", "/{space_id}/") for route, _ in RETIRED_ROUTES
+    } | {"/gfs/spaces/{space_id}/subscribers"}
+    paths = set()
+    for resource in gfs.app_.router.resources():
+        info = resource.get_info()
+        paths.add(info.get("path") or info.get("formatter") or "")
+    assert "/gfs/spaces/{space_id}" in paths  # the listing stays
+    assert not paths & retired
 
 
 async def test_the_subscriber_roster_read_is_gone(gfs):
