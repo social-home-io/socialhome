@@ -1093,9 +1093,8 @@ path is proven by ``gfs-space-follow``, ``gfs-global-channel``,
 ``gfs-follower-comment`` and ``gfs-authority-rotate``; the content-blindness
 of the channel by the §27.9 tests (``test_gfs_global_channel_blind.py``).
 ``verify``'s former §13 block (gated on the retired steps' state) went with
-them. ``gfs-media-on-demand`` read its follower photo from
-``gfs-space-post`` and now stops with "retired" until the GFS-side
-space-scope media is reworked.
+them. ``gfs-media-on-demand`` now reads the follower photo
+``gfs-global-channel`` puts through the channel's media cache.
 
 ### ``gfs-space-follower-names`` / ``gfs-space-follower-reconnect`` — retired (v_96, P4)
 
@@ -1376,14 +1375,9 @@ WS pushes across allocs. The step:
    sequential write pays it; at the old fixed 500 ms every publish took
    ≥ 0.5 s (`GFS_WRITE_BATCH_WINDOW_MS=500` in the environment reproduces
    that: median ~509 ms, the step fails). At the 5 ms default: ~7 ms.
-5. Proves the two single-recipient pushes reach a socket held by ANOTHER
-   node: with the owner's ``/gfs/ws`` on node 0, a follower's subscribe via
-   node 1 must bring the owner a ``new_subscriber`` frame (``reason:
-   subscribe``, ``accepts`` intact — forwarded as ``NODE_DRAIN_HINT.notices``);
-   with the follower's socket on node 1, the owner's targeted ``to`` key
-   handoff via node 0 must reach it (shared relay queue + drain hint).
-   Without the cross-node path the step fails with "no 'new_subscriber'
-   frame within 10 s".
+5. (Its former first leg — a ``new_subscriber`` notice and a targeted
+   ``/gfs/publish`` key handoff crossing nodes — went with the space-keyed
+   relay in v_96.)
    Then **anonymous mailboxes** (GFS redesign PR 1, step 3d''): a mailbox
    (keys derived with ``federation/gfs_mailbox.py``) registered via node 0
    and claimed on node 1 (``/gfs/mailbox/ws``) must get a JSON envelope and
@@ -1406,12 +1400,15 @@ WS pushes across allocs. The step:
    via node 0 — bound to node 0's id — is claimed there and gets an envelope
    and a media frame posted via node 0, byte-identical (a node accepts the
    ids its shared-key siblings serve). The extra node is stopped after.
-   Then a **broadcast**: one follower's socket on EACH node, a signed
-   ``space_post_public`` published via node 0 — every follower must get
-   exactly one ``relay`` frame (a further 2 s window must stay empty). The
+   Then a **channel broadcast**: a space's opaque channel registered via
+   node 1 (channel key, epoch notice pinning the channel writer key), one
+   seated household's socket on EACH node, an item published anonymously
+   via node 0 (``POST /gfs/channels/publish-anon``, signed with the channel
+   writer key) — every seat must get exactly one ``relay`` frame naming the
+   channel and no space (a further 2 s window must stay empty). The
    accepting node forwards the item once per peer node in the coalesced
    ``NODE_DRAIN_HINT.relays``; before that fan-out was node-local and the
-   step fails with "the follower on node 1 got 0 copies".
+   step fails with "the seat on node 1 got 0 copies".
    Then a **public moment**: an author registered via node 1, one follower
    household per node (each following through a different node), an
    encrypted moment published via node 0 and its tombstone via node 1 —
@@ -1432,28 +1429,26 @@ WS pushes across allocs. The step:
    bytes) must all succeed. Before, the offer on a node without the
    author's socket answered 503 and the polls, answers and uploads reached
    nodes that did not hold the session.
-   Then the **space media cache** (step 3h): a space published with an
-   authority key the step holds; one encrypted, padded blob uploaded via
-   node 0 under that authority must be served **byte-identical by node 1**
+   Then the **space media cache** (steps 3h + 3i), under a space's opaque
+   channel (since v_96 its only scope, owner decision Q5): a channel
+   registered via node 1 gets the uniform ``403`` until a member household
+   holds a seat (ONE seat is enough: the owner never subscribes to its own
+   channel); then one encrypted, padded blob uploaded via node 0 under the
+   channel key must be served **byte-identical by node 1**
    (``Cache-Control: public, max-age=3600, immutable``) — files under the
    shared ``space_media`` dir, rows in the shared DB; the same upload via
    node 1 must coalesce (``200 already_stored``) and a miss via node 1 must
    be ``404`` with ``no-store`` (every write and fetch at the ONE
    scope-free ``/gfs/media/{blob}``, the scope only in what is signed).
-   Then (step 3i) the same for a **private space's opaque channel**: a
-   channel registered via node 1 gets the uniform ``403`` until a member
-   household holds a seat (epoch notice, pass, subscribe — ONE seat is
-   enough: the owner never subscribes to its own channel); then a blob
-   uploaded via node 0 under the channel key must be served byte-identical
-   by node 1. Every address is bound to its scope
+   Every address is bound to its scope
    (``sha256("sm1|" + scope + "|" + scope_id + "|" + ciphertext)``): the
-   space step's ciphertext uploaded under that channel via node 1 is a NEW
-   blob (``201``) at another address; the channel's delete of the space's
-   address answers ``deleted: false`` (still ``200`` to fetch); the space's
-   own delete via node 1 removes it on every node (``404``) while the
-   channel's copy stays.
+   same ciphertext under a SECOND channel via node 1 is a NEW blob
+   (``201``) at another address; that channel's delete of the first one's
+   address answers ``deleted: false`` (still ``200`` to fetch); the first
+   channel's own delete via node 1 removes it on every node (``404``) while
+   the second channel's copy stays.
    Then (step 3j) **space media on demand** (v_83) across nodes: a fake
-   holder household (real Ed25519 key) owns a listed space and holds its
+   holder household (real Ed25519 key) holds the one seat of a channel and its
    socket on node 0 (hello ``accepts: ["space_media_serve"]``). Ten readers
    (distinct ``X-Forwarded-For`` prefixes) POST ``/gfs/media/{blob}/wanted``
    at once DIRECTLY to node 1 for a blob the cache never held: the holder
@@ -1465,7 +1460,7 @@ WS pushes across allocs. The step:
    — and every reader gets it byte-identical with ``Cache-Control:
    no-store``; node 2 does not serve it (nothing stored). Then cache mode: a
    second blob with a fresh ``gfs_space_media_demand`` row gets one
-   ``cache`` request, the holder's serve carries its upload authorization,
+   ``cache`` request, the holder's serve carries its channel upload authorization,
    ``{"stored": true}``, and node 2 serves it from the shared cache
    (immutable). Node 1's admin overview counts 2 holder requests, 2 streams,
    1 re-upload over both legs.
@@ -1734,7 +1729,8 @@ space. e's reply rides a's mailbox the same way.
 **Pictures through the GFS media cache (v_80).** The step ends with a
 ~0.5 MB photo post (``_picture_via_gfs_media_cache``): the reader holds
 the file byte-identical, the GFS's own ``gfs_space_media`` holds the blob
-for the space (scope ``space``), the reader's ``space_media_refs`` names
+under the space's opaque channel (scope ``channel``; never the space id),
+the reader's ``space_media_refs`` names
 it, the author logged ``uploaded blob <id>`` and the reader ``fetched blob
 <id> … from GFS``.
 
@@ -1779,32 +1775,32 @@ on the one wire that cannot fall back to a peer row — see below.
 
 ### ``gfs-media-on-demand`` — a picture that left the GFS cache comes back on a view (v_83)
 
-**Retired until the GFS-side space-scope media rework:** its follower leg
-read the photo ``gfs-space-post`` (removed with v_96) proved through the GFS
-media cache; the step now stops with "retired". What it covered: the chain
-through ``gfs-invite-link-content``, d (a follower) holding a's space photo. Since v_92 only a **follower** asks its GFS on demand; a
-member household (the link-joined e) asks the host and helpers with
-``SPACE_MEDIA_WANTED`` instead (``gfs-space-healing``). The blob is expired exactly as the GFS
+Prereqs: ``gfs-global-channel`` — member **b**'s photo in a's global space
+reached the follower **e** through the GFS media cache, under the space's
+opaque channel (since v_96 the cache's only scope). Since v_92 only a
+**follower** asks its GFS on demand; a member household asks the host and
+helpers with ``SPACE_MEDIA_WANTED`` instead (``gfs-space-healing``). The blob is expired exactly as the GFS
 store does it (``gfs_space_media`` row + ``data_dir/space_media/<blob>``
 deleted, ``gfs_space_media_demand`` upserted with ``stored_at`` as
 ``_remember_left`` writes it) and the reader's own copy is deleted;
 then the reader VIEWS it (``GET /api/media/<name>``) — a miss everywhere
-→ ``POST /gfs/media/{blob}/wanted`` → the GFS asks the host a
-(``space_media_request``) → a re-seals and serves the ticket.
+→ ``POST /gfs/media/{blob}/wanted`` → the GFS asks a household seated on
+the channel (``space_media_request``: b, which holds the file — e, seated
+too, declines; the owner a holds no seat and is never asked) → b re-seals
+and serves the ticket.
 
 1. **Fresh** (``stored_at`` = the row's ``created_at``) → cache: the reader
-   gets the photo byte-identical; the GFS row and file are back; a logged
+   gets the photo byte-identical; the GFS row and file are back; b logged
    exactly one ``re-uploaded on demand`` line for the blob; the admin
-   overview (``/admin/api/overview`` → ``space_media``) counts +1 holder
-   request, +1 re-upload. e, when it holds the same blob, then views it
-   from the cache (``fetched blob … from GFS``) with no new holder request.
+   overview (``/admin/api/overview`` → ``space_media``) counts one or two
+   holder requests (e may be asked first) and +1 re-upload.
 2. **Old** (``stored_at`` 30 days ago) → stream: byte-identical again, but
    no row and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
-   a logged ``streamed on demand``. Waits first until the GFS has no live
+   b logged ``streamed on demand``. Waits first until the GFS has no live
    sessions (a delivered session stays joinable ``coalesce_seconds``).
 
-Both legs run for the follower d. Not
-re-runnable within ~10 min (a attaches its upload authorization once per
+Both legs run for the follower e. Not
+re-runnable within ~10 min (b attaches its upload authorization once per
 (GFS, blob) per ``REUPLOAD_COALESCE_S``). ``verify`` asserts
 ``MIN_FOR_SPACE_MEDIA_ON_DEMAND`` is v_83 and covered by the ``OURS``
 round-trip.
@@ -2230,7 +2226,10 @@ exactly one channel frame, no space-keyed relay frame for the space — and
 the GFS log and database never hold its text. a restarts and catches b's post
 up — and adds no channel copy of it (b marked it ``channel_sent``; e still saw
 one frame), b never tried to reach e directly; then a's own post reaches e
-over the channel (the owner publishes into it, holding no seat).
+over the channel (the owner publishes into it, holding no seat). Last, b
+posts a photo: e holds it byte-identical, fetched from the GFS media cache,
+which keeps it under the channel id, never the space (``gfs-media-on-demand``
+expires it later).
 
 Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-global-channel, verify, down``.
 
