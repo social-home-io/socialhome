@@ -301,6 +301,10 @@ describe('renderMarkdown — bare links are clickable', () => {
     ['mail@www.example.org'],
     ['https://'],
     ['www.'],
+    ['https://\u0001'],
+    ['www.\u0001.\u0001'],
+    ['https://accounts.example.com@evil.example/x'],
+    ['www.good.example@evil.example'],
   ])('%s is not linked', (src) => {
     expect(links(renderMarkdown(src))).toHaveLength(0)
   })
@@ -317,6 +321,15 @@ describe('renderMarkdown — bare links are clickable', () => {
     const doc = new DOMParser().parseFromString(html, 'text/html')
     expect(doc.querySelectorAll('img, [onerror]')).toHaveLength(0)
     expect(links(html).map(l => l.href)).toEqual(['https://x.example/'])
+  })
+
+  test('a code span inside a markdown href never makes a rel-less link', () => {
+    const html = renderMarkdown('[x](https://evil.example/`b`)')
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    for (const a of doc.querySelectorAll('a')) {
+      expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+      expect(a.getAttribute('href')).not.toMatch(/[<>"]/)
+    }
   })
 
   test('a mention inside a URL is not a button inside the link', () => {

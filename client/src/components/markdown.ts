@@ -72,7 +72,8 @@ function _mapText(
 // as do whitespace and ``()[]{}`` / backtick — the same stop set as the
 // server's ``domain.link_preview.first_url``, so the link and its card
 // agree on where the URL ends.
-const _BARE_LINK = /(^|[^\w/.@-])((?:https?:\/\/|www\.)(?:[^\s&<>"'()[\]{}`]|&amp;)+)/gi
+// eslint-disable-next-line no-control-regex
+const _BARE_LINK = /(^|[^\w/.@-])((?:https?:\/\/|www\.)(?:[^\s\u0000-\u001f\u007f&<>"'()[\]{}`]|&amp;)+)/gi
 // Punctuation that ends a sentence, not a URL (as the server trims it).
 const _TRAILING_PUNCT = /[.,;:!?*_~]$/
 
@@ -87,6 +88,17 @@ function _trimTrailing(raw: string): string {
 // link needs a host.
 const _LINK_HAS_HOST = /^(?:https?:\/\/[^/]|www\.[^./]+\.[^./])/i
 
+/** ``https://name@host`` — refused like ``safeWebUrl`` and the server's
+ *  fetcher do: the text before the ``@`` only disguises the real host. */
+function _hasUserinfo(href: string): boolean {
+  try {
+    const u = new URL(href.replace(/&amp;/g, '&'))
+    return u.username !== '' || u.password !== ''
+  } catch {
+    return true
+  }
+}
+
 /** Turn plain-text web links in escaped text into safe anchors. A
  *  ``www.`` link opens over ``https``. Never inside an existing link. */
 function _autolink(text: string, inLink: boolean): string {
@@ -95,7 +107,7 @@ function _autolink(text: string, inLink: boolean): string {
     const url = _trimTrailing(raw)
     if (!_LINK_HAS_HOST.test(url)) return m
     const href = _safeHref(/^www\./i.test(url) ? `https://${url}` : url)
-    if (href === null) return m
+    if (href === null || _hasUserinfo(href)) return m
     const rest = raw.slice(url.length)
     return `${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>${rest}`
   })
@@ -148,6 +160,10 @@ const _URL_EDGE = /^[\u0000- ]+|[\u0000- ]+$/g
 function _safeHref(href: string): string | null {
   const read = href.replace(_URL_STRIPPED, '').replace(_URL_EDGE, '')
   if (!_SAFE_SCHEMES.test(read) || _PROTOCOL_RELATIVE.test(read)) return null
+  // User text arrives escaped, so a raw ``<`` / ``>`` / ``"`` can only be
+  // markup an earlier pass made (``[x](https://a/`b`)`` puts a <code> tag
+  // into the href) — it would end the attribute and drop ``rel``.
+  if (/[<>"]/.test(read)) return null
   return read
 }
 
