@@ -843,3 +843,57 @@ async def test_a_moment_reaction_frame_goes_to_the_router(db):
     inbound.attach_reactions(reactions)  # type: ignore[arg-type]
     await inbound.handle(frame, gfs_id="g1")
     assert reactions.frames == [(frame, "g1")]
+
+
+# ── Storage rule (v_96): kept only when someone here will see it ─────────
+
+
+@pytest.mark.parametrize(
+    "gone",
+    [
+        "UPDATE users SET state='inactive' WHERE user_id='u1'",
+        (
+            "UPDATE users SET deleted_at=datetime('now'), state='inactive'"
+            " WHERE user_id='u1'"
+        ),
+        # A protected account never sees a moment that came through a GFS.
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='u1'",
+        (
+            "INSERT INTO user_blocks(blocker_user_id, blocked_user_id)"
+            " VALUES('u1', 'u-noor')"
+        ),
+    ],
+)
+async def test_a_moment_nobody_here_will_see_is_not_kept(db, gone):
+    """The GFS path keeps a moment by the same rule as the mesh
+    (``has_visible_recipient``): a follow row alone is not enough when its
+    follower is removed, protected or blocks the author — no row, no file.
+    (A guardian block binds only a protected account, which a GFS moment
+    never counts for anyway.)"""
+    inbound, _follows = await _env(db)
+    await db.enqueue(gone)
+    await _create(inbound, _moment("m-unseen"))
+    assert await _stored(db, "m-unseen") is None
+
+
+async def test_a_housemate_who_will_see_it_keeps_it(db):
+    """A protected follower alone keeps nothing, but an adult housemate
+    sees public moments the household holds — so it is kept."""
+    inbound, _follows = await _env(db)
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name, state)"
+        " VALUES('u-adult', 'adult', 'Adult', 'active')"
+    )
+    await _create(inbound, _moment("m-seen"))
+    assert await _stored(db, "m-seen") is not None
+
+
+async def test_a_picture_nobody_here_will_see_is_not_fetched(db):
+    inbound, _ = await _env(db)
+    media = _MediaIn()
+    inbound.attach_media(media)
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await _create(inbound, _moment("m-pic", media=_MEDIA, media_type="image"))
+    assert media.jobs == []
+    assert await _stored(db, "m-pic") is None

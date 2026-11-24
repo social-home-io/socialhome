@@ -407,7 +407,13 @@ below):
   ``moment_public_follows``) and has not blocked them (personal or guardian
   block) — a follow then shows the author's moments whatever the follower's
   ``max_hops`` (the inbox rule changes the same way, so "stored" and "seen"
-  stay one rule); protected accounts still only at hop 1;
+  stay one rule); protected accounts still only at hop 1; only active,
+  undeleted people count (the same people as ``moment_look_hops``);
+* the GFS path keeps a followed author's public moment by the same rule
+  (``has_visible_recipient(…, via_gfs=True)``, where a protected account
+  counts at no hop — it never sees a GFS moment): a follow row whose
+  follower was removed, is protected or blocks the author keeps no row and
+  fetches no file;
 * otherwise the household forwards within reach and keeps nothing but the
   in-memory, id-only relay seen-map (bounded, 48 h) — and, for a delete,
   the content-free 30-day tombstone it already keeps (which is what makes a
@@ -511,7 +517,7 @@ per moment in a tree but up to *d* copies in a dense mesh — at d = 10,
 reach 5 that is up to ≈ 3 million envelopes/day per household, each a
 signature check and a replay-cache write before the seen-map drops it.
 Storage does not grow with reach (it follows local viewers' ``max_hops``,
-default 3) — unless someone here looks 5 hops, when a d = 10 tree delivers
+default 3, and their follows of authors whose moments reach the household) — unless someone here looks 5 hops, when a d = 10 tree delivers
 ≈ 295 000 moments/day ≈ 450 MB/day of rows. The relay seen-map
 (``RELAY_SEEN_MAX`` 50 000 entries, two per relayed create, plus deletes
 and totals revs) overflows inside its 48 h window past ≈ 12 000 relayed

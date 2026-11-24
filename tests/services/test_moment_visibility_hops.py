@@ -389,3 +389,18 @@ async def test_a_protected_follower_still_sees_only_its_circle(db, repo):
     await repo.save(_moment(moment_id="far", hop_count=2))
     assert await repo.list_visible_to("u-self", max_hops=5) == []
     assert await repo.get_readable("far", "u-self", max_hops=5) is None
+
+
+async def test_a_gfs_moment_is_never_kept_for_a_protected_account(db, repo):
+    """Through a GFS (``via_gfs``) a protected account counts at no hop —
+    it never sees such a moment (§CP.R) — whatever it follows."""
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await _follow_via_gfs(db, "u-self")
+    assert await repo.has_visible_recipient(author_user_id="u-author", hop_count=1)
+    assert not await repo.has_visible_recipient(
+        author_user_id="u-author", hop_count=1, via_gfs=True
+    )
+    await _add_user(db, "u-adult")
+    assert await repo.has_visible_recipient(
+        author_user_id="u-author", hop_count=1, via_gfs=True
+    )

@@ -339,6 +339,7 @@ class AbstractMomentRepo(Protocol):
         *,
         author_user_id: str,
         hop_count: int,
+        via_gfs: bool = False,
     ) -> bool: ...
     async def moment_look_hops(self) -> int: ...
 
@@ -680,6 +681,7 @@ class SqliteMomentRepo:
         *,
         author_user_id: str,
         hop_count: int,
+        via_gfs: bool = False,
     ) -> bool:
         """True iff at least one local user will see this moment — the
         storage rule (``docs/protocol/momentum.md`` § Storage). Used by the
@@ -693,8 +695,10 @@ class SqliteMomentRepo:
         * No personal block (:table:`user_blocks`) and no guardian block
           (§CP.F2, either way) separates them from the author.
         * They are not a protected account (§CP.R), or the moment is from a
-          paired household (``hop_count`` 1) — a protected account sees no
-          moment from further away, whomever it follows.
+          paired household (``hop_count`` 1) and did not come through a GFS
+          (``via_gfs`` — the GFS inbound path asks with it) — a protected
+          account sees no moment from further away or through a GFS
+          (:data:`_PROTECTED_CIRCLE_SQL`), whomever it follows.
         * Their ``moments.max_hops`` preference (read from
           ``users.preferences_json``) is ≥ ``hop_count``, **or** they follow
           the author (``user_follows`` / ``moment_public_follows``) — a
@@ -707,6 +711,7 @@ class SqliteMomentRepo:
         :data:`MOMENT_DEFAULT_MAX_HOPS` (3 — matches new accounts).
         """
         hop = int(hop_count)
+        protected_counts = int(hop <= 1 and not via_gfs)
         row = await self._db.fetchone(
             f"""
             SELECT 1 FROM users AS u
@@ -717,7 +722,7 @@ class SqliteMomentRepo:
                     AND blocked_user_id = ?
              )
                AND ? NOT IN ({guardian_block_counterparts_sql("u.user_id")})
-               AND (u.child_protection_enabled = 0 OR ? <= 1)
+               AND (u.child_protection_enabled = 0 OR ? = 1)
                AND (
                  {_VIEWER_HOPS_SQL} >= ?
                  OR EXISTS (
@@ -736,7 +741,7 @@ class SqliteMomentRepo:
             (
                 author_user_id,
                 author_user_id,
-                hop,
+                protected_counts,
                 *_VIEWER_HOPS_PARAMS,
                 hop,
                 author_user_id,

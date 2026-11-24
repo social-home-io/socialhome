@@ -276,14 +276,34 @@ async def test_a_forward_only_household_forwards_and_keeps_nothing(
 # ═══ b: a follower keeps it — and only the follower sees it ═══════════════
 
 
-@pytest.mark.parametrize("hop", [2, 3, 5])
-async def test_a_follower_keeps_the_authors_moment_and_alone_sees_it(env, hop):
-    app, db, sent, _fetched, _media = env
+async def _follow_direct(db) -> None:
     await db.enqueue(
         "INSERT INTO user_follows(follower_user_id, followed_user_id)"
         " VALUES('u-anna', ?)",
         (MIA,),
     )
+
+
+async def _follow_via_gfs(db) -> None:
+    await db.enqueue(
+        "INSERT INTO gfs_connections(id, gfs_instance_id, display_name,"
+        " public_key, inbox_url, status, paired_at) VALUES('g1', 'gfs-1',"
+        " 'GFS One', ?, 'https://gfs1.example', 'active', datetime('now'))",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO moment_public_follows(follower_user_id, followed_user_id,"
+        " gfs_id, followed_instance_pk, followed_username, followed_display_name)"
+        " VALUES('u-anna', ?, 'g1', ?, 'mia', 'Mia')",
+        (MIA, "bb" * 32),
+    )
+
+
+@pytest.mark.parametrize("follow", [_follow_direct, _follow_via_gfs])
+@pytest.mark.parametrize("hop", [2, 3, 5])
+async def test_a_follower_keeps_the_authors_moment_and_alone_sees_it(env, hop, follow):
+    app, db, sent, _fetched, _media = env
+    await follow(db)
     await _deliver(
         app,
         FET.MOMENT_CREATED,
@@ -479,6 +499,7 @@ async def test_totals_pass_a_forward_only_household_that_relayed_the_create(env)
         (UP2, 3),
     ]
     assert await _count(db, "moments", "id", "m-tot") == 0
+    # The totals live on the row (``moments.reaction_summary``): none kept.
 
 
 # ═══ media: only the reference rides; nothing is fetched ═══════════════════
