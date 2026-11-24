@@ -3104,7 +3104,7 @@
   "settings.momentum.hop_5": "5 steps",
   "settings.momentum.steps": "{n} steps",
   "settings.momentum.reach_label": "How far my moments go",
-  "settings.momentum.reach_hint": "Below 3 steps, households on an older Social Home don't get your moments until they update. At 4 or 5, older households further away miss them, and steps 4 and 5 only reach households where someone looks that far.",
+  "settings.momentum.reach_hint": "Steps 4 and 5 only reach households where someone looks that far.",
   "settings.momentum.reach_household_max": "Your household allows up to {n} steps.",
   "settings.momentum.reach_household_max_one": "Your household allows 1 step only.",
   "settings.momentum.reach_max_label": "Household maximum",

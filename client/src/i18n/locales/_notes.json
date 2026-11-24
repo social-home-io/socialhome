@@ -346,7 +346,7 @@
   "settings.momentum.hop_4": "Same scale as settings.momentum.hop_1: a \"step\" is one pairing between households. Used both for \"Show moments up to\" and \"How far my moments go\".",
   "settings.momentum.steps": "Option in the admin \"Household maximum\" dropdown. {n} is 2, 3 or 4 (steps between households, as in settings.momentum.hop_2).",
   "settings.momentum.reach_label": "Label of a dropdown of steps (settings.momentum.hop_1 … hop_5): how far the person's own moments travel through paired households. Contrast with settings.momentum.show_up_to (what reaches you).",
-  "settings.momentum.reach_hint": "Plain-words note under \"How far my moments go\". \"Older Social Home\" = households that haven't updated yet. Keep the three facts: below 3 they wait for an update; at 4–5 far-away older ones miss them; 4–5 reach only where someone looks that far.",
+  "settings.momentum.reach_hint": "Plain-words note under \"How far my moments go\": steps 4 and 5 travel only toward households where someone has \"Show moments up to\" set that far.",
   "settings.momentum.reach_household_max": "{n} = 2, 3 or 4: the most steps an admin allows for everyone in the household. The _one form is for exactly 1 step.",
   "settings.momentum.reach_max_label": "Admin-only dropdown: the most steps anyone in this household may send their moments.",
   "settings.momentum.reach_max_none": "Top option of the \"Household maximum\" dropdown: 5 steps is the default and means there is no extra household limit.",
