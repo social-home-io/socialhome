@@ -16,14 +16,12 @@ import json
 import os
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
 
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.authority_cert import sign_authority_cert
-from socialhome.authority_sig import sign_authority_event
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
@@ -33,7 +31,6 @@ from socialhome.crypto import (
 from socialhome.domain.gfs_channel import channel_frame
 from socialhome.gfs_channel import new_channel_id
 from socialhome.global_server import cluster as cluster_mod
-from socialhome.global_server import member_publish as mp_mod
 from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_admin_service_key,
@@ -43,9 +40,9 @@ from socialhome.global_server.app_keys import (
     gfs_cluster_repo_key,
     gfs_config_key,
     gfs_envelope_queue_repo_key,
+    gfs_fan_out_key,
     gfs_fed_repo_key,
     gfs_highlight_pub_service_key,
-    gfs_member_publish_key,
     gfs_moment_public_follow_repo_key,
     gfs_moment_public_registry_key,
     gfs_rtc_key,
@@ -967,14 +964,11 @@ async def test_fan_out_with_recipients_converges_across_three_nodes(
         await _stop_nodes(*nodes.values())
 
 
-# ─── Owner notices + targeted relays across two real nodes on ONE DB ──────
+# ─── Two real nodes on ONE DB ─────────────────────────────────────────────
 #
 # The production topology: N GFS processes share one SQLite file and one
 # identity seed behind a round-robin balancer, so a household's socket and
-# its next HTTP request usually land on DIFFERENT nodes. Before the fix a
-# ``new_subscriber`` notice reached the owner only if the subscribe hit the
-# node holding the owner's socket, and a targeted ``to`` relay only if the
-# publish hit the node holding the target's socket.
+# its next HTTP request usually land on DIFFERENT nodes.
 
 _OWNER_ID = "ownerhome222222222222222222222aa"
 _FOLLOWER_ID = "followerhome2222222222222222222a"
@@ -1096,98 +1090,10 @@ async def _seed_households(app) -> tuple[bytes, bytes, bytes]:
     return owner.private_key, follower.private_key, space.private_key
 
 
-def _signed_subscribe_body(seed: bytes) -> dict:
-    ts = datetime.now(UTC).isoformat()
-    signed = {
-        "action": "subscribe",
-        "instance_id": _FOLLOWER_ID,
-        "space_id": _SPACE_ID,
-        "ts": ts,
-    }
-    canonical = json.dumps(signed, separators=(",", ":"), sort_keys=True).encode()
-    return {
-        **signed,
-        "signature": b64url_encode(sign_ed25519(seed, canonical)),
-        "accepts": ["author_profiles_bundle"],
-    }
-
-
-async def test_a_subscribe_on_one_node_notifies_the_owner_on_another(
-    shared_db_nodes,
-):
-    a, b = shared_db_nodes
-    owner_seed, follower_seed, _space_seed = await _seed_households(a.app)
-    async with (
-        aiohttp.ClientSession() as http,
-        http.ws_connect(a.make_url("/gfs/ws")) as owner_ws,
-    ):
-        await _ws_hello(owner_ws, _OWNER_ID, owner_seed)
-        await _await_connected(a.app, _OWNER_ID)
-        # The balancer sent the follower's subscribe to node B.
-        async with http.post(
-            b.make_url("/gfs/subscribe"), json=_signed_subscribe_body(follower_seed)
-        ) as resp:
-            assert resp.status == 200
-        frame = await _next_frame(owner_ws, "new_subscriber")
-    assert frame["reason"] == "subscribe"
-    assert frame["space_id"] == _SPACE_ID
-    assert frame["subscriber"]["instance_id"] == _FOLLOWER_ID
-    assert frame["subscriber"]["keywrap_public_key"] == "cc" * 32
-    assert frame["subscriber"]["accepts"] == ["author_profiles_bundle"]
-
-
-async def test_a_targeted_relay_on_one_node_reaches_a_socket_on_another(
-    shared_db_nodes,
-):
-    a, b = shared_db_nodes
-    _owner_seed, follower_seed, space_seed = await _seed_households(a.app)
-    await a.app[gfs_fed_repo_key].add_subscriber(
-        space_id=_SPACE_ID, instance_id=_FOLLOWER_ID
-    )
-    payload: dict = {"space_id": _SPACE_ID, "sealed": {"ciphertext": "for-you"}}
-    payload.update(
-        sign_authority_event(
-            event_type="space_subscriber_key_handoff",
-            space_id=_SPACE_ID,
-            payload=payload,
-            space_seed=space_seed,
-        )
-    )
-    async with (
-        aiohttp.ClientSession() as http,
-        http.ws_connect(b.make_url("/gfs/ws")) as follower_ws,
-    ):
-        await _ws_hello(follower_ws, _FOLLOWER_ID, follower_seed)
-        await _await_connected(b.app, _FOLLOWER_ID)
-        # The owner's targeted handoff landed on node A.
-        async with http.post(
-            a.make_url("/gfs/publish"),
-            json={
-                "space_id": _SPACE_ID,
-                "event_type": "space_subscriber_key_handoff",
-                "payload": payload,
-                "to": _FOLLOWER_ID,
-            },
-        ) as resp:
-            assert resp.status == 200
-            assert (await resp.json())["delivered_to"] == 1
-        frame = await _next_frame(follower_ws, "relay")
-    assert frame == {
-        "type": "relay",
-        "space_id": _SPACE_ID,
-        "event_type": "space_subscriber_key_handoff",
-        "payload": payload,
-    }
-    queue = a.app[gfs_envelope_queue_repo_key]
-    assert await _wait_for(lambda: _async_eq(queue.count_for(_FOLLOWER_ID), 0)), (
-        "the drained row must leave the shared queue"
-    )
-
-
 # ─── Broadcast fan-out across THREE real nodes on ONE DB ──────────────────
 #
-# Before the fix every broadcast item — an authority-signed ``/gfs/publish``,
-# a member publish, a channel item — reached only the sockets of the node
+# Before the fix every broadcast item — a channel item, a public moment —
+# reached only the sockets of the node
 # that took the request: on N nodes behind a round-robin balancer (N−1)/N of
 # the followers missed each post.
 
@@ -1231,7 +1137,7 @@ async def three_shared_nodes(tmp_path_factory, monkeypatch):
 
 
 async def _seed_space_with_followers(app, ids) -> tuple[bytes, dict[str, bytes]]:
-    """A published space with *ids* subscribed. Returns (space seed,
+    """A published space and the households *ids*. Returns (space seed,
     instance id → identity seed)."""
     space = generate_identity_keypair()
     fed_repo = app[gfs_fed_repo_key]
@@ -1257,8 +1163,6 @@ async def _seed_space_with_followers(app, ids) -> tuple[bytes, dict[str, bytes]]
             identity_public_key=space.public_key.hex(),
         )
     )
-    for iid in ids:
-        await fed_repo.add_subscriber(space_id=_SPACE_ID, instance_id=iid)
     return space.private_key, seeds
 
 
@@ -1290,94 +1194,13 @@ async def _connect_all(http, placement, seeds) -> dict:
     return sockets
 
 
-def _signed_post(space_seed: bytes, text: str) -> dict:
-    payload: dict = {"space_id": _SPACE_ID, "epoch": 1, "ciphertext": text}
-    payload.update(
-        sign_authority_event(
-            event_type="space_post_public",
-            space_id=_SPACE_ID,
-            payload=payload,
-            space_seed=space_seed,
-        )
-    )
-    return payload
-
-
-async def test_a_public_post_on_one_node_reaches_followers_on_every_node_once(
-    three_shared_nodes,
-):
-    a, b, c = three_shared_nodes
-    on_b, on_c, on_a = _FOLLOWER_IDS
-    space_seed, seeds = await _seed_space_with_followers(a.app, _FOLLOWER_IDS)
-    payload = _signed_post(space_seed, "hello cluster")
-    async with aiohttp.ClientSession() as http:
-        sockets = await _connect_all(http, ((on_a, a), (on_b, b), (on_c, c)), seeds)
-        # The balancer sent the publish to node A.
-        async with http.post(
-            a.make_url("/gfs/publish"),
-            json={
-                "space_id": _SPACE_ID,
-                "event_type": "space_post_public",
-                "payload": payload,
-            },
-        ) as resp:
-            assert resp.status == 200
-        got = {iid: await _relays_within(ws, 1.5) for iid, ws in sockets.items()}
-        for ws in sockets.values():
-            await ws.close()
-    want = {
-        "type": "relay",
-        "space_id": _SPACE_ID,
-        "event_type": "space_post_public",
-        "payload": payload,
-    }
-    assert got == {on_a: [want], on_b: [want], on_c: [want]}, (
-        "each follower — on the publishing node and on both others — gets the "
-        "post exactly once"
-    )
-    # A broadcast is WebSocket-only: nothing was queued for anybody.
-    queue = a.app[gfs_envelope_queue_repo_key]
-    for iid in _FOLLOWER_IDS:
-        assert await queue.count_for(iid) == 0
-
-
-async def test_a_replayed_post_on_another_node_is_not_fanned_out_again(
-    three_shared_nodes,
-):
-    """The forwarded item is remembered on every node, so the same bytes
-    re-POSTed to node B inside the replay window go nowhere — before, each
-    node had to see the bytes once itself."""
-    a, b, _c = three_shared_nodes
-    on_b = _FOLLOWER_IDS[0]
-    space_seed, seeds = await _seed_space_with_followers(a.app, _FOLLOWER_IDS)
-    body = {
-        "space_id": _SPACE_ID,
-        "event_type": "space_post_public",
-        "payload": _signed_post(space_seed, "once"),
-    }
-    async with aiohttp.ClientSession() as http:
-        (ws,) = (await _connect_all(http, ((on_b, b),), seeds)).values()
-        async with http.post(a.make_url("/gfs/publish"), json=body) as resp:
-            assert resp.status == 200
-        first = await _relays_within(ws, 1.0)
-        async with http.post(b.make_url("/gfs/publish"), json=body) as resp:
-            assert resp.status == 200
-            assert (await resp.json())["delivered_to"] == 0
-        again = await _relays_within(ws, 1.0)
-        await ws.close()
-    assert len(first) == 1
-    assert again == []
-
-
-async def test_a_member_item_reaches_every_node_and_queues_only_the_offline(
+async def test_a_channel_item_reaches_every_node_and_queues_only_the_offline(
     three_shared_nodes, monkeypatch
 ):
-    """A member item accepted by node A: followers on B and C get it live
+    """A channel item accepted by node A: seats on B and C get it live
     exactly once — including one whose socket is too new to count as
-    "seen" — the publisher does not, and the ONE recently-seen follower with
-    no socket anywhere gets the only queue row. Before, a follower on another
-    node got the item only through a queue row, and only if it had been
-    seen: the one on C got nothing, and B's copy cost a row."""
+    "seen" — the publisher does not, and the ONE recently-seen seat with no
+    socket anywhere gets the only queue row."""
     a, b, c = three_shared_nodes
     on_b, on_c, on_a = _FOLLOWER_IDS
     ids = (*_FOLLOWER_IDS, _OFFLINE_ID, _PUBLISHER_ID)
@@ -1405,25 +1228,23 @@ async def test_a_member_item_reaches_every_node_and_queues_only_the_offline(
         return queued
 
     monkeypatch.setattr(type(queue), "enqueue_relay_many", _recording_enqueue_many)
-    frame = {
-        "space_id": _SPACE_ID,
-        "event_type": "space_item",
-        "epoch": 1,
-        "payload": "c2VhbGVk",
-    }
-    member_publish = a.app[gfs_member_publish_key]
+    channel_id = new_channel_id()
+    channels = a.app[gfs_channel_repo_key]
+    assert await channels.register(
+        channel_id, channel_suite="ed25519", channel_pk="aa" * 32, now=now
+    )
+    assert await channels.set_epoch(channel_id, 3, expected=None, now=now)
+    for iid in ids:
+        await channels.add_subscriber(channel_id, iid, pass_epoch=3, now=now)
+    frame = channel_frame(channel_id, 3, "c2VhbGVk")
     async with aiohttp.ClientSession() as http:
         sockets = await _connect_all(
             http,
             ((on_a, a), (on_b, b), (on_c, c), (_PUBLISHER_ID, c)),
             seeds,
         )
-        assert member_publish._submit(
-            mp_mod._FanOutJob(
-                space_id=_SPACE_ID, publisher_id=_PUBLISHER_ID, frame=frame
-            )
-        )
-        await member_publish.wait_idle()
+        a.app[gfs_channel_service_key]._submit(channel_id, _PUBLISHER_ID, frame)
+        await a.app[gfs_fan_out_key].wait_idle()
         got = {iid: await _relays_within(ws, 1.5) for iid, ws in sockets.items()}
         for ws in sockets.values():
             await ws.close()
@@ -1453,7 +1274,7 @@ async def test_a_channel_item_reaches_seats_on_every_node_once(three_shared_node
     async with aiohttp.ClientSession() as http:
         sockets = await _connect_all(http, ((on_a, a), (on_b, b), (on_c, c)), seeds)
         a.app[gfs_channel_service_key]._submit(channel_id, "", frame)
-        await a.app[gfs_member_publish_key].wait_idle()
+        await a.app[gfs_fan_out_key].wait_idle()
         got = {iid: await _relays_within(ws, 1.5) for iid, ws in sockets.items()}
         for ws in sockets.values():
             await ws.close()

@@ -242,21 +242,6 @@ async def test_a_pin_only_withdrawn_publish_keeps_the_counts(gfs_client):
 # ── relay seats are not the owner's to declare ──────────────────────────
 
 
-async def test_a_publish_racing_a_subscribe_keeps_the_seat_recount(gfs_client):
-    """``publish_space`` reads the row, then upserts: a subscribe that lands
-    between the two must not be undone by the stale ``subscriber_count``."""
-    app = gfs_client.server.app
-    repo = app[gfs_fed_repo_key]
-    seed, _ = await _register_owner(app)
-    await _publish(gfs_client, seed, {"allow_subscribers": True}, ts=_ts())
-    stale = await _stored(gfs_client)
-    await _register_owner(app, instance_id="reader.home")
-    await repo.add_subscriber(space_id=_SPACE, instance_id="reader.home")
-    # The publish's upsert, built from the row it read before the subscribe.
-    await repo.upsert_space(stale)
-    assert (await _stored(gfs_client)).subscriber_count == 1
-
-
 async def test_a_new_row_still_takes_the_given_subscriber_count(gfs_client):
     repo = gfs_client.server.app[gfs_fed_repo_key]
     await _register_owner(gfs_client.server.app)

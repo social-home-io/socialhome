@@ -14,7 +14,6 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from socialhome.authority_sig import sign_authority_event
 from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     UnsupportedCapsSigSuite,
@@ -23,7 +22,6 @@ from socialhome.capabilities_sig import (
 from socialhome.crypto import (
     derive_instance_id,
     ed25519_public_key,
-    generate_space_keypair,
 )
 from socialhome.csp import build_public_page_csp, build_spa_csp
 from socialhome.global_server import create_gfs_app, server
@@ -33,9 +31,7 @@ from socialhome.global_server.app_keys import (
     gfs_token_service_key,
 )
 from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClientInstance, GlobalSpace
-from socialhome.global_server.federation import GfsFederationService
-from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
+from socialhome.global_server.domain import ClientInstance
 from socialhome.moment_public_media import MAX_BLOB_BYTES
 
 #: A household whose id is the one its key derives (the GFS refuses others).
@@ -86,16 +82,23 @@ async def test_gfs_app_has_register_route(tmp_path):
     assert "/gfs/register" in _route_paths(app)
 
 
-async def test_gfs_app_has_publish_route(tmp_path):
-    """The GFS app exposes /gfs/publish."""
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/gfs/publish",
+        "/gfs/subscribe",
+        "/gfs/member-publish-anon",
+        "/gfs/spaces/{space_id}/epoch",
+        "/gfs/spaces/{space_id}/subscribers",
+        "/gfs/spaces/{space_id}/key_request",
+    ],
+)
+async def test_gfs_app_has_no_space_keyed_route(tmp_path, path):
+    """v_96 (P7) — the space-keyed relay is gone: a space's content reaches
+    a GFS only through its opaque channel."""
     app = create_gfs_app(db_path=tmp_path / "gfs.db")
-    assert "/gfs/publish" in _route_paths(app)
-
-
-async def test_gfs_app_has_subscribe_route(tmp_path):
-    """The GFS app exposes /gfs/subscribe."""
-    app = create_gfs_app(db_path=tmp_path / "gfs.db")
-    assert "/gfs/subscribe" in _route_paths(app)
+    assert path not in _route_paths(app)
+    assert "/gfs/channels/publish-anon" in _route_paths(app)
 
 
 async def test_gfs_app_has_spaces_route(tmp_path):
@@ -266,30 +269,20 @@ async def test_gfs_info_returns_public_key(gfs_client):
     assert body["server_name"]
 
 
-async def test_gfs_info_advertises_anonymous_publish(gfs_client):
-    """``/gfs/info`` is the capability channel for the GFS↔HFS leg (no
-    proto_version negotiation there): ``anonymous_publish`` tells a household
-    it may drop ``from_instance`` from its ``/gfs/publish`` bodies."""
-    resp = await gfs_client.get("/gfs/info")
-    assert resp.status == 200
-    assert (await resp.json())["anonymous_publish"] is True
-
-
 async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client):
     """The capability that matters is SIGNED with the GFS's own identity key —
     the one already published as ``public_key`` and pinned by every household
-    at pair time. A household trusts ``anonymous_publish`` only through this
-    block, so an on-path attacker can no longer strip the flag and force the
-    identified (household-signed, third-party-provable) legacy body."""
+    at pair time. A household trusts a capability only through this block,
+    so an on-path attacker cannot strip a flag and push it onto a path that
+    reveals more. Since v_96 (P7) the space-keyed relay's flags are gone."""
     resp = await gfs_client.get("/gfs/info")
     body = await resp.json()
+    assert "anonymous_publish" not in body
     assert body["capabilities"] == {
-        "anonymous_publish": True,
         # §D2b — this GFS carries ``POST /gfs/envelope``, so a household only
         # attempts a bootstrap redeem against a server that proved it can
-        # relay one. Inside the signed block for the same reason
-        # ``anonymous_publish`` is: an on-path stripper must not be able to
-        # push a household back onto a path that reveals more.
+        # relay one: an on-path stripper must not be able to push a
+        # household back onto a path that reveals more.
         "envelope_relay": True,
         # §24.8.5 — this GFS hosts owner-minted invite links, so a household
         # only offers to mint one against a server that proved it can serve
@@ -303,10 +296,6 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # of a withdrawn listing) and answers every publish with the key it
         # pins. A household only sends the field to a server that signs this.
         "withdrawn_repin": True,
-        # v_50 (the only member publish since v_90) — this GFS carries the
-        # anonymous, writer-group-key-signed ``POST /gfs/member-publish-anon``.
-        # The identified ``member_publish_trusted`` is gone.
-        "member_publish_strict": True,
         "private_channels": True,
         # Open sign-up is an operator opt-in, off by default.
         "open_signup": False,
@@ -315,8 +304,6 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "addressee_key": True,
         # Verifies and lists a global space's optional place pin.
         "place_pin": True,
-        # v_61 — ``POST /gfs/publish`` takes ``to``: one subscriber only.
-        "targeted_publish": True,
         # The public highlight viewer page opens the end-to-end sealed stream.
         "sealed_highlight_stream": True,
         "encrypted_moments": True,
@@ -327,19 +314,11 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "moment_media_30d": True,
         "moment_reactions": True,
         "moment_counts": True,
-        # #5b — a follower that missed a space key asks for it.
-        "space_key_pull": True,
         "join_contact": True,
         # v_96 — serves the contact of a space that takes follows only.
         "subscriber_seats": True,
         # The owner's signed publish may declare member / follower counts.
         "listing_counts": True,
-        # Step 12 — counts followers that cannot read member items.
-        "space_item_followers": True,
-        # Takes zlib-compressed items; 409 while a follower can't open one.
-        "payload_zlib1": True,
-        # …and with the preset dictionary (``zlib1+dict1``), the same gate.
-        "payload_zlib1_dict1": True,
         # The encrypted, short-lived space media cache and the limits a
         # household needs (largest blob, how long one is kept).
         "space_media": {
@@ -347,7 +326,7 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
             "ttl_s": 259_200,
             "space_max_bytes": 256 * 1024**2,
             "space_uploads_per_hour": 300,
-            "scopes": ["channel", "space"],
+            "scopes": ["channel"],
             # v_83 — a reader may ask for a blob it missed, waiting this long.
             "on_demand": {"wait_s": 25},
         },
@@ -383,7 +362,7 @@ async def test_gfs_info_capability_signature_covers_every_signed_field(gfs_clien
     assert not verify_capabilities(
         body["public_key"],
         body["gfs_instance_id"],
-        {"anonymous_publish": False},
+        {"subscriber_seats": False},
         body["capabilities_sig"],
         body["capabilities_sig_suite"],
     )
@@ -402,104 +381,6 @@ async def test_gfs_info_capability_signature_covers_every_signed_field(gfs_clien
             body["capabilities_sig"],
             "ed25519+mldsa65",
         )
-
-
-async def test_publish_endpoint_is_rate_limited_per_ip(gfs_client):
-    """``POST /gfs/publish`` sheds a per-IP flood with 429. The relay is
-    authorized by the space-authority signature alone, so the GFS cannot
-    identify the caller — the IP window is the only shedding handle."""
-    body = {"space_id": "sp-rl", "event_type": "space_post_public", "payload": {}}
-    allowed = 0
-    for _ in range(PUBLISH_MAX_PER_MINUTE + 1):
-        resp = await gfs_client.post("/gfs/publish", json=body)
-        if resp.status == 429:
-            assert resp.headers.get("Retry-After") == "60"
-            break
-        # Un-relayable (no such space) but past the limiter — 403, not 429.
-        assert resp.status == 403
-        allowed += 1
-    else:  # pragma: no cover - limiter never fired
-        pytest.fail("/gfs/publish was never rate-limited")
-    assert allowed == PUBLISH_MAX_PER_MINUTE
-
-
-async def test_publish_refuses_a_malformed_target(gfs_client):
-    """``to`` must be a short string (a subscriber's instance id)."""
-    for bad in (123, "", "x" * 1000):
-        body = {
-            "space_id": "sp-to",
-            "event_type": "space_subscriber_key_handoff",
-            "payload": {},
-            "to": bad,
-        }
-        resp = await gfs_client.post("/gfs/publish", json=body)
-        assert resp.status == 400
-
-
-async def test_publish_passes_a_target_through(gfs_client):
-    """A well-formed ``to`` reaches the authorizer (an unknown space is the
-    usual uniform 403)."""
-    body = {
-        "space_id": "sp-to",
-        "event_type": "space_author_profiles_bundle",
-        "payload": {},
-        "to": "sub-a",
-    }
-    resp = await gfs_client.post("/gfs/publish", json=body)
-    assert resp.status == 403
-
-
-async def test_publish_refuses_an_unknown_payload_suite(gfs_client):
-    """An unknown ``payload_suite`` is a 400 before anything else runs."""
-    body = {
-        "space_id": "sp-z",
-        "event_type": "space_post_public",
-        "payload": {"payload_suite": "zlib9"},
-    }
-    resp = await gfs_client.post("/gfs/publish", json=body)
-    assert resp.status == 400
-
-
-async def test_publish_answers_409_for_a_compressed_item_an_old_follower_cant_open(
-    gfs_client,
-):
-    """Authorized, but a seat lacks ``payload_zlib1``: 409
-    ``payload_suite_unsupported`` (the household re-sends JSON)."""
-    app = gfs_client.server.app
-    fed = app[gfs_fed_repo_key]
-    skp = generate_space_keypair()
-    for iid in ("owner.home", "old.home"):
-        await fed.upsert_instance(
-            ClientInstance(
-                instance_id=iid, display_name=iid, public_key="aa" * 32, status="active"
-            )
-        )
-    await fed.upsert_space(
-        GlobalSpace(
-            space_id="sp-z",
-            owning_instance="owner.home",
-            name="S",
-            status="active",
-            identity_public_key=skp.public_key.hex(),
-        )
-    )
-    await fed.add_subscriber(space_id="sp-z", instance_id="old.home")
-    payload: dict = {"encrypted_payload": "x", "payload_suite": "zlib1"}
-    payload.update(
-        sign_authority_event(
-            event_type="space_post_public",
-            space_id="sp-z",
-            payload=payload,
-            space_seed=skp.private_key,
-        )
-    )
-    body = {"space_id": "sp-z", "event_type": "space_post_public", "payload": payload}
-    resp = await gfs_client.post("/gfs/publish", json=body)
-    assert resp.status == 409
-    assert await resp.json() == {"error": "payload_suite_unsupported"}
-    await fed.set_seat_accepts("sp-z", "old.home", bits=3)
-    resp = await gfs_client.post("/gfs/publish", json=body)
-    assert resp.status == 200
 
 
 async def test_admin_static_index_served(gfs_client):
@@ -616,423 +497,7 @@ async def _register_and_publish(
     return seed
 
 
-async def test_subscribe_returns_subscribed(gfs_client):
-    """POST /gfs/subscribe with a valid self-signed body returns 'subscribed'."""
-    seed = await _register_and_publish(
-        gfs_client, instance_id="inst-sub", space_id="space-1", client_ip="127.0.0.20"
-    )
-    ts = _now_iso()
-    sig = _sign(
-        seed,
-        {
-            "action": "subscribe",
-            "instance_id": "inst-sub",
-            "space_id": "space-1",
-            "ts": ts,
-        },
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-sub",
-            "space_id": "space-1",
-            "ts": ts,
-            "signature": sig,
-        },
-    )
-    assert resp.status == 200
-    body = await resp.json()
-    assert body["status"] == "subscribed"
-
-
-def _signed_subscribe_body(seed, instance_id: str, space_id: str) -> dict:
-    ts = _now_iso()
-    sig = _sign(
-        seed,
-        {
-            "action": "subscribe",
-            "instance_id": instance_id,
-            "space_id": space_id,
-            "ts": ts,
-        },
-    )
-    return {
-        "instance_id": instance_id,
-        "space_id": space_id,
-        "ts": ts,
-        "signature": sig,
-    }
-
-
-async def test_subscribe_forwards_accepts_outside_the_signed_bytes(
-    gfs_client, monkeypatch
-):
-    """``accepts`` (v_61) rides next to the signed bytes: the unchanged
-    signature still verifies, and the labels reach the service."""
-    seen: list[tuple[str, ...]] = []
-    original = GfsFederationService.subscribe
-
-    async def _spy(self, *args, accepts=(), **kw):
-        seen.append(accepts)
-        return await original(self, *args, accepts=accepts, **kw)
-
-    monkeypatch.setattr(GfsFederationService, "subscribe", _spy)
-    seed = await _register_and_publish(
-        gfs_client, instance_id="inst-acc", space_id="space-acc", client_ip="127.0.0.41"
-    )
-    body = _signed_subscribe_body(seed, "inst-acc", "space-acc")
-    resp = await gfs_client.post(
-        "/gfs/subscribe", json={**body, "accepts": ["author_profiles_bundle"]}
-    )
-    assert resp.status == 200
-    assert seen == [("author_profiles_bundle",)]
-
-
-@pytest.mark.parametrize(
-    ("accepts", "forwarded"),
-    [
-        ("author_profiles_bundle", ()),
-        ([1], ()),
-        (["Bad Label", "author_profiles_bundle"], ("author_profiles_bundle",)),
-        (["x"] * 17, ("x",)),
-    ],
-)
-async def test_subscribe_malformed_accepts_still_subscribes(
-    gfs_client, monkeypatch, accepts, forwarded
-):
-    """``accepts`` is an unsigned hint: bad labels are dropped and the
-    subscribe itself still succeeds (no 400 for a future label format)."""
-    seen: list[tuple[str, ...]] = []
-    original = GfsFederationService.subscribe
-
-    async def _spy(self, *args, accepts=(), **kw):
-        seen.append(accepts)
-        return await original(self, *args, accepts=accepts, **kw)
-
-    monkeypatch.setattr(GfsFederationService, "subscribe", _spy)
-    seed = await _register_and_publish(
-        gfs_client, instance_id="inst-acx", space_id="space-acx", client_ip="127.0.0.42"
-    )
-    body = _signed_subscribe_body(seed, "inst-acx", "space-acx")
-    resp = await gfs_client.post("/gfs/subscribe", json={**body, "accepts": accepts})
-    assert resp.status == 200
-    assert seen == [forwarded]
-
-
-async def test_subscribe_space_without_subscribers_403(gfs_client):
-    """A perfectly-signed subscribe for a space whose owner has not opted
-    into subscribers is refused: the space is listed for discovery but is NOT
-    publicly readable, so there is no readership to seat a subscriber in.
-    Note the join mode here is ``open`` — anyone may JOIN this space; that is
-    a different question from whether a stranger may READ it."""
-    seed = await _register_and_publish(
-        gfs_client,
-        instance_id="inst-inv",
-        space_id="space-inv",
-        client_ip="127.0.0.40",
-        join_mode="open",
-        allow_subscribers=False,
-    )
-    ts = _now_iso()
-    sig = _sign(
-        seed,
-        {
-            "action": "subscribe",
-            "instance_id": "inst-inv",
-            "space_id": "space-inv",
-            "ts": ts,
-        },
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-inv",
-            "space_id": "space-inv",
-            "ts": ts,
-            "signature": sig,
-        },
-    )
-    assert resp.status == 403
-    assert "not publicly readable" in (await resp.json())["error"]
-
-
-async def test_subscribe_unsigned_rejected(gfs_client):
-    """POST /gfs/subscribe without a signature is rejected with 403."""
-    await _register_and_publish(
-        gfs_client,
-        instance_id="inst-nosig",
-        space_id="space-ns",
-        client_ip="127.0.0.22",
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-nosig",
-            "space_id": "space-ns",
-            "ts": _now_iso(),
-            "signature": "",
-        },
-    )
-    assert resp.status == 403
-
-
-async def test_subscribe_missing_signature_field_400(gfs_client):
-    """A subscribe body with no ``signature`` field at all is a 400."""
-    await _register_and_publish(
-        gfs_client, instance_id="inst-mf", space_id="space-mf", client_ip="127.0.0.23"
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={"instance_id": "inst-mf", "space_id": "space-mf"},
-    )
-    assert resp.status == 400
-
-
-async def test_subscribe_unsubscribe_roundtrip(gfs_client):
-    """POST /gfs/subscribe then unsubscribe returns correct statuses."""
-    seed = await _register_and_publish(
-        gfs_client,
-        instance_id="inst-unsub",
-        space_id="space-X",
-        client_ip="127.0.0.21",
-    )
-    ts = _now_iso()
-    sig = _sign(
-        seed,
-        {
-            "action": "subscribe",
-            "instance_id": "inst-unsub",
-            "space_id": "space-X",
-            "ts": ts,
-        },
-    )
-    await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-unsub",
-            "space_id": "space-X",
-            "ts": ts,
-            "signature": sig,
-        },
-    )
-    ts2 = _now_iso()
-    sig2 = _sign(
-        seed,
-        {
-            "action": "unsubscribe",
-            "instance_id": "inst-unsub",
-            "space_id": "space-X",
-            "ts": ts2,
-        },
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-unsub",
-            "space_id": "space-X",
-            "action": "unsubscribe",
-            "ts": ts2,
-            "signature": sig2,
-        },
-    )
-    assert resp.status == 200
-    body = await resp.json()
-    assert body["status"] == "unsubscribed"
-
-
-async def test_unsubscribe_missing_signature_field_400(gfs_client):
-    """An unsubscribe body with no ``ts``/``signature`` at all is a 400."""
-    await _register_and_publish(
-        gfs_client,
-        instance_id="inst-unsub-mf",
-        space_id="space-umf",
-        client_ip="127.0.0.24",
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-unsub-mf",
-            "space_id": "space-umf",
-            "action": "unsubscribe",
-        },
-    )
-    assert resp.status == 400
-
-
-async def test_unsubscribe_unsigned_is_403_and_row_survives(gfs_client):
-    """SECURITY: an empty signature cannot evict a subscriber over HTTP."""
-    seed = await _register_and_publish(
-        gfs_client,
-        instance_id="inst-unsub-ns",
-        space_id="space-uns",
-        client_ip="127.0.0.25",
-    )
-    ts = _now_iso()
-    sig = _sign(
-        seed,
-        {
-            "action": "subscribe",
-            "instance_id": "inst-unsub-ns",
-            "space_id": "space-uns",
-            "ts": ts,
-        },
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-unsub-ns",
-            "space_id": "space-uns",
-            "ts": ts,
-            "signature": sig,
-        },
-    )
-    assert resp.status == 200
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-unsub-ns",
-            "space_id": "space-uns",
-            "action": "unsubscribe",
-            "ts": _now_iso(),
-            "signature": "",
-        },
-    )
-    assert resp.status == 403
-    repo = gfs_client.server.app[gfs_fed_repo_key]
-    subs = await repo.list_subscribers("space-uns")
-    assert any(s.instance_id == "inst-unsub-ns" for s in subs)
-
-
 # ── Action domain separation (a subscribe sig can't act as unsubscribe) ──
-
-
-async def _subscriber_rows(gfs_client, space_id):
-    repo = gfs_client.server.app[gfs_fed_repo_key]
-    return await repo.list_subscribers(space_id)
-
-
-async def test_subscribe_signature_replayed_as_unsubscribe_is_403(gfs_client):
-    """SECURITY: the signed payload binds ``action``, so a captured
-    subscribe body re-POSTed with ``action=unsubscribe`` is rejected and
-    the subscriber row survives."""
-    seed = await _register_and_publish(
-        gfs_client,
-        instance_id="inst-ds1",
-        space_id="space-ds1",
-        client_ip="127.0.0.30",
-    )
-    ts = _now_iso()
-    sig = _sign(
-        seed,
-        {
-            "action": "subscribe",
-            "instance_id": "inst-ds1",
-            "space_id": "space-ds1",
-            "ts": ts,
-        },
-    )
-    body = {
-        "instance_id": "inst-ds1",
-        "space_id": "space-ds1",
-        "ts": ts,
-        "signature": sig,
-    }
-    resp = await gfs_client.post("/gfs/subscribe", json=body)
-    assert resp.status == 200
-
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={**body, "action": "unsubscribe"},
-    )
-    assert resp.status == 403
-    subs = await _subscriber_rows(gfs_client, "space-ds1")
-    assert any(s.instance_id == "inst-ds1" for s in subs)
-
-
-async def test_unsubscribe_signature_replayed_as_subscribe_is_403(gfs_client):
-    """SECURITY (mirror): an unsubscribe signature cannot re-enrol a
-    household that deliberately left."""
-    seed = await _register_and_publish(
-        gfs_client,
-        instance_id="inst-ds2",
-        space_id="space-ds2",
-        client_ip="127.0.0.31",
-    )
-    ts = _now_iso()
-    sub_sig = _sign(
-        seed,
-        {
-            "action": "subscribe",
-            "instance_id": "inst-ds2",
-            "space_id": "space-ds2",
-            "ts": ts,
-        },
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-ds2",
-            "space_id": "space-ds2",
-            "ts": ts,
-            "signature": sub_sig,
-        },
-    )
-    assert resp.status == 200
-
-    ts2 = _now_iso()
-    unsub_sig = _sign(
-        seed,
-        {
-            "action": "unsubscribe",
-            "instance_id": "inst-ds2",
-            "space_id": "space-ds2",
-            "ts": ts2,
-        },
-    )
-    unsub_body = {
-        "instance_id": "inst-ds2",
-        "space_id": "space-ds2",
-        "ts": ts2,
-        "signature": unsub_sig,
-    }
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={**unsub_body, "action": "unsubscribe"},
-    )
-    assert resp.status == 200
-    subs = await _subscriber_rows(gfs_client, "space-ds2")
-    assert not any(s.instance_id == "inst-ds2" for s in subs)
-
-    # Replaying the unsubscribe signature as a subscribe must not re-enrol.
-    resp = await gfs_client.post("/gfs/subscribe", json=unsub_body)
-    assert resp.status == 403
-    subs = await _subscriber_rows(gfs_client, "space-ds2")
-    assert not any(s.instance_id == "inst-ds2" for s in subs)
-
-
-async def test_subscribe_with_non_hex_public_key_is_403(gfs_client):
-    """A malformed stored pubkey fails closed as 403, never a 500."""
-    repo = gfs_client.server.app[gfs_fed_repo_key]
-    await repo.upsert_instance(
-        ClientInstance(
-            instance_id="inst-badkey",
-            display_name="",
-            public_key="not-hex!!",
-            status="active",
-            auto_accept=True,
-        )
-    )
-    ts = _now_iso()
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-badkey",
-            "space_id": "space-badkey",
-            "ts": ts,
-            "signature": "AAAA",
-        },
-    )
-    assert resp.status == 403
 
 
 async def test_publish_space_with_non_hex_public_key_is_403(gfs_client):
@@ -1061,39 +526,6 @@ async def test_publish_space_with_non_hex_public_key_is_403(gfs_client):
         },
     )
     assert resp.status == 403
-
-
-async def test_unrecognised_action_is_400(gfs_client):
-    """A typo'd action must not silently fall through to subscribe."""
-    seed = await _register_and_publish(
-        gfs_client,
-        instance_id="inst-ds3",
-        space_id="space-ds3",
-        client_ip="127.0.0.32",
-    )
-    ts = _now_iso()
-    sig = _sign(
-        seed,
-        {
-            "action": "subscribe",
-            "instance_id": "inst-ds3",
-            "space_id": "space-ds3",
-            "ts": ts,
-        },
-    )
-    resp = await gfs_client.post(
-        "/gfs/subscribe",
-        json={
-            "instance_id": "inst-ds3",
-            "space_id": "space-ds3",
-            "action": "unsubscibe",
-            "ts": ts,
-            "signature": sig,
-        },
-    )
-    assert resp.status == 400
-    subs = await _subscriber_rows(gfs_client, "space-ds3")
-    assert not any(s.instance_id == "inst-ds3" for s in subs)
 
 
 # ── main() entry point: bind address resolution (issue #563) ────────────
