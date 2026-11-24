@@ -2097,19 +2097,6 @@ async def test_gfs_channel_healed_at_round_trip(env):
     assert await env.repo.get_gfs_channel_healed_at("sp-missing") is None
 
 
-async def test_rebind_mirror_provenance_is_a_compare_and_set(env):
-    await env.repo.save(_space("sp-m", space_type=SpaceType.GLOBAL))
-    await env.repo.set_mirror_provenance("sp-m", gfs_id="conn-old", rotation_seq=4)
-    assert not await env.repo.rebind_mirror_provenance(
-        "sp-m", from_gfs_id="conn-other", to_gfs_id="conn-new"
-    )
-    assert await env.repo.rebind_mirror_provenance(
-        "sp-m", from_gfs_id="conn-old", to_gfs_id="conn-new"
-    )
-    # The seq is kept: the heal still needs a strictly higher one.
-    assert await env.repo.get_mirror_provenance("sp-m") == ("conn-new", 4)
-
-
 # ── GFS server list (migration 0093) ──────────────────────────────────────
 
 

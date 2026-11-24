@@ -2315,12 +2315,13 @@ async def test_a_definitive_accept_failure_rolls_back_with_a_clear_message(
     ] == "pending"
 
 
-async def test_startup_sweep_spares_gfs_mirror_stubs(stack):
-    """Round 8 L2: a public / global stub the household follows through a
-    GFS (mirror provenance or a recorded GFS seat) is never swept, even with
-    a private invitation for its id — its teardown is the mirror's."""
+async def test_startup_sweep_spares_followers_and_gfs_mirror_rows(stack):
+    """Round 8 L2: a space a local user follows (a member with the read-only
+    role) is never swept, even with a private invitation for its id; nor is
+    a row left from a GFS follow-only mirror (``mirror_gfs_id``) — migration
+    0155 owns those."""
     bob = await _user(stack, "bobmirror")
-    for sid in ("sp-mirror", "sp-seat"):
+    for sid in ("sp-mirror", "sp-follow"):
         await stack.space_repo.save(
             Space(
                 id=sid,
@@ -2342,12 +2343,17 @@ async def test_startup_sweep_spares_gfs_mirror_stubs(stack):
             invite_token=f"t-{sid}",
         )
     await stack.db.enqueue("UPDATE spaces SET mirror_gfs_id='g1' WHERE id='sp-mirror'")
-    await stack.db.enqueue(
-        "INSERT INTO gfs_space_seats(space_id, gfs_instance_id) VALUES('sp-seat','g1')"
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id="sp-follow",
+            user_id=bob.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
     )
     assert await stack.svc.sweep_unjoined_invitation_stubs() == 0
     assert await stack.space_repo.get("sp-mirror") is not None
-    assert await stack.space_repo.get("sp-seat") is not None
+    assert await stack.space_repo.get("sp-follow") is not None
 
 
 # ── v_77: a remote moderator forwards a games-list edit, and only that ──

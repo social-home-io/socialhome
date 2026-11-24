@@ -605,22 +605,16 @@ async def _lose_key(env) -> tuple[int, bytes]:
     return epoch, raw
 
 
-async def test_a_frame_under_a_missing_key_asks_for_it_and_lands_once_it_comes(env):
-    """#5b: a follower that misses the key no longer drops the frame and
-    waits for its next reconnect's key repair: it asks for the key (once)
-    and the held frame lands when the key does."""
+async def test_a_frame_under_a_missing_key_is_held_and_lands_once_it_comes(env):
+    """#5b: a frame that beats its key is held (nothing is asked for — the
+    key arrives by federation) and lands when the key does."""
     envelope = await _make_envelope(env)
     epoch, raw = await _lose_key(env)
-    asked: list[str] = []
-
-    async def _pull(space_id: str) -> bool:
-        asked.append(space_id)
-        return True
-
-    env["inbound"].attach_key_pull(_pull, PendingDecryptsCache(bus=env["bus"]))
+    pending = PendingDecryptsCache(bus=env["bus"])
+    env["inbound"].attach_key_wait(pending)
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert asked == ["sp-1"]
     assert await env["post_repo"].get("post-1") is None
+    assert len(pending) == 1
 
     await env["crypto"].import_key("sp-1", epoch, raw)
     await env["bus"].publish(SpaceContentKeyImported(space_id="sp-1", epoch=epoch))
@@ -628,10 +622,10 @@ async def test_a_frame_under_a_missing_key_asks_for_it_and_lands_once_it_comes(e
     assert len(env["events"]) == 1
 
 
-async def test_a_missing_key_older_than_ours_is_neither_held_nor_asked(env):
-    """The owner seals its CURRENT key, so an older epoch we lack would never
-    come; and the frame epoch is plaintext, so holding such frames would let
-    a relay fill the hold."""
+async def test_a_missing_key_older_than_ours_is_not_held(env):
+    """A rekey delivers the CURRENT key, so an older epoch we lack would
+    never come; and the frame epoch is plaintext, so holding such frames
+    would let a relay fill the hold."""
     envelope = await _make_envelope(env)
     old_epoch = envelope["epoch"]
     await env["crypto"].rotate_epoch("sp-1")
@@ -639,38 +633,17 @@ async def test_a_missing_key_older_than_ours_is_neither_held_nor_asked(env):
         "DELETE FROM space_keys WHERE space_id='sp-1' AND epoch=?", (old_epoch,)
     )
     await env["db"].fetchone("SELECT 1")
-    asked: list[str] = []
-
-    async def _pull(space_id: str) -> bool:
-        asked.append(space_id)
-        return True
-
     pending = PendingDecryptsCache(bus=env["bus"])
-    env["inbound"].attach_key_pull(_pull, pending)
+    env["inbound"].attach_key_wait(pending)
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert asked == []
     assert len(pending) == 0
 
 
-async def test_without_a_key_puller_a_missing_key_still_drops(env):
+async def test_without_a_key_wait_a_missing_key_still_drops(env):
     envelope = await _make_envelope(env)
     await _lose_key(env)
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
-
-
-async def test_a_failing_key_pull_still_holds_the_frame(env):
-    envelope = await _make_envelope(env)
-    epoch, raw = await _lose_key(env)
-
-    async def _boom(_space_id: str) -> bool:
-        raise RuntimeError("gfs down")
-
-    env["inbound"].attach_key_pull(_boom, PendingDecryptsCache(bus=env["bus"]))
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    await env["crypto"].import_key("sp-1", epoch, raw)
-    await env["bus"].publish(SpaceContentKeyImported(space_id="sp-1", epoch=epoch))
-    assert await env["post_repo"].get("post-1") is not None
 
 
 async def test_unknown_local_space_dropped(env):
@@ -889,46 +862,16 @@ async def test_a_relayed_post_into_an_archived_space_is_dropped(env, reason):
     assert env["events"] == []
 
 
-# ── v_44: lazy pin heal on an authority failure ──────────────────────────
+# ── v_44: a relayed post signed by a retired authority key ─────────────
 
 
-class _Refresher:
-    """Stands in for the GFS mirror's pin refresh: re-pins to ``new_pk``."""
-
-    def __init__(self, space_repo, new_pk_hex: str | None):
-        self._spaces = space_repo
-        self._new = new_pk_hex
-        self.calls: list[str] = []
-
-    async def refresh_authority_pin(self, space_id: str) -> bool:
-        self.calls.append(space_id)
-        if self._new is None:
-            return False
-        await self._spaces.adopt_authority_key(space_id, self._new, 1)
-        return True
-
-
-async def test_new_key_post_heals_the_pin_and_is_accepted(env):
-    """The owner rotated; this subscriber still pins K1. A K2-signed post
-    fails, the refresh re-pins from the GFS cert, the retry accepts it."""
-    k2 = generate_space_keypair()
-    refresher = _Refresher(env["space_repo"], k2.public_key.hex())
-    env["inbound"].attach_pin_refresher(refresher)
-    env_frame = _frame(await _make_envelope(env, space_seed=k2.private_key))
-    await env["inbound"].handle(env_frame)
-    assert refresher.calls == ["sp-1"]
-    assert await env["post_repo"].get("post-1") is not None
-
-
-async def test_old_key_post_is_refused_after_the_heal(env):
-    """Spec §8.5: once healed to K2, a K1-signed relayed post is refused."""
+async def test_old_key_post_is_refused_after_a_rotation(env):
+    """Spec §8.5: once the pin moved to K2, a K1-signed relayed post is
+    refused."""
     k1_seed = env["space_kp"].private_key
     k2 = generate_space_keypair()
     await env["space_repo"].adopt_authority_key("sp-1", k2.public_key.hex(), 1)
-    refresher = _Refresher(env["space_repo"], None)
-    env["inbound"].attach_pin_refresher(refresher)
     await env["inbound"].handle(_frame(await _make_envelope(env, space_seed=k1_seed)))
-    assert refresher.calls == ["sp-1"]
     assert await env["post_repo"].get("post-1") is None
 
 
@@ -2717,4 +2660,25 @@ async def test_a_member_post_the_host_put_on_the_channel_lands_once(item_env):
         "sp-1", epoch=frame["epoch"], payload=frame["payload"]
     )
     await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    assert len(item_env["events"]) == 1
+
+
+async def test_a_channel_item_that_beats_its_rekey_lands_once_the_key_does(item_env):
+    """A channel item under an epoch whose key has not reached this
+    household yet is held and applied when the key lands by federation —
+    never dropped."""
+    inner = _signed_inner(item_env)
+    inner["writer_cert"] = await _cert(item_env)
+    epoch, ct = await _channel_authority(item_env, inner)
+    _epoch, raw = await _lose_key(item_env)
+    pending = PendingDecryptsCache(bus=item_env["bus"])
+    item_env["inbound"].attach_key_wait(pending)
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    assert await item_env["post_repo"].get("post-1") is None
+    assert len(pending) == 1
+
+    await item_env["crypto"].import_key("sp-1", epoch, raw)
+    await item_env["bus"].publish(SpaceContentKeyImported(space_id="sp-1", epoch=epoch))
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "member-published content"
     assert len(item_env["events"]) == 1

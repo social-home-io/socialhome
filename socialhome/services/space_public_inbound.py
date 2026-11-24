@@ -162,7 +162,6 @@ if TYPE_CHECKING:
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .pending_decrypts_cache import PendingDecryptsCache
-    from .space_authority_pin import AuthorityPinRefresher
     from .space_crypto_service import SpaceContentEncryption
     from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
     from .space_mentions import SpaceMentionResolver
@@ -170,8 +169,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 #: The most relayed frames held for a missing space key at once (#5b),
-#: oldest dropped first. A follower needs a handful: the frames of one
-#: rotation it was offline for.
+#: oldest dropped first. A reader needs a handful: the items that beat one
+#: rekey to this household.
 RELAY_KEY_WAIT_MAX_FRAMES: int = 64
 
 
@@ -184,12 +183,10 @@ class SpacePublicInbound:
         "_crypto",
         "_gfs_media",
         "_items",
-        "_key_pull",
         "_mentions",
         "_own_instance_id",
         "_pending_decrypts",
         "_pending_parents",
-        "_pin_refresher",
         "_posts",
         "_spaces",
         "_writer_certs",
@@ -212,7 +209,6 @@ class SpacePublicInbound:
         #: Resolves @-mentions in the decrypted relayed post against this
         #: household's view of the space's members. ``None`` → no mentions.
         self._mentions = mention_resolver
-        self._pin_refresher: AuthorityPinRefresher | None = None
         #: v_49 — the writer-cert service. Host-signed frames (all of them
         #: today) skip its epoch-freshness gate; member-authorized items
         #: (PR 2) will run it.
@@ -230,9 +226,8 @@ class SpacePublicInbound:
         #: Holds an item whose post (or parent comment) has not landed here
         #: yet and re-runs its frame when it does. ``None`` drops instead.
         self._pending_parents: PendingParentBuffer | None = None
-        #: #5b — asks a server that seats us for a space key we miss, and
-        #: holds the frame until that key lands. ``None``: dropped.
-        self._key_pull: Callable[[str], Awaitable[bool]] | None = None
+        #: #5b — holds a frame under an epoch we hold no key for yet until
+        #: that key lands by federation. ``None``: dropped.
         self._pending_decrypts: PendingDecryptsCache | None = None
         #: v_80 — keeps a relayed post's ``media_refs`` (its pictures in the
         #: GFS media cache, sealed under the space key) and fetches them.
@@ -242,43 +237,30 @@ class SpacePublicInbound:
         """Wire the v_80 GFS media fetcher."""
         self._gfs_media = fetcher
 
-    def attach_key_pull(
-        self,
-        pull: Callable[[str], Awaitable[bool]],
-        pending: PendingDecryptsCache,
-    ) -> None:
-        """Wire the #5b key pull: a frame under an epoch we hold no key for
-        is held in *pending* (replayed on :class:`SpaceContentKeyImported`)
-        and *pull* asks for the key (``GfsSpaceMirrorService
-        .request_space_key`` — rate-limited, only where we hold a seat)."""
-        self._key_pull = pull
+    def attach_key_wait(self, pending: PendingDecryptsCache) -> None:
+        """Wire the #5b key wait: a frame under an epoch we hold no key for
+        yet is held in *pending* and replayed on
+        :class:`SpaceContentKeyImported` — the rekey reaches every member
+        household by federation, a channel item can simply beat it here."""
         self._pending_decrypts = pending
 
     async def _await_key(
         self, space_id: str, epoch: int, replay: Callable[[], Awaitable[None]]
     ) -> None:
-        """Hold *replay* until *space_id*'s *epoch* key lands, and ask for
-        it. Fail-soft: a failed request still leaves the frame held (a key
-        that arrives another way replays it).
+        """Hold *replay* until *space_id*'s *epoch* key lands (the key
+        arrives by federation; nothing is asked for here).
 
         Only for an epoch AFTER the newest key we hold (or with none held):
-        the owner seals its current key, so an older missing epoch would
+        a rekey delivers the new current key, so an older missing epoch would
         never come — and the frame epoch is plaintext, so a relay could
         otherwise fill the hold with frames no key will ever open. The hold
         is this path's own bounded cache, never the sync one."""
-        if self._pending_decrypts is None or self._key_pull is None:
+        if self._pending_decrypts is None:
             return
         held = await self._crypto.get_current_epoch(space_id)
         if held is not None and epoch <= held:
             return
         self._pending_decrypts.stash(space_id, epoch, replay)
-        try:
-            await self._key_pull(space_id)
-        except Exception:
-            log.exception(
-                "space_public.inbound: asking for the key of space %s failed",
-                space_id,
-            )
 
     def attach_pending_parents(self, buffer: PendingParentBuffer) -> None:
         """Wire the parent-wait buffer (shared with the federated path)."""
@@ -295,11 +277,6 @@ class SpacePublicInbound:
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert service."""
         self._writer_certs = writer_certs
-
-    def attach_pin_refresher(self, refresher: AuthorityPinRefresher) -> None:
-        """Wire the lazy pin heal (v_44): on an authority failure the
-        subscriber re-fetches the GFS listing's owner cert once."""
-        self._pin_refresher = refresher
 
     def attach_identity(self, *, own_instance_id: str) -> None:
         """Wire our own instance id — the self-echo guard's only input."""
@@ -368,24 +345,11 @@ class SpacePublicInbound:
             return
         pinned_pk_hex = space.identity_public_key
         if not self._verify_authority(space_id, envelope, pinned_pk_hex):
-            # v_44 — the owner may have rotated the space authority key
-            # since we pinned it: heal from the GFS listing's owner cert
-            # (rate-limited) and verify ONCE more against the new pin.
-            healed = None
-            if self._pin_refresher is not None and (
-                await self._pin_refresher.refresh_authority_pin(space_id)
-            ):
-                healed = await self._spaces.get(space_id)
-            if healed is None or not self._verify_authority(
-                space_id, envelope, healed.identity_public_key
-            ):
-                log.warning(
-                    "space_public.inbound: authority signature failed for space %s",
-                    space_id,
-                )
-                return
-            space = healed
-            pinned_pk_hex = healed.identity_public_key
+            log.warning(
+                "space_public.inbound: authority signature failed for space %s",
+                space_id,
+            )
+            return
         epoch = envelope.get("epoch")
         ciphertext = envelope.get("encrypted_payload")
         if not isinstance(epoch, int) or not isinstance(ciphertext, str):

@@ -1804,54 +1804,6 @@ async def test_publish_body_raises_when_space_missing(env):
     assert session.calls == []
 
 
-async def test_subscribe_to_gfs_space_signs_body(env):
-    """``subscribe_to_gfs_space`` signs the canonical
-    ``{action, instance_id, space_id, ts}`` body with the household
-    identity key and POSTs it to the GFS ``/gfs/subscribe`` endpoint.
-    The ``action`` rides inside the signed bytes (domain separation), so
-    the GFS can't have this signature replayed as an unsubscribe."""
-    _, repo = env
-    await repo.save(_make_conn("gfs-sub", inbox_url="https://gfs.example"))
-    kp = generate_identity_keypair()
-    session = _StubSession(method_responses={"POST": (200, {"status": "subscribed"})})
-    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-    svc.attach_publish_context(
-        space_repo=None,
-        own_instance_id="alpha.home",
-        own_signing_key=kp.private_key,
-    )
-    await svc.subscribe_to_gfs_space("sp-join", "gfs-sub")
-    assert session.calls == [
-        ("POST", "https://gfs.example/gfs/subscribe"),
-    ]
-    body = session._last_body  # type: ignore[attr-defined]
-    assert body["action"] == "subscribe"
-    assert body["instance_id"] == "alpha.home"
-    assert body["space_id"] == "sp-join"
-    assert body["ts"]
-    sig = body["signature"]
-    canonical = json.dumps(
-        {
-            "action": "subscribe",
-            "instance_id": "alpha.home",
-            "space_id": "sp-join",
-            "ts": body["ts"],
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig))
-    # v_61: what this household opens rides NEXT to the signed bytes (the
-    # canonical above is unchanged, so an older GFS still verifies it).
-    assert body["accepts"] == [
-        "author_profiles_bundle",
-        "space_key_pull",
-        "space_item",
-        "payload_zlib1",
-        "payload_zlib1_dict1",
-    ]
-
-
 async def test_unpublish_space_signs_canonical_body(env):
     """SECURITY: ``unpublish`` is owner-authenticated on the GFS, so the HFS
     must ship a signed ``{owning_instance, ts, signature}`` body — the
@@ -1889,7 +1841,7 @@ async def test_unpublish_space_signs_canonical_body(env):
 
 async def test_unpublish_space_raises_without_signing_key(env):
     """No identity wired → fail closed rather than send a body the GFS
-    rejects (mirrors ``subscribe_to_gfs_space``); the local row survives."""
+    rejects; the local row survives."""
     _, repo = env
     await repo.save(_make_conn("gfs-un2", inbox_url="https://gfs.example"))
     await repo.publish_space("sp-un2", "gfs-un2")
@@ -1899,17 +1851,6 @@ async def test_unpublish_space_raises_without_signing_key(env):
         await svc.unpublish_space("sp-un2", "gfs-un2")
     assert session.calls == []
     assert len(await repo.list_publications_for_space("sp-un2")) == 1
-
-
-async def test_subscribe_to_gfs_space_raises_without_signing_key(env):
-    """No identity wired → fail closed; the GFS rejects unsigned subscribes."""
-    _, repo = env
-    await repo.save(_make_conn("gfs-sub2", inbox_url="https://gfs.example"))
-    session = _StubSession(method_responses={"POST": (200, {"status": "subscribed"})})
-    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-    with pytest.raises(GfsConnectionError):
-        await svc.subscribe_to_gfs_space("sp-join", "gfs-sub2")
-    assert session.calls == []
 
 
 # ─── publish_space_event (Phase 5a2 — relay a space event to the GFS) ──────
@@ -2039,78 +1980,6 @@ async def test_publish_space_event_skips_unpublished_space(env):
     )
     assert delivered == 0
     assert session.posts == []
-
-
-# ─── unsubscribe_from_gfs_space ──────────────────────────────────────────
-
-
-async def test_unsubscribe_from_gfs_space_signs_body(env):
-    """``unsubscribe_from_gfs_space`` signs the canonical
-    ``{action, instance_id, space_id, ts}`` body with the household identity
-    key and POSTs it to ``/gfs/subscribe``. The GFS requires the signature
-    (an unsigned unsubscribe is a 403) and the ``action`` rides inside the
-    signed bytes, so the signature can't be replayed as a subscribe."""
-    _, repo = env
-    await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
-    session = _StubSession(method_responses={"POST": (200, {"status": "removed"})})
-    svc, pubkey = _signing_svc(repo, session)
-    status = await svc.unsubscribe_from_gfs_space("sp-leave", "gfs-unsub")
-    assert status == "removed"
-    assert session.calls == [("POST", "https://gfs.example/gfs/subscribe")]
-    body = session._last_body  # type: ignore[attr-defined]
-    assert body["action"] == "unsubscribe"
-    assert body["instance_id"] == "alpha.home"
-    assert body["space_id"] == "sp-leave"
-    assert body["ts"]
-    canonical = json.dumps(
-        {
-            "action": "unsubscribe",
-            "instance_id": "alpha.home",
-            "space_id": "sp-leave",
-            "ts": body["ts"],
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    assert verify_ed25519(pubkey, canonical, b64url_decode(body["signature"]))
-
-
-async def test_unsubscribe_from_gfs_space_404_is_success(env):
-    """Idempotent: already-absent on the GFS is not an error."""
-    _, repo = env
-    await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
-    session = _StubSession(method_responses={"POST": (404, {})})
-    svc, _pk = _signing_svc(repo, session)
-    assert await svc.unsubscribe_from_gfs_space("sp-gone", "gfs-unsub")
-
-
-async def test_unsubscribe_from_gfs_space_raises_on_server_error(env):
-    _, repo = env
-    await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
-    session = _StubSession(method_responses={"POST": (500, {})})
-    svc, _pk = _signing_svc(repo, session)
-    with pytest.raises(GfsConnectionError):
-        await svc.unsubscribe_from_gfs_space("sp-x", "gfs-unsub")
-
-
-async def test_unsubscribe_from_gfs_space_unknown_gfs_raises(env):
-    _, repo = env
-    session = _StubSession(status=200)
-    svc, _pk = _signing_svc(repo, session)
-    with pytest.raises(GfsConnectionError):
-        await svc.unsubscribe_from_gfs_space("sp-x", "nope")
-    assert session.calls == []
-
-
-async def test_unsubscribe_from_gfs_space_without_signing_key_raises(env):
-    """Fail-closed: no signing identity → never send an unsigned body."""
-    _, repo = env
-    await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
-    session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-    with pytest.raises(GfsConnectionError):
-        await svc.unsubscribe_from_gfs_space("sp-x", "gfs-unsub")
-    assert session.calls == []
 
 
 # ─── remote-authored error text (FIX 6) ──────────────────────────────────

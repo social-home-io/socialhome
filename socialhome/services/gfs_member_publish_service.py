@@ -14,9 +14,6 @@ publish mode, always anonymous). Wire codec in
   every reconnect, a delegated admin signs it with the space authority seed
   (the GFS takes it as +1 at most) and sends it for its own rotation only;
   both pin the epoch's writer key (``writer_key_cert``);
-* **auto-subscribes** a member household to the GFS fan-out of the spaces it
-  writes in (:meth:`member_subscription_ids`, merged into the shuffled
-  reconnect batch), so it receives other members' items live;
 * decodes / encodes the encrypted item the GFS relays
   (:func:`build_item_plaintext` / :func:`parse_item_plaintext`).
 
@@ -31,10 +28,9 @@ whose signed block proves ``member_publish_strict`` (the label keeps its v_50
 name). Without the key (an older household, or one the key has not reached
 yet) or without such a server, NOTHING goes to a connection server: the item
 takes the host path (the member broadcast, which always runs). Publishing
-never subscribes on the spot (an identified subscribe right before an
-anonymous publish would link the two); the auto-subscribe runs only on a seat
-and on every (re)connect, with the SAME signed body a follower's subscribe
-and re-subscribe carry — nothing in it says "writer".
+never subscribes anywhere: a household never takes an identity-bound
+space-keyed seat on a GFS; other members' items reach it by federation or,
+for a channel space, through its channel seat.
 
 **What a member publish carries.** ``payload`` is the space-content-key
 ciphertext of ``{"item_type": <type>, "inner": <author-signed inner +
@@ -106,7 +102,6 @@ from ..crypto import b64url_encode, sign_ed25519
 from ..domain.events import (
     SpaceConfigChanged,
     SpaceContentKeyImported,
-    SpaceMemberJoined,
 )
 from ..domain.federation import GfsConnection
 from ..domain.gfs_member_publish import (
@@ -114,7 +109,7 @@ from ..domain.gfs_member_publish import (
     MemberPublishAnonRequest,
     owner_epoch_notice_signing_payload,
 )
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatures, SpaceRole, SpaceType
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatures, SpaceType
 from ..domain.space_item import (
     ITEM_TYPE_POST,
     PAYLOAD_SUITE_JSON,
@@ -149,7 +144,6 @@ if TYPE_CHECKING:
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_channel_service import GfsChannelService
-    from .gfs_space_mirror_service import GfsSpaceMirrorService
     from .space_crypto_service import SpaceContentEncryption
     from .space_writer_cert_service import SpaceWriterCertService
 
@@ -260,10 +254,8 @@ class GfsMemberPublishService:
         "_own_identity_seed",
         "_own_instance_id",
         "_retry",
-        "_seats",
         "_spaces",
         "_stopping",
-        "_subscribed",
         "_tasks",
         "_writer_certs",
     )
@@ -287,19 +279,13 @@ class GfsMemberPublishService:
         self._writer_certs = writer_certs
         self._own_instance_id = own_instance_id
         self._own_identity_seed = own_identity_seed
-        #: Each server's whole public directory — the cache shared with the
-        #: mirror (``app`` wires one instance into both), read over the
-        #: cookie-less publish session. Cleared on every key import and
+        #: Each server's whole public directory (``app`` wires the shared
+        #: instance), read over the cookie-less publish session. Cleared on every key import and
         #: config change.
         self._directories = directories or GfsDirectoryCache(
             lambda: gfs.publish_client()
         )
-        #: The keeper of this household's GFS subscriber seats; every
-        #: auto-subscribe is recorded there so a leave can tear it down.
-        self._seats: GfsSpaceMirrorService | None = None
         self._retry = GfsPublishRetryQueue(self._retry_send)
-        #: (conn id, space id) pairs this process already subscribed.
-        self._subscribed: set[tuple[str, str]] = set()
         #: Background publishes in flight (strong refs) and the stop flag.
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
@@ -307,11 +293,6 @@ class GfsMemberPublishService:
         #: ``private_gfs`` on. ``None`` → private spaces always take the host
         #: path.
         self._channels: GfsChannelService | None = None
-
-    def attach_seats(self, seats: GfsSpaceMirrorService) -> None:
-        """Wire the seat keeper: auto-subscribes go through
-        :meth:`GfsSpaceMirrorService.take_seat`, which records the seat."""
-        self._seats = seats
 
     def attach_channels(self, channels: GfsChannelService) -> None:
         """Wire the private-space channel service (v_51)."""
@@ -377,9 +358,7 @@ class GfsMemberPublishService:
             await self._channels.on_rekey_sent(space_id)
 
     def wire(self, bus: EventBus) -> None:
-        """Subscribe a newly seated local writer to the GFS fan-out at once
-        (the reconnect hook would otherwise only catch it next connect)."""
-        bus.subscribe(SpaceMemberJoined, self._on_member_joined)
+        """Clear the directory cache when a space's state moves."""
         # A key import (a rotation) or a config change (a space entering or
         # leaving a listing) re-reads each server's listing before the next
         # decision.
@@ -390,15 +369,6 @@ class GfsMemberPublishService:
         self, event: SpaceContentKeyImported | SpaceConfigChanged
     ) -> None:
         self.forget_directories()
-
-    async def _on_member_joined(self, event: SpaceMemberJoined) -> None:
-        try:
-            await self.ensure_subscribed(event.space_id)
-        except Exception:
-            log.exception(
-                "gfs.member_publish: subscribing after a join failed for %s",
-                event.space_id,
-            )
 
     async def start(self) -> None:
         self._stopping = False
@@ -1058,103 +1028,6 @@ class GfsMemberPublishService:
                 conn_id,
             )
         return match
-
-    # ── Auto-subscribe ────────────────────────────────────────────────────
-
-    async def ensure_subscribed(self, space_id: str) -> int:
-        """Subscribe to *space_id*'s fan-out on every capable GFS listing it,
-        when this household is a local writer there and not its owner (a
-        delegated admin keeps its seat like any writer)."""
-        space = await self._spaces.get(space_id)
-        if not self._publicly_readable(space):
-            return 0
-        assert space is not None
-        if await self._relays_as_owner(space):
-            return 0
-        if await self._on_channel(space):
-            # v_96 — its channel seat carries the others' items.
-            return 0
-        if not await self._local_writer(space_id):
-            return 0
-        return await self._subscribe(await self._capable_listed(space_id), space_id)
-
-    async def _subscribe(self, conns: list[GfsConnection], space_id: str) -> int:
-        done = 0
-        for conn in conns:
-            if not conn.registered or (conn.id, space_id) in self._subscribed:
-                # A subscribe is identified: only where we are registered.
-                continue
-            try:
-                if self._seats is not None:
-                    await self._seats.take_seat(space_id, conn)
-                else:
-                    await self._gfs.subscribe_to_gfs_space(space_id, conn.id)
-            except Exception as exc:  # GfsConnectionError and transport errors
-                log.info(
-                    "gfs.member_publish: subscribing space %s on %s failed: %s",
-                    space_id,
-                    conn.id,
-                    exc,
-                    exc_info=True,
-                )
-                continue
-            self._subscribed.add((conn.id, space_id))
-            done += 1
-        return done
-
-    async def member_subscription_ids(self, gfs_id: str) -> list[str]:
-        """The spaces this household should hold a fan-out seat in on
-        *gfs_id* because it writes there (publicly readable, a local writer
-        seat, not the owner, listed there) — for the reconnect batch, which
-        merges them with the followed spaces and shuffles the lot
-        (:meth:`GfsSpaceMirrorService.resubscribe_all`). ``[]`` for an
-        inactive or incapable connection."""
-        conn = await self._conn_repo.get(gfs_id)
-        if conn is None or conn.status != "active":
-            return []
-        if not await self._gfs.member_publish_strict_supported(conn):
-            return []
-        out: list[str] = []
-        for space in await self._spaces.list_all():
-            if not self._publicly_readable(space):
-                continue
-            if await self._relays_as_owner(space):
-                continue
-            if await self._on_channel(space):
-                continue  # v_96 — its channel seat carries the items
-            if not await self._local_writer(space.id):
-                continue
-            if await self._listed(conn, space.id):
-                out.append(space.id)
-        return out
-
-    async def subscribe_member_spaces(self, gfs_id: str) -> int:
-        """Subscribe this household to *gfs_id*'s fan-out for every publicly
-        readable space it holds a writer seat in (the owner apart — it
-        receives its members' posts over federation and relays them itself),
-        so other members' items arrive live. The GFS subscribe is an upsert.
-        Fail-soft per space. Returns how many were (re)subscribed. (The
-        reconnect hook instead merges :meth:`member_subscription_ids` into
-        the shuffled follower batch.)"""
-        conn = await self._conn_repo.get(gfs_id)
-        if conn is None:
-            return 0
-        done = 0
-        for space_id in await self.member_subscription_ids(gfs_id):
-            # Re-subscribes even what this process already did: the GFS may
-            # have dropped the seat meanwhile (upsert).
-            self._subscribed.discard((conn.id, space_id))
-            done += await self._subscribe([conn], space_id)
-        return done
-
-    async def _local_writer(self, space_id: str) -> bool:
-        local = set(await self._spaces.list_local_member_user_ids(space_id))
-        if not local:
-            return False
-        return any(
-            m.user_id in local and m.role != SpaceRole.SUBSCRIBER.value
-            for m in await self._spaces.list_members(space_id)
-        )
 
     async def announce_held_epochs(self, gfs_id: str) -> int:
         """On a GFS (re)connect: re-announce the current epoch of every space

@@ -138,16 +138,6 @@ class AbstractSpaceRepo(Protocol):
         older_than: int | None = None,
     ) -> bool: ...
     async def mark_seed_shared(self, space_id: str) -> None: ...
-    async def set_mirror_provenance(
-        self, space_id: str, *, gfs_id: str, rotation_seq: int
-    ) -> None: ...
-    async def get_mirror_provenance(self, space_id: str) -> tuple[str | None, int]: ...
-    async def rebind_mirror_provenance(
-        self, space_id: str, *, from_gfs_id: str, to_gfs_id: str
-    ) -> bool: ...
-    async def adopt_gfs_pin(
-        self, space_id: str, *, gfs_id: str, public_key_hex: str, rotation_seq: int
-    ) -> bool: ...
     async def get_seed_shared_epoch(self, space_id: str) -> int | None: ...
     async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None: ...
     async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None: ...
@@ -249,7 +239,6 @@ class AbstractSpaceRepo(Protocol):
         picture_hash: str | None | object = None,
     ) -> None: ...
     async def list_local_member_user_ids(self, space_id: str) -> list[str]: ...
-    async def list_subscribed_space_ids(self) -> list[str]: ...
 
     # ── Instances that mirror this space ───────────────────────────────
     async def add_space_instance(self, space_id: str, instance_id: str) -> None: ...
@@ -1135,55 +1124,6 @@ class SqliteSpaceRepo:
             (space_id,),
         )
 
-    async def set_mirror_provenance(
-        self, space_id: str, *, gfs_id: str, rotation_seq: int
-    ) -> None:
-        """Record which GFS connection seated this follower mirror, and the
-        ``authority_rotation_seq`` it showed then (v_44)."""
-        await self._db.enqueue(
-            "UPDATE spaces SET mirror_gfs_id=?, gfs_rotation_seq=? WHERE id=?",
-            (gfs_id, rotation_seq, space_id),
-        )
-
-    async def get_mirror_provenance(self, space_id: str) -> tuple[str | None, int]:
-        row = await self._db.fetchone(
-            "SELECT mirror_gfs_id, gfs_rotation_seq FROM spaces WHERE id=?",
-            (space_id,),
-        )
-        if row is None:
-            return None, 0
-        return row["mirror_gfs_id"], int(row["gfs_rotation_seq"] or 0)
-
-    async def rebind_mirror_provenance(
-        self, space_id: str, *, from_gfs_id: str, to_gfs_id: str
-    ) -> bool:
-        """Move a mirror's provenance to a re-paired connection of the SAME
-        server (v_44 pin-heal anchor). Compare-and-set on the old connection
-        id; ``gfs_rotation_seq`` is kept, so the heal still only moves to a
-        strictly higher seq. The caller proves same server + same key."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE spaces SET mirror_gfs_id=? WHERE id=? AND mirror_gfs_id=?",
-            (to_gfs_id, space_id, from_gfs_id),
-        )
-        return changed > 0
-
-    async def adopt_gfs_pin(
-        self, space_id: str, *, gfs_id: str, public_key_hex: str, rotation_seq: int
-    ) -> bool:
-        """A FOLLOWER re-pins from the GFS that seated its mirror (v_44).
-
-        Compare-and-set: only that connection (``mirror_gfs_id``), only to a
-        strictly higher ``rotation_seq``. Clears any seed held. Never touches
-        ``authority_key_epoch`` — that orders owner-certified epochs.
-        """
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE spaces SET identity_public_key=?, gfs_rotation_seq=?,"
-            " identity_private_key=NULL WHERE id=? AND mirror_gfs_id=?"
-            " AND gfs_rotation_seq < ?",
-            (public_key_hex, rotation_seq, space_id, gfs_id, rotation_seq),
-        )
-        return changed > 0
-
     async def mark_seed_shared(self, space_id: str) -> None:
         """Owner side: the signing seed for the CURRENT key was just shared
         with an admin household."""
@@ -1645,28 +1585,6 @@ class SqliteSpaceRepo:
             {"space_id": r["space_id"], "subscribed_at": r["subscribed_at"]}
             for r in rows
         ]
-
-    async def list_subscribed_space_ids(self) -> list[str]:
-        """Return every space id this HOUSEHOLD holds a subscription on.
-
-        Household-wide (any local user with ``role='subscriber'``), unlike
-        :meth:`list_subscriptions_for_user` which answers per user. The GFS
-        seat is registered once per household, not per user, so the reconnect
-        self-heal (``GfsSpaceMirrorService.resubscribe_all``) needs the
-        household view. Dissolved spaces excluded.
-        """
-        rows = await self._db.fetchall(
-            """
-            SELECT DISTINCT m.space_id AS space_id
-              FROM space_members m
-              JOIN users u ON u.user_id = m.user_id
-              JOIN spaces s ON s.id = m.space_id
-             WHERE m.role = 'subscriber'
-               AND s.dissolved = 0
-             ORDER BY m.space_id
-            """,
-        )
-        return [r["space_id"] for r in rows]
 
     async def list_all(self) -> list[Space]:
         """Return every active space hosted on this instance (admin).
@@ -3034,16 +2952,15 @@ class SqliteSpaceRepo:
         """Stubs a cross-household invitation seated before migration 0093
         that nobody here ever joined: a space we do not own, with no local
         member and at least one received invitation, none of them accepted.
-        Never a GFS-mirror stub (``mirror_gfs_id`` or a recorded
-        ``gfs_space_seats`` row — those are torn down through the mirror's
-        own path, with the GFS unsubscribe); invite-link stubs have no
-        invitation row."""
+        A follower is a member (read-only role), so its space is never
+        matched; a row left from a GFS follow-only mirror (``mirror_gfs_id``)
+        is never matched either — migration 0155 owns those. Invite-link
+        stubs have no invitation row."""
         rows = await self._db.fetchall(
             """
             SELECT s.id FROM spaces s
              WHERE s.owner_instance_id != ?
                AND s.mirror_gfs_id IS NULL
-               AND NOT EXISTS (SELECT 1 FROM gfs_space_seats g WHERE g.space_id = s.id)
                AND NOT EXISTS (SELECT 1 FROM space_members m WHERE m.space_id = s.id)
                AND EXISTS (
                    SELECT 1 FROM space_invitations i

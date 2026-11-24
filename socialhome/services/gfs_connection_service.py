@@ -107,7 +107,6 @@ from ..domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_PREFIX,
     SPACE_IMAGE_EMBED_MAX_BYTES,
 )
-from ..domain.moment_public import is_path_safe_id
 from ..domain.relay_media_frame import ENVELOPE_MEDIA_CAPABILITY
 from ..domain.space import (
     PUBLIC_SPACE_TIERS,
@@ -118,7 +117,6 @@ from ..domain.space import (
 )
 from ..domain.space_item import COMPRESSED_PAYLOAD_SUITES, PAYLOAD_SUITE_ZLIB_DICT1
 from ..domain.space_place import place_pin_of, place_pin_wire
-from ..domain.subscriber_accepts import OUR_ACCEPTS
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..gfs_client_status import (
     CLIENT_STATUSES,
@@ -3648,139 +3646,6 @@ class GfsConnectionService:
         canonical = canonical_bytes(payload)
         return b64url_encode(sign_ed25519(self._own_signing_key, canonical))
 
-    async def subscribe_to_gfs_space(self, space_id: str, gfs_id: str) -> str:
-        """Subscribe this household to a GFS-listed space's relay fan-out.
-
-        The GFS mandates an Ed25519 signature on every subscribe (so a
-        caller can only subscribe itself), so this signs the canonical
-        ``{action: "subscribe", instance_id, space_id, ts}`` body — the
-        ``action`` is inside the signed bytes so the GFS can't have the
-        signature replayed as an unsubscribe — with the household identity
-        key and POSTs it to ``/gfs/subscribe``. Fail-closed: with no
-        signing identity wired, it raises rather than sending an unsigned
-        body the GFS would reject. Returns the GFS-reported status.
-        """
-        if not self._own_instance_id or not self._own_signing_key:
-            raise GfsConnectionError(
-                "cannot subscribe to a GFS space without a wired signing identity",
-            )
-        conn = await self._repo.get(gfs_id)
-        if conn is None:
-            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
-
-        ts = datetime.now(UTC).isoformat()
-        canonical = canonical_bytes(
-            {
-                "action": "subscribe",
-                "instance_id": self._own_instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            }
-        )
-        body = {
-            "action": "subscribe",
-            "instance_id": self._own_instance_id,
-            "space_id": space_id,
-            "ts": ts,
-            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
-            # v_61 — what this household opens, OUTSIDE the signed bytes (an
-            # older GFS ignores it and still verifies). Same list on every
-            # seat, follower or member, so it never tells them apart.
-            "accepts": list(OUR_ACCEPTS),
-        }
-        client = self._client()
-        url = f"{conn.inbox_url}/gfs/subscribe"
-        try:
-            async with client.post(
-                url,
-                allow_redirects=False,
-                json=body,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status not in (200, 201):
-                    detail = await _remote_detail(resp, context="subscribe")
-                    raise GfsConnectionError(
-                        f"GFS rejected subscribe (HTTP {resp.status}): {detail}",
-                    )
-                try:
-                    data = await resp.json()
-                except aiohttp.ClientError, ValueError:
-                    data = {}
-                if not isinstance(data, dict):
-                    data = {}
-        except (TimeoutError, aiohttp.ClientError) as exc:
-            raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
-        return str(data.get("status") or "subscribed")
-
-    async def unsubscribe_from_gfs_space(self, space_id: str, gfs_id: str) -> str:
-        """Unsubscribe this household from a GFS-listed space's relay fan-out.
-
-        Mirror of :meth:`subscribe_to_gfs_space`: the GFS mandates an
-        Ed25519 signature on every (un)subscribe (so a caller can only
-        unsubscribe **itself** — without it any household could evict any
-        other from a space's relay), so this signs the canonical
-        ``{action: "unsubscribe", instance_id, space_id, ts}`` body — the
-        ``action`` is inside the signed bytes so the signature can't be
-        replayed as a subscribe — and POSTs it to ``/gfs/subscribe``.
-        Fail-closed: with no signing identity wired it raises rather than
-        send an unsigned body the GFS would reject with a 403.
-
-        ``404`` counts as success alongside ``200``/``204`` — mirroring
-        :meth:`unpublish_space`, removing an already-absent subscription is
-        idempotent. Returns the GFS-reported status.
-        """
-        conn = await self._repo.get(gfs_id)
-        if conn is None:
-            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
-        return await self.unsubscribe_via(conn, space_id)
-
-    async def unsubscribe_via(self, conn: GfsConnection, space_id: str) -> str:
-        """:meth:`unsubscribe_from_gfs_space` over a connection snapshot —
-        for the unsubscribes an unpair sends after its row is gone."""
-        if not self._own_instance_id or not self._own_signing_key:
-            raise GfsConnectionError(
-                "cannot unsubscribe from a GFS space without a wired signing identity",
-            )
-        ts = datetime.now(UTC).isoformat()
-        canonical = canonical_bytes(
-            {
-                "action": "unsubscribe",
-                "instance_id": self._own_instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            }
-        )
-        body = {
-            "action": "unsubscribe",
-            "instance_id": self._own_instance_id,
-            "space_id": space_id,
-            "ts": ts,
-            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
-        }
-        client = self._client()
-        url = f"{conn.inbox_url}/gfs/subscribe"
-        try:
-            async with client.post(
-                url,
-                allow_redirects=False,
-                json=body,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status not in (200, 204, 404):
-                    detail = await _remote_detail(resp, context="unsubscribe")
-                    raise GfsConnectionError(
-                        f"GFS rejected unsubscribe (HTTP {resp.status}): {detail}",
-                    )
-                try:
-                    data = await resp.json()
-                except aiohttp.ClientError, ValueError:
-                    data = {}
-                if not isinstance(data, dict):
-                    data = {}
-        except (TimeoutError, aiohttp.ClientError) as exc:
-            raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
-        return str(data.get("status") or "unsubscribed")
-
     async def _require_publishable(self, space_id: str) -> None:
         """Refuse to list anything but a GLOBAL space on a GFS.
 
@@ -4776,16 +4641,6 @@ class GfsConnectionService:
             PAYLOAD_SUITE_REFUSAL_TTL_S,
         )
 
-    async def space_key_pull_supported(self, gfs_id: str) -> bool:
-        """Whether the GFS *gfs_id* proved ``space_key_pull`` (#5b) under a
-        valid signature: it takes a follower's key request."""
-        conn = await self._repo.get(gfs_id)
-        if conn is None or conn.status != "active" or not conn.inbox_url:
-            return False
-        return await self._signed_capability_supported(
-            conn, "space_key_pull", self._space_key_pull
-        )
-
     async def viewer_pages_supported(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s GFS serves the JSON the pinned viewer renders a
         global space's page from (``GET /gfs/pages/spaces/{id}``, #1109).
@@ -4798,55 +4653,6 @@ class GfsConnectionService:
         return await self._signed_capability_supported(
             conn, "space_key_pull", self._space_key_pull
         )
-
-    async def request_space_key(self, space_id: str, gfs_id: str) -> bool:
-        """Ask the GFS *gfs_id* to have *space_id*'s owner seal its content
-        key to us again (#5b: we got a frame under an epoch we hold no key
-        for). Signed like a subscribe, over ``{action: "space_key_request",
-        instance_id, space_id, ts}``. Only to a server that proved
-        ``space_key_pull``; ``True`` when it accepted the request. Never
-        raises."""
-        if not self._own_instance_id or not self._own_signing_key:
-            return False
-        if not await self.space_key_pull_supported(gfs_id):
-            return False
-        conn = await self._repo.get(gfs_id)
-        if conn is None or not is_path_safe_id(space_id):
-            return False
-        ts = datetime.now(UTC).isoformat()
-        canonical = canonical_bytes(
-            {
-                "action": "space_key_request",
-                "instance_id": self._own_instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            }
-        )
-        body = {
-            "instance_id": self._own_instance_id,
-            "ts": ts,
-            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
-        }
-        try:
-            async with self._client().post(
-                f"{conn.inbox_url}/gfs/spaces/{space_id}/key_request",
-                allow_redirects=False,
-                json=body,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status >= 300:
-                    log.warning(
-                        "gfs: %s refused a key request for space %s — HTTP %d",
-                        gfs_id,
-                        space_id,
-                        resp.status,
-                    )
-                    return False
-        except (TimeoutError, aiohttp.ClientError) as exc:
-            log.warning("gfs: key request to %s failed: %s", gfs_id, exc)
-            return False
-        log.info("gfs: asked %s for the content key of space %s", gfs_id, space_id)
-        return True
 
     async def publish_space_event_to(
         self,
@@ -5082,11 +4888,12 @@ class GfsConnectionService:
     async def heal_space_pins(self, gfs_id: str) -> int:
         """Re-publish every space this household published to *gfs_id*.
 
-        Run on each GFS-WS (re)connect. ``POST /gfs/publish`` now authorizes
-        purely on the space's TOFU-pinned authority key, so a GFS row that
-        pinned NO key (published by a household predating the pin) rejects
-        every relay for that space with 403 until the metadata is published
-        again — and nothing else re-publishes it. Re-publishing is idempotent
+        Run on each GFS-WS (re)connect. The GFS checks every
+        space-authority-signed request for a listed space (the listing's
+        sealed join contact, the space media cache) against the key it pinned
+        for the space, so a GFS row that pinned NO key (published by a
+        household predating the pin) refuses them until the metadata is
+        published again — and nothing else re-publishes it. Re-publishing is idempotent
         on the GFS side (the pin is COALESCE-guarded and only moves on an
         owner-certified rotation, v_44 — which this publish also carries),
         so this heals a NULL pin without disturbing a healthy one.

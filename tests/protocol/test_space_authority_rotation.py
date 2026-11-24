@@ -1278,25 +1278,17 @@ async def test_k1_seed_share_cannot_be_stored_after_the_pin_moved(world, monkeyp
     assert await m_spaces.get_space_seed(w.space_id) is None
 
 
-async def test_a_hostile_gfs_cannot_move_a_private_stubs_pin(world, monkeypatch):
-    """N2: the GFS-trust heal is only for a follower of a PUBLIC space,
-    and only from the GFS that seated the mirror — never a private stub with
-    no local member (a pending invite), never from another GFS."""
+async def test_a_gfs_can_never_move_a_spaces_pin(world):
+    """N2 (was: a hostile GFS cannot move a private stub's pin). The v_44
+    GFS-trust heal served only follow-only GFS mirrors, which v_96 removed:
+    a follower is a member and gets every authority cert by federation. So
+    no household path adopts a key from a GFS listing at all — the repo
+    write and the space service's mirror hook are gone."""
     w = world
-    mirror = w.m_app[space_service_key]._gfs_mirror
-    evil = generate_identity_keypair().public_key.hex()
-
-    class _Conn:
-        id = "evil-gfs"
-        inbox_url = "https://evil.invalid"
-
-    async def _fetch(self, conn, space_id):
-        return {"identity_public_key": evil, "authority_rotation_seq": 5}
-
-    monkeypatch.setattr(type(mirror), "_fetch_listing", _fetch)
     spaces = w.m_app[space_repo_key]
-    await spaces.delete_member(w.space_id, "um")
-    assert not await mirror._refresh_from([_Conn()], w.space_id)
+    assert not hasattr(spaces, "adopt_gfs_pin")
+    assert not hasattr(spaces, "set_mirror_provenance")
+    assert not hasattr(w.m_app[space_service_key], "_gfs_mirror")
     assert (await w.m_space()).identity_public_key == w.k1_pk
 
 

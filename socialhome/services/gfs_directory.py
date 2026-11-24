@@ -3,14 +3,12 @@
 ``GET {gfs}/gfs/spaces`` is the only question a household may ask a
 connection server about which spaces it lists: it is the same request for
 every household and names no space. A space-specific probe
-(``GET /gfs/spaces/{id}``) or an identity-bound (un)subscribe tells the
-server which space this household cares about, so every such request is
-gated on this directory first — by the mirror (follower subscribe and the
-legacy (un)subscribe fallback) and by member publish (which servers to
-publish / auto-subscribe on).
+(``GET /gfs/spaces/{id}``) tells the server which space this household
+cares about, so every such request is gated on this directory first — by
+member publish (which servers to publish on).
 
-One instance is shared by both services (``app._build_*``), so a server's
-directory is downloaded once per TTL rather than once per caller.
+One instance is built in ``app`` and handed to member publish, so a
+server's directory is downloaded once per TTL rather than once per caller.
 """
 
 from __future__ import annotations

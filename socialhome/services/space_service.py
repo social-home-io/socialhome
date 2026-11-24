@@ -728,7 +728,6 @@ class SpaceService(
         "_gallery",
         "_gfs",
         "_gfs_join",
-        "_gfs_mirror",
         "_gfs_selection",
         "_icons",
         "_instance_purger",
@@ -743,7 +742,6 @@ class SpaceService(
         "_media_guard",
         "_media_refs",
         "_member_gfs",
-        "_mirror_locks",
         "_moderation",
         "_own_instance_id",
         "_peer_spaces",
@@ -760,6 +758,7 @@ class SpaceService(
         "_roster_repairs",
         "_roster_seats_cache",
         "_roster_tasks",
+        "_seat_locks",
         "_space_crypto",
         "_spaces",
         "_subscriber_keys",
@@ -802,12 +801,11 @@ class SpaceService(
         self._covers = None
         self._icons = None
         self._gfs = None
-        self._gfs_mirror = None
         self._gfs_selection = None
-        #: Per-space lock shared by a GFS-mirror subscribe and the mirror
-        #: teardown, so a teardown never purges a subscribe in progress.
+        #: Per-space lock shared by a follow and the seating paths (an
+        #: invitation accept, the stub sweep), so they never interleave.
         #: Weak values: an idle space's lock goes with its last holder.
-        self._mirror_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+        self._seat_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
         self._subscriber_keys = None
@@ -972,14 +970,6 @@ class SpaceService(
         if self._gfs_selection is None:
             return ()
         return await self._gfs_selection.check_selection(gfs_ids, required=required)
-
-    def attach_gfs_space_mirror(self, mirror) -> None:
-        """Wire the legacy GFS mirror (pre-v_96 follows). A follow no longer
-        mirrors anything (:meth:`follow_space` asks the host); the mirror is
-        kept only so :meth:`unfollow_space` can purge a stub an older follow
-        made. Optional: absent when no GFS is paired.
-        """
-        self._gfs_mirror = mirror
 
     def attach_authority_rotation(
         self, rotation: SpaceAuthorityRotationService
@@ -7851,12 +7841,12 @@ class SpaceService(
 
     def seating_lock(self, space_id: str) -> asyncio.Lock:
         """The per-space lock held by every path that seats or tears down
-        the local stub of *space_id*: a GFS-mirror subscribe and teardown, a
+        the local stub of *space_id*: a follow, the unjoined-stub sweep, a
         private-invite accept and an invite-link redeem (the redeem
         coordinator shares it). Two joins for one space id from different
         households therefore never both seat — the second re-reads the row
         the first left and is refused (migration 0093)."""
-        return self._mirror_lock(space_id)
+        return self._seat_lock(space_id)
 
     async def _purge_unjoined_stub(self, space_id: str) -> None:
         """Drop a stub nobody here joined, with everything that came with it:
@@ -10143,11 +10133,11 @@ class SpaceService(
     # * Subscribe respects bans + the §CP.F1 age gate, same as
     #   ``add_member``.
 
-    def _mirror_lock(self, space_id: str) -> asyncio.Lock:
-        lock = self._mirror_locks.get(space_id)
+    def _seat_lock(self, space_id: str) -> asyncio.Lock:
+        lock = self._seat_locks.get(space_id)
         if lock is None:
             lock = asyncio.Lock()
-            self._mirror_locks[space_id] = lock
+            self._seat_locks[space_id] = lock
         return lock
 
     async def follow_space(
@@ -10173,7 +10163,7 @@ class SpaceService(
           ``share_location`` — the person agreed to send this household's
           home (~1 km) for a local community's host to decide on.
         """
-        async with self._mirror_lock(space_id):
+        async with self._seat_lock(space_id):
             return await self._follow_space(
                 user_id, space_id, share_location=share_location
             )
@@ -10290,99 +10280,6 @@ class SpaceService(
         if space is None:
             return
         await self._end_local_seat(space, existing, actor_user_id=user_id, is_self=True)
-        await self._maybe_purge_gfs_mirror(space_id)
-
-    async def release_gfs_mirror_if_unused(self, space_id: str) -> None:
-        """The mirror's post-grace re-check: the same proven-mirror teardown
-        an unsubscribe runs, for a subscribe that was undone while its GFS
-        seat was still in its grace window."""
-        await self._maybe_purge_gfs_mirror(space_id)
-
-    async def _maybe_purge_gfs_mirror(self, space_id: str) -> None:
-        """Drop a GFS-mirrored stub once its last local subscriber leaves.
-
-        Both of the things this does — unsubscribing from the GFS server(s)
-        that seat this household for the space, and deleting the row with
-        its posts / gallery / bazaar / media — are irreversible and visible
-        to third parties, so they run only on *positive* evidence that the
-        row is a GFS mirror:
-
-        * the space is ``GLOBAL`` (what the mirror seats), owned by another
-          instance, and we hold no space seed for it (we are not its
-          authority); **and**
-        * some evidence that a GFS listed it
-          (``GfsSpaceMirrorService.was_gfs_listed``: mirror provenance, a
-          recorded GFS seat, a ``public_space_cache`` row, or a cached
-          directory listing).
-
-        Without that evidence the row may be a public/global stub learned
-        from a direct peer, which has nothing to do with any GFS: an
-        identity-bound unsubscribe would disclose to a GFS operator a
-        relationship with a space they never knew about, and the purge would
-        destroy a space we were never asked to forget. In that case the local
-        member removal (already done by the caller) is all that happens —
-        losing a stub row is worse than keeping an inert one.
-
-        Runs under the space's subscribe lock: a subscribe of the same space
-        in progress finishes first (and is then seen as a member). The
-        GFS-side unsubscribe is best-effort (a down GFS must not block the
-        local leave); the local purge then cascades from ``spaces``, which is
-        what drops the space's ``space_keys`` row — the content key goes with
-        the mirror rather than lingering for a space we can no longer read.
-        """
-        if self._gfs_mirror is None:
-            return
-        async with self._mirror_lock(space_id):
-            await self._purge_gfs_mirror_if_unused(space_id)
-
-    async def _purge_gfs_mirror_if_unused(self, space_id: str) -> None:
-        assert self._gfs_mirror is not None
-        space = await self._spaces.get(space_id)
-        if space is None or space.owner_instance_id == self._own_instance_id:
-            return
-        try:
-            if await self._spaces.get_space_seed(space_id) is not None:
-                # We hold authority for this space — not a passive mirror.
-                return
-        except RuntimeError:
-            # Seed access is unavailable (no KEK wired). We cannot establish
-            # that we are *not* this space's authority, and this path is
-            # destructive — fail safe by doing nothing.
-            log.debug(
-                "space %s: cannot read the space seed — skipping mirror purge",
-                space_id,
-            )
-            return
-        if await self._spaces.list_local_member_user_ids(space_id):
-            # Another local user still subscribes — keep the mirror. (Only
-            # ours: ``space_members`` may also mirror the host's people.)
-            return
-        if await self._gfs_mirror.seat_in_grace(space_id):
-            # A subscribe is in flight: its GFS seat was just taken and its
-            # member row is not written yet. Tearing down now would pull the
-            # seat (and the row) out from under it.
-            log.debug(
-                "space %s: a subscribe is in flight — keeping the mirror", space_id
-            )
-            return
-        proven_mirror = space.space_type is SpaceType.GLOBAL and (
-            await self._gfs_mirror.was_gfs_listed(space_id)
-        )
-        if not proven_mirror:
-            log.debug(
-                "space %s: no evidence it is a GFS mirror (type=%s) — leaving "
-                "the row alone and sending no GFS unsubscribe",
-                space_id,
-                space.space_type,
-            )
-            return
-        await self._gfs_mirror.unsubscribe(space_id)
-        await purge_space_and_media(
-            space_repo=self._spaces,
-            media_dir=self._media_dir,
-            media_refs=self._media_refs,
-            space_id=space_id,
-        )
 
     async def list_subscriptions(self, user_id: str) -> list[dict]:
         return await self._spaces.list_subscriptions_for_user(user_id)
@@ -10398,10 +10295,6 @@ class SpaceService(
             user_id,
             own_instance_id=self._own_instance_id,
         )
-
-    async def is_subscribed(self, user_id: str, space_id: str) -> bool:
-        member = await self._spaces.get_member(space_id, user_id)
-        return member is not None and member.role == SpaceRole.SUBSCRIBER
 
     # ── Sidebar links (§23 — admin-configurable quick-links) ───────────
 

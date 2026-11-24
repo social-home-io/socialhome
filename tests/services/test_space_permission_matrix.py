@@ -166,7 +166,6 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "rotation_owed",
         # Federation inbound (owner side): an authority-verified admin rekey.
         "relay_admin_rekey_to_followers",
-        "is_subscribed",
         # Self-service joins / leaves — gate is on the *invite* / *request*,
         # not the join action itself.
         "create_space",  # creator becomes owner
@@ -197,10 +196,6 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "revoke_space_session_if_orphaned",
         "apply_space_session_cleanup",
         "end_space_session_if_unused",
-        # The GFS mirror's post-grace re-check — no actor; the teardown it
-        # runs is driven by the ABSENCE of any local member (re-read from
-        # our own rows) and refuses owned / seed-held / unproven spaces.
-        "release_gfs_mirror_if_unused",
         # Federation inbound hook — the actor's role is validated inside
         # the method itself by looking up ``space_remote_members.role``;
         # there is no actor-username to thread through ``_require_admin``.

@@ -82,7 +82,6 @@ class _Gfs:
     def __init__(self, identified, anon) -> None:
         self._identified = identified
         self._anon = anon
-        self.subscribed: list = []
 
     def client(self):
         return self._identified
@@ -104,9 +103,6 @@ class _Gfs:
 
     async def member_publish_strict_supported(self, conn):
         return True
-
-    async def subscribe_to_gfs_space(self, space_id, gfs_id):
-        self.subscribed.append((space_id, gfs_id))
 
     async def server_targets(self, space_id):
         return None

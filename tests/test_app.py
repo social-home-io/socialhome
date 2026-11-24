@@ -465,41 +465,13 @@ def test_map_tile_user_agent_identifies_the_app_and_a_contact():
     assert "@social-home.io" in MAP_TILE_USER_AGENT
 
 
-async def test_gfs_space_mirror_wired_into_space_service(tmp_dir):
-    """The GFS on-ramp is constructed, attached to the LIVE space service
-    (the real-instance one built during startup), and carries the shared
-    HTTP session — without all three, subscribing to a GFS-discovered space
-    404s."""
-    from socialhome.app_keys import gfs_connection_service_key, space_service_key
-    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
-
-    cfg = Config(
-        data_dir=str(tmp_dir),
-        db_path=str(tmp_dir / "test.db"),
-        media_path=str(tmp_dir / "media"),
-        mode="standalone",
-        log_level="WARNING",
-    )
-    app = create_app(cfg)
-    async with TestClient(TestServer(app)):
-        space_svc = app[space_service_key]
-        mirror = space_svc._gfs_mirror
-        assert isinstance(mirror, GfsSpaceMirrorService)
-        assert mirror._http_client is not None
-        assert mirror._gfs is app[gfs_connection_service_key]
-
-
-async def test_gfs_connect_hook_resubscribes_our_seats(tmp_dir):
-    """F4b: the GFS-WS (re)connect hook re-registers this household's
-    subscriber seats beside the space-pin heal.
-
-    Without the hook a seat the GFS purged is never re-taken — the local row
-    says "subscribed" forever while nothing is delivered.
-    """
+async def test_gfs_connect_hook_heals_the_space_pins(tmp_dir):
+    """F4b: the GFS-WS (re)connect hook runs the bulk reconcile — the
+    space-pin heal among it. No space-keyed seat is taken there any more."""
     from unittest.mock import AsyncMock, patch
 
     from socialhome.app_keys import gfs_ws_supervisor_key
-    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
+    from socialhome.services.gfs_connection_service import GfsConnectionService
 
     cfg = Config(
         data_dir=str(tmp_dir),
@@ -513,13 +485,10 @@ async def test_gfs_connect_hook_resubscribes_our_seats(tmp_dir):
         on_connected = app[gfs_ws_supervisor_key]._on_connected
         assert on_connected is not None
         with patch.object(
-            GfsSpaceMirrorService, "resubscribe_all", new_callable=AsyncMock
-        ) as resub:
+            GfsConnectionService, "heal_space_pins", new_callable=AsyncMock
+        ) as heal:
             await on_connected("gfs-1")
-        resub.assert_awaited_once()
-        assert resub.await_args.args == ("gfs-1",)
-        # v_50 — writer spaces ride the same (shuffled) batch.
-        assert list(resub.await_args.kwargs["also"]) == []
+        heal.assert_awaited_once_with("gfs-1")
 
 
 # ── GFS relay fan-out dispatch (identity-free frame) ──────────────────────

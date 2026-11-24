@@ -32,7 +32,6 @@ from socialhome.crypto import (
 from socialhome.domain.events import (
     SpaceConfigChanged,
     SpaceContentKeyImported,
-    SpaceMemberJoined,
 )
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.gfs_member_publish import MEMBER_PUBLISH_ANON_ROUTE
@@ -203,7 +202,6 @@ class _Gfs:
         self.listing_session: object = None
         self.listing_opened: list = []
         self.strict_capable = True
-        self.subscribed: list[tuple[str, str]] = []
 
     async def member_publish_strict_supported(self, conn):
         return self.capable and self.strict_capable
@@ -245,10 +243,6 @@ class _Gfs:
 
     def note_suite_refused(self, conn, space_id, suite):
         self.suite_refused = self.suite_refused | {(conn.id, space_id, suite)}
-
-    async def subscribe_to_gfs_space(self, space_id, gfs_id):
-        self.subscribed.append((space_id, gfs_id))
-        return "subscribed"
 
     #: v_57 — what ``server_targets`` answers (``None`` = no owner list).
     targets: list | None = None
@@ -612,101 +606,13 @@ async def test_announce_held_epochs_covers_owned_spaces_on_one_server(world):
     assert await owner_svc.announce_held_epochs("missing") == 0
 
 
-# ── Auto-subscribe ───────────────────────────────────────────────────────
+# ── Seats on the roster ──────────────────────────────────────────────────
 
 
 def _member(user_id: str, role: SpaceRole) -> SpaceMember:
     return SpaceMember(
         space_id=SPACE_ID, user_id=user_id, role=role.value, joined_at="2026-10-03"
     )
-
-
-async def test_a_writer_household_subscribes_to_its_spaces(world):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-    assert await world["svc"].subscribe_member_spaces("conn-1") == 1
-    assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
-
-
-async def test_an_auto_subscribe_is_a_recorded_seat(world):
-    """M1: with the seat keeper wired, every auto-subscribe goes through
-    ``take_seat`` (which records it), so a leave can tear it down."""
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-
-    class _Seats:
-        def __init__(self):
-            self.taken: list[tuple[str, str]] = []
-
-        async def take_seat(self, space_id, conn):
-            self.taken.append((space_id, conn.gfs_instance_id))
-
-    seats = _Seats()
-    world["svc"].attach_seats(seats)
-    assert await world["svc"].subscribe_member_spaces("conn-1") == 1
-    assert seats.taken == [(SPACE_ID, world["conn"].gfs_instance_id)]
-    assert world["gfs"].subscribed == []  # never the raw, unrecorded path
-
-
-@pytest.mark.parametrize("case", ["follower_only", "incapable", "none"])
-async def test_auto_subscribe_skips_what_it_must(world, case):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-    if case == "follower_only":
-        spaces.members[SPACE_ID] = [_member("u1", SpaceRole.SUBSCRIBER)]
-    elif case == "incapable":
-        world["gfs"].capable = False
-    elif case == "none":
-        spaces.local[SPACE_ID] = []
-    assert await world["svc"].subscribe_member_spaces("conn-1") == 0
-    assert world["gfs"].subscribed == []
-
-
-async def test_a_failing_subscribe_is_fail_soft(world):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.ADMIN)]
-
-    async def _boom(space_id, gfs_id):
-        raise RuntimeError("down")
-
-    world["gfs"].subscribe_to_gfs_space = _boom
-    assert await world["svc"].subscribe_member_spaces("conn-1") == 0
-
-
-async def test_planning_a_post_never_subscribes(world):
-    """An identified subscribe right before an anonymous publish would link
-    the two: the auto-subscribe runs only on a seat and on (re)connect."""
-    svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID, AUTHOR)
-    assert world["gfs"].subscribed == []
-
-
-async def test_a_local_writer_seat_subscribes_on_join(world):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-    bus = EventBus()
-    world["svc"].wire(bus)
-    await bus.publish(SpaceMemberJoined(space_id=SPACE_ID, user_id="u1"))
-    assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
-
-
-async def test_ensure_subscribed_skips_followers_and_the_owner(world):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.SUBSCRIBER)]
-    assert await world["svc"].ensure_subscribed(SPACE_ID) == 0
-    # The owner household (it lists the space under its own name anyway)
-    # receives over federation and relays: no seat.
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.OWNER)]
-    owner_svc = _owner_svc(world)
-    assert await owner_svc.ensure_subscribed(SPACE_ID) == 0
-    assert await owner_svc.member_subscription_ids("conn-1") == []
-    assert world["gfs"].subscribed == []
 
 
 # ── A delegated admin looks like any writer to the GFS ────────────────────
@@ -735,10 +641,9 @@ class _GfsTrace:
 
 
 async def _gfs_view(world, *, delegated_admin: bool) -> dict:
-    """What the GFS sees from the ``me`` household over one life: a writer
-    seat taken on a join, a post, a comment, then a socket reconnect (the
-    seat list and the epoch re-announce, as ``app._gfs_reconcile`` runs
-    them)."""
+    """What the GFS sees from the ``me`` household over one life: a post, a
+    comment, then a socket reconnect (the epoch re-announce, as
+    ``app._gfs_reconcile`` runs it)."""
     svc, spaces, gfs = world["svc"], world["spaces"], world["gfs"]
     spaces.local[SPACE_ID] = [AUTHOR]
     spaces.members[SPACE_ID] = [
@@ -748,7 +653,6 @@ async def _gfs_view(world, *, delegated_admin: bool) -> dict:
         spaces.seeds[SPACE_ID] = SPACE_SEED
     rec = _GfsTrace(gfs.session)
     gfs.session = rec
-    seat_on_join = await svc.ensure_subscribed(SPACE_ID)
     post_targets = await svc.plan_post(SPACE_ID, AUTHOR)
     posted = await svc.publish_post(SPACE_ID, _inner(), post_targets)
     commented = await svc.publish_item(
@@ -758,16 +662,12 @@ async def _gfs_view(world, *, delegated_admin: bool) -> dict:
         await svc.plan_item(SPACE_ID, AUTHOR, "comment"),
     )
     # The socket came back.
-    reconnect_seats = await svc.member_subscription_ids("conn-1")
     before = len(rec.seen)
     announced = await svc.announce_held_epochs("conn-1")
     return {
-        "seat_on_join": seat_on_join,
-        "subscribed": list(gfs.subscribed),
         "post_targets": [c.id for c in post_targets],
         "posted": [c.id for c in posted],
         "commented": [c.id for c in commented],
-        "reconnect_seats": reconnect_seats,
         "reconnect_requests": rec.seen[before:],
         "announced": announced,
         "requests": [(m, path) for m, path, _ in rec.seen],
@@ -778,16 +678,13 @@ async def _gfs_view(world, *, delegated_admin: bool) -> dict:
 @pytest.mark.security
 async def test_the_gfs_sees_a_delegated_admin_as_any_writer(world):
     """GFS must not learn who holds a space's signing seed: a delegated
-    admin household keeps its fan-out seat, publishes its posts anonymously
-    under the writer group key and stays silent on a reconnect — request for
+    admin household publishes its posts anonymously under the writer group
+    key and stays silent on a reconnect — request for
     request what a plain writer household sends."""
     view = await _gfs_view(world, delegated_admin=True)
-    assert view["seat_on_join"] == 1
-    assert view["subscribed"] == [(SPACE_ID, "conn-1")]
     assert view["post_targets"] == ["conn-1"]
     assert view["posted"] == ["conn-1"]
     assert view["commented"] == ["conn-1"]
-    assert view["reconnect_seats"] == [SPACE_ID]
     assert view["reconnect_requests"] == []
     assert view["announced"] == 0
     # Two anonymous items and nothing else that names the space.
@@ -802,13 +699,9 @@ async def test_the_gfs_sees_a_delegated_admin_as_any_writer(world):
 async def test_a_plain_writer_gives_the_gfs_the_same_view(world):
     """The reference the test above is held to: the very same trace."""
     plain = await _gfs_view(world, delegated_admin=False)
-    assert plain["seat_on_join"] == 1
-    assert plain["reconnect_seats"] == [SPACE_ID]
     assert plain["reconnect_requests"] == []
     # Now the same household is handed the seed: nothing it sends changes.
     world["gfs"].session = world["gfs"].session._session
-    world["gfs"].subscribed.clear()
-    world["svc"]._subscribed.clear()
     world["svc"].forget_directories()
     admin = await _gfs_view(world, delegated_admin=True)
     assert admin == plain
@@ -835,16 +728,6 @@ async def test_a_delegated_admin_reconnect_sends_no_epoch_notice(world):
     )
     assert await world["svc"].announce_epoch(SPACE_ID) == 1
     assert (await _epoch(world)).current == 4
-
-
-async def test_a_failing_join_subscribe_is_logged_not_raised(world, monkeypatch):
-    async def _boom(self, space_id):
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(GfsMemberPublishService, "ensure_subscribed", _boom)
-    bus = EventBus()
-    world["svc"].wire(bus)
-    await bus.publish(SpaceMemberJoined(space_id=SPACE_ID, user_id="u1"))
 
 
 # ── v2: author binding, accepted-only targets, directory listing ─────────
@@ -999,8 +882,6 @@ async def test_the_owner_publishes_items_but_not_posts(world):
     assert [c.id for c in await svc.plan_item(SPACE_ID, AUTHOR, "comment")] == [
         "conn-1"
     ]
-    # The owner never auto-subscribes: it receives over federation.
-    assert world["gfs"].subscribed == []
 
 
 @pytest.mark.security
@@ -1228,9 +1109,8 @@ async def test_strict_publishes_anonymously_over_the_cookie_less_session(world):
     assert [c.id for c in targets] == ["conn-1"]
     accepted = await svc.publish_post(SPACE_ID, _inner(), targets)
     assert [c.id for c in accepted] == ["conn-1"]
-    # Nothing went over the identified session — no publish, no subscribe.
+    # Nothing went over the identified session.
     assert identified.posts == []
-    assert world["gfs"].subscribed == []
     [(_url, body)] = [
         p for p in anon.posts if p[0].endswith("/gfs/member-publish-anon")
     ]
@@ -1283,7 +1163,6 @@ async def test_strict_without_the_writer_key_takes_the_host_path(world):
     # Even handed targets, the item is never sent identified.
     assert await svc.publish_post(SPACE_ID, _inner(), [world["conn"]]) == []
     assert identified.posts == [] and anon.posts == []
-    assert world["gfs"].subscribed == []
 
 
 @pytest.mark.security
@@ -1429,32 +1308,6 @@ async def test_a_delegated_admin_notice_carries_only_the_writer_key_pin(world):
     assert "publish_mode" not in body and "owning_instance" not in body
 
 
-async def test_strict_auto_subscribe_is_the_plain_follower_subscribe(world):
-    """The member auto-subscribe calls the very same signed subscribe a
-    follower's subscribe / re-subscribe uses — ``(space_id, gfs_id)`` and
-    nothing else — so the server cannot tell a writer from a follower."""
-    _strict_world(world)
-    world["spaces"].local[SPACE_ID] = [AUTHOR]
-    world["spaces"].members[SPACE_ID] = [
-        SpaceMember(space_id=SPACE_ID, user_id=AUTHOR, role="member", joined_at="")
-    ]
-    assert await world["svc"].ensure_subscribed(SPACE_ID) == 1
-    assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
-
-
-async def test_member_subscription_ids_lists_the_writer_spaces(world):
-    world["spaces"].local[SPACE_ID] = [AUTHOR]
-    world["spaces"].members[SPACE_ID] = [
-        SpaceMember(space_id=SPACE_ID, user_id=AUTHOR, role="member", joined_at="")
-    ]
-    assert await world["svc"].member_subscription_ids("conn-1") == [SPACE_ID]
-    # Nothing subscribed by the listing itself — the reconnect batch does it.
-    assert world["gfs"].subscribed == []
-    assert await world["svc"].member_subscription_ids("nope") == []
-    world["gfs"].capable = False
-    assert await world["svc"].member_subscription_ids("conn-1") == []
-
-
 @pytest.mark.security
 async def test_strict_ts_is_whole_seconds_with_jitter(world):
     """No sub-second clock skew to fingerprint the household by; the jitter
@@ -1558,7 +1411,6 @@ async def test_a_private_space_publishes_only_through_its_channel(world):
     assert [t.id for t in targets] == ["conn-1"]
     # Nothing identified or space-keyed: no subscribe to the space, no
     # /gfs/member-publish.
-    assert world["gfs"].subscribed == []
     accepted = await svc.publish_item(SPACE_ID, "post", _inner(), targets)
     assert accepted == targets
     (space_id, epoch, ct, _t) = channels.sealed[0]
@@ -1765,7 +1617,6 @@ async def test_with_the_key_a_trusted_space_publishes_anonymously_to_a_listed_gf
     accepted = await svc.publish_post(SPACE_ID, _inner(), targets)
     assert [c.id for c in accepted] == [f"listing:{GFS_ID}"]
     assert identified.posts == [] and anon.posts == []
-    assert world["gfs"].subscribed == []
     [(url, body)] = listing.posts
     assert url.endswith("/gfs/member-publish-anon")
     blob = json.dumps(body)
@@ -1894,12 +1745,6 @@ async def test_the_owner_notice_goes_only_to_its_own_connections(world):
     await owner.announce_epoch(SPACE_ID)
     assert listing.posts == []
     assert _tail(identified.posts) == ["epoch"]
-
-
-async def test_auto_subscribe_never_goes_to_a_listing_target(world):
-    svc = world["svc"]
-    assert await svc._subscribe([_listing(world)], SPACE_ID) == 0
-    assert world["gfs"].subscribed == []
 
 
 class _OldSuiteNode:
@@ -2097,17 +1942,6 @@ async def test_the_owner_publishes_its_own_global_post_into_the_channel(world):
     channels = _global_channel(world, owner=world["me"].instance_id)
     targets = await world["svc"].plan_post(SPACE_ID, AUTHOR)
     assert targets == [channels.conn]
-
-
-@pytest.mark.security
-async def test_a_global_channel_member_takes_no_space_keyed_seat(world):
-    _global_channel(world)
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-    assert await world["svc"].ensure_subscribed(SPACE_ID) == 0
-    assert await world["svc"].member_subscription_ids("conn-1") == []
-    assert world["gfs"].subscribed == []
 
 
 async def test_a_global_channel_announces_only_on_the_channel(world):

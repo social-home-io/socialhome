@@ -51,9 +51,10 @@ log = logging.getLogger(__name__)
 class AuthorityPinRefresher(Protocol):
     """Heals a subscriber's pin from a GFS listing's owner cert (v_44).
 
-    Implemented by
-    :class:`~socialhome.services.gfs_space_mirror_service.GfsSpaceMirrorService`;
-    the GFS-relay consumers call it when an authority check fails.
+    No implementation is wired since the GFS follow-only mirror was removed
+    (a follower is a member and gets the authority cert by federation); the
+    one remaining consumer (:mod:`.space_subscriber_key_inbound`) goes with
+    the subscriber key handoff.
     """
 
     async def refresh_authority_pin(self, space_id: str) -> bool: ...
