@@ -23,7 +23,7 @@ may span any number of paired HFS instances.
 `SPACE_AGE_GATE_UPDATED`, `SPACE_MEMBER_PROFILE_UPDATED`. (A new GFS
 follower's author names travel host → follower through the GFS, not
 between households — see
-[discovery.md](./discovery.md#a-new-followers-author-names-v_61); removed in
+[discovery.md](./discovery.md#removed-in-v_96-the-space-keyed-relay); removed in
 v_96, see [Followers (v_96)](#followers-v_96).)
 
 `SPACE_MEMBER_PROFILE_UPDATED` carries a member's per-space display name

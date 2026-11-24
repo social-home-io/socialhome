@@ -2115,9 +2115,9 @@ once per freed slot per budget.
   itself is a sealed single-recipient frame (`SPACE_ADMIN_KEY_SHARE`, v_94),
   and in a publicly readable space a household that holds the seed without
   owning the space sends the GFS what any writer household sends —
-  anonymous items, the same fan-out seat, nothing on a reconnect beyond the
-  seat re-take every writer sends — and answers nothing the GFS hands it
-  differently (a `new_subscriber` frame, a delete delivered to its seat)
+  anonymous channel items and the same channel seat as every member (the
+  space-keyed `new_subscriber` frames and seats it once had to answer like
+  a writer went in v_96)
   ([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)).
   What only the seed can sign still goes out for something done on that
   household itself — the notice of a rotation it runs, a removal made

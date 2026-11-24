@@ -860,14 +860,11 @@ unfollowed redirect, is permanent and not retried. While a connection has
 retries pending, a new publish to it queues behind them, so subscribers see
 order. A queued item is exactly `{space_id, event_type, payload}` — there is
 no slot for `from_instance` or a household signature, so a retry cannot add
-identity. **There is no identified body at all any more:** a publish goes
-only to a GFS that has proved `anonymous_publish` under its signed capability
-block. A cold cache with `/gfs/info` unreachable puts the publish straight
-into the retry queue (nothing is sent until the capability is proven); a
-reachable GFS without the proof — an older build — **receives no space
-publishes until it upgrades**, with one WARNING per connection. Before each
-retry the sender re-checks that the space is still published to that
-connection and re-checks the capability the same way. **Why in memory:** the outbox
+identity. **There is no identified body at all:** a channel publish goes only
+to a GFS whose signed capability block proves what the channel needs
+(`private_channels`, and `subscriber_seats` for a global space). Before each
+retry the sender re-checks that the space still uses that server and
+re-checks the capability the same way. **Why in memory:** the outbox
 row is keyed by a recipient instance and re-signed on redelivery — a GFS
 publish has neither — so carrying it there, or in a new table, would be a
 migration for a payload that is already authority-signed public ciphertext,
@@ -1337,25 +1334,19 @@ process: during a reconnect that moves a household between nodes, a stale
 socket on the old node can in rare cases take a frame another node also
 delivers. Receivers tolerate it — a relayed §24.11 envelope is dropped by the
 pipeline's replay step (`msg_id`), an invite-bootstrap body by its
-`redeem_nonce` replay guard, a member item by its item-id dedupe. A targeted
-`POST /gfs/publish` (`to`) whose subscriber has no socket on the publishing
-node is queued the same way (`GfsEnvelopeRelay.queue_relay`). Owner notices
-ride the same hint: a `new_subscriber` notice for an owner whose socket is
-elsewhere is added to the next `NODE_DRAIN_HINT` as `notices:[…]` (ids and
-labels only, `ClusterService.hint_subscriber_notice`), and the node holding
-the owner's socket rebuilds it from the shared DB
-(`GfsFederationService.deliver_forwarded_notice`) — no frame of its own, so it
-spends nothing of a peer's 60-a-minute sync budget beyond the hint.
+`redeem_nonce` replay guard, a member item by its item-id dedupe. (The
+targeted `POST /gfs/publish` queue and the `new_subscriber` owner notices
+that rode the same hint went with the space-keyed relay in v_96.)
 
-**Cross-node broadcast fan-out.** A broadcast `POST /gfs/publish`, a member
-publish and a channel item reached only the sockets of the node that took the
-request — on four nodes behind a round-robin balancer about three followers in
+**Cross-node broadcast fan-out.** A channel item (before v_96 also a
+broadcast `POST /gfs/publish` and a space-keyed member publish) reached only
+the sockets of the node that took the request — on four nodes behind a round-robin balancer about three followers in
 four missed every post (`NODE_RELAY` never had a production caller). Now the
 accepting node pushes to its own sockets and hands the item to
 `ClusterRelayFanOut.forward` (`global_server/cluster_relay.py`); it rides the
 next `NODE_DRAIN_HINT` as `relays:[…]`, ONE copy per peer node however many
-subscribers. Each receiver resolves the item's audience (`space` / `channel`
-id) from the shared DB, pushes to the members whose socket it holds, never
+subscribers. Each receiver resolves the item's audience (a `channel` id;
+the `space` audience went in v_96) from the shared DB, pushes to the members whose socket it holds, never
 forwards again, and dedupes on its own digest of the frame (10 min). For member
 and channel items it answers with `held` (the audience members it holds), so
 the accepting node queues offline copies only for the recently-seen
