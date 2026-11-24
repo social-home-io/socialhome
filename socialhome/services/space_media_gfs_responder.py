@@ -31,14 +31,12 @@ kept in its cache again. This service answers that:
    :data:`REUPLOAD_COALESCE_S`: one re-upload per blob however many readers
    asked; later requests in the window stream only.
 
-**Who answers.** Only a household the GFS may ask: for a listed space its
-OWNER household, and only for a space it listed on THAT GFS (the GFS knows
-both already); for a private space's channel a member household holding a
-seat on that GFS. Any other request — a space this household doesn't own,
-didn't list there, or a private space — is declined ``not_held`` on the same
-path, before any key or crypto is touched, so a GFS can't probe who is a
-member or which spaces a household owns. Over its hourly budget the owner
-declines ``busy`` (the GFS may then ask the members).
+**Who answers.** Only a household the GFS may ask: one holding a seat on
+the space's channel on that GFS (the ``channel`` scope, the only one since
+v_96). Any other request is declined ``not_held`` on the same path, before
+any key or crypto is touched, so a GFS can't probe who is a member. Over
+its hourly budget a household declines ``busy`` (the GFS may then ask
+another seat).
 
 A hint older than
 :data:`~socialhome.space_media_hint.HINT_MAX_AGE_S` is refused. Only a file a
@@ -452,38 +450,25 @@ class SpaceMediaGfsResponder:
         self, scope: str, scope_id: str, conn: GfsConnection
     ) -> str | None:
         """The space this household may be asked for under the scope by
-        *conn*'s GFS: a space it OWNS and LISTED on that GFS (the only
-        household that GFS asks for it), or the space of a private channel it
-        holds a seat for on that GFS. ``None`` otherwise — every such case
-        the same way, before any crypto."""
-        if scope == SCOPE_CHANNEL:
-            spaces = await self._spaces.spaces_for_gfs_channel(scope_id)
-            space_id = spaces[0] if len(spaces) == 1 else ""
-            grant = (
-                await self._channels.current_grant(space_id)
-                if self._channels is not None and space_id
-                else None
-            )
-            if (
-                grant is None
-                or grant.channel_id != scope_id
-                or not self._gfs.known_instance_ids(conn) & set(grant.gfs_ids)
-            ):
-                return None
-            return space_id
-        own = self._federation.own_instance_id if self._federation else ""
-        space = await self._spaces.get(scope_id)
-        listed = await self._gfs_repo.list_publications_for_space(scope_id)
+        *conn*'s GFS: the space of a channel it holds a seat for on that GFS
+        (the ``channel`` scope, the only one since v_96). ``None`` otherwise
+        — every such case the same way, before any crypto."""
+        if scope != SCOPE_CHANNEL:
+            return None
+        spaces = await self._spaces.spaces_for_gfs_channel(scope_id)
+        space_id = spaces[0] if len(spaces) == 1 else ""
+        grant = (
+            await self._channels.current_grant(space_id)
+            if self._channels is not None and space_id
+            else None
+        )
         if (
-            space is None
-            or not own
-            or space.owner_instance_id != own
-            or not any(
-                p.gfs_connection_id == conn.id and p.status == "active" for p in listed
-            )
+            grant is None
+            or grant.channel_id != scope_id
+            or not self._gfs.known_instance_ids(conn) & set(grant.gfs_ids)
         ):
             return None
-        return scope_id
+        return space_id
 
     async def _read(self, name: str) -> bytes | None:
         path = media_file_path(self._dir, name)

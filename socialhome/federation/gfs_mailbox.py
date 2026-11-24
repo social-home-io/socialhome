@@ -68,6 +68,7 @@ from .. import privacy_pass as pp
 from ..canonical_json import canonical_bytes
 from ..capabilities_sig import verify_capabilities
 from ..crypto import b64url_decode, b64url_encode, ed25519_public_key, sign_ed25519
+from ..domain.gfs_hello_accepts import ACCEPTS_ENVELOPE_MEDIA
 from ..domain.gfs_mailbox import (
     FRAME_MAILBOX_CHALLENGE,
     FRAME_MAILBOX_CLAIM,
@@ -88,7 +89,6 @@ from ..domain.gfs_mailbox import (
     register_signed_bytes,
     unregister_signed_bytes,
 )
-from ..domain.subscriber_accepts import ACCEPTS_ENVELOPE_MEDIA
 
 log = logging.getLogger(__name__)
 

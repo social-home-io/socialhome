@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 import orjson
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from socialhome.domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -43,7 +44,6 @@ from socialhome.crypto import (
     derive_user_id,
     ed25519_public_key,
 )
-from socialhome.domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space_item import (

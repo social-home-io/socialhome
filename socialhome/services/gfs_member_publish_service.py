@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING
 
 import orjson
 
@@ -44,11 +44,10 @@ from ..domain.federation import GfsConnection
 from ..domain.space import SpaceFeatures, SpaceType
 from ..domain.space_item import (
     ITEM_TYPE_POST,
-    PAYLOAD_SUITE_JSON,
     SUPPORTED_ITEM_TYPES,
+    pad_json_object,
     reader_cert_permits,
     required_scope,
-    seal_item_plaintext,
 )
 from ..domain.writer_cert import WriterCert, scope_permits
 from ..task_drain import wait_tasks_done
@@ -96,23 +95,13 @@ def _cert_lets(
     )
 
 
-@overload
-def build_item_plaintext(item_type: str, inner: dict) -> bytes: ...
-@overload
-def build_item_plaintext(
-    item_type: str, inner: dict, *, suite: str
-) -> bytes | None: ...
-def build_item_plaintext(
-    item_type: str, inner: dict, *, suite: str = PAYLOAD_SUITE_JSON
-) -> bytes | None:
-    """The bytes a member publish encrypts: the real type + the inner,
-    under ``suite`` (:func:`~socialhome.domain.space_item.seal_item_plaintext`).
-    JSON is padded with ASCII ``0`` in
-    :data:`~socialhome.domain.space_item.PAD_FIELD` to exactly the smallest
-    :data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS` size that fits (an
-    item larger than the largest bucket is left unpadded); ``zlib1`` is
-    compressed then zero-padded, or ``None`` when that suite can't carry it."""
-    return seal_item_plaintext({"item_type": item_type, "inner": inner}, suite=suite)
+def build_item_plaintext(item_type: str, inner: dict) -> bytes:
+    """The bytes a channel item encrypts: the real type + the inner, padded
+    JSON (:func:`~socialhome.domain.space_item.pad_json_object`) — ASCII
+    ``0`` in :data:`~socialhome.domain.space_item.PAD_FIELD` to exactly the
+    smallest :data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS` size
+    that fits (an item larger than the largest bucket is left unpadded)."""
+    return pad_json_object({"item_type": item_type, "inner": inner})
 
 
 def parse_item_plaintext(plaintext: bytes) -> tuple[str, dict] | None:

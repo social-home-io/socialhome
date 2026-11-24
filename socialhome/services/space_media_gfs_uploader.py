@@ -8,30 +8,27 @@ media is created in a space that has such readers, this household:
 1. **plans** (:meth:`SpaceMediaGfsUploader.plan`, or
    :meth:`~SpaceMediaGfsUploader.plan_for_reader` for one §25.6 catch-up
    requester): finds the GFSs those readers use — each link-joined v_80
-   member's ``relay_via`` connection, and (for followers, v_96: only for a
-   space that runs an opaque channel here) every GFS that channel lives on —
-   keeps the ones whose signed ``space_media`` capability
-   lists the space's scope, and describes each file of the item
+   member's ``relay_via`` connection, and (for followers) every GFS the
+   space's opaque channel lives on — keeps the ones whose signed
+   ``space_media`` capability lists the ``channel`` scope, and describes each file of the item
    (:func:`~socialhome.domain.space_media_ref.record_media_urls`, ≤ 8 MiB):
    its deterministic sealed blob's scope-bound address (``sm1``), suite,
    epoch, size, scope and ``addr_suite``. Only a file that is no reserved
    (DM / moment) name and that nothing but this space's content references
    (``MediaReferenceRepo.confined_to_space``) is ever described. The caller
    puts that ``media_refs`` descriptor inside the item's encrypted payload.
-   No reader, or no upload authorization here → no plan, no sealing.
+   No reader, no channel (since v_96 the GFS keeps space media only under a
+   space's opaque channel), or no upload authorization here → no plan, no
+   sealing.
 2. **uploads** (:meth:`SpaceMediaGfsUploader.upload`) in the background: seals
    each file once more (deterministic: the same bytes, so no sealed copy is
    kept in memory meanwhile; the file is re-checked as the space's own) and
    PUTs it once per target GFS to the one scope-free path
    ``PUT /gfs/media/{blob_id}`` — the scope rides only inside the signed
-   claim — authorized as the GFS requires: the space-authority signature on
-   the space's owner, and on a delegated admin only where the space has no
-   writer group key (since v_96 nobody signs with that key: no GFS pins it
-   any more). Nothing names the household; never ``from_instance``.
-   A space reached through its opaque channel (v_51 private, v_96 global)
-   uploads under the channel scope instead (the claim names the channel; the channel key for a
-   seed holder, else the member's channel writer key from its grant) — the
-   GFS learns the channel id, never the space.
+   claim — authorized as the GFS requires: the claim names the space's
+   opaque channel (v_51 private, v_96 global); the channel key signs for a
+   seed holder, else the member's channel writer key from its grant. The
+   GFS learns the channel id, never the space; nothing names the household.
 
 ``200 already_stored`` is success (another uploader or an earlier try got
 there first) and is remembered per (GFS, blob) until min(:data:`KEEP_S`, that
@@ -46,18 +43,6 @@ picture until it is re-uploaded.
 
 Cost per item: one upload per file per GFS (never per reader).
 
-**On demand (v_83).** A video whose blob is at least
-:data:`LAZY_VIDEO_MIN_BYTES` is described but NOT uploaded eagerly to a GFS
-that proved ``on_demand`` while no member household of the space reads
-through a GFS (only followers, who can't be told apart, ask a GFS for a
-missed blob; a member gets it at once) — and only by the household the GFS
-would ask for
-it: the OWNER of a listed space (a member's or a private channel's large
-video goes eagerly, as before, or nobody could ever be asked for it). It
-goes only when a reader plays it and the GFS
-asks a holder (:mod:`.space_media_gfs_responder`), which re-uses
-:meth:`SpaceMediaGfsUploader.authorize` and
-:meth:`~SpaceMediaGfsUploader.remember_stored`. Pictures go at once, as before.
 """
 
 from __future__ import annotations
@@ -80,11 +65,9 @@ from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import CHANNEL_SUITE_ED25519
 from ..domain.gfs_space_media import (
     ADDR_SUITE_SM1,
-    AUTH_AUTHORITY,
     AUTH_CHANNEL,
     AUTH_WRITER_KEY,
     SCOPE_CHANNEL,
-    SCOPE_SPACE,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
     space_media_address,
@@ -104,8 +87,6 @@ from ..space_media_seal import (
 from ..writer_key import sign_with_writer_key
 from .gfs_channel_service import channel_on
 from .inbound_media_store import media_file_path
-from .space_crypto_service import AUTHORITY_SIG_SUITE_ED25519
-from .space_writer_cert_service import writer_key_min_version
 
 if TYPE_CHECKING:
     from ..domain.federation import GfsConnection
@@ -136,13 +117,6 @@ KEEP_S: int = 7 * 86_400
 #: until min(KEEP_S, that GFS's TTL), after which the GFS may have dropped
 #: the blob and a repeat sends it again.
 MAX_REMEMBERED: int = 4096
-
-#: v_83 — a video blob at least this big is uploaded only on demand (a
-#: reader plays it); smaller clips and every picture go at once.
-LAZY_VIDEO_MIN_BYTES: int = 1024 * 1024
-
-#: What counts as a video (by extension) for the lazy upload.
-VIDEO_EXTENSIONS: frozenset[str] = frozenset({"mp4", "m4v", "mov", "webm", "mkv"})
 
 #: Descriptors remembered per (space, epoch, file, size, mtime), so one item
 #: planned by two senders (the member broadcast and the seed holder's
@@ -223,9 +197,6 @@ class SpaceMediaPlan:
     space_id: str
     refs: tuple[SpaceMediaRef, ...]
     targets: tuple[GfsConnection, ...]
-    #: No member household reads the space through a GFS (v_83): a large
-    #: video may wait for a follower GFS's request.
-    lazy_ok: bool = False
 
     def wire(self) -> dict[str, dict]:
         """The ``media_refs`` descriptor."""
@@ -237,13 +208,6 @@ class _Job:
     ref: SpaceMediaRef
     conns: tuple[GfsConnection, ...]
     attempt: int = 1
-    lazy_ok: bool = False
-
-
-def is_lazy_ref(ref: SpaceMediaRef) -> bool:
-    """A video whose blob is at least :data:`LAZY_VIDEO_MIN_BYTES` (v_83)."""
-    ext = ref.filename.rpartition(".")[2].lower()
-    return ext in VIDEO_EXTENSIONS and ref.size >= LAZY_VIDEO_MIN_BYTES
 
 
 class SpaceMediaGfsUploader:
@@ -315,11 +279,13 @@ class SpaceMediaGfsUploader:
 
     async def can_upload(self, space_id: str) -> bool:
         """Whether this household holds an upload authorization for
-        *space_id*'s scope right now — the very one :meth:`_put` would sign
-        with (the space authority; for a space's channel, the channel key
-        or this household's grant). A
-        link-joined proposer describes a page's files only when it does."""
-        scope, scope_id = await self.scope_of(space_id)
+        *space_id*'s channel right now — the very one :meth:`_put` would
+        sign with (the channel key or this household's grant). A link-joined
+        proposer describes a page's files only when it does."""
+        scoped = await self.scope_of(space_id)
+        if scoped is None:
+            return False
+        scope, scope_id = scoped
         now = int(time.time())
         claim = SpaceMediaClaim(
             scope=scope,
@@ -329,25 +295,20 @@ class SpaceMediaGfsUploader:
             expires_at=now + KEEP_S,
             ts=now,
         )
-        auth = (
-            await self._authorize_channel(claim, space_id)
-            if scope == SCOPE_CHANNEL
-            else await self._authorize(claim)
-        )
-        return auth is not None
+        return await self._authorize_channel(claim, space_id) is not None
 
-    async def scope_of(self, space_id: str) -> tuple[str, str]:
+    async def scope_of(self, space_id: str) -> tuple[str, str] | None:
         """``(scope, scope_id)`` *space_id*'s blobs are uploaded under: the
         opaque channel of a space that uses one — a PRIVATE space with
-        ``private_gfs``, or a GLOBAL space (v_96: once it runs a channel its
-        space-keyed writer-key pin is no longer announced) — else the space
-        itself (listed on the GFS)."""
+        ``private_gfs``, or a GLOBAL space — else ``None``: since v_96 a GFS
+        keeps no space-keyed media, so a space without a channel here
+        uploads nothing (its readers get their files pushed)."""
         space = await self._spaces.get(space_id)
         if space is not None and channel_on(space):
             stored = await self._spaces.get_gfs_channel(space_id)
             if stored is not None:
                 return SCOPE_CHANNEL, stored[0]
-        return SCOPE_SPACE, space_id
+        return None
 
     # ── Readers ──────────────────────────────────────────────────────────
 
@@ -444,23 +405,16 @@ class SpaceMediaGfsUploader:
     ) -> SpaceMediaPlan | None:
         """The plan for item *item_id* of *space_id* referencing
         *media_urls*: link-joined v_80 members' GFSs, plus (``followers``)
-        the GFSs the space's opaque channel is relayed on. ``None`` when no
-        capable GFS needs it or no file can be described — nothing is sealed
-        then. v_96 — a space without a channel here has no GFS readers but
-        its link-joined members: nothing is uploaded space-scoped for
-        followers (no request names the space to a listing GFS for a reader
-        that does not exist)."""
+        the GFSs the space's opaque channel is relayed on. ``None`` when the
+        space runs no channel here, no capable GFS needs it or no file can
+        be described — nothing is sealed then."""
         names = media_names(media_urls)
-        if not names:
+        if not names or await self.scope_of(space_id) is None:
             return None
         conns = await self._relay_reader_conns(space_id)
-        # Lazy (v_83, a large video waits for a follower to play it) only
-        # where no member household reads through a GFS: a member never asks
-        # a GFS for a missed file — it gets it at once.
-        lazy_ok = not conns
-        if followers and (await self.scope_of(space_id))[0] == SCOPE_CHANNEL:
+        if followers:
             conns.extend(await self._gfs.space_media_follower_targets(space_id))
-        return await self._plan(space_id, names, conns, item_id, lazy_ok=lazy_ok)
+        return await self._plan(space_id, names, conns, item_id)
 
     async def plan_for_reader(
         self,
@@ -484,11 +438,11 @@ class SpaceMediaGfsUploader:
         names: list[str],
         conns: list[GfsConnection],
         item_id: str,
-        *,
-        lazy_ok: bool = False,
     ) -> SpaceMediaPlan | None:
-        scope, _scope_id = await self.scope_of(space_id)
-        targets = await self._capable(conns, scope)
+        scoped = await self.scope_of(space_id)
+        if scoped is None:
+            return None
+        targets = await self._capable(conns, scoped[0])
         if not targets:
             return None
         # Nothing this household could PUT is never sealed or described: a
@@ -496,16 +450,11 @@ class SpaceMediaGfsUploader:
         # fetch before the push lands.
         if not await self.can_upload(space_id):
             return None
-        # Lazy only where the GFS asks THIS household for it on demand.
-        # v_96: followers are planned only under the channel scope, so this
-        # space-scope branch no longer triggers; the on-demand refill is
-        # reworked with the GFS's space-scope media.
-        lazy_ok = lazy_ok and scope == SCOPE_SPACE and await self._owns(space_id)
         refs = await self._describe_names(space_id, names, item_id)
         if not refs:
             return None
         return SpaceMediaPlan(
-            space_id=space_id, refs=tuple(refs), targets=tuple(targets), lazy_ok=lazy_ok
+            space_id=space_id, refs=tuple(refs), targets=tuple(targets)
         )
 
     async def _describe_names(
@@ -529,7 +478,10 @@ class SpaceMediaGfsUploader:
         if current is None:
             return []
         epoch, key = current
-        scope, scope_id = await self.scope_of(space_id)
+        scoped = await self.scope_of(space_id)
+        if scoped is None:
+            return []
+        scope, scope_id = scoped
         refs: list[SpaceMediaRef] = []
         for name in names[:MAX_FILES_PER_ITEM]:
             if not await self._space_file(space_id, name):
@@ -577,12 +529,6 @@ class SpaceMediaGfsUploader:
                 self._described.popitem(last=False)
             refs.append(ref)
         return refs
-
-    async def _owns(self, space_id: str) -> bool:
-        """Whether this household owns *space_id* (the holder a GFS asks)."""
-        own = self._federation.own_instance_id if self._federation else ""
-        space = await self._spaces.get(space_id)
-        return bool(own) and space is not None and space.owner_instance_id == own
 
     async def _space_file(self, space_id: str, name: str) -> bool:
         """Whether *name* may be sealed under *space_id*'s key: never a
@@ -635,9 +581,7 @@ class SpaceMediaGfsUploader:
                 )
                 continue
             self._pending += 1
-            self._queue.put_nowait(
-                _Job(ref=ref, conns=plan.targets, lazy_ok=plan.lazy_ok)
-            )
+            self._queue.put_nowait(_Job(ref=ref, conns=plan.targets))
 
     async def drain(self) -> None:
         """Wait until every queued upload (and retry) finished — tests and
@@ -693,15 +637,12 @@ class SpaceMediaGfsUploader:
         todo = [
             c for c in job.conns if self._stored.get((c.id, ref.blob_id), 0.0) <= now
         ]
-        if job.lazy_ok and is_lazy_ref(ref):
-            # v_83 — a large video waits for a reader to play it: a GFS that
-            # can ask for it gets it then (:mod:`.space_media_gfs_responder`).
-            todo = [
-                c for c in todo if await self._gfs.space_media_on_demand_wait(c) is None
-            ]
         if not todo:
             return
-        scope, scope_id = await self.scope_of(ref.space_id)
+        scoped = await self.scope_of(ref.space_id)
+        if scoped is None:
+            return
+        scope, scope_id = scoped
         blob = await self._reseal(ref, scope, scope_id)
         if blob is None:
             return
@@ -776,10 +717,10 @@ class SpaceMediaGfsUploader:
         self, claim: SpaceMediaClaim, space_id: str
     ) -> SpaceMediaUploadAuth | None:
         """The upload authorization this household holds for *claim* of
-        *space_id* (the claim's scope decides which kind), or ``None``."""
-        if claim.scope == SCOPE_CHANNEL:
-            return await self._authorize_channel(claim, space_id)
-        return await self._authorize(claim)
+        *space_id* (a channel-scope claim), or ``None``."""
+        if claim.scope != SCOPE_CHANNEL:
+            return None
+        return await self._authorize_channel(claim, space_id)
 
     async def _remember(
         self, conn: GfsConnection, blob_id: str, *, filename: str | None = None
@@ -855,9 +796,7 @@ class SpaceMediaGfsUploader:
         )
         if not refs:
             return None
-        return SpaceMediaPlan(
-            space_id=plan.space_id, refs=refs, targets=plan.targets, lazy_ok=False
-        )
+        return SpaceMediaPlan(space_id=plan.space_id, refs=refs, targets=plan.targets)
 
     async def _reseal(
         self, ref: SpaceMediaRef, scope: str, scope_id: str
@@ -983,34 +922,3 @@ class SpaceMediaGfsUploader:
                 epoch=epoch,
             )
         return None
-
-    async def _authorize(self, claim: SpaceMediaClaim) -> SpaceMediaUploadAuth | None:
-        """The authorization this household uploads a SPACE-scope blob with.
-        The space's OWNER: the space authority (its seed). A delegated admin
-        signs as the authority only where the space has no writer group key
-        (nobody may follow it). Nobody signs with the writer group key any
-        more (v_96): a GFS pinned that key only from the space-keyed epoch
-        notice, which no household sends since the channel carries a global
-        space's content, so such an upload would only be refused — nothing
-        is sent instead. All anonymous."""
-        space_id = claim.scope_id
-        try:
-            seed = await self._spaces.get_space_seed(space_id)
-        except RuntimeError:
-            seed = None
-        if seed is None:
-            return None
-        if await self._owns(space_id):
-            return self._authority_auth(claim, seed)
-        if writer_key_min_version(await self._spaces.get(space_id)) is None:
-            return self._authority_auth(claim, seed)
-        return None
-
-    @staticmethod
-    def _authority_auth(claim: SpaceMediaClaim, seed: bytes) -> SpaceMediaUploadAuth:
-        return SpaceMediaUploadAuth(
-            claim=claim,
-            kind=AUTH_AUTHORITY,
-            sig=b64url_encode(sign_ed25519(seed, claim.authority_signing_bytes())),
-            sig_suite=AUTHORITY_SIG_SUITE_ED25519,
-        )

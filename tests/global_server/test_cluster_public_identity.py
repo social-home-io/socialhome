@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession
 from aiohttp.test_utils import TestServer
+from socialhome.domain.gfs_member_publish import MemberPublishAnonRequest
 
 from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import (
@@ -28,7 +29,6 @@ from socialhome.crypto import (
     derive_instance_id,
     ed25519_public_key,
 )
-from socialhome.domain.gfs_member_publish import MemberPublishAnonRequest
 from socialhome.global_server.app_keys import (
     gfs_cluster_key,
     gfs_fed_repo_key,

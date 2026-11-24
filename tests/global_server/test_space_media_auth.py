@@ -15,6 +15,7 @@ import time
 
 import pytest
 from aiohttp import web
+from socialhome.global_server.member_publish import GfsMemberPublishService
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
@@ -41,7 +42,6 @@ from socialhome.gfs_channel import channel_pk_of, signing_bytes
 from socialhome.global_server.channels import GfsChannelService
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
-from socialhome.global_server.member_publish import GfsMemberPublishService
 from socialhome.global_server.repositories import (
     SqliteGfsChannelRepo,
     SqliteGfsFederationRepo,

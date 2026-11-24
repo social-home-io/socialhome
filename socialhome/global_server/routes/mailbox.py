@@ -54,6 +54,11 @@ import orjson
 from aiohttp import WSMsgType, web
 
 from ... import crypto
+from ...domain.gfs_hello_accepts import (
+    ACCEPTS_ENVELOPE_MEDIA,
+    ACCEPTS_WS_BINARY1,
+    parse_accepts,
+)
 from ...domain.gfs_mailbox import (
     FRAME_MAILBOX_CHALLENGE,
     FRAME_MAILBOX_CLAIM,
@@ -61,11 +66,6 @@ from ...domain.gfs_mailbox import (
     SUPPORTED_MAILBOX_SIG_SUITES,
     UnsupportedMailboxSigSuite,
     validate_mailbox_sig_suite,
-)
-from ...domain.subscriber_accepts import (
-    ACCEPTS_ENVELOPE_MEDIA,
-    ACCEPTS_WS_BINARY1,
-    parse_accepts,
 )
 from .. import app_keys as K
 from ..mailboxes import MailboxRefused

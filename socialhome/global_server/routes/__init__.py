@@ -2,9 +2,8 @@
 
 Each module groups views by URL concern:
 
-* :mod:`.relay`   — ``/gfs/*`` HTTPS relay endpoints (register, plus
-  HTTPS-fallback variants of publish / subscribe / report / appeal +
-  spaces / healthz).
+* :mod:`.relay`   — ``/gfs/*`` HTTPS endpoints (register, info, proof,
+  report / appeal, the space directory + listing publish, healthz).
 * :mod:`.ws`      — ``/gfs/ws`` SH↔GFS WebSocket transport (spec §24.12,
   primary path).
 * :mod:`.cluster` — ``/cluster/*`` + admin cluster tab.
@@ -101,10 +100,6 @@ from .mailbox import (
     MailboxUnregisterView,
     MailboxWebSocketView,
 )
-from .member_publish import (
-    MemberPublishAnonView,
-    SpaceEpochNoticeView,
-)
 from .moments_public import (
     GfsMomentCountsView,
     GfsMomentDeleteCertView,
@@ -133,17 +128,13 @@ from .relay import (
     GfsProofView,
     HealthzView,
     InstanceUpdateView,
-    PublishView,
     RegisterView,
     ReportView,
     SignupTokenView,
     SpaceDetailView,
-    SpaceKeyRequestView,
     SpacePublishView,
     SpacesListView,
-    SpaceSubscribersView,
     SpaceUnpublishView,
-    SubscribeView,
 )
 from .space_media import (
     SPACE_MEDIA_DELETE_ROUTE,
@@ -204,10 +195,6 @@ def register_routes(
     # Persistent SH↔GFS WebSocket — primary transport (spec §24.12).
     app.router.add_view("/gfs/ws", GfsWebSocketView)
 
-    # HTTPS-fallback wire endpoints — used when the WebSocket cannot
-    # stay open. The protocol is otherwise identical to the WS frames.
-    app.router.add_view("/gfs/publish", PublishView)
-    app.router.add_view("/gfs/subscribe", SubscribeView)
     # Opaque household-to-household relay (§D2b invite bootstrap). Anonymous
     # by design: the body names only the recipient, the payload is sealed
     # end-to-end, and every well-formed request gets the same 202.
@@ -225,15 +212,10 @@ def register_routes(
     # A registered household's daily batch of anonymous registration
     # tickets (Privacy Pass): signed by the household, blind-signed here.
     app.router.add_view(MAILBOX_TICKETS_ROUTE, MailboxTicketsView)
-    # Member publish: anonymous, authorized by the space's per-epoch writer
-    # group key; plus the content-epoch notice that pins the key and that the
-    # freshness check relies on.
-    app.router.add_view("/gfs/member-publish-anon", MemberPublishAnonView)
-    app.router.add_view("/gfs/spaces/{space_id}/epoch", SpaceEpochNoticeView)
     # The encrypted, short-lived space media cache: ONE scope-free path —
     # upload (PUT) and fetch (GET) by address, and a delete. The scope (a
-    # listed space, or a private space's opaque channel) rides only inside
-    # the signed claim / delete body, never in the URL.
+    # space's opaque channel) rides only inside the signed claim / delete
+    # body, never in the URL.
     app.router.add_view(SPACE_MEDIA_ROUTE, GfsMediaView)
     app.router.add_view(SPACE_MEDIA_DELETE_ROUTE, GfsMediaDeleteView)
     # v_83 — on demand: a reader asks for a blob it missed (scope in the
@@ -242,7 +224,7 @@ def register_routes(
     app.router.add_view(SPACE_MEDIA_WANTED_ROUTE, GfsMediaWantedView)
     app.router.add_view(SPACE_MEDIA_SERVE_ROUTE, GfsMediaServeView)
     app.router.add_view(SPACE_MEDIA_DECLINE_ROUTE, GfsMediaDeclineView)
-    # Opaque channels for private spaces (v_51) — every id in the body.
+    # Opaque channels (v_51 private, v_96 global) — every id in the body.
     app.router.add_view(CHANNEL_REGISTER_ROUTE, ChannelRegisterView)
     app.router.add_view(CHANNEL_EPOCH_ROUTE, ChannelEpochView)
     app.router.add_view(CHANNEL_UNREGISTER_ROUTE, ChannelUnregisterView)
@@ -253,9 +235,6 @@ def register_routes(
     app.router.add_view("/gfs/appeal", AppealView)
     app.router.add_view("/gfs/spaces", SpacesListView)
     app.router.add_view("/gfs/spaces/{space_id}", SpaceDetailView)
-    app.router.add_view("/gfs/spaces/{space_id}/subscribers", SpaceSubscribersView)
-    # #5b — a follower that missed a space's content key asks for it.
-    app.router.add_view("/gfs/spaces/{space_id}/key_request", SpaceKeyRequestView)
     app.router.add_view("/gfs/spaces/{space_id}/publish", SpacePublishView)
     app.router.add_view("/gfs/spaces/{space_id}/unpublish", SpaceUnpublishView)
     # Owner-minted invite links (§24.8.5). The mint/revoke pair is signed by

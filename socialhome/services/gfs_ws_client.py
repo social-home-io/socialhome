@@ -34,9 +34,9 @@ import aiohttp
 import orjson
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.gfs_hello_accepts import OUR_HELLO_ACCEPTS
 from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..domain.relay_media_frame import is_relay_media_body
-from ..domain.subscriber_accepts import OUR_HELLO_ACCEPTS
 from ..domain.ws_binary_frame import InvalidBinaryFrame, decode_binary_frame
 from ..federation.inbound_validator import UnpairedPeerRefusedError
 

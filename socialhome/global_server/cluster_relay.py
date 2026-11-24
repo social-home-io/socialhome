@@ -2,10 +2,8 @@
 
 Each GFS node knows only its OWN ``/gfs/ws`` sockets, and production runs
 several nodes on one shared database behind a round-robin balancer. A
-broadcast item — an authority-signed ``/gfs/publish`` (``space_post_public``
-and the other broadcast space events), a member publish (identified or
-anonymous) or a private-channel item — used to reach only the subscribers
-connected to the node that took the request: on four nodes about three
+broadcast item — a channel item or a public moment — used to reach only the
+seats connected to the node that took the request: on four nodes about three
 followers in four missed every post.
 
 **One forward per peer node, not per subscriber.** The node that accepted
@@ -14,8 +12,7 @@ the item pushes it to its own sockets as before, then hands it to
 ``NODE_DRAIN_HINT`` frame (key ``relays``, see
 :meth:`~socialhome.global_server.cluster.ClusterService.forward_relay`) —
 one frame per peer per flush, however many subscribers and items. The frame
-names the AUDIENCE, not the recipients: ``("space", space_id)``,
-``("channel", channel_id)``, ``("followers", author_user_id)`` (a public
+names the AUDIENCE, not the recipients: ``("channel", channel_id)``, ``("followers", author_user_id)`` (a public
 moment or its tombstone) or ``("instance", instance_id)`` (a push for one
 household the origin had no socket for — ``follow_changed`` /
 ``moment_key_request`` to an author, and the public-highlight
@@ -33,17 +30,15 @@ by the BLAKE2b digest of the frame, which each node computes itself (an id
 taken off the wire could name other bytes) — for
 :data:`RELAY_FORWARD_SEEN_TTL_S`. A second copy (a retried frame, or the
 same bytes published to two nodes) is never pushed twice by one node; each
-socket lives on one node, so each subscriber gets the item once. The same
-memory makes a replay of a broadcast to ANOTHER node a no-op there
-(``GfsFederationService.publish_event``).
+socket lives on one node, so each subscriber gets the item once.
 
 An ``instance`` item is the exception (:data:`DEDUPED_KINDS`): it is
 forwarded only after the origin found no socket, and the same request a
 minute later must reach the household again.
 
-**Offline copies.** Member, channel and moment items are queued for a
+**Offline copies.** Channel and moment items are queued for a
 recently-seen subscriber with no socket (``queue_ok``, see
-:mod:`.member_publish`). Only
+:mod:`.fan_out_workers`). Only
 the node that holds a socket knows it does, so for those items each
 receiver answers the ``NODE_DRAIN_HINT`` POST with ``held``: per audience,
 the instance ids it holds a socket for. The origin then queues
@@ -101,9 +96,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-#: Audience kinds a forwarded item may name. ``space``: the space's active
-#: subscribers (``/gfs/publish`` broadcasts and member publishes). ``channel``:
-#: a private channel's seats for its open epochs (v_51). ``followers``: the
+#: Audience kinds a forwarded item may name. ``channel``: a channel's seats
+#: for its open epochs (v_51; the space-keyed ``space`` audience went with
+#: the space-keyed relay in v_96 — an older node's ``space`` item is ignored
+#: as an unknown kind). ``followers``: the
 #: follower households of a public-Momentum author that can open its moments
 #: (key: the author's user id). ``instance``: one household (key: its
 #: instance id) — a single-recipient push the origin had no socket for.
@@ -113,7 +109,6 @@ log = logging.getLogger(__name__)
 #: author that declared ``ops: ["counts"]`` (key: the author's user id) — an
 #: author's reaction totals, pushed live only (never queued). An older node
 #: ignores the unknown kind: its followers miss that update, nothing else.
-AUDIENCE_SPACE: str = "space"
 AUDIENCE_CHANNEL: str = "channel"
 AUDIENCE_FOLLOWERS: str = "followers"
 AUDIENCE_COUNT_FOLLOWERS: str = "count_followers"
@@ -121,7 +116,6 @@ AUDIENCE_INSTANCE: str = "instance"
 AUDIENCE_ALL: str = "all"
 AUDIENCE_KINDS: frozenset[str] = frozenset(
     {
-        AUDIENCE_SPACE,
         AUDIENCE_CHANNEL,
         AUDIENCE_FOLLOWERS,
         AUDIENCE_COUNT_FOLLOWERS,
@@ -524,11 +518,6 @@ class ClusterRelayFanOut:
         if item.deduped:
             self._seen_for(item.kind).record(item.digest())
         return True
-
-    def forward_to_space(self, space_id: str, frame: dict) -> bool:
-        """:meth:`forward` a broadcast ``/gfs/publish`` relay to the space's
-        subscribers on the other nodes (nothing is queued for a broadcast)."""
-        return self.forward(kind=AUDIENCE_SPACE, key=space_id, frame=frame)
 
     def forward_to_household(self, instance_id: str, push: dict) -> bool:
         """:meth:`forward` a single-recipient socket frame *push* (one of

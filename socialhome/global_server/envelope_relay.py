@@ -206,8 +206,8 @@ ENVELOPE_MAX_BODY_BYTES: int = 320 * 1024
 
 #: Per-IP/minute cap on ``POST /gfs/envelope``. The endpoint is anonymous ON
 #: PURPOSE — there is no household identity on the wire to account against —
-#: so the client address is the only shedding handle, exactly as for
-#: ``/gfs/publish``.
+#: so the client address is the only shedding handle, exactly as for the
+#: anonymous channel publish.
 #:
 #: **This is not an invite-only path.** The relay started life carrying two
 #: envelopes per invite redeem, and 30/min was generous for that. It now also
@@ -376,8 +376,8 @@ def queued_relay_push(row: dict) -> dict:
     return {**row, "type": RELAY_FRAME_TYPE}
 
 
-#: Per-recipient caps for queued RELAY items (member-published space items,
-#: ``POST /gfs/member-publish-anon``). Counted separately from the envelope caps
+#: Per-recipient caps for queued RELAY items (channel items,
+#: ``POST /gfs/channels/publish-anon``, and public moments). Counted separately from the envelope caps
 #: above so a busy public space can never crowd out a household's sealed
 #: invite / link-federation envelopes. Past either cap the recipient's OWN
 #: oldest relay item is evicted (``enqueue_relay``) — only authenticated
@@ -1543,8 +1543,8 @@ def build_mailbox_rate_limits(
 def build_envelope_rate_limit(resolver: ClientIpResolver):
     """Per-IP rate limiter middleware for ``POST /gfs/envelope``.
 
-    The relay is anonymous by design, so — exactly as for ``/gfs/publish`` —
-    the client address is the only handle available for shedding a flood.
+    The relay is anonymous by design, so — exactly as for the anonymous
+    channel publish — the client address is the only handle available for shedding a flood.
     """
     return build_window_limiter(
         resolver,

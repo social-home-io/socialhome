@@ -624,21 +624,6 @@ class SpaceInviteTokenRedeemCoordinator:
         if cert is None:
             return
         meta["writer_cert"] = cert
-        # v_50 — the epoch's writer group key too (a v_90 publisher).
-        try:
-            key = await self._writer_certs.writer_key_for_peer(
-                str(ack_body.get("space_id") or ""),
-                redeemer_instance_id,
-                epoch=cert.get("epoch"),
-            )
-        except Exception:
-            log.exception(
-                "invite redeem: writer key for %s could not be issued",
-                redeemer_instance_id,
-            )
-            return
-        if key is not None:
-            meta["writer_key"] = key
 
     def attach_bootstrap(
         self,
@@ -1162,13 +1147,6 @@ class SpaceInviteTokenRedeemCoordinator:
                     and self._writer_certs is not None
                 ):
                     await self._writer_certs.accept(space_id, meta.get("writer_cert"))
-                if (
-                    meta.get("writer_key") is not None
-                    and self._writer_certs is not None
-                ):
-                    await self._writer_certs.accept_writer_key(
-                        space_id, meta.get("writer_key")
-                    )
                 # v_51 — our private-space channel grant for that epoch.
                 if (
                     meta.get("gfs_channel") is not None

@@ -83,13 +83,22 @@ import re
 from dataclasses import dataclass, field
 
 from ..canonical_json import canonical_bytes
-from .gfs_member_publish import (
-    MAX_NONCE_CHARS,
-    MEMBER_PUBLISH_MAX_PAYLOAD_CHARS,
-    MIN_NONCE_CHARS,
-    SPACE_ITEM_EVENT_TYPE,
-)
 from .writer_cert import MAX_WRITER_CERT_EPOCH
+
+#: The one outer event type a channel item ever carries. The real type (a
+#: post, a comment, an authority item …) travels inside the ciphertext.
+SPACE_ITEM_EVENT_TYPE: str = "space_item"
+
+#: Length bounds of an anonymous request's ``nonce`` (b64url of >= 12 random
+#: bytes).
+MIN_NONCE_CHARS: int = 16
+MAX_NONCE_CHARS: int = 64
+
+#: Upper bound on a channel item's ciphertext string (chars). A post's
+#: AES-GCM ciphertext base64-expanded is ~55 KiB at the post-length cap;
+#: media bytes ride separate blobs. Sits under the GFS body cap with room for
+#: the signature fields.
+MEMBER_PUBLISH_MAX_PAYLOAD_CHARS: int = 200 * 1024
 
 #: Suite of the channel key — of ``channel_pk`` and of every statement it
 #: signs (registration, notice, unregister, pass, writer key cert).

@@ -35,8 +35,12 @@ from ...domain.gfs_channel import (
     InvalidChannelWire,
 )
 from .. import app_keys as K
-from ..channels import ChannelEpochTooSoon, ChannelPinned
-from ..member_publish import MemberPublishBusy, MemberPublishRateLimited
+from ..channels import (
+    ChannelBusy,
+    ChannelEpochTooSoon,
+    ChannelPinned,
+    ChannelRateLimited,
+)
 from ..public import PUBLISH_MAX_BODY_BYTES
 from .base import GfsBaseView
 
@@ -73,9 +77,9 @@ class ChannelRegisterView(_ChannelView):
         req = await self._parse(ChannelRegisterRequest)
         try:
             status = await svc.register(req, client_ip=self.client_bucket())
-        except MemberPublishRateLimited:
+        except ChannelRateLimited:
             return self._limited()
-        except MemberPublishBusy:
+        except ChannelBusy:
             resp = web.json_response({"error": "busy"}, status=503)
             resp.headers["Retry-After"] = "3600"
             return resp
@@ -142,9 +146,9 @@ class ChannelPublishAnonView(_ChannelView):
         req = await self._parse(ChannelPublishAnonRequest, PUBLISH_MAX_BODY_BYTES)
         try:
             await svc.publish_anon(req, client_ip=self.client_bucket())
-        except MemberPublishRateLimited:
+        except ChannelRateLimited:
             return self._limited()
-        except MemberPublishBusy:
+        except ChannelBusy:
             resp = web.json_response({"error": "busy"}, status=503)
             resp.headers["Retry-After"] = "5"
             return resp

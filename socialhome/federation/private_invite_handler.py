@@ -1547,15 +1547,6 @@ class PrivateSpaceInviteHandler:
             and self._writer_certs is not None
         ):
             await self._writer_certs.accept(space_id, event.payload.get("writer_cert"))
-        # v_50 — and the new epoch's writer group key (a v_90 publisher)
-        # (verified against the pinned space key on its own).
-        if (
-            event.payload.get("writer_key") is not None
-            and self._writer_certs is not None
-        ):
-            await self._writer_certs.accept_writer_key(
-                space_id, event.payload.get("writer_key")
-            )
         # v_51 — and, in a private space using a channel, our channel grant
         # for the new epoch (bound to the pinned space key). No grant for the
         # new epoch while an earlier one seated us: drop that seat.
@@ -2213,10 +2204,6 @@ class PrivateSpaceInviteHandler:
             and event.from_instance == space.owner_instance_id
         ):
             await self._writer_certs.accept(space_id, p.get("writer_cert"))
-            if p.get("writer_key") is not None:
-                await self._writer_certs.accept_writer_key(
-                    space_id, p.get("writer_key")
-                )
         # v_51 — our private-space channel grant, from the host only (a
         # reader household gets one without a writer cert).
         if (

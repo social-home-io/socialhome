@@ -89,7 +89,7 @@ from ..domain.file_hashes import (
     sha256_hex,
     space_content_media_name,
 )
-from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
+from ..domain.gfs_space_media import SCOPE_CHANNEL, space_media_address
 from ..domain.media_constraints import is_gfs_space_media_name, is_reserved_media_name
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
@@ -804,10 +804,8 @@ class SpaceMediaGfsFetcher:
 
     async def _scope_id(self, ref: SpaceMediaRef) -> str | None:
         """The scope id this household itself knows for *ref*'s scope: the
-        space id, or the opaque channel id of its own grant — never one a
-        descriptor or a GFS supplies."""
-        if ref.scope == SCOPE_SPACE:
-            return ref.space_id
+        opaque channel id of its own grant — never one a descriptor or a GFS
+        supplies."""
         if ref.scope == SCOPE_CHANNEL:
             stored = await self._spaces.get_gfs_channel(ref.space_id)
             return stored[0] if stored is not None else None

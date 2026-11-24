@@ -50,7 +50,7 @@ import functools
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -58,11 +58,7 @@ from cryptography.exceptions import InvalidTag
 
 from ..crypto import derive_instance_id
 from ..domain.events import PostEdited, SpacePostCreated
-from ..domain.gfs_member_publish import (
-    SPACE_ITEM_EVENT_TYPE,
-    InvalidMemberPublish,
-    SpaceItemFrame,
-)
+from ..domain.gfs_channel import SPACE_ITEM_EVENT_TYPE
 from ..domain.link_preview import card_survives_edit
 from ..domain.media_constraints import space_media_ref
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
@@ -76,7 +72,6 @@ from ..domain.space_item import (
     POST_SHAPED_ITEM_TYPES,
     AuthorityRemoval,
     item_stamp,
-    open_item_plaintext,
     required_scope,
     stamp_to_db,
 )
@@ -144,6 +139,17 @@ RELAY_KEY_WAIT_MAX_FRAMES: int = 64
 #: How far past our newest content epoch a frame may claim to be and still
 #: be held for its key (two quick rotations in a row).
 KEY_WAIT_MAX_AHEAD: int = 2
+
+
+@dataclass(slots=True, frozen=True)
+class _ChannelItem:
+    """One channel item as :meth:`SpacePublicInbound._on_space_item` reads
+    it: the space its channel maps to here, the content epoch and the
+    ciphertext. Service-local DTO."""
+
+    space_id: str
+    epoch: int
+    payload: str
 
 
 class SpacePublicInbound:
@@ -503,11 +509,13 @@ class SpacePublicInbound:
         apply by type: a post dedupes by id; a post edit lands last-writer-
         wins (:meth:`_apply_post_edit`); every other type goes to
         :class:`SpaceItemInbound`."""
-        try:
-            item = SpaceItemFrame.from_wire(frame)
-        except InvalidMemberPublish:
-            log.warning("space_public.inbound: malformed space_item frame — dropped")
-            return
+        # Built by :meth:`handle_channel_item` from a parsed channel frame
+        # (``ChannelItemFrame``) and the space its channel id maps to here.
+        item = _ChannelItem(
+            space_id=str(frame["space_id"]),
+            epoch=int(frame["epoch"]),
+            payload=str(frame["payload"]),
+        )
         space = await self._spaces.get(item.space_id)
         if space is None or not space.identity_public_key:
             log.info(
@@ -542,17 +550,7 @@ class SpacePublicInbound:
                 exc,
             )
             return
-        try:
-            opened = open_item_plaintext(pt, item.suite)
-        except ValueError as exc:
-            log.warning(
-                "space_public.inbound: undecodable %s space_item for space %s "
-                "(%s) — dropped",
-                item.suite,
-                item.space_id,
-                exc,
-            )
-            return
+        opened = pt
         if is_channel_authority(opened):
             # v_96 — an authority item on the space's opaque channel: the
             # inner carries the space authority signature (the frame has
@@ -565,9 +563,8 @@ class SpacePublicInbound:
             parsed = parse_item_plaintext(opened)
         except ValueError as exc:
             log.warning(
-                "space_public.inbound: undecodable %s space_item for space %s "
+                "space_public.inbound: undecodable space_item for space %s "
                 "(%s) — dropped",
-                item.suite,
                 item.space_id,
                 exc,
             )

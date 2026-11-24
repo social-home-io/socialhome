@@ -85,7 +85,7 @@ from ..domain.gfs_mailbox import (
 from ..domain.gfs_server import GfsServer
 from ..domain.gfs_space_media import (
     MEDIA_SCOPES,
-    SCOPE_SPACE,
+    SCOPE_CHANNEL,
     SPACE_MEDIA_AUTH_HEADER,
     SPACE_MEDIA_CAPABILITY,
 )
@@ -4063,11 +4063,11 @@ class GfsConnectionService:
     # ── Space media cache (``space_media``) ─────────────────────────────
 
     async def space_media_max_blob(
-        self, conn: GfsConnection, *, scope: str = SCOPE_SPACE
+        self, conn: GfsConnection, *, scope: str = SCOPE_CHANNEL
     ) -> int | None:
         """The largest space media blob *conn*'s GFS proved (under a valid
         signature, the ``space_media`` capability) it keeps under *scope*
-        (``space`` / ``channel``), or ``None`` when it proved nothing for
+        (``channel``, the one scope since v_96), or ``None`` when it proved nothing for
         that scope — then no space media of it is uploaded there.
         Same discipline as :meth:`_signed_capability_supported`: RAM cache
         when warm, one probe on a cold miss, the negative TTL after an
