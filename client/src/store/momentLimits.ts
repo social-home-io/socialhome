@@ -45,36 +45,35 @@ function hops(v: unknown): number | null {
     : null
 }
 
-let inflight: Promise<MomentLimits | null> | null = null
-/** Bumped per request: only the newest read writes the signals, so a
- *  read that started before a save can't put back what it saw. */
+/** The latest read, settled or not — a fresh read waits for it. */
+let last: Promise<unknown> | null = null
+/** Bumped per read: only the newest read writes the signals, so an older
+ *  one landing late can't put back what it saw. */
 let readSeq = 0
 
 /** Read the limits; ``null`` when they couldn't be read (what was known
- *  before stays). Callers at the same time share one request; ``fresh``
- *  (after a save) always asks again. */
-export function loadMomentLimits(
+ *  before stays). Callers at the same time already share one request
+ *  (``api.get`` shares identical in-flight GETs). That sharing is why a
+ *  ``fresh`` read (after a save) first waits for a read sent before it:
+ *  joining that one would answer with what the server said before the
+ *  save. */
+export async function loadMomentLimits(
   { fresh = false }: { fresh?: boolean } = {},
 ): Promise<MomentLimits | null> {
-  if (inflight && !fresh) return inflight
+  if (fresh && last) await last.catch(() => undefined)
   const mine = ++readSeq
-  let p: Promise<MomentLimits | null> | null = null
-  p = (async () => {
-    try {
-      const r = await api.get<MomentLimits>('/api/moments/limits')
-      if (mine === readSeq) {
-        myMomentReach.value = hops(r?.reach)
-        momentReachMax.value = hops(r?.reach_max)
-      }
-      return r ?? null
-    } catch {
-      return null
-    } finally {
-      if (inflight === p) inflight = null
+  const req = Promise.resolve().then(() => api.get<MomentLimits>('/api/moments/limits'))
+  last = req
+  try {
+    const r = await req
+    if (mine === readSeq) {
+      myMomentReach.value = hops(r?.reach)
+      momentReachMax.value = hops(r?.reach_max)
     }
-  })()
-  inflight = p
-  return p
+    return r ?? null
+  } catch {
+    return null
+  }
 }
 
 /** How far a new moment of the caller's goes, for the text: the read

@@ -89,35 +89,43 @@ describe('momentLimits — how far the caller\'s moments go', () => {
     expect(momentReach({ reach } as unknown as Pick<Moment, 'reach'>)).toBe(want)
   })
 
-  it('loads share one in-flight read', async () => {
-    let resolve!: (v: unknown) => void
-    apiMock.get.mockReturnValue(new Promise((r) => { resolve = r }))
-    const a = loadMomentLimits()
-    const b = loadMomentLimits()
-    expect(apiMock.get).toHaveBeenCalledTimes(1)
-    resolve({ next_allowed_at: null, reach: 2, reach_max: 4 })
-    expect(await a).toEqual(await b)
-    expect(myMomentReach.value).toBe(2)
-    // Once settled, the next load reads again.
-    apiMock.get.mockResolvedValue({ next_allowed_at: null, reach: 3, reach_max: 4 })
-    await loadMomentLimits()
-    expect(apiMock.get).toHaveBeenCalledTimes(2)
-    expect(myMomentReach.value).toBe(3)
-  })
-
-  it('a fresh read after a save is not answered by an older read', async () => {
+  it('a fresh read after a save waits for a read sent before it, then asks again', async () => {
+    // ``api.get`` shares identical in-flight GETs, so a fresh read sent
+    // while a pre-save read is pending would get the pre-save answer.
     let resolveOld!: (v: unknown) => void
     apiMock.get.mockReturnValueOnce(new Promise((r) => { resolveOld = r }))
     const old = loadMomentLimits()
     apiMock.get.mockResolvedValueOnce({ next_allowed_at: null, reach: 1, reach_max: 1 })
-    await loadMomentLimits({ fresh: true })
+    const fresh = loadMomentLimits({ fresh: true })
+    await Promise.resolve()
+    expect(apiMock.get).toHaveBeenCalledTimes(1)
+    resolveOld({ next_allowed_at: null, reach: 5, reach_max: 5 })
+    await old
+    await fresh
     expect(apiMock.get).toHaveBeenCalledTimes(2)
     expect(myMomentReach.value).toBe(1)
-    // The older read lands late: it must not put back what it saw.
+    expect(momentReachMax.value).toBe(1)
+  })
+
+  it('a fresh read still asks when the read before it failed', async () => {
+    apiMock.get.mockRejectedValueOnce(new Error('offline'))
+    const old = loadMomentLimits()
+    apiMock.get.mockResolvedValueOnce({ next_allowed_at: null, reach: 2, reach_max: 5 })
+    await loadMomentLimits({ fresh: true })
+    expect(await old).toBeNull()
+    expect(myMomentReach.value).toBe(2)
+  })
+
+  it('an older read landing after a newer one does not put back what it saw', async () => {
+    let resolveOld!: (v: unknown) => void
+    apiMock.get.mockReturnValueOnce(new Promise((r) => { resolveOld = r }))
+    const old = loadMomentLimits()
+    apiMock.get.mockResolvedValueOnce({ next_allowed_at: null, reach: 1, reach_max: 1 })
+    await loadMomentLimits()
+    expect(myMomentReach.value).toBe(1)
     resolveOld({ next_allowed_at: null, reach: 5, reach_max: 5 })
     await old
     expect(myMomentReach.value).toBe(1)
-    expect(momentReachMax.value).toBe(1)
   })
 
   it('reach 1 reads as its own sentence (the _one key)', () => {
