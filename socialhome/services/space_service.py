@@ -318,6 +318,7 @@ from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
 from .local_community import (
+    APPROVAL_HONOURED_DAYS,
     LocalAreaBudget,
     hosted_local_area,
     join_location_for,
@@ -8972,11 +8973,24 @@ class SpaceService(
     async def expire_due_join_requests(self) -> int:
         """Mark pending join requests past ``expires_at`` expired (both the
         host's and our own outgoing ones). Frees their slot under the cap of
-        requests from the GFS (v_84). Returns how many."""
+        requests from the GFS (v_84). Returns how many.
+
+        The same sweep prunes what a settled remote approval leaves behind
+        (v_96: GFS follows add up to 120 approved rows and bound tokens per
+        hour per space): a follow's approved row and a bound token once
+        neither can be used any more — past the window an approval is
+        honoured for (:data:`APPROVAL_HONOURED_DAYS`, which outlives every
+        bound token's expiry), the token spent or expired
+        (``prune_settled_remote_approvals``)."""
         expired = 0
         for row in await self._spaces.list_expired_join_requests():
             if await self._spaces.answer_join_request(str(row["id"]), "expired"):
                 expired += 1
+        pruned = await self._spaces.prune_settled_remote_approvals(
+            older_than_days=APPROVAL_HONOURED_DAYS
+        )
+        if pruned:
+            log.info("join requests: pruned %d settled approval row(s)", pruned)
         return expired
 
     async def request_join_remote(

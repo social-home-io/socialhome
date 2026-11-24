@@ -202,6 +202,32 @@ async def test_a_remote_follow_is_approved_with_a_bound_subscriber_token(stack):
     ]
 
 
+async def test_the_hourly_sweep_prunes_a_settled_follow_and_its_token(stack):
+    """P5 (v_96): GFS follows add up to 120 approved rows and bound tokens
+    per hour per space. The join-request sweep deletes a follow's approved
+    row and its bound token once neither can be used: past the window an
+    approval is honoured for (``APPROVAL_HONOURED_DAYS``), the token spent
+    or expired. A fresh one stays — its token can still be redeemed."""
+    space = await _hosted(stack)
+    assert await _approve_follow(stack, space.id) is True
+    assert await stack.svc.expire_due_join_requests() == 0
+    assert await stack.spaces.get_join_request("rq-1") is not None
+    token = (await _token_row(stack, space.id))["token"]
+
+    await stack.db.enqueue(
+        "UPDATE space_join_requests SET reviewed_at=datetime('now', '-8 days')"
+        " WHERE id='rq-1'"
+    )
+    await stack.db.enqueue(
+        "UPDATE space_invite_tokens SET created_at=datetime('now', '-8 days'),"
+        " uses_remaining=0 WHERE token=?",
+        (token,),
+    )
+    assert await stack.svc.expire_due_join_requests() == 0
+    assert await stack.spaces.get_join_request("rq-1") is None
+    assert await stack.spaces.get_invite_token_space_id(token) is None
+
+
 async def test_a_follow_through_the_gfs_is_answered_through_the_gfs(stack):
     """A follow that came over the GFS (v_84 relay contact kept with the
     request) is answered the same way: a 48 h bound subscriber token sealed

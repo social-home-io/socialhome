@@ -489,6 +489,7 @@ class AbstractSpaceRepo(Protocol):
         reviewed_by: str | None = None,
     ) -> bool: ...
     async def list_expired_join_requests(self) -> list[dict]: ...
+    async def prune_settled_remote_approvals(self, *, older_than_days: int) -> int: ...
     async def set_join_request_gfs_relay(
         self, request_id: str, gfs_relay: str
     ) -> None: ...
@@ -3390,6 +3391,71 @@ class SqliteSpaceRepo:
             """,
         )
         return rows_to_dicts(rows)
+
+    async def prune_settled_remote_approvals(self, *, older_than_days: int) -> int:
+        """Delete what a remote approval leaves behind once nothing can use
+        it any more (v_96: GFS follows add up to 120 of each per hour per
+        space). Returns how many rows went.
+
+        * An automatic (follow) approval — ``approved``, ``reviewed_by``
+          NULL, a remote household — answered more than
+          ``older_than_days`` ago (past the window
+          :meth:`has_approved_join_request` honours it for), with no live
+          token bound to that household and person left. An admin's
+          approval stays (the admins' record).
+        * A token bound to one household and person (an approval's answer,
+          never a link) created more than ``older_than_days`` ago and spent
+          or expired: a lost ACK's retry reads a spent one
+          (:meth:`get_invite_token_space_id`) only while the relay queue
+          holds it, a day.
+
+        ``expires_at`` comparisons go through ``datetime()``
+        (:meth:`consume_invite_token`); an unreadable one reads as expired.
+        """
+        window = f"-{int(older_than_days)} days"
+
+        def _run(conn) -> int:
+            rows = conn.execute(
+                """
+                DELETE FROM space_join_requests
+                 WHERE status='approved'
+                   AND reviewed_by IS NULL
+                   AND requested_role IS NULL
+                   AND remote_applicant_instance_id IS NOT NULL
+                   AND datetime(reviewed_at) < datetime('now', ?)
+                   AND NOT EXISTS (
+                        SELECT 1 FROM space_invite_tokens AS t
+                         WHERE t.space_id = space_join_requests.space_id
+                           AND t.bound_instance_id
+                               = space_join_requests.remote_applicant_instance_id
+                           AND t.bound_user_id = space_join_requests.user_id
+                           AND t.uses_remaining > 0
+                           AND (
+                                t.expires_at IS NULL
+                                OR datetime(t.expires_at) > datetime('now')
+                           )
+                   )
+                """,
+                (window,),
+            ).rowcount
+            tokens = conn.execute(
+                """
+                DELETE FROM space_invite_tokens
+                 WHERE bound_instance_id IS NOT NULL
+                   AND datetime(created_at) < datetime('now', ?)
+                   AND (
+                        uses_remaining <= 0
+                        OR (
+                            expires_at IS NOT NULL
+                            AND IFNULL(datetime(expires_at) <= datetime('now'), 1)
+                        )
+                   )
+                """,
+                (window,),
+            ).rowcount
+            return int(rows) + int(tokens)
+
+        return await self._db.transact(_run)
 
     # ── Sidebar + aliases ──────────────────────────────────────────────
 
