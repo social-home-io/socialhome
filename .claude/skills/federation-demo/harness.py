@@ -8752,9 +8752,7 @@ def _set_posts_access(state: dict, space_id: str, level: str) -> None:
         ):
             return
         time.sleep(3.0)
-    raise SystemExit(
-        f"e never saw posts_access={level} within 60 s"
-    )
+    raise SystemExit(f"e never saw posts_access={level} within 60 s")
 
 
 def _check_private_channel(state: dict, failures: list[str], cap) -> None:
@@ -10152,8 +10150,7 @@ def cmd_gfs_private_channel_multi() -> None:
     d_iid = d["instance_id"]
     if d_iid not in _peer_ids(a):
         raise SystemExit(
-            "gfs-private-channel-multi: a and d are not paired — run "
-            "'relay-pair' first"
+            "gfs-private-channel-multi: a and d are not paired — run 'relay-pair' first"
         )
     d_pk = _rows("d", "SELECT identity_public_key FROM instance_identity")[0][0]
 

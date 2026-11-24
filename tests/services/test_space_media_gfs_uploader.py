@@ -233,18 +233,24 @@ class _MediaRefs:
         return basename not in self.foreign
 
 
+#: The owner's space seed the helper defaults to (so planning has an upload
+#: authorization); pass ``seed=None`` for a household that holds none.
+OWNER_SEED = b"\x01" * 32
+_DEFAULT = object()
+
+
 def _uploader(
     tmp_path,
     *,
     gfs,
     instances=(),
     versions=None,
-    seed=None,
+    seed=_DEFAULT,
     spaces=None,
     media_refs=None,
 ):
     u = SpaceMediaGfsUploader(
-        space_repo=spaces or _Spaces(seed),
+        space_repo=spaces or _Spaces(OWNER_SEED if seed is _DEFAULT else seed),
         space_crypto=_Crypto(),
         federation_repo=_FedRepo(instances),
         gfs_service=gfs,
@@ -339,8 +345,12 @@ async def test_followers_target_the_channel_gfs_set(tmp_path):
     GFSs are planned (under the channel scope) only once it runs one."""
     _write(tmp_path, "a.webp", 10)
     g2 = _Conn("g2", "https://g2.example")
+    cid = "c" * 32
+    pk = channel_pk_of(derive_channel_seed(OWNER_SEED, SPACE, cid))
     u = _uploader(
-        tmp_path, gfs=_Gfs([], follower=[g2]), spaces=_Spaces(channel=("c" * 32, "pk"))
+        tmp_path,
+        gfs=_Gfs([], follower=[g2]),
+        spaces=_Spaces(OWNER_SEED, channel=(cid, pk)),
     )
     assert (
         await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False) is None
@@ -521,12 +531,29 @@ async def test_a_writer_cert_alone_uploads_nothing(tmp_path):
         gfs=gfs,
         instances=[RELAY],
         versions={"e": V},
+        seed=None,
     )
     await _upload(
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     )
     assert gfs.puts == []
     assert not await u.can_upload(SPACE)
+
+
+async def test_without_an_upload_authorization_nothing_is_sealed_or_described(
+    tmp_path,
+):
+    """A plain member of a space it cannot upload for (no seed, no channel
+    grant): no plan — no blob is sealed and no ``media_refs`` names a blob
+    that will never be on the GFS; its link-joined readers get the push."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _uploader(
+        tmp_path, gfs=_Gfs([g1]), instances=[RELAY], versions={"e": V}, seed=None
+    )
+    assert (
+        await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=True) is None
+    )
 
 
 async def test_no_authorization_uploads_nothing(tmp_path, caplog):
@@ -538,6 +565,7 @@ async def test_no_authorization_uploads_nothing(tmp_path, caplog):
         gfs=gfs,
         instances=[RELAY],
         versions={"e": V},
+        seed=None,
     )
     await _upload(
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
@@ -957,11 +985,13 @@ async def test_no_authorization_is_not_a_gfs_refusal_and_is_logged_once(
     plan = await u.plan(
         SPACE, ["api/media/a.webp", "api/media/b.webp"], item_id=ITEM, followers=False
     )
+    # The authorization went between plan and upload (the seed was dropped).
+    u._spaces.seed = None
     with caplog.at_level("WARNING"):
         await _upload(u, plan)
     assert gfs.puts == []
     lines = [r.getMessage() for r in caplog.records]
-    assert sum("no seed or writer key" in m for m in lines) == 1
+    assert sum("no upload authorization" in m for m in lines) == 1
     assert not any("HTTP 403" in m for m in lines)
 
 
@@ -1002,7 +1032,7 @@ async def test_can_upload_answers_with_the_authorization_a_put_would_use(tmp_pat
     scope since v_96 (no GFS pins the writer key)."""
     gfs = _Gfs([])
     assert await _uploader(tmp_path, gfs=gfs, seed=b"\x02" * 32).can_upload(SPACE)
-    assert not await _uploader(tmp_path, gfs=gfs).can_upload(SPACE)
+    assert not await _uploader(tmp_path, gfs=gfs, seed=None).can_upload(SPACE)
     elsewhere = _uploader(
         tmp_path, gfs=gfs, spaces=_Spaces(b"\x02" * 32, owner="owner.elsewhere")
     )
@@ -1085,7 +1115,10 @@ async def test_authorize_is_the_upload_authorization_for_either_scope(tmp_path):
     )
     auth = await u.authorize(claim, SPACE)
     assert auth is not None and auth.kind == AUTH_AUTHORITY
-    assert await _uploader(tmp_path, gfs=_Gfs([])).authorize(claim, SPACE) is None
+    assert (
+        await _uploader(tmp_path, gfs=_Gfs([]), seed=None).authorize(claim, SPACE)
+        is None
+    )
 
 
 async def test_remember_stored_skips_a_later_eager_upload(tmp_path):

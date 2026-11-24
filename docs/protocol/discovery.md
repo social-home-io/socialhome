@@ -1207,6 +1207,8 @@ cannot widen access through a missing field or Python truthiness.
 
 ### `allow_subscribers: false` — listed, never relayed
 
+> **Household side superseded in v_96 (P6).** The space-keyed relay, fan-out seat, epoch notice, key handoff and writer-key uploads named below are gone: a space's GFS content rides its opaque channel (see "Since v_96" at the top). Kept as the GFS side's description until its removal.
+
 Being listed in the directory and being publicly readable are two different
 things, and so are being *joinable* and being *readable*. A **public/global
 space whose `features.allow_subscribers` is off is published to the GFS
@@ -2047,6 +2049,8 @@ publish fails for good (a permanent refusal; transient ones are retried)
 is no longer backed by the owner's copy on such a server.
 
 ### A delegated admin is a writer to the GFS
+
+> **Household side superseded in v_96 (P6).** The space-keyed relay, fan-out seat, epoch notice, key handoff and writer-key uploads named below are gone: a space's GFS content rides its opaque channel (see "Since v_96" at the top). Kept as the GFS side's description until its removal.
 
 A GFS must not learn which household holds a space's signing seed. The
 owner is known to it by design: the listing is signed by the owner

@@ -231,6 +231,14 @@ class SpacePublicInbound:
             return
         held = await self._crypto.get_current_epoch(space_id)
         if held is not None and (epoch <= held or epoch > held + KEY_WAIT_MAX_AHEAD):
+            log.debug(
+                "space_public.inbound: space %s epoch %d not held (ours %d, at "
+                "most %d ahead) — sync covers it",
+                space_id,
+                epoch,
+                held,
+                KEY_WAIT_MAX_AHEAD,
+            )
             return
         self._pending_decrypts.stash(space_id, epoch, replay)
 

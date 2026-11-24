@@ -78,14 +78,6 @@ class GfsPublish:
     event_type: str
     payload: dict
 
-    def body(self) -> dict:
-        """``{space_id, event_type, payload}``, nothing else."""
-        return {
-            "space_id": self.space_id,
-            "event_type": self.event_type,
-            "payload": self.payload,
-        }
-
 
 @dataclass(slots=True, frozen=True)
 class PublishOutcome:

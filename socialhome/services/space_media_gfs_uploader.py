@@ -8,8 +8,9 @@ media is created in a space that has such readers, this household:
 1. **plans** (:meth:`SpaceMediaGfsUploader.plan`, or
    :meth:`~SpaceMediaGfsUploader.plan_for_reader` for one §25.6 catch-up
    requester): finds the GFSs those readers use — each link-joined v_80
-   member's ``relay_via`` connection, and (for followers) every GFS the space
-   is relayed to — keeps the ones whose signed ``space_media`` capability
+   member's ``relay_via`` connection, and (for followers, v_96: only for a
+   space that runs an opaque channel here) every GFS that channel lives on —
+   keeps the ones whose signed ``space_media`` capability
    lists the space's scope, and describes each file of the item
    (:func:`~socialhome.domain.space_media_ref.record_media_urls`, ≤ 8 MiB):
    its deterministic sealed blob's scope-bound address (``sm1``), suite,
@@ -17,18 +18,18 @@ media is created in a space that has such readers, this household:
    (DM / moment) name and that nothing but this space's content references
    (``MediaReferenceRepo.confined_to_space``) is ever described. The caller
    puts that ``media_refs`` descriptor inside the item's encrypted payload.
-   No reader → no plan, no sealing.
+   No reader, or no upload authorization here → no plan, no sealing.
 2. **uploads** (:meth:`SpaceMediaGfsUploader.upload`) in the background: seals
    each file once more (deterministic: the same bytes, so no sealed copy is
    kept in memory meanwhile; the file is re-checked as the space's own) and
    PUTs it once per target GFS to the one scope-free path
    ``PUT /gfs/media/{blob_id}`` — the scope rides only inside the signed
    claim — authorized as the GFS requires: the space-authority signature on
-   the space's owner, the writer group key on every other household (a
-   delegated admin too; it signs as the authority only where the space has
-   no writer key). Nothing names the household; never ``from_instance``.
-   A PRIVATE space reached through its v_51 opaque channel uploads under the
-   channel scope instead (the claim names the channel; the channel key for a
+   the space's owner, and on a delegated admin only where the space has no
+   writer group key (since v_96 nobody signs with that key: no GFS pins it
+   any more). Nothing names the household; never ``from_instance``.
+   A space reached through its opaque channel (v_51 private, v_96 global)
+   uploads under the channel scope instead (the claim names the channel; the channel key for a
    seed holder, else the member's channel writer key from its grant) — the
    GFS learns the channel id, never the space.
 
@@ -151,7 +152,8 @@ MAX_DESCRIBED: int = 2048
 _STATUS_STORED = frozenset({200, 201})
 
 #: ``_put``'s answer when this household holds no authorization for the
-#: space (no seed, writer key or cert) — nothing was sent; not a GFS status.
+#: space (no space seed, no channel key or grant) — nothing was sent; not a
+#: GFS status.
 _NO_AUTHORIZATION = -1
 _STATUS_RETRY = frozenset({408, 429})
 
@@ -488,6 +490,11 @@ class SpaceMediaGfsUploader:
         scope, _scope_id = await self.scope_of(space_id)
         targets = await self._capable(conns, scope)
         if not targets:
+            return None
+        # Nothing this household could PUT is never sealed or described: a
+        # descriptor naming a blob no GFS will hold only costs its readers a
+        # fetch before the push lands.
+        if not await self.can_upload(space_id):
             return None
         # Lazy only where the GFS asks THIS household for it on demand.
         # v_96: followers are planned only under the channel scope, so this
@@ -916,8 +923,8 @@ class SpaceMediaGfsUploader:
             if ref.space_id not in self._unauthorized:
                 self._unauthorized.add(ref.space_id)
                 log.warning(
-                    "space media of space %s: this household holds no seed "
-                    "or writer key — its files are not uploaded",
+                    "space media of space %s: this household holds no upload "
+                    "authorization — its files are not uploaded",
                     ref.space_id,
                 )
             return _NO_AUTHORIZATION
