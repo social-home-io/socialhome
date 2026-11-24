@@ -427,7 +427,7 @@ export default function SpaceFeedPage() {
   const detailCount = spaceDetail.value?.member_count
   const membersShown = detailCount !== undefined ? detailCount : memberCount.value
   const followerCount = spaceDetail.value?.follower_count
-  const followersOnHero = followersShown(followerCount, features?.allow_subscribers)
+  const followersOnHero = followersShown(followerCount)
     ? followerCount
     : null
   const soloSpace = membersShown === 1

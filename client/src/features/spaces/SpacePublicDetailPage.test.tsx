@@ -326,6 +326,25 @@ describe('SpacePublicDetailPage cold link (no directory entry)', () => {
       .toBe('7 members · 1 follower')
   })
 
+  it.each([
+    ['takes followers, nobody yet', true, 0, '4 members · 0 followers'],
+    ['takes no followers', false, null, '4 members'],
+  ])('a space that %s: the About header says %j', async (_label, takes, followers, shown) => {
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/sp-1') {
+        return {
+          id: 'sp-1', name: 'Chess club', description: '', emoji: '',
+          space_type: 'global', join_mode: 'request', category: 'general',
+          features: { allow_subscribers: takes }, member_count: 4, follower_count: followers,
+        }
+      }
+      throw Object.assign(new Error('Not a space member.'), { status: 403 })
+    })
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Chess club'))
+    expect(container.querySelector('.sh-space-public__title p')?.textContent).toBe(shown)
+  })
+
   it('shows no number when the space declares none — never "0 members"', async () => {
     api.get.mockImplementation(async (url: string) => {
       if (url === '/api/spaces/sp-1') {
@@ -343,8 +362,8 @@ describe('SpacePublicDetailPage cold link (no directory entry)', () => {
     expect(container.textContent).not.toMatch(/\d+ followers?/)
   })
 
-  it('a directory row with no declared number shows none; followers of a space that takes none stay out', async () => {
-    cacheDirectoryEntries([entry({ member_count: null, follower_count: 0, allow_subscribers: false, host_display_name: 'Keller household', host_instance_id: 'iid-k', scope: 'public' })])
+  it('a directory row with no declared number shows none; a space that takes no followers declares none either', async () => {
+    cacheDirectoryEntries([entry({ member_count: null, follower_count: null, allow_subscribers: false, host_display_name: 'Keller household', host_instance_id: 'iid-k', scope: 'public' })])
     const { container, getByText } = await renderPage()
     await waitFor(() => getByText('Space One'))
     expect(container.textContent).not.toMatch(/\d+ members?/)

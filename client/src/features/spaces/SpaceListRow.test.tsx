@@ -42,12 +42,12 @@ describe('followersLabel / followersShown', () => {
     expect(followersLabel(12)).toBe('12 followers')
   })
 
-  it('shows a declared number; "0 followers" only for a space that takes followers', () => {
-    expect(followersShown(12, undefined)).toBe(true)
-    expect(followersShown(0, true)).toBe(true)
-    expect(followersShown(0, false)).toBe(false)
-    expect(followersShown(0, undefined)).toBe(false)
-    expect(followersShown(null, true)).toBe(false)
-    expect(followersShown(undefined, true)).toBe(false)
+  it('shows exactly a declared number — "0 followers" included; none for a space that takes no followers', () => {
+    // The host declares a follower count only while the space takes
+    // followers, so a number on the wire is always one to show.
+    expect(followersShown(12)).toBe(true)
+    expect(followersShown(0)).toBe(true)
+    expect(followersShown(null)).toBe(false)
+    expect(followersShown(undefined)).toBe(false)
   })
 })

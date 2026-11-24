@@ -453,8 +453,8 @@ describe('SpaceListPage — Discover', () => {
         g('gOne', 'One follower', { member_count: 1, follower_count: 1, allow_subscribers: true }),
         // An older host declares no number: no "0 members".
         g('gOld', 'Older host', { member_count: null, follower_count: null, allow_subscribers: true }),
-        // Takes no followers: never "0 followers".
-        g('gNoFollow', 'No followers taken', { member_count: 3, follower_count: 0, allow_subscribers: false }),
+        // Takes no followers: its host declares no follower count.
+        g('gNoFollow', 'No followers taken', { member_count: 3, follower_count: null, allow_subscribers: false }),
         g('gZero', 'Nobody follows yet', { member_count: 3, follower_count: 0, allow_subscribers: true }),
       ],
     })
@@ -480,6 +480,24 @@ describe('SpaceListPage — Discover', () => {
       const meta = async (name: string) =>
         (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
       expect(await meta('Müller family market')).toBe('Müller household · 6 members · 4 followers · ask to join')
+      expect(await meta('Hottingen bike repair')).toBe('Keller household · 12 members · open')
+    } finally {
+      PAIRED_EXTRA.value = null
+    }
+  })
+
+  it('a paired space that takes followers says "0 followers"; one that takes none shows only its members', async () => {
+    // The paired directory carries no ``allow_subscribers``: the host
+    // declares a follower count exactly when the space takes followers.
+    PAIRED_EXTRA.value = [
+      { ...PAIRED[0], follower_count: 0 },
+      { ...PAIRED[1] },
+    ]
+    try {
+      const r = await renderPage('/spaces?discover=paired')
+      const meta = async (name: string) =>
+        (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
+      expect(await meta('Müller family market')).toBe('Müller household · 6 members · 0 followers · ask to join')
       expect(await meta('Hottingen bike repair')).toBe('Keller household · 12 members · open')
     } finally {
       PAIRED_EXTRA.value = null

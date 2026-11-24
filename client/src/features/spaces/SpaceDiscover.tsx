@@ -135,7 +135,7 @@ function entryMeta(e: DirectoryEntry, source: DiscoverSource, home: Home | null 
   if (host) parts.push(host)
   // Discover lists spaces the viewer isn't in — never "Just you".
   if (e.member_count !== null) parts.push(membersLabel(e.member_count, false))
-  if (followersShown(e.follower_count, e.allow_subscribers)) parts.push(followersLabel(e.follower_count))
+  if (followersShown(e.follower_count)) parts.push(followersLabel(e.follower_count))
   const mode = joinModeWord(e)
   if (mode) parts.push(mode)
   return parts.join(' · ')
