@@ -52,7 +52,10 @@ from ..domain.moment import (
     reaction_counts_valid,
 )
 from .base import row_to_dict, rows_to_dicts
-from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
+from .cp_repo import (
+    GUARDIAN_BLOCK_COUNTERPARTS_SQL,
+    guardian_block_counterparts_sql,
+)
 
 #: A protected account (§CP.R) sees moments from its own household and its
 #: directly paired households only — the circle its own ``no_relay`` moments
@@ -95,29 +98,54 @@ _PRUNABLE_SQL = (
     + _SAVED_BY_ANYONE_SQL
 )
 
-#: The viewer follows the moment's author — on a paired household
-#: (``user_follows``) or through a GFS (``moment_public_follows``): both are
-#: a follow, so both keep the author's moments until their ``expires_at``
-#: (decision 6d). Binds the viewer twice.
-_FOLLOWS_AUTHOR_SQL = """
+
+def follows_author_sql(follower: str = "?", author: str = "m.author_user_id") -> str:
+    """*follower* follows *author* — on a paired household (``user_follows``)
+    or through a GFS (``moment_public_follows``): both are a follow. Each
+    argument is a SQL expression — a bind placeholder or a column of the
+    outer query; the one fragment the reads and the storage rule share."""
+    return f"""
     (
         EXISTS (
             SELECT 1 FROM user_follows
-             WHERE follower_user_id = ? AND followed_user_id = m.author_user_id
+             WHERE follower_user_id = {follower} AND followed_user_id = {author}
         )
         OR EXISTS (
             SELECT 1 FROM moment_public_follows
-             WHERE follower_user_id = ? AND followed_user_id = m.author_user_id
+             WHERE follower_user_id = {follower} AND followed_user_id = {author}
         )
     )
 """
 
+
+#: The viewer follows the moment's author: a follow keeps the author's
+#: moments until their ``expires_at`` (decision 6d). Binds the viewer twice.
+_FOLLOWS_AUTHOR_SQL = follows_author_sql()
+
+#: A current person of this household (``users AS u``): active and not
+#: deleted. The storage rule (:meth:`SqliteMomentRepo.has_visible_recipient`)
+#: and the look (:meth:`SqliteMomentRepo.moment_look_hops`) count the same
+#: people, so a removed person neither keeps moments here nor widens the look.
+_LOCAL_PERSON_SQL = "u.state = 'active' AND u.deleted_at IS NULL"
+
+#: Within the viewer's reach of sight: the row's ``hop_count`` is at most the
+#: viewer's ``max_hops``, or the viewer follows the author — a follow shows
+#: the author's moments whatever the viewer's ``max_hops`` (v_96; the same
+#: rule :meth:`SqliteMomentRepo.has_visible_recipient` stores by, so "stored"
+#: and "seen" stay one rule). Child protection (:data:`_PROTECTED_CIRCLE_SQL`)
+#: still applies on top. Binds the viewer twice, then the hop cap — the cap
+#: must stay the last placeholder (every ``count("?") - 1`` bind helper below
+#: relies on it), which is why ``hop_count <= ?`` comes after the EXISTS.
+_WITHIN_HOPS_SQL = f"({_FOLLOWS_AUTHOR_SQL} OR m.hop_count <= ?)"
+
 #: What the inbox shows a viewer — the one rule :meth:`list_visible_to` and
 #: :meth:`get_readable` share, so a detail read can never show what the
 #: inbox hides: no personal block (§Privacy) or guardian block (§CP.F2,
-#: either way) between viewer and author; younger than 24 h, or the viewer
-#: follows the author (then until its ``expires_at``); not expired or deleted;
-#: within the viewer's ``max_hops``; and, for a protected account (§CP.R),
+#: either way) between viewer and author; not expired or deleted; the viewer
+#: follows the author (then until its ``expires_at``, whatever their
+#: ``max_hops`` — :data:`_WITHIN_HOPS_SQL`), or it is younger than 24 h and
+#: within their ``max_hops`` — ``(24 h ∨ F) ∧ (F ∨ hops)`` written as
+#: ``F ∨ (24 h ∧ hops)``, one follow check; and, for a protected account (§CP.R),
 #: only a moment from its household or a paired one
 #: (:data:`_PROTECTED_CIRCLE_SQL`) — the row is household-wide, so the
 #: filter is per viewer. Binds the viewer
@@ -128,13 +156,15 @@ _VISIBLE_SQL = f"""
         SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
     )
     AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
-    AND (
-        (julianday('now') - julianday(m.created_at)) * 24 < 24
-        OR {_FOLLOWS_AUTHOR_SQL}
-    )
     AND datetime(m.expires_at) > datetime('now')
     AND m.deleted_at IS NULL
-    AND m.hop_count <= ?
+    AND (
+        {_FOLLOWS_AUTHOR_SQL}
+        OR (
+            (julianday('now') - julianday(m.created_at)) * 24 < 24
+            AND m.hop_count <= ?
+        )
+    )
 """
 
 #: How many times :data:`_VISIBLE_SQL` binds the viewer (every placeholder
@@ -145,7 +175,8 @@ _VISIBLE_VIEWER_BINDS = _VISIBLE_SQL.count("?") - 1
 #: and past its expiry, for them only — still never across a personal or
 #: guardian block (§CP.F2), never one from outside a protected account's
 #: circle (§CP.R — a save made before protection was turned on stays
-#: hidden), within the viewer's ``max_hops``. Binds the viewer
+#: hidden), within the viewer's ``max_hops`` unless they follow the author
+#: (:data:`_WITHIN_HOPS_SQL`). Binds the viewer
 #: :data:`_SAVED_VIEWER_BINDS` times, then the hop cap.
 _SAVED_READABLE_SQL = f"""
     EXISTS (
@@ -158,7 +189,7 @@ _SAVED_READABLE_SQL = f"""
     )
     AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
     AND m.deleted_at IS NULL
-    AND m.hop_count <= ?
+    AND {_WITHIN_HOPS_SQL}
 """
 
 #: How many times :data:`_SAVED_READABLE_SQL` binds the viewer.
@@ -219,10 +250,11 @@ def _readable_params(viewer_user_id: str, max_hops: int) -> tuple:
 
 #: What one viewer may read of a *thread*: the inbox rule without its
 #: 24-hour window. A reply drops out for a personal or guardian block, child
-#: protection (§CP.R), the viewer's ``max_hops`` or expiry — never because
+#: protection (§CP.R), the viewer's ``max_hops`` (unless they follow whoever
+#: wrote it, :data:`_WITHIN_HOPS_SQL`) or expiry — never because
 #: it is a day old and the viewer doesn't follow whoever wrote it, which
 #: would empty a thread whose root (a followed author's) is still readable
-#: and shrink its count. Binds the viewer, then the hop cap; bind with
+#: and shrink its count. Binds the viewer, then the hop cap (last); bind with
 #: :func:`_thread_params`.
 _THREAD_READABLE_SQL = f"""
     (
@@ -236,7 +268,7 @@ _THREAD_READABLE_SQL = f"""
         AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
         AND datetime(m.expires_at) > datetime('now')
         AND m.deleted_at IS NULL
-        AND m.hop_count <= ?
+        AND {_WITHIN_HOPS_SQL}
       )
     )
 """
@@ -318,8 +350,10 @@ class AbstractMomentRepo(Protocol):
         *,
         author_user_id: str,
         hop_count: int,
+        via_gfs: bool = False,
     ) -> bool: ...
     async def moment_look_hops(self) -> int: ...
+    async def public_follow_pins(self, author_user_id: str) -> frozenset[str]: ...
 
     # Reactions -----------------------------------------------------------
     async def set_reaction(
@@ -613,7 +647,7 @@ class SqliteMomentRepo:
           author — directly or through a GFS — (then until the moment's
           ``expires_at``, the author's choice of 1–30 days).
         * The row's ``hop_count`` is ≤ the viewer's ``max_hops``
-          preference (default 3 = the wire cap, so all rows pass).
+          preference (default 3), or the viewer follows the author.
         * ``before`` is an ISO-8601 ``created_at`` cursor; ``NULL``
           fetches from newest.
         * ``tag`` (lowercase) restricts the result to moments tagged
@@ -659,39 +693,67 @@ class SqliteMomentRepo:
         *,
         author_user_id: str,
         hop_count: int,
+        via_gfs: bool = False,
     ) -> bool:
-        """True iff at least one local user can see this moment under
-        their preferences and block list. Used by the inbound
-        federation handler to skip the local persist when no one
+        """True iff at least one local user will see this moment — the
+        storage rule (``docs/protocol/momentum.md`` § Storage). Used by the
+        inbound federation handler to skip the local persist when no one
         wants the row (pure pass-through — relay continues).
 
-        A user "can see" iff:
-        * The author is NOT on their :table:`user_blocks` row.
-        * Their ``moments.max_hops`` preference (read from
-          ``users.preferences_json``) is ≥ ``hop_count``.
+        A user "will see" it iff:
+        * They are a current person here (:data:`_LOCAL_PERSON_SQL` —
+          active, not deleted; the same people :meth:`moment_look_hops`
+          counts).
+        * No personal block (:table:`user_blocks`) and no guardian block
+          (§CP.F2, either way) separates them from the author.
         * They are not a protected account (§CP.R), or the moment is from a
-          paired household (``hop_count`` 1) — a protected account sees no
-          moment from further away, so a household of only protected
-          accounts passes a relayed moment on without storing it.
+          paired household (``hop_count`` 1) and did not come through a GFS
+          (``via_gfs`` — the GFS inbound path asks with it) — a protected
+          account sees no moment from further away or through a GFS
+          (:data:`_PROTECTED_CIRCLE_SQL`), whomever it follows.
+        * Their ``moments.max_hops`` preference (read from
+          ``users.preferences_json``) is ≥ ``hop_count``, **or** they follow
+          the author (``user_follows`` / ``moment_public_follows``) — a
+          follow shows the author's moments whatever ``max_hops`` says, the
+          same rule the reads apply (:data:`_WITHIN_HOPS_SQL`).
+
+        The GFS path asks at hop 1 (a GFS row is stored at hop 1), so any
+        current, unblocked adult here keeps it — not only its follower —
+        exactly as the reads show a GFS moment to every adult for 24 h.
 
         The preference is read inline (:data:`_VIEWER_HOPS_SQL`) so we
         don't have to load every user just to compute the gate. Rows
         without a usable ``moments.max_hops`` default to
         :data:`MOMENT_DEFAULT_MAX_HOPS` (3 — matches new accounts).
         """
+        hop = int(hop_count)
+        protected_counts = int(hop <= 1 and not via_gfs)
         row = await self._db.fetchone(
             f"""
             SELECT 1 FROM users AS u
-             WHERE NOT EXISTS (
+             WHERE {_LOCAL_PERSON_SQL}
+               AND NOT EXISTS (
                  SELECT 1 FROM user_blocks
                   WHERE blocker_user_id = u.user_id
                     AND blocked_user_id = ?
              )
-               AND {_VIEWER_HOPS_SQL} >= ?
-               AND (u.child_protection_enabled = 0 OR ? <= 1)
+               AND ? NOT IN ({guardian_block_counterparts_sql("u.user_id")})
+               AND (u.child_protection_enabled = 0 OR ? = 1)
+               AND (
+                 {_VIEWER_HOPS_SQL} >= ?
+                 OR {follows_author_sql("u.user_id", "?")}
+               )
              LIMIT 1
             """,
-            (author_user_id, *_VIEWER_HOPS_PARAMS, int(hop_count), int(hop_count)),
+            (
+                author_user_id,
+                author_user_id,
+                protected_counts,
+                *_VIEWER_HOPS_PARAMS,
+                hop,
+                author_user_id,
+                author_user_id,
+            ),
         )
         return row is not None
 
@@ -706,12 +768,25 @@ class SqliteMomentRepo:
             f"""
             SELECT MAX({_VIEWER_HOPS_SQL}) AS look FROM users AS u
              WHERE u.child_protection_enabled = 0
-               AND u.state = 'active' AND u.deleted_at IS NULL
+               AND {_LOCAL_PERSON_SQL}
             """,
             _VIEWER_HOPS_PARAMS,
         )
         look = row["look"] if row is not None else None
         return int(look) if look is not None else 1
+
+    async def public_follow_pins(self, author_user_id: str) -> frozenset[str]:
+        """The home-household keys (64-hex Ed25519) pinned for
+        *author_user_id* by anyone here who follows them through a GFS
+        (``moment_public_follows.followed_instance_pk``) — empty when nobody
+        does. The mesh inbound binds such an author's moments to that
+        household."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT followed_instance_pk FROM moment_public_follows"
+            " WHERE followed_user_id = ?",
+            (author_user_id,),
+        )
+        return frozenset(str(r["followed_instance_pk"]) for r in rows)
 
     async def list_public_for(
         self,

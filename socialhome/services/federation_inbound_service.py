@@ -29,6 +29,7 @@ import orjson
 
 from ..crypto import (
     UnsupportedUserSigSuite,
+    derive_instance_id,
     derive_user_id,
     verify_user_identity_assertion,
 )
@@ -299,6 +300,19 @@ def _moment_expired(expires_at: object) -> bool:
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)
     return when <= datetime.now(UTC)
+
+
+def _instance_ids_of(pks_hex: frozenset[str]) -> set[str]:
+    """The instance ids the 64-hex Ed25519 household keys *pks_hex* derive
+    (an instance id IS ``derive_instance_id(pk)``); a malformed key derives
+    nothing."""
+    ids: set[str] = set()
+    for pk in pks_hex:
+        try:
+            ids.add(derive_instance_id(bytes.fromhex(pk)))
+        except ValueError:
+            continue
+    return ids
 
 
 def _now_iso() -> str:
@@ -5267,18 +5281,8 @@ class FederationInboundService(ProtectionGateMixin):
             await self._user_repo.get_by_user_id(author_user_id) is not None
         ):
             return False
-        if from_instance == origin_instance_id:
-            # Direct delivery — also check the author lives there.
-            try:
-                home = await self._user_repo.get_instance_for_user(author_user_id)
-            except Exception:  # pragma: no cover — defensive
-                log.debug(
-                    "FederationInboundService._moment_authority_matches: fail-soft error ignored",
-                    exc_info=True,
-                )
-                return True
-            return home is None or home == origin_instance_id
-        # Relay: trust the origin field; sender just relayed.
+        # Direct delivery or relay alike: the author must live at the origin
+        # when we know where they live.
         try:
             home = await self._user_repo.get_instance_for_user(author_user_id)
         except Exception:  # pragma: no cover — defensive
@@ -5287,7 +5291,29 @@ class FederationInboundService(ProtectionGateMixin):
                 exc_info=True,
             )
             return True
-        return home is None or home == origin_instance_id
+        if home is not None:
+            return home == origin_instance_id
+        # Home unknown here. A follow lifts the follower's ``max_hops``
+        # (v_96), so an author someone follows through a GFS is bound to the
+        # household key that follow pinned — an instance id IS
+        # ``derive_instance_id(pk)`` — and another household can't post in
+        # their name to that follower.
+        if self._moment_repo is None:  # pragma: no cover — always wired
+            return True
+        # A pin that doesn't decode (an older directory sent none) proves
+        # nothing: it neither binds the author nor refuses their moments.
+        homes = _instance_ids_of(
+            await self._moment_repo.public_follow_pins(author_user_id)
+        )
+        if homes and origin_instance_id not in homes:
+            log.warning(
+                "moment by GFS-followed author %s from %s, not the household "
+                "the follow pinned — refusing",
+                author_user_id,
+                origin_instance_id,
+            )
+            return False
+        return True
 
     async def _moment_origin_verified(
         self,

@@ -21,9 +21,16 @@ _USERS = [
 ]
 
 
+#: author → the people here who blocked them.
+_BLOCKERS: dict[str, frozenset[str]] = {}
+
+
 class _Users:
     async def list_active(self):
         return _USERS
+
+    async def list_blockers(self, user_id):
+        return _BLOCKERS.get(user_id, frozenset())
 
 
 class _Spaces:
@@ -94,3 +101,12 @@ async def test_a_far_moment_frame_skips_protected_accounts(env, hop_count):
     bus, socks = env
     await bus.publish(_event(None, hop_count))
     assert _got(socks) == {"adult"}
+
+
+async def test_a_moment_frame_skips_people_who_blocked_its_author(env, monkeypatch):
+    """A row kept for one person (a follower) is not announced to someone
+    who blocked its author — the REST read hides it from them."""
+    bus, socks = env
+    monkeypatch.setitem(_BLOCKERS, "u-stranger", frozenset({"adult"}))
+    await bus.publish(_event("household", hop_count=1))
+    assert _got(socks) == {"kid"}

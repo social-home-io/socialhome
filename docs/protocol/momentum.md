@@ -275,9 +275,10 @@ reach (``moments.reach`` / ``moments.reach_max``, no route or UI yet).
 Phase 2 (still v_96) has landed too: ``MOMENT_MAX_HOPS`` 5 with the
 viewer's ``max_hops`` 1–5 (default 3), ``MAX_RETURN_TOKENS`` 4 with the
 per-source rate on four-token reactions, ``moment_look_hops`` (decision C,
-no migration) and hop ≥ 4 copies only to v_96. Still to come: the
-storage rule, the routes and the UI (the settings screen still offers
-``max_hops`` 1–3).
+no migration) and hop ≥ 4 copies only to v_96. Phase 3 (still v_96, no
+new wire field) has landed the storage rule's follower branch and the
+forward-only guarantees below. Still to come: the routes and the UI (the
+settings screen still offers ``max_hops`` 1–3).
 
 ### Rules
 
@@ -398,15 +399,47 @@ neither raise it, strip it nor splice it onto another moment:
 
 ### Storage: a household keeps a moment only if someone here will see it
 
-Already true for viewers' ``max_hops`` (pure pass-through,
-``has_visible_recipient``, below). v_96 completes it:
+Built (``SqliteMomentRepo.has_visible_recipient``, pure pass-through
+below):
 
 * store when a local non-protected person's ``max_hops ≥ hop``, **or** a
   local person follows the author (``user_follows`` /
   ``moment_public_follows``) and has not blocked them (personal or guardian
   block) — a follow then shows the author's moments whatever the follower's
   ``max_hops`` (the inbox rule changes the same way, so "stored" and "seen"
-  stay one rule); protected accounts still only at hop 1;
+  stay one rule); protected accounts still only at hop 1; only active,
+  undeleted people count (the same people as ``moment_look_hops``);
+* the GFS path keeps a followed author's public moment by the same rule
+  (``has_visible_recipient(…, via_gfs=True)``, asked at hop 1 — a GFS row's
+  hop — where a protected account counts at no hop, since it never sees a
+  GFS moment): it is kept when any current, unblocked adult here will see
+  it (as the reads show it to every adult for 24 h), and a follow row
+  whose follower was removed, is protected or blocks the author keeps
+  nothing — no row, no file — unless someone else here will see it;
+* **a follow is bound to the author's household** (adversarial review,
+  P3): the origin signature proves which household signed a moment, not
+  that its author lives there, and a follow lifts ``max_hops``. A mesh
+  moment whose author's home is known here (``remote_users``) must come
+  from that home (as before); one whose author is followed through a GFS
+  but whose home is not known here must come from the household that
+  follow pinned (``derive_instance_id(followed_instance_pk)`` — an
+  instance id is its key's hash), else it is refused and not relayed.
+  *Residual:* an author followed only through ``user_follows`` whose home
+  is not known here (one met 2–5 hops away, or a household since
+  unpaired) cannot be bound without a new wire field (an author anchor —
+  ``derive_user_id(origin_pk, anchor)``), so a household within reach
+  could still post in that id to its followers — as it can today to
+  anyone whose ``max_hops`` covers it. The increment is narrow: the look
+  stays ``max_hops``-only, so such a copy only arrives at a hop someone
+  here already looks at; what is new is that a follower with a lower
+  ``max_hops`` sees it too. An unpair drops the household's
+  ``remote_users`` rows, so its authors become unbound. A pin that does
+  not decode binds nothing. The pin is what the GFS directory said; the
+  GFS register route binding ``home_instance_pk`` to the registering
+  household is a follow-up too;
+* rows kept for a follower stay until they expire when the follow ends
+  (unfollow, block, removal): nobody can read them (the reads apply the
+  rule per viewer), and they go at ``expires_at`` (≤ 30 days);
 * otherwise the household forwards within reach and keeps nothing but the
   in-memory, id-only relay seen-map (bounded, 48 h) — and, for a delete,
   the content-free 30-day tombstone it already keeps (which is what makes a
@@ -417,7 +450,22 @@ Already true for viewers' ``max_hops`` (pure pass-through,
   tombstone-gated; totals as above;
 * media: mesh moments carry only a media *reference*; no household fetches
   mesh moment bytes (only the GFS public path does, and only for a stored
-  row) — nothing to skip.
+  row) — nothing to skip;
+* **the look stays ``max_hops``-only.** A follow keeps the followed
+  author's moments that *reach* this household, but does not raise
+  ``moment_look_hops`` (decision C): a follower whose ``max_hops`` is 3
+  gets no hop-4–5 copy of the author from relays, since nobody sends one
+  toward a household that does not look that far. Owner-accepted
+  trade-off — following someone far away and seeing all of them means
+  raising "Show moments up to".
+
+Release-blocker tests: ``tests/protocol/test_moment_forward_only.py``
+(forward within reach and keep nothing — no row, route, hashtag or media
+file; a follower keeps and alone sees; reactions from behind pass on
+return tokens; a reply like a create; a delete passes as a content-free
+tombstone and a replay stops; one relay per create from any neighbour,
+and no relay of a replay past 48 h after a restart; totals pass while the
+seen-map remembers the create; no media fetch).
 
 ### Per-moment row: ``moments.reach`` (migration audit)
 
@@ -495,7 +543,8 @@ per moment in a tree but up to *d* copies in a dense mesh — at d = 10,
 reach 5 that is up to ≈ 3 million envelopes/day per household, each a
 signature check and a replay-cache write before the seen-map drops it.
 Storage does not grow with reach (it follows local viewers' ``max_hops``,
-default 3) — unless someone here looks 5 hops, when a d = 10 tree delivers
+default 3, and their follows of authors whose moments reach the
+household) — unless someone here looks 5 hops, when a d = 10 tree delivers
 ≈ 295 000 moments/day ≈ 450 MB/day of rows. The relay seen-map
 (``RELAY_SEEN_MAX`` 50 000 entries, two per relayed create, plus deletes
 and totals revs) overflows inside its 48 h window past ≈ 12 000 relayed
@@ -637,8 +686,18 @@ user sees** is a separate, per-user knob: ``moments.max_hops`` in
   advertises ``moment_look_hops`` so relays send it hop-4–5 copies).
 
 The recipient instance writes the inbound ``hop_count`` onto the
-``moments`` row; ``list_visible_to`` adds ``AND m.hop_count <= ?``
-against the viewer's preference so the inbox respects it.
+``moments`` row; every read applies ``(viewer follows the author OR
+m.hop_count <= ?)`` against the viewer's preference
+(``moment_repo._WITHIN_HOPS_SQL``) — the inbox and ``?tag=``, trending
+tags, the detail read, a thread's replies and ``reply_count``, and the
+Saved list. **A follower sees the followed author's moments whatever their
+``max_hops``** (a follow through ``user_follows`` or a GFS
+``moment_public_follows``) — the same rule the household stores by
+(§ Storage above), so "stored" and "seen" stay one rule. The ``max_hops``
+cap still holds for every author the viewer does not follow, and child
+protection (below) still applies on top: a protected follower sees no
+moment from beyond hop 1. A follow does not make the household look
+further (``moment_look_hops`` stays ``max_hops``-only, § Storage).
 
 ``hop_count`` is outside the origin signature (each relay bumps it), so the
 receiver never trusts a low one from a relay: a copy whose sender is not its
@@ -669,9 +728,11 @@ lifting protection takes effect on the next read.
 
 ### Pure pass-through
 
-If **no local user** can see an inbound moment under their
-``max_hops``, per-viewer ``user_blocks`` and child protection (a protected
-account counts only for a hop-1 moment), the recipient instance
+If **no local user** will see an inbound moment — nobody whose
+``max_hops`` covers its hop and nobody who follows its author, after
+personal ``user_blocks`` and guardian blocks (§CP.F2) and child protection
+(a protected account counts only for a hop-1 moment) — the recipient
+instance
 **skips the local persist** but **still relays** onward. This
 keeps the household acting as a transparent forwarder when no one
 locally subscribes — saves disk + retention work without breaking

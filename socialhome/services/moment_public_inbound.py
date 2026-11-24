@@ -532,6 +532,20 @@ class MomentPublicInbound:
                 env.get("moment_id"),
             )
             return
+        if not await self._moments.has_visible_recipient(
+            author_user_id=str(env["author_user_id"]),
+            hop_count=1,
+            via_gfs=True,
+        ):
+            # Kept only if someone here will see it — the mesh's storage rule
+            # (v_96). The follower may be removed, protected (never sees a
+            # GFS moment) or block the author, and nobody else here may see
+            # it either: no row, no file fetched.
+            log.info(
+                "moment_public.inbound: moment %s — nobody here will see it, not kept",
+                env.get("moment_id"),
+            )
+            return
         if (
             stored is None
             and follow is not None
