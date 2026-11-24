@@ -368,6 +368,32 @@ describe('Discover › ranking the GFS list', () => {
       .toBe('Sorted by newest')
   })
 
+  it('a slow answer for an order the person already left never lands', async () => {
+    let releaseNew: () => void = () => {}
+    vi.mocked(api.get).mockImplementation(async (path: string, params?: Record<string, string>) => {
+      if (path === '/api/gfs/connections') return [gfs]
+      if (path === '/api/gfs/g1/moments/users') {
+        if (params?.sort === 'new') {
+          await new Promise<void>((r) => { releaseNew = r })
+          return { users: newest, sort: 'new' }
+        }
+        return { users: ranked, sort: 'followers' }
+      }
+      if (path === '/api/friends') return NO_FRIENDS
+      return []
+    })
+    const { findByRole, getByRole } = render(<PublicDiscoveryPage />)
+    await findByRole('button', { name: 'Most followed' })
+    fireEvent.click(getByRole('button', { name: 'Newest' }))
+    fireEvent.click(getByRole('button', { name: 'Most followed' }))
+    await waitFor(() => expect(names(getByRole('list', { name: 'People sharing on Demo GFS' })))
+      .toEqual(['Dana Rivers', 'Ivo', 'Gus']))
+    releaseNew()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(names(getByRole('list', { name: 'People sharing on Demo GFS' })))
+      .toEqual(['Dana Rivers', 'Ivo', 'Gus'])
+  })
+
   it('a GFS that does not rank: no sort buttons and no counts', async () => {
     ranks = false
     const { findByRole, queryByRole } = render(<PublicDiscoveryPage />)
@@ -384,6 +410,8 @@ describe('Discover › ranking the GFS list', () => {
     down = true
     const { findByRole, getByRole } = render(<PublicDiscoveryPage />)
     await findByRole('alert')
+    expect(names(getByRole('list', { name: 'People sharing on Demo GFS' })))
+      .toEqual(['Dana Rivers', 'Ivo', 'Gus'])
     const newestBtn = getByRole('button', { name: 'Newest' })
     expect(newestBtn.getAttribute('aria-disabled')).toBe('true')
     const calls = vi.mocked(api.get).mock.calls.length

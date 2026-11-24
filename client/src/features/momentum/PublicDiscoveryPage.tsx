@@ -115,13 +115,20 @@ async function loadFriends(): Promise<void> {
   }
 }
 
-async function loadDirectory(gfsId: string): Promise<void> {
+/** Bumped per directory read: only the newest read's answer (or failure)
+ *  lands, whatever order the answers come back in. */
+let directoryRead = 0
+
+async function loadDirectory(gfsId: string, gfsChanged = false): Promise<void> {
   const sort = sortOrder.value
-  const current = () => selectedGfs.value === gfsId && sortOrder.value === sort
+  const read = ++directoryRead
+  const current = () => read === directoryRead
   const cached = directoryCache.get(cacheKey(gfsId, sort))
   loading.value = true
   directory.value = cached?.users ?? []
+  // Another GFS may not rank: no sort chips until it says it does.
   if (cached) ranks.value = cached.sort !== null
+  else if (gfsChanged) ranks.value = false
   try {
     const page = await fetchGfsDirectory(gfsId, sort)
     directoryCache.set(cacheKey(gfsId, sort), { ...page, at: Date.now() })
@@ -149,10 +156,19 @@ function chooseSort(sort: DirectorySort): void {
 /** "1.2K followers" / "1 follower"; nothing for 0 or no count. */
 function followersLabel(n: number | undefined): string | null {
   if (!n) return null
-  const count = new Intl.NumberFormat(formatLocale(), {
-    notation: 'compact', maximumFractionDigits: 1,
-  }).format(n)
+  const count = compactNumber(formatLocale()).format(n)
   return t(isOne(n) ? 'moment.discover.followers_one' : 'moment.discover.followers', { count })
+}
+
+let compactFormat: { locale: string, format: Intl.NumberFormat } | null = null
+function compactNumber(locale: string): Intl.NumberFormat {
+  if (compactFormat?.locale !== locale) {
+    compactFormat = {
+      locale,
+      format: new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }),
+    }
+  }
+  return compactFormat.format
 }
 
 async function bootstrapGfs(): Promise<void> {
@@ -219,7 +235,7 @@ export default function PublicDiscoveryPage() {
             onChange={(ev) => {
               const next = (ev.currentTarget as HTMLSelectElement).value
               selectedGfs.value = next
-              void loadDirectory(next)
+              void loadDirectory(next, true)
             }}
           >
             {gfses.map((g) => (
@@ -362,6 +378,7 @@ function GfsSection() {
         <ul class="sh-momentum-discover-list" aria-labelledby={GFS_HEADING_ID}>
           {rows.map((u) => {
             const name = u.display_name || u.username
+            const followers = followersLabel(u.follower_count)
             return (
               <li key={u.user_id} class="sh-momentum-discover-row">
                 <Avatar src={discoveryAvatarUrl(u)} name={name} size={40} />
@@ -372,7 +389,7 @@ function GfsSection() {
                   </button>
                   <span class="sh-muted sh-momentum-discover-sub">
                     <bdi dir="auto">@{u.username}</bdi>
-                    {followersLabel(u.follower_count) && ` · ${followersLabel(u.follower_count)}`}
+                    {followers && ` · ${followers}`}
                   </span>
                   {u.bio && <p class="sh-momentum-discover-bio" dir="auto">{u.bio}</p>}
                 </div>

@@ -321,6 +321,20 @@ async def test_fetch_directory_survives_a_body_that_is_not_an_object(repos):
     assert page.users == () and page.sort is None
 
 
+async def test_fetch_directory_bad_json_is_a_gfs_failure(repos):
+    """A GFS answering 200 with junk is a GFS failure (502), not our 422."""
+
+    class _BadJson(_StubResp):
+        async def json(self):
+            raise ValueError("not json")
+
+    sess = _StubSession(status=200)
+    sess.get = lambda url, **_kw: _BadJson(200)
+    svc = _make_service(repos, session=sess)
+    with pytest.raises(MomentPublicError):
+        await svc.fetch_directory("g1", sort="followers")
+
+
 async def test_fetch_directory_5xx_raises(repos):
     svc = _make_service(repos, session=_StubSession(status=500, body={}))
     with pytest.raises(MomentPublicError):

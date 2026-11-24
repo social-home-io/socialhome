@@ -518,7 +518,9 @@ class MomentPublicService(ProtectionGateMixin):
                         f"GFS directory fetch failed: HTTP {resp.status}"
                     )
                 payload = await resp.json()
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, ValueError) as exc:
+            # ValueError: a body that isn't JSON — the GFS's fault (502),
+            # not a bad request of ours.
             raise MomentPublicError(f"GFS directory request failed: {exc}") from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("users"), list):
             return MomentPublicDirectoryPage(users=())

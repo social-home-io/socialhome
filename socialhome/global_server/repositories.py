@@ -2013,9 +2013,10 @@ class AbstractGfsUserRegistrationRepo(Protocol):
     async def list_active(
         self, *, q: str | None = None, limit: int = 200
     ) -> list[GfsUserRegistration]: ...
-    async def list_most_followed(
-        self, *, q: str | None = None, limit: int = 200
-    ) -> list[tuple[GfsUserRegistration, int]]: ...
+    async def most_followed_ids(self, *, limit: int = 200) -> list[str]: ...
+    async def list_active_by_ids(
+        self, user_ids: list[str]
+    ) -> list[GfsUserRegistration]: ...
     async def list_for_instance(
         self, instance_id: str
     ) -> list[GfsUserRegistration]: ...
@@ -2106,37 +2107,42 @@ class SqliteGfsUserRegistrationRepo:
         out = [_row_to_user_reg(_dict(r)) for r in rows]
         return [r for r in out if r is not None]
 
-    async def list_most_followed(
-        self, *, q: str | None = None, limit: int = 200
-    ) -> list[tuple[GfsUserRegistration, int]]:
-        """Active registrations with the most followers first (ties newest
-        first), each with its follower count. One count over the follow
-        graph per call — the registry keeps the answer for a while."""
+    async def most_followed_ids(self, *, limit: int = 200) -> list[str]:
+        """The ids of the active authors followed by the most households
+        (then by most followers, then newest) — at most *limit*, at most 200.
+        Households, not follower ids: a follow's ``follower_user_id`` is
+        whatever the signed household says, so one household could make up
+        followers; it counts once here. One count over the follow graph per
+        call — the registry keeps the answer for a while."""
         clamped = max(1, min(int(limit), 200))
-        where = "r.status='active'"
-        params: tuple = ()
-        if q:
-            like = f"%{q.strip()}%"
-            where += " AND (r.display_name LIKE ? OR r.username LIKE ?)"
-            params = (like, like)
-        cols = ", ".join(f"r.{c.strip()}" for c in _USER_REG_COLS.split(","))
         rows = await self._db.fetchall(
-            f"SELECT {cols}, COALESCE(f.c, 0) AS follower_count "
-            "FROM gfs_user_registrations r LEFT JOIN ("
-            "  SELECT followed_user_id, COUNT(*) AS c FROM gfs_moment_follows"
-            "  GROUP BY followed_user_id"
+            "SELECT r.user_id FROM gfs_user_registrations r LEFT JOIN ("
+            "  SELECT followed_user_id,"
+            "         COUNT(DISTINCT follower_instance_id) AS h, COUNT(*) AS c"
+            "    FROM gfs_moment_follows GROUP BY followed_user_id"
             ") f ON f.followed_user_id = r.user_id "
-            f"WHERE {where} "
-            "ORDER BY follower_count DESC, r.registered_at DESC LIMIT ?",
-            (*params, clamped),
+            "WHERE r.status='active' "
+            "ORDER BY COALESCE(f.h, 0) DESC, COALESCE(f.c, 0) DESC, "
+            "r.registered_at DESC LIMIT ?",
+            (clamped,),
         )
-        out: list[tuple[GfsUserRegistration, int]] = []
-        for raw in rows:
-            d = _dict(raw)
-            reg = _row_to_user_reg(d)
-            if reg is not None:
-                out.append((reg, int((d or {}).get("follower_count") or 0)))
-        return out
+        return [str((_dict(r) or {})["user_id"]) for r in rows]
+
+    async def list_active_by_ids(
+        self, user_ids: list[str]
+    ) -> list[GfsUserRegistration]:
+        """The active registrations among *user_ids* (≤ 200, any order)."""
+        ids = list(dict.fromkeys(user_ids))[:200]
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = await self._db.fetchall(
+            f"SELECT {_USER_REG_COLS} FROM gfs_user_registrations "
+            f"WHERE status='active' AND user_id IN ({marks})",
+            tuple(ids),
+        )
+        out = [_row_to_user_reg(_dict(r)) for r in rows]
+        return [r for r in out if r is not None]
 
     async def list_for_instance(self, instance_id: str) -> list[GfsUserRegistration]:
         rows = await self._db.fetchall(

@@ -66,6 +66,7 @@ from ..html_page import html_response
 from ..link_preview import person_handoff
 from ..moment_media import MediaRefused
 from ..moment_public_registry import (
+    DIRECTORY_SORT_FOLLOWERS,
     DIRECTORY_SORT_NEW,
     DIRECTORY_SORTS,
     envelope_step_current,
@@ -647,7 +648,8 @@ class GfsUserDirectoryView(GfsBaseView):
     * ``q`` — substring filter on ``display_name`` / ``username``.
     * ``limit`` — page cap (1..200, default 200).
     * ``sort`` — ``new`` (newest registration first, the default) or
-      ``followers`` (most followed first); anything else is 422.
+      ``followers`` (followed by the most households first); anything else
+      is 422, and so is ``followers`` with a search (``search_not_ranked``).
 
     Each row carries ``follower_count`` — the number the author's public
     page already shows — and the response echoes ``sort``, so a household
@@ -656,10 +658,15 @@ class GfsUserDirectoryView(GfsBaseView):
 
     async def get(self) -> web.Response:
         registry = self.svc(K.gfs_moment_public_registry_key)
-        q = self.request.query.get("q") or None
+        # A blank search is no search (it would match everyone).
+        q = (self.request.query.get("q") or "").strip() or None
         sort = self.request.query.get("sort") or DIRECTORY_SORT_NEW
         if sort not in DIRECTORY_SORTS:
             return web.json_response({"error": "invalid_sort"}, status=422)
+        if q and sort == DIRECTORY_SORT_FOLLOWERS:
+            # Ranking a search would recount the whole follow graph on every
+            # request; a search is listed newest first.
+            return web.json_response({"error": "search_not_ranked"}, status=422)
         try:
             limit = int(self.request.query.get("limit", "200"))
         except ValueError:

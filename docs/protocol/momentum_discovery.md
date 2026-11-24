@@ -69,19 +69,31 @@ chose instead of 24 hours. The hint under the heading says so.
 order). Each row now carries `follower_count` (follower users, the number
 the per-author pages already show) and the response echoes `sort`. An
 unknown `sort` is `422 invalid_sort`. `q` is unchanged and still never sent
-by Social Home (the search box filters in the browser).
+by Social Home (the search box filters in the browser); a blank `q` is no
+search, and a search is never ranked (`sort=followers` with `q` is
+`422 search_not_ranked` — ranking it would recount on every request).
 
-* `sort=followers` — the 200 active authors with the most followers, ties
-  newest first. One grouped count over `gfs_moment_follows`; each node
-  keeps the answer for `RANKED_DIRECTORY_TTL_S` (5 minutes, `q` absent), so
-  visitors can't make it recount.
+* `sort=followers` — the 200 active authors **followed by the most
+  households**, then by most followers, then newest. Households, not
+  follower ids: a follow's `follower_user_id` is whatever the signed
+  household says, so one household could make up any number of followers
+  — it counts once toward the order. (The label stays the public follower
+  count, so an author with many followers in few households may sit below
+  one with fewer.) The order is one grouped count over
+  `gfs_moment_follows`; each node keeps only the ordered ids for
+  `RANKED_DIRECTORY_TTL_S` (5 minutes), recounted by one request at a time
+  while the others wait for it — visitors can't make it recount. The rows
+  and counts are read live (≤ 200 by primary key, one indexed `IN` count),
+  so an author who leaves or is suspended is gone at once.
 * `sort=new` — newest registration first, with the counts of those ≤ 200
   rows (one indexed `IN` count).
 
 The household proxy `GET /api/gfs/{gfs_id}/moments/users?sort=…` passes
-`sort` through (anything else is `400`), keeps a `follower_count` only when
-it is a non-negative integer, and returns `{users, sort}` — `sort` is
-`null` when the GFS did not echo one.
+`sort` through (anything else is `422`) and treats what comes back as
+display data: `sort` only when the GFS echoed exactly the order asked for
+(else `null`), a `follower_count` only as a whole number from 0 to 1e9,
+and a body that isn't JSON is `502`. The app checks both again; they label
+the list and its rows and drive nothing else.
 
 **No capability flag.** An older GFS ignores the parameter and answers in
 its old order without `sort` or counts; the app then offers no sort buttons
@@ -104,11 +116,14 @@ v_96), no migration on either side.
 * Response: +`follower_count` (~20 B) × ≤ 200 rows ≈ +4 KB per directory
   fetch; one fetch per Discover visit and sort per GFS, as before.
 * GFS, most followed: one grouped count over the follow graph. Large GFS,
-  50 000 authors × 20 followers = 1 M rows: ~0.2–0.5 s in SQLite, at most
+  50 000 authors × 20 followers = 1 M rows: ~0.05–0.5 s in SQLite, at most
   once per 5 minutes per node whatever the number of visitors (12 an hour
-  per node, worst case), kept as ≤ 200 rows in memory. A search (`q`) is
-  not cached; Social Home never sends one.
+  per node, worst case), kept as ≤ 200 ids in memory (~10 KB). Each request
+  then reads ≤ 200 rows by primary key and one indexed count — the same as
+  newest.
 * GFS, newest: as before plus one indexed count over ≤ 200 authors.
+* Not rate-limited per address (it never was): every answer is bounded by
+  the two reads above.
 
 ## UI
 

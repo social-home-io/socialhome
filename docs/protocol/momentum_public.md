@@ -712,7 +712,7 @@ verifies the author's signature directly.
 | POST   | `/gfs/moments/users/{user_id}/react` | v_68. Signed by a follower household: exactly `{instance_id, sealed}` — a sealed reaction to one of the author's public moments, pushed (`moment_reaction`) to the author's household only. `202` (whether the author was online is not said), `403 not_following` (not a follower household here, or the author's own), `422 invalid_reaction` (any other field, a malformed seal), `413` past 4 KB, `429 rate_limited` (30 / min per household + author, 120 / min per household, cluster-wide). Advertised as the signed `moment_reactions` capability. |
 | POST   | `/gfs/moments/counts` | v_69. Signed by the author's household: exactly the eight envelope fields (`op: "counts"` sealed under today's step). Pushed as `incoming_public_moment_counts` to connected followers that declared `ops: ["counts"]` — never queued. `202` (also for a retried post), `403 instance_mismatch`, `409 stale_envelope` (an earlier day's step), `413` past 4 KB, `422 encryption_required`, `429 rate_limited` (10 / min per author household, 3 / day per moment, cluster-wide). Advertised as the signed `moment_counts` capability. |
 | POST   | `/gfs/moments/users/{user_id}/follower_stats` | v_62. Signed by the author's household: `{followers, households, households_unable}` — counts only. |
-| GET    | `/gfs/moments/users` | Public JSON directory. |
+| GET    | `/gfs/moments/users` | Public JSON directory. `?sort=new` (default) or `followers`; rows carry `follower_count`, `sort` is echoed — see [Momentum discovery](momentum_discovery.md#2-ranking-the-gfs-directory). |
 | GET    | `/gfs/moments/users/{user_id}` | Public JSON per-user detail. |
 | GET    | `/gfs/moments/users/{user_id}/picture` | Public avatar bytes. |
 | GET    | `/moments` | Public HTML directory. |
@@ -1219,7 +1219,11 @@ identical bytes-for-bytes to the sender's canonical encoding.
   page can show social proof.
 * **Server-side filter** `GET /gfs/moments/users?q=<substr>` matches
   `display_name` and `username` (`LIKE '%q%'`). Capped at 200
-  rows; the SH-side proxy passes `q` through.
+  rows; the SH-side proxy passes `q` through. A search is listed newest
+  first only (`sort=followers` with `q` is `422 search_not_ranked`).
+* **Order** `?sort=new` (default) or `?sort=followers`, every row with its
+  `follower_count`, the order echoed — the Discover sort chips, "Most
+  followed" first ([Momentum discovery](momentum_discovery.md)).
 * **In-app Discover** is the Momentum tab `/momentum/discover` (the old
   `/momentum/public/discover` redirects there) — fetches
   `GET /api/gfs/{gfs_id}/moments/users` (SH proxy, no `q`: the search box

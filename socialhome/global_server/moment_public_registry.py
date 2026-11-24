@@ -254,6 +254,7 @@ class MomentPublicRegistry:
         "_mailbox",
         "_publishes",
         "_ranked",
+        "_ranked_lock",
         "_reaction_seen",
         "_reactions_author",
         "_reactions_household",
@@ -324,8 +325,9 @@ class MomentPublicRegistry:
             ttl_s=MOMENT_SEEN_TTL_S, cap=MOMENT_SEEN_MAX
         )
         self._tasks: set[asyncio.Task] = set()
-        #: (monotonic time, the most-followed list) — :meth:`list_directory`.
-        self._ranked: tuple[float, list[tuple[GfsUserRegistration, int]]] | None = None
+        #: (monotonic time, the most-followed ids) — :meth:`_ranked_ids`.
+        self._ranked: tuple[float, list[str]] | None = None
+        self._ranked_lock = asyncio.Lock()
 
     # ── Registration ────────────────────────────────────────────────────
 
@@ -377,19 +379,43 @@ class MomentPublicRegistry:
     ) -> list[tuple[GfsUserRegistration, int]]:
         """Active authors with their follower counts (the number each
         author's public page already shows): newest first, or most followed
-        first. The most-followed list without a search is one count over the
-        whole follow graph, so each node keeps it for
-        :data:`RANKED_DIRECTORY_TTL_S` — visitors can't make it recount."""
+        first (by follower households — see
+        :meth:`~.repositories.SqliteGfsUserRegistrationRepo.most_followed_ids`).
+
+        The most-followed *order* is one count over the whole follow graph,
+        so each node keeps only the ids for :data:`RANKED_DIRECTORY_TTL_S`,
+        one recount at a time — visitors can't make it recount. The rows and
+        counts are read live on every request (≤ 200, by primary key and
+        index), so an author who leaves or is suspended is gone at once.
+        A search is not ranked (``ValueError``): it would need a recount."""
         if sort == DIRECTORY_SORT_FOLLOWERS:
             if q:
-                return await self._users.list_most_followed(q=q, limit=limit)
-            now = ranked_clock()
-            if self._ranked is None or now - self._ranked[0] >= RANKED_DIRECTORY_TTL_S:
-                self._ranked = (now, await self._users.list_most_followed(limit=200))
-            return self._ranked[1][: max(1, min(int(limit), 200))]
-        regs = await self._users.list_active(q=q, limit=limit)
+                raise ValueError("a search is listed newest first")
+            ids = (await self._ranked_ids())[: max(1, min(int(limit), 200))]
+            by_id = {r.user_id: r for r in await self._users.list_active_by_ids(ids)}
+            regs = [by_id[i] for i in ids if i in by_id]
+        else:
+            regs = await self._users.list_active(q=q, limit=limit)
         counts = await self._follows.follower_counts([r.user_id for r in regs])
         return [(r, counts.get(r.user_id, 0)) for r in regs]
+
+    async def _ranked_ids(self) -> list[str]:
+        """The most-followed ids, recounted at most once per
+        :data:`RANKED_DIRECTORY_TTL_S` on this node and by one request at a
+        time (the others wait for its answer)."""
+        if (
+            self._ranked is not None
+            and ranked_clock() - self._ranked[0] < RANKED_DIRECTORY_TTL_S
+        ):
+            return self._ranked[1]
+        async with self._ranked_lock:
+            if (
+                self._ranked is None
+                or ranked_clock() - self._ranked[0] >= RANKED_DIRECTORY_TTL_S
+            ):
+                ids = await self._users.most_followed_ids(limit=200)
+                self._ranked = (ranked_clock(), ids)
+            return self._ranked[1]
 
     async def set_picture_digest(
         self, *, user_id: str, picture_digest: str | None
