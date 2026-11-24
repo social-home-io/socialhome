@@ -120,7 +120,7 @@ def _moment_dict(
         # ``household`` when it is seen in this household only.
         "reactions_reach": reach,
         # How far away it was written: 1 = this household or a paired one,
-        # 2–3 = relayed (the card's provenance line, "2 hops away").
+        # 2–5 = relayed (the card's provenance line, "2 hops away").
         "hop_count": m.hop_count,
         # v_96: how many hops it goes (1–5) — fixed when it was written, so
         # the SPA can say how far a moment (and a reply's parent) went.
@@ -448,11 +448,12 @@ class MomentLimitsView(BaseView):
         if ctx is None:
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         svc = self.svc(moment_service_key)
+        reach_max = await svc.household_reach_max()
         return self._json(
             {
                 "next_allowed_at": await svc.next_allowed_at(ctx.user_id),
-                "reach": await svc.effective_reach(ctx.user_id),
-                "reach_max": await svc.household_reach_max(),
+                "reach": await svc.effective_reach(ctx.user_id, reach_max=reach_max),
+                "reach_max": reach_max,
             }
         )
 

@@ -461,17 +461,22 @@ class MomentService(MediaRefGuardedMixin, ProtectionGateMixin):
         )
         return prefs.follower_retention_days
 
-    async def effective_reach(self, author_user_id: str) -> int:
+    async def effective_reach(
+        self, author_user_id: str, *, reach_max: int | None = None
+    ) -> int:
         """How many hops a new moment of *author_user_id* goes (v_96): one
         for a protected account (§CP.R, never raised), else the person's
-        ``moments.reach`` within the household's ``moments.reach_max``."""
+        ``moments.reach`` within the household's ``moments.reach_max``.
+        A caller that already read the maximum passes it as *reach_max*."""
         if await self._is_protected(author_user_id):
             return 1
         author = await self._users.get_by_user_id(author_user_id)
         prefs = parse_moment_preferences(
             author.preferences_json if author is not None else None
         )
-        return min(prefs.reach, await self.household_reach_max())
+        if reach_max is None:
+            reach_max = await self.household_reach_max()
+        return min(prefs.reach, reach_max)
 
     async def household_reach_max(self) -> int:
         """The household's maximum reach (``moments.reach_max``, 1–5)."""

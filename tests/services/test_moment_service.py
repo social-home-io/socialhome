@@ -1147,6 +1147,19 @@ async def test_effective_reach_and_household_maximum_are_public(stack):
     assert await svc.effective_reach(a.user_id) == 2
 
 
+async def test_effective_reach_takes_a_maximum_already_read(stack):
+    """The limits route reads the household maximum once and hands it in;
+    the passed maximum is the one applied (a protected account stays 1)."""
+    a = await stack.provision("alice")
+    kid = await stack.provision("kid")
+    await stack.user_svc.patch_preferences("alice", {"moments": {"reach": 4}})
+    svc = _reach_svc(stack, protected={kid.user_id})
+    assert await svc.household_reach_max() == 5
+    assert await svc.effective_reach(a.user_id, reach_max=2) == 2
+    assert await svc.effective_reach(a.user_id, reach_max=5) == 4
+    assert await svc.effective_reach(kid.user_id, reach_max=5) == 1
+
+
 async def test_set_reach_max_is_admin_only(stack):
     svc = _reach_svc(stack)
     with pytest.raises(PermissionError):
