@@ -1171,7 +1171,9 @@ async def test_banning_a_long_gone_follower_reads_the_debt_before_its_gossip(
 ):
     """The ban's own LEFT gossip re-tombstones the seat at a higher version,
     which stamps ``removed_at`` now — read after it, every such ban looked
-    owed and rotated. The debt is read before the gossip."""
+    owed and rotated at once. The debt is read before the gossip. (The
+    re-stamp itself leaves one owed rotation for the sweep: a newer
+    tombstone is a new removal, by design.)"""
     space = await _hosted(stack)
     await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
     await stack.svc.on_remote_member_left(space.id, PEER, "u-fan")
@@ -1448,10 +1450,11 @@ async def test_followers_off_tells_the_members_only_once_every_follower_left(sta
     assert all(not ({"fan-1", "fan-2", "fan-3"} & seen) for seen in audiences)
 
 
+@pytest.mark.parametrize("hours_ago", [25, 47])
 async def test_a_seed_holding_delegated_admin_leaves_a_one_day_debt_to_the_owner(
-    stack,
+    stack, hours_ago
 ):
-    space = await _owing(stack, hours_ago=25)
+    space = await _owing(stack, hours_ago=hours_ago)
     await stack.db.enqueue(
         "UPDATE spaces SET owner_instance_id=? WHERE id=?", (HOST, space.id)
     )

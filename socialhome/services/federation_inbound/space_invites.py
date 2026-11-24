@@ -320,22 +320,23 @@ class SpaceInviteInboundHandlers:
             return
         assert space is not None
         # Follows are bounded before anything is approved (a seat, a token,
-        # a join-request row per follow) — the GFS bootstrap's numbers: per
-        # space, whoever sends them (a routed follow's origin is any
-        # self-authenticating key, so a fresh origin would get a fresh
-        # per-household budget), then per household. Until the limiter is
-        # wired with the approver, nothing is approved anyway.
+        # a join-request row per follow) — the GFS bootstrap's numbers and
+        # order: per household first, then a peek at the space's budget
+        # (whoever sends them: a routed follow's origin is any
+        # self-authenticating key, so a fresh origin gets a fresh household
+        # budget), which is charged only right before the approval, so a
+        # rate-limited, banned or repeated follow never spends it. Until the
+        # limiter is wired with the approver, nothing is approved anyway.
         limiter = self._follow_limiter
+        space_budget = f"follow:space:{space_id}"
         if limiter is not None and not (
             limiter.is_allowed(
-                f"follow:space:{space_id}",
-                limit=PER_SPACE_LIMIT,
-                window_s=PER_SPACE_WINDOW_S,
-            )
-            and limiter.is_allowed(
                 f"follow:sender:{event.from_instance}",
                 limit=PER_SENDER_LIMIT,
                 window_s=PER_SENDER_WINDOW_S,
+            )
+            and limiter.has_room(
+                space_budget, limit=PER_SPACE_LIMIT, window_s=PER_SPACE_WINDOW_S
             )
         ):
             log.info(
@@ -398,6 +399,15 @@ class SpaceInviteInboundHandlers:
         if self._follow_approver is None:
             log.warning(
                 "follow from %s for space %s dropped: no approver wired",
+                event.from_instance,
+                space_id,
+            )
+            return
+        if limiter is not None and not limiter.is_allowed(
+            space_budget, limit=PER_SPACE_LIMIT, window_s=PER_SPACE_WINDOW_S
+        ):
+            log.info(
+                "follow from %s for space %s dropped: rate limit",
                 event.from_instance,
                 space_id,
             )

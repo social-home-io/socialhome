@@ -1126,3 +1126,16 @@ async def test_follows_to_one_space_are_bounded_whoever_sends_them(bus, repo):
     h = _follow_handlers(bus, repo, approver=approver, limiter=limiter)
     await _follow(h)
     assert approver.calls == []
+
+
+async def test_a_refused_follow_never_spends_the_space_budget(bus, repo):
+    """The space's budget is charged only right before the approval (the
+    GFS bootstrap's order): one household's rate-limited, banned or repeat
+    follows cannot use it up for everyone else."""
+    repo.spaces["sp-1"] = _follow_space()
+    repo.banned.add(("sp-1", U_FOLLOWER))
+    limiter = RateLimiter()
+    h = _follow_handlers(bus, repo, approver=_Approver(), limiter=limiter)
+    for i in range(PER_SENDER_LIMIT + 5):
+        await _follow(h, request_id=f"req-{i}")
+    assert limiter.has_room("follow:space:sp-1", limit=1, window_s=PER_SPACE_WINDOW_S)

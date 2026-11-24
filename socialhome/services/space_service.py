@@ -4902,6 +4902,9 @@ class SpaceService(
             space.id, instance_id, include_tombstoned=False
         )
         orphaned = all(seat.user_id in ending_ids for seat in live)
+        # A crash between the two leaves a live seat with no fan-out row:
+        # the household gets nothing until the leave / kick is retried —
+        # the safe side (the old order left a row with no seat).
         if orphaned:
             await self._spaces.remove_space_instance(space.id, instance_id)
         for seat in ending:
@@ -6507,9 +6510,10 @@ class SpaceService(
                     )
                 )
             elif follower_owed:
-                # A follower who left while the key it holds is still the
-                # current one (the rotation is owed): a ban kills that key
-                # now instead of at the sweep (v_96).
+                # The space owes a rotation (this follower's leave, or another
+                # follower's): a ban pays it now instead of at the sweep, so
+                # a banned follower who left under the current key loses it
+                # at once (v_96).
                 await self._rotate_and_distribute_space_key(space_id)
             return
         # A ban is a ROSTER mutation, not a config edit — it must NOT advance
@@ -7667,7 +7671,7 @@ class SpaceService(
             )
         )
         if not targets:
-            return 0
+            return 0  # the mark stays: a later copy has nobody new either
         per_peer = (
             self._writer_certs.peer_payload_hook(space_id, epoch=epoch)
             if self._writer_certs is not None

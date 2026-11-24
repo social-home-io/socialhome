@@ -510,8 +510,9 @@ within seconds).
   `SpaceService.pay_owed_rotation` to rotate, once, each space whose debt
   is 24 h old — only on the owner or a seed-holding acting host (its
   rekey is authority-signed), a delegated admin only once the debt is
-  48 h old (the owner had its day, so the owner and K admins never each
-  rotate the same debt), and with the debt re-read so a rotation
+  48 h old (the owner had its day, so owner and admins do not race on one
+  debt; with the owner away, two admins paying in the same hour settle on
+  one key by the rotation tiebreak), and with the debt re-read so a rotation
   that ran meanwhile is not doubled. `removed_at` keeps whole seconds, so
   a leave in the same second as the key's minting stays owed (one extra
   rotation at worst, never a missed one).
@@ -530,7 +531,10 @@ within seconds).
   is the remedy — it rotates at once. The household leaves
   `space_instances` before the seat is tombstoned, so a rotation racing
   the leave either never reaches it or is newer than `removed_at` (owed);
-  a ban reads the debt before its own LEFT gossip re-stamps `removed_at`.
+  a ban reads the debt before its own LEFT gossip re-stamps `removed_at`,
+  so banning a long-gone follower does not rotate at once; that re-stamp
+  (a newer tombstone is a new removal, carried by the 30-day snapshot
+  window) leaves one owed rotation, paid by the sweep a day later.
 - **At once:** a follower ban — a seated follower's, and a follower who
   already left while the space still owes for it; `allow_subscribers`
   turned off (owner-only) — this household's own followers leave, and
