@@ -160,6 +160,29 @@ async def test_unchanged_counts_send_nothing(env):
     assert len(gfs.calls) == 2
 
 
+@pytest.mark.parametrize("tier", [SpaceType.GLOBAL, SpaceType.PUBLIC])
+async def test_switching_followers_off_and_on_reshares_the_counts(env, tier):
+    """The followers switch is a config change; the builder then declares no
+    follower count (off) or one again (on), and each flip is re-shared."""
+    bus, spaces, _public, _peers, gfs, peer_dir, svc = env
+    spaces.spaces["s"] = _space("s", tier)
+    spaces.counts["s"] = SpaceListingCounts(member_count=3, follower_count=2)
+    await bus.publish(SpaceMemberJoined(space_id="s", user_id="u1"))
+    await _settle(svc)
+    for followers in (None, 0):
+        spaces.counts["s"] = SpaceListingCounts(
+            member_count=3, follower_count=followers
+        )
+        await bus.publish(
+            SpaceConfigChanged(
+                space_id="s", event_type="feature_changed", payload={}, sequence=1
+            )
+        )
+        await _settle(svc)
+    assert len(gfs.calls) + peer_dir.refreshes == 3
+    assert svc._last["s"] == SpaceListingCounts(member_count=3, follower_count=0)
+
+
 async def test_a_republish_nobody_took_is_tried_on_the_next_change(env):
     bus, spaces, _public, _peers, gfs, _peer_dir, svc = env
     spaces.spaces["g"] = _space("g", SpaceType.GLOBAL)

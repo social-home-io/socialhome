@@ -273,6 +273,34 @@ async def test_gfs_info_advertises_listing_counts_in_the_signed_block(gfs_client
     assert body["capabilities_sig"]
 
 
+async def test_turning_followers_off_shows_only_the_member_count(gfs_client):
+    """A space that takes no followers declares members only (its household
+    leaves ``follower_count`` out): the newer publish clears the follower
+    count, and every GFS surface shows "N members" — never "0 followers"."""
+    seed, _ = await _register_owner(gfs_client.server.app)
+    await _publish(
+        gfs_client,
+        seed,
+        {"member_count": 3, "follower_count": 2, "allow_subscribers": True},
+        ts=_ts(seconds=-5),
+    )
+    assert (await _listed(gfs_client))["follower_count"] == 2
+    await _publish(
+        gfs_client, seed, {"member_count": 3, "allow_subscribers": False}, ts=_ts()
+    )
+    stored = await _stored(gfs_client)
+    assert (stored.member_count, stored.follower_count) == (3, None)
+    assert (await _listed(gfs_client))["follower_count"] is None
+    space = (await (await gfs_client.get(f"/gfs/pages/spaces/{_SPACE}")).json())[
+        "space"
+    ]
+    assert (space["member_count"], space["follower_count"]) == (3, None)
+    page = await (await gfs_client.get(f"/spaces/{_SPACE}")).text()
+    assert "3 members" in page and "follower" not in page
+    landing = await (await gfs_client.get("/")).text()
+    assert "3 members" in landing and "follower" not in landing
+
+
 # ── viewer JSON ─────────────────────────────────────────────────────────
 
 

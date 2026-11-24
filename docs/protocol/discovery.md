@@ -194,7 +194,17 @@ The Social Home ↔ GFS link is split by direction:
     live remote seats, never a follower; `space_repo.MEMBER_COUNT_SQL`) and
     `follower_count` (live follower seats, local plus remote non-tombstoned;
     `FOLLOWER_COUNT_SQL`), both from one builder,
-    `space_repo.listing_counts`. They ride inside the signed body, so no
+    `space_repo.listing_counts`. **A space that takes no followers
+    (`allow_subscribers` off) declares no `follower_count` at all** (owner
+    request 2026-11-24): the builder leaves it `NULL`
+    (`LISTED_FOLLOWER_COUNT_SQL`) and the key is left out of the publish
+    and the snapshot, so every surface — GFS pages, Discover, the space page
+    — shows only "N members", never "0 followers"; a space that takes
+    followers always declares one, `0` included, and every renderer shows a
+    follower count exactly when one is present. A publish that declares
+    `member_count` without `follower_count` clears the stored follower
+    count, so flipping the switch (a config change, re-published at once)
+    updates every surface. They ride inside the signed body, so no
     relay or other household can change them on the way to the GFS (the
     signature is not served onward: a GFS can misreport them to its readers,
     as it could the name), and go only to a server whose
@@ -220,7 +230,8 @@ The Social Home ↔ GFS link is split by direction:
     it one). The paired-household `SPACE_DIRECTORY_SYNC` snapshot carries
     the same two numbers from the same builder (`member_count` always did;
     `follower_count` is additive — an older peer ignores it, an older host
-    sends none and shows no number).
+    sends none and shows no number; left out for a space that takes no
+    followers).
 
     **Re-shared on change, coalesced.** A join, leave, follow, unfollow,
     kick, ban or role change in a global or public space this household

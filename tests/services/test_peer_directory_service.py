@@ -65,11 +65,17 @@ class _FakeSpaceRepo:
         return list(self._spaces)
 
     async def listing_counts(self, space_id: str) -> SpaceListingCounts:
-        # The shared listing builder (members exclude followers) — the
-        # snapshot publishes both as they are.
+        # The shared listing builder (members exclude followers; no follower
+        # count for a space that takes none) — the snapshot publishes both
+        # as they are.
+        space = next(s for s in self._spaces if s.id == space_id)
         return SpaceListingCounts(
             member_count=len(self._members.get(space_id, [])),
-            follower_count=len(self._followers.get(space_id, [])),
+            follower_count=(
+                len(self._followers.get(space_id, []))
+                if space.features.allow_subscribers
+                else None
+            ),
         )
 
 
@@ -125,7 +131,9 @@ class _FakeFederationService:
 
 @pytest.fixture
 def env():
-    sp1 = _space(id="sp-1", name="Garden")
+    sp1 = _space(
+        id="sp-1", name="Garden", features=SpaceFeatures(allow_subscribers=True)
+    )
     sp2 = _space(id="sp-2", name="Kitchen", emoji="🍳")
     space_repo = _FakeSpaceRepo(
         public_spaces=[sp1, sp2],
@@ -173,6 +181,10 @@ async def test_space_config_changed_broadcasts_to_confirmed_peers(env):
         assert garden["member_count"] == 2
         assert garden["follower_count"] == 0
         assert garden["join_mode"] == "open"
+        # Kitchen takes no followers: no follower count at all, not 0.
+        kitchen = next(s for s in payload["spaces"] if s["space_id"] == "sp-2")
+        assert kitchen["member_count"] == 1
+        assert "follower_count" not in kitchen
 
 
 async def test_pairing_confirmed_sends_single_snapshot(env):
@@ -528,3 +540,18 @@ async def test_refresh_resends_only_a_changed_snapshot(env):
     svc._space_repo._followers["sp-1"] = ["f1"]
     await svc.refresh()
     assert [r[0] for r in fed.sent] == ["peer-1", "peer-2"]
+
+
+async def test_turning_followers_off_drops_the_follower_count(env):
+    """The followers switch is a config change: the snapshot goes out again
+    at once, the space's follower count gone (members only)."""
+    bus, fed, svc = env
+    svc._space_repo._followers["sp-1"] = ["f1"]
+    await bus.publish(_changed())
+    fed.sent.clear()
+    svc._space_repo._spaces[0] = _space(id="sp-1", name="Garden")
+    await bus.publish(_changed())
+    assert [r[0] for r in fed.sent] == ["peer-1", "peer-2"]
+    garden = next(s for s in fed.sent[0][2]["spaces"] if s["space_id"] == "sp-1")
+    assert "follower_count" not in garden
+    assert garden["member_count"] == 2
