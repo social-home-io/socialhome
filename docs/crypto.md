@@ -1809,7 +1809,24 @@ decryption.
 - ID derivation (public, deterministic, no secret):
   - `instance_id = base32(SHA256(identity_pk)[:20]).lower()`
   - `space_id    = base32(SHA256(space_pk)[:20]).lower()`
-  - `user_id     = base32(SHA256(instance_pk ‖ 0x00 ‖ username)[:20]).lower()`
+  - `user_id     = base32(SHA256(instance_pk ‖ 0x00 ‖ anchor)[:20]).lower()`
+    — `anchor` is the person's `identity_anchor or username`.
+  - **Person-ID anchor proof on seating (P5).** A host seats a person
+    another household names only when that household proves the id:
+    the request carries the person's anchor inside its encrypted payload /
+    sealed body — `redeemer_anchor` (§D2 / mesh `SPACE_INVITE_TOKEN_REDEEM`,
+    §D2b bootstrap redeem), `invitee_anchor` (`SPACE_PRIVATE_INVITE_ACCEPT`),
+    `user_anchor` (`SPACE_JOIN_REQUEST`, GFS join request; checked for a
+    follow) — and the host checks `derive_user_id(sender_pk, anchor) ==
+    user_id` (`space_member_guard.user_id_proven`, fail closed). `sender_pk`
+    is a key the host already holds: the pinned `remote_instances` key, a
+    mesh-only sender's origin-authenticated mesh claim (derives to the
+    sender), or a §D2b body's `identity_pk` (bound to `instance_id` by
+    `derive_instance_id`). No new key, signature or suite: the anchor is a
+    public derivation input, not a secret, and the check reuses the
+    self-certifying id. Checked before any ban / seat / roster / token read,
+    refused like every other refusal (no probing), mandatory (no version
+    fallback — a version is the requester's own claim).
 - Space media key and nonce (v_80, GFS media cache):
   - `media_key = HKDF-SHA256(epoch content key, salt=None, info=b"sh-space-media:v1")`
   - `nonce = HKDF-SHA256(media_key, salt=None, info=b"sh-space-media:v1|nonce|" ‖ filename ‖ "|" ‖ hex(SHA-256(file)))[:12]`

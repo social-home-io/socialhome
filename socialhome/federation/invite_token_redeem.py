@@ -88,7 +88,7 @@ from ..services.space_authority_pin import (
     owner_authority_cert_via,
     owner_statement_via,
 )
-from ..services.space_member_guard import user_id_of_another_household
+from ..services.space_member_guard import user_id_proven
 from ..services.space_service import (
     UnfittableImages,
     _coerce_min_age,
@@ -104,12 +104,17 @@ from .invite_bootstrap import (
     KIND_REDEEM_DENY,
     BootstrapEnvelopeTooLarge,
     InviteBootstrapHint,
+    body_identity_pk,
     derive_space_session_keys,
     seal_bootstrap_envelope,
     validate_bootstrap_body,
     verify_peer_keywrap,
 )
-from .mesh_member_claim import mesh_member_claim, parse_mesh_member_claim
+from .mesh_member_claim import (
+    mesh_member_claim,
+    parse_mesh_member_claim,
+    sender_identity_pk,
+)
 from .pairing_coordinator import PAIRING_TTL_SECONDS
 
 if TYPE_CHECKING:
@@ -852,6 +857,10 @@ class SpaceInviteTokenRedeemCoordinator:
             "redeem_nonce": nonce,
             "invite_token": token,
             "redeemer_user_id": viewer_user_id,
+            # P5 — the person's identity anchor: the host seats us only when
+            # ``derive_user_id(our identity key, anchor) == redeemer_user_id``.
+            # Inside the encrypted payload (SPACE_ROUTED: sealed end to end).
+            "redeemer_anchor": user.identity_anchor or user.username,
             "redeemer_display_name": (user.display_name or user.username),
             "redeemer_public_key": getattr(user, "public_key", None),
         }
@@ -1283,6 +1292,9 @@ class SpaceInviteTokenRedeemCoordinator:
         sender = await self._federation_repo.get_instance(event.from_instance)
         over_gfs = sender is not None and sender.source is InstanceSource.SPACE_SESSION
         may_moderate = await self._redeemer_may_moderate(event, sender)
+        # P5 — the key the person's id must derive from: the sender's pinned
+        # key, or a mesh-only sender's routed claim (derives to the sender).
+        redeemer_identity_pk = await sender_identity_pk(self._federation, event)
         async with self._redeem_lock(event.from_instance):
             (
                 ack_payload,
@@ -1292,6 +1304,8 @@ class SpaceInviteTokenRedeemCoordinator:
                 token=token,
                 redeemer_instance_id=event.from_instance,
                 redeemer_user_id=redeemer_user_id,
+                redeemer_identity_pk=redeemer_identity_pk,
+                redeemer_anchor=p.get("redeemer_anchor"),
                 redeemer_pk=redeemer_pk,
                 redeemer_display=redeemer_display,
                 over_gfs=over_gfs,
@@ -1405,6 +1419,8 @@ class SpaceInviteTokenRedeemCoordinator:
         token: str,
         redeemer_instance_id: str,
         redeemer_user_id: str,
+        redeemer_identity_pk: bytes | None,
+        redeemer_anchor: object,
         redeemer_pk: str | None,
         redeemer_display: str | None,
         bootstrap: bool = False,
@@ -1413,6 +1429,20 @@ class SpaceInviteTokenRedeemCoordinator:
         join_location: tuple[float, float] | None = None,
     ) -> tuple[dict | None, str | _Deny | None, _SeatReservation | None]:
         """Issuer-side authorization + seating for one redeem.
+
+        ``redeemer_identity_pk`` / ``redeemer_anchor`` — P5 person-ID
+        anchor: the redeeming household's identity key as we hold it (the
+        §D2 sender's pinned key or mesh claim, the §D2b body's key bound to
+        its instance id) and the anchor the redeem carried. Checked FIRST
+        (:func:`~socialhome.services.space_member_guard.user_id_proven`),
+        before the re-ACK, the consume, the ban and every roster read, and
+        refused with the same opaque :data:`REDEEM_DENY_REASON` and an
+        untouched link — so the answer depends only on the requester's own
+        anchor, never on whether the id is seated, was seated or is banned.
+        A household can therefore only ever seat ids derived from its own
+        key: an earlier squat by someone else no longer blocks the real
+        person, and our own people (whose ids derive from OUR key) can never
+        be claimed.
 
         ``redeemer_may_moderate`` is whether the redeeming household runs
         v_41+ and can store a ``moderator`` seat; the caller decides it (a
@@ -1465,6 +1495,14 @@ class SpaceInviteTokenRedeemCoordinator:
         a surface anybody holding a link can reach. The detail lives in
         ``log.exception`` on the issuer, where it belongs.
         """
+        if not user_id_proven(redeemer_identity_pk, redeemer_anchor, redeemer_user_id):
+            log.warning(
+                "invite redeem from %s refused: user id %s is not proven by "
+                "the household's identity key",
+                redeemer_instance_id,
+                redeemer_user_id,
+            )
+            return None, REDEEM_DENY_REASON, None
         reack = await self._reack_seated_redeemer(
             token,
             redeemer_instance_id=redeemer_instance_id,
@@ -1509,21 +1547,6 @@ class SpaceInviteTokenRedeemCoordinator:
                 "invite redeem: refused a redeem over the connection-server "
                 "relay for space %s — the link is internal, or the private "
                 "space does not use a connection server",
-                space_id,
-            )
-            await self._release_token_use(token, space_id)
-            return None, REDEEM_DENY_REASON, None
-
-        # The redeemer names its own user id: never one of our own people,
-        # nor one seated (now or before) under another household — else a
-        # household could take a seat under somebody else's id and then act
-        # as that person's own household (edit / delete their rows). The
-        # follow path's rule (``SpaceService.approve_remote_follow``).
-        if await self._user_id_taken(space_id, redeemer_instance_id, redeemer_user_id):
-            log.warning(
-                "invite redeem from %s for space %s refused: the user id "
-                "belongs to another household",
-                redeemer_instance_id,
                 space_id,
             )
             await self._release_token_use(token, space_id)
@@ -1802,27 +1825,6 @@ class SpaceInviteTokenRedeemCoordinator:
                 unfittable=self._unfittable,
             )
         return ack_body
-
-    async def _user_id_taken(
-        self, space_id: str, instance_id: str, user_id: str
-    ) -> bool:
-        """``user_id`` is one of our own people, or holds (or held) a seat
-        in ``space_id`` under a household other than ``instance_id``. A user
-        id belongs to one household; fail closed on a lookup error."""
-        try:
-            return await user_id_of_another_household(
-                seats=self._remote_members,
-                users=self._users,
-                space_id=space_id,
-                instance_id=instance_id,
-                user_id=user_id,
-            )
-        except Exception:
-            log.exception(
-                "invite redeem: user id ownership lookup failed for space %s",
-                space_id,
-            )
-            return True
 
     async def _reack_seated_redeemer(
         self,
@@ -2192,6 +2194,8 @@ class SpaceInviteTokenRedeemCoordinator:
             "display_name": own_display_name,
             "proto_version": OURS,
             "redeemer_user_id": viewer_user_id,
+            # P5 — proves ``redeemer_user_id`` against ``identity_pk``.
+            "redeemer_anchor": user.identity_anchor or user.username,
             "redeemer_display_name": (user.display_name or user.username),
             "redeemer_public_key": getattr(user, "public_key", None),
         }
@@ -2396,6 +2400,11 @@ class SpaceInviteTokenRedeemCoordinator:
             token=str(body.get("invite_token") or ""),
             redeemer_instance_id=redeemer_instance_id,
             redeemer_user_id=redeemer_user_id,
+            # The sealed body's key — ``open_bootstrap_envelope`` bound it
+            # to ``instance_id`` (``derive_instance_id``) and verified the
+            # body's signature under it.
+            redeemer_identity_pk=body_identity_pk(body),
+            redeemer_anchor=body.get("redeemer_anchor"),
             redeemer_pk=(
                 str(body["redeemer_public_key"])
                 if body.get("redeemer_public_key")

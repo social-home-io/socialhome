@@ -16,7 +16,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.crypto import (
+    derive_instance_id,
+    derive_user_id,
+    generate_identity_keypair,
+)
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.errors import NotFoundError
 from socialhome.domain.events import (
@@ -67,6 +71,14 @@ from socialhome.services.user_service import UserService
 
 PEER = "peer-house"
 HOST = "host-house"
+
+#: The applicant household's identity key (pinned on its peer row): its
+#: people's user ids derive from it (P5 person-ID anchor).
+PEER_IDENTITY = generate_identity_keypair()
+PEER_PK = PEER_IDENTITY.public_key
+U_FAN = derive_user_id(PEER_PK, "fan")
+U_OTHER = derive_user_id(PEER_PK, "other")
+_ANCHORS = {U_FAN: "fan", U_OTHER: "other"}
 
 
 @pytest.fixture
@@ -131,6 +143,7 @@ async def stack(tmp_dir):
         fed_repo=fed_repo,
         remote=remote_members,
         iid=iid,
+        own_pk=kp.public_key,
         events=events,
         provision=provision,
     )
@@ -164,12 +177,18 @@ def _approved_sends(stack) -> list[dict]:
     ]
 
 
-async def _approve_follow(stack, space_id, *, user_id="u-fan", request_id="rq-1"):
+def _proof(user_id: str = U_FAN) -> dict:
+    """The applicant household's proof of ``user_id`` (P5)."""
+    return {"applicant_identity_pk": PEER_PK, "applicant_anchor": _ANCHORS.get(user_id)}
+
+
+async def _approve_follow(stack, space_id, *, user_id=U_FAN, request_id="rq-1"):
     return await stack.svc.approve_remote_follow(
         space_id=space_id,
         instance_id=PEER,
         user_id=user_id,
         request_id=request_id,
+        **_proof(user_id),
     )
 
 
@@ -188,7 +207,7 @@ async def test_a_remote_follow_is_approved_with_a_bound_subscriber_token(stack):
     token = await _token_row(stack, space.id)
     assert token["role"] == SpaceRole.SUBSCRIBER.value
     assert token["bound_instance_id"] == PEER
-    assert token["bound_user_id"] == "u-fan"
+    assert token["bound_user_id"] == U_FAN
     assert token["uses_remaining"] == 1
     (sent,) = _approved_sends(stack)
     assert sent["to_instance_id"] == PEER
@@ -216,9 +235,10 @@ async def test_a_follow_through_the_gfs_is_answered_through_the_gfs(stack):
         await stack.svc.approve_remote_follow(
             space_id=space.id,
             instance_id=PEER,
-            user_id="u-fan",
+            user_id=U_FAN,
             request_id="rq-g",
             gfs_relay=relay,
+            **_proof(),
         )
         is True
     )
@@ -226,7 +246,7 @@ async def test_a_follow_through_the_gfs_is_answered_through_the_gfs(stack):
     token = await _token_row(stack, space.id)
     assert token["role"] == SpaceRole.SUBSCRIBER.value
     assert token["bound_instance_id"] == PEER
-    assert token["bound_user_id"] == "u-fan"
+    assert token["bound_user_id"] == U_FAN
     row = gfs_join.send_answer.await_args.args[0]
     assert row["id"] == "rq-g" and row["gfs_relay"] == relay
     kwargs = gfs_join.send_answer.await_args.kwargs
@@ -264,7 +284,7 @@ async def test_a_follow_of_a_space_hosted_elsewhere_is_not_approved_here(stack):
 
 async def test_a_banned_person_cannot_follow(stack):
     space = await _hosted(stack)
-    await stack.spaces.ban_member(space.id, "u-fan", banned_by="owner", reason="x")
+    await stack.spaces.ban_member(space.id, U_FAN, banned_by="owner", reason="x")
     assert await _approve_follow(stack, space.id) is False
     assert _approved_sends(stack) == []
 
@@ -280,31 +300,104 @@ async def test_a_follow_without_the_seat_store_fails_closed(stack):
 
 async def test_a_follow_naming_a_local_user_is_refused(stack, caplog):
     """The applicant picks ``user_id``: one of THIS household's people is
-    never seated as another household's follower."""
+    never seated as another household's follower — their id derives from
+    OUR key, so the applicant cannot prove it (P5)."""
     space = await _hosted(stack)
     local = await stack.provision("local")
     with caplog.at_level("INFO"):
-        assert await _approve_follow(stack, space.id, user_id=local.user_id) is False
+        got = await stack.svc.approve_remote_follow(
+            space_id=space.id,
+            instance_id=PEER,
+            user_id=local.user_id,
+            request_id="rq-1",
+            applicant_identity_pk=PEER_PK,
+            applicant_anchor="local",
+        )
+    assert got is False
     assert _approved_sends(stack) == []
     assert await stack.spaces.get_join_request("rq-1") is None
 
 
+@pytest.mark.parametrize(
+    "case", ["somebody-elses-id", "wrong-anchor", "missing-anchor", "no-key"]
+)
+async def test_a_follow_is_approved_only_for_a_proven_person(stack, case):
+    """P5 person-ID anchor: ``derive_user_id(applicant household key,
+    anchor)`` must be the ``user_id`` — else refused, nothing stored."""
+    space = await _hosted(stack)
+    victim = derive_user_id(generate_identity_keypair().public_key, "fan")
+    kwargs = {
+        "somebody-elses-id": {"user_id": victim, **_proof()},
+        "wrong-anchor": {
+            "user_id": U_FAN,
+            "applicant_identity_pk": PEER_PK,
+            "applicant_anchor": "eve",
+        },
+        "missing-anchor": {"user_id": U_FAN, "applicant_identity_pk": PEER_PK},
+        "no-key": {"user_id": U_FAN, "applicant_anchor": "fan"},
+    }[case]
+    got = await stack.svc.approve_remote_follow(
+        space_id=space.id, instance_id=PEER, request_id="rq-1", **kwargs
+    )
+    assert got is False
+    assert await stack.spaces.get_join_request("rq-1") is None
+    assert _approved_sends(stack) == []
+
+
 @pytest.mark.parametrize("tombstoned", [False, True])
-async def test_a_follow_naming_another_households_user_is_refused(stack, tombstoned):
-    """A user id seated (or once seated) under another household is not
-    this applicant's to claim."""
+async def test_a_legacy_squat_no_longer_locks_the_real_person_out(stack, tombstoned):
+    """P4's first-come rule refused an id seated (now or before) under
+    another household — so a squatter that got there first locked the real
+    person out for good. With the proof, the real person's own household
+    is approved whatever a legacy squat seat says."""
     space = await _hosted(stack)
     await stack.remote.add(
         space_id=space.id,
         instance_id="other-house",
-        user_id="u-fan",
+        user_id=U_FAN,
         user_pk=None,
         display_name="Fan",
         role=SpaceRole.MEMBER.value,
     )
     if tombstoned:
-        await stack.remote.remove(space.id, "other-house", "u-fan")
-    assert await _approve_follow(stack, space.id) is False
+        await stack.remote.remove(space.id, "other-house", U_FAN)
+    assert await _approve_follow(stack, space.id) is True
+    assert len(_approved_sends(stack)) == 1
+
+
+@pytest.mark.parametrize("state", ["unknown", "seated", "tombstoned", "banned"])
+async def test_an_unproven_follow_is_refused_before_any_roster_read(stack, state):
+    """No probing signal: an unproven follow is refused before the ban,
+    seat or roster is read, so the outcome is the same whatever they hold."""
+    space = await _hosted(stack)
+    victim = derive_user_id(generate_identity_keypair().public_key, "fan")
+    if state in ("seated", "tombstoned"):
+        await stack.remote.add(
+            space_id=space.id,
+            instance_id=PEER,
+            user_id=victim,
+            user_pk=None,
+            display_name="V",
+            role=SpaceRole.MEMBER.value,
+        )
+        if state == "tombstoned":
+            await stack.remote.remove(space.id, PEER, victim)
+    elif state == "banned":
+        await stack.spaces.ban_member(space.id, victim, banned_by="owner", reason="x")
+    with (
+        patch.object(SqliteSpaceRepo, "is_banned", AsyncMock()) as banned,
+        patch.object(SqliteSpaceRemoteMemberRepo, "get", AsyncMock()) as seat,
+    ):
+        got = await stack.svc.approve_remote_follow(
+            space_id=space.id,
+            instance_id=PEER,
+            user_id=victim,
+            request_id="rq-1",
+            **_proof(),
+        )
+    assert got is False
+    banned.assert_not_awaited()
+    seat.assert_not_awaited()
     assert _approved_sends(stack) == []
 
 
@@ -330,9 +423,10 @@ async def test_a_local_community_follow_needs_the_inside_verdict(
     got = await stack.svc.approve_remote_follow(
         space_id=space.id,
         instance_id=PEER,
-        user_id="u-fan",
+        user_id=U_FAN,
         request_id="rq-1",
         area_verdict=verdict,
+        **_proof(),
     )
     assert got is approved
     assert len(_approved_sends(stack)) == (1 if approved else 0)
@@ -341,7 +435,7 @@ async def test_a_local_community_follow_needs_the_inside_verdict(
 async def test_a_reused_request_id_is_refused(stack):
     space = await _hosted(stack)
     assert await _approve_follow(stack, space.id) is True
-    assert await _approve_follow(stack, space.id, user_id="u-other") is False
+    assert await _approve_follow(stack, space.id, user_id=U_OTHER) is False
     assert len(_approved_sends(stack)) == 1
 
 
@@ -351,13 +445,13 @@ async def test_the_host_drops_a_follow_from_a_seated_household_user(stack):
     await stack.remote.add(
         space_id=space.id,
         instance_id=PEER,
-        user_id="u-fan",
+        user_id=U_FAN,
         user_pk=None,
         display_name="Fan",
         role=SpaceRole.MEMBER.value,
     )
     assert await _approve_follow(stack, space.id) is False
-    seat = await stack.remote.get(space.id, PEER, "u-fan")
+    seat = await stack.remote.get(space.id, PEER, U_FAN)
     assert seat is not None and seat.role == SpaceRole.MEMBER.value
     assert _approved_sends(stack) == []
 
@@ -368,7 +462,7 @@ async def test_an_admins_approval_still_seats_a_member(stack):
     space = await _hosted(stack, join_mode=JoinMode.REQUEST)
     await stack.spaces.save_join_request(
         space.id,
-        "u-fan",
+        U_FAN,
         remote_applicant_instance_id=PEER,
         request_id="rq-2",
     )
@@ -403,6 +497,9 @@ async def test_a_follow_request_carries_the_requested_role(stack):
     (sent,) = _join_request_sends(stack)
     assert sent["to_instance_id"] == HOST
     assert sent["payload"]["requested_role"] == "subscriber"
+    # P5 — the person's anchor rides inside the payload: it proves their id
+    # against our identity key.
+    assert derive_user_id(stack.own_pk, sent["payload"]["user_anchor"]) == fan.user_id
     stack.fed.peer_supports.assert_any_await(
         HOST, min_version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
     )
@@ -829,13 +926,13 @@ async def test_a_read_only_remote_followers_leave_does_not_rotate(stack):
     cert: its leave weakens nothing, so nothing rotates."""
     space = await _hosted(stack)
     _attach_writer_certs(stack)
-    await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
+    await _seat_remote(stack, space.id, U_FAN, SpaceRole.SUBSCRIBER)
     with patch.object(
         SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
     ) as rotate:
-        assert await stack.svc.on_remote_member_left(space.id, PEER, "u-fan")
+        assert await stack.svc.on_remote_member_left(space.id, PEER, U_FAN)
     rotate.assert_not_awaited()
-    assert await stack.remote.get(space.id, PEER, "u-fan") is None
+    assert await stack.remote.get(space.id, PEER, U_FAN) is None
     assert PEER not in await stack.spaces.list_member_instances(space.id)
 
 
@@ -870,11 +967,11 @@ async def test_a_commenting_remote_followers_leave_is_owed_not_rotated(stack):
     )
     await _key_at(stack, space.id, "2026-01-01T00:00:00+00:00")
     _attach_writer_certs(stack)
-    await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
+    await _seat_remote(stack, space.id, U_FAN, SpaceRole.SUBSCRIBER)
     with patch.object(
         SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
     ) as rotate:
-        assert await stack.svc.on_remote_member_left(space.id, PEER, "u-fan")
+        assert await stack.svc.on_remote_member_left(space.id, PEER, U_FAN)
     rotate.assert_not_awaited()
     assert await stack.svc.rotation_owed(space.id) is not None
 
@@ -893,7 +990,7 @@ async def test_a_remote_members_leave_rotates_at_once(stack):
 async def test_a_mixed_member_and_follower_leave_rotates(stack):
     space = await _hosted(stack)
     _attach_writer_certs(stack)
-    await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
+    await _seat_remote(stack, space.id, U_FAN, SpaceRole.SUBSCRIBER)
     await _seat_remote(stack, space.id, "u-mem", SpaceRole.MEMBER)
     with patch.object(
         SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
@@ -920,7 +1017,7 @@ async def test_f3a_a_remote_member_leaves_then_follows_as_a_subscriber(stack):
     """The leave rotates; the follow is approved for the tombstoned seat,
     redeemed into a ``subscriber`` seat, and rotates nothing more."""
     space = await _hosted(stack)
-    await _seat_remote(stack, space.id, "u-fan", SpaceRole.MEMBER)
+    await _seat_remote(stack, space.id, U_FAN, SpaceRole.MEMBER)
     with (
         patch.object(
             SpaceService, "rotate_if_writer_scope_weakened", AsyncMock()
@@ -929,7 +1026,7 @@ async def test_f3a_a_remote_member_leaves_then_follows_as_a_subscriber(stack):
             SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
         ) as full_rotate,
     ):
-        assert await stack.svc.on_remote_member_left(space.id, PEER, "u-fan")
+        assert await stack.svc.on_remote_member_left(space.id, PEER, U_FAN)
         assert rotate.await_count == 1
 
         assert await _approve_follow(stack, space.id) is True
@@ -937,13 +1034,15 @@ async def test_f3a_a_remote_member_leaves_then_follows_as_a_subscriber(stack):
         ack, reason, reservation = await _redeemer(stack)._consume_seat_and_build_ack(
             token=token,
             redeemer_instance_id=PEER,
-            redeemer_user_id="u-fan",
+            redeemer_user_id=U_FAN,
+            redeemer_identity_pk=PEER_PK,
+            redeemer_anchor="fan",
             redeemer_pk=None,
             redeemer_display="Fan",
         )
         assert reason is None and ack is not None and reservation is not None
         assert ack["role"] == SpaceRole.SUBSCRIBER.value
-        seat = await stack.remote.get(space.id, PEER, "u-fan")
+        seat = await stack.remote.get(space.id, PEER, U_FAN)
         assert seat is not None and seat.role == SpaceRole.SUBSCRIBER.value
         assert rotate.await_count == 1
         full_rotate.assert_not_awaited()

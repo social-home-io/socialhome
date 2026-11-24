@@ -76,7 +76,7 @@ from ..services.space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from ..services.space_member_guard import user_id_of_another_household
+from ..services.space_member_guard import user_id_proven
 from ..services.space_service import (
     SUPPORTED_SEED_SUITES,
     admit_join,
@@ -87,6 +87,7 @@ from ..services.space_service import (
 from ..services.space_writer_households import holds_member_seat
 from .host_equivalence import acts_as_host, holds_local_admin_seat
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
+from .mesh_member_claim import sender_identity_pk
 
 if TYPE_CHECKING:
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
@@ -678,10 +679,30 @@ class PrivateSpaceInviteHandler:
         ``SPACE_MEMBER_ROLE_CHANGED``. The role is passed explicitly for
         the same reason: so a future change to ``add``'s default cannot
         quietly promote through here.
+
+        First of all (P5 person-ID anchor) the accept must prove its
+        ``invitee_user_id``: ``derive_user_id(the sender's pinned key — or a
+        mesh-only sender's routed claim —, invitee_anchor)`` must be it
+        (:func:`~socialhome.services.space_member_guard.user_id_proven`).
+        Checked before the invitation or any seat is read, and dropped the
+        same silent way as every other refusal here.
         """
         p = event.payload
         token = str(p.get("invite_token") or "")
         if not token:
+            return
+        invitee_user_id = str(p.get("invitee_user_id") or "")
+        if not user_id_proven(
+            await sender_identity_pk(self._federation, event),
+            p.get("invitee_anchor"),
+            invitee_user_id,
+        ):
+            log.warning(
+                "SPACE_PRIVATE_INVITE_ACCEPT from %s: user id %s is not proven "
+                "by the household's identity key — dropping",
+                event.from_instance,
+                invitee_user_id,
+            )
             return
         invite = await self._space_repo.get_invitation_by_token(token)
         if invite is None:
@@ -690,7 +711,6 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        invitee_user_id = str(p.get("invitee_user_id") or "")
         if not self._accept_matches_invitation(
             event,
             invite=invite,
@@ -710,28 +730,6 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
                 invitee_user_id,
                 live_seat.role,
-            )
-            return
-        # A user id belongs to one household: never seat it under a second
-        # one (the redeem's rule) — the seat would let this household act as
-        # that person's own (P4 adversarial review). No user repo is wired
-        # here, so one of OUR people's ids is not caught at this step: the
-        # invitation names an id an admin picked from this household's own
-        # directory, and every receiver refuses acting for one of its own
-        # people (``SpaceAuthorship.acts_for``).
-        if await user_id_of_another_household(
-            seats=self._remote_members,
-            users=None,
-            space_id=invite["space_id"],
-            instance_id=event.from_instance,
-            user_id=invitee_user_id,
-        ):
-            log.warning(
-                "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s: %s is seated under "
-                "another household — refusing",
-                invite["space_id"],
-                event.from_instance,
-                invitee_user_id,
             )
             return
         if not await self._local_area_admits(invite, event, invitee_user_id):

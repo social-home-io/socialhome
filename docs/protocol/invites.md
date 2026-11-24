@@ -51,7 +51,11 @@ Used when a member shares a `socialhome://invite#…` code with someone
 on a paired peer instance. The receiver pastes the code locally; their
 backend recognises ``issuer_instance_id`` as a CONFIRMED peer and
 sends ``SPACE_INVITE_TOKEN_REDEEM`` to the issuer carrying the token
-and the receiving user's identity. The issuer validates the token
+and the receiving user's identity — ``redeemer_user_id`` plus
+``redeemer_anchor``, the person's identity anchor, inside the encrypted
+payload (P5, see [Person-ID anchor](#the-redeem-proves-the-person-it-names-p5)).
+The issuer first checks that ``derive_user_id(the sender's pinned identity
+key, redeemer_anchor) == redeemer_user_id``, then validates the token
 (exists, not expired, ``uses_remaining > 0``), atomically decrements,
 seats the receiver as a ``SpaceRemoteMember`` + records the
 ``(space, instance)`` mapping, then sends ``SPACE_INVITE_TOKEN_REDEEM_ACK``
@@ -245,10 +249,14 @@ sorted-key bytes with the sender's own identity key):
  "instance_id": "…", "identity_pk": "<hex>",
  "keywrap_pk": "<hex>", "keywrap_sig": "<b64url>",
  "display_name": "…", "proto_version": 29,
- "redeemer_user_id": "…", "redeemer_public_key": "…",
- "redeemer_display_name": "…",
+ "redeemer_user_id": "…", "redeemer_anchor": "…",
+ "redeemer_public_key": "…", "redeemer_display_name": "…",
  "signature": "<hex>"}
 ```
+
+`redeemer_anchor` proves `redeemer_user_id` against the body's own
+`identity_pk` (bound to `instance_id` by the anti-tamper check below) —
+see [The redeem proves the person it names](#the-redeem-proves-the-person-it-names-p5).
 
 The reply mirrors it with the issuer's identity + key-wrap material and
 either `{space_id, role, space_meta}` (ACK — the same
@@ -671,6 +679,9 @@ Cheapest check first; every rung has its own regression test.
     sender is.
 11. **Key-wrap binding** of the redeemer's own key — we refuse to seal
     a space snapshot (content key included) to a key nobody vouched for.
+11b. **Person-ID anchor** (P5) — `derive_user_id(identity_pk,
+    redeemer_anchor)` must be `redeemer_user_id`; otherwise the opaque
+    DENY, before the token, the ban or any seat is read.
 12. **Token + ban, in one statement** — `consume_invite_token`, a single
     atomic UPDATE guarding `uses_remaining > 0`, the expiry, **and** the
     §13.7 ban (`NOT EXISTS (SELECT 1 FROM space_bans …)` correlated on
@@ -1528,6 +1539,36 @@ Every link has a type, chosen by the issuer at mint time
   `gfs_legacy` (`422`), and while the option is OFF a new `gfs` link is
   still `409 PRIVATE_GFS_OFF`. Links of public / global spaces stayed
   `gfs`.
+
+### The redeem proves the person it names (P5)
+
+Every path that seats a person another household names — an invite-link
+redeem (§D2 paired, mesh-routed, §D2b bootstrap), a private invitation's
+accept, a follow approval — proves the user id before it seats:
+the request carries the person's **identity anchor** (`redeemer_anchor` /
+`invitee_anchor` / `user_anchor`, always inside the encrypted payload or the
+sealed body, never a routing field) and the host checks
+`derive_user_id(the sender household's identity key, anchor) == user_id`
+(`space_member_guard.user_id_proven`). The key is the one the host already
+holds: the sender's pinned `remote_instances` key, a mesh-only sender's
+origin-authenticated mesh claim (it derives to the sender), or a §D2b body's
+`identity_pk` (bound to its `instance_id`). A user id is minted as
+`derive_user_id(own key, identity_anchor or username)`, so a household can
+only ever be seated under ids derived from its own key — never somebody
+else's, never one of the host's own people.
+
+The proof is checked **first** — before the re-ACK, the token consume, the
+ban and every roster read — and a failure gets the same opaque
+`REDEEM_DENY_REASON` (the accept and the follow: the same silent drop) with
+the link untouched, so the answer depends only on the requester's own
+anchor: no "is / was user X here" probe through a multi-use link. It
+replaces the P4 first-come rule (refuse an id held — tombstones included —
+under another household), which let whoever redeemed a link under somebody's
+id first lock that person out of the space for good. The anchor is
+mandatory, with no version fallback (a version is the requester's own
+claim, so any fallback would be attacker-downgradable): a redeemer,
+invitee or applicant below v_96 can no longer be seated by a v_96 host.
+The anchor is never logged.
 
 ## Flow — private invite (paired peers)
 

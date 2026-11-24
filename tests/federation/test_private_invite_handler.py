@@ -18,7 +18,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from PIL import Image
 
-from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.crypto import (
+    derive_instance_id,
+    derive_user_id,
+    generate_identity_keypair,
+)
 from socialhome.domain.events import (
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
@@ -39,6 +43,7 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
+from socialhome.federation.mesh_member_claim import mesh_member_claim
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -50,6 +55,24 @@ from socialhome.services.space_service import (
     seat_join_stub,
 )
 from tests.local_area_budget import memory_budget
+
+#: The invited household ``peer-1``'s identity key: its person's user id
+#: derives from it with the anchor ``bob`` (P5 person-ID anchor).
+PEER_IDENTITY = generate_identity_keypair()
+U1 = derive_user_id(PEER_IDENTITY.public_key, "bob")
+
+
+class _PinnedKeys:
+    """The keys this host pins for its peers (``remote_instances`` rows)."""
+
+    def __init__(self, pinned: dict[str, bytes] | None = None) -> None:
+        self.pinned = {"peer-1": PEER_IDENTITY.public_key, **(pinned or {})}
+
+    async def peer_identity_public_key(self, instance_id):
+        return self.pinned.get(instance_id)
+
+    async def record_mesh_member_claim(self, event, *, notify=True):
+        return False
 
 
 class _RecordingBus:
@@ -71,11 +94,18 @@ def _event(event_type: str, payload: dict, *, from_instance: str = "peer-1"):
     # .from_instance, and .space_id attrs — a namespace is cheaper and
     # clearer. ``space_id`` mirrors the real envelope's routing field
     # (None here unless a test sets it via the payload).
+    if event_type == "SPACE_PRIVATE_INVITE_ACCEPT" and payload.get("invitee_user_id"):
+        # The invited household's person proves their id with their anchor
+        # (P5) — unless the test names one (``None`` sends none).
+        payload = {"invitee_anchor": "bob", **payload}
+        if payload["invitee_anchor"] is None:
+            del payload["invitee_anchor"]
     return SimpleNamespace(
         event_type=event_type,
         payload=payload,
         from_instance=from_instance,
         space_id=payload.get("space_id"),
+        routed_path=None,
     )
 
 
@@ -84,7 +114,7 @@ def _invitation(
     *,
     space_id="sp-a",
     remote_instance_id="peer-1",
-    remote_user_id="u1",
+    remote_user_id=U1,
     status="pending",
     expires_at=None,
     invited_by="u-inviter",
@@ -127,8 +157,6 @@ def handler():
     # refuses to re-seat a household that already holds one with a
     # different role.
     remote_members.get = AsyncMock(return_value=None)
-    # The invitee is seated under no other household by default.
-    remote_members.list_instances_of_user = AsyncMock(return_value=set())
     cover_repo = AsyncMock()
     cover_repo.set = AsyncMock()
     icon_repo = AsyncMock()
@@ -140,6 +168,7 @@ def handler():
         cover_repo=cover_repo,
         icon_repo=icon_repo,
     )
+    h._federation = _PinnedKeys()  # type: ignore[assignment]
     return SimpleNamespace(
         h=h,
         bus=bus,
@@ -193,7 +222,7 @@ async def test_invite_happy_path(handler):
         {
             "space_id": "sp1",
             "invite_token": "tkn",
-            "invitee_user_id": "u1",
+            "invitee_user_id": U1,
             "inviter_user_id": "u2",
             "space_display_hint": "Board",
         },
@@ -236,7 +265,7 @@ async def test_accept_happy_path(handler):
         "SPACE_PRIVATE_INVITE_ACCEPT",
         {
             "invite_token": "abc",
-            "invitee_user_id": "u1",
+            "invitee_user_id": U1,
             "invitee_public_key": "pk",
             "invitee_display_name": "Bob",
         },
@@ -252,18 +281,89 @@ async def test_accept_happy_path(handler):
     assert accepted.invitee_display_name == "Bob"
 
 
-async def test_accept_never_seats_a_user_id_of_another_household(handler):
-    """P4 adversarial review: a user id belongs to one household — an accept
-    naming a user seated (now or before) under another household is refused,
-    or the accepting household could act as that person's own."""
+@pytest.mark.parametrize(
+    "case", ["somebody-elses-id", "wrong-anchor", "missing-anchor", "unpinned"]
+)
+async def test_accept_seats_only_a_proven_person(handler, case):
+    """P5 person-ID anchor: an accept must prove its ``invitee_user_id`` —
+    ``derive_user_id(the sender's pinned key, invitee_anchor)``. Somebody
+    else's id (derived from another household's key), a wrong anchor, no
+    anchor or no pinned key: dropped, nothing seated or answered."""
+    victim = derive_user_id(generate_identity_keypair().public_key, "bob")
+    uid = victim if case == "somebody-elses-id" else U1
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(
+        42, remote_user_id=uid
+    )
+    payload = {"invite_token": "abc", "invitee_user_id": uid}
+    if case == "wrong-anchor":
+        payload["invitee_anchor"] = "mallory"
+    elif case == "missing-anchor":
+        payload["invitee_anchor"] = None
+    if case == "unpinned":
+        handler.h._federation = _PinnedKeys()
+        handler.h._federation.pinned.clear()
+    await handler.h._on_accept(_event("SPACE_PRIVATE_INVITE_ACCEPT", payload))
+    handler.remote_members.add.assert_not_awaited()
+    handler.space_repo.update_invitation_status.assert_not_awaited()
+    assert handler.bus.events == []
+
+
+async def test_accept_proves_the_person_before_reading_anything(handler):
+    """No probing signal: an unproven accept is dropped before the
+    invitation, a seat or the roster is read — the outcome cannot depend on
+    whether the id is seated, was seated or is banned."""
     handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
-    handler.remote_members.list_instances_of_user.return_value = {"victim-home"}
+    await handler.h._on_accept(
+        _event(
+            "SPACE_PRIVATE_INVITE_ACCEPT",
+            {"invite_token": "abc", "invitee_user_id": U1, "invitee_anchor": "x"},
+        )
+    )
+    handler.space_repo.get_invitation_by_token.assert_not_awaited()
+    handler.remote_members.get.assert_not_awaited()
+
+
+async def test_accept_seats_the_real_person_despite_a_legacy_squat(handler):
+    """P4's first-come rule refused an id seated (now or before) under
+    another household, locking the real person out for good. With the proof
+    the real person's own household is seated whatever the roster holds."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
+    handler.remote_members.list_live_instances_of_user = AsyncMock(
+        return_value={"squatter-home"}
+    )
+    await handler.h._on_accept(
+        _event(
+            "SPACE_PRIVATE_INVITE_ACCEPT",
+            {"invite_token": "abc", "invitee_user_id": U1},
+        )
+    )
+    handler.remote_members.add.assert_awaited_once()
+
+
+async def test_a_mesh_only_household_proves_its_person_by_its_routed_claim(handler):
+    """Members are equal on any path: a household that reached us only over
+    the mesh (no pinned key) proves its person by the identity key its
+    origin-authenticated mesh claim carries."""
+    ident = generate_identity_keypair()
+    sender = derive_instance_id(ident.public_key)
+    uid = derive_user_id(ident.public_key, "carol")
+    handler.h._federation = _PinnedKeys()
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(
+        43, remote_instance_id=sender, remote_user_id=uid
+    )
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1", "invitee_public_key": "pk"},
+        {
+            "invite_token": "abc",
+            "invitee_user_id": uid,
+            "invitee_anchor": "carol",
+            **mesh_member_claim(ident.public_key),
+        },
+        from_instance=sender,
     )
+    ev.routed_path = [sender, "host"]
     await handler.h._on_accept(ev)
-    handler.remote_members.add.assert_not_awaited()
+    handler.remote_members.add.assert_awaited_once()
 
 
 def _local_community(owner="host-self"):
@@ -289,7 +389,7 @@ BERN = {"lat": 46.95, "lon": 7.45}
 
 
 def _accept_event(location=None, **extra):
-    payload = {"invite_token": "abc", "invitee_user_id": "u1", **extra}
+    payload = {"invite_token": "abc", "invitee_user_id": U1, **extra}
     if location is not None:
         payload["join_location"] = location
     return _event("SPACE_PRIVATE_INVITE_ACCEPT", payload)
@@ -306,6 +406,7 @@ def _community_host(handler, *, approved=False, pending=()):
     handler.h._own_instance_id = "host-self"
     handler.h._local_area_budget = memory_budget()
     fed = AsyncMock()
+    fed.peer_identity_public_key = AsyncMock(return_value=PEER_IDENTITY.public_key)
     handler.h._federation = fed
     return fed
 
@@ -321,7 +422,7 @@ async def test_accept_refused_outside_or_without_a_location(handler, location):
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
     kw = fed.send_with_mesh_fallback.await_args.kwargs
     assert kw["to_instance_id"] == "peer-1"
-    assert kw["payload"] == {"space_id": "sp-a", "user_id": "u1"}
+    assert kw["payload"] == {"space_id": "sp-a", "user_id": U1}
     handler.space_repo.save_join_request.assert_not_awaited()
 
 
@@ -347,7 +448,7 @@ async def test_accept_near_the_edge_becomes_a_join_request_the_household_keeps(
     assert kw["remote_applicant_pk"] == "pk"
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
     payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
-    assert payload == {"space_id": "sp-a", "user_id": "u1", "join_request_id": "rid-1"}
+    assert payload == {"space_id": "sp-a", "user_id": U1, "join_request_id": "rid-1"}
 
 
 async def test_an_accept_while_a_request_waits_answers_with_that_request(handler):
@@ -356,7 +457,7 @@ async def test_an_accept_while_a_request_waits_answers_with_that_request(handler
         pending=[
             {
                 "id": "rid-0",
-                "user_id": "u1",
+                "user_id": U1,
                 "remote_applicant_instance_id": "peer-1",
             }
         ],
@@ -380,7 +481,7 @@ async def test_accepting_spends_the_persons_budget(handler):
     budget = handler.h._local_area_budget
     for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
         assert await budget.spend_seat_check(
-            "sp-a", household="peer-1", user_id="u1", remote=True
+            "sp-a", household="peer-1", user_id=U1, remote=True
         )
     await handler.h._on_accept(_accept_event(NEAR))
     handler.remote_members.add.assert_not_awaited()
@@ -407,7 +508,7 @@ async def test_accept_broadcasts_member_joined_gossip(handler):
         "SPACE_PRIVATE_INVITE_ACCEPT",
         {
             "invite_token": "abc",
-            "invitee_user_id": "u1",
+            "invitee_user_id": U1,
             "invitee_public_key": "pk",
             "invitee_display_name": "Bob",
         },
@@ -416,7 +517,7 @@ async def test_accept_broadcasts_member_joined_gossip(handler):
     space_service.broadcast_remote_member_joined.assert_awaited_once()
     kw = space_service.broadcast_remote_member_joined.await_args.kwargs
     assert kw["instance_id"] == "peer-1"
-    assert kw["user_id"] == "u1"
+    assert kw["user_id"] == U1
 
 
 async def test_accept_records_the_mesh_claim_before_the_seat_snapshot(handler):
@@ -450,10 +551,13 @@ async def test_accept_records_the_mesh_claim_before_the_seat_snapshot(handler):
             claims.append((event, notify))
             return True
 
+        async def peer_identity_public_key(self, instance_id):
+            return PEER_IDENTITY.public_key
+
     handler.h.attach_to(_Fed())  # type: ignore[arg-type]
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
+        {"invite_token": "abc", "invitee_user_id": U1},
     )
     await handler.h._on_accept(ev)
     assert order == ["space_instance", "claim", "snapshot"]
@@ -466,7 +570,7 @@ async def test_accept_without_space_service_still_seats(handler):
     handler.space_repo.get_invitation_by_token.return_value = _invitation(8)
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
+        {"invite_token": "abc", "invitee_user_id": U1},
     )
     await handler.h._on_accept(ev)
     handler.remote_members.add.assert_awaited_once()
@@ -491,7 +595,7 @@ async def test_decline_happy_path(handler):
     )
     ev = _event(
         "SPACE_PRIVATE_INVITE_DECLINE",
-        {"invite_token": "tk", "invitee_user_id": "u1"},
+        {"invite_token": "tk", "invitee_user_id": U1},
     )
     await handler.h._on_decline(ev)
     handler.space_repo.update_invitation_status.assert_awaited_with(5, "declined")
@@ -499,7 +603,7 @@ async def test_decline_happy_path(handler):
         e for e in handler.bus.events if isinstance(e, RemoteSpaceInviteDeclined)
     ]
     assert declined.inviter_user_id == "u-inviter"
-    assert declined.invitee_user_id == "u1"
+    assert declined.invitee_user_id == U1
 
 
 async def test_member_removed_missing_fields_noops(handler):
@@ -1911,7 +2015,7 @@ def _invite_with(host_pk, *, space_id="sp-mesh"):
     return {
         "space_id": space_id,
         "invite_token": "tkn",
-        "invitee_user_id": "u1",
+        "invitee_user_id": U1,
         "inviter_user_id": "u2",
         "space_display_hint": "Board",
         "host_identity_pk": host_pk,
@@ -2030,7 +2134,7 @@ async def test_invite_for_a_stub_from_a_third_party_is_refused(handler):
         {
             "space_id": "sp-remote",
             "invite_token": "forged",
-            "invitee_user_id": "u1",
+            "invitee_user_id": U1,
             "inviter_user_id": "u2",
         },
         from_instance="peer-rogue",
@@ -2067,7 +2171,7 @@ async def test_accept_from_a_household_other_than_the_invitee_is_refused(handler
     )
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
+        {"invite_token": "abc", "invitee_user_id": U1},
         from_instance="peer-rogue",
     )
     await handler.h._on_accept(ev)
@@ -2095,7 +2199,7 @@ async def test_accept_of_an_already_used_invitation_is_refused(handler):
     )
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
+        {"invite_token": "abc", "invitee_user_id": U1},
     )
     await handler.h._on_accept(ev)
     handler.remote_members.add.assert_not_awaited()
@@ -2113,7 +2217,7 @@ async def test_a_late_accept_of_a_pending_invitation_still_seats(handler):
     )
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
+        {"invite_token": "abc", "invitee_user_id": U1},
     )
     await handler.h._on_accept(ev)
     handler.remote_members.add.assert_awaited_once()
@@ -2125,7 +2229,7 @@ async def test_accept_seats_the_member_role_explicitly(handler):
     handler.space_repo.get_invitation_by_token.return_value = _invitation(9)
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
+        {"invite_token": "abc", "invitee_user_id": U1},
     )
     await handler.h._on_accept(ev)
     assert (
@@ -2146,13 +2250,13 @@ async def test_accept_never_raises_an_existing_follower_seat(handler):
         return_value=SpaceRemoteMember(
             space_id="sp-a",
             instance_id="peer-1",
-            user_id="u1",
+            user_id=U1,
             role=SpaceRole.SUBSCRIBER.value,
         ),
     )
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
+        {"invite_token": "abc", "invitee_user_id": U1},
     )
     await handler.h._on_accept(ev)
     handler.remote_members.add.assert_not_awaited()
@@ -2168,12 +2272,12 @@ async def test_accept_never_demotes_a_moderator_or_admin_seat(handler, role):
     handler.space_repo.get_invitation_by_token.return_value = _invitation(10)
     handler.remote_members.get = AsyncMock(
         return_value=SpaceRemoteMember(
-            space_id="sp-a", instance_id="peer-1", user_id="u1", role=role
+            space_id="sp-a", instance_id="peer-1", user_id=U1, role=role
         ),
     )
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
+        {"invite_token": "abc", "invitee_user_id": U1},
     )
     await handler.h._on_accept(ev)
     handler.remote_members.add.assert_not_awaited()
@@ -2187,7 +2291,7 @@ async def test_decline_from_another_household_is_refused(handler):
     )
     ev = _event(
         "SPACE_PRIVATE_INVITE_DECLINE",
-        {"invite_token": "tk", "invitee_user_id": "u1"},
+        {"invite_token": "tk", "invitee_user_id": U1},
         from_instance="peer-rogue",
     )
     await handler.h._on_decline(ev)
@@ -2252,7 +2356,7 @@ async def _location_handler(
             SpaceRemoteMember(
                 space_id="sp-a",
                 instance_id="peer-1",
-                user_id="u1",
+                user_id=U1,
                 role=role,
             )
             if seat
@@ -2274,7 +2378,7 @@ async def test_space_location_updated_refuses_a_subscriber_seat():
     h, locations, _ = await _location_handler(SpaceRole.SUBSCRIBER.value)
     ev = _event(
         "SPACE_LOCATION_UPDATED",
-        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+        {"space_id": "sp-a", "user_id": U1, "mode": "gps", "lat": 1.0, "lon": 2.0},
     )
     await h._on_space_location_updated(ev)
     locations.upsert.assert_not_awaited()
@@ -2289,7 +2393,7 @@ async def test_space_location_updated_accepts_every_writer_seat(role):
     h, locations, _ = await _location_handler(role)
     ev = _event(
         "SPACE_LOCATION_UPDATED",
-        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+        {"space_id": "sp-a", "user_id": U1, "mode": "gps", "lat": 1.0, "lon": 2.0},
     )
     await h._on_space_location_updated(ev)
     locations.upsert.assert_awaited_once()
@@ -2307,7 +2411,7 @@ async def test_space_location_updated_pins_the_routing_space_id():
         space_id="sp-a",
         payload={
             "space_id": "sp-somewhere-else",
-            "user_id": "u1",
+            "user_id": U1,
             "mode": "gps",
             "lat": 1.0,
             "lon": 2.0,
@@ -2322,7 +2426,7 @@ async def test_space_location_updated_accepts_a_matching_pair():
     h, locations, _ = await _location_handler()
     ev = _event(
         "SPACE_LOCATION_UPDATED",
-        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+        {"space_id": "sp-a", "user_id": U1, "mode": "gps", "lat": 1.0, "lon": 2.0},
     )
     await h._on_space_location_updated(ev)
     locations.upsert.assert_awaited_once()
@@ -2331,7 +2435,7 @@ async def test_space_location_updated_accepts_a_matching_pair():
 def _pin(updated_at: str | None, **extra) -> SimpleNamespace:
     payload = {
         "space_id": "sp-a",
-        "user_id": "u1",
+        "user_id": U1,
         "mode": "gps",
         "lat": 1.0,
         "lon": 2.0,
@@ -2351,13 +2455,13 @@ async def test_a_stopped_share_takes_the_pin_off_the_map():
             "SPACE_LOCATION_UPDATED",
             {
                 "space_id": "sp-a",
-                "user_id": "u1",
+                "user_id": U1,
                 "mode": "off",
                 "updated_at": "2026-10-22T10:00:00+00:00",
             },
         )
     )
-    locations.delete_for_member.assert_awaited_once_with("sp-a", "peer-1", "u1")
+    locations.delete_for_member.assert_awaited_once_with("sp-a", "peer-1", U1)
     locations.upsert.assert_not_awaited()
 
 
@@ -2367,14 +2471,14 @@ async def test_a_stopped_share_is_published_for_open_maps():
     await h._on_space_location_updated(
         _event(
             "SPACE_LOCATION_UPDATED",
-            {"space_id": "sp-a", "user_id": "u1", "mode": "off"},
+            {"space_id": "sp-a", "user_id": U1, "mode": "off"},
         )
     )
     [removed] = [e for e in h._bus.events if isinstance(e, RemoteSpaceLocationRemoved)]
     assert (removed.space_id, removed.instance_id, removed.user_id) == (
         "sp-a",
         "peer-1",
-        "u1",
+        U1,
     )
 
 
@@ -2383,7 +2487,7 @@ async def test_a_removal_from_a_household_without_the_seat_is_ignored():
     await h._on_space_location_updated(
         _event(
             "SPACE_LOCATION_UPDATED",
-            {"space_id": "sp-a", "user_id": "u1", "mode": "off"},
+            {"space_id": "sp-a", "user_id": U1, "mode": "off"},
         )
     )
     locations.delete_for_member.assert_not_awaited()
@@ -2418,7 +2522,7 @@ async def test_space_location_updated_truncates_gps_and_publishes_for_live_pins(
         "SPACE_LOCATION_UPDATED",
         {
             "space_id": "sp-a",
-            "user_id": "u1",
+            "user_id": U1,
             "mode": "gps",
             "lat": 48.13512345,
             "lon": 11.58204567,
@@ -2436,7 +2540,7 @@ async def test_space_location_updated_truncates_gps_and_publishes_for_live_pins(
     assert published == RemoteSpaceLocationUpdated(
         space_id="sp-a",
         instance_id="peer-1",
-        user_id="u1",
+        user_id=U1,
         mode="gps",
         latitude=48.1351,
         longitude=11.582,
@@ -2454,7 +2558,7 @@ async def test_space_location_updated_zone_only_drops_any_coordinates():
         "SPACE_LOCATION_UPDATED",
         {
             "space_id": "sp-a",
-            "user_id": "u1",
+            "user_id": U1,
             "mode": "zone_only",
             "zone_id": "z1",
             "zone_name": "School",
@@ -2477,7 +2581,7 @@ async def test_space_location_updated_bad_coordinates_are_dropped():
     h, locations, _ = await _location_handler()
     ev = _event(
         "SPACE_LOCATION_UPDATED",
-        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": "north"},
+        {"space_id": "sp-a", "user_id": U1, "mode": "gps", "lat": "north"},
         from_instance="peer-1",
     )
     await h._on_space_location_updated(ev)
@@ -2489,7 +2593,7 @@ async def test_space_location_updated_refused_seat_publishes_nothing():
     h, _, _ = await _location_handler(seat=False)
     ev = _event(
         "SPACE_LOCATION_UPDATED",
-        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+        {"space_id": "sp-a", "user_id": U1, "mode": "gps", "lat": 1.0, "lon": 2.0},
         from_instance="peer-1",
     )
     await h._on_space_location_updated(ev)
@@ -2799,7 +2903,7 @@ async def test_space_location_updated_dropped_by_a_follower_only_household():
     h, locations, _ = await _location_handler(member_household=False)
     ev = _event(
         "SPACE_LOCATION_UPDATED",
-        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+        {"space_id": "sp-a", "user_id": U1, "mode": "gps", "lat": 1.0, "lon": 2.0},
     )
     await h._on_space_location_updated(ev)
     locations.upsert.assert_not_awaited()
@@ -2913,7 +3017,7 @@ async def test_a_join_snapshot_over_the_config_limit_seats_the_space_without_its
         meta=meta,
         join=resolve_join_owner("sp1", meta, issuer, own_instance_id=None),
         issuer_instance_id=issuer,
-        joining_user_id="u1",
+        joining_user_id=U1,
         own_instance_id=None,
         cover_repo=handler.cover_repo,
         icon_repo=handler.icon_repo,

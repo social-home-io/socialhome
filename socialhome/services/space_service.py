@@ -344,7 +344,7 @@ from .space_member_guard import (
     SpaceMemberGuardMixin,
     require_seat,
     seat_of,
-    user_id_of_another_household,
+    user_id_proven,
 )
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
@@ -7863,13 +7863,19 @@ class SpaceService(
         # host's roster otherwise shows the raw ``user_id``).
         display = None
         user_pk = None
+        anchor = None
         user = await self._users.get_by_user_id(user_id)
         if user is not None:
             display = user.display_name or user.username
             user_pk = getattr(user, "public_key", None)
+            anchor = user.identity_anchor or user.username
         accept_payload: dict = {
             "invite_token": token,
             "invitee_user_id": user_id,
+            # P5 — the person's identity anchor: the host seats only an id
+            # that derives from our identity key with it. Inside the
+            # encrypted payload (mesh: sealed end to end).
+            "invitee_anchor": anchor,
             "invitee_public_key": user_pk,
             "invitee_display_name": display,
         }
@@ -8805,6 +8811,8 @@ class SpaceService(
         instance_id: str,
         user_id: str,
         request_id: str,
+        applicant_identity_pk: bytes | None = None,
+        applicant_anchor: object = None,
         applicant_pk: str | None = None,
         area_verdict: Eligibility | None = None,
         gfs_relay: str | None = None,
@@ -8814,12 +8822,16 @@ class SpaceService(
         space takes followers.
 
         Everything is re-checked here, failing closed (``False``, logged,
-        nothing stored or sent): a live (not dissolved / archived) public or
-        global space this household hosts, ``allow_subscribers`` on
-        (:func:`takes_follows`), an ``INSIDE`` ``area_verdict`` for a local
-        community, the person not banned, a ``user_id`` that is neither one
-        of our own people nor seated (now or before) under another
-        household, no live seat of theirs from that household already
+        nothing stored or sent): FIRST the person-ID anchor (P5) —
+        ``derive_user_id(applicant_identity_pk, applicant_anchor)`` must be
+        ``user_id`` (:func:`user_id_proven`; ``applicant_identity_pk`` is the
+        key we pin for household ``instance_id``, or a GFS request's sealed
+        key bound to it), so an applicant can only follow as one of its own
+        people, never as somebody else nor one of ours —, then a live (not
+        dissolved / archived) public or global space this household hosts,
+        ``allow_subscribers`` on (:func:`takes_follows`), an ``INSIDE``
+        ``area_verdict`` for a local community, the person not banned, no
+        live seat of theirs from that household already
         (a member who follows keeps their seat), and ``request_id`` not used
         before. The join mode does not matter — following is not joining as
         a member. The request is kept (approved; no admin bell — a follow
@@ -8830,6 +8842,15 @@ class SpaceService(
         """
         if self._federation is None or not self._own_instance_id:
             log.warning("follow from %s: federation not attached", instance_id)
+            return False
+        if not user_id_proven(applicant_identity_pk, applicant_anchor, user_id):
+            log.info(
+                "follow from %s for space %s refused: user id %s is not proven "
+                "by the household's identity key",
+                instance_id,
+                space_id,
+                user_id,
+            )
             return False
         if self._remote_members is None:
             # "Not seated already" cannot be proved: never approve blind.
@@ -8862,22 +8883,6 @@ class SpaceService(
             return False
         if await self._spaces.is_banned(space_id, user_id):
             log.info("follow from %s refused: banned from %s", instance_id, space_id)
-            return False
-        # The applicant picks ``user_id``: never one of our own people, nor
-        # one seated (now or before) under another household.
-        if await user_id_of_another_household(
-            seats=self._remote_members,
-            users=self._users,
-            space_id=space_id,
-            instance_id=instance_id,
-            user_id=user_id,
-        ):
-            log.info(
-                "follow from %s for space %s refused: the user id belongs to "
-                "another household",
-                instance_id,
-                space_id,
-            )
             return False
         if await self._remote_members.get(space_id, instance_id, user_id) is not None:
             log.info(
@@ -9042,6 +9047,7 @@ class SpaceService(
         location = await join_location_for(
             self._federation_repo, share_location=share_location
         )
+        applicant = await self._users.get_by_user_id(applicant_user_id)
         # Persist locally so the inbound APPROVED handler can look up
         # the applicant_user_id; there's no host-side space row locally.
         # §Audit #11: route through ``save_join_request`` rather than
@@ -9062,6 +9068,13 @@ class SpaceService(
                 "request_id": request_id,
                 "space_id": space_id,
                 "user_id": applicant_user_id,
+                # P5 — proves ``user_id`` against our identity key; a follow
+                # is approved on it (the redeem of the token proves again).
+                **(
+                    {"user_anchor": applicant.identity_anchor or applicant.username}
+                    if applicant is not None
+                    else {}
+                ),
                 "message": message,
                 # Only with consent, only to the host, inside the envelope's
                 # encrypted payload (§25.8.21) — never stored here.

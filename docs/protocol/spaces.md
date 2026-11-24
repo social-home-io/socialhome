@@ -441,10 +441,14 @@ Every remote path ends in the one approval every remote join request takes
 applicant household and person** with role `subscriber`; the applicant
 redeems it automatically (§D2 / §D2b), and the seat role comes from the
 token, never from the applicant. The host re-checks at approval
-(`approve_remote_follow`, fail closed): a live (not dissolved, not archived)
+(`approve_remote_follow`, fail closed), the person-ID proof first — the
+join request carries the person's `user_anchor` inside its encrypted
+payload / sealed body and `derive_user_id(the applicant household's
+identity key, user_anchor)` must be the user id, so a household follows
+only as one of its own people (never as somebody else, never as one of the
+host's people; see [invites.md](./invites.md#the-redeem-proves-the-person-it-names-p5)) —, then a live (not dissolved, not archived)
 `public` / `global` space it hosts, `allow_subscribers` on, the person not
-banned, the user id not one of the host's own people nor seated (now or
-before) under another household, inside the area for a local community,
+banned, inside the area for a local community,
 no live seat of theirs from that household already (a member who
 follows keeps the member seat), the request id unused. At seat time the
 redeem re-checks the ban and, for the follow's own token (bound, role
@@ -627,16 +631,16 @@ switches there either. Both hold on every path, `SPACE_ROUTED` included.
   of a comment the receiver never held (the early-delete tombstone, and
   the parent hold of a federated delete): with the switch off a follower
   could otherwise plant unbounded rows on every household. Every
-  receiver also refuses an authorship claim for one of its own people or
-  for a user seated under another household, and a redeem never seats a
-  user id that belongs to another household (the follow path's rule,
-  `user_id_of_another_household`; a private invitation's accept too).
-  Residual: the rule is first come, first served — a household that
-  redeems a link under someone's id before they join blocks their own
-  redeem (the follow path had this already). The proper fix is to prove
-  the claim (`derive_user_id(instance_pk, anchor)` against the pinned
-  household key, as the public author check does), a version-gated
-  redeem field — a follow-up.
+  host seats a user id only when the seated household proves it (P5
+  person-ID anchor, `user_id_proven`: `derive_user_id(its identity key,
+  anchor)` — on every redeem, private accept and follow approval; see
+  [invites.md](./invites.md#the-redeem-proves-the-person-it-names-p5)),
+  so nobody can be seated under somebody else's id and an earlier squat
+  no longer locks the real person out. Receivers see no anchors: they
+  trust the seats the host seated, and refuse an authorship claim for one
+  of their own people or for a user holding a LIVE seat under another
+  household (`user_id_of_another_household` — only a legacy, pre-proof
+  seat can; an admin removing it clears it).
 
 Names: a follower's people reach members through the roster like any
 member's (the roster entry's display name, role `subscriber`), so a

@@ -42,6 +42,8 @@ from socialhome.federation.invite_token_redeem import (
 from socialhome.services.local_community import MAX_LOCAL_AREA_CHECKS_PER_PERSON
 
 from .test_invite_token_redeem import (
+    _REDEEMER_IDENTITY,
+    U_LOCAL,
     _a_space,
     _bootstrap_pair,
     _FakeFederationRepo,
@@ -93,7 +95,7 @@ def _linked():
 async def _redeem(sender, location=None):
     return await sender.request_redeem(
         "good-token",
-        viewer_user_id="u-local",
+        viewer_user_id=U_LOCAL,
         issuer_instance_id="issuer-1",
         join_location=location,
     )
@@ -140,7 +142,7 @@ async def test_a_redeem_near_the_edge_becomes_a_join_request_on_both_sides():
     (own_row,) = sender._spaces.join_requests
     assert own_row["id"] == host_row["id"]
     assert own_row["space_id"] == "sp-1"
-    assert own_row["user_id"] == "u-local"
+    assert own_row["user_id"] == U_LOCAL
     assert own_row["remote_applicant_instance_id"] == "issuer-1"
 
 
@@ -159,14 +161,19 @@ async def test_an_approved_person_is_seated_without_a_location():
     minted (or the same link opened again) seats the person with no check —
     and no location is sent for it."""
     sender, issuer_repo, members = _linked()
-    issuer_repo.approved.add(("sp-1", "u-local", "sender-1"))
+    issuer_repo.approved.add(("sp-1", U_LOCAL, "sender-1"))
     result = await _redeem(sender, None)
     assert result["space_id"] == "sp-1"
     assert len(members.added) == 1
 
 
 def _issuer_event(location=None, *, token="tok"):
-    payload = {"redeem_nonce": "n1", "invite_token": token, "redeemer_user_id": "u-x"}
+    payload = {
+        "redeem_nonce": "n1",
+        "invite_token": token,
+        "redeemer_user_id": U_LOCAL,
+        "redeemer_anchor": "alice",
+    }
     if location is not None:
         payload["join_location"] = location
     return FederationEvent(
@@ -181,6 +188,8 @@ def _issuer_event(location=None, *, token="tok"):
 
 def _issuer(mode=JoinMode.REQUEST):
     fed = _FakeFederationService()
+    # The redeeming household's pinned key proves its person (P5).
+    fed.identity_pks["sender-1"] = _REDEEMER_IDENTITY.public_key
     repo = _FakeSpaceRepo()
     repo.tokens["tok"] = {"space_id": "sp-1", "created_by": "o", "uses_remaining": 3}
     repo.space_rows_for_get["sp-1"] = _community("sp-1", fed.own_instance_id, mode=mode)
@@ -255,7 +264,7 @@ async def test_a_redeem_carries_no_location_unless_given():
         with pytest.raises(TimeoutError):
             await sender.request_redeem(
                 "tkn",
-                viewer_user_id="u-local",
+                viewer_user_id=U_LOCAL,
                 issuer_instance_id="issuer-1",
                 join_location=location,
             )
@@ -278,14 +287,14 @@ async def test_a_bootstrap_redeem_seals_the_location_from_the_gfs():
     with pytest.raises(LocationRequiredError):
         await env.redeemer.request_redeem(
             "tok-1",
-            viewer_user_id="u-local",
+            viewer_user_id=U_LOCAL,
             issuer_instance_id=env.issuer_party.instance_id,
             bootstrap=env.hint,
         )
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
     result = await env.redeemer.request_redeem(
         "tok-1",
-        viewer_user_id="u-local",
+        viewer_user_id=U_LOCAL,
         issuer_instance_id=env.issuer_party.instance_id,
         bootstrap=env.hint,
         join_location=NEAR,
@@ -305,7 +314,7 @@ async def test_a_bootstrap_redeem_near_the_edge_files_a_request():
     with pytest.raises(JoinRequestSentError):
         await env.redeemer.request_redeem(
             "tok-1",
-            viewer_user_id="u-local",
+            viewer_user_id=U_LOCAL,
             issuer_instance_id=env.issuer_party.instance_id,
             bootstrap=env.hint,
             join_location=EDGE,
@@ -336,7 +345,5 @@ async def test_a_malformed_review_deny_files_nothing_on_the_redeemer():
     stores them."""
     sender = _make_coordinator()
     exc = JoinRequestSentError(params={})
-    await sender._record_review_request(
-        exc, viewer_user_id="u-local", issuer="issuer-1"
-    )
+    await sender._record_review_request(exc, viewer_user_id=U_LOCAL, issuer="issuer-1")
     assert sender._spaces.join_requests == []
