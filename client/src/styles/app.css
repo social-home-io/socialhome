@@ -23287,6 +23287,19 @@ span.sh-hlv__who { cursor: default; }
   gap: var(--sh-space-xs) var(--sh-space-sm);
 }
 .sh-discover-section__count { font-size: var(--sh-font-size-sm); }
+/* Most followed / Newest: toggle chips beside the GFS heading, under it
+   on a phone. */
+.sh-discover-sort {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-xs);
+}
+.sh-discover-sort .sh-chip { min-height: 36px; }
+.sh-discover-sort .sh-chip[aria-disabled="true"] { opacity: 0.6; cursor: not-allowed; }
+.sh-discover-sort .sh-chip:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
 /* One width for Follow and Following (and their translations) so a tap
    never shifts the row. */
 .sh-follow-toggle {

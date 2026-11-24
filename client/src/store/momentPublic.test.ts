@@ -94,13 +94,35 @@ describe('momentPublic store', () => {
     expect(mod.follows.value).toHaveLength(1)
   })
 
-  it('fetchGfsDirectory returns the users array', async () => {
+  it('fetchGfsDirectory asks for an order and returns the rows and the order used', async () => {
     apiGet.mockResolvedValueOnce({
-      users: [{ user_id: 'u-remote', display_name: 'Bob' }],
+      users: [{ user_id: 'u-remote', display_name: 'Bob', follower_count: 3 }],
+      sort: 'followers',
     })
     const mod = await import('./momentPublic')
-    const list = await mod.fetchGfsDirectory('g1')
-    expect(list).toHaveLength(1)
+    const page = await mod.fetchGfsDirectory('g1', 'followers')
+    expect(apiGet).toHaveBeenLastCalledWith('/api/gfs/g1/moments/users', { sort: 'followers' })
+    expect(page.users).toHaveLength(1)
+    expect(page.users[0].follower_count).toBe(3)
+    expect(page.sort).toBe('followers')
+  })
+
+  it('fetchGfsDirectory treats the order and counts as untrusted labels', async () => {
+    apiGet.mockResolvedValueOnce({
+      users: [
+        { user_id: 'a', follower_count: -1 },
+        { user_id: 'b', follower_count: '7' },
+        { user_id: 'c', follower_count: 2.5 },
+        { user_id: 'd', follower_count: 4 },
+      ],
+      sort: 'something else',
+    })
+    const mod = await import('./momentPublic')
+    const page = await mod.fetchGfsDirectory('g1', 'followers')
+    expect(page.sort).toBeNull()
+    expect(page.users.map((u) => u.follower_count)).toEqual([undefined, undefined, undefined, 4])
+    apiGet.mockResolvedValueOnce({ users: 'nope' })
+    expect((await mod.fetchGfsDirectory('g1', 'new')).users).toEqual([])
   })
 })
 

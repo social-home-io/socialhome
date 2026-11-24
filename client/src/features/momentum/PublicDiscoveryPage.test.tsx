@@ -206,7 +206,11 @@ describe('Discover tab', () => {
     fireEvent.input(search, { target: { value: 'pizza' } })
     expect(queryAllByRole('button', { name: 'Marco Rossi' }).length).toBe(1)
     expect(container.textContent).not.toContain('Sophie Keller')
-    expect(api.get).not.toHaveBeenCalledWith('/api/gfs/g1/moments/users', expect.anything())
+    const directoryParams = vi.mocked(api.get).mock.calls
+      .filter(([path]) => path === '/api/gfs/g1/moments/users')
+      .map(([, params]) => params as Record<string, string> | undefined)
+    expect(directoryParams.length).toBeGreaterThan(0)
+    expect(directoryParams.every((p) => !p || !('q' in p))).toBe(true)
   })
 
   it('Follow goes through the GFS and flips to Following', async () => {
@@ -297,5 +301,93 @@ describe('Discover tab', () => {
     const { findByRole, findByText } = render(<PublicDiscoveryPage />)
     expect(await findByRole('list', { name: 'Friends' })).toBeTruthy()
     expect(await findByText('Connect to a GFS (Global Federation Server) first to find other people.')).toBeTruthy()
+  })
+})
+
+describe('Discover › ranking the GFS list', () => {
+  const gfs = { id: 'g1', display_name: 'Demo GFS', status: 'active' }
+  const author = (id: string, name: string, count: number) => ({
+    user_id: id, instance_id: `i-${id}`, username: id, display_name: name,
+    picture_url: null, bio: null, picture_digest: null, follower_count: count,
+  })
+  const ranked = [author('dana', 'Dana Rivers', 1204), author('ivo', 'Ivo', 1), author('gus', 'Gus', 0)]
+  const newest = [author('gus', 'Gus', 0), author('ivo', 'Ivo', 1), author('dana', 'Dana Rivers', 1204)]
+  let ranks = true
+  let down = false
+
+  beforeEach(() => {
+    vi.mocked(api.get).mockReset()
+    _resetGfsConnectionsForTests()
+    _resetDiscoverForTests()
+    follows.value = []
+    ranks = true
+    down = false
+    vi.mocked(api.get).mockImplementation(async (path: string, params?: Record<string, string>) => {
+      if (path === '/api/gfs/connections') return [gfs]
+      if (path === '/api/gfs/g1/moments/users') {
+        if (down) throw new Error('offline')
+        const sort = params?.sort
+        return ranks
+          ? { users: sort === 'new' ? newest : ranked, sort }
+          : { users: newest.map((u) => ({ ...u, follower_count: undefined })) }
+      }
+      if (path === '/api/friends') return NO_FRIENDS
+      return []
+    })
+  })
+
+  const names = (list: HTMLElement) =>
+    [...list.querySelectorAll('.sh-momentum-discover-name')].map((b) => b.textContent)
+
+  it('starts with Most followed and shows compact counts — nothing for 0', async () => {
+    const { findByRole, getByRole } = render(<PublicDiscoveryPage />)
+    const list = await findByRole('list', { name: 'People sharing on Demo GFS' })
+    await waitFor(() => expect(names(list)).toEqual(['Dana Rivers', 'Ivo', 'Gus']))
+    expect(api.get).toHaveBeenCalledWith('/api/gfs/g1/moments/users', { sort: 'followers' })
+    const group = getByRole('group', { name: 'Order' })
+    const most = getByRole('button', { name: 'Most followed' })
+    expect(group.contains(most)).toBe(true)
+    expect(most.getAttribute('aria-pressed')).toBe('true')
+    expect(getByRole('button', { name: 'Newest' }).getAttribute('aria-pressed')).toBe('false')
+    const rows = [...list.querySelectorAll('li')].map((li) => li.textContent)
+    expect(rows[0]).toContain('1.2K followers')
+    expect(rows[1]).toContain('1 follower')
+    expect(rows[1]).not.toContain('1 followers')
+    expect(rows[2]).not.toContain('follower')
+  })
+
+  it('Newest reads the list in that order and says so', async () => {
+    const { findByRole, getByRole } = render(<PublicDiscoveryPage />)
+    await findByRole('button', { name: 'Most followed' })
+    fireEvent.click(getByRole('button', { name: 'Newest' }))
+    await waitFor(() => expect(names(getByRole('list', { name: 'People sharing on Demo GFS' })))
+      .toEqual(['Gus', 'Ivo', 'Dana Rivers']))
+    expect(api.get).toHaveBeenCalledWith('/api/gfs/g1/moments/users', { sort: 'new' })
+    expect(getByRole('button', { name: 'Newest' }).getAttribute('aria-pressed')).toBe('true')
+    expect(document.querySelector('[role="status"].sh-discover-sort__said')!.textContent)
+      .toBe('Sorted by newest')
+  })
+
+  it('a GFS that does not rank: no sort buttons and no counts', async () => {
+    ranks = false
+    const { findByRole, queryByRole } = render(<PublicDiscoveryPage />)
+    const list = await findByRole('list', { name: 'People sharing on Demo GFS' })
+    await waitFor(() => expect(names(list)).toEqual(['Gus', 'Ivo', 'Dana Rivers']))
+    expect(queryByRole('button', { name: 'Most followed' })).toBeNull()
+    expect(list.textContent).not.toContain('follower')
+  })
+
+  it('an unreachable GFS keeps its list; the sort buttons do nothing', async () => {
+    const first = render(<PublicDiscoveryPage />)
+    await first.findByRole('button', { name: 'Most followed' })
+    first.unmount()
+    down = true
+    const { findByRole, getByRole } = render(<PublicDiscoveryPage />)
+    await findByRole('alert')
+    const newestBtn = getByRole('button', { name: 'Newest' })
+    expect(newestBtn.getAttribute('aria-disabled')).toBe('true')
+    const calls = vi.mocked(api.get).mock.calls.length
+    fireEvent.click(newestBtn)
+    expect(vi.mocked(api.get).mock.calls.length).toBe(calls)
   })
 })
