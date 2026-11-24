@@ -58,7 +58,6 @@ from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
-    gfs_space_epoch_repo_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
@@ -73,7 +72,6 @@ from socialhome.services.gfs_server_selection_service import (
     GfsServerSelectionService,
 )
 from socialhome.services.gfs_server_targets import listing_target_id
-from socialhome.writer_key import issue_writer_key_grant
 
 pytestmark = pytest.mark.security
 
@@ -188,14 +186,7 @@ async def _prepare_gfs(tc: TestClient, owner: _Household, follower: _Household):
             identity_public_key=SPACE_PK.hex(),
         )
     )
-    await fed.add_subscriber(space_id=SPACE_ID, instance_id=follower.instance_id)
     await fed.mark_relay_seen(follower.instance_id, at=int(time.time()))
-    epochs = tc.app[gfs_space_epoch_repo_key]
-    await epochs.confirm(SPACE_ID, EPOCH, now=int(time.time()))
-    wkc = issue_writer_key_grant(
-        space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=EPOCH
-    ).writer_key_cert
-    await epochs.pin_writer_key(SPACE_ID, EPOCH, wkc.writer_pk, replace=True)
 
 
 @pytest.fixture

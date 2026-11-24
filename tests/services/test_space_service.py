@@ -99,7 +99,6 @@ from socialhome.domain.space_roster_digest import (
     roster_digest_wire,
 )
 from socialhome.domain.writer_cert import WriterCert, WriterEntitlement
-from socialhome.domain.writer_key import WriterKeyGrant
 from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -12333,7 +12332,7 @@ async def test_comment_and_post_events_name_the_actor_and_the_author(stack):
     )
 
 
-# ─── The writer group key: one anonymous GFS publish mode (v_90) ─────────
+# ─── No space writer group key since v_96 (P7) ───────────────────────────
 
 _V90 = FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY
 
@@ -12348,44 +12347,6 @@ async def _readable(stack, space_id: str) -> None:
 
 async def test_space_features_have_no_publish_mode():
     assert not hasattr(SpaceFeatures(), "gfs_publish_mode")
-
-
-async def test_readable_roster_snapshot_carries_the_writer_key(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
-    await _readable(stack, space.id)
-    await _seat(remote, space.id, "peer-a", "u-a")
-    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
-    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
-    grant = WriterKeyGrant.from_wire(payload["writer_key"])
-    assert grant.epoch == _cert_of(payload).epoch == 0
-
-
-async def test_an_unreadable_space_roster_snapshot_carries_no_writer_key(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
-    await _seat(remote, space.id, "peer-a", "u-a")
-    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
-    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
-    assert "writer_cert" in payload and "writer_key" not in payload
-
-
-async def test_rekey_delivers_the_new_writer_key_only_to_publishers(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
-    await _readable(stack, space.id)
-    await _seat(remote, space.id, "peer-a", "u-a")
-    await _seat(remote, space.id, "peer-b", "u-b", role=SpaceRole.SUBSCRIBER.value)
-    stack.space_svc._space_crypto = SpaceContentEncryption(
-        SqliteSpaceKeyRepo(stack.db),
-        KeyManager(b"\x0a" * 32),
-        own_instance_id=stack.iid,
-    )
-    await stack.space_svc._rotate_and_distribute_space_key(space.id)
-    call = fed.broadcast_to_space_members.await_args
-    hook = call.kwargs["per_peer"]
-    a = await hook("peer-a", call.args[2])
-    assert WriterKeyGrant.from_wire(a["writer_key"]).epoch == 1
-    # A follower without comment rights publishes nothing: no key.
-    assert "writer_key" not in await hook("peer-b", call.args[2])
-    assert "writer_key" not in call.args[2]
 
 
 async def test_rotation_tells_the_gfs_before_the_members(stack):
@@ -12429,9 +12390,9 @@ async def test_a_forwarded_config_edit_naming_a_mode_changes_nothing_else(
     assert rekeys == []
 
 
-async def test_an_upgrade_to_v90_delivers_the_writer_key(stack):
-    """Re-sent at the upgrade, so the member publishes over the GFS without
-    waiting for the next rotation."""
+async def test_an_upgrade_re_sends_the_credentials_without_a_writer_key(stack):
+    """Re-sent at the upgrade (the writer cert, the channel grant) — and,
+    since v_96 (P7), never a space writer group key."""
     space, fed, remote, _pks = await _cert_space(stack, version=_V90)
     await _readable(stack, space.id)
     await _seat(remote, space.id, "peer-a", "u-a")
@@ -12443,48 +12404,12 @@ async def test_an_upgrade_to_v90_delivers_the_writer_key(stack):
     )
     kw = fed.send_with_mesh_fallback.await_args.kwargs
     assert kw["to_instance_id"] == "peer-a"
-    assert "writer_key" in kw["payload"]
+    assert "writer_cert" in kw["payload"]
+    assert "writer_key" not in kw["payload"]
 
 
-async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
-    """A global space that just became publicly readable gets a writer key
-    at once — the owner's epoch notice pins it at its GFSs and each member
-    household gets it with its credentials alone, no roster entry (no
-    rotation needed)."""
+async def test_a_readable_space_roster_snapshot_carries_no_writer_key(stack):
     space, fed, remote, _pks = await _cert_space(stack, version=_V90)
-    await stack.db.enqueue(
-        "UPDATE spaces SET space_type='global', allow_subscribers=0 WHERE id=?",
-        (space.id,),
-    )
-    await _seat(remote, space.id, "peer-a", "u-a")
-    await stack.space_repo.add_space_instance(space.id, "peer-a")
-    member_gfs = SimpleNamespace(
-        announce_epoch=AsyncMock(return_value=1),
-        channel_space=AsyncMock(return_value=False),
-    )
-    stack.space_svc.attach_member_gfs(member_gfs)
-    fed.send_with_mesh_fallback.reset_mock()
-    current = (await stack.space_repo.get(space.id)).features
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=dataclasses.replace(current, allow_subscribers=True),
-    )
-    member_gfs.announce_epoch.assert_awaited_with(space.id)
-    sent = [
-        c.kwargs
-        for c in fed.send_with_mesh_fallback.await_args_list
-        if c.kwargs.get("to_instance_id") == "peer-a"
-    ]
-    assert any("writer_key" in kw["payload"] for kw in sent)
-    # Its credentials alone — never the whole roster to every household.
-    assert all(kw["payload"]["entries"] == [] for kw in sent)
-
-
-async def test_no_writer_key_below_v90(stack):
-    """BREAKING (v_90): a v_57..v_89 household no longer gets the key, so it
-    publishes nothing over a GFS (its posts take the host path)."""
-    space, fed, remote, _pks = await _cert_space(stack, version=_V90 - 1)
     await _readable(stack, space.id)
     await _seat(remote, space.id, "peer-a", "u-a")
     assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")

@@ -44,8 +44,8 @@ from socialhome.global_server import domain as gfs_domain
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_envelope_queue_repo_key,
+    gfs_fan_out_key,
     gfs_fed_repo_key,
-    gfs_member_publish_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
@@ -459,7 +459,7 @@ async def env(tmp_dir, request):
 
 
 async def _queued(env, node: _Node) -> list:
-    await env.app[gfs_member_publish_key].wait_idle()
+    await env.app[gfs_fan_out_key].wait_idle()
     return await env.app[gfs_envelope_queue_repo_key].list_for(
         node.h.instance_id, now=0
     )

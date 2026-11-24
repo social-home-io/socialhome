@@ -36,8 +36,8 @@ from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_envelope_queue_repo_key,
+    gfs_fan_out_key,
     gfs_fed_repo_key,
-    gfs_member_publish_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
@@ -495,7 +495,7 @@ async def test_a_member_reaches_a_server_it_never_connected_to_anonymously(world
     accepted = await world.a.member.publish_item(SPACE_ID, "post", inner, targets)
     assert len(accepted) == 2
     # b's seat on B received it — no host involved.
-    await world.apps["b"][gfs_member_publish_key].wait_idle()
+    await world.apps["b"][gfs_fan_out_key].wait_idle()
     queued = await world.apps["b"][gfs_envelope_queue_repo_key].list_for(
         world.b.h.instance_id, now=0
     )
