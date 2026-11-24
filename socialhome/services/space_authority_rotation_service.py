@@ -28,7 +28,8 @@ on → off. Under a per-space lock it
    when delegation is still on;
 6. re-publishes a public/global space so each GFS re-pins from the cert
    (right after the content key, BEFORE the per-member bundles — a GFS that
-   still pins the old key takes the revoked holder's relays), drops every
+   still pins the old key takes the revoked holder's signed listing
+   contact and media-cache requests), drops every
    seed share still queued for the space. Followers are member households
    (v_96): the bundles reach them like any member.
 
@@ -275,7 +276,7 @@ class SpaceAuthorityRotationService:
 
     def attach_member_gfs(self, member_gfs) -> None:
         """Optional (v_49): re-announce the current content epoch to each GFS
-        right after the re-pin (which clears the GFS epoch state)."""
+        right after the re-pin, into the space's channel."""
         self._member_gfs = member_gfs
 
     def attach_restore_gate(self, pending: Callable[[], Awaitable[bool]]) -> None:

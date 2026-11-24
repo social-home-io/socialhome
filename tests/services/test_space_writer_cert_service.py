@@ -46,7 +46,6 @@ from socialhome.writer_cert import (
 from socialhome.writer_key import (
     derive_writer_seed,
     issue_writer_key_grant,
-    verify_writer_key_cert,
     verify_writer_key_grant,
 )
 
@@ -896,21 +895,12 @@ async def test_writer_key_never_goes_to_an_older_household():
 async def test_writer_key_not_in_a_space_nobody_may_follow():
     svc, _ = _key_svc(space=_space(), remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
-    assert await svc.writer_key_cert_wire("sp-1", 2) is None
     assert await svc.own_writer_key("sp-1", 2) is None
 
 
-async def test_a_seed_holder_derives_and_pins_the_key():
+async def test_a_seed_holder_derives_the_key():
     svc, _ = _key_svc()
     assert await svc.own_writer_key("sp-1", 4) == derive_writer_seed(SEED, "sp-1", 4)
-    wire = await svc.writer_key_cert_wire("sp-1", 4)
-    expected = issue_writer_key_grant(
-        space_seed=SEED, space_id="sp-1", epoch=4
-    ).writer_key_cert
-    pk = verify_writer_key_cert(
-        expected, space_pubkey=SPACE_PK, space_id="sp-1", epoch=4
-    )
-    assert wire is not None and wire["writer_pk"] == b64url_encode(pk)
 
 
 @pytest.mark.parametrize(
@@ -923,7 +913,6 @@ async def test_a_seed_holder_derives_and_pins_the_key():
 async def test_no_key_outside_the_public_tiers(space):
     svc, _ = _key_svc(space=space, remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
-    assert await svc.writer_key_cert_wire("sp-1", 2) is None
     assert await svc.own_writer_key("sp-1", 2) is None
 
 
@@ -942,7 +931,6 @@ def test_writer_key_min_version():
 async def test_writer_key_needs_a_matching_seed():
     svc, _ = _key_svc(seed=os.urandom(32), remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
-    assert await svc.writer_key_cert_wire("sp-1", 2) is None
     svc, _ = _key_svc(seed=None, remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
 
@@ -971,24 +959,6 @@ async def test_writer_key_rotates_with_the_epoch():
     k2 = await svc.writer_key_for_peer("sp-1", "peer", epoch=2)
     k3 = await svc.writer_key_for_peer("sp-1", "peer", epoch=3)
     assert k2["writer_seed"] != k3["writer_seed"]
-
-
-async def test_writer_key_cert_wire_pins_the_derived_key():
-    svc, _ = _key_svc()
-    wire = await svc.writer_key_cert_wire("sp-1", 4)
-    from_cert = verify_writer_key_cert(
-        WriterKeyGrant.from_wire(
-            {
-                **issue_writer_key_grant(
-                    space_seed=SEED, space_id="sp-1", epoch=4
-                ).to_wire()
-            }
-        ).writer_key_cert,
-        space_pubkey=SPACE_PK,
-        space_id="sp-1",
-        epoch=4,
-    )
-    assert wire["writer_pk"] == b64url_encode(from_cert)
 
 
 async def test_accept_writer_key_stores_it_wrapped_and_own_writer_key_reads_it():

@@ -194,7 +194,6 @@ async def world():
         space_repo=spaces,  # type: ignore[arg-type]
         space_crypto=crypto,  # type: ignore[arg-type]
         writer_certs=_Certs(me),  # type: ignore[arg-type]
-        own_instance_id=me.instance_id,
     )
     channels = _Channels(conn)
     svc.attach_channels(channels)  # type: ignore[arg-type]
@@ -319,7 +318,6 @@ async def test_without_a_channel_service_nothing_is_planned(world):
         space_repo=world["spaces"],  # type: ignore[arg-type]
         space_crypto=world["crypto"],  # type: ignore[arg-type]
         writer_certs=_Certs(world["me"]),  # type: ignore[arg-type]
-        own_instance_id=world["me"].instance_id,
     )
     assert await svc.plan_item(SPACE_ID, AUTHOR, "post") == []
     assert await svc.publish_item(SPACE_ID, "post", _inner(), [world["conn"]]) == []

@@ -41,6 +41,8 @@ from socialhome.domain.gfs_channel import (
     CHANNEL_FRAME_KEYS,
     CHANNEL_PUBLISH_ANON_ROUTE,
     CHANNEL_ROUTES,
+    GFS_KEY_FIELD,
+    PUBLISH_ANON_KEYS,
 )
 from socialhome.domain.space import JoinMode, SpaceFeatures, SpaceType
 from socialhome.domain.space_author_profile import (
@@ -108,7 +110,6 @@ def _node(h, *, seed, session, conn, peers, seats, link, owner_id):
         space_repo=spaces,  # type: ignore[arg-type]
         space_crypto=pc._Crypto(),  # type: ignore[arg-type]
         writer_certs=certs,  # type: ignore[arg-type]
-        own_instance_id=h.instance_id,
     )
     member.attach_channels(channels)
     return SimpleNamespace(h=h, spaces=spaces, channels=channels, member=member)
@@ -344,14 +345,18 @@ async def test_nothing_identifying_reaches_the_gfs_for_a_member_publish(world):
     request and the fan-out frame carry no household id or key, no
     household signature, no writer cert and no user it binds."""
     world.requests.clear()
+    world.caplog.clear()
     queued = await _publish(
         world, "post", {"post_id": "p-3", "space_id": SPACE_ID, "content": "x"}
     )
     [body] = _channel_publishes(world.requests)
+    # Exactly the anonymous request shape: nothing more can ride along.
+    assert PUBLISH_ANON_KEYS <= set(body) <= PUBLISH_ANON_KEYS | GFS_KEY_FIELD
     h = world.b.h
     for where, blob in (
         ("the request", json.dumps(body)),
         ("the fan-out frame / queued row", json.dumps(queued[0].sealed)),
+        ("the GFS logs during the publish", _server_lines(world)),
     ):
         for leak in (
             h.instance_id,

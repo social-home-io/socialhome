@@ -317,7 +317,6 @@ def _node(h, *, seed, session, conn, peers, seats, link, owner_id):
         space_repo=spaces,  # type: ignore[arg-type]
         space_crypto=_Crypto(),  # type: ignore[arg-type]
         writer_certs=certs,  # type: ignore[arg-type]
-        own_instance_id=h.instance_id,
     )
     member.attach_channels(channels)
     return SimpleNamespace(h=h, spaces=spaces, channels=channels, member=member)

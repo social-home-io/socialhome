@@ -139,7 +139,6 @@ class GfsMemberPublishService:
         "_channels",
         "_conn_repo",
         "_crypto",
-        "_own_instance_id",
         "_spaces",
         "_stopping",
         "_tasks",
@@ -153,13 +152,11 @@ class GfsMemberPublishService:
         space_repo: AbstractSpaceRepo,
         space_crypto: SpaceContentEncryption,
         writer_certs: SpaceWriterCertService,
-        own_instance_id: str,
     ) -> None:
         self._conn_repo = conn_repo
         self._spaces = space_repo
         self._crypto = space_crypto
         self._writer_certs = writer_certs
-        self._own_instance_id = own_instance_id
         #: Background publishes in flight (strong refs) and the stop flag.
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping = False

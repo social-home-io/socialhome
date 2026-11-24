@@ -133,7 +133,6 @@ if TYPE_CHECKING:
         AbstractSpaceAuthorProfileRepo,
     )
     from ..repositories.space_post_repo import AbstractSpacePostRepo
-    from ..repositories.space_repo import AbstractSpaceRepo
     from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
@@ -181,18 +180,16 @@ class _Item:
 class SpaceItemInbound:
     """Persist member-published generic items (see the module docstring)."""
 
-    __slots__ = ("_bus", "_mentions", "_posts", "_profiles", "_spaces")
+    __slots__ = ("_bus", "_mentions", "_posts", "_profiles")
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        space_repo: AbstractSpaceRepo,
         space_post_repo: AbstractSpacePostRepo,
         mention_resolver: SpaceMentionResolver | None = None,
     ) -> None:
         self._bus = bus
-        self._spaces = space_repo
         self._posts = space_post_repo
         self._mentions = mention_resolver
         #: v_60 — where verified author profiles are kept. ``None`` drops.

@@ -3878,14 +3878,15 @@ class SpaceService(
             and self._gfs is not None
         ):
             # Both dials the GFS directory stores — ``allow_subscribers``
-            # (readability, enforced on ``/gfs/subscribe``) and ``join_mode``
+            # (readability — the GFS side of its legacy subscribe enforces it
+            # until those routes go) and ``join_mode``
             # (how people get in, shown on the listing) — are re-published on
             # any change. One condition rather than two blocks: the action is
             # identical, and forgetting to add the next directory field to a
             # duplicated block is exactly how the GFS falls out of sync.
-            # Turning ``allow_subscribers`` OFF also PURGES the subscriber
-            # seats taken while it was on, so nobody is left holding a
-            # subscription that can never deliver. Without this the truth would
+            # (On a GFS still running the legacy code, turning
+            # ``allow_subscribers`` OFF also purges its space-keyed seats.)
+            # Without this the truth would
             # not reach the GFS until the owner's next WS reconnect
             # (``heal_space_pins``). A type flip is already covered above,
             # hence the was_global/will_be_global guard. Only the GFSs that

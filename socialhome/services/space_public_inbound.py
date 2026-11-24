@@ -141,8 +141,13 @@ log = logging.getLogger(__name__)
 RELAY_KEY_WAIT_MAX_FRAMES: int = 64
 
 
+#: How far past our newest content epoch a frame may claim to be and still
+#: be held for its key (two quick rotations in a row).
+KEY_WAIT_MAX_AHEAD: int = 2
+
+
 class SpacePublicInbound:
-    """GFS-relay → local-persist consumer for public/global space posts."""
+    """Opaque-channel item → local-persist consumer (private and global spaces)."""
 
     __slots__ = (
         "_authorship",
@@ -186,7 +191,6 @@ class SpacePublicInbound:
         #: v_49 — applies member-published comments, deletes and reactions.
         self._items = SpaceItemInbound(
             bus=bus,
-            space_repo=space_repo,
             space_post_repo=space_post_repo,
             mention_resolver=mention_resolver,
         )
@@ -219,13 +223,14 @@ class SpacePublicInbound:
 
         Only for an epoch AFTER the newest key we hold (or with none held):
         a rekey delivers the new current key, so an older missing epoch would
-        never come — and the frame epoch is plaintext, so a relay could
-        otherwise fill the hold with frames no key will ever open. The hold
+        never come — and at most :data:`KEY_WAIT_MAX_AHEAD` past it: the
+        frame epoch is plaintext, so a relay could otherwise fill the hold
+        with frames no key will open soon. The hold
         is this path's own bounded cache, never the sync one."""
         if self._pending_decrypts is None:
             return
         held = await self._crypto.get_current_epoch(space_id)
-        if held is not None and epoch <= held:
+        if held is not None and (epoch <= held or epoch > held + KEY_WAIT_MAX_AHEAD):
             return
         self._pending_decrypts.stash(space_id, epoch, replay)
 

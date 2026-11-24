@@ -2,7 +2,7 @@
 
 The GFS is publicly reachable, so an SH instance opens a long-lived
 ``wss://`` connection to it for receiving relay events the GFS pushes.
-SH→GFS calls (publish, subscribe, report, appeal) keep using the
+SH→GFS calls (listing, channel requests, report, appeal) keep using the
 existing REST endpoints in :class:`GfsConnectionService` — request /
 response semantics fit those calls and a WS RPC envelope would only add
 ``request_id`` bookkeeping.

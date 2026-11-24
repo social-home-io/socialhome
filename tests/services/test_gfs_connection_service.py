@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import dataclasses
 import json
@@ -20,10 +19,6 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
 from socialhome.authority_cert import verify_authority_cert
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-)
 from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     sign_capabilities,
@@ -49,11 +44,8 @@ from socialhome.gfs_proof import sign_possession_proof
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server import create_gfs_app
 from socialhome.global_server.app_keys import (
-    gfs_fed_repo_key,
     gfs_token_service_key,
-    gfs_ws_registry_key,
 )
-from socialhome.global_server.domain import ClientInstance
 from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
@@ -2471,119 +2463,6 @@ async def real_gfs(tmp_path):
     app = create_gfs_app(db_path=tmp_path / "gfs-e2e.db")
     async with TestClient(TestServer(app)) as tc:
         yield tc
-
-
-@pytest.fixture
-async def e2e_sender(tmp_dir, real_gfs):
-    """A real :class:`GfsConnectionService` wired against the real GFS.
-
-    Registers the household + one subscriber on the GFS, publishes the space
-    metadata through the REAL publish path (TOFU-pinning the space's authority
-    key), subscribes the subscriber and holds its GFS push WebSocket open —
-    the GFS stores no household address, so that socket is the only way a
-    relay reaches it. Yields ``(svc, space_seed, subscriber_ws)``.
-    """
-    from socialhome.domain.space import JoinMode, Space, SpaceFeatures
-
-    fed_repo = real_gfs.server.app[gfs_fed_repo_key]
-
-    household_kp = generate_identity_keypair()
-    subscriber_kp = generate_identity_keypair()
-    space_kp = generate_identity_keypair()
-
-    await fed_repo.upsert_instance(
-        ClientInstance(
-            instance_id=_E2E_OWN_INSTANCE,
-            display_name="Alpha",
-            public_key=household_kp.public_key.hex(),
-            status="active",
-            auto_accept=True,
-        )
-    )
-    await fed_repo.upsert_instance(
-        ClientInstance(
-            instance_id=_E2E_SUB_INSTANCE,
-            display_name="Sub",
-            public_key=subscriber_kp.public_key.hex(),
-            status="active",
-            auto_accept=True,
-        )
-    )
-
-    db = AsyncDatabase(tmp_dir / "hfs-e2e.db", batch_timeout_ms=10)
-    await db.startup()
-    conn_repo = SqliteGfsConnectionRepo(db)
-    gfs_base = str(real_gfs.make_url("")).rstrip("/")
-    await conn_repo.save(
-        GfsConnection(
-            id="gfs-e2e",
-            gfs_instance_id="gfs-inst",
-            display_name="E2E GFS",
-            public_key="ab" * 32,
-            inbox_url=gfs_base,
-            status="active",
-            paired_at="2026-01-01T00:00:00+00:00",
-        )
-    )
-
-    space = Space(
-        id=_E2E_SPACE_ID,
-        name="E2E Space",
-        owner_instance_id=_E2E_OWN_INSTANCE,
-        owner_username="alice",
-        identity_public_key=space_kp.public_key.hex(),
-        config_sequence=0,
-        features=SpaceFeatures(),
-        space_type=SpaceType.GLOBAL,
-        join_mode=JoinMode.OPEN,
-    )
-    async with aiohttp.ClientSession() as session:
-        svc = GfsConnectionService(
-            conn_repo, http_client=session, publish_client=session
-        )
-        svc.attach_publish_context(
-            space_repo=_SeedSpaceRepo(space, space_kp.private_key),
-            own_instance_id=_E2E_OWN_INSTANCE,
-            own_signing_key=household_kp.private_key,
-        )
-        # Real metadata publish → the GFS TOFU-pins the space authority key,
-        # which is the ONLY thing authorizing the anonymous relay below.
-        await svc.publish_space(_E2E_SPACE_ID, "gfs-e2e")
-        await fed_repo.add_subscriber(
-            space_id=_E2E_SPACE_ID, instance_id=_E2E_SUB_INSTANCE
-        )
-        async with real_gfs.ws_connect("/gfs/ws") as sub_ws:
-            await sub_ws.send_json(
-                _ws_hello(_E2E_SUB_INSTANCE, subscriber_kp.private_key)
-            )
-            # The hello verifies asynchronously; wait until the GFS has the
-            # socket registered or the relay below has nowhere to go.
-            registry = real_gfs.server.app[gfs_ws_registry_key]
-            for _ in range(100):
-                if registry.is_connected(_E2E_SUB_INSTANCE):
-                    break
-                await asyncio.sleep(0.01)
-            assert registry.is_connected(_E2E_SUB_INSTANCE)
-            yield svc, space_kp.private_key, sub_ws
-    await db.shutdown()
-
-
-def _authority_payload(seed: bytes, *, post_id: str) -> dict:
-    payload = {
-        "space_id": _E2E_SPACE_ID,
-        "epoch": 0,
-        "post_id": post_id,
-        "encrypted_payload": "Y2lwaGVy",
-    }
-    payload.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=_E2E_SPACE_ID,
-            payload=payload,
-            space_seed=seed,
-        )
-    )
-    return payload
 
 
 async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(

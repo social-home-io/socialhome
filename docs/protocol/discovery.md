@@ -2210,7 +2210,8 @@ goes compressed only when every follower on that server can read it:
    `payload_zlib1`. A seed holder sends both copies, each authority-signed;
    a member sends its compressed request. On a 409, the publisher sends the
    JSON item to that server at once and keeps that (server, space) on JSON
-   for an hour (`GfsConnectionService.compress_for`). Any other refusal of
+   for an hour (as shipped; no household sends a compressed item since
+   v_96). Any other refusal of
    a compressed item is handled the same way, so an older node that rejects
    the unknown field also gets the JSON item.
 5. Private spaces' opaque channels always carry JSON.

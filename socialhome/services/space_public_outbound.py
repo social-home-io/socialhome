@@ -284,7 +284,6 @@ class SpacePublicOutbound:
                     relay,
                     restamp_for,
                     expect_pk=str(relay.get("author_pk") or ""),
-                    required=True,
                 )
             else:
                 sealed = await self._seal(event.space_id, relay)
@@ -339,7 +338,6 @@ class SpacePublicOutbound:
                 inner,
                 origin,
                 expect_pk=str(inner.get("author_pk") or ""),
-                required=True,
                 required_scope=WRITER_SCOPE_COMMENT,
                 # A post is never a follower's: re-issue without follower
                 # seats, so a member whose household also holds a follower
@@ -571,80 +569,65 @@ class SpacePublicOutbound:
         instance_id: str,
         *,
         expect_pk: str = "",
-        required: bool = False,
         required_scope: str = WRITER_SCOPE_WRITE,
-        item_type: str = ITEM_TYPE_POST,
         followers: bool = True,
     ) -> _Sealed:
-        """Encrypt ``inner`` (an ``item_type`` item) with ``instance_id``'s
-        writer cert for the epoch it is encrypted under (re-read once if a
-        rotation lands in between). Without a cert service, or with no cert
-        for that household that permits ``required_scope`` — and, for a
-        follower's ``reader`` cert (v_96), ``item_type`` under the space's
-        follower switches — the inner goes as is, unless ``required`` (a
-        re-stamp), which raises :class:`_NoWriterCert`. ``expect_pk`` pins
-        the cert to the author key the inner names. ``followers=False``
-        re-issues a remote household's cert without its follower seats (a
-        plain cert binding only seated users). Raises ``RuntimeError`` when
-        there is no content key.
+        """Seal the post ``inner`` re-stamped with remote household
+        ``instance_id``'s writer cert for the epoch it is sealed under
+        (re-read once if a rotation lands in between). Raises
+        :class:`_NoWriterCert` when there is no cert service, or no cert for
+        that household that permits ``required_scope`` on a post (a
+        follower's ``reader`` cert never does, v_96). ``expect_pk`` pins the
+        cert to the author key the inner names. ``followers=False`` re-issues
+        the cert without the household's follower seats (a plain cert binding
+        only seated users). Raises ``RuntimeError`` when there is no content
+        key.
         """
         if self._writer_certs is None:
-            if required:
-                raise _NoWriterCert(instance_id)
-            return await self._seal(space_id, inner)
+            raise _NoWriterCert(instance_id)
+        try:
+            hint = bytes.fromhex(expect_pk) if expect_pk else None
+        except ValueError:
+            hint = None
         for _attempt in range(2):
             current = await self._crypto.get_current_epoch(space_id)
             if current is None:
                 raise RuntimeError(f"no content key for space {space_id}")
-            if instance_id == self._own_instance_id and followers:
-                cert = await self._writer_certs.own_cert(space_id, current)
-            else:
-                hint: bytes | None
-                try:
-                    hint = bytes.fromhex(expect_pk) if expect_pk else None
-                except ValueError:
-                    hint = None
-                cert = await self._writer_certs.issue_for_instance(
-                    space_id,
-                    instance_id,
-                    epoch=current,
-                    instance_pk_hint=hint,
-                    followers=followers,
-                )
+            cert = await self._writer_certs.issue_for_instance(
+                space_id,
+                instance_id,
+                epoch=current,
+                instance_pk_hint=hint,
+                followers=followers,
+            )
             if cert is not None and expect_pk:
                 named = SpaceWriterCertService.cert_instance_pk(cert.to_wire())
                 if named is None or named.hex() != expect_pk:
                     cert = None
             # Never put a cert on an item it does not authorize (a comment
-            # cert on a post).
+            # cert on a post), nor a follower's reader cert (every receiver
+            # refuses it on a post).
             if cert is not None and not scope_permits(cert.scope, required_scope):
                 cert = None
-            # Nor a follower's reader cert on a type every receiver refuses
-            # it on (a post, or a comment / reaction whose switch is off).
             if cert is not None and cert.reader:
                 space = await self._spaces.get(space_id)
                 if space is None or not reader_cert_permits(
-                    cert, item_type, space.features
+                    cert, ITEM_TYPE_POST, space.features
                 ):
                     cert = None
-            if cert is None and required:
+            if cert is None:
                 raise _NoWriterCert(instance_id)
-            body = dict(inner)
-            body.pop(WRITER_CERT_FIELD, None)
-            if cert is not None:
-                body[WRITER_CERT_FIELD] = cert.to_wire()
+            body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
+            body[WRITER_CERT_FIELD] = cert.to_wire()
             sealed = await self._seal(space_id, body)
-            if cert is None or sealed.epoch == cert.epoch:
+            if sealed.epoch == cert.epoch:
                 return sealed
         log.warning(
             "space_public.outbound: content epoch kept moving for space %s — "
-            "relaying without a writer cert",
+            "not relaying",
             space_id,
         )
-        if required:
-            raise _NoWriterCert(instance_id)
-        body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
-        return await self._seal(space_id, body)
+        raise _NoWriterCert(instance_id)
 
 
 class _Sealed(NamedTuple):

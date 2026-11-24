@@ -689,8 +689,9 @@ class GfsConnectionService:
         # reaction totals and pushes them to connected followers that
         # declared ``ops: ["counts"]`` — never queued.
         self._moment_counts: dict[str, bool] = {}
-        # …and ``space_key_pull`` (#5b): the GFS takes a follower's
-        # ``/gfs/spaces/{id}/key_request``. Asked only once proved.
+        # …and ``space_key_pull`` (#5b): nothing asks for a key any more
+        # (v_96); kept as the proof the GFS serves ``/gfs/pages``
+        # (:meth:`viewer_pages_supported`).
         self._space_key_pull: dict[str, bool] = {}
         # …and ``join_contact`` (v_84): the GFS serves a listing's
         # authority-signed join contact. Sent only to a server that proved it.
@@ -2486,7 +2487,7 @@ class GfsConnectionService:
             log.warning(
                 "GFS %r (%s) previously advertised anonymous_publish under a "
                 "valid signature and no longer does — capability downgrade "
-                "ignored, relays stay identity-free. A connection server "
+                "ignored. A connection server "
                 "cannot lose this capability, so suspect tampering or a "
                 "proxy rewriting /gfs/info.",
                 conn.display_name,
@@ -2506,8 +2507,8 @@ class GfsConnectionService:
             return
         self._caps_warned.add(conn.id)
         log.warning(
-            "GFS %r (%s) %s. No space events are relayed to it until a "
-            "verifiable capability block appears.",
+            "GFS %r (%s) %s. Nothing that needs a proven capability goes to "
+            "it until a verifiable capability block appears.",
             conn.display_name,
             conn.inbox_url,
             detail,
@@ -2516,13 +2517,14 @@ class GfsConnectionService:
     async def _anonymous_publish_supported(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s GFS proved ``anonymous_publish`` on /gfs/info.
 
-        Answers from the cache when it is warm (filled at pair time and on
-        every WS reconnect). On a cold miss — the first publish after a boot
-        that hasn't seen a reconnect yet — probe ``/gfs/info`` ONCE. An
-        unreachable GFS answers ``False`` (and lands in ``_info_failed_at``,
-        which :meth:`_publish_capability` reads as "unknown"), and its failure is
-        suppressed for :data:`GFS_INFO_NEGATIVE_TTL_S` so a burst of publishes
-        doesn't pay the connect timeout each time.
+        The reference capability of the signed-block machinery (verify,
+        ratchet, negative TTL): no household request is gated on it since the
+        space-keyed ``/gfs/publish`` went (v_96); it is removed with the GFS's
+        legacy routes. Answers from the cache when it is warm (filled at pair
+        time and on every WS reconnect); on a cold miss probes ``/gfs/info``
+        ONCE. An unreachable GFS answers ``False`` (and lands in
+        ``_info_failed_at``, :meth:`capability_unknown`), its failure
+        suppressed for :data:`GFS_INFO_NEGATIVE_TTL_S`.
         """
         if self._listing_failed(conn):
             return False
@@ -4383,10 +4385,11 @@ class GfsConnectionService:
         )
 
     async def _relay_targets(self, space_id: str) -> list[GfsConnection]:
-        """Where a relay of *space_id* goes: every server on the owner's
-        signed list (v_57 — a delegated admin relaying while the owner is
-        offline reaches the servers it never connected to, anonymously), or,
-        without a list, the servers THIS household published it to."""
+        """The servers *space_id*'s media goes to (its one caller,
+        :meth:`space_media_follower_targets`): every server on the owner's
+        signed list (v_57 — including ones this household never connected
+        to, reached anonymously), or, without a list, the servers THIS
+        household published it to."""
         targets = await self.server_targets(space_id)
         if targets is not None:
             return targets

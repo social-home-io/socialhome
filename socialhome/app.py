@@ -2889,7 +2889,6 @@ def _build_space_media_gfs(
     space_repo,
     space_crypto: SpaceContentEncryption,
     gfs_connection_service: GfsConnectionService,
-    writer_certs: SpaceWriterCertService,
     federation_service,
     identity_seed: bytes,
 ) -> tuple[SpaceMediaGfsUploader, SpaceMediaGfsFetcher]:
@@ -2908,7 +2907,6 @@ def _build_space_media_gfs(
         # ever sealed under its key (a member may name any file).
         media_refs=repos.media_reference,
         media_dir=media_dir,
-        writer_certs=writer_certs,
     )
     uploader.attach_federation(federation_service)
     fetcher = SpaceMediaGfsFetcher(
@@ -5114,7 +5112,6 @@ def create_app(config: Config | None = None) -> web.Application:
             space_repo=space_repo,
             space_crypto=space_crypto,
             writer_certs=writer_certs,
-            own_instance_id=real_instance_id,
         )
         real_space_service.attach_member_gfs(gfs_member_publish)
         _member = gfs_member_publish
@@ -5799,7 +5796,6 @@ def create_app(config: Config | None = None) -> web.Application:
             space_repo=space_repo,
             space_crypto=space_crypto,
             gfs_connection_service=gfs_connection_service,
-            writer_certs=writer_certs,
             federation_service=federation_service,
             identity_seed=identity_seed,
         )

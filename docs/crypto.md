@@ -1126,7 +1126,10 @@ epoch), shared by every household allowed to publish anything there (both
   cert (rekey `per_peer`, roster snapshot, redeem ACK `space_meta`, v_44
   rotation bundle), only to a household holding a publishing scope, in
   every publicly readable space, at v_90 (`writer_key_min_version`). The
-  owner's epoch notice pins `writer_key_cert`. The receiver verifies the cert against its pinned space key
+  owner's epoch notice pins `writer_key_cert` (as shipped; since v_96 no
+  household sends that notice or signs a writer-key upload — a GFS no
+  longer learns the pin, so the key authorizes nothing on the household
+  side until it is retired with the GFS's legacy routes). The receiver verifies the cert against its pinned space key
   and that the seed's public half is `writer_pk`, then stores the grant
   KEK-wrapped (AES-GCM, AAD `socialhome-writer-key:<space_id>:<epoch>`) on
   that epoch's `space_keys.writer_key`. Rotates with every content epoch, so

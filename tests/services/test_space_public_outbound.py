@@ -271,19 +271,6 @@ async def test_remote_authored_relay_happy_path(env):
     )
 
 
-class _Coverage:
-    def __init__(self) -> None:
-        self.asked: list[tuple[str, str | None]] = []
-
-    async def redundant_on(self, space_id, author_instance_id):
-        self.asked.append((space_id, author_instance_id))
-
-        async def _skip(conn) -> bool:
-            return True
-
-        return _skip
-
-
 async def test_remote_authored_not_seed_holder_not_relayed(env):
     await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=False)
     _kp, author_user_id, relay = _remote_relay()
@@ -719,15 +706,6 @@ async def test_a_member_hint_carrying_an_authority_kind_is_not_relayed(env, capl
 # ─── Removals: a seed holder relays every host-path delete ──────────────
 
 
-_ENVELOPE_KEYS = {
-    "space_id",
-    "epoch",
-    "encrypted_payload",
-    "authority_sig",
-    "authority_sig_suite",
-}
-
-
 async def _removal_inner(env, skp, space_id="sp-pub") -> dict:
     _frame, inner = await _decrypted(env, space_id)
     return inner
@@ -977,8 +955,9 @@ async def test_an_approved_post_of_a_mixed_household_carries_a_plain_cert(env):
 
 
 async def test_a_reader_cert_is_never_stamped_on_a_post(env):
-    """Hardening: whatever path asks, ``_encrypt_with_cert`` refuses to put
-    a follower's reader cert on an item type it may not carry."""
+    """Hardening: whatever path asks, ``_encrypt_with_cert`` never puts a
+    follower's reader cert on a post (every receiver refuses it there),
+    even with both follower switches on."""
     _skp, author_kp, iid, _post, relay = await _approved_env(env, seats=("subscriber",))
     space = await env["space_repo"].get("sp-pub")
     await env["space_repo"].save(
@@ -998,20 +977,8 @@ async def test_a_reader_cert_is_never_stamped_on_a_post(env):
             relay,
             iid,
             expect_pk=author_kp.public_key.hex(),
-            required=True,
             required_scope="comment",
         )
-    # The same cert on a comment is fine.
-    sealed = await sub._encrypt_with_cert(
-        "sp-pub",
-        relay,
-        iid,
-        expect_pk=author_kp.public_key.hex(),
-        required=True,
-        required_scope="comment",
-        item_type="comment",
-    )
-    assert sealed.ct
 
 
 async def test_an_approved_post_without_a_signed_copy_is_not_relayed(env, caplog):
@@ -1143,29 +1110,6 @@ async def test_a_removal_in_an_archived_space_is_not_relayed(env):
 
 
 # ── v_80 — the relayed post's pictures for followers ────────────────────
-
-
-class _MediaPlan:
-    def wire(self):
-        return {"a.webp": {"blob_id": "c" * 64, "suite": "s", "epoch": 0, "size": 9}}
-
-
-class _MediaGfs:
-    def __init__(self):
-        self.planned = []
-        self.items = []
-        self.uploaded = []
-
-    async def plan(self, space_id, urls, *, item_id, followers):
-        self.planned.append((space_id, list(urls), followers))
-        self.items.append(item_id)
-        return _MediaPlan()
-
-    async def is_relay_reader(self, iid):  # pragma: no cover - unused here
-        return False
-
-    def upload(self, plan):
-        self.uploaded.append(plan)
 
 
 # ─── A delegated admin: only what the seed alone can say ───────────────────

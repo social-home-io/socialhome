@@ -229,11 +229,9 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             # is named by the roster and holds only a reader cert, which
             # does not admit an author profile.
             return False
-        name = (
-            (member.space_display_name if member else None)
-            or user.display_name
-            or user.username
-        )[:PROFILE_NAME_MAX_LENGTH]
+        name = (member.space_display_name or user.display_name or user.username)[
+            :PROFILE_NAME_MAX_LENGTH
+        ]
         # Name only for a protected account (§CP.R) or a person who hides
         # their picture and bio from followers (M6).
         protected = (

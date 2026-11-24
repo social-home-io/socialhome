@@ -690,7 +690,7 @@ def test_build_link_previews_wires_the_guarded_fetcher(tmp_path):
 
 
 async def test_gfs_publishes_ride_a_cookie_less_session(tmp_dir):
-    """``/gfs/publish`` and its retries use their own session with no cookie
+    """Anonymous publishes and their retries use their own session with no cookie
     jar, so a sticky load-balancer cookie set on the household's
     authenticated GFS calls can never link an anonymous publish back to it."""
     cfg = Config(

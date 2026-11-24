@@ -31,12 +31,8 @@ import orjson
 
 log = logging.getLogger(__name__)
 
-#: Cap for a single-space metadata body (``GET /gfs/spaces/{id}``). Room
-#: for a base64 icon + cover and generous text fields, nothing more.
-MAX_GFS_BODY_BYTES: int = 5 * 1024 * 1024
-
-#: Cap for the public-space directory (``GET /gfs/spaces``) — the same
-#: per-space payload, many times over.
+#: Cap for the public-space directory (``GET /gfs/spaces``) — room for a
+#: base64 icon + cover and generous text fields per space, many times over.
 MAX_GFS_DIRECTORY_BODY_BYTES: int = 32 * 1024 * 1024
 
 #: Cap on directory rows imported per poll tick, independent of the byte

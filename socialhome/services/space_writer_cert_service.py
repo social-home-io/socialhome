@@ -32,9 +32,8 @@ service is the one place that
   :data:`WRITER_CERT_EPOCH_GRACE_S` after the newest key arrived).
 
 **Writer group key (v_50; every publicly readable space, one mode since
-v_90).** In a publicly readable space (a public tier with followers — members
-publish anonymously to every GFS on the owner's list; there is no other way
-to publish over a GFS) the same per-peer channels also carry the epoch's
+v_90).** In a publicly readable space (a public tier with followers) the
+same per-peer channels also carry the epoch's
 writer GROUP key (:mod:`socialhome.writer_key`) under ``writer_key``, next to
 the cert — only to a household at v_90 (:func:`writer_key_min_version`)
 that holds a publishing scope (``write`` OR ``comment``: the connection server must not
@@ -43,7 +42,12 @@ it from the space seed and store nothing; every other household verifies a
 delivered grant against the pinned space key and keeps it KEK-wrapped on that
 epoch's ``space_keys`` row (migration 0076). The key rotates with every
 content epoch, so the revocation that retires a writer cert (a rotation)
-retires the writer key with it.
+retires the writer key with it. Since v_96 the household publishes space
+items only into a space's opaque channel (under the channel's own writer
+key); the space-keyed anonymous publish and the space-scope media upload
+this key authorized are gone (a GFS pinned it only from the space-keyed
+epoch notice), so nothing on the household signs with it. Its delivery is
+retired with the GFS's legacy routes.
 """
 
 from __future__ import annotations
@@ -609,9 +613,9 @@ class SpaceWriterCertService:
         Only from a seed holder whose seed matches the pin, only to a peer
         that holds a publishing scope (``write`` or ``comment`` alike) — never
         to a non-publisher — and only where the peer can use it: in a
-        publicly readable space (the key is how a member publishes, always
-        anonymously, to every server on the owner's list) to a v_90 peer. An
-        older household gets no key: its items take the host path."""
+        publicly readable space to a v_90 peer (see the module docstring for
+        what it still authorizes since v_96). An older household gets no
+        key."""
         if self._federation is None or instance_id == self._own_instance_id:
             return None
         space = await self._spaces.get(space_id)
@@ -678,8 +682,8 @@ class SpaceWriterCertService:
         return stored
 
     async def own_writer_key(self, space_id: str, epoch: int) -> bytes | None:
-        """The writer group key seed our household signs anonymous publishes
-        with at ``epoch``, or ``None``: derived when we hold the matching
+        """The writer group key seed at ``epoch`` (no household signer since
+        v_96, see the module docstring), or ``None``: derived when we hold the matching
         seed and the space has a writer key; else the stored grant while it still
         verifies against the CURRENT pin (a v_44 re-pin retires it)."""
         space = await self._spaces.get(space_id)
@@ -716,21 +720,6 @@ class SpaceWriterCertService:
                 exc_info=True,
             )
             return None
-
-    async def writer_key_cert_wire(self, space_id: str, epoch: int) -> dict | None:
-        """The authority-signed ``writer_key_cert`` a seed holder pins at the
-        GFS for ``epoch`` (v_50) — for a space whose writers get a writer key
-        (every publicly readable space) and while our seed matches the pin;
-        else ``None``."""
-        space = await self._spaces.get(space_id)
-        if space is None or writer_key_min_version(space) is None:
-            return None
-        seed = await self._matching_seed(space)
-        if seed is None:
-            return None
-        return issue_writer_key_grant(
-            space_seed=seed, space_id=space_id, epoch=epoch
-        ).writer_key_cert.to_wire()
 
     # ── Holding ──────────────────────────────────────────────────────────
 

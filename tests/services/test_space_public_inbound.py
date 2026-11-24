@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import zlib
 from datetime import UTC, datetime
 
 import pytest
@@ -89,6 +88,7 @@ from socialhome.services.space_public_authority import (
     open_channel_authority,
 )
 from socialhome.services.space_public_inbound import (
+    KEY_WAIT_MAX_AHEAD,
     SpacePublicInbound,
     _only_described_files,
 )
@@ -305,10 +305,6 @@ async def test_valid_relay_decrypts_persists_and_publishes(env):
 
 
 # ── payload_suite "zlib1" ────────────────────────────────────────────────
-
-#: A member holding the content key can seal a tiny stream that inflates to
-#: gigabytes; the follower must stop at the cap, never buffer it.
-_BOMB = zlib.compress(b" " * (512 * 1024 * 1024 // 64), 9)
 
 
 @pytest.mark.parametrize("suite", ["zlib1", "zlib1+dict1"])
@@ -618,6 +614,21 @@ async def test_a_missing_key_older_than_ours_is_not_held(env):
     env["inbound"].attach_key_wait(pending)
     await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert len(pending) == 0
+
+
+async def test_a_frame_far_ahead_of_our_key_is_not_held(env):
+    """The frame epoch is plaintext: a frame claiming an epoch far past the
+    next rekey would only crowd genuine waiting frames out of the hold."""
+    envelope = await _make_envelope(env)
+    held = await env["crypto"].get_current_epoch("sp-1")
+    pending = PendingDecryptsCache(bus=env["bus"])
+    env["inbound"].attach_key_wait(pending)
+    far = {**envelope, "epoch": held + KEY_WAIT_MAX_AHEAD + 1}
+    await _relay(env["inbound"], far)
+    assert len(pending) == 0
+    near = {**envelope, "epoch": held + KEY_WAIT_MAX_AHEAD}
+    await _relay(env["inbound"], near)
+    assert len(pending) == 1
 
 
 async def test_without_a_key_wait_a_missing_key_still_drops(env):
