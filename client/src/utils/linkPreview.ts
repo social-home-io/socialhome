@@ -43,15 +43,17 @@ export function linkDomain(raw: string | null | undefined): string {
   return new URL(href).hostname.replace(/^www\./i, '')
 }
 
-/** Whether a card built for *text* opens the same page the text links.
+/** Whether the link a card was built for is a link the text shows.
  *
  *  The server builds the card for ``first_url`` (mirrored by
  *  :func:`firstUrl`), which stops at ``(``; the text renderer links
  *  balanced parentheses in full (``…/wiki/Mercury_(planet)``). Teaching
  *  the server the same rule would change ``card_survives_edit`` on every
- *  household (a protocol bump), so instead a card shows only when its URL
- *  is exactly one of the links the text renders — link and card never
- *  point at different pages. */
+ *  household (a protocol bump), so instead the card is hidden when the
+ *  text's first link is not rendered as written. It does not compare the
+ *  card's own ``url``: that is the page's canonical / final URL (after a
+ *  redirect), so it may differ on purpose; the card's domain line always
+ *  shows the host it opens. */
 export function cardFitsText(text: string | null | undefined): boolean {
   const url = firstUrl(text)
   if (!url || !text) return false

@@ -69,12 +69,13 @@ function _mapText(
 // ``foo.www.x`` and ``mail@www.x`` stay text; ``Link:https://…`` links,
 // as the server's ``first_url`` finds it). It runs on RAW text (the
 // renderer unescapes its own escaping first) and stops at whitespace,
-// control characters, ``<>"'``, ``[]{}`` and backtick. Parentheses are
+// control characters, bidi controls (which could flip how the link's
+// tail reads), ``<>"'``, ``[]{}`` and backtick. Parentheses are
 // part of a link while they balance — the GFM rule, so
 // ``…/wiki/Mercury_(planet)`` links in full and ``(see https://x/y)``
 // ends before the ``)``.
 // eslint-disable-next-line no-control-regex
-const _BARE_LINK = /(?<![\w/.@-])(?:https?:\/\/|www\.)[^\s\u0000-\u001f\u007f<>"'[\]{}`]+/gi
+const _BARE_LINK = /(?<![\w/.@-])(?:https?:\/\/|www\.)[^\s\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069<>"'[\]{}`]+/gi
 // Punctuation that ends a sentence, not a URL (as the server trims it).
 const _TRAILING_PUNCT = /[.,;:!?*_~]$/
 // A ``www.`` link needs one more label (``www.example.org``); a scheme
@@ -168,8 +169,9 @@ export function cutOutsideLinks(text: string, at: number): number {
 export const EXTERNAL_LINK_REL = 'noopener noreferrer nofollow ugc'
 
 /** The decorative mark after an external link: ↗ in text presentation
- *  (U+FE0E), so it never turns into a colour emoji. */
-export const EXTERNAL_LINK_ICON = '↗\uFE0E'
+ *  (U+FE0E), so it never turns into a colour emoji, glued to the link's
+ *  last word (U+2060 word joiner) so it never wraps onto a line alone. */
+export const EXTERNAL_LINK_ICON = '\u2060↗\uFE0E'
 
 /** Longest link text shown in full; a longer one shows host + path cut
  *  to :data:`_LABEL_CUT` characters and ``…`` (the full URL stays the
@@ -182,8 +184,14 @@ const _LABEL_CUT = 40
 export function linkLabel(text: string): string {
   if (text.length <= _LABEL_MAX) return text
   const bare = text.replace(/^https?:\/\//i, '')
-  const chars = [...bare]  // by code point: never half an emoji
-  return chars.length <= _LABEL_CUT ? bare : `${chars.slice(0, _LABEL_CUT).join('')}…`
+  // The host is never shortened — ``www.bank.example.evil.example/…``
+  // must show where it really goes. Only path and query are cut, by
+  // code point (never half an emoji).
+  const hostEnd = bare.search(/[/?#]/)
+  const host = hostEnd === -1 ? bare : bare.slice(0, hostEnd)
+  const rest = [...bare.slice(host.length)]
+  const room = Math.max(0, _LABEL_CUT - [...host].length)
+  return rest.length <= room ? bare : `${host}${rest.slice(0, room).join('')}…`
 }
 
 function _unescape(html: string): string {
@@ -312,7 +320,14 @@ export function renderMarkdown(input: string, opts: RenderOptions = {}): string 
     (_m, text, href) => {
       const safe = _safeHref(href)
       if (safe === null) return _escape(text)
-      if (/^https?:/i.test(safe)) return _externalAnchor(safe, text)
+      if (/^https?:/i.test(safe)) {
+        // A label with nothing to see (spaces, zero-width characters)
+        // would hide where the link goes: show the URL instead.
+        const blank = _unescape(text).replace(/[\s\u200b-\u200d\u2060\ufeff]/g, '') === ''
+        return blank
+          ? _linkHtml({ href: _unescape(safe), text: _unescape(safe) })
+          : _externalAnchor(safe, text)
+      }
       return `<a href="${safe}" target="_blank" rel="${EXTERNAL_LINK_REL}">${text}</a>`
     },
   )

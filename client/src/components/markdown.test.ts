@@ -476,3 +476,32 @@ describe('review round 2', () => {
     expect(linkLabel(url)).toBe(`a.example/${'p'.repeat(21)}😀${'q'.repeat(8)}…`)
   })
 })
+
+describe('security review round 3', () => {
+  const anchors = (html: string) =>
+    [...new DOMParser().parseFromString(html, 'text/html').querySelectorAll('a')]
+
+  test.each([
+    'https://www.paypal.com.secure-login.account-verify.evil.example/x',
+    `https://bank.com.${'a'.repeat(40)}.evil.com/login`,
+    `https://example.org/${'p'.repeat(80)}`,
+  ])('a shortened label always shows the whole host: %s', (url) => {
+    const [a] = anchors(renderMarkdown(url))
+    expect(visibleText(a)).toContain(new URL(url).hostname)
+  })
+
+  test('a markdown link with an invisible label shows its URL', () => {
+    const html = renderMarkdown('www.bank.example [\u200b](https://evil.example/)')
+    const evil = anchors(html).find(a => a.getAttribute('href') === 'https://evil.example/')!
+    expect(visibleText(evil)).toBe('https://evil.example/')
+    // A query survives that path unharmed.
+    const [q] = anchors(renderMarkdown('[ ](https://q.example/?a=1&b=2)'))
+    expect(q.getAttribute('href')).toBe('https://q.example/?a=1&b=2')
+    expect(visibleText(q)).toBe('https://q.example/?a=1&b=2')
+  })
+
+  test('bidi controls end a plain-text link', () => {
+    const [a] = anchors(renderMarkdown('https://evil.example/\u202emoc.knab//:sptth'))
+    expect(a.getAttribute('href')).toBe('https://evil.example/')
+  })
+})

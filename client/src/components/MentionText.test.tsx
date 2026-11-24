@@ -74,7 +74,7 @@ describe('MentionText — links', () => {
       ['https://example.org/a?b=1&c=2', 'noopener noreferrer nofollow ugc', '_blank'],
       ['https://www.example.com', 'noopener noreferrer nofollow ugc', '_blank'],
     ])
-    expect(links[0].querySelector('[aria-hidden="true"]')!.textContent).toBe('↗\uFE0E')
+    expect(links[0].querySelector('[aria-hidden="true"]')!.textContent).toBe('\u2060↗\uFE0E')
     expect(links[0].querySelector('.sr-only')!.textContent).toBe('(opens in a new tab)')
     fireEvent.click(container.querySelector('button[data-mention="anna"]')!)
     expect(onMention).toHaveBeenCalledWith('anna')
