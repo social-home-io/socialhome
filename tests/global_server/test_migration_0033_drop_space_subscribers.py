@@ -210,3 +210,32 @@ def test_running_the_migration_body_twice_is_harmless(tmp_path):
     assert after == before == 3
     assert "space_subscribers" not in _tables(c)
     c.close()
+
+
+def test_no_space_keyed_identity_row_stays(tmp_path):
+    """The dead ``space_instance_bans`` table goes, and no space-scope or
+    household-owner byte counter survives even if it drifted."""
+    c = _conn(tmp_path)
+    apply_through(c, 32, directory=_GFS_MIGRATIONS)
+    _seed(c)
+    c.execute(
+        "INSERT INTO space_instance_bans(space_id, instance_id) VALUES('sp-1', 'i')"
+    )
+    # Drift: counters with no blob behind them (the trigger never fires).
+    c.execute(
+        "INSERT OR REPLACE INTO gfs_space_media_scope_bytes(scope_kind, scope_id,"
+        " bytes) VALUES('space', 'sp-drift', 5)"
+    )
+    c.execute(
+        "INSERT OR REPLACE INTO gfs_space_media_owner_bytes(owner_kind, owner_id,"
+        " bytes) VALUES('household', 'inst-drift', 5)"
+    )
+    apply_through(c, 33, directory=_GFS_MIGRATIONS)
+    assert "space_instance_bans" not in _tables(c)
+    assert not c.execute(
+        "SELECT 1 FROM gfs_space_media_scope_bytes WHERE scope_kind='space'"
+    ).fetchall()
+    assert not c.execute(
+        "SELECT 1 FROM gfs_space_media_owner_bytes WHERE owner_kind='household'"
+    ).fetchall()
+    c.close()

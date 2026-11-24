@@ -376,7 +376,7 @@ class GfsChannelService:
         :class:`ChannelBusy` (the server-wide cap)."""
         self._addressed(req.gfs_instance_id, req.gfs_key)
         self._fresh(req.ts)
-        if not self._register_limiter.allow(client_ip):
+        if not self._allow(self._register_limiter, client_ip):
             raise ChannelRateLimited()
         try:
             verify_register(req)
@@ -599,9 +599,12 @@ def _is_channel_path(path: str) -> bool:
     return path in CHANNEL_ROUTES
 
 
-def build_channel_rate_limit(resolver: ClientIpResolver):
+def build_channel_rate_limit(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+):
     """Per-IP limiter on every ``/gfs/channels/*`` route, shedding a flood
-    before any signature work."""
+    before any signature work. With *nodes* (the cluster's live node count)
+    it is cluster-wide: each node allows its :func:`~.public.node_share`."""
     return build_window_limiter(
-        resolver, CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP, _is_channel_path
+        resolver, CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP, _is_channel_path, nodes=nodes
     )

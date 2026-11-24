@@ -42,11 +42,14 @@
 --    rows are orphans the maintenance sweep removes (``sweep_orphans``).
 -- Rolling upgrade (cluster nodes share one database): the first upgraded
 -- node drops the table while an older node may still serve the legacy
--- routes. Households upgrade first (v_96 sends nothing space-keyed), so only
--- a not-yet-upgraded household's ``/gfs/subscribe`` / ``/gfs/publish`` and an
--- older node's fail-soft hello key-repair pass meet the missing table (500 /
--- a logged error) until every node runs this build — upgrade the allocs
--- together. Accepted: keeping the table for one more release would keep the
+-- routes. Households upgrade first (v_96 sends nothing space-keyed), but an
+-- older node still reads the table on a legacy household's
+-- ``/gfs/subscribe`` / ``/gfs/publish``, on a listing publish with
+-- ``allow_subscribers: false`` (its subscriber purge — a 500 after the
+-- listing row was upserted) and in its fail-soft hello key-repair pass —
+-- so stop every old alloc before the first new one starts. (An old node
+-- writing meanwhile leaves space-keyed queue / media rows that expire by
+-- TTL; households drop them.) Accepted: keeping the table for one more release would keep the
 -- follow graph at rest that this migration exists to remove.
 --
 -- ``json_extract`` raises on malformed JSON and SQLite does not promise to
@@ -69,3 +72,15 @@ DROP TABLE IF EXISTS space_subscribers;
 DELETE FROM gfs_space_media WHERE scope_kind = 'space';
 DELETE FROM gfs_space_media_demand WHERE scope_kind = 'space';
 DELETE FROM gfs_space_media_uploads WHERE scope_kind = 'space';
+
+-- Belt and braces: the 0025 delete trigger removes a counter row once its
+-- bytes reach zero; any drift must not leave a space id or a household id
+-- (the ``household`` fairness owner of a space blob) at rest.
+DELETE FROM gfs_space_media_scope_bytes WHERE scope_kind = 'space';
+DELETE FROM gfs_space_media_owner_bytes WHERE owner_kind = 'household';
+
+-- ``space_instance_bans(space_id, instance_id)`` (0001) has had no reader or
+-- writer on the GFS (``global_server/*.py``) for many releases — an
+-- identity-bound table keyed by space id, the shape this migration removes.
+-- (The household's own ``space_instance_bans`` is another database.)
+DROP TABLE IF EXISTS space_instance_bans;
