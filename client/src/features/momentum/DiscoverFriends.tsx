@@ -22,7 +22,7 @@ import { LoadErrorState } from '@/components/LoadErrorState'
 import { openPerson } from '@/components/PersonSheet'
 import { Spinner } from '@/components/Spinner'
 import {
-  COLLAPSE_OVER, COLLAPSED_SHOWN, buildModel, fold, matches,
+  COLLAPSE_OVER, COLLAPSED_SHOWN, buildModel, collatorFor, fold, matches,
   type FriendsPayload, type Person,
 } from '@/features/friends/friendsModel'
 import { t } from '@/i18n/i18n'
@@ -35,9 +35,14 @@ export function discoverFriends(
   opts: { selfId?: string | null, locale: string, hidden?: (userId: string) => boolean },
 ): Person[] {
   const model = buildModel(data, opts)
+  // By household name only: the Friends page puts unreachable households
+  // first, which is about the household, not about following its people.
+  const collator = collatorFor(opts.locale)
+  const groups = [...model.groups].sort((a, b) =>
+    collator.compare(a.household.display_name, b.household.display_name))
   return [
     ...model.atHome.filter((p) => !p.isSelf),
-    ...model.groups.flatMap((g) => g.people),
+    ...groups.flatMap((g) => g.people),
   ]
 }
 

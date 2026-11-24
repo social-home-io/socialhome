@@ -49,6 +49,14 @@ describe('discoverFriends', () => {
     expect(people[2].home.display_name).toBe('Bakker family')
   })
 
+  it('orders paired households by name only — an unreachable one does not jump ahead', () => {
+    const data = payload()
+    data.households[0].reachable = false
+    const people = discoverFriends(data, { selfId: 'u-me', locale: 'en' })
+    expect(people.map((p) => p.home.display_name)).toEqual(
+      ['Alpha House', 'Alpha House', 'Bakker family', 'The Okafors', 'The Okafors'])
+  })
+
   it('leaves out people the viewer blocked', () => {
     const people = discoverFriends(payload(), {
       selfId: 'u-me', locale: 'en', hidden: (id) => id === 'u-femi',
