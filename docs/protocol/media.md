@@ -1026,8 +1026,8 @@ sequenceDiagram
     G-->>A: 201 stored (200 already_stored)
     A->>G: POST /gfs/envelope (sealed SPACE_POST_CREATED + media_refs)
     G->>E: relay envelope
-    A->>G: POST /gfs/publish (encrypted inner + media_refs)
-    G->>F: relay space_post_public
+    A->>G: POST /gfs/channels/publish-anon (encrypted item + media_refs, v_96)
+    G->>F: channel frame (follower's channel seat)
     E->>G: GET /gfs/media/{blob_id} (prefetch / on view)
     G-->>E: ciphertext
     Note over E: scope-bound address check, decrypt, write-once
