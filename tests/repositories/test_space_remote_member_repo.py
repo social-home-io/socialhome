@@ -607,3 +607,99 @@ async def test_instances_of_user_lists_every_household_tombstones_included(repo)
     await repo.remove("sp1", "i-b", "u1")
     assert await repo.list_instances_of_user("sp1", "u1") == {"i-a", "i-b"}
     assert await repo.list_instances_of_user("sp1", "u-none") == set()
+
+
+# ── Owed rotation (v_96 followers) ───────────────────────────────────────
+
+
+async def _key(repo, epoch: int, created_at: str) -> None:
+    """A ``space_keys`` row written the way the key repo writes it: a
+    tz-aware ISO ``created_at`` (``datetime.now(UTC).isoformat()``)."""
+    await repo._db.enqueue(
+        "INSERT INTO space_keys(space_id, epoch, content_key_hex, created_at)"
+        " VALUES('sp1', ?, ?, ?)",
+        (epoch, "aa" * 32, created_at),
+    )
+
+
+async def _left(repo, user_id: str, removed_at: str, *, role: str) -> None:
+    """A tombstoned seat whose ``removed_at`` has SQLite's naive
+    ``datetime('now')`` shape."""
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-a",
+        user_id=user_id,
+        user_pk=None,
+        display_name=None,
+        role=role,
+    )
+    await repo.remove("sp1", "i-a", user_id)
+    await repo._db.enqueue(
+        "UPDATE space_remote_members SET removed_at=? WHERE user_id=?",
+        (removed_at, user_id),
+    )
+
+
+async def test_a_follower_tombstone_newer_than_the_key_owes_a_rotation(repo):
+    """The two columns have different string shapes — naive
+    ``YYYY-MM-DD HH:MM:SS`` against tz-aware ISO with a ``T`` — so a raw
+    string comparison would read ``" "`` < ``"T"`` and call every leave
+    older than the key. Compared as times, the debt is seen."""
+    await _key(repo, 0, "2026-11-20T10:00:00.123456+00:00")
+    await _left(repo, "u-fan", "2026-11-20 10:30:00", role="subscriber")
+    assert await repo.owed_rotation_since("sp1") == "2026-11-20 10:30:00"
+    assert await repo.list_spaces_owing_rotation() == [("sp1", "2026-11-20 10:30:00")]
+
+
+async def test_a_follower_tombstone_older_than_the_key_owes_nothing(repo):
+    await _left(repo, "u-fan", "2026-11-20 10:30:00", role="subscriber")
+    await _key(repo, 0, "2026-11-20T09:00:00+00:00")
+    await _key(repo, 1, "2026-11-20T11:00:00.5+00:00")
+    assert await repo.owed_rotation_since("sp1") is None
+    assert await repo.list_spaces_owing_rotation() == []
+
+
+async def test_a_leave_in_the_same_second_as_the_rotation_stays_owed(repo):
+    """``removed_at`` keeps whole seconds only: a leave in the second a key
+    was minted may have come after it, so it stays owed (one extra
+    rotation at worst, never a missed one)."""
+    await _key(repo, 0, "2026-11-20T10:30:00.900000+00:00")
+    await _left(repo, "u-fan", "2026-11-20 10:30:00", role="subscriber")
+    assert await repo.owed_rotation_since("sp1") == "2026-11-20 10:30:00"
+
+
+async def test_owed_since_is_the_oldest_unpaid_leave(repo):
+    await _key(repo, 0, "2026-11-20T10:00:00+00:00")
+    await _left(repo, "u-a", "2026-11-21 08:00:00", role="subscriber")
+    await _left(repo, "u-b", "2026-11-20 12:00:00", role="subscriber")
+    await _left(repo, "u-c", "2026-11-19 12:00:00", role="subscriber")
+    assert await repo.owed_rotation_since("sp1") == "2026-11-20 12:00:00"
+
+
+async def test_only_follower_tombstones_owe(repo):
+    """A member's leave rotates at once; a live follower owes nothing."""
+    await _key(repo, 0, "2026-11-20T10:00:00+00:00")
+    await _left(repo, "u-mem", "2026-11-20 11:00:00", role="member")
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-b",
+        user_id="u-live",
+        user_pk=None,
+        display_name=None,
+        role="subscriber",
+    )
+    assert await repo.owed_rotation_since("sp1") is None
+
+
+async def test_a_space_without_a_content_key_owes_nothing(repo):
+    await _left(repo, "u-fan", "2026-11-20 10:30:00", role="subscriber")
+    assert await repo.owed_rotation_since("sp1") is None
+    assert await repo.list_spaces_owing_rotation() == []
+
+
+async def test_any_new_key_pays_the_debt(repo):
+    await _key(repo, 0, "2026-11-20T10:00:00+00:00")
+    await _left(repo, "u-fan", "2026-11-20 10:30:00", role="subscriber")
+    assert await repo.owed_rotation_since("sp1") is not None
+    await _key(repo, 1, "2026-11-20T10:30:01.000001+00:00")
+    assert await repo.owed_rotation_since("sp1") is None
