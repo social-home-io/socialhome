@@ -32,6 +32,7 @@ from ...domain.space import (
     SpaceRole,
     takes_follows,
 )
+from ...federation.gfs_join_request import PER_SENDER_LIMIT, PER_SENDER_WINDOW_S
 from ...infrastructure.event_bus import EventBus
 from ..local_community import (
     LocalAreaBudget,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...domain.space import Space
     from ...federation.federation_service import FederationService
+    from ...rate_limiter import RateLimiter
     from ...repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
@@ -65,6 +67,7 @@ class SpaceInviteInboundHandlers:
     __slots__ = (
         "_bus",
         "_follow_approver",
+        "_follow_limiter",
         "_local_area_budget",
         "_own_instance_id",
         "_space_repo",
@@ -88,12 +91,17 @@ class SpaceInviteInboundHandlers:
         #: Approves a follow (v_96) — :meth:`attach_follow_approver`; until
         #: then a follow is dropped (fail closed).
         self._follow_approver: FollowApprover | None = None
+        self._follow_limiter: RateLimiter | None = None
 
-    def attach_follow_approver(self, approver: FollowApprover) -> None:
+    def attach_follow_approver(
+        self, approver: FollowApprover, *, rate_limiter: RateLimiter
+    ) -> None:
         """Wire the host's automatic approval of a follow
-        (``SpaceService.approve_remote_follow``). The service is built after
-        these handlers, so it is attached once it exists."""
+        (``SpaceService.approve_remote_follow``) and the limiter that bounds
+        each sending household's follows. The service is built after these
+        handlers, so both are attached once it exists."""
         self._follow_approver = approver
+        self._follow_limiter = rate_limiter
 
     def attach_to(self, federation_service: FederationService) -> None:
         self._own_instance_id = federation_service.own_instance_id
@@ -281,6 +289,21 @@ class SpaceInviteInboundHandlers:
             )
             return
         assert space is not None
+        # Each household's follows are bounded before anything is approved
+        # (a seat, a token, a join-request row per follow) — the GFS
+        # bootstrap's per-sender numbers. Until the limiter is wired with
+        # the approver, nothing is approved anyway.
+        if self._follow_limiter is not None and not self._follow_limiter.is_allowed(
+            f"follow:sender:{event.from_instance}",
+            limit=PER_SENDER_LIMIT,
+            window_s=PER_SENDER_WINDOW_S,
+        ):
+            log.info(
+                "follow from %s for space %s dropped: per-household rate limit",
+                event.from_instance,
+                space_id,
+            )
+            return
         if await self._space_repo.is_banned(space_id, user_id):
             log.info(
                 "follow from %s refused: applicant banned from %s",

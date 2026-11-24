@@ -5578,7 +5578,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # v_96 — a remote follow (SPACE_JOIN_REQUEST for the subscriber
         # role) is approved by the host on its own.
         app[K.space_invite_handlers_key].attach_follow_approver(
-            real_space_service.approve_remote_follow
+            real_space_service.approve_remote_follow, rate_limiter=limiter
         )
         # v_44 — rotate the space authority key when an admin household is
         # revoked (owner side), and apply the owner's rotation bundle

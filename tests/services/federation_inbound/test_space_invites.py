@@ -15,7 +15,12 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.federation.gfs_join_request import (
+    PER_SENDER_LIMIT,
+    PER_SENDER_WINDOW_S,
+)
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.rate_limiter import RateLimiter
 from socialhome.services.federation_inbound import SpaceInviteInboundHandlers
 from socialhome.services.local_community import MAX_LOCAL_AREA_CHECKS_PER_PERSON
 from tests.local_area_budget import memory_budget
@@ -835,13 +840,13 @@ def _follow_space(**kw) -> Space:
     return replace(_space(**kw), features=SpaceFeatures(allow_subscribers=True))
 
 
-def _follow_handlers(bus, repo, *, approver=None):
+def _follow_handlers(bus, repo, *, approver=None, limiter=None):
     h = SpaceInviteInboundHandlers(
         bus=bus, space_repo=repo, local_area_budget=memory_budget()
     )
     h.attach_to(_FakeFederationService())
     if approver is not None:
-        h.attach_follow_approver(approver)
+        h.attach_follow_approver(approver, rate_limiter=limiter or RateLimiter())
     return h
 
 
@@ -954,6 +959,24 @@ async def test_a_follow_without_an_approver_is_dropped(bus, repo):
     h = _follow_handlers(bus, repo)
     await _follow(h)
     assert repo.join_requests == []
+
+
+async def test_follows_from_one_household_are_rate_limited(bus, repo):
+    """P5 (v_96): a paired or mesh household's follows are bounded per
+    sending household — the GFS bootstrap's numbers (10 per hour per
+    sender) — before the approval, not only by the 600/min inbound budget.
+    Another household keeps its own budget."""
+    repo.spaces["sp-1"] = _follow_space()
+    approver = _Approver()
+    limiter = RateLimiter()
+    h = _follow_handlers(bus, repo, approver=approver, limiter=limiter)
+    for i in range(PER_SENDER_LIMIT + 3):
+        await _follow(h, user_id=f"u-{i}", request_id=f"req-{i}")
+    assert len(approver.calls) == PER_SENDER_LIMIT
+    await _follow(h, from_instance="peer-b", user_id="u-b", request_id="req-b")
+    assert len(approver.calls) == PER_SENDER_LIMIT + 1
+    assert approver.calls[-1]["instance_id"] == "peer-b"
+    assert PER_SENDER_WINDOW_S == 3600
 
 
 async def test_an_unknown_requested_role_is_dropped(bus, repo):
