@@ -210,15 +210,28 @@ function _unescape(html: string): string {
 function _linkHtml(link: TextLink): string {
   const label = linkLabel(link.text)
   const title = label === link.text ? '' : ` title="${_escape(link.text)}"`
-  return _externalAnchor(_escape(link.href), _escape(label), title)
+  const [head, tail] = splitLabelTail(label)
+  return _externalAnchor(_escape(link.href), _escape(head), title, _escape(tail))
 }
 
-/** The ``<a>`` every external link in a body gets (*href* / *labelHtml* /
- *  *titleAttr* already escaped). Reads the locale at render time — a
- *  memo of the output must key on the locale too. */
-function _externalAnchor(href: string, labelHtml: string, titleAttr = ''): string {
+/** *label* as ``[head, lastCharacter]``: the last character and the ``↗``
+ *  share one ``white-space: nowrap`` box (``sh-ext-link__tail``), so the
+ *  arrow never wraps onto a line of its own. */
+export function splitLabelTail(label: string): [string, string] {
+  const chars = [...label]
+  const tail = chars.pop() ?? ''
+  return [chars.join(''), tail]
+}
+
+/** The ``<a>`` every external link in a body gets (*href* / *headHtml* /
+ *  *titleAttr* / *tailHtml* already escaped). Reads the locale at render
+ *  time — a memo of the output must key on the locale too. */
+function _externalAnchor(
+  href: string, headHtml: string, titleAttr = '', tailHtml = '',
+): string {
   return `<a class="sh-ext-link" href="${href}"${titleAttr} target="_blank" rel="${EXTERNAL_LINK_REL}">`
-    + `${labelHtml}<span class="sh-ext-link__icon" aria-hidden="true">${EXTERNAL_LINK_ICON}</span>`
+    + `${headHtml}<span class="sh-ext-link__tail">${tailHtml}`
+    + `<span class="sh-ext-link__icon" aria-hidden="true">${EXTERNAL_LINK_ICON}</span></span>`
     + `<span class="sr-only">${_escape(t('link.new_tab'))}</span></a>`
 }
 
@@ -319,11 +332,14 @@ export function renderMarkdown(input: string, opts: RenderOptions = {}): string 
     /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))+)\)/g,
     (_m, text, href) => {
       const safe = _safeHref(href)
-      if (safe === null) return _escape(text)
+      // ``text`` is already escaped — escaping it again showed "&#39;".
+      if (safe === null) return text
+      if (/^https?:/i.test(safe) && _hasUserinfo(_unescape(safe))) return text
       if (/^https?:/i.test(safe)) {
         // A label with nothing to see (spaces, zero-width characters)
         // would hide where the link goes: show the URL instead.
-        const blank = _unescape(text).replace(/[\s\u200b-\u200d\u2060\ufeff]/g, '') === ''
+        const blank = _unescape(text)
+          .replace(/\u034f|[\s\u00ad\u115f\u1160\u180e\u200b-\u200f\u2060-\u2064\u2800\u3164\ufeff\uffa0]/g, '') === ''
         return blank
           ? _linkHtml({ href: _unescape(safe), text: _unescape(safe) })
           : _externalAnchor(safe, text)

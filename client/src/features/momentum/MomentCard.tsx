@@ -177,12 +177,15 @@ export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
   // The page counts your own moment's reactions as chips, like anyone's.
   const listMode = reactionMode(m, me)
   const mode: ReactionMode = page && listMode === 'own' ? 'counted' : listMode
-  const longContent = m.content.length > CONTENT_TRUNCATE_AT
+  // Never cut inside a link; a moment that is one long link has nothing
+  // to hide, so it shows in full with no "Show more".
+  const cutAt = m.content.length > CONTENT_TRUNCATE_AT
+    ? cutOutsideLinks(m.content, CONTENT_TRUNCATE_AT)
+    : m.content.length
+  const longContent = cutAt < m.content.length
   const cut = longContent && !expanded.value
   // The "…" sits outside the rendered text, so it never joins a link.
-  const text = cut
-    ? m.content.slice(0, cutOutsideLinks(m.content, CONTENT_TRUNCATE_AT))
-    : m.content
+  const text = cut ? m.content.slice(0, cutAt) : m.content
   const openTag = (tag: string, ev: MouseEvent) => {
     ev.preventDefault()
     loc.route(`/momentum?tag=${encodeURIComponent(tag)}`)

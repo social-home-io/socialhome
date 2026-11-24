@@ -505,3 +505,25 @@ describe('security review round 3', () => {
     expect(a.getAttribute('href')).toBe('https://evil.example/')
   })
 })
+
+describe('final review round 2', () => {
+  const anchors = (html: string) =>
+    [...new DOMParser().parseFromString(html, 'text/html').querySelectorAll('a')]
+
+  test('a refused markdown link shows its label once escaped', () => {
+    const html = renderMarkdown("[don't](javascript:alert(1))")
+    expect(anchors(html)).toHaveLength(0)
+    expect(new DOMParser().parseFromString(html, 'text/html').body.textContent).toBe("don't")
+  })
+
+  test('a markdown link with user-info stays text', () => {
+    expect(anchors(renderMarkdown('[x](https://good.example@evil.example/)'))).toHaveLength(0)
+  })
+
+  test.each(['\u00ad', '\u3164', '\u2800', '\u034f'])(
+    'an invisible label (%s) shows the URL', (ch) => {
+      const [a] = anchors(renderMarkdown(`[${ch}](https://evil.example/)`))
+      expect(visibleText(a)).toBe('https://evil.example/')
+    },
+  )
+})

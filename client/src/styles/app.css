@@ -16233,17 +16233,29 @@ a.sh-link-preview-link:focus-visible {
 }
 /* Links in user text: a small ↗ after an external link (decorative —
    screen readers read the hidden "(opens in a new tab)" instead). */
+.sh-ext-link__tail {
+  white-space: nowrap;
+}
 .sh-ext-link__icon {
   display: inline-block;
   margin-inline-start: 0.15em;
   font-size: 0.8em;
   text-decoration: none;
 }
-a.sh-ext-link {
+/* Zero specificity (``:where``): a container's own link colour wins —
+   your own DM bubble (on-primary ink), dark media overlays. */
+:where(a.sh-ext-link) {
   color: var(--sh-primary-text);
   text-decoration: underline;
   text-underline-offset: 2px;
   overflow-wrap: anywhere;
+}
+/* Captions over a picture are white on near-black: links keep that ink,
+   and stay tappable inside the click-through caption layer. */
+.sh-gviewer-caption a,
+.sh-lightbox-meta-line a {
+  color: inherit;
+  pointer-events: auto;
 }
 .sh-post-edit-hint,
 .sh-composer-link-hint {

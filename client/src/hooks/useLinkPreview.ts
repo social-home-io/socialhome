@@ -13,7 +13,7 @@
  * * A 403 (the household admin turned previews off) silences the hook for
  *   the rest of the session; any other failure just means "no card".
  */
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import type { LinkPreview } from '@/types'
 import { cardFitsText, firstUrl } from '@/utils/linkPreview'
@@ -46,7 +46,7 @@ export interface LinkPreviewState {
 
 export function useLinkPreview(text: string): LinkPreviewState {
   // A link the card would get wrong (``cardFitsText``) gets no card.
-  const fits = cardFitsText(text)
+  const fits = useMemo(() => cardFitsText(text), [text])
   const url = disabledForSession || !fits ? null : firstUrl(text)
   const [preview, setPreview] = useState<LinkPreview | null>(null)
   const [previewFor, setPreviewFor] = useState<string | null>(null)

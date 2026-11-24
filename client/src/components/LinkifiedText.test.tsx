@@ -33,7 +33,11 @@ describe('LinkifiedText', () => {
     const a = container.querySelector('a')!
     expect(a.getAttribute('href')).toBe(url)
     expect(a.getAttribute('title')).toBe(url)
-    expect(a.firstChild!.textContent).toBe('www.home-assistant.io/integrations/mqtt/…')
+    const shown = a.cloneNode(true) as Element
+    shown.querySelectorAll('.sh-ext-link__icon, .sr-only').forEach(n => n.remove())
+    expect(shown.textContent).toBe('www.home-assistant.io/integrations/mqtt/…')
+    // The last character and the arrow never part.
+    expect(a.querySelector('.sh-ext-link__tail')!.textContent).toBe('…\u2060↗\ufe0e')
     expect(a.querySelector('.sh-ext-link__icon')!.getAttribute('aria-hidden')).toBe('true')
     expect(a.querySelector('.sr-only')!.textContent).toBe('(opens in a new tab)')
   })
