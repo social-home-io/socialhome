@@ -9,6 +9,7 @@ self-leave without the immediate rotation.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -1272,3 +1273,105 @@ async def test_followers_off_on_a_seed_holding_delegated_admin_ends_seats_too(
         )
     rotate.assert_awaited_once_with(space.id)
     assert await stack.remote.get(space.id, PEER, "u-fan") is None
+
+
+# ── P5: a delegated admin's rekey reaches GFS-reached followers ───────────
+
+
+async def _seat_household(stack, space_id, instance_id, role, user_id=None):
+    await stack.remote.add(
+        space_id=space_id,
+        instance_id=instance_id,
+        user_id=user_id or f"u-{instance_id}",
+        user_pk=None,
+        display_name=instance_id,
+        role=role.value,
+    )
+    await stack.spaces.add_space_instance(space_id, instance_id)
+
+
+_RAW_KEY = b"\x42" * 32
+
+
+def _admin_meta(*, epoch=4, raw=_RAW_KEY, rotated_by="admin-house") -> dict:
+    return {
+        "epoch": epoch,
+        "key_suite": "aesgcm-256",
+        "key_base64": base64.b64encode(raw).decode("ascii"),
+        "rotated_by": rotated_by,
+        "authority_sig": "c2ln",
+        "authority_sig_suite": "ed25519",
+    }
+
+
+async def _relay_setup(stack):
+    space = await _hosted(stack)
+    # gfs-fan: a follower seated through the GFS (a space-session row only);
+    # paired-fan: a follower the admin reaches itself; gfs-writer: a
+    # household seated through the GFS that also holds a member's seat (the
+    # ordinary path reaches it: a writer is never skipped).
+    await _seat_household(stack, space.id, "gfs-fan", SpaceRole.SUBSCRIBER)
+    await _seat_household(stack, space.id, "paired-fan", SpaceRole.SUBSCRIBER)
+    await _seat_household(stack, space.id, "gfs-writer", SpaceRole.MEMBER)
+    await _seat_household(
+        stack, space.id, "gfs-writer", SpaceRole.SUBSCRIBER, user_id="u-w2"
+    )
+    sessions = {"gfs-fan", "gfs-writer"}
+    stack.fed.is_space_session_peer = AsyncMock(side_effect=lambda i: i in sessions)
+    stack.svc.attach_space_crypto_service(
+        SimpleNamespace(export_current_key=AsyncMock(return_value=(4, _RAW_KEY)))
+    )
+    stack.fed.broadcast_to_space_members.reset_mock()
+    return space
+
+
+@pytest.mark.security
+async def test_the_owner_relays_a_delegated_admins_rekey_to_gfs_followers(stack):
+    """A seed-holding delegated admin's rotation cannot reach a follower
+    reached only through the GFS (it holds no row or card for it). The
+    OWNER, applying that rekey, re-sends the same signed key meta over the
+    ordinary member rekey path to exactly the follower-only households it
+    holds a space-session row for — once per epoch."""
+    space = await _relay_setup(stack)
+    meta = _admin_meta()
+    assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 1
+    call = stack.fed.broadcast_to_space_members.await_args
+    assert call.args[0] == space.id
+    assert call.args[1] is FederationEventType.SPACE_KEY_EXCHANGE_REKEY
+    assert call.args[2] == {"space_id": space.id, "space_content_key": meta}
+    assert set(call.kwargs["only_instances"]) == {"gfs-fan"}
+    # The same epoch again (a repeat, another relay): never twice.
+    assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 0
+    assert stack.fed.broadcast_to_space_members.await_count == 1
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "meta",
+    [
+        _admin_meta(raw=b"\x07" * 32),  # lost the tiebreak: not the key we hold
+        _admin_meta(epoch=3),  # not our current epoch
+        _admin_meta(rotated_by=""),  # no minter
+    ],
+)
+async def test_the_owner_relays_only_the_key_it_holds(stack, meta):
+    space = await _relay_setup(stack)
+    assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 0
+    stack.fed.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_the_owner_does_not_relay_its_own_rotation(stack):
+    space = await _relay_setup(stack)
+    meta = _admin_meta(rotated_by=stack.iid)
+    assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 0
+    stack.fed.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_only_the_owner_relays_an_admins_rekey(stack):
+    space = await _relay_setup(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id=? WHERE id=?", (HOST, space.id)
+    )
+    meta = _admin_meta()
+    assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 0
+    stack.fed.broadcast_to_space_members.assert_not_awaited()

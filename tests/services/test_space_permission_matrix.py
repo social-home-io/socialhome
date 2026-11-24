@@ -164,6 +164,8 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_spaces_owing_rotation",
         "pay_owed_rotation",
         "rotation_owed",
+        # Federation inbound (owner side): an authority-verified admin rekey.
+        "relay_admin_rekey_to_followers",
         "is_subscribed",
         # Self-service joins / leaves — gate is on the *invite* / *request*,
         # not the join action itself.
