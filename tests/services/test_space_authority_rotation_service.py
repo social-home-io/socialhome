@@ -392,11 +392,11 @@ async def test_an_applied_bundle_announces_the_stored_space(env):
     assert seen == [None]
 
 
-async def test_public_space_republishes_then_reseals(env):
-    """A public / global space: every GFS that lists it re-pins (republish)
-    BEFORE the K2-signed subscriber re-seal, which a GFS only accepts once
-    it re-pinned. A private space gets the re-pin pass too — a GFS it was
-    WITHDRAWN from may still pin the old key (D2) — but no re-seal."""
+async def test_every_tier_republishes_and_nothing_is_resealed(env):
+    """Every GFS that lists the space re-pins (republish). A private space
+    gets the re-pin pass too — a GFS it was WITHDRAWN from may still pin the
+    old key (D2). Since v_96 there is no GFS subscriber re-seal: followers
+    are member households and the bundles reach them."""
     calls: list[str] = []
 
     class _Gfs:
@@ -404,18 +404,14 @@ async def test_public_space_republishes_then_reseals(env):
             calls.append(f"republish:{space_id}")
             return 0
 
-    class _Keys:
-        async def reconcile_space_everywhere(self, space_id):
-            calls.append(f"reseal:{space_id}")
-
     env.svc.attach_gfs(_Gfs())
-    env.svc.attach_subscriber_keys(_Keys())
+    assert not hasattr(env.svc, "attach_subscriber_keys")
     await env.svc.rotate(SPACE)  # private
     assert calls == [f"republish:{SPACE}"]
     calls.clear()
     await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
     await env.svc.rotate(SPACE)
-    assert calls == [f"republish:{SPACE}", f"reseal:{SPACE}"]
+    assert calls == [f"republish:{SPACE}"]
 
 
 async def test_rotate_hosted_after_restore_only_touches_spaces_with_history(env):
@@ -1189,19 +1185,15 @@ async def test_member_ignores_a_bundle_cert_from_a_non_owner(env):
     assert certs.accepted == []
 
 
-async def test_a_re_pin_re_announces_the_epoch_before_the_reseal(env):
+async def test_a_re_pin_re_announces_the_epoch(env):
     """v_49: the re-pin clears the GFS epoch state — the owner re-announces
-    the current epoch right after the republish, before the re-seal."""
+    the current epoch right after the republish."""
     calls: list[str] = []
 
     class _Gfs:
         async def repin_owed(self, space_id):
             calls.append("republish")
             return 0
-
-    class _Keys:
-        async def reconcile_space_everywhere(self, space_id):
-            calls.append("reseal")
 
     class _Member:
         async def announce_epoch(self, space_id):
@@ -1212,11 +1204,10 @@ async def test_a_re_pin_re_announces_the_epoch_before_the_reseal(env):
             return None
 
     env.svc.attach_gfs(_Gfs())
-    env.svc.attach_subscriber_keys(_Keys())
     env.svc.attach_member_gfs(_Member())
     await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
     await env.svc.rotate(SPACE)
-    assert calls == ["republish", "notice", "reseal"]
+    assert calls == ["republish", "notice"]
 
 
 # ── v_51: a private space's fresh channel rides the bundle ───────────────
@@ -1350,8 +1341,7 @@ async def test_rotation_drops_every_queued_seed_share_before_sharing_again(env):
 async def test_rotation_repins_every_gfs_before_the_bundles_go_out(env):
     """The revoked holder can use a GFS that still pins the old key until
     it re-pins: the re-publish runs as soon as the new key AND its content
-    epoch exist, before the per-member bundles (N sends), and the
-    subscriber re-seal still follows it."""
+    epoch exist, before the per-member bundles (N sends)."""
     calls: list[str] = []
     epoch_before = await env.crypto.get_current_epoch(SPACE)
 
@@ -1365,19 +1355,14 @@ async def test_rotation_repins_every_gfs_before_the_bundles_go_out(env):
             calls.append("republish")
             return 0
 
-    class _Keys:
-        async def reconcile_space_everywhere(self, space_id):
-            assert any(
-                e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED
-                for e in env.fed.log
-            )
-            calls.append("reseal")
-
     env.svc.attach_gfs(_Gfs())
-    env.svc.attach_subscriber_keys(_Keys())
     await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
     await env.svc.rotate(SPACE)
-    assert calls == ["republish", "reseal"]
+    assert calls == ["republish"]
+    # …and the bundles went out after it.
+    assert any(
+        e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED for e in env.fed.log
+    )
 
 
 async def test_rotation_reannounces_the_epoch_with_the_repin_before_the_bundles(env):

@@ -124,6 +124,21 @@ async def test_parse_json_rejects_unknown_event_type():
         await step(ctx)
 
 
+async def test_parse_json_rejects_the_retired_subscriber_key_handoff():
+    """v_96 retired ``space_subscriber_key_handoff`` (a follower is a member
+    and gets the key by federation). An envelope still naming it — an old
+    queued row, a hostile peer — is refused at the parse step like any
+    unknown type: a clean ``ValueError``, never a crash further in."""
+    step = make_parse_json(loads=_loads)
+    ctx = InboundContext(
+        raw_body=orjson.dumps(
+            _minimal_envelope(event_type="space_subscriber_key_handoff")
+        ),
+    )
+    with pytest.raises(ValueError, match="Unknown event_type"):
+        await step(ctx)
+
+
 async def test_parse_json_accepts_space_route_stale():
     """The route-stale nack is a first-class ``FederationEventType`` —
     the §24.11 parse step must let it through to instance lookup /

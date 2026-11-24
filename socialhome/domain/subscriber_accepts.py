@@ -1,16 +1,16 @@
-"""What a GFS follower can open — the ``accepts`` labels of ``/gfs/subscribe``.
+"""What a household can open — the ``accepts`` labels it lists to a GFS.
 
-A household subscribing to a public / global space at a GFS lists the
-optional relay deliveries it understands (``"accepts": [...]``, v_61). The
-field rides NEXT to the signed ``{action, instance_id, space_id, ts}`` bytes,
-not inside them, so an older GFS still verifies the subscribe; it is a hint,
-not an authorization. The GFS checks the shape, stores nothing, and forwards
-the labels in the ``new_subscriber`` frame it sends the space's host for a
-NEW seat. The host sends a delivery only to a follower that lists it — so an
-older follower, which would drop the unknown relay type, is never sent the
-up-to-~1 MB author-profiles bundle. A GFS could add or strip labels; the
-host's per-space and per-follower backstops bound what that costs. A
-malformed label is dropped, never an error: it is a hint.
+The labels are an unsigned hint next to signed bytes (the WS hello, and the
+legacy ``/gfs/subscribe`` the GFS still serves until it is removed): the GFS
+checks the shape, stores per-seat bits, and gates optional deliveries on
+them so an older household is never sent what it would drop. A GFS could add
+or strip labels; it is a hint, not an authorization. A malformed label is
+dropped, never an error.
+
+Since v_96 the household takes no space-keyed seat (followers are members
+on the opaque channel), so :data:`OUR_ACCEPTS` rides only the hello. The
+author-profiles bundle label (v_61) left it with the bundle; the GFS-side
+labels are trimmed when the GFS's legacy routes go.
 
 Pure, no I/O.
 """
@@ -20,9 +20,6 @@ from __future__ import annotations
 import re
 
 from .space_item import PAYLOAD_SUITE_ZLIB, PAYLOAD_SUITE_ZLIB_DICT1
-
-#: The follower opens the sealed ``space_author_profiles_bundle`` (v_61).
-ACCEPTS_AUTHOR_PROFILES_BUNDLE: str = "author_profiles_bundle"
 
 #: The follower asks for a space's content key when it misses one
 #: (``POST /gfs/spaces/{id}/key_request``, #5b) — so the GFS need not have
@@ -66,10 +63,9 @@ ACCEPTS_SPACE_MEDIA_SERVE: str = "space_media_serve"
 #: the unknown binary message after the GFS dequeued it).
 ACCEPTS_ENVELOPE_MEDIA: str = "envelope_media"
 
-#: What this household lists on every subscribe — follower and member seats
-#: alike, so the label never tells the GFS which seats are writers'.
+#: The seat labels this household understands (listed in its hello). They
+#: once rode every subscribe, follower and member seats alike.
 OUR_ACCEPTS: tuple[str, ...] = (
-    ACCEPTS_AUTHOR_PROFILES_BUNDLE,
     ACCEPTS_SPACE_KEY_PULL,
     ACCEPTS_SPACE_ITEM,
     ACCEPTS_PAYLOAD_ZLIB1,

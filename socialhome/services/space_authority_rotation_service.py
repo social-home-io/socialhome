@@ -29,8 +29,8 @@ on → off. Under a per-space lock it
 6. re-publishes a public/global space so each GFS re-pins from the cert
    (right after the content key, BEFORE the per-member bundles — a GFS that
    still pins the old key takes the revoked holder's relays), drops every
-   seed share still queued for the space, then — after the bundles —
-   re-seals the content key to GFS subscribers.
+   seed share still queued for the space. Followers are member households
+   (v_96): the bundles reach them like any member.
 
 **Member household** (:meth:`_on_rotated`). Requires the bundle to come from
 the space's owner household, applies the cert (shared rules in
@@ -188,7 +188,6 @@ class SpaceAuthorityRotationService:
         "_space_crypto",
         "_space_service",
         "_spaces",
-        "_subscriber_keys",
         "_tasks",
         "_warned_pending",
         "_writer_certs",
@@ -211,7 +210,6 @@ class SpaceAuthorityRotationService:
         self._space_crypto: SpaceContentEncryption | None = None
         self._space_service: SpaceService | None = None
         self._gfs = None
-        self._subscriber_keys = None
         self._member_gfs = None
         #: v_49 — re-issues each household's writer cert under the NEW
         #: authority key (owner side) and stores ours (member side).
@@ -275,14 +273,9 @@ class SpaceAuthorityRotationService:
         cert signed with the new key; a member stores the one it receives."""
         self._writer_certs = writer_certs
 
-    def attach_subscriber_keys(self, subscriber_key_outbound) -> None:
-        """Optional: re-seal the rotated content key to GFS subscribers."""
-        self._subscriber_keys = subscriber_key_outbound
-
     def attach_member_gfs(self, member_gfs) -> None:
         """Optional (v_49): re-announce the current content epoch to each GFS
-        right after the re-pin (which clears the GFS epoch state), before the
-        subscriber re-seal."""
+        right after the re-pin (which clears the GFS epoch state)."""
         self._member_gfs = member_gfs
 
     def attach_restore_gate(self, pending: Callable[[], Awaitable[bool]]) -> None:
@@ -603,7 +596,6 @@ class SpaceAuthorityRotationService:
                 prior_key_epoch=prior_epoch,
                 forgotten_key_epoch=forgotten_key_epoch,
             )
-            await self._refresh_gfs(space)
             return epoch
 
     async def _drop_queued_seed_shares(
@@ -902,21 +894,6 @@ class SpaceAuthorityRotationService:
             except Exception:
                 log.exception(
                     "authority rotation: GFS epoch notice failed for %s", space.id
-                )
-
-    async def _refresh_gfs(self, space: Space) -> None:
-        """After the bundles: re-seal the content key to subscribers of a
-        public/global space — the handoff is signed with the new key, which
-        a GFS only accepts once it re-pinned (:meth:`_repin_gfs`, run
-        before the bundles)."""
-        if space.space_type not in PUBLIC_SPACE_TIERS:
-            return
-        if self._subscriber_keys is not None:
-            try:
-                await self._subscriber_keys.reconcile_space_everywhere(space.id)
-            except Exception:
-                log.exception(
-                    "authority rotation: subscriber re-seal failed for %s", space.id
                 )
 
     # ── Owner: the authority epoch echo (v_46) ──────────────────────────

@@ -72,7 +72,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -100,7 +100,6 @@ from ..domain.space import SpaceRole
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
-    ITEM_TYPE_AUTHOR_PROFILE,
     ITEM_TYPE_POST,
     ITEM_TYPE_POST_EDIT,
     PAYLOAD_SUITE_FIELD,
@@ -818,11 +817,9 @@ class SpacePublicInbound:
         epoch: int,
         item_type: str,
         inner: dict[str, Any],
-        fresh_epoch: bool = True,
     ) -> tuple[WriterCert, str, str, str] | None:
         """Every check a member-published item gets before it is applied
-        (see :meth:`_on_space_item`), shared with the v_61 new-follower
-        bundle (:meth:`apply_bundled_profiles`): ``(inner_cert, item_id,
+        (see :meth:`_on_space_item`): ``(inner_cert, item_id,
         author_user_id, origin_instance_id)``, or ``None`` (logged)."""
         if self._writer_certs is None:
             return None
@@ -885,28 +882,13 @@ class SpacePublicInbound:
             author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
         except ValueError:
             return None
-        # A bundled item (``fresh_epoch=False``) is checked at the epoch it
-        # was published at, with no freshness: the bundle is authority-signed
-        # and sealed to us, and its sender, a seed holder, could mint a
-        # current cert anyway. A key rotation then never forces a republish.
-        cert_ok = (
-            await self._writer_certs.check_item(
-                space,
-                raw_cert,
-                epoch=epoch,
-                author_pk=author_pk,
-                required_scope=required_scope(item_type),
-                item_type=item_type,
-            )
-            if fresh_epoch
-            else self._writer_certs.check_item_cert(
-                space,
-                raw_cert,
-                epoch=epoch,
-                author_pk=author_pk,
-                required_scope=required_scope(item_type),
-                item_type=item_type,
-            )
+        cert_ok = await self._writer_certs.check_item(
+            space,
+            raw_cert,
+            epoch=epoch,
+            author_pk=author_pk,
+            required_scope=required_scope(item_type),
+            item_type=item_type,
         )
         if not cert_ok:
             log.warning(
@@ -935,79 +917,6 @@ class SpacePublicInbound:
             )
             return None
         return inner_cert, item_id, author_user_id, origin_instance_id
-
-    async def apply_bundled_profiles(
-        self,
-        space_id: str,
-        *,
-        items: list[tuple[int, dict]],
-        pictures: Sequence[tuple[str, str, str]] = (),
-    ) -> int:
-        """Apply one opened part of a v_61 new-follower bundle. The part was
-        opened and authority-verified by
-        :class:`~socialhome.services.space_subscriber_key_inbound.SpaceSubscriberKeyInbound`.
-
-        ``items`` are ``(epoch, author-signed author_profile item)``. Each
-        gets every check a relayed item gets: author signature, author-bound
-        type, origin, and a writer cert with a v2 user binding at ITS OWN
-        epoch, though not a fresh one (see :meth:`_verified_item`). Anything
-        but a profile is refused. ``pictures`` are
-        ``(author, signed hash, base64 WebP)``, kept only when the bytes hash
-        to the held profile's signed hash. Returns how many profiles and
-        pictures were stored. Never raises."""
-        space = await self._spaces.get(space_id)
-        if space is None or not space.identity_public_key or self._writer_certs is None:
-            return 0
-        stored = 0
-        for epoch, raw in items:
-            if not isinstance(raw, dict):
-                continue
-            if raw.get("item_type") != ITEM_TYPE_AUTHOR_PROFILE:
-                log.warning(
-                    "space_public.inbound: a follower bundle for space %s carries "
-                    "a %r item — dropped",
-                    space_id,
-                    raw.get("item_type"),
-                )
-                continue
-            try:
-                verified = await self._verified_item(
-                    space,
-                    epoch=epoch,
-                    item_type=ITEM_TYPE_AUTHOR_PROFILE,
-                    inner=raw,
-                    fresh_epoch=False,
-                )
-                if verified is None:
-                    continue
-                _cert, _id, _author, origin = verified
-                if await self._items.apply(
-                    space=space,
-                    item_type=ITEM_TYPE_AUTHOR_PROFILE,
-                    inner=raw,
-                    origin_instance_id=origin,
-                    member_household=await self._holds_writer_seat(space_id),
-                    authorship=self._authorship,
-                    epoch=epoch,
-                ):
-                    stored += 1
-            except Exception:
-                log.exception(
-                    "space_public.inbound: a bundled profile for space %s failed",
-                    space_id,
-                )
-        for author, picture_hash, picture in pictures:
-            try:
-                if await self._items.attach_bundled_picture(
-                    space_id, author, picture_hash, picture
-                ):
-                    stored += 1
-            except Exception:
-                log.exception(
-                    "space_public.inbound: a bundled picture for space %s failed",
-                    space_id,
-                )
-        return stored
 
     async def _localize_media(
         self, space_id: str, post: Post, origin_instance_id: str, inner: dict

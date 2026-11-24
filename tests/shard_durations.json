@@ -749,8 +749,6 @@
  "tests/services/test_space_service_cp_hook.py": 0.61,
  "tests/services/test_space_service_federation_coverage.py": 3.71,
  "tests/services/test_space_service_private_gfs.py": 1.05,
- "tests/services/test_space_subscriber_key_inbound.py": 0.46,
- "tests/services/test_space_subscriber_key_outbound.py": 0.87,
  "tests/services/test_space_writer_cert_service.py": 0.17,
  "tests/services/test_space_zone_outbound.py": 0.01,
  "tests/services/test_space_zone_service.py": 1.43,

@@ -43,7 +43,6 @@ from .auth import (
     SignedMediaStrategy,
     require_auth,
 )
-from .authority_sig import AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE
 from .config import Config
 from .crypto import REPLAY_CACHE_WINDOW
 from .dashboard.advertiser import DisplayAdvertiser
@@ -458,7 +457,6 @@ from .services.space_chat_service import SpaceChatService
 from .services.space_config_outbound import SpaceConfigOutbound
 from .services.space_crypto_service import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     SpaceContentEncryption,
 )
 from .services.space_gfs_needed_service import SpaceGfsNeededService
@@ -488,8 +486,6 @@ from .services.space_public_outbound import SpacePublicOutbound
 from .services.space_relay_coverage import SpaceRelayCoverage
 from .services.space_rsvp_mirror_bridge import SpaceRsvpMirrorBridge
 from .services.space_service import own_inviter_proof
-from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
-from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
 from .services.space_summary_service import SpaceSummaryService
 from .services.space_sync_status import SpaceSyncStatusService
 from .services.space_writer_cert_service import SpaceWriterCertService
@@ -1339,7 +1335,6 @@ def _wire_space_authority_rotation(
     space_crypto,
     space_service,
     gfs_connection_service,
-    subscriber_key_outbound,
     writer_certs: SpaceWriterCertService | None = None,
 ) -> SpaceAuthorityRotationService:
     """Build + wire :class:`SpaceAuthorityRotationService` (v_44)."""
@@ -1354,8 +1349,6 @@ def _wire_space_authority_rotation(
     svc.attach_space_service(space_service)
     space_service.attach_authority_rotation(svc)
     svc.attach_gfs(gfs_connection_service)
-    if subscriber_key_outbound is not None:
-        svc.attach_subscriber_keys(subscriber_key_outbound)
     if writer_certs is not None:
         svc.attach_writer_certs(writer_certs)
     svc.wire()
@@ -1433,7 +1426,6 @@ async def dispatch_gfs_relay_frame(
     frame: dict,
     *,
     space_public_inbound: SpacePublicInbound | None,
-    space_subscriber_key_inbound: SpaceSubscriberKeyInbound | None,
     gfs_channels: GfsChannelService | None = None,
     inbound_limiter: RateLimiter | None = None,
 ) -> None:
@@ -1480,17 +1472,6 @@ async def dispatch_gfs_relay_frame(
         and space_public_inbound is not None
     ):
         await space_public_inbound.handle(frame)
-    # Phase 5b-b subscriber content-key handoff: the subscriber unseals +
-    # imports the relayed content key so it can decrypt the relay.
-    elif (
-        frame.get("event_type")
-        in (
-            AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
-            AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
-        )
-        and space_subscriber_key_inbound is not None
-    ):
-        await space_subscriber_key_inbound.handle(frame)
 
 
 def _default_ice_servers(
@@ -4450,11 +4431,6 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_channels: GfsChannelService | None = None
     space_public_inbound: SpacePublicInbound | None = None
     space_authority_rotation: SpaceAuthorityRotationService | None = None
-    # Phase 5b-b: deliver the per-space content key to a GFS subscriber so it
-    # can decrypt the Phase-5a public relay. Same late-build reason as above
-    # (both depend on ``space_crypto``).
-    space_subscriber_key_outbound: SpaceSubscriberKeyOutbound | None = None
-    space_subscriber_key_inbound: SpaceSubscriberKeyInbound | None = None
     profile_sync_service = ProfileSyncService(
         bus=bus,
         registration_repo=moment_public_registration_repo,
@@ -5154,7 +5130,6 @@ def create_app(config: Config | None = None) -> web.Application:
         # Built here (not in create_app) because both depend on
         # ``space_crypto``, which only exists once the seed/KEK are wired.
         nonlocal space_public_outbound, space_public_inbound
-        nonlocal space_subscriber_key_outbound, space_subscriber_key_inbound
         nonlocal gfs_member_publish, gfs_channels
         # v_49 member publish (household side, anonymous since v_90): our
         # own items to each capable GFS, epoch notices on rotation, member
@@ -5261,43 +5236,6 @@ def create_app(config: Config | None = None) -> web.Application:
         space_public_inbound.attach_key_wait(
             PendingDecryptsCache(bus=bus, max_entries=RELAY_KEY_WAIT_MAX_FRAMES),
         )
-        # Phase 5b-b — subscriber content-key delivery. Outbound: a seed-holder
-        # seals + relays the content key on a GFS ``new_subscriber`` notify.
-        # Inbound: the subscriber unseals + imports the relayed handoff.
-        space_subscriber_key_outbound = SpaceSubscriberKeyOutbound(
-            space_repo=space_repo,
-            space_crypto=space_crypto,
-            gfs_service=gfs_connection_service,
-        )
-        space_subscriber_key_outbound.attach_identity(
-            own_instance_id=real_instance_id,
-        )
-        # Phase 5b-c reconcile deps: the GFS-connection repo (to enumerate
-        # published spaces) + the shared HTTP session (to pull the subscriber
-        # list). Hooked to the GFS-WS on_connected below.
-        space_subscriber_key_outbound.attach_reconcile_context(
-            gfs_conn_repo=repos.gfs_connection,
-            http_session=http_session,
-        )
-        # A forward-secrecy rekey (member removal / ban / §D1b kick) must reach
-        # GFS subscribers too — they're not member households, so the
-        # ``space_instances`` fan-out misses them entirely.
-        real_space_service.attach_subscriber_key_outbound(space_subscriber_key_outbound)
-        space_subscriber_key_inbound = SpaceSubscriberKeyInbound(
-            space_repo=space_repo,
-            space_crypto=space_crypto,
-        )
-        space_subscriber_key_inbound.attach_identity(
-            own_instance_id=real_instance_id,
-            keywrap_private_key=identity.keywrap_private_key,
-        )
-        # v_61 — a new follower's profiles bundle: built by the host from the
-        # author-profile cache, verified item by item on the follower.
-        space_subscriber_key_outbound.attach_author_profiles(repos.space_author_profile)
-        # …re-stamping a cached profile whose cert predates an authority
-        # rotation (a new follower would refuse the old key's cert).
-        space_subscriber_key_outbound.attach_writer_certs(writer_certs)
-        space_subscriber_key_inbound.attach_profiles_sink(space_public_inbound)
 
         # 5. Federation stack — FederationService + sync manager + typing/dm/
         #    presence attach + inbound bridge + pairing-relay queue.
@@ -5542,7 +5480,6 @@ def create_app(config: Config | None = None) -> web.Application:
             space_crypto=space_crypto,
             space_service=real_space_service,
             gfs_connection_service=gfs_connection_service,
-            subscriber_key_outbound=space_subscriber_key_outbound,
             writer_certs=writer_certs,
         )
         if gfs_member_publish is not None:
@@ -5861,7 +5798,6 @@ def create_app(config: Config | None = None) -> web.Application:
                 user_repo=user_repo,
                 picture_repo=profile_picture_repo,
                 federation_repo=repos.federation,
-                space_crypto=space_crypto,
                 member_gfs=gfs_member_publish,
                 own_instance_id=real_instance_id,
                 own_instance_pk=identity_pk,
@@ -5870,11 +5806,8 @@ def create_app(config: Config | None = None) -> web.Application:
                 picture_cache=public_picture_cache,
             )
             author_profiles.attach_child_protection(child_protection_service)
-            # v_61 — our own authors' signed items go into the cache too,
-            # so the host's new-follower bundle names them.
-            author_profiles.attach_profile_cache(
-                repos.space_author_profile, writer_certs=writer_certs
-            )
+            # The record of what we published (the dedupe, persisted).
+            author_profiles.attach_profile_cache(repos.space_author_profile)
             author_profiles.wire()
         # Federate per-edit config changes (rename, emoji, feature
         # toggles, location_mode flips, retention bumps) to remote
@@ -6186,7 +6119,6 @@ def create_app(config: Config | None = None) -> web.Application:
             await dispatch_gfs_relay_frame(
                 frame,
                 space_public_inbound=space_public_inbound,
-                space_subscriber_key_inbound=space_subscriber_key_inbound,
                 gfs_channels=gfs_channels,
                 inbound_limiter=federation_service.inbound_limiter,
             )
@@ -6224,8 +6156,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_connection_service.refresh_connection_metadata(gfs_id)
             # Proof of possession: once this connection's server has proved
             # it holds the pinned key (the persisted ratchet), the bulk
-            # reconcile below — pin heal, epoch notices,
-            # the name push, the key reconcile — runs only after a fresh
+            # reconcile below — pin heal, epoch notices, the name push —
+            # runs only after a fresh
             # proof at this address. (The socket's signed hello is already
             # out; user-driven traffic is not gated.) A retryable answer
             # holds it for a bounded retry instead of dropping it.
@@ -6268,7 +6200,7 @@ def create_app(config: Config | None = None) -> web.Application:
             # the stale name forever. Re-push the *current* federated
             # display_name (instance_identity self-row, the same source the
             # pairing QR + peers use) on every (re)connect. Fail-soft: a push
-            # failure must never break the metadata refresh or key reconcile.
+            # failure must never break the metadata refresh.
             try:
                 local_identity = await federation_repo.get_local_identity()
                 current_name = (local_identity or {}).get("display_name")
@@ -6280,12 +6212,6 @@ def create_app(config: Config | None = None) -> web.Application:
                     gfs_id,
                     exc_info=True,
                 )
-            # Phase 5b-c reconcile: pull this GFS's subscriber list for every
-            # public/global space we own and listed there and re-seal the
-            # content key to each — delivering keys missed while we were
-            # offline. Fail-soft (never raises).
-            if space_subscriber_key_outbound is not None:
-                await space_subscriber_key_outbound.reconcile(gfs_id)
 
         async def _gated_gfs_reconcile(gfs_id: str) -> str:
             """Gate + reconcile; a ``retry`` answer is handed to the bounded
@@ -6344,7 +6270,6 @@ def create_app(config: Config | None = None) -> web.Application:
             on_moment_public=moment_public_inbound.handle,
             # v_62 — a follower to seal the author's moment key to.
             on_follow_changed=moment_public_key_outbound.handle,
-            on_new_subscriber=space_subscriber_key_outbound.handle,
             on_envelope=_on_gfs_envelope,
             on_connected=_on_gfs_connected,
         )

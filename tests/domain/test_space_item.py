@@ -93,15 +93,15 @@ def test_reader_cert_permits_every_item_type(item_type, comment, react):
     )
     # A non-reader cert is never narrowed by the follower switches.
     assert reader_cert_permits(_reader_cert(reader=False), item_type, features)
-    if item_type == "author_profile":
-        expected = comment or react
-    elif item_type == ITEM_TYPE_COMMENT_DELETE:
+    if item_type == ITEM_TYPE_COMMENT_DELETE:
         expected = True  # the author's own delete: always (owner F6)
     elif item_type in _READER_ALLOWED:
         needs_comment, needs_react = _READER_ALLOWED[item_type]
         expected = (needs_comment and comment) or (needs_react and react)
     else:
-        expected = False  # posts and their edits / deletes: never a reader
+        # Posts and their edits / deletes, and (v_96) the author profile —
+        # a follower is named by the roster: never a reader.
+        expected = False
     assert reader_cert_permits(_reader_cert(reader=True), item_type, features) is (
         expected
     )

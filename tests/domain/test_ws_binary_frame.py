@@ -117,7 +117,7 @@ def test_the_caller_frame_is_never_mutated():
 @pytest.mark.parametrize(
     "frame",
     [
-        {"type": "new_subscriber", "payload": CT},  # unlisted type
+        {"type": "not_a_listed_type", "payload": CT},  # unlisted type
         {"type": "relay", "payload": {"other": CT}},  # no listed field
         _relay_frame("short:abc"),  # too short to pay off
         _relay_frame(CT + "="),  # padded: not canonical

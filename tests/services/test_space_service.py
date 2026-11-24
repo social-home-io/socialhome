@@ -3288,74 +3288,10 @@ async def test_ban_rotates_and_distributes_key(stack):
     )
 
 
-async def test_remove_member_reseals_key_to_gfs_subscribers(stack):
-    """REGRESSION: a rotation must also reach GFS subscribers. They aren't
-    member households (never in ``space_instances``), so the
-    ``broadcast_to_space_members`` fan-out skips them and every relayed frame
-    they get stops decrypting until the next GFS reconnect. The rotation now
-    re-runs the per-space subscriber reconcile."""
-    from unittest.mock import AsyncMock
-
-    _anna = await stack.provision_user("anna")
-    bob = await stack.provision_user("bob")
-    space = await stack.space_svc.create_space(owner_username="anna", name="S")
-    await stack.space_svc.add_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto = AsyncMock()
-    space_crypto.rotate_epoch = AsyncMock(return_value=7)
-    space_crypto.export_current_key = AsyncMock(return_value=(7, bytes(range(32))))
-    federation = AsyncMock()
-    federation.broadcast_to_space_members = AsyncMock()
-    subscriber_keys = AsyncMock()
-    stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
-    stack.space_svc._federation = federation
-
-    await stack.space_svc.remove_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto.rotate_epoch.assert_awaited_once_with(space.id)
-    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
-
-
-async def test_rotation_reseal_failure_does_not_break_removal(stack):
-    """Fail-soft: a GFS that is down must not turn a successful kick into an
-    error — the member is still removed."""
-    from unittest.mock import AsyncMock
-
-    _anna = await stack.provision_user("anna")
-    bob = await stack.provision_user("bob")
-    space = await stack.space_svc.create_space(owner_username="anna", name="S")
-    await stack.space_svc.add_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto = AsyncMock()
-    space_crypto.rotate_epoch = AsyncMock(return_value=3)
-    space_crypto.export_current_key = AsyncMock(return_value=(3, bytes(range(32))))
-    federation = AsyncMock()
-    federation.broadcast_to_space_members = AsyncMock()
-    subscriber_keys = AsyncMock()
-    subscriber_keys.reconcile_space_everywhere = AsyncMock(
-        side_effect=RuntimeError("gfs down")
-    )
-    stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
-    stack.space_svc._federation = federation
-
-    await stack.space_svc.remove_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    assert await stack.space_repo.get_member(space.id, bob.user_id) is None
-    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
-
-
-async def test_rotation_without_subscriber_outbound_attached_is_noop(stack):
-    """No GFS paired → nothing attached → rotation still completes."""
+async def test_rotation_without_a_gfs_attached_completes(stack):
+    """No GFS paired → nothing attached → rotation still completes. Since
+    v_96 there is no GFS subscriber re-seal to attach at all: followers are
+    member households and the rekey broadcast reaches them."""
     from unittest.mock import AsyncMock
 
     _anna = await stack.provision_user("anna")
@@ -3378,6 +3314,7 @@ async def test_rotation_without_subscriber_outbound_attached_is_noop(stack):
     )
 
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+    assert not hasattr(stack.space_svc, "attach_subscriber_key_outbound")
 
 
 async def test_remove_member_without_crypto_attached_is_noop(stack):
@@ -12189,12 +12126,6 @@ async def _removal_with_member_gfs(stack, member_gfs):
             order.append("rekey")
 
     federation.broadcast_to_space_members = AsyncMock(side_effect=_broadcast)
-    subscriber_keys = AsyncMock()
-
-    async def _reseal(space_id):
-        order.append("reseal")
-
-    subscriber_keys.reconcile_space_everywhere = AsyncMock(side_effect=_reseal)
 
     async def _announce(space_id):
         order.append("notice")
@@ -12209,7 +12140,6 @@ async def _removal_with_member_gfs(stack, member_gfs):
     gfs.announce_epoch = AsyncMock(side_effect=_announce)
     gfs.channel_rekey_sent = AsyncMock(side_effect=_seat)
     stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
     stack.space_svc.attach_member_gfs(gfs)
     stack.space_svc._federation = federation
     await stack.space_svc.remove_member(
@@ -12218,13 +12148,13 @@ async def _removal_with_member_gfs(stack, member_gfs):
     return space, bob, order, gfs
 
 
-async def test_a_rotation_sends_the_gfs_epoch_notice_before_rekey_and_reseal(stack):
+async def test_a_rotation_sends_the_gfs_epoch_notice_before_the_rekey(stack):
     space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
     gfs.announce_epoch.assert_awaited_once_with(space.id)
     # A rotating admin's own channel seat is renewed once its rekey went
     # out — when the members renew theirs — never right after the notice.
     gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
-    assert order == ["notice", "rekey", "own seat", "reseal"]
+    assert order == ["notice", "rekey", "own seat"]
 
 
 async def test_a_failing_own_seat_renewal_never_breaks_the_rotation(stack):
@@ -12233,14 +12163,14 @@ async def test_a_failing_own_seat_renewal_never_breaks_the_rotation(stack):
     order.clear()
     await stack.space_svc._rotate_and_distribute_space_key(space.id)
     gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
-    assert order == ["notice", "rekey", "reseal"]
+    assert order == ["notice", "rekey"]
 
 
 async def test_a_failing_epoch_notice_never_breaks_the_rotation(stack):
     space, bob, order, _gfs = await _removal_with_member_gfs(
         stack, RuntimeError("gfs down")
     )
-    assert order == ["notice", "rekey", "own seat", "reseal"]
+    assert order == ["notice", "rekey", "own seat"]
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
 
 

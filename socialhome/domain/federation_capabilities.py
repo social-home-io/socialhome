@@ -930,7 +930,7 @@ from __future__ import annotations
 #:   ``author_profiles_bundle`` in ``accepts``
 #:   (next to the signed bytes, forwarded only in that frame), the host
 #:   sends the content-key handoff and then ONE
-#:   ``space_author_profiles_bundle`` — the authors' own signed
+#:   author-profiles bundle event — the authors' own signed
 #:   ``author_profile`` items from its cache, sealed to the follower's
 #:   key-wrap key — both TARGETED to that follower alone (the GFS
 #:   ``targeted_publish`` capability: ``POST /gfs/publish`` with ``to``).
@@ -944,7 +944,10 @@ from __future__ import annotations
 #:   bundle (and the fanned-out handoff); either way the follower learns names on each
 #:   author's next post, as with v_60. Not space-scoped; labelled "Names for
 #:   new followers right away" — the version a household's followers code
-#:   reads bundles at.
+#:   reads bundles at. **Retired with v_96:** a follower is a member with
+#:   the read-only role and learns names from the roster, so the household
+#:   neither sends nor opens the bundle (nor the content-key handoff); the
+#:   number and its label stay as history.
 #: * **v_62** (2026-10-20) — **public moments are encrypted from the GFS.**
 #:   A public moment's text, media reference, id and author profile are
 #:   sealed under the author's per-author, per-epoch MOMENT CONTENT KEY
@@ -2123,7 +2126,8 @@ class FederationCapability:
 
     #: v_61 — a new GFS follower's targeted author-profile bundle. Nothing
     #: is gated on it between households (the bundle goes host → follower
-    #: through the GFS); it names the version that reads bundles.
+    #: through the GFS); it names the version that reads bundles. Retired
+    #: with v_96 (followers are members and read names from the roster).
     MIN_FOR_FOLLOWER_PROFILE_BUNDLE = 61
 
     #: v_62 — public moments encrypted from the GFS under the author's

@@ -148,13 +148,14 @@ def reader_cert_permits(
     A non-reader cert → ``True`` (its scope decides). A follower's
     ``reader`` cert carries comments (and their edits) only while
     ``allow_subscriber_comment`` is on, reactions only while
-    ``allow_subscriber_react`` is on, the author's ``author_profile`` while
-    either is, and the author's delete of their own comment always (owner
-    decision F6, 2026-11-23: the receiver decides that one on authorship —
-    the stored comment's author — not on a switch); anything else — posts
-    and their edits / deletes, any type this build does not know — is
-    refused. Fail closed: the flags are read from the receiver's own copy,
-    never from the item."""
+    ``allow_subscriber_react`` is on, and the author's delete of their own
+    comment always (owner decision F6, 2026-11-23: the receiver decides
+    that one on authorship — the stored comment's author — not on a
+    switch); anything else — posts and their edits / deletes, the v_60
+    ``author_profile`` (a follower is named by the roster and never
+    publishes one), any type this build does not know — is refused. Fail
+    closed: the flags are read from the receiver's own copy, never from the
+    item."""
     if not cert.reader:
         return True
     if item_type == ITEM_TYPE_COMMENT_DELETE:
@@ -163,10 +164,6 @@ def reader_cert_permits(
         return bool(features.allow_subscriber_comment)
     if item_type in _READER_REACTION_TYPES:
         return bool(features.allow_subscriber_react)
-    if item_type == ITEM_TYPE_AUTHOR_PROFILE:
-        return bool(
-            features.allow_subscriber_comment or features.allow_subscriber_react
-        )
     return False
 
 

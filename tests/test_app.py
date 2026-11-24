@@ -39,7 +39,6 @@ from socialhome.app_keys import gfs_connection_service_key, http_session_key
 from socialhome.auth import SIGNED_URL_PRINCIPAL, USER_KEY
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
 )
 from socialhome.config import Config
 from socialhome.dashboard.advertiser import DisplayAdvertiser, display_short_id
@@ -515,40 +514,32 @@ def _relay_frame(event_type: str) -> dict:
 
 
 async def test_gfs_relay_dispatches_a_public_post_frame_without_from_instance():
-    posts, keys = _RecordingConsumer(), _RecordingConsumer()
+    posts = _RecordingConsumer()
     frame = _relay_frame(AUTHORITY_EVENT_SPACE_POST_PUBLIC)
-    await dispatch_gfs_relay_frame(
-        frame,
-        space_public_inbound=posts,
-        space_subscriber_key_inbound=keys,
-    )
+    await dispatch_gfs_relay_frame(frame, space_public_inbound=posts)
     assert posts.frames == [frame]
-    assert keys.frames == []
 
 
-async def test_gfs_relay_dispatches_a_key_handoff_frame_without_from_instance():
-    posts, keys = _RecordingConsumer(), _RecordingConsumer()
-    frame = _relay_frame(AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF)
-    await dispatch_gfs_relay_frame(
-        frame,
-        space_public_inbound=posts,
-        space_subscriber_key_inbound=keys,
-    )
-    assert keys.frames == [frame]
+@pytest.mark.parametrize(
+    "event_type", ["space_subscriber_key_handoff", "space_author_profiles_bundle"]
+)
+async def test_gfs_relay_drops_a_legacy_key_handoff_or_bundle_frame(event_type, caplog):
+    """v_96 — the household neither opens a GFS subscriber key handoff nor
+    a v_61 profiles bundle: a GFS still sending one reaches no consumer, and
+    nothing above DEBUG is logged."""
+    caplog.set_level(logging.DEBUG, logger="socialhome")
+    posts = _RecordingConsumer()
+    await dispatch_gfs_relay_frame(_relay_frame(event_type), space_public_inbound=posts)
     assert posts.frames == []
+    assert not [r for r in caplog.records if r.levelno > logging.INFO]
 
 
 async def test_gfs_relay_dispatches_a_member_published_space_item():
     """v_49: ``space_item`` frames go to the same public-content consumer."""
-    posts, keys = _RecordingConsumer(), _RecordingConsumer()
+    posts = _RecordingConsumer()
     frame = _relay_frame("space_item")
-    await dispatch_gfs_relay_frame(
-        frame,
-        space_public_inbound=posts,
-        space_subscriber_key_inbound=keys,
-    )
+    await dispatch_gfs_relay_frame(frame, space_public_inbound=posts)
     assert posts.frames == [frame]
-    assert keys.frames == []
 
 
 class _RecordingChannels:
@@ -573,15 +564,12 @@ async def test_gfs_relay_routes_a_private_channel_frame_to_the_channel_service()
     await dispatch_gfs_relay_frame(
         frame,
         space_public_inbound=posts,
-        space_subscriber_key_inbound=None,
         gfs_channels=channels,  # type: ignore[arg-type]
     )
     assert channels.frames == [frame]
     assert posts.frames == []
     # Without a channel service it is dropped, never handed to the space path.
-    await dispatch_gfs_relay_frame(
-        frame, space_public_inbound=posts, space_subscriber_key_inbound=None
-    )
+    await dispatch_gfs_relay_frame(frame, space_public_inbound=posts)
     assert posts.frames == []
 
 
@@ -605,7 +593,6 @@ async def test_gfs_channel_frames_over_the_per_channel_budget_are_dropped(caplog
         await dispatch_gfs_relay_frame(
             _channel_frame(),
             space_public_inbound=None,
-            space_subscriber_key_inbound=None,
             gfs_channels=channels,  # type: ignore[arg-type]
             inbound_limiter=limiter,
         )
@@ -616,7 +603,6 @@ async def test_gfs_channel_frames_over_the_per_channel_budget_are_dropped(caplog
     await dispatch_gfs_relay_frame(
         _channel_frame("b" * 32),
         space_public_inbound=None,
-        space_subscriber_key_inbound=None,
         gfs_channels=channels,  # type: ignore[arg-type]
         inbound_limiter=limiter,
     )
@@ -631,7 +617,6 @@ async def test_gfs_channel_frames_share_a_household_wide_budget():
         await dispatch_gfs_relay_frame(
             _channel_frame(f"{i:032x}"),
             space_public_inbound=None,
-            space_subscriber_key_inbound=None,
             gfs_channels=channels,  # type: ignore[arg-type]
             inbound_limiter=limiter,
         )
@@ -648,7 +633,6 @@ async def test_a_malformed_channel_id_makes_no_budget_key():
         await dispatch_gfs_relay_frame(
             _channel_frame(bad),
             space_public_inbound=None,
-            space_subscriber_key_inbound=None,
             gfs_channels=channels,  # type: ignore[arg-type]
             inbound_limiter=limiter,
         )
@@ -667,7 +651,6 @@ async def test_gfs_channel_budget_sweeps_idle_channel_keys():
     await dispatch_gfs_relay_frame(
         _channel_frame(),
         space_public_inbound=None,
-        space_subscriber_key_inbound=None,
         gfs_channels=channels,  # type: ignore[arg-type]
         inbound_limiter=limiter,
     )
@@ -686,7 +669,6 @@ async def test_gfs_relay_never_logs_an_outer_from_instance(caplog):
     await dispatch_gfs_relay_frame(
         frame,
         space_public_inbound=posts,
-        space_subscriber_key_inbound=None,
     )
     assert posts.frames == [frame]
     leaked = [
@@ -703,12 +685,10 @@ async def test_gfs_relay_is_a_noop_without_consumers():
     await dispatch_gfs_relay_frame(
         _relay_frame(AUTHORITY_EVENT_SPACE_POST_PUBLIC),
         space_public_inbound=None,
-        space_subscriber_key_inbound=None,
     )
     await dispatch_gfs_relay_frame(
         _relay_frame("some_other_event"),
         space_public_inbound=None,
-        space_subscriber_key_inbound=None,
     )
 
 

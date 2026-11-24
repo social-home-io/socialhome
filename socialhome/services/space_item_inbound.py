@@ -92,8 +92,6 @@ from ..domain.space_author_profile import (
     SpaceAuthorProfile,
     decode_picture_sidecar,
     decode_profile_content,
-    stored_profile_inner,
-    without_picture_sidecar,
 )
 from ..domain.space_item import (
     ITEM_TYPE_AUTHOR_PROFILE,
@@ -263,8 +261,7 @@ class SpaceItemInbound:
         The picture bytes ride beside the signed content as a sidecar,
         accepted only when they hash to the signed ``picture_hash``. A
         newer item that names the held hash and carries no bytes keeps
-        the held picture. The author-signed item itself is kept only by a
-        seed holder: only a host builds new-follower bundles."""
+        the held picture."""
         if self._profiles is None:
             return False
         if not (item.author and item.target == item.author == item.post_id):
@@ -303,27 +300,6 @@ class SpaceItemInbound:
         picture: bytes | None = None
         if sidecar is not None and not (same_picture and held and held.has_picture):
             picture = await public_profile_picture(sidecar)
-        signed_item: dict | None = None
-        kept = stored_profile_inner(item.inner)
-        if kept is None:
-            log.warning(
-                "space_item: author_profile for %s in space %s is oversized — "
-                "kept without its signed item",
-                item.author,
-                item.space.id,
-            )
-        if kept is not None and await self._spaces.get_space_seed(item.space.id):
-            signed_item = without_picture_sidecar(kept)
-            # The original bytes are what a follower checks against the
-            # signed hash, so the host keeps them with the item: these ones,
-            # or the ones it held for the same signed hash.
-            keep = (
-                raw_sidecar
-                if sidecar is not None
-                else (held.picture_sidecar if same_picture and held else None)
-            )
-            if keep:
-                signed_item[PROFILE_PICTURE_FIELD] = keep
         return await self._profiles.upsert_if_newer(
             SpaceAuthorProfile(
                 space_id=item.space.id,
@@ -336,40 +312,6 @@ class SpaceItemInbound:
                 ts=item.stamp.astimezone(UTC).isoformat(timespec="microseconds"),
             ),
             picture_webp=picture,
-            signed_item=signed_item,
-            item_epoch=item.epoch if signed_item is not None else None,
-        )
-
-    async def attach_bundled_picture(
-        self, space_id: str, author_user_id: str, picture_hash: str, raw: object
-    ) -> bool:
-        """A picture from a later part of a new-follower bundle: kept when
-        its bytes are the picture the author signed for (the held row's
-        ``picture_hash``), re-encoded like every peer picture. Never raises."""
-        if self._profiles is None:
-            return False
-        held = await self._profiles.get(space_id, author_user_id)
-        if (
-            held is None
-            or held.has_picture
-            or held.profile.picture_hash is None
-            or held.profile.picture_hash != picture_hash
-        ):
-            return False
-        picture = decode_picture_sidecar(raw, held.profile.picture_hash)
-        if picture is None:
-            log.warning(
-                "space_item: a bundled picture for %s in space %s is not the "
-                "signed picture — dropped",
-                author_user_id,
-                space_id,
-            )
-            return False
-        stored = await public_profile_picture(picture)
-        if stored is None:
-            return False
-        return await self._profiles.set_picture(
-            space_id, author_user_id, picture_hash, stored
         )
 
     # ── Shared checks ────────────────────────────────────────────────────

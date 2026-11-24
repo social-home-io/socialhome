@@ -258,7 +258,6 @@ _PEER_HTTP_MODULES = (
     "socialhome/global_server/cluster.py",
     "socialhome/services/gfs_connection_service.py",
     "socialhome/services/gfs_envelope_sender.py",
-    "socialhome/services/space_subscriber_key_outbound.py",
     "socialhome/services/public_space_discovery_service.py",
     "socialhome/services/highlight_publication_service.py",
     "socialhome/services/highlight_signaling_handler.py",

@@ -105,7 +105,6 @@ class GfsWebSocketClient:
         "_on_follow_changed",
         "_on_highlight_signal",
         "_on_moment_public",
-        "_on_new_subscriber",
         "_on_relay",
         "_on_space_media_request",
         "_reconnect_delays",
@@ -128,7 +127,6 @@ class GfsWebSocketClient:
         on_highlight_signal: Callable[[dict], Awaitable[None]] | None = None,
         on_moment_public: Callable[[dict], Awaitable[None]] | None = None,
         on_follow_changed: Callable[[dict], Awaitable[None]] | None = None,
-        on_new_subscriber: Callable[[dict], Awaitable[None]] | None = None,
         on_envelope: Callable[[dict], Awaitable[None]] | None = None,
         on_connected: Callable[[], Awaitable[None]] | None = None,
         on_space_media_request: Callable[[dict], Awaitable[None]] | None = None,
@@ -142,7 +140,6 @@ class GfsWebSocketClient:
         self._on_highlight_signal = on_highlight_signal
         self._on_moment_public = on_moment_public
         self._on_follow_changed = on_follow_changed
-        self._on_new_subscriber = on_new_subscriber
         self._on_envelope = on_envelope
         self._on_connected = on_connected
         #: v_87 — media frames refused since the last WARNING, and when it was.
@@ -214,21 +211,6 @@ class GfsWebSocketClient:
         author's moment key). The author's household answers both by
         sealing its key to the follower."""
         self._on_follow_changed = handler
-
-    def attach_new_subscriber_handler(
-        self,
-        handler: Callable[[dict], Awaitable[None]],
-    ) -> None:
-        """Late-bound wiring for the Phase-5b subscriber key-handoff producer.
-
-        The GFS pushes a ``new_subscriber`` frame when a household subscribes
-        to a space this household owns; a seed-holder answers by sealing the
-        per-space content key to the new subscriber. The
-        :class:`SpaceSubscriberKeyOutbound` service is constructed after the
-        WS client (it depends on the space crypto, wired during startup), so
-        this lets startup attach the handler without re-creating the client.
-        """
-        self._on_new_subscriber = handler
 
     def attach_envelope_handler(
         self,
@@ -543,24 +525,6 @@ class GfsWebSocketClient:
                     exc_info=True,
                 )
             return
-        if frame_type == "new_subscriber":
-            if self._on_new_subscriber is None:
-                log.debug(
-                    "gfs.ws.client: dropping new_subscriber — no handler "
-                    "attached on %s",
-                    self._gfs_url,
-                )
-                return
-            try:
-                await self._on_new_subscriber(frame)
-            except Exception as exc:  # defensive
-                log.warning(
-                    "gfs.ws.client: on_new_subscriber handler raised for %s: %s",
-                    self._gfs_url,
-                    exc,
-                    exc_info=True,
-                )
-            return
         if frame_type in ("envelope", ENVELOPE_MEDIA_FRAME):
             if self._on_envelope is None:
                 # WARNING, not DEBUG: the relay DELETED its queue row to
@@ -659,10 +623,10 @@ class GfsWebSocketClient:
             "instance_id": self._instance_id,
             "ts": ts,
             "sig": b64url_encode(sig),
-            # #5b — an unsigned hint, like the subscribe's: we ask for a
-            # space key when we miss one (``space_key_pull``), so the server
-            # need not have every owner re-seal on each reconnect. An older
-            # server ignores it.
+            # An unsigned hint. ``space_key_pull`` (#5b) still tells a GFS
+            # running the legacy seat code to skip its reconnect key-repair
+            # pass — since v_96 there is nothing to repair (the household
+            # holds no space-keyed seat; keys arrive by federation).
             # ``ws_binary1``: push frames carrying a ciphertext may come as
             # binary frames on this connection (``_on_binary``).
             "accepts": list(OUR_HELLO_ACCEPTS),

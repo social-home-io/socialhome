@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from socialhome.domain.subscriber_accepts import (
-    ACCEPTS_AUTHOR_PROFILES_BUNDLE,
     ACCEPTS_PAYLOAD_ZLIB1,
     ACCEPTS_PAYLOAD_ZLIB1_DICT1,
     ACCEPTS_SPACE_MEDIA_SERVE,
@@ -19,8 +18,11 @@ from socialhome.domain.subscriber_accepts import (
 )
 
 
-def test_our_accepts_include_the_bundle():
-    assert ACCEPTS_AUTHOR_PROFILES_BUNDLE in OUR_ACCEPTS
+def test_our_accepts_no_longer_list_the_author_profiles_bundle():
+    """v_96 — the household neither sends nor opens the v_61 bundle, so it
+    never asks a GFS for one."""
+    assert "author_profiles_bundle" not in OUR_ACCEPTS
+    assert "author_profiles_bundle" not in OUR_HELLO_ACCEPTS
     # It reads zlib-compressed items (payload_suite "zlib1").
     assert ACCEPTS_PAYLOAD_ZLIB1 == "payload_zlib1"
     assert ACCEPTS_PAYLOAD_ZLIB1 in OUR_ACCEPTS

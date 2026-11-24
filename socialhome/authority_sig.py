@@ -60,9 +60,9 @@ AUTHORITY_EVENT_SPACE_POST_PUBLIC: str = "space_post_public"
 #: seed-holder seals the per-space content key to a new GFS subscriber's
 #: key-wrap pubkey and authority-signs the (opaque) sealed envelope so the GFS
 #: authorizes the relay against the same TOFU-pinned space public key — without
-#: ever learning the key. The signer (``space_subscriber_key_outbound``) and
-#: verifier (GFS + ``space_subscriber_key_inbound``) reference this one name so
-#: the canonical signing bytes stay in lock-step.
+#: ever learning the key. The household sender and receiver were removed in
+#: v_96 (a follower is a member and gets the key by federation); the constant
+#: stays for the GFS side, which goes in P7.
 AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF: str = "space_subscriber_key_handoff"
 
 
@@ -72,6 +72,7 @@ AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF: str = "space_subscriber_key_handof
 #: TARGETED (``POST /gfs/publish`` with ``to``) so the GFS hands it to that
 #: subscriber only. Target-only: a GFS refuses it without ``to``
 #: (:data:`AUTHORITY_TARGET_ONLY_EVENT_TYPES`), so it is never fanned out.
+#: Household sender and receiver removed in v_96; the GFS side goes in P7.
 AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE: str = "space_author_profiles_bundle"
 
 

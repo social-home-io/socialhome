@@ -1,8 +1,7 @@
-"""Publish our authors' public profiles to a space's GFS followers (v_60).
+"""Publish our authors' public profiles into a public / global space (v_60).
 
-A household that follows a public / global space through a GFS holds no
-roster, so its people saw every post there as "Someone". When one of our
-users posts in such a space, this service publishes their profile into it as
+When one of our users posts in a public or global space, this service
+publishes their profile into it as
 the generic ``author_profile`` item (:mod:`socialhome.domain.space_author_profile`)
 — signed by our household identity key, encrypted under the space content
 key and sent over the existing member-publish path
@@ -10,11 +9,9 @@ key and sent over the existing member-publish path
 
 * **When:** on the author's first post in the space, then only when the
   profile really changes (``UserProfileUpdated`` / ``SpaceMemberProfileUpdated``).
-  Every follower gets each change once. A content-key rotation or a restart
+  Every reader gets each change once. A content-key rotation or a restart
   sends nothing: the dedupe is the persisted cache row's ``profile_rev``,
-  not anything in memory. A follower who subscribes later gets the names
-  from the host's targeted bundle, which carries each item under the epoch
-  it was published at.
+  not anything in memory.
 * **Picture:** the signed content names the picture by its hash. The bytes
   ride beside it as the unsigned sidecar (``picture``) only when the
   picture changed. So a name or bio change is a 1–4 KiB item, and only a
@@ -35,12 +32,12 @@ key and sent over the existing member-publish path
   :data:`~socialhome.domain.federation_capabilities.FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE`.
 * **Where:** only a public / global space that admits followers — a
   private space's channel readers are all members and hold the roster.
-* **A new follower (v_61)** is NOT answered here: the space's host sends
-  them one sealed bundle of the cached, author-signed profiles, to that
-  follower only (:class:`~socialhome.services.space_subscriber_key_outbound.SpaceSubscriberKeyOutbound`).
-  Every item this service sends is therefore also kept in the
-  author-profile cache (:meth:`attach_profile_cache`), so a host's bundle
-  names its own authors.
+  It rides the member publish (the channel for a channel space), so readers
+  there and on the paired paths that predate the roster get names.
+* **Who:** a member (any writer role). A follower (v_96: a member with the
+  read-only ``subscriber`` role) never publishes one — members name it
+  from the roster — and a ``reader`` writer cert does not admit the item
+  (:func:`~socialhome.domain.space_item.reader_cert_permits`).
 
 No in-memory bookkeeping: what was sent is the cache row
 (:meth:`attach_profile_cache`), so a restart or a rotation re-sends nothing.
@@ -60,7 +57,7 @@ from ..domain.events import (
     UserProfileUpdated,
 )
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole
 from ..domain.space_author_profile import (
     PROFILE_BIO_MAX_LENGTH,
     PROFILE_NAME_MAX_LENGTH,
@@ -75,7 +72,6 @@ from ..infrastructure.event_bus import EventBus
 from ..media.profile_picture import PublicPictureCache
 from .protection_gate import ProtectionGateMixin
 from .space_item_author import build_signed_item_inner
-from .space_writer_cert_service import WRITER_CERT_FIELD
 
 if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -87,8 +83,6 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .gfs_member_publish_service import GfsMemberPublishService
-    from .space_crypto_service import SpaceContentEncryption
-    from .space_writer_cert_service import SpaceWriterCertService
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +93,6 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
     __slots__ = (
         "_bus",
         "_child_protection",
-        "_crypto",
         "_federation_repo",
         "_member_gfs",
         "_own_instance_id",
@@ -111,7 +104,6 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         "_profile_cache",
         "_spaces",
         "_users",
-        "_writer_certs",
     )
 
     def __init__(
@@ -122,7 +114,6 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         user_repo: AbstractUserRepo,
         picture_repo: AbstractProfilePictureRepo,
         federation_repo: AbstractFederationRepo,
-        space_crypto: SpaceContentEncryption,
         member_gfs: GfsMemberPublishService,
         own_instance_id: str,
         own_instance_pk: bytes,
@@ -135,7 +126,6 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         self._users = user_repo
         self._pictures = picture_repo
         self._federation_repo = federation_repo
-        self._crypto = space_crypto
         self._member_gfs = member_gfs
         self._preferences = preferences_repo
         self._own_instance_id = own_instance_id
@@ -146,22 +136,12 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         )
         self._child_protection = None
         self._profile_cache: AbstractSpaceAuthorProfileRepo | None = None
-        self._writer_certs: SpaceWriterCertService | None = None
 
-    def attach_profile_cache(
-        self,
-        repo: AbstractSpaceAuthorProfileRepo,
-        *,
-        writer_certs: SpaceWriterCertService,
-    ) -> None:
+    def attach_profile_cache(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
         """Wire the author-profile cache: the record of what we published
-        (the dedupe, persisted) and, on a seed holder, the signed items the
-        host's new-follower bundle forwards. The bundle sends each item as
-        a follower receives it: with our writer cert for its epoch
-        (*writer_certs*) and the original picture. Until this is wired,
-        nothing is published."""
+        (the dedupe, persisted). Until this is wired, nothing is
+        published."""
         self._profile_cache = repo
-        self._writer_certs = writer_certs
 
     def wire(self) -> None:
         self._bus.subscribe(SpacePostCreated, self._on_post)
@@ -201,8 +181,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             await self.publish(event.space_id, event.user_id)
 
     async def _on_left(self, event: SpaceMemberLeft) -> None:
-        """A member left or was removed: forget their cached profile, so a
-        host never forwards it to a new follower again."""
+        """A member left or was removed: forget their cached profile."""
         if self._profile_cache is None:
             return
         try:
@@ -245,8 +224,10 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             )
             return False
         member = await self._spaces.get_member(space_id, user_id)
-        if member is None:
-            # Not (or no longer) a member here: nothing to name.
+        if member is None or member.role == SpaceRole.SUBSCRIBER:
+            # Not (or no longer) a member here: nothing to name. A follower
+            # is named by the roster and holds only a reader cert, which
+            # does not admit an author profile.
             return False
         name = (
             (member.space_display_name if member else None)
@@ -272,7 +253,6 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         held = await self._profile_cache.get(space_id, user_id)
         if held is not None and held.profile.profile_rev == rev:
             return False
-        epoch = await self._crypto.get_current_epoch(space_id)
         now = datetime.now(UTC)
         inner = build_signed_item_inner(
             item_type=ITEM_TYPE_AUTHOR_PROFILE,
@@ -306,13 +286,12 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             profile_rev=rev,
             ts=now.isoformat(timespec="microseconds"),
         )
-        bundle_copy = await self._bundle_copy(space_id, epoch, inner, sidecar)
 
         async def _published() -> None:
             # Recorded only once a server took it: the record is the dedupe,
             # so a publish no server took (no cert yet after a rotation, a
             # server down) is sent again on the next trigger.
-            await cache.upsert_if_newer(row, picture_webp=picture, **bundle_copy)
+            await cache.upsert_if_newer(row, picture_webp=picture)
 
         return self._member_gfs.schedule_item(
             space_id,
@@ -321,27 +300,6 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             outbound,
             on_published=_published,
         )
-
-    async def _bundle_copy(
-        self, space_id: str, epoch: int | None, inner: dict, sidecar: str | None
-    ) -> dict:
-        """``signed_item`` / ``item_epoch`` for the cache. On a seed holder
-        (only a host builds bundles) that is the item as a follower receives
-        it: our writer cert for its epoch and the picture sidecar. Elsewhere,
-        or with no cert to verify by, it is nothing."""
-        if (
-            self._writer_certs is None
-            or epoch is None
-            or await self._spaces.get_space_seed(space_id) is None
-        ):
-            return {"signed_item": None, "item_epoch": None}
-        cert = await self._writer_certs.own_cert(space_id, epoch)
-        if cert is None:
-            return {"signed_item": None, "item_epoch": None}
-        item = {**inner, WRITER_CERT_FIELD: cert.to_wire()}
-        if sidecar is not None:
-            item[PROFILE_PICTURE_FIELD] = sidecar
-        return {"signed_item": item, "item_epoch": epoch}
 
     async def _members_understand(self, space_id: str) -> bool:
         """Every member household whose version we know is v_60+."""

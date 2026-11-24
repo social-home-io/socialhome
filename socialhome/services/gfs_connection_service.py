@@ -603,7 +603,6 @@ class GfsConnectionService:
         "_suite_refused_at",
         "_suspended_since",
         "_target_warned",
-        "_targeted_publish",
         "_theme_repo",
         "_withdrawn_repin",
         "_withdrawn_repin_warned",
@@ -690,11 +689,6 @@ class GfsConnectionService:
         # into the canonical bytes it verifies. An older one does not, so a
         # body carrying the pin would 403 there — it gets the body without.
         self._place_pin: dict[str, bool] = {}
-        # …and for ``targeted_publish`` (v_61): ``POST /gfs/publish`` takes a
-        # ``to`` and delivers to that one subscriber. An older GFS would fan
-        # a targeted item out to every subscriber, so nothing targeted is
-        # sent to it.
-        self._targeted_publish: dict[str, bool] = {}
         # …and for ``sealed_highlight_stream``: the GFS's public highlight
         # viewer page opens the end-to-end sealed stream (``stream_seal`` +
         # ``sealed`` frames, the ``#k=`` link secret). An older page can't,
@@ -1001,7 +995,6 @@ class GfsConnectionService:
             self._envelope_multi,
             self._invite_links,
             self._place_pin,
-            self._targeted_publish,
             self._sealed_highlight_stream,
             self._encrypted_moments,
             self._encrypted_moment_media,
@@ -4653,48 +4646,6 @@ class GfsConnectionService:
         return await self._signed_capability_supported(
             conn, "space_key_pull", self._space_key_pull
         )
-
-    async def publish_space_event_to(
-        self,
-        gfs_id: str,
-        *,
-        space_id: str,
-        event_type: str,
-        payload: dict,
-        to_instance_id: str,
-    ) -> bool | None:
-        """Relay one event to ONE subscriber of *space_id* on the GFS
-        *gfs_id* (``targeted_publish``, v_61) — the subscriber that GFS
-        itself named in its ``new_subscriber`` notify.
-
-        ``None`` when that server has not proved ``targeted_publish`` (and
-        ``anonymous_publish``) under a valid signature: nothing was sent, and
-        the caller falls back (or skips). Otherwise ``True`` when the GFS
-        accepted it. No retry queue: the key handoff is asked for again on
-        the subscriber's next connect (``new_subscriber`` with ``reason:
-        "reconnect"``); the one-time profiles bundle is not. The body is
-        ``{space_id, event_type, payload, to}`` — still no household
-        identity.
-        """
-        if self._publish_client is None or not to_instance_id:
-            return None
-        conn = await self._repo.get(gfs_id)
-        if conn is None or conn.status != "active" or not conn.inbox_url:
-            return None
-        if not await self._anonymous_publish_supported(conn):
-            return None
-        if not await self._signed_capability_supported(
-            conn, "targeted_publish", self._targeted_publish
-        ):
-            return None
-        body = {
-            **GfsPublish(
-                space_id=space_id, event_type=event_type, payload=payload
-            ).body(),
-            "to": to_instance_id,
-        }
-        outcome = await self._post_publish(conn, body, space_id=space_id)
-        return outcome.kind == "delivered"
 
     async def _relay_targets(self, space_id: str) -> list[GfsConnection]:
         """Where a relay of *space_id* goes: every server on the owner's

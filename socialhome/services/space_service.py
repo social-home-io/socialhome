@@ -761,7 +761,6 @@ class SpaceService(
         "_seat_locks",
         "_space_crypto",
         "_spaces",
-        "_subscriber_keys",
         "_unfittable",
         "_users",
         "_writer_certs",
@@ -808,7 +807,6 @@ class SpaceService(
         self._seat_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
-        self._subscriber_keys = None
         #: v_49 — announces each rotated epoch to the GFS (member publish).
         self._member_gfs = None
         #: v_49 writer-cert issuer/holder (:class:`SpaceWriterCertService`).
@@ -984,15 +982,6 @@ class SpaceService(
         content epoch to each capable GFS listing the space, BEFORE the
         subscriber re-seal (so a removed writer stops being relayed)."""
         self._member_gfs = member_gfs
-
-    def attach_subscriber_key_outbound(self, subscriber_key_outbound) -> None:
-        """Wire the Phase-5b subscriber content-key producer so a
-        forward-secrecy rekey also reaches GFS *subscribers*. They hold a
-        read-only subscription and are never in ``space_instances``, so the
-        member fan-out misses them entirely. Optional: absent when no GFS is
-        paired — rotation then behaves exactly as before.
-        """
-        self._subscriber_keys = subscriber_key_outbound
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert service: the roster snapshot and the
@@ -1249,11 +1238,11 @@ class SpaceService(
     async def _ensure_content_key(self, space_id: str) -> None:
         """Mint epoch 0 for a space that sits in a public tier.
 
-        A PUBLIC / GLOBAL space's audience may be GFS *subscribers* only —
+        A PUBLIC / GLOBAL space's audience may be followers only —
         nobody is ever invited cross-household, so the §D1b invite-metadata
         builder (the only other caller of ``initialise_for_space``) never
         runs. Without a key the public-relay producers log "no content key …
-        cannot relay" forever, and a new subscriber never receives one
+        cannot relay" forever, and a new follower never receives one
         either. Both of those can happen before the first post, so the key is
         established the moment the space enters a public tier.
 
@@ -3922,7 +3911,7 @@ class SpaceService(
             # On the owner — the switch is owner-only (``_require_owner``
             # above), so no delegated admin gets here: every remote follower
             # seat ends too and the key rotates at once — not owed (v_96) —
-            # which also locks out the GFS subscribers sealed to.
+            # which also locks out every follower household.
             if space.owner_instance_id == self._own_instance_id:
                 await self._end_remote_follower_seats(updated)
                 rotated_for_followers = True
@@ -7445,15 +7434,9 @@ class SpaceService(
         re-imports the new key in-place (a no-op for them since
         they're not in ``space_members`` anymore).
 
-        GFS *subscribers* are not member households — they hold a
-        read-only subscription and never appear in ``space_instances``
-        — so the broadcast above misses them and every relayed frame
-        they receive would stop decrypting until their next GFS
-        reconnect. For a PUBLIC/GLOBAL space published to a GFS, the
-        rotation therefore also re-runs the Phase-5b subscriber
-        reconcile, which re-seals the new epoch's key per subscriber
-        through the content-blind relay (same verified seal path; the
-        tier + seed-holder gates live there).
+        Followers are members with the read-only role (v_96), so the
+        same broadcast reaches them; there is no separate GFS subscriber
+        re-seal any more.
 
         Failures are logged and swallowed — a rotation that can't
         federate is still better than no rotation, and the kick
@@ -7591,17 +7574,6 @@ class SpaceService(
                 log.exception(
                     "rotate_and_distribute_space_key: renewing our own "
                     "channel seat failed for %s",
-                    space_id,
-                )
-        # GFS subscribers (not member households — see the docstring). Never
-        # raises by contract, but stay defensive: the kick already succeeded.
-        if self._subscriber_keys is not None:
-            try:
-                await self._subscriber_keys.reconcile_space_everywhere(space_id)
-            except Exception:
-                log.exception(
-                    "rotate_and_distribute_space_key: GFS subscriber re-seal "
-                    "failed for %s",
                     space_id,
                 )
 
