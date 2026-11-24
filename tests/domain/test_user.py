@@ -229,3 +229,17 @@ def test_person_summary_to_dict_carries_only_the_display_fields():
         "picture_url": None,
         "household": "Vizeli",
     }
+
+
+def test_person_anchor_is_the_identity_anchor_or_the_username():
+    """What ``user_id`` derives from: the anchor, else (a pre-v_26 row) the
+    username — the one spelling every person-ID proof sends."""
+    assert (
+        User(user_id="u1", username="alice", display_name="A").person_anchor == "alice"
+    )
+    assert (
+        User(
+            user_id="u1", username="alice", display_name="A", identity_anchor="abc"
+        ).person_anchor
+        == "abc"
+    )

@@ -29,6 +29,11 @@ that hold the space repo under another slot name (themes, approvals).
 about the space's *people* (proposals, map pins, zones): a follower is an
 outsider there and gets the same 403.
 
+:func:`user_id_proven` is the person-ID anchor proof every path that seats
+a person another household names checks first (P5);
+:func:`user_id_of_another_household` is the receivers' rule for trusting a
+seat the host seated.
+
 Compare roles against the :class:`SpaceRole` enum (never bare strings) —
 the caller passes the allowed set; this mixin only does the membership
 read and the ``in`` check.
@@ -38,6 +43,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..crypto import derive_user_id
 from ..domain.errors import NotFoundError
 from ..domain.space import WRITER_ROLES, SpacePermissionError
 
@@ -159,29 +165,57 @@ async def require_member_seat(
     return member
 
 
+def user_id_proven(identity_pk: bytes | None, anchor: object, user_id: str) -> bool:
+    """Whether the household holding ``identity_pk`` proves ``user_id`` is
+    one of its people: ``derive_user_id(identity_pk, anchor) == user_id`` —
+    the construction every household mints its users with (``anchor`` is
+    the person's ``identity_anchor or username``).
+
+    The one gate on every path that SEATS a person another household names
+    (an invite-link redeem — paired, mesh or §D2b bootstrap —, a private
+    invitation's accept, a follow approval). ``identity_pk`` is the key the
+    receiver already pins for the sending household (its
+    ``remote_instances`` row, a mesh claim deriving to the sender, or a
+    §D2b body's key bound to its instance id), so a household can only ever
+    seat ids derived from its own key: never somebody else's, never one of
+    OUR people (theirs derive from our key). Fail closed: a missing key or
+    anchor, a non-string anchor, or any derivation error is ``False``.
+
+    Callers check it before any ban / seat / roster / token read and answer
+    a failure exactly like their other refusals, so the answer depends only
+    on the requester's own anchor (no probing). Never log the anchor."""
+    if not identity_pk or not isinstance(anchor, str) or not anchor or not user_id:
+        return False
+    try:
+        return derive_user_id(identity_pk, anchor) == user_id
+    except ValueError:
+        return False
+
+
 async def user_id_of_another_household(
     *,
     seats: AbstractSpaceRemoteMemberRepo,
-    users: AbstractUserRepo | None,
+    users: AbstractUserRepo,
     space_id: str,
     instance_id: str,
     user_id: str,
 ) -> bool:
-    """Whether ``user_id`` is NOT household ``instance_id``'s to claim in
-    ``space_id``: one of OUR people (when ``users`` is given), or a user
-    holding — or having held — a seat there under another household.
+    """Whether a seat household ``instance_id`` holds under ``user_id`` in
+    ``space_id`` is NOT proof of acting for that person: ``user_id`` is one
+    of OUR people, or holds a LIVE seat there under another household.
 
-    A user id belongs to one household. The one rule for every place that
-    takes a remote household's word for a user id — seating it (a redeem,
-    a follow, a private invitation's accept) and acting as it (the
-    receivers' authorship checks, ``SpaceAuthorship``) — so a seat taken
-    under somebody else's id seats nobody and proves nothing (P4
-    adversarial review: the own-comment delete needs no switch, owner
-    decision F6). The local lookup is a primary-key read; the roster read
-    filters ``(space_id, user_id)`` on the primary key's ``space_id``
-    prefix, so it walks the space's roster (the same read
-    ``get_including_tombstones`` already makes) — ≈ 10 000 index rows for a
-    10 000-follower space, run only after the sender's seat was found."""
-    if users is not None and await users.get_by_user_id(user_id) is not None:
+    The receivers' rule (``SpaceAuthorship.acts_for`` and the member-publish
+    seat checks). Receivers see no anchors: they trust the seats the host
+    seated (authority-signed roster gossip), and since P5 a host seats only
+    ids the seated household proves (:func:`user_id_proven`). So only a
+    legacy seat a pre-proof host gave can put one id under two households;
+    a tombstone does not count, so an admin removing such a seat clears it
+    and nobody is locked out for good. The local lookup is a primary-key
+    read; the roster read filters ``(space_id, user_id)`` on the primary
+    key's ``space_id`` prefix (≈ 10 000 index rows for a 10 000-follower
+    space), run only after the sender's seat was found."""
+    if await users.get_by_user_id(user_id) is not None:
         return True
-    return bool(await seats.list_instances_of_user(space_id, user_id) - {instance_id})
+    return bool(
+        await seats.list_live_instances_of_user(space_id, user_id) - {instance_id}
+    )

@@ -32,6 +32,13 @@ from ...domain.space import (
     SpaceRole,
     takes_follows,
 )
+from ...federation.gfs_join_request import (
+    PER_SENDER_LIMIT,
+    PER_SENDER_WINDOW_S,
+    PER_SPACE_LIMIT,
+    PER_SPACE_WINDOW_S,
+)
+from ...federation.mesh_member_claim import sender_identity_pk
 from ...infrastructure.event_bus import EventBus
 from ..local_community import (
     LocalAreaBudget,
@@ -39,11 +46,13 @@ from ..local_community import (
     pending_join_request_id,
     require_local_eligibility,
 )
+from ..space_member_guard import user_id_proven
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...domain.space import Space
     from ...federation.federation_service import FederationService
+    from ...rate_limiter import RateLimiter
     from ...repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
@@ -64,7 +73,9 @@ class SpaceInviteInboundHandlers:
 
     __slots__ = (
         "_bus",
+        "_federation",
         "_follow_approver",
+        "_follow_limiter",
         "_local_area_budget",
         "_own_instance_id",
         "_space_repo",
@@ -88,15 +99,25 @@ class SpaceInviteInboundHandlers:
         #: Approves a follow (v_96) — :meth:`attach_follow_approver`; until
         #: then a follow is dropped (fail closed).
         self._follow_approver: FollowApprover | None = None
+        #: Resolves a sender's pinned identity key for the P5 person-ID
+        #: proof of a follow — set by :meth:`attach_to`; until then every
+        #: follow fails that proof (fail closed).
+        self._federation: FederationService | None = None
+        self._follow_limiter: RateLimiter | None = None
 
-    def attach_follow_approver(self, approver: FollowApprover) -> None:
+    def attach_follow_approver(
+        self, approver: FollowApprover, *, rate_limiter: RateLimiter
+    ) -> None:
         """Wire the host's automatic approval of a follow
-        (``SpaceService.approve_remote_follow``). The service is built after
-        these handlers, so it is attached once it exists."""
+        (``SpaceService.approve_remote_follow``) and the limiter that bounds
+        each sending household's follows. The service is built after these
+        handlers, so both are attached once it exists."""
         self._follow_approver = approver
+        self._follow_limiter = rate_limiter
 
     def attach_to(self, federation_service: FederationService) -> None:
         self._own_instance_id = federation_service.own_instance_id
+        self._federation = federation_service
         registry = federation_service._event_registry
         registry.register(FederationEventType.SPACE_INVITE, self._on_invite)
         registry.register(FederationEventType.SPACE_INVITE_VIA, self._on_invite_via)
@@ -270,7 +291,24 @@ class SpaceInviteInboundHandlers:
         inside a local community (outside, near the edge or without a
         location): dropped — following a local community is inside only
         (owner 2026-11-23), with no admin review. Everything else is
-        re-checked by the approver."""
+        re-checked by the approver.
+
+        FIRST the person-ID anchor (P5): ``user_id`` must derive from the
+        sender's pinned identity key with the ``user_anchor`` the request
+        carries — before the ban, the pending request or the local-area
+        budget is read, so an unproven follow is dropped the same silent way
+        whatever that id holds, and never spends another person's budget."""
+        applicant_identity_pk = await sender_identity_pk(self._federation, event)
+        applicant_anchor = event.payload.get("user_anchor")
+        if not user_id_proven(applicant_identity_pk, applicant_anchor, user_id):
+            log.info(
+                "follow from %s for space %s refused: user id %s is not proven "
+                "by the household's identity key",
+                event.from_instance,
+                space_id,
+                user_id,
+            )
+            return
         space = await self._space_repo.get(space_id)
         if not takes_follows(space, self._own_instance_id):
             log.info(
@@ -281,6 +319,32 @@ class SpaceInviteInboundHandlers:
             )
             return
         assert space is not None
+        # Follows are bounded before anything is approved (a seat, a token,
+        # a join-request row per follow) — the GFS bootstrap's numbers and
+        # order: per household first, then a peek at the space's budget
+        # (whoever sends them: a routed follow's origin is any
+        # self-authenticating key, so a fresh origin gets a fresh household
+        # budget), which is charged only right before the approval, so a
+        # rate-limited, banned or repeated follow never spends it. Until the
+        # limiter is wired with the approver, nothing is approved anyway.
+        limiter = self._follow_limiter
+        space_budget = f"follow:space:{space_id}"
+        if limiter is not None and not (
+            limiter.is_allowed(
+                f"follow:sender:{event.from_instance}",
+                limit=PER_SENDER_LIMIT,
+                window_s=PER_SENDER_WINDOW_S,
+            )
+            and limiter.has_room(
+                space_budget, limit=PER_SPACE_LIMIT, window_s=PER_SPACE_WINDOW_S
+            )
+        ):
+            log.info(
+                "follow from %s for space %s dropped: rate limit",
+                event.from_instance,
+                space_id,
+            )
+            return
         if await self._space_repo.is_banned(space_id, user_id):
             log.info(
                 "follow from %s refused: applicant banned from %s",
@@ -339,11 +403,22 @@ class SpaceInviteInboundHandlers:
                 space_id,
             )
             return
+        if limiter is not None and not limiter.is_allowed(
+            space_budget, limit=PER_SPACE_LIMIT, window_s=PER_SPACE_WINDOW_S
+        ):
+            log.info(
+                "follow from %s for space %s dropped: rate limit",
+                event.from_instance,
+                space_id,
+            )
+            return
         await self._follow_approver(
             space_id=space_id,
             instance_id=event.from_instance,
             user_id=user_id,
             request_id=str(request_id),
+            applicant_identity_pk=applicant_identity_pk,
+            applicant_anchor=applicant_anchor,
             applicant_pk=str(applicant_pk) if applicant_pk else None,
             area_verdict=verdict,
         )

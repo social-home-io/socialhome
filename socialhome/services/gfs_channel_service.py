@@ -1371,6 +1371,22 @@ class GfsChannelService:
         grant = await self._delegate_grant(space.id)
         return grant.gfs_ids if grant is not None else ()
 
+    async def _grant_gfs_ids(self, space: Space) -> tuple[str, ...]:
+        """The servers a grant we issue or publish with names (at most
+        :data:`MAX_GRANT_GFS_IDS`): :meth:`_channel_gfs_ids`; on the OWNER,
+        when this process has not re-registered the channel yet (a restart
+        before the reconnect's heal, the GFS unreachable), the chosen
+        capable servers — the channel lives there. A server that lost it
+        refuses, and that subscribe / item is retried like any transient
+        failure; without the fallback an owner rekey in that window issued
+        no grant and every seat dropped (``drop_stale``)."""
+        gfs_ids = await self._channel_gfs_ids(space)
+        if not gfs_ids and space.owner_instance_id == self._own_instance_id:
+            gfs_ids = tuple(
+                sorted(c.gfs_instance_id for c in await self._chosen_capable(space))
+            )
+        return gfs_ids[:MAX_GRANT_GFS_IDS]
+
     async def _delegate_grant(self, space_id: str) -> GfsChannelGrant | None:
         """A delegated admin's newest grant for the space's channel: the one
         for our latest epoch, else the newest stored below it — right after
@@ -1659,7 +1675,7 @@ class GfsChannelService:
         pk = await self._writer_certs.verified_instance_pk(instance_id)
         if pk is None or len(pk) != 32:
             return None
-        gfs_ids = (await self._channel_gfs_ids(space))[:MAX_GRANT_GFS_IDS]
+        gfs_ids = await self._grant_gfs_ids(space)
         if not gfs_ids:
             return None
         channel_id, channel_seed = found
@@ -1991,16 +2007,7 @@ class GfsChannelService:
         seed = await self._matching_seed(space)
         if found is None or seed is None:
             return None
-        gfs_ids = await self._channel_gfs_ids(space)
-        if not gfs_ids:
-            # Not re-registered in this process yet (a restart before the
-            # reconnect's heal): the chosen capable servers — the channel
-            # lives there; a server that lost it refuses, and that item is
-            # retried like any transient failure.
-            gfs_ids = tuple(
-                sorted(c.gfs_instance_id for c in await self._chosen_capable(space))
-            )
-        gfs_ids = gfs_ids[:MAX_GRANT_GFS_IDS]
+        gfs_ids = await self._grant_gfs_ids(space)
         if not gfs_ids:
             return None
         channel_id, channel_seed = found

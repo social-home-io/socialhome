@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from socialhome.crypto import derive_user_id, generate_identity_keypair
 from socialhome.domain.events import (
     RemoteJoinRequestApproved,
     RemoteJoinRequestDenied,
@@ -15,7 +16,14 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.federation.gfs_join_request import (
+    PER_SENDER_LIMIT,
+    PER_SENDER_WINDOW_S,
+    PER_SPACE_LIMIT,
+    PER_SPACE_WINDOW_S,
+)
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.rate_limiter import RateLimiter
 from socialhome.services.federation_inbound import SpaceInviteInboundHandlers
 from socialhome.services.local_community import MAX_LOCAL_AREA_CHECKS_PER_PERSON
 from tests.local_area_budget import memory_budget
@@ -29,10 +37,21 @@ class _FakeRegistry:
         self.registered.append((t, h))
 
 
+#: Household ``peer-a``'s identity key (pinned on its peer row); its
+#: person ``ann``'s user id derives from it (P5 person-ID anchor).
+PEER_A_PK = generate_identity_keypair().public_key
+U_FOLLOWER = derive_user_id(PEER_A_PK, "ann")
+#: Household ``peer-b``'s identity key — a second sending household.
+PEER_B_PK = generate_identity_keypair().public_key
+
+
 class _FakeFederationService:
     def __init__(self) -> None:
         self._event_registry = _FakeRegistry()
         self.own_instance_id = "self"
+
+    async def peer_identity_public_key(self, instance_id):
+        return {"peer-a": PEER_A_PK, "peer-b": PEER_B_PK}.get(instance_id)
 
 
 def _space(
@@ -835,23 +854,25 @@ def _follow_space(**kw) -> Space:
     return replace(_space(**kw), features=SpaceFeatures(allow_subscribers=True))
 
 
-def _follow_handlers(bus, repo, *, approver=None):
+def _follow_handlers(bus, repo, *, approver=None, limiter=None):
     h = SpaceInviteInboundHandlers(
         bus=bus, space_repo=repo, local_area_budget=memory_budget()
     )
     h.attach_to(_FakeFederationService())
     if approver is not None:
-        h.attach_follow_approver(approver)
+        h.attach_follow_approver(approver, rate_limiter=limiter or RateLimiter())
     return h
 
 
 async def _follow(h, *, from_instance="peer-a", location=None, **extra):
     payload: dict = {
-        "user_id": "u-1",
+        "user_id": U_FOLLOWER,
+        "user_anchor": "ann",
         "request_id": "req-f",
         "requested_role": "subscriber",
         **extra,
     }
+    payload = {k: v for k, v in payload.items() if v is not None}
     if location is not None:
         payload["join_location"] = location
     await h._on_join_request(
@@ -886,14 +907,58 @@ async def test_a_follow_goes_to_the_approver_whatever_the_join_mode(
         {
             "space_id": "sp-1",
             "instance_id": "peer-a",
-            "user_id": "u-1",
+            "user_id": U_FOLLOWER,
             "request_id": "req-f",
+            "applicant_identity_pk": PEER_A_PK,
+            "applicant_anchor": "ann",
             "applicant_pk": "pk-1",
             "area_verdict": None,
         }
     ]
     assert repo.join_requests == []
     assert seen == []
+
+
+@pytest.mark.parametrize(
+    ("case", "extra"),
+    [
+        ("somebody-elses-id", {"user_id": derive_user_id(b"\x05" * 32, "ann")}),
+        ("wrong-anchor", {"user_anchor": "eve"}),
+        ("missing-anchor", {"user_anchor": None}),
+        ("unpinned-sender", {}),
+    ],
+)
+@pytest.mark.parametrize("state", ["unknown", "banned", "pending"])
+async def test_an_unproven_follow_is_dropped_first(bus, repo, case, extra, state):
+    """P5 person-ID anchor: a follow must prove its ``user_id`` against the
+    sender's pinned key — checked FIRST, so it is dropped the same silent
+    way whether the id is banned, already asking or unknown, and it never
+    spends anybody's local-area budget."""
+    repo.spaces["sp-1"] = _local_follow_space()
+    uid = extra.get("user_id", U_FOLLOWER)
+    if state == "banned":
+        repo.banned.add(("sp-1", uid))
+    elif state == "pending":
+        repo.pending.append(
+            {
+                "id": "req-old",
+                "space_id": "sp-1",
+                "user_id": uid,
+                "remote_applicant_instance_id": "peer-a",
+            }
+        )
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(
+        h,
+        from_instance="peer-b" if case == "unpinned-sender" else "peer-a",
+        location=NEAR,
+        **extra,
+    )
+    assert approver.calls == []
+    assert repo.join_requests == []
+    # Nobody's local-area budget was spent.
+    assert h._local_area_budget._repo.rows == {}
 
 
 async def test_a_follow_is_dropped_when_the_space_takes_no_followers(bus, repo):
@@ -925,7 +990,7 @@ async def test_a_follow_of_a_space_not_hosted_here_live_and_public_is_dropped(
 
 async def test_a_banned_follower_is_dropped(bus, repo):
     repo.spaces["sp-1"] = _follow_space()
-    repo.banned.add(("sp-1", "u-1"))
+    repo.banned.add(("sp-1", U_FOLLOWER))
     approver = _Approver()
     h = _follow_handlers(bus, repo, approver=approver)
     await _follow(h)
@@ -938,7 +1003,7 @@ async def test_a_follow_while_a_request_is_pending_is_dropped(bus, repo):
         {
             "id": "req-old",
             "space_id": "sp-1",
-            "user_id": "u-1",
+            "user_id": U_FOLLOWER,
             "remote_applicant_instance_id": "peer-a",
         }
     )
@@ -954,6 +1019,35 @@ async def test_a_follow_without_an_approver_is_dropped(bus, repo):
     h = _follow_handlers(bus, repo)
     await _follow(h)
     assert repo.join_requests == []
+
+
+async def test_follows_from_one_household_are_rate_limited(bus, repo):
+    """P5 (v_96): a paired or mesh household's follows are bounded per
+    sending household — the GFS bootstrap's numbers (10 per hour per
+    sender) — before the approval, not only by the 600/min inbound budget.
+    Another household keeps its own budget."""
+    repo.spaces["sp-1"] = _follow_space()
+    approver = _Approver()
+    limiter = RateLimiter()
+    h = _follow_handlers(bus, repo, approver=approver, limiter=limiter)
+    for i in range(PER_SENDER_LIMIT + 3):
+        await _follow(
+            h,
+            user_id=derive_user_id(PEER_A_PK, f"p{i}"),
+            user_anchor=f"p{i}",
+            request_id=f"req-{i}",
+        )
+    assert len(approver.calls) == PER_SENDER_LIMIT
+    await _follow(
+        h,
+        from_instance="peer-b",
+        user_id=derive_user_id(PEER_B_PK, "pb"),
+        user_anchor="pb",
+        request_id="req-b",
+    )
+    assert len(approver.calls) == PER_SENDER_LIMIT + 1
+    assert approver.calls[-1]["instance_id"] == "peer-b"
+    assert PER_SENDER_WINDOW_S == 3600
 
 
 async def test_an_unknown_requested_role_is_dropped(bus, repo):
@@ -1015,3 +1109,33 @@ async def test_a_join_request_without_a_role_is_unchanged(bus, repo):
     await _request(h, "peer-a", None, request_id="req-j")
     assert approver.calls == []
     assert [r[4] for r in repo.join_requests] == ["req-j"]
+
+
+async def test_follows_to_one_space_are_bounded_whoever_sends_them(bus, repo):
+    """P5 review: a routed follow's origin is any self-authenticating key,
+    so a fresh origin per follow would get a fresh per-household budget.
+    The space's own budget (the GFS bootstrap's 120 per hour) bounds them
+    all, before the approval."""
+    repo.spaces["sp-1"] = _follow_space()
+    approver = _Approver()
+    limiter = RateLimiter()
+    for _ in range(PER_SPACE_LIMIT):
+        assert limiter.is_allowed(
+            "follow:space:sp-1", limit=PER_SPACE_LIMIT, window_s=PER_SPACE_WINDOW_S
+        )
+    h = _follow_handlers(bus, repo, approver=approver, limiter=limiter)
+    await _follow(h)
+    assert approver.calls == []
+
+
+async def test_a_refused_follow_never_spends_the_space_budget(bus, repo):
+    """The space's budget is charged only right before the approval (the
+    GFS bootstrap's order): one household's rate-limited, banned or repeat
+    follows cannot use it up for everyone else."""
+    repo.spaces["sp-1"] = _follow_space()
+    repo.banned.add(("sp-1", U_FOLLOWER))
+    limiter = RateLimiter()
+    h = _follow_handlers(bus, repo, approver=_Approver(), limiter=limiter)
+    for i in range(PER_SENDER_LIMIT + 5):
+        await _follow(h, request_id=f"req-{i}")
+    assert limiter.has_room("follow:space:sp-1", limit=1, window_s=PER_SPACE_WINDOW_S)

@@ -296,6 +296,14 @@ class User:
     def is_active(self) -> bool:
         return self.state == "active" and self.deleted_at is None
 
+    @property
+    def person_anchor(self) -> str:
+        """What ``user_id`` derives from under this household's key
+        (``derive_user_id(own_instance_pk, person_anchor)``): the
+        ``identity_anchor``, or the username of a row that predates it. The
+        one spelling every person-ID proof sends (P5)."""
+        return self.identity_anchor or self.username
+
 
 @dataclass(slots=True, frozen=True)
 class RemoteUser:

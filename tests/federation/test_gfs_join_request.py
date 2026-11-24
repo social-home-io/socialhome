@@ -26,6 +26,7 @@ import orjson
 import pytest
 from aiohttp.test_utils import TestServer
 
+from socialhome.crypto import derive_user_id, generate_identity_keypair
 from socialhome.domain.events import (
     RemoteJoinRequestBusy,
     SpaceJoinRequested,
@@ -1262,8 +1263,26 @@ async def _followable_space(
     return space
 
 
-def _follow(sender, **fields) -> dict:
-    return _signed(sender, requested_role="subscriber", **fields)
+def _uid(sender, label: str) -> str:
+    """The user id *sender*'s person minted from the anchor ``label`` has
+    (P5 person-ID anchor: it derives from the household's key)."""
+    return derive_user_id(sender.identity_pk, label)
+
+
+def _follow(sender, *, user_id: str, anchor: object = "", **fields) -> dict:
+    """A follow by *sender*'s person ``user_id`` (a label: the id sent is
+    the one it derives to, proven by the anchor ``user_id`` — unless the
+    test names an ``anchor``; ``None`` sends none)."""
+    body = {"user_anchor": user_id if anchor == "" else anchor}
+    if body["user_anchor"] is None:
+        body = {}
+    return _signed(
+        sender,
+        requested_role="subscriber",
+        user_id=_uid(sender, user_id),
+        **body,
+        **fields,
+    )
 
 
 def _approver(b, *, approved: bool = True) -> AsyncMock:
@@ -1377,8 +1396,10 @@ async def test_a_follow_is_handed_to_the_approver_with_the_relay_contact(
     assert kwargs == {
         "space_id": space.id,
         "instance_id": a.instance_id,
-        "user_id": "u-fan",
+        "user_id": _uid(a, "u-fan"),
         "request_id": "rq-f",
+        "applicant_identity_pk": a.identity_pk,
+        "applicant_anchor": "u-fan",
         "applicant_pk": "pk-fan",
         "area_verdict": None,
     }
@@ -1558,11 +1579,11 @@ async def test_a_follow_over_the_space_budget_answers_busy(households, gfs):
 async def test_a_banned_or_pending_follower_is_dropped_without_a_word(households, gfs):
     a, b = households
     space = await _followable_space(b, gfs, a, join_mode=JoinMode.REQUEST)
-    await b.space_repo.ban_member(space.id, "banned-u", banned_by=b.user_id)
+    await b.space_repo.ban_member(space.id, _uid(a, "banned-u"), banned_by=b.user_id)
     # A member request of "asker" already waits for the admins.
     assert (
         await b.gfsjoin.join.handle_body(
-            _signed(a, space_id=space.id, user_id="asker", request_id="first")
+            _signed(a, space_id=space.id, user_id=_uid(a, "asker"), request_id="first")
         )
     )["filed"] is True
     approve = _approver(b)
@@ -1574,6 +1595,53 @@ async def test_a_banned_or_pending_follower_is_dropped_without_a_word(households
         assert out == {"ok": True, "filed": False}
     approve.assert_not_awaited()
     assert await _answers_to(gfs, a) == before
+
+
+@pytest.mark.parametrize(
+    "case", ["somebody-elses-id", "wrong-anchor", "missing-anchor"]
+)
+@pytest.mark.parametrize("state", ["unknown", "banned", "pending"])
+async def test_an_unproven_follow_is_dropped_first(households, gfs, case, state):
+    """P5 person-ID anchor: a follow through the GFS must prove its user id
+    against the key its sealed body carries (bound to its instance id). It
+    is checked before the ban, the pending request and the space budget:
+    the same silent drop whatever that id holds, no approval, nothing
+    filed, no budget spent."""
+    a, b = households
+    space = await _followable_space(b, gfs, a, join_mode=JoinMode.REQUEST)
+    victim = derive_user_id(generate_identity_keypair().public_key, "fan")
+    uid = victim if case == "somebody-elses-id" else _uid(a, "fan")
+    if state == "banned":
+        await b.space_repo.ban_member(space.id, uid, banned_by=b.user_id)
+    elif state == "pending":
+        assert (
+            await b.gfsjoin.join.handle_body(
+                _signed(a, space_id=space.id, user_id=uid, request_id="first")
+            )
+        )["filed"] is True
+    approve = _approver(b)
+    before = await _answers_to(gfs, a)
+    anchor = {"somebody-elses-id": "fan", "wrong-anchor": "eve"}.get(case)
+    body = _signed(
+        a,
+        space_id=space.id,
+        user_id=uid,
+        request_id="rq-p5",
+        requested_role="subscriber",
+        **({"user_anchor": anchor} if anchor else {}),
+    )
+    b.gfsjoin.join._rate_limiter = RateLimiter()
+    with patch.object(gfs_join_module, "PER_SPACE_LIMIT", 1):
+        out = await b.gfsjoin.join.handle_body(body, gfs_url=gfs.url)
+        assert out == {"ok": True, "filed": False}
+        approve.assert_not_awaited()
+        assert await _answers_to(gfs, a) == before
+        assert await b.space_repo.get_join_request("rq-p5") is None
+        # The space budget was not spent: a proven follow still gets in.
+        again = await b.gfsjoin.join.handle_body(
+            _follow(a, user_id="other", space_id=space.id, request_id="rq-ok")
+        )
+    assert again["filed"] is True
 
 
 async def test_a_follow_under_a_used_request_id_is_refused(households, gfs):

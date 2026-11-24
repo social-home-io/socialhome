@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import logging
 import re
 import time
@@ -318,6 +319,7 @@ from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
 from .local_community import (
+    APPROVAL_HONOURED_DAYS,
     LocalAreaBudget,
     hosted_local_area,
     join_location_for,
@@ -344,7 +346,7 @@ from .space_member_guard import (
     SpaceMemberGuardMixin,
     require_seat,
     seat_of,
-    user_id_of_another_household,
+    user_id_proven,
 )
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
@@ -447,6 +449,11 @@ DEFAULT_INVITE_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
 #: for days. A follow through the GFS keeps the long wait (the relay queue
 #: may hold the answer for 24 h).
 FOLLOW_REQUEST_TTL = timedelta(minutes=15)
+
+#: How old an owed content-key rotation (a follower's leave or removal,
+#: v_96) gets before the sweep pays it — any rotation in between pays it
+#: first (spaces.md "Followers (v_96)" → "Keys and rotation").
+OWED_ROTATION_MIN_AGE = timedelta(hours=24)
 
 #: Post content caps — matches FeedService values.
 MAX_POST_LENGTH = 10_000
@@ -717,6 +724,7 @@ class SpaceService(
         "_delegation_blocked_told",
         "_federation",
         "_federation_repo",
+        "_followers_rekeyed",
         "_gallery",
         "_gfs",
         "_gfs_join",
@@ -778,6 +786,11 @@ class SpaceService(
         #: D1 notices told per space (monotonic seconds), see
         #: :meth:`_tell_owner_delegation_blocked`.
         self._delegation_blocked_told: dict[str, float] = {}
+        #: The newest ``(epoch, key digest)`` per space whose delegated-admin
+        #: rekey this owner re-sent to its GFS-reached followers
+        #: (:meth:`relay_admin_rekey_to_followers`) — the key, not only the
+        #: epoch: a tiebreak winner replaces a key at the same epoch.
+        self._followers_rekeyed: dict[str, tuple[int, bytes]] = {}
         self._own_instance_id = own_instance_id
         # When both are set, a deleted space post's media file(s) are
         # removed once the post row + its gallery system-album mirror are
@@ -3706,6 +3719,7 @@ class SpaceService(
         delegated_admin_just_enabled = False
         delegated_admin_just_disabled = False
         subscribers_just_disabled = False
+        rotated_for_followers = False
         if features is not None:
             location_mode_changed = (
                 features.location_mode != space.features.location_mode
@@ -3910,12 +3924,18 @@ class SpaceService(
             # real members are untouched, since ``unfollow_space`` refuses
             # to end anything but a subscriber seat. Only OUR people: a
             # self-leave (gossip, SPACE_INSTANCE_LEFT) is never run in the
-            # name of another household's mirrored person. Remote follower
-            # seats are ended by the owed-rotation phase (P5).
+            # name of another household's mirrored person.
             local_ids = set(await self._spaces.list_local_member_user_ids(space_id))
             for member in await self._spaces.list_members(space_id):
                 if member.user_id in local_ids and member.role == SpaceRole.SUBSCRIBER:
                     await self.unfollow_space(member.user_id, space_id)
+            # On the owner — the switch is owner-only (``_require_owner``
+            # above), so no delegated admin gets here: every remote follower
+            # seat ends too and the key rotates at once — not owed (v_96) —
+            # which also locks out the GFS subscribers sealed to.
+            if space.owner_instance_id == self._own_instance_id:
+                await self._end_remote_follower_seats(updated)
+                rotated_for_followers = True
         if location_mode_changed:
             # §23.8.6: refire latest presence so receivers see the new
             # privacy tier within seconds rather than waiting for the
@@ -3953,11 +3973,19 @@ class SpaceService(
                 space_id
             ):
                 await self.share_admin_signing_seed(updated, instance_id=admin_instance)
-        if features is not None and (
-            features.posts_access != space.features.posts_access
-            or features.allow_subscriber_comment
-            != space.features.allow_subscriber_comment
-            or features.allow_subscriber_react != space.features.allow_subscriber_react
+        # Followers off already rotated: that rekey carries every household
+        # its new credentials, so a rights change in the same edit adds no
+        # second rotation.
+        if (
+            features is not None
+            and not rotated_for_followers
+            and (
+                features.posts_access != space.features.posts_access
+                or features.allow_subscriber_comment
+                != space.features.allow_subscriber_comment
+                or features.allow_subscriber_react
+                != space.features.allow_subscriber_react
+            )
         ):
             await self._writer_certs_after_rights_change(space, updated)
         if (
@@ -4685,9 +4713,11 @@ class SpaceService(
         await self._end_local_seat(
             space, target, actor_user_id=actor.user_id, is_self=is_self
         )
-        if is_self and target.role == SpaceRole.SUBSCRIBER:
-            # A follower leaving (unfollow) does not rotate at once: the
-            # rotation is owed and batched (v_96).
+        if target.role == SpaceRole.SUBSCRIBER:
+            # A follower's leave (unfollow) or removal (not a ban) does not
+            # rotate at once: the rotation is owed and batched (v_96,
+            # :meth:`rotation_owed`). A local follower's household is this
+            # one and keeps the key anyway.
             return
         await self._rotate_and_distribute_space_key(space_id)
 
@@ -4805,37 +4835,23 @@ class SpaceService(
             )
             return True
         scope_before = await self.writer_entitlement(space, instance_id)
-        for seat in ending:
-            await self._remote_members.remove(space_id, instance_id, seat.user_id)
-        remaining = await self._remote_members.list_for_instance(
-            space_id, instance_id, include_tombstoned=False
-        )
-        if not remaining:
-            await self._spaces.remove_space_instance(space_id, instance_id)
-        for seat in ending:
-            await self._emit_member_roster_gossip(
-                space,
-                user_id=seat.user_id,
-                instance_id=instance_id,
-                display_name=seat.display_name,
-                user_pk=seat.user_pk,
-                role=seat.role,
-                tombstoned=True,
-            )
+        orphaned = await self._end_remote_seats(space, instance_id, ending)
         admin_ended = any(r.role == SpaceRole.ADMIN for r in ending)
         follows = admin_ended and await self._authority_rotation_follows(
             space, instance_id
         )
-        # Rotates only when the household's writer scope weakened: a
-        # read-only follower (no writer cert) leaves without a rotation; a
-        # follower holding a ``reader`` comment cert rotates at once until
-        # the owed-rotation sweep exists (v_96).
-        await self.rotate_if_writer_scope_weakened(
-            space_id,
-            instance_id,
-            scope_before,
-            authority_rotation_follows=follows,
-        )
+        # Rotates when the household's writer scope weakened — unless only
+        # follower seats ended: then not at once, even for a follower that
+        # held a ``reader`` comment cert. The rotation is owed (v_96,
+        # :meth:`rotation_owed`), paid by the next rotation or the daily
+        # sweep (:meth:`pay_owed_rotation`).
+        if not all(r.role == SpaceRole.SUBSCRIBER for r in ending):
+            await self.rotate_if_writer_scope_weakened(
+                space_id,
+                instance_id,
+                scope_before,
+                authority_rotation_follows=follows,
+            )
         if admin_ended:
             await self._publish_admin_revoked(
                 space_id,
@@ -4847,9 +4863,122 @@ class SpaceService(
             )
         # LAST, as on a kick: a link-joined household's §D2b seat loses its
         # reason to exist once it shares no space with us any more.
-        if not remaining:
+        if orphaned:
             await self.revoke_space_session_if_orphaned(instance_id)
         return True
+
+    async def _end_remote_seats(
+        self,
+        space: Space,
+        instance_id: str,
+        ending: list[SpaceRemoteMember],
+    ) -> bool:
+        """Host side: end ``ending`` — live seats of household
+        ``instance_id`` — the way its own leave does: tombstone each, drop
+        its ``space_instances`` row with its last seat (BEFORE any rotation,
+        so the new key never reaches it), gossip each ended seat. The caller
+        decides on the rotation and, once that went out, on the §D2b seat.
+        Returns whether the household has no live seat left."""
+        orphaned = await self._tombstone_remote_seats(space, instance_id, ending)
+        await self._gossip_ended_seats(space, instance_id, ending)
+        return orphaned
+
+    async def _tombstone_remote_seats(
+        self,
+        space: Space,
+        instance_id: str,
+        ending: list[SpaceRemoteMember],
+    ) -> bool:
+        """Tombstone ``ending`` and drop the household's ``space_instances``
+        row with its last live seat. Returns whether none is left.
+
+        The row goes FIRST: a rotation minting between the two steps then
+        never reaches the household, and one minting after the tombstone is
+        newer than ``removed_at`` — no window where the leaver gets the new
+        key and the space owes nothing."""
+        assert self._remote_members is not None
+        ending_ids = {seat.user_id for seat in ending}
+        live = await self._remote_members.list_for_instance(
+            space.id, instance_id, include_tombstoned=False
+        )
+        orphaned = all(seat.user_id in ending_ids for seat in live)
+        # A crash between the two leaves a live seat with no fan-out row:
+        # the household gets nothing until the leave / kick is retried —
+        # the safe side (the old order left a row with no seat).
+        if orphaned:
+            await self._spaces.remove_space_instance(space.id, instance_id)
+        for seat in ending:
+            await self._remote_members.remove(space.id, instance_id, seat.user_id)
+        return orphaned
+
+    async def _gossip_ended_seats(
+        self,
+        space: Space,
+        instance_id: str,
+        ending: list[SpaceRemoteMember],
+    ) -> None:
+        """The authority-signed LEFT gossip for each ended seat, to the
+        households still in the space."""
+        for seat in ending:
+            await self._emit_member_roster_gossip(
+                space,
+                user_id=seat.user_id,
+                instance_id=instance_id,
+                display_name=seat.display_name,
+                user_pk=seat.user_pk,
+                role=seat.role,
+                tombstoned=True,
+            )
+
+    async def _end_remote_follower_seats(self, space: Space) -> None:
+        """``allow_subscribers`` turned off on the owner: end EVERY live
+        remote follower seat, then rotate the content key ONCE.
+
+        A seat is a seat: a follower is a member with the read-only role on
+        every path (owner rule, v_96), so the seats a follow, a GFS or an
+        explicit follower link created all end — one rule, though
+        invites.md lets a follower link be minted with the switch off.
+
+        In three passes, so the cost stays linear: each household is told
+        (as on a kick, one notice per seat), then EVERY seat is tombstoned
+        and every follower-only household leaves ``space_instances``, and
+        only then is each ended seat gossiped — to the member households
+        left, never to the followers being removed (gossiping seat by seat
+        while they were still listed cost N²/2 sends for N followers). The
+        rotation follows at once (no owed debt), then a household left with
+        no shared space loses its §D2b seat. Cost: N notices + N × M LEFT
+        entries for M member households + M rekeys.
+        """
+        if self._remote_members is None:
+            return
+        by_household: dict[str, list[SpaceRemoteMember]] = {}
+        for seat in await self._remote_members.list_for_space(space.id):
+            if seat.role == SpaceRole.SUBSCRIBER and seat.instance_id:
+                by_household.setdefault(seat.instance_id, []).append(seat)
+        households = sorted(by_household.items())
+        if self._federation is not None:
+            for instance_id, seats in households:
+                for seat in seats:
+                    await self._tell_removed_household(
+                        space.id, instance_id, seat.user_id
+                    )
+        orphaned: list[str] = []
+        for instance_id, seats in households:
+            if await self._tombstone_remote_seats(space, instance_id, seats):
+                orphaned.append(instance_id)
+        for instance_id, seats in households:
+            await self._gossip_ended_seats(space, instance_id, seats)
+            for seat in seats:
+                await self._bus.publish(
+                    SpaceRemoteSeatEnded(
+                        space_id=space.id,
+                        instance_id=instance_id,
+                        user_id=seat.user_id,
+                    )
+                )
+        await self._rotate_and_distribute_space_key(space.id)
+        for instance_id in orphaned:
+            await self.revoke_space_session_if_orphaned(instance_id)
 
     async def set_role(
         self,
@@ -5061,6 +5190,62 @@ class SpaceService(
             instance_id,
             scope_before,
             after,
+        )
+        await self._rotate_and_distribute_space_key(space_id)
+        return True
+
+    async def rotation_owed(self, space_id: str) -> datetime | None:
+        """Since when ``space_id`` owes a content-key rotation (UTC), or
+        ``None`` (v_96).
+
+        A follower's leave or removal (not a ban) ends its seat without a
+        rotation; the space owes one while that tombstone is at least as new
+        as the current key. Any rotation pays it — the new key is newer —
+        so there is no state of its own to keep or clear.
+        """
+        if self._remote_members is None:
+            return None
+        since = await self._remote_members.owed_rotation_since(space_id)
+        return _owed_since(since) if since is not None else None
+
+    async def list_spaces_owing_rotation(self) -> list[tuple[str, datetime]]:
+        """Every space that owes a rotation, with since when (the sweep)."""
+        if self._remote_members is None:
+            return []
+        return [
+            (space_id, _owed_since(since))
+            for space_id, since in await self._remote_members.list_spaces_owing_rotation()
+        ]
+
+    async def pay_owed_rotation(
+        self,
+        space_id: str,
+        *,
+        min_age: timedelta = OWED_ROTATION_MIN_AGE,
+    ) -> bool:
+        """Rotate ``space_id``'s content key once when its owed rotation is
+        at least ``min_age`` old. Only the owner or a seed-holding acting
+        host rotates (its rekey is authority-signed), the admin only once
+        the debt is ``2 × min_age`` old; the debt is re-read here, so a
+        rotation that ran meanwhile is not doubled. Returns whether it
+        rotated."""
+        space = await self._spaces.get(space_id)
+        if space is None or not self._own_instance_id:
+            return False
+        if space.owner_instance_id != self._own_instance_id:
+            if not await self._executes_locally_as_delegated_admin(space):
+                return False
+            # The owner pays first: a seed-holding admin pays only a debt
+            # the owner left for a whole extra ``min_age`` (it is away), so
+            # the owner and K admins do not each rotate the same debt.
+            min_age = min_age * 2
+        since = await self.rotation_owed(space_id)
+        if since is None or datetime.now(UTC) - since < min_age:
+            return False
+        log.info(
+            "space %s: paying the content-key rotation owed since %s",
+            space_id,
+            since.isoformat(),
         )
         await self._rotate_and_distribute_space_key(space_id)
         return True
@@ -6284,13 +6469,20 @@ class SpaceService(
                 actor_username=actor_username,
                 instance_id=remote_seat.instance_id,
                 user_id=user_id,
+                banned=True,
             )
             return
         if stale_seat is not None:
             # The user's seat on another household is already a tombstone.
             # The ban still lands; the LEFT gossip names THAT household (not
             # ours), and an admin seat that ended without a rotation now gets
-            # one (v_44).
+            # one (v_44). A follower's debt is read BEFORE the gossip: its
+            # re-tombstone stamps ``removed_at`` now, after which every such
+            # ban would look owed.
+            follower_owed = (
+                stale_seat.role == SpaceRole.SUBSCRIBER
+                and await self.rotation_owed(space_id) is not None
+            )
             await self._bus.publish(
                 SpaceConfigChanged(
                     space_id=space_id,
@@ -6317,6 +6509,12 @@ class SpaceService(
                         space_id=space_id, instance_id=stale_seat.instance_id
                     )
                 )
+            elif follower_owed:
+                # The space owes a rotation (this follower's leave, or another
+                # follower's): a ban pays it now instead of at the sweep, so
+                # a banned follower who left under the current key loses it
+                # at once (v_96).
+                await self._rotate_and_distribute_space_key(space_id)
             return
         # A ban is a ROSTER mutation, not a config edit — it must NOT advance
         # config_sequence. The removal federates via the LEFT gossip below
@@ -7417,6 +7615,91 @@ class SpaceService(
                     space_id,
                 )
 
+    async def relay_admin_rekey_to_followers(self, space_id: str, meta: dict) -> int:
+        """Owner side (v_96): re-send a seed-holding delegated admin's rekey
+        to the follower households only the owner reaches. Returns how many.
+
+        The admin holds no row or mailbox card for a follower that came
+        through a GFS, and sync does not carry the key, so its rotation
+        alone leaves that follower reading nothing until the owner rotates.
+        The owner, which applied the rekey (``meta`` — the admin's
+        authority-signed ``space_content_key``, unchanged), sends it over the
+        ordinary member rekey path (each copy with the household's own
+        writer cert / channel grant for the epoch) to exactly the
+        follower-only households it holds a space-session row for. A writer
+        household is reached by the admin's own broadcast; a paired or
+        mesh follower too.
+
+        Only on the owner, only for another household's rotation, only when
+        ``meta`` is the key it now holds at its current epoch (a rekey that
+        lost the smallest-``rotated_by`` tiebreak is not passed on), and
+        once per epoch per space in this process (a repeat or another
+        relay's copy sends nothing). Never raises out of the fan-out."""
+        if self._federation is None or self._space_crypto is None:
+            return 0
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id != self._own_instance_id:
+            return 0
+        rotated_by = meta.get("rotated_by")
+        if not isinstance(rotated_by, str) or rotated_by in (
+            "",
+            self._own_instance_id,
+        ):
+            return 0
+        exported = await self._space_crypto.export_current_key(space_id)
+        if exported is None:
+            return 0
+        epoch, raw_key = exported
+        try:
+            held = int(meta.get("epoch", -1)) == epoch and base64.b64decode(
+                str(meta.get("key_base64") or ""), validate=True
+            ) == bytes(raw_key)
+        except TypeError, ValueError, binascii.Error:
+            return 0
+        mark = (epoch, hashlib.sha256(bytes(raw_key)).digest())
+        previous = self._followers_rekeyed.get(space_id)
+        if not held or (
+            previous is not None and (previous[0] > epoch or previous == mark)
+        ):
+            return 0
+        # Marked before the awaits (a concurrent copy sends nothing), handed
+        # back when the broadcast fails so the next copy is sent.
+        self._followers_rekeyed[space_id] = mark
+        targets = sorted(
+            await self._federation.gfs_reached_followers(
+                space_id, await self._spaces.list_member_instances(space_id)
+            )
+        )
+        if not targets:
+            return 0  # the mark stays: a later copy has nobody new either
+        per_peer = (
+            self._writer_certs.peer_payload_hook(space_id, epoch=epoch)
+            if self._writer_certs is not None
+            else None
+        )
+        try:
+            await self._federation.broadcast_to_space_members(
+                space_id,
+                FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+                {"space_id": space_id, "space_content_key": dict(meta)},
+                per_peer=per_peer,
+                only_instances=targets,
+            )
+        except Exception:
+            log.exception(
+                "relay_admin_rekey_to_followers: rekey to %d follower "
+                "household(s) of %s failed",
+                len(targets),
+                space_id,
+            )
+            if self._followers_rekeyed.get(space_id) == mark:
+                if previous is None:
+                    del self._followers_rekeyed[space_id]
+                else:
+                    self._followers_rekeyed[space_id] = previous
+            return 0
+        return len(targets)
+
     async def invite_remote_user(
         self,
         space_id: str,
@@ -7721,13 +8004,19 @@ class SpaceService(
         # host's roster otherwise shows the raw ``user_id``).
         display = None
         user_pk = None
+        anchor = None
         user = await self._users.get_by_user_id(user_id)
         if user is not None:
             display = user.display_name or user.username
             user_pk = getattr(user, "public_key", None)
+            anchor = user.person_anchor
         accept_payload: dict = {
             "invite_token": token,
             "invitee_user_id": user_id,
+            # P5 — the person's identity anchor: the host seats only an id
+            # that derives from our identity key with it. Inside the
+            # encrypted payload (mesh: sealed end to end).
+            "invitee_anchor": anchor,
             "invitee_public_key": user_pk,
             "invitee_display_name": display,
         }
@@ -7938,8 +8227,13 @@ class SpaceService(
         actor_username: str,
         instance_id: str,
         user_id: str,
+        banned: bool = False,
     ) -> None:
-        """§D1b — drop a remote member + tell their household."""
+        """§D1b — drop a remote member + tell their household.
+
+        The content key rotates at once — except for a follower's removal
+        that is not a ban (``banned``): that rotation is owed (v_96,
+        :meth:`rotation_owed`)."""
         if self._federation is None or self._remote_members is None:
             raise RuntimeError("federation not attached")
         space = await self._require_space(space_id)
@@ -7964,26 +8258,23 @@ class SpaceService(
         # removal half-way: the seat gone on its own household, no gossip,
         # no rekey. Telling is best effort now; the removal always completes.
         await self._tell_removed_household(space_id, instance_id, user_id)
+        # With its last live seat the household leaves ``space_instances``
+        # (audit-fix, PR #429: no more space content shipped to a household
+        # with nobody in the space) — BEFORE the tombstone (see
+        # :meth:`_tombstone_remote_seats`): a key minted in between never
+        # reaches the household, one minted after is owed.
+        still_present = any(
+            r.instance_id == instance_id and r.user_id != user_id
+            for r in await self._remote_members.list_for_space(space_id)
+        )
+        if not still_present:
+            await self._spaces.remove_space_instance(space_id, instance_id)
         await self._remote_members.remove(space_id, instance_id, user_id)
         await self._bus.publish(
             SpaceRemoteSeatEnded(
                 space_id=space_id, instance_id=instance_id, user_id=user_id
             )
         )
-        # Audit-fix (HIGH from PR #429 review): if that was the
-        # last remote member from this peer instance, also drop the
-        # ``space_instances`` row so subsequent broadcasts via
-        # ``broadcast_to_space_members`` stop trying to deliver
-        # content to the kicked household. Without this, future
-        # space posts / comments / reactions keep getting shipped
-        # to a household that no longer has anyone in the space —
-        # transport-rule-compliant (the envelope is encrypted) but
-        # wasteful, and could leak metadata about the space's
-        # activity to the no-longer-member relay.
-        rows = await self._remote_members.list_for_space(space_id)
-        still_present = any(r.instance_id == instance_id for r in rows)
-        if not still_present:
-            await self._spaces.remove_space_instance(space_id, instance_id)
         # v_23 — peer-replicate the kick so every member household tombstones
         # this user in their roster.
         await self._emit_member_roster_gossip(
@@ -7995,7 +8286,8 @@ class SpaceService(
             role=removed.role if removed else SpaceRole.MEMBER,
             tombstoned=True,
         )
-        await self._rotate_and_distribute_space_key(space_id)
+        if banned or last is None or last.role != SpaceRole.SUBSCRIBER:
+            await self._rotate_and_distribute_space_key(space_id)
         if (
             last is not None
             and last.instance_id == instance_id
@@ -8657,6 +8949,8 @@ class SpaceService(
         instance_id: str,
         user_id: str,
         request_id: str,
+        applicant_identity_pk: bytes | None = None,
+        applicant_anchor: object = None,
         applicant_pk: str | None = None,
         area_verdict: Eligibility | None = None,
         gfs_relay: str | None = None,
@@ -8666,12 +8960,16 @@ class SpaceService(
         space takes followers.
 
         Everything is re-checked here, failing closed (``False``, logged,
-        nothing stored or sent): a live (not dissolved / archived) public or
-        global space this household hosts, ``allow_subscribers`` on
-        (:func:`takes_follows`), an ``INSIDE`` ``area_verdict`` for a local
-        community, the person not banned, a ``user_id`` that is neither one
-        of our own people nor seated (now or before) under another
-        household, no live seat of theirs from that household already
+        nothing stored or sent): FIRST the person-ID anchor (P5) —
+        ``derive_user_id(applicant_identity_pk, applicant_anchor)`` must be
+        ``user_id`` (:func:`user_id_proven`; ``applicant_identity_pk`` is the
+        key we pin for household ``instance_id``, or a GFS request's sealed
+        key bound to it), so an applicant can only follow as one of its own
+        people, never as somebody else nor one of ours —, then a live (not
+        dissolved / archived) public or global space this household hosts,
+        ``allow_subscribers`` on (:func:`takes_follows`), an ``INSIDE``
+        ``area_verdict`` for a local community, the person not banned, no
+        live seat of theirs from that household already
         (a member who follows keeps their seat), and ``request_id`` not used
         before. The join mode does not matter — following is not joining as
         a member. The request is kept (approved; no admin bell — a follow
@@ -8682,6 +8980,15 @@ class SpaceService(
         """
         if self._federation is None or not self._own_instance_id:
             log.warning("follow from %s: federation not attached", instance_id)
+            return False
+        if not user_id_proven(applicant_identity_pk, applicant_anchor, user_id):
+            log.info(
+                "follow from %s for space %s refused: user id %s is not proven "
+                "by the household's identity key",
+                instance_id,
+                space_id,
+                user_id,
+            )
             return False
         if self._remote_members is None:
             # "Not seated already" cannot be proved: never approve blind.
@@ -8714,22 +9021,6 @@ class SpaceService(
             return False
         if await self._spaces.is_banned(space_id, user_id):
             log.info("follow from %s refused: banned from %s", instance_id, space_id)
-            return False
-        # The applicant picks ``user_id``: never one of our own people, nor
-        # one seated (now or before) under another household.
-        if await user_id_of_another_household(
-            seats=self._remote_members,
-            users=self._users,
-            space_id=space_id,
-            instance_id=instance_id,
-            user_id=user_id,
-        ):
-            log.info(
-                "follow from %s for space %s refused: the user id belongs to "
-                "another household",
-                instance_id,
-                space_id,
-            )
             return False
         if await self._remote_members.get(space_id, instance_id, user_id) is not None:
             log.info(
@@ -8824,11 +9115,24 @@ class SpaceService(
     async def expire_due_join_requests(self) -> int:
         """Mark pending join requests past ``expires_at`` expired (both the
         host's and our own outgoing ones). Frees their slot under the cap of
-        requests from the GFS (v_84). Returns how many."""
+        requests from the GFS (v_84). Returns how many.
+
+        The same sweep prunes what a settled remote approval leaves behind
+        (v_96: GFS follows add up to 120 approved rows and bound tokens per
+        hour per space): a follow's approved row and a bound token once
+        neither can be used any more — past the window an approval is
+        honoured for (:data:`APPROVAL_HONOURED_DAYS`, which outlives every
+        bound token's expiry), the token spent or expired
+        (``prune_settled_remote_approvals``)."""
         expired = 0
         for row in await self._spaces.list_expired_join_requests():
             if await self._spaces.answer_join_request(str(row["id"]), "expired"):
                 expired += 1
+        pruned = await self._spaces.prune_settled_remote_approvals(
+            older_than_days=APPROVAL_HONOURED_DAYS
+        )
+        if pruned:
+            log.info("join requests: pruned %d settled approval row(s)", pruned)
         return expired
 
     async def request_join_remote(
@@ -8894,6 +9198,7 @@ class SpaceService(
         location = await join_location_for(
             self._federation_repo, share_location=share_location
         )
+        applicant = await self._users.get_by_user_id(applicant_user_id)
         # Persist locally so the inbound APPROVED handler can look up
         # the applicant_user_id; there's no host-side space row locally.
         # §Audit #11: route through ``save_join_request`` rather than
@@ -8914,6 +9219,13 @@ class SpaceService(
                 "request_id": request_id,
                 "space_id": space_id,
                 "user_id": applicant_user_id,
+                # P5 — proves ``user_id`` against our identity key; a follow
+                # is approved on it (the redeem of the token proves again).
+                **(
+                    {"user_anchor": applicant.person_anchor}
+                    if applicant is not None
+                    else {}
+                ),
                 "message": message,
                 # Only with consent, only to the host, inside the envelope's
                 # encrypted payload (§25.8.21) — never stored here.
@@ -12178,6 +12490,11 @@ def _coerce_join_mode(value: JoinMode | str) -> JoinMode:
         return JoinMode(value)
     except ValueError as exc:
         raise ValueError(f"invalid join mode {value!r}") from exc
+
+
+def _owed_since(value: str) -> datetime:
+    """The repo's naive UTC ``YYYY-MM-DD HH:MM:SS`` as an aware datetime."""
+    return datetime.fromisoformat(value).replace(tzinfo=UTC)
 
 
 def _coerce_post_type(value: PostType | str) -> PostType:

@@ -2,12 +2,14 @@
 
 import pytest
 
+from socialhome.crypto import derive_user_id, generate_identity_keypair
 from socialhome.domain.space import SpacePermissionError, SpaceRole
 from socialhome.services.space_member_guard import (
     NOT_A_SPACE_MEMBER,
     SpaceMemberGuardMixin,
     require_seat,
     user_id_of_another_household,
+    user_id_proven,
 )
 
 
@@ -138,11 +140,15 @@ async def test_require_seat_refuses_a_banned_user_with_a_leftover_seat():
 
 
 class _Roster:
-    def __init__(self, rows: set[tuple[str, str, str]]) -> None:
-        self.rows = rows  # (space, instance, user), tombstones included
+    def __init__(self, rows: set[tuple[str, str, str, bool]]) -> None:
+        self.rows = rows  # (space, instance, user, tombstoned)
 
-    async def list_instances_of_user(self, space_id, user_id):
-        return {i for s, i, u in self.rows if (s, u) == (space_id, user_id)}
+    async def list_live_instances_of_user(self, space_id, user_id):
+        return {
+            i
+            for s, i, u, dead in self.rows
+            if (s, u) == (space_id, user_id) and not dead
+        }
 
 
 class _LocalUsers:
@@ -154,25 +160,64 @@ class _LocalUsers:
 
 
 @pytest.mark.parametrize(
-    ("rows", "local", "users_wired", "taken"),
+    ("rows", "local", "taken"),
     [
-        (set(), set(), True, False),  # nobody holds it
-        ({("s1", "home-a", "u1")}, set(), True, False),  # its own household
-        ({("s1", "home-b", "u1")}, set(), True, True),  # another household
-        ({("s2", "home-b", "u1")}, set(), True, False),  # another space only
-        (set(), {"u1"}, True, True),  # one of our people
-        (set(), {"u1"}, False, False),  # no user repo: the roster alone
+        (set(), set(), False),  # nobody holds it
+        ({("s1", "home-a", "u1", False)}, set(), False),  # its own household
+        ({("s1", "home-b", "u1", False)}, set(), True),  # live under another
+        # A tombstoned seat under another household no longer blocks: an
+        # admin removing a legacy squat clears it — no permanent lockout.
+        ({("s1", "home-b", "u1", True)}, set(), False),
+        ({("s2", "home-b", "u1", False)}, set(), False),  # another space only
+        (set(), {"u1"}, True),  # one of our people
     ],
 )
-async def test_a_user_id_belongs_to_one_household(rows, local, users_wired, taken):
-    """P4 adversarial review: the one rule every seat and authorship check
-    shares — a user id is not household ``home-a``'s to claim when it is
-    one of our people or holds (or held) a seat under another household."""
+async def test_a_receiver_trusts_a_seat_only_for_its_own_household(rows, local, taken):
+    """The receivers' rule (``SpaceAuthorship.acts_for``): a seat proves
+    acting for ``user_id`` unless that id is one of OUR people or holds a
+    LIVE seat under another household (only a pre-proof legacy seat can)."""
     got = await user_id_of_another_household(
         seats=_Roster(rows),
-        users=_LocalUsers(local) if users_wired else None,
+        users=_LocalUsers(local),
         space_id="s1",
         instance_id="home-a",
         user_id="u1",
     )
     assert got is taken
+
+
+_KEY = generate_identity_keypair().public_key
+_OTHER_KEY = generate_identity_keypair().public_key
+
+
+@pytest.mark.parametrize(
+    ("pk", "anchor", "user_id", "proven"),
+    [
+        (_KEY, "alice", derive_user_id(_KEY, "alice"), True),
+        # Somebody else's id: it derives from another household's key.
+        (_OTHER_KEY, "alice", derive_user_id(_KEY, "alice"), False),
+        (_KEY, "bob", derive_user_id(_KEY, "alice"), False),  # wrong anchor
+        (_KEY, None, derive_user_id(_KEY, "alice"), False),  # missing anchor
+        (_KEY, "", derive_user_id(_KEY, "alice"), False),
+        (_KEY, 42, derive_user_id(_KEY, "alice"), False),  # not a string
+        (None, "alice", derive_user_id(_KEY, "alice"), False),  # no pinned key
+        (b"short", "alice", derive_user_id(_KEY, "alice"), False),  # bad key
+        (_KEY, "alice", "", False),
+    ],
+    ids=[
+        "own",
+        "somebody-elses",
+        "wrong-anchor",
+        "no-anchor",
+        "empty-anchor",
+        "int-anchor",
+        "no-key",
+        "bad-key",
+        "no-user-id",
+    ],
+)
+def test_a_user_id_is_proven_only_by_its_households_key(pk, anchor, user_id, proven):
+    """P5 person-ID anchor: a household proves a user id is its own by the
+    anchor it was minted from — ``derive_user_id(pk, anchor) == user_id`` —
+    fail-closed on any malformed input."""
+    assert user_id_proven(pk, anchor, user_id) is proven

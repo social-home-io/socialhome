@@ -783,6 +783,7 @@ space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat → space-follow-paired →
+space-follow-rotation →
 space-reaction → space-poll-vote → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
@@ -2456,6 +2457,21 @@ a's roster), the switch off rotates once and refuses b's next comment (403),
 and b's delete of its own comment with the switch off reaches a.
 ``DELETE /subscribe`` is b's own leave: a tombstones the seat and the
 content-key epoch (``space_keys``) does not move.
+
+### ``space-follow-rotation`` — the person-ID anchor and owed rotations (v_96 P5)
+
+Part of ``all`` (after ``space-follow-paired``). Prereqs: ``up`` + ``pair``.
+a creates a ``public`` invite-only space with followers on. **Squat
+refused:** the harness rewrites b's person's ``identity_anchor`` on b, so b's
+follow names a user id b's identity key does not derive with that anchor; a
+logs "is not proven by the household's identity key" and seats nobody (no
+seat, no bound token). Anchor restored (and b's 15-minute pending follow
+expired), b follows and is seated — no lockout; c follows too. **Unfollow:**
+b leaves, a tombstones the seat, the epoch stays and a owes a rotation.
+**Owed rotation:** the harness moves b's ``removed_at`` and the current key's
+``created_at`` back past 24 h and restarts a (the hourly sweep ticks at
+start): a rotates exactly once, owes nothing, and c holds the new epoch.
+**Ban:** a bans c and the epoch moves at once.
 
 ### ``gfs-space-follow`` — an unpaired follow through the GFS (v_96)
 
