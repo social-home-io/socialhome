@@ -1166,6 +1166,70 @@ async def test_banning_a_follower_whose_old_key_is_already_dead_does_not_rotate(
     rotate.assert_not_awaited()
 
 
+async def test_banning_a_long_gone_follower_reads_the_debt_before_its_gossip(
+    stack,
+):
+    """The ban's own LEFT gossip re-tombstones the seat at a higher version,
+    which stamps ``removed_at`` now — read after it, every such ban looked
+    owed and rotated. The debt is read before the gossip."""
+    space = await _hosted(stack)
+    await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
+    await stack.svc.on_remote_member_left(space.id, PEER, "u-fan")
+    await _key_at(stack, space.id, "2999-01-01T00:00:00+00:00")
+
+    async def _restamp(*_a, **_k):
+        await stack.db.enqueue(
+            "UPDATE space_remote_members SET removed_at='3000-01-01 00:00:00'"
+            " WHERE space_id=?",
+            (space.id,),
+        )
+
+    with (
+        patch.object(
+            SpaceService, "_emit_member_roster_gossip", AsyncMock(side_effect=_restamp)
+        ),
+        patch.object(
+            SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
+        ) as rotate,
+    ):
+        await stack.svc.ban(space.id, actor_username="owner", user_id="u-fan")
+    rotate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("path", ["left", "removed"])
+async def test_a_follower_leaves_the_fan_out_before_its_tombstone(stack, path):
+    """A rotation that mints between the tombstone and the fan-out drop
+    would hand the leaver the new key with no debt (its ``created_at`` is
+    after ``removed_at``). So the household leaves ``space_instances``
+    FIRST: any key minted after the tombstone is never sent to it."""
+    space = await _hosted(stack)
+    await _seat_remote(stack, space.id, "u-fan", SpaceRole.SUBSCRIBER)
+    await stack.spaces.add_space_instance(space.id, PEER)
+    fan_out_at_tombstone: list[set[str]] = []
+    repo_cls = type(stack.remote)
+    real_remove = repo_cls.remove
+
+    async def _remove(repo, space_id, instance_id, user_id):
+        fan_out_at_tombstone.append(
+            set(await stack.spaces.list_member_instances(space_id))
+        )
+        await real_remove(repo, space_id, instance_id, user_id)
+
+    with (
+        patch.object(repo_cls, "remove", _remove),
+        patch.object(SpaceService, "_rotate_and_distribute_space_key", AsyncMock()),
+    ):
+        if path == "left":
+            await stack.svc.on_remote_member_left(space.id, PEER, "u-fan")
+        else:
+            await stack.svc.remove_remote_member(
+                space.id, actor_username="owner", instance_id=PEER, user_id="u-fan"
+            )
+    assert fan_out_at_tombstone and all(
+        PEER not in seen for seen in fan_out_at_tombstone
+    )
+
+
 async def test_followers_off_ends_every_remote_follower_seat_and_rotates_once(
     stack,
 ):
@@ -1476,6 +1540,28 @@ async def test_the_owner_relays_a_delegated_admins_rekey_to_gfs_followers(stack)
     # The same epoch again (a repeat, another relay): never twice.
     assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 0
     assert stack.fed.broadcast_to_space_members.await_count == 1
+
+
+@pytest.mark.security
+async def test_a_tiebreak_winner_at_the_same_epoch_is_relayed_too(stack):
+    """Two admins rotate to the same epoch: the owner relays B's key, then
+    A's (smaller ``rotated_by``) replaces it at that epoch. The mark is the
+    key, not the epoch, so the followers get the key that stays."""
+    space = await _relay_setup(stack)
+    assert (
+        await stack.svc.relay_admin_rekey_to_followers(
+            space.id, _admin_meta(rotated_by="admin-b")
+        )
+        == 1
+    )
+    winner = b"\x09" * 32
+    stack.svc.attach_space_crypto_service(
+        SimpleNamespace(export_current_key=AsyncMock(return_value=(4, winner)))
+    )
+    meta = _admin_meta(raw=winner, rotated_by="admin-a")
+    assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 1
+    assert await stack.svc.relay_admin_rekey_to_followers(space.id, meta) == 0
+    assert stack.fed.broadcast_to_space_members.await_count == 2
 
 
 async def test_a_failed_relay_is_sent_again_on_the_next_copy(stack):

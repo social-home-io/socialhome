@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import logging
 import re
 import time
@@ -785,10 +786,11 @@ class SpaceService(
         #: D1 notices told per space (monotonic seconds), see
         #: :meth:`_tell_owner_delegation_blocked`.
         self._delegation_blocked_told: dict[str, float] = {}
-        #: The newest epoch per space whose delegated-admin rekey this
-        #: owner re-sent to its GFS-reached followers
-        #: (:meth:`relay_admin_rekey_to_followers`).
-        self._followers_rekeyed: dict[str, int] = {}
+        #: The newest ``(epoch, key digest)`` per space whose delegated-admin
+        #: rekey this owner re-sent to its GFS-reached followers
+        #: (:meth:`relay_admin_rekey_to_followers`) — the key, not only the
+        #: epoch: a tiebreak winner replaces a key at the same epoch.
+        self._followers_rekeyed: dict[str, tuple[int, bytes]] = {}
         self._own_instance_id = own_instance_id
         # When both are set, a deleted space post's media file(s) are
         # removed once the post row + its gallery system-album mirror are
@@ -4888,16 +4890,23 @@ class SpaceService(
         ending: list[SpaceRemoteMember],
     ) -> bool:
         """Tombstone ``ending`` and drop the household's ``space_instances``
-        row with its last live seat. Returns whether none is left."""
+        row with its last live seat. Returns whether none is left.
+
+        The row goes FIRST: a rotation minting between the two steps then
+        never reaches the household, and one minting after the tombstone is
+        newer than ``removed_at`` — no window where the leaver gets the new
+        key and the space owes nothing."""
         assert self._remote_members is not None
-        for seat in ending:
-            await self._remote_members.remove(space.id, instance_id, seat.user_id)
-        remaining = await self._remote_members.list_for_instance(
+        ending_ids = {seat.user_id for seat in ending}
+        live = await self._remote_members.list_for_instance(
             space.id, instance_id, include_tombstoned=False
         )
-        if not remaining:
+        orphaned = all(seat.user_id in ending_ids for seat in live)
+        if orphaned:
             await self._spaces.remove_space_instance(space.id, instance_id)
-        return not remaining
+        for seat in ending:
+            await self._remote_members.remove(space.id, instance_id, seat.user_id)
+        return orphaned
 
     async def _gossip_ended_seats(
         self,
@@ -6464,7 +6473,13 @@ class SpaceService(
             # The user's seat on another household is already a tombstone.
             # The ban still lands; the LEFT gossip names THAT household (not
             # ours), and an admin seat that ended without a rotation now gets
-            # one (v_44).
+            # one (v_44). A follower's debt is read BEFORE the gossip: its
+            # re-tombstone stamps ``removed_at`` now, after which every such
+            # ban would look owed.
+            follower_owed = (
+                stale_seat.role == SpaceRole.SUBSCRIBER
+                and await self.rotation_owed(space_id) is not None
+            )
             await self._bus.publish(
                 SpaceConfigChanged(
                     space_id=space_id,
@@ -6491,10 +6506,7 @@ class SpaceService(
                         space_id=space_id, instance_id=stale_seat.instance_id
                     )
                 )
-            elif (
-                stale_seat.role == SpaceRole.SUBSCRIBER
-                and await self.rotation_owed(space_id) is not None
-            ):
+            elif follower_owed:
                 # A follower who left while the key it holds is still the
                 # current one (the rotation is owed): a ban kills that key
                 # now instead of at the sweep (v_96).
@@ -7640,12 +7652,15 @@ class SpaceService(
             ) == bytes(raw_key)
         except TypeError, ValueError, binascii.Error:
             return 0
-        previous = self._followers_rekeyed.get(space_id, -1)
-        if not held or previous >= epoch:
+        mark = (epoch, hashlib.sha256(bytes(raw_key)).digest())
+        previous = self._followers_rekeyed.get(space_id)
+        if not held or (
+            previous is not None and (previous[0] > epoch or previous == mark)
+        ):
             return 0
         # Marked before the awaits (a concurrent copy sends nothing), handed
         # back when the broadcast fails so the next copy is sent.
-        self._followers_rekeyed[space_id] = epoch
+        self._followers_rekeyed[space_id] = mark
         targets = sorted(
             await self._federation.gfs_reached_followers(
                 space_id, await self._spaces.list_member_instances(space_id)
@@ -7673,8 +7688,11 @@ class SpaceService(
                 len(targets),
                 space_id,
             )
-            if self._followers_rekeyed.get(space_id) == epoch:
-                self._followers_rekeyed[space_id] = previous
+            if self._followers_rekeyed.get(space_id) == mark:
+                if previous is None:
+                    del self._followers_rekeyed[space_id]
+                else:
+                    self._followers_rekeyed[space_id] = previous
             return 0
         return len(targets)
 
@@ -8236,26 +8254,23 @@ class SpaceService(
         # removal half-way: the seat gone on its own household, no gossip,
         # no rekey. Telling is best effort now; the removal always completes.
         await self._tell_removed_household(space_id, instance_id, user_id)
+        # With its last live seat the household leaves ``space_instances``
+        # (audit-fix, PR #429: no more space content shipped to a household
+        # with nobody in the space) — BEFORE the tombstone (see
+        # :meth:`_tombstone_remote_seats`): a key minted in between never
+        # reaches the household, one minted after is owed.
+        still_present = any(
+            r.instance_id == instance_id and r.user_id != user_id
+            for r in await self._remote_members.list_for_space(space_id)
+        )
+        if not still_present:
+            await self._spaces.remove_space_instance(space_id, instance_id)
         await self._remote_members.remove(space_id, instance_id, user_id)
         await self._bus.publish(
             SpaceRemoteSeatEnded(
                 space_id=space_id, instance_id=instance_id, user_id=user_id
             )
         )
-        # Audit-fix (HIGH from PR #429 review): if that was the
-        # last remote member from this peer instance, also drop the
-        # ``space_instances`` row so subsequent broadcasts via
-        # ``broadcast_to_space_members`` stop trying to deliver
-        # content to the kicked household. Without this, future
-        # space posts / comments / reactions keep getting shipped
-        # to a household that no longer has anyone in the space —
-        # transport-rule-compliant (the envelope is encrypted) but
-        # wasteful, and could leak metadata about the space's
-        # activity to the no-longer-member relay.
-        rows = await self._remote_members.list_for_space(space_id)
-        still_present = any(r.instance_id == instance_id for r in rows)
-        if not still_present:
-            await self._spaces.remove_space_instance(space_id, instance_id)
         # v_23 — peer-replicate the kick so every member household tombstones
         # this user in their roster.
         await self._emit_member_roster_gossip(

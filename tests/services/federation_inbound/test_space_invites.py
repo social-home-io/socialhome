@@ -19,6 +19,8 @@ from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.federation.gfs_join_request import (
     PER_SENDER_LIMIT,
     PER_SENDER_WINDOW_S,
+    PER_SPACE_LIMIT,
+    PER_SPACE_WINDOW_S,
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.rate_limiter import RateLimiter
@@ -1107,3 +1109,20 @@ async def test_a_join_request_without_a_role_is_unchanged(bus, repo):
     await _request(h, "peer-a", None, request_id="req-j")
     assert approver.calls == []
     assert [r[4] for r in repo.join_requests] == ["req-j"]
+
+
+async def test_follows_to_one_space_are_bounded_whoever_sends_them(bus, repo):
+    """P5 review: a routed follow's origin is any self-authenticating key,
+    so a fresh origin per follow would get a fresh per-household budget.
+    The space's own budget (the GFS bootstrap's 120 per hour) bounds them
+    all, before the approval."""
+    repo.spaces["sp-1"] = _follow_space()
+    approver = _Approver()
+    limiter = RateLimiter()
+    for _ in range(PER_SPACE_LIMIT):
+        assert limiter.is_allowed(
+            "follow:space:sp-1", limit=PER_SPACE_LIMIT, window_s=PER_SPACE_WINDOW_S
+        )
+    h = _follow_handlers(bus, repo, approver=approver, limiter=limiter)
+    await _follow(h)
+    assert approver.calls == []

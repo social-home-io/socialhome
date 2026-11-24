@@ -461,7 +461,7 @@ The age gate runs on the applicant household when it opens the ACK
 | Where the follower is | Path |
 |---|---|
 | The host household | The local gates (ban, age gate, `allow_subscribers`, the local-community check) and then the members' seating path (`_seat_local_member`) with role `subscriber`: the row, the roster gossip, the audit. No federation beyond the gossip. |
-| A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role: "subscriber"` inside the encrypted payload (needs a host at v_96, else `409 HOST_TOO_OLD`, `feature: "follow"`) → auto-approved → `SPACE_JOIN_REQUEST_APPROVED` with the bound token → §D2 redeem, seated with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. The host is read off this household's stub, else the paired households' directory (§D1a, `peer_space_directory`), else the GFS directory cache. The applicant's row waits 15 minutes (`FOLLOW_REQUEST_TTL`): the host answers at once or drops the follow without a word, so after that a new follow asks again. The host takes at most 10 follows per hour from one household (the bootstrap's per-sender numbers, on the shared rate limiter, `follow:sender:<household>`), counted before the approval; past it a follow is dropped without a word, like any refused one. Its own bucket: a household reached only through a GFS is counted by the bootstrap's `gfs-join:sender:<household>` instead (10 per hour on each path). |
+| A paired or mesh household | `SPACE_JOIN_REQUEST` with `requested_role: "subscriber"` inside the encrypted payload (needs a host at v_96, else `409 HOST_TOO_OLD`, `feature: "follow"`) → auto-approved → `SPACE_JOIN_REQUEST_APPROVED` with the bound token → §D2 redeem, seated with role `subscriber`. The ACK's `space_meta` carries the content key (no rotation on join), the roster snapshot (the same one a member gets), the writer cert (`reader: true`, only while comment or react is on) and the channel grant. The host is read off this household's stub, else the paired households' directory (§D1a, `peer_space_directory`), else the GFS directory cache. The applicant's row waits 15 minutes (`FOLLOW_REQUEST_TTL`): the host answers at once or drops the follow without a word, so after that a new follow asks again. The host takes at most 120 follows per hour into one space, whoever sends them (`follow:space:<space>` — a routed follow's origin is any self-authenticating key, so a per-household count alone could be dodged with fresh origins), and at most 10 per hour from one household (`follow:sender:<household>`) — the bootstrap's numbers, on the shared rate limiter — counted before the approval; past it a follow is dropped without a word, like any refused one. Its own bucket: a household reached only through a GFS is counted by the bootstrap's `gfs-join:sender:<household>` instead (10 per hour on each path). |
 | Reached only through a GFS | The v_84 bootstrap: `join_contact` from the polled listing (published while the space takes requests or followers — the GFS now serves the contact on an invite-only listing with followers on; for such a follow-only space, only to a GFS that proves `subscriber_seats`: it relays the v_96 follow bootstrap and seats a global space's members and followers on its channel), `SPACE_JOIN_REQUEST_BOOTSTRAP` with `requested_role: "subscriber"` in the sealed body, the host auto-answers with a bound subscriber token (48 h), the applicant auto-redeems over §D2b and is seated as a `space_session` subscriber. The bootstrap budgets (120/h per space, 10/h per sender, 200 pending → "busy") apply unchanged and before the approval. |
 
 **A local community: following is inside only** (owner decision
@@ -524,6 +524,13 @@ within seconds).
   removal — including a member who leaves and then follows — still
   rotates at once when the household's writer scope weakened, so no
   writer key survives a move from a writer seat to a follower seat.
+  Until the debt is paid a removed follower that held a `reader` comment
+  cert still holds it (and the channel writer key): every receiver refuses
+  its items on the tombstone, but a GFS still fans its frames out. A ban
+  is the remedy — it rotates at once. The household leaves
+  `space_instances` before the seat is tombstoned, so a rotation racing
+  the leave either never reaches it or is newer than `removed_at` (owed);
+  a ban reads the debt before its own LEFT gossip re-stamps `removed_at`.
 - **At once:** a follower ban — a seated follower's, and a follower who
   already left while the space still owes for it; `allow_subscribers`
   turned off (owner-only) — this household's own followers leave, and
@@ -552,8 +559,10 @@ within seconds).
   households it holds a `space_session` row for
   (`SpaceService.relay_admin_rekey_to_followers`). Only for the key it now
   holds at its current epoch (a rekey that lost the smallest-`rotated_by`
-  tiebreak is not passed on), never for its own rotation, once per epoch
-  per space in a process. Cost: F × ≈ 2 KiB per admin rotation for F such
+  tiebreak is not passed on), never for its own rotation, once per key
+  per space in a process (a tiebreak winner that replaces a relayed key at
+  the same epoch is relayed too; a broadcast that failed is retried on the
+  next copy). Cost: F × ≈ 2 KiB per admin rotation for F such
   followers — exactly what the owner's own rotation sends them (10 000 GFS
   followers ≈ 20 MiB, once per epoch; rotations are rare — a follower's
   leave only owes one, paid at most daily). The relay runs when the
