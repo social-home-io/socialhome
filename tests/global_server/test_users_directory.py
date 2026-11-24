@@ -11,9 +11,17 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
 from socialhome.csp import MEDIA_CSP
-from socialhome.global_server.app_keys import gfs_fed_repo_key
+from socialhome.global_server import moment_public_registry as registry_mod
+from socialhome.global_server.app_keys import (
+    gfs_fed_repo_key,
+    gfs_moment_public_registry_key,
+)
 from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.domain import (
+    ClientInstance,
+    GfsMomentFollow,
+    GfsUserRegistration,
+)
 from socialhome.global_server.server import create_gfs_app
 
 from .conftest import assert_strict_public_page
@@ -294,3 +302,117 @@ async def test_directory_and_detail_pages_have_strict_csp(client, author):
         resp = await client.get(path)
         assert resp.status == 200
         assert_strict_public_page(resp, await resp.text())
+
+
+# ── ranking: most followed / newest (Momentum discovery) ──────────────
+
+
+async def _seed_ranked(client) -> None:
+    """Authors a (newest, 0 followers), b (2), c (oldest, 5) and a
+    suspended s (9) — followers from households fol-0..fol-8."""
+    fed = client._app[gfs_fed_repo_key]
+    registry = client._app[gfs_moment_public_registry_key]
+    for n in range(9):
+        await fed.upsert_instance(
+            ClientInstance(
+                instance_id=f"fol-{n}",
+                display_name="",
+                public_key="00",
+                status="active",
+            )
+        )
+    for uid, age, followers, status in (
+        ("u-a", 0, 0, "active"),
+        ("u-b", 10, 2, "active"),
+        ("u-c", 20, 5, "active"),
+        ("u-s", 30, 9, "suspended"),
+    ):
+        await fed.upsert_instance(
+            ClientInstance(
+                instance_id=f"inst-{uid}",
+                display_name="",
+                public_key="00",
+                status="active",
+            )
+        )
+        await registry._users.upsert(
+            GfsUserRegistration(
+                user_id=uid,
+                instance_id=f"inst-{uid}",
+                username=uid,
+                display_name=uid,
+                picture_url=None,
+                home_instance_pk="ab" * 32,
+                registered_at=1_700_000_000 - age,
+                status=status,
+            )
+        )
+        for n in range(followers):
+            await registry._follows.upsert(
+                GfsMomentFollow(
+                    follower_user_id=f"fu-{n}",
+                    follower_instance_id=f"fol-{n}",
+                    followed_user_id=uid,
+                    created_at=1_700_000_000,
+                )
+            )
+
+
+async def test_directory_most_followed_first_with_counts(client):
+    await _seed_ranked(client)
+    resp = await client.get("/gfs/moments/users?sort=followers")
+    assert resp.status == 200
+    out = await resp.json()
+    assert out["sort"] == "followers"
+    assert [(u["user_id"], u["follower_count"]) for u in out["users"]] == [
+        ("u-c", 5),
+        ("u-b", 2),
+        ("u-a", 0),
+    ]
+
+
+async def test_directory_newest_first_by_default_with_counts(client):
+    await _seed_ranked(client)
+    for path in ("/gfs/moments/users", "/gfs/moments/users?sort=new"):
+        out = await (await client.get(path)).json()
+        assert out["sort"] == "new"
+        assert [(u["user_id"], u["follower_count"]) for u in out["users"]] == [
+            ("u-a", 0),
+            ("u-b", 2),
+            ("u-c", 5),
+        ]
+
+
+async def test_directory_most_followed_honours_search(client):
+    await _seed_ranked(client)
+    out = await (await client.get("/gfs/moments/users?sort=followers&q=u-b")).json()
+    assert [u["user_id"] for u in out["users"]] == ["u-b"]
+
+
+async def test_directory_refuses_an_unknown_sort(client):
+    resp = await client.get("/gfs/moments/users?sort=recent")
+    assert resp.status == 422
+    assert (await resp.json())["error"] == "invalid_sort"
+
+
+async def test_directory_ranking_is_kept_for_a_while(client, monkeypatch):
+    """The ranked list is one grouped count over every follow; each node
+    keeps it for RANKED_DIRECTORY_TTL_S so visitors can't make it recount."""
+    now = [1000.0]
+    monkeypatch.setattr(registry_mod.time, "monotonic", lambda: now[0])
+    await _seed_ranked(client)
+    first = await (await client.get("/gfs/moments/users?sort=followers")).json()
+    registry = client._app[gfs_moment_public_registry_key]
+    await registry._follows.upsert(
+        GfsMomentFollow(
+            follower_user_id="fu-late",
+            follower_instance_id="fol-0",
+            followed_user_id="u-a",
+            created_at=1_700_000_000,
+        )
+    )
+    again = await (await client.get("/gfs/moments/users?sort=followers")).json()
+    assert again["users"] == first["users"]
+    now[0] += registry_mod.RANKED_DIRECTORY_TTL_S + 1
+    later = await (await client.get("/gfs/moments/users?sort=followers")).json()
+    assert ("u-a", 1) in [(u["user_id"], u["follower_count"]) for u in later["users"]]
