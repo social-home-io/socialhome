@@ -39,6 +39,8 @@ Triggers:
    0078), and any member household's version-gated broadcast reaches us.
    A household no route reaches after :data:`MAX_MESH_ANNOUNCE_ATTEMPTS`
    attempts is tried only every :data:`MESH_ANNOUNCE_SLOW_EVERY` sweeps.
+   A follower reached only through the space's opaque channel
+   (``FederationService.channel_reached_followers``, v_96) is never tried.
 8. **Per-provider slots** — every BEGIN this scheduler sends holds one of
    the provider's :data:`MAX_ACTIVE_SESSIONS_PER_INSTANCE` slots until its
    ``SpaceSyncComplete`` (or deferral, or :data:`INFLIGHT_BEGIN_TTL_S`). A
@@ -1679,7 +1681,15 @@ class SpaceSyncScheduler:
                     continue
                 if not hosted_here:
                     targets.update(await self._mesh_targets(space))
-                targets.update(await self._space_repo.list_member_instances(space.id))
+                members = set(await self._space_repo.list_member_instances(space.id))
+                # v_96: a follower reached only through the space's channel
+                # (no peer row, no mesh claim) has no route but a mesh route
+                # discovery — the same households a fan-out skips
+                # (``channel_reached_followers``), one rule for both.
+                members -= await self._federation.channel_reached_followers(
+                    space.id, members
+                )
+                targets.update(members)
             targets -= {"", self._own_instance_id}
             households = sorted(targets)
         except Exception:  # pragma: no cover — defensive

@@ -76,6 +76,15 @@ class _FakeFederation:
         self.request_pages: list[dict | None] = []
         self.request_buckets: list[list[int] | None] = []
         self.request_haves: list[str | None] = []
+        #: space_id → households ``channel_reached_followers`` names (v_96).
+        self.channel_followers: dict[str, set[str]] = {}
+        self.channel_asks: list[tuple[str, frozenset[str]]] = []
+
+    async def channel_reached_followers(self, space_id, instance_ids):
+        self.channel_asks.append((space_id, frozenset(instance_ids)))
+        return frozenset(
+            i for i in instance_ids if i in self.channel_followers.get(space_id, ())
+        )
 
     async def space_member_supports(self, instance_id, *, min_version):
         self.version_asks.append((instance_id, min_version))
@@ -1636,6 +1645,51 @@ async def test_tick_announces_our_version_to_mesh_only_member_households(
     assert announced == ["host-x", "mesh-co-member", "mesh-member"]
     assert await sched._tick_mesh_announce() == 0
     assert len(announced) == 3
+
+
+async def test_mesh_announce_skips_followers_reached_only_through_the_channel(
+    bus, queue, sync_manager
+):
+    """v_96 (P5): a follower household that came through a GFS — no peer
+    row, no mesh claim, no writer seat, in a space with a channel — has no
+    route but a mesh route discovery, so the sweep never tries it (at
+    10 000 GFS followers that was thousands of discoveries per sweep). One
+    rule with the broadcast skip: exactly the households
+    ``channel_reached_followers`` names. A household skipped in one space
+    but a member of another is still announced to; a host never skipped."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [
+            _space("sp-global", owner_instance_id="self"),
+            _space("sp-joined", owner_instance_id="host-x"),
+        ],
+    )
+    sched._space_repo._members.update(
+        {
+            "sp-global": ["self", "mesh-member", "gfs-follower", "both"],
+            "sp-joined": ["host-x", "self", "both"],
+        }
+    )
+    fed.channel_followers = {
+        "sp-global": {"gfs-follower", "both"},
+        "sp-joined": {"host-x"},
+    }
+    announced: list[str] = []
+
+    async def _announce(instance_id: str) -> bool:
+        announced.append(instance_id)
+        return False
+
+    sched.attach_mesh_announce(_announce)
+    for _ in range(scheduler_mod.MAX_MESH_ANNOUNCE_ATTEMPTS + 10):
+        await sched._tick_mesh_announce()
+    assert "gfs-follower" not in announced
+    assert {"mesh-member", "both", "host-x"} <= set(announced)
+    assert "gfs-follower" not in sched._mesh_announce_failed
 
 
 async def test_a_household_no_route_reaches_is_announced_to_ever_more_rarely(
