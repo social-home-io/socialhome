@@ -16242,9 +16242,10 @@ a.sh-link-preview-link:focus-visible {
   font-size: 0.8em;
   text-decoration: none;
 }
-/* Zero specificity (``:where``): a container's own link colour wins —
-   your own DM bubble (on-primary ink), dark media overlays. */
-:where(a.sh-ext-link) {
+/* One class (0,1,0): beats the bare ``a`` reset (no underline) and
+   still loses to a container's own link rule (0,1,1) — your own DM
+   bubble's on-primary ink, the picture captions. */
+.sh-ext-link {
   color: var(--sh-primary-text);
   text-decoration: underline;
   text-underline-offset: 2px;

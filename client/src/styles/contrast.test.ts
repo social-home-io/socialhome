@@ -143,9 +143,12 @@ describe('highlight viewer chrome', () => {
 
 describe('links in user text', () => {
   it('the shared link colour never beats a container (own DM bubble)', () => {
-    const shared = rules().find(([sel]) => sel === ':where(a.sh-ext-link)')
-    expect(shared).toBeTruthy()
-    expect(rules().some(([sel]) => sel === 'a.sh-ext-link')).toBe(false)
+    // Exactly one class: (0,1,0) beats the bare ``a { text-decoration:
+    // none }`` reset and loses to ``.sh-message--mine a`` (0,1,1).
+    const shared = rules().find(([sel]) => sel === '.sh-ext-link')
+    expect(shared?.[1]).toMatch(/text-decoration\s*:\s*underline/)
+    expect(rules().some(([sel]) => /(?:^|,)\s*(?:a\.sh-ext-link|:where\(a\.sh-ext-link\))/.test(sel)))
+      .toBe(false)
     const mine = rules().find(([sel]) => sel === '.sh-message--mine a')
     expect(mine?.[1]).toMatch(/color\s*:\s*var\(--sh-on-primary-fill\)/)
   })
