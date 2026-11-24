@@ -46,7 +46,7 @@ def _ref(name: str = "x.webp", **kw) -> SpaceMediaRef:
         "suite": SUITE,
         "epoch": 2,
         "size": 65_564,
-        "scope": "space",
+        "scope": "channel",
         "addr_suite": "sm1",
     }
     args.update(kw)
@@ -60,7 +60,7 @@ def test_field_name() -> None:
 def test_wire_round_trip() -> None:
     refs = [_ref("x.webp"), _ref("y.webp", blob_id="b" * 64)]
     wire = media_refs_to_wire(refs)
-    common = {"suite": SUITE, "epoch": 2, "size": 65_564, "scope": "space"}
+    common = {"suite": SUITE, "epoch": 2, "size": 65_564, "scope": "channel"}
     assert wire == {
         "x.webp": {"blob_id": BID, "addr_suite": "sm1", **common},
         "y.webp": {"blob_id": "b" * 64, "addr_suite": "sm1", **common},
@@ -414,3 +414,10 @@ def test_localization_renames_every_registered_post_field() -> None:
     assert item_media_urls("posts", renamed) == [
         u.rsplit("/", 1)[0] + "/sg-" + u.rsplit("/", 1)[-1] for u in urls
     ]
+
+
+def test_a_space_scope_entry_is_dropped() -> None:
+    """v_96 (P7) — the retired ``space`` scope names no blob any GFS keeps."""
+    wire = media_refs_to_wire([_ref("x.webp")])
+    wire["x.webp"]["scope"] = "space"
+    assert parse_media_refs(wire, space_id="sp", allowed={"x.webp"}) == []

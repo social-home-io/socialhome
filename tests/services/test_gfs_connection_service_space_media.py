@@ -92,7 +92,9 @@ def _info(space_media) -> dict:
 
 async def test_capability_read_from_the_signed_block(env):
     session = _MediaSession(
-        info=_info({"max_blob_bytes": 8_388_640, "ttl_s": 259200, "scopes": ["space"]})
+        info=_info(
+            {"max_blob_bytes": 8_388_640, "ttl_s": 259200, "scopes": ["channel"]}
+        )
     )
     svc = await _svc(env, session)
     conn = await env[1].get("g1")
@@ -125,9 +127,9 @@ async def test_a_warm_info_fetch_records_it_and_forgetting_drops_it(env):
     svc = await _svc(env, session)
     conn = await env[1].get("g1")
     svc._record_capabilities(
-        conn, _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
+        conn, _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["channel"]})
     )
-    assert svc._space_media["g1"] == (4096, frozenset({"space"}), 600, None)
+    assert svc._space_media["g1"] == (4096, frozenset({"channel"}), 600, None)
     svc._forget_listing("g1")
     assert "g1" not in svc._space_media
 
@@ -233,18 +235,21 @@ async def _publishable_follower_svc(env, session, *, space_type: str):
 
 
 async def test_the_capability_says_which_scopes_it_serves(env):
+    """v_96 (P7) — the one scope is ``channel``: an older GFS proving only
+    ``space`` is a cache this household uploads nothing to."""
     session = _MediaSession(
         info=_info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
     )
     svc = await _svc(env, session)
     conn = await env[1].get("g1")
-    assert await svc.space_media_max_blob(conn, scope="space") == 4096
     assert await svc.space_media_max_blob(conn, scope="channel") is None
+    assert await svc.space_media_max_blob(conn) is None
     both = _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["channel", "space"]})
     svc = await _svc(env, _MediaSession(info=both))
     assert await svc.space_media_max_blob(conn, scope="channel") == 4096
+    assert svc._space_media["g1"][1] == frozenset({"channel"})
     # A malformed scope list proves nothing.
-    bad = _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": "space"})
+    bad = _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": "channel"})
     svc = await _svc(env, _MediaSession(info=bad))
     assert await svc.space_media_max_blob(conn) is None
 
@@ -329,12 +334,12 @@ async def test_no_session_means_no_fetch(env):
 
 async def test_the_capability_carries_the_servers_ttl(env):
     session = _MediaSession(
-        info=_info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
+        info=_info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["channel"]})
     )
     svc = await _svc(env, session)
     conn = await env[1].get("g1")
     assert await svc.space_media_ttl_s(conn) == 600
-    bad = _info({"max_blob_bytes": 4096, "ttl_s": "x", "scopes": ["space"]})
+    bad = _info({"max_blob_bytes": 4096, "ttl_s": "x", "scopes": ["channel"]})
     svc = await _svc(env, _MediaSession(info=bad))
     assert await svc.space_media_ttl_s(conn) is None
 
@@ -348,7 +353,7 @@ async def test_the_on_demand_wait_comes_from_the_signed_capability(env):
             {
                 "max_blob_bytes": 4096,
                 "ttl_s": 600,
-                "scopes": ["space"],
+                "scopes": ["channel"],
                 "on_demand": {"wait_s": 25},
             }
         )
@@ -357,7 +362,7 @@ async def test_the_on_demand_wait_comes_from_the_signed_capability(env):
     conn = await env[1].get("g1")
     assert await svc.space_media_on_demand_wait(conn) == 25
     for bad in (None, {"wait_s": 0}, {"wait_s": "x"}, {"wait_s": 999}, True):
-        entry = {"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]}
+        entry = {"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["channel"]}
         if bad is not None:
             entry["on_demand"] = bad
         session = _MediaSession(info=_info(entry))
@@ -521,7 +526,7 @@ async def test_a_cache_means_not_off(env):
     session = _MediaSession(
         info=_media_info(
             envelope_media=True,
-            space_media={"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]},
+            space_media={"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["channel"]},
         )
     )
     svc = await _svc(env, session)

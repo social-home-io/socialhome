@@ -1217,7 +1217,7 @@ async def test_a_gfs_described_hashed_file_is_filled_by_the_hosts_push(env, db):
                         "suite": "aesgcm-256-pad-det",
                         "epoch": 0,
                         "size": 99,
-                        "scope": "space",
+                        "scope": "channel",
                         "addr_suite": "sm1",
                     }
                 },
