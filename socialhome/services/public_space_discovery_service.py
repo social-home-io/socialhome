@@ -363,9 +363,15 @@ class PublicSpaceDiscoveryService:
                         # listing (re-validated). Never the GFS's own
                         # ``subscriber_count`` — its relay seats, not the
                         # space's members. Absent (an older host or GFS) ⇒
-                        # no number, never 0.
+                        # no number, never 0. A space that takes no
+                        # followers has no follower count, whatever the
+                        # row says (a stale or older one): members only.
                         member_count=parse_listing_count(item.get("member_count")),
-                        follower_count=parse_listing_count(item.get("follower_count")),
+                        follower_count=(
+                            parse_listing_count(item.get("follower_count"))
+                            if item.get("allow_subscribers") is True
+                            else None
+                        ),
                         # Clamped: the GFS's ``min_age`` is an unconstrained
                         # int, and the ``public_space_cache`` CHECK would
                         # raise on e.g. 15 — aborting the whole poll tick.

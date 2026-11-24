@@ -240,3 +240,16 @@ async def test_get_reads_one_hosts_entry(repo):
     got = await repo.get("peerA", "s1")
     assert got is not None and (got.name, got.follower_count) == ("One", 2)
     assert await repo.get("peerB", "s1") is None
+
+
+async def test_followers_turned_off_clears_the_follower_count(repo):
+    """The host turned followers off: the next snapshot leaves the key out,
+    and the cached entry keeps only the member count."""
+    handler = PeerDirectoryHandler(repo)
+    entry = {"space_id": "s1", "name": "One", "member_count": 3}
+    await handler._on_snapshot(_event("peerA", [{**entry, "follower_count": 0}]))
+    first = await repo.get("peerA", "s1")
+    assert first is not None and first.follower_count == 0
+    await handler._on_snapshot(_event("peerA", [entry]))
+    got = await repo.get("peerA", "s1")
+    assert got is not None and (got.member_count, got.follower_count) == (3, None)

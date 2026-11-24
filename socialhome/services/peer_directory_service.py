@@ -129,11 +129,13 @@ class PeerDirectoryService:
                 "description": s.description,
                 "emoji": s.emoji,
                 "member_count": counts.member_count if counts else 0,
-                # An older peer ignores the key (additive, no version gate).
-                "follower_count": counts.follower_count if counts else 0,
                 "join_mode": s.join_mode.value,
                 "category": normalize_category(s.category),
             }
+            # An older peer ignores the key (additive, no version gate). Left
+            # out for a space that takes no followers: members only.
+            if counts is not None and counts.follower_count is not None:
+                entry["follower_count"] = counts.follower_count
             area = local_area_of(s) if with_area else None
             if area is not None:
                 entry.update(local_community_wire(area))

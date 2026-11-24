@@ -24,7 +24,7 @@ _StubSession = _base._StubSession
 env = _base.env
 
 
-async def _svc(env, *, counts_cap: bool):
+async def _svc(env, *, counts_cap: bool, takes_followers: bool = True):
     db, conn_repo = env
     await conn_repo.save(_make_conn("gfs-c", inbox_url="https://gfs.example"))
     space_repo = SqliteSpaceRepo(db)
@@ -36,7 +36,7 @@ async def _svc(env, *, counts_cap: bool):
             owner_username="alice",
             identity_public_key="aa" * 32,
             config_sequence=0,
-            features=SpaceFeatures(allow_subscribers=True),
+            features=SpaceFeatures(allow_subscribers=takes_followers),
             space_type=SpaceType.GLOBAL,
             join_mode=JoinMode.REQUEST,
         )
@@ -77,6 +77,19 @@ async def test_the_counts_ride_inside_the_signed_body(env):
     assert (body["member_count"], body["follower_count"]) == (3, 2)
     # One round-trip: the publish itself, no capability probe.
     assert [c[0] for c in session.calls] == ["POST"]  # type: ignore[attr-defined]
+    sig = b64url_decode(body.pop("signature"))
+    assert verify_ed25519(kp.public_key, _canonical(body), sig)
+
+
+async def test_followers_off_declares_members_only(env):
+    """A space that takes no followers declares no follower count — the
+    key is absent from the signed body, so every GFS surface shows only
+    "N members" (never "0 followers")."""
+    svc, session, kp = await _svc(env, counts_cap=True, takes_followers=False)
+    await svc.publish_space("sp-c", "gfs-c")
+    body = dict(session._last_body)  # type: ignore[attr-defined]
+    assert body["member_count"] == 3
+    assert "follower_count" not in body
     sig = b64url_decode(body.pop("signature"))
     assert verify_ed25519(kp.public_key, _canonical(body), sig)
 

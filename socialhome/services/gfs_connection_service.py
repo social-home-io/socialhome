@@ -3284,7 +3284,10 @@ class GfsConnectionService:
         )
         if counts is not None:
             body["member_count"] = counts.member_count
-            body["follower_count"] = counts.follower_count
+            # Left out for a space that takes no followers: the GFS then
+            # stores and shows no follower count (members only).
+            if counts.follower_count is not None:
+                body["follower_count"] = counts.follower_count
         if gfs_key is not None:
             body["gfs_key"] = gfs_key
         canonical = canonical_bytes(body)

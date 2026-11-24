@@ -14,6 +14,12 @@ remote seats, never a follower); ``follower_count`` is the live follower
 seats, local plus remote non-tombstoned (``FOLLOWER_COUNT_SQL``). A follower
 reached only through a GFS is not a roster seat yet, so it is not counted.
 
+A space that takes no followers (``allow_subscribers`` off) declares NO
+follower count (``follower_count`` is ``None`` and left off the wire;
+owner request 2026-11-24): the builder decides it once, so every surface
+shows only "N members" — never "0 followers". A space that takes followers
+always declares one, ``0`` included.
+
 A receiver that gets no value (an older household, an older GFS) shows NO
 number — never ``0``. Every receiver re-validates with
 :func:`parse_listing_count`.
@@ -41,7 +47,8 @@ class SpaceListingCounts:
     """How many members and followers a space has, as its host counts them."""
 
     member_count: int
-    follower_count: int
+    #: ``None``: the space takes no followers — say nothing about followers.
+    follower_count: int | None
 
 
 def parse_listing_count(value: object) -> int | None:

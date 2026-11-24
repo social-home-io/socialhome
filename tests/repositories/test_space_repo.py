@@ -2711,7 +2711,7 @@ async def test_a_purged_item_is_revived_and_open_items_are_listed(env):
 async def test_listing_counts_members_and_live_followers(env):
     """The shared listing builder: members as :data:`MEMBER_COUNT_SQL`,
     followers as live follower seats — local plus remote non-tombstoned."""
-    await env.repo.save(_space("a", "Alpha", SpaceType.GLOBAL))
+    await env.repo.save(_takes_followers(_space("a", "Alpha", SpaceType.GLOBAL)))
     await env.repo.save_member(_member("a", "uid-alice", "owner"))
     await env.repo.save_member(_member("a", "uid-bob"))
     await env.repo.save_member(_member("a", "uid-carol", "subscriber"))
@@ -2727,6 +2727,56 @@ async def test_listing_counts_members_and_live_followers(env):
     assert counts == SpaceListingCounts(member_count=3, follower_count=3)
     assert counts.member_count == await env.repo.count_members("a")
     assert await env.repo.listing_counts("nope") is None
+
+
+def _takes_followers(space: Space) -> Space:
+    return replace(space, features=SpaceFeatures(allow_subscribers=True))
+
+
+async def test_listing_counts_no_follower_count_when_the_space_takes_no_followers(
+    env,
+):
+    """Followers off: the listing declares no follower count at all — not
+    ``0``, and not a seat left over — so every surface shows only members."""
+    await env.repo.save(_space("off", "Off", SpaceType.GLOBAL))
+    await env.repo.save_member(_member("off", "uid-alice", "owner"))
+    await env.repo.save_member(_member("off", "uid-carol", "subscriber"))
+
+    assert await env.repo.listing_counts("off") == SpaceListingCounts(
+        member_count=1, follower_count=None
+    )
+
+
+async def test_listing_counts_zero_followers_when_the_space_takes_them(env):
+    await env.repo.save(_takes_followers(_space("on", "On", SpaceType.PUBLIC)))
+    await env.repo.save_member(_member("on", "uid-alice", "owner"))
+
+    assert await env.repo.listing_counts("on") == SpaceListingCounts(
+        member_count=1, follower_count=0
+    )
+
+
+async def test_listing_counts_follow_the_followers_switch(env):
+    await env.repo.save(_takes_followers(_space("s", "S", SpaceType.GLOBAL)))
+    await env.repo.save_member(_member("s", "uid-alice", "owner"))
+    await env.repo.save_member(_member("s", "uid-carol", "subscriber"))
+    assert (await env.repo.listing_counts("s")).follower_count == 1
+    await env.repo.save(_space("s", "S", SpaceType.GLOBAL))
+    assert (await env.repo.listing_counts("s")).follower_count is None
+
+
+async def test_list_hosted_listings_follower_count_only_when_taking_followers(env):
+    await env.repo.save(_takes_followers(_space("on", "On", SpaceType.PUBLIC)))
+    await env.repo.save(_space("off", "Off", SpaceType.PUBLIC))
+    for sid in ("on", "off"):
+        await env.repo.save_member(_member(sid, "uid-alice", "owner"))
+        await env.repo.save_member(_member(sid, "uid-carol", "subscriber"))
+
+    rows = await env.repo.list_hosted_listings(
+        "inst-x", "uid-bob", tiers=frozenset({SpaceType.PUBLIC})
+    )
+
+    assert {r.space.id: r.follower_count for r in rows} == {"on": 1, "off": None}
 
 
 async def test_holds_roster_only_with_a_local_member_seat(env):

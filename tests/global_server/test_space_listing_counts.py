@@ -39,6 +39,8 @@ _BASE = {
     "accent_color": "#D2542A",
     "icon_url": "",
     "primary_color": "#D2542A",
+    # A space that takes followers: only such a space has a follower count.
+    "allow_subscribers": True,
 }
 
 
@@ -273,6 +275,34 @@ async def test_gfs_info_advertises_listing_counts_in_the_signed_block(gfs_client
     assert body["capabilities_sig"]
 
 
+async def test_turning_followers_off_shows_only_the_member_count(gfs_client):
+    """A space that takes no followers declares members only (its household
+    leaves ``follower_count`` out): the newer publish clears the follower
+    count, and every GFS surface shows "N members" — never "0 followers"."""
+    seed, _ = await _register_owner(gfs_client.server.app)
+    await _publish(
+        gfs_client,
+        seed,
+        {"member_count": 3, "follower_count": 2, "allow_subscribers": True},
+        ts=_ts(seconds=-5),
+    )
+    assert (await _listed(gfs_client))["follower_count"] == 2
+    await _publish(
+        gfs_client, seed, {"member_count": 3, "allow_subscribers": False}, ts=_ts()
+    )
+    stored = await _stored(gfs_client)
+    assert (stored.member_count, stored.follower_count) == (3, None)
+    assert (await _listed(gfs_client))["follower_count"] is None
+    space = (await (await gfs_client.get(f"/gfs/pages/spaces/{_SPACE}")).json())[
+        "space"
+    ]
+    assert (space["member_count"], space["follower_count"]) == (3, None)
+    page = await (await gfs_client.get(f"/spaces/{_SPACE}")).text()
+    assert "3 members" in page and "follower" not in page
+    landing = await (await gfs_client.get("/")).text()
+    assert "3 members" in landing and "follower" not in landing
+
+
 # ── viewer JSON ─────────────────────────────────────────────────────────
 
 
@@ -430,6 +460,7 @@ async def _seed_counts(app, **kw) -> None:
             member_count=5,
             follower_count=3,
             counts_ts="2026-11-23T10:00:00.000000+00:00",
+            allow_subscribers=True,
             **kw,
         )
     )
@@ -508,6 +539,7 @@ async def test_a_row_without_a_stamp_never_wipes_the_counts_in_sql(gfs_client):
             owning_instance="owner.home",
             status="active",
             identity_public_key=stale_read.identity_public_key,
+            allow_subscribers=stale_read.allow_subscribers,
         )
     )
     stored = await _stored(gfs_client)
@@ -538,3 +570,56 @@ async def test_a_first_seen_space_never_takes_a_far_future_stamp(gfs_client):
         None,
         None,
     )
+
+
+async def test_followers_off_without_counts_clears_a_stale_follower_count(gfs_client):
+    """REGRESSION (adversarial review): a household that has not yet seen
+    this server's ``listing_counts`` turns followers off and publishes with
+    no counts. The GFS must not keep the old follower count beside the new
+    ``allow_subscribers: false`` — a space that takes no followers has none,
+    whatever a sender declares (the member count stays)."""
+    seed, _ = await _register_owner(gfs_client.server.app)
+    await _publish(
+        gfs_client,
+        seed,
+        {"member_count": 5, "follower_count": 3, "allow_subscribers": True},
+        ts=_ts(seconds=-5),
+    )
+    await _publish(gfs_client, seed, {"allow_subscribers": False}, ts=_ts())
+    stored = await _stored(gfs_client)
+    assert (stored.member_count, stored.follower_count) == (5, None)
+    assert (await _listed(gfs_client))["follower_count"] is None
+    page = await (await gfs_client.get(f"/spaces/{_SPACE}")).text()
+    assert "5 members" in page and "follower" not in page
+
+
+async def test_a_follower_count_declared_with_followers_off_is_not_stored(gfs_client):
+    seed, _ = await _register_owner(gfs_client.server.app)
+    await _publish(
+        gfs_client,
+        seed,
+        {"member_count": 2, "follower_count": 0, "allow_subscribers": False},
+        ts=_ts(),
+    )
+    stored = await _stored(gfs_client)
+    assert (stored.member_count, stored.follower_count) == (2, None)
+
+
+async def test_gossip_with_followers_off_carries_no_follower_count(gfs_client):
+    """A cluster peer's row (or any upsert) for a space that takes no
+    followers stores no follower count, even with a newer stamp."""
+    await _register_owner(gfs_client.server.app)
+    repo = gfs_client.server.app[gfs_fed_repo_key]
+    await repo.upsert_space(
+        GlobalSpace(
+            space_id=_SPACE,
+            owning_instance="owner.home",
+            status="active",
+            allow_subscribers=False,
+            member_count=4,
+            follower_count=7,
+            counts_ts=_ts(),
+        )
+    )
+    stored = await _stored(gfs_client)
+    assert (stored.member_count, stored.follower_count) == (4, None)

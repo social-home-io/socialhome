@@ -84,6 +84,14 @@ FOLLOWER_COUNT_SQL = """(
           AND rf.role = 'subscriber')
 )"""
 
+#: The follower count a space's listing declares: :data:`FOLLOWER_COUNT_SQL`
+#: while the space takes followers (``allow_subscribers``), else ``NULL`` —
+#: a space without followers declares no follower count at all, so every
+#: surface (GFS pages, Discover, the space page) shows only its members.
+LISTED_FOLLOWER_COUNT_SQL = (
+    f"(CASE WHEN s.allow_subscribers = 1 THEN {FOLLOWER_COUNT_SQL} END)"
+)
+
 
 @runtime_checkable
 class AbstractSpaceRepo(Protocol):
@@ -1397,7 +1405,7 @@ class SqliteSpaceRepo:
             f"""
             SELECT s.*,
                    {MEMBER_COUNT_SQL} AS listing_member_count,
-                   {FOLLOWER_COUNT_SQL} AS listing_follower_count,
+                   {LISTED_FOLLOWER_COUNT_SQL} AS listing_follower_count,
                    (SELECT m.role FROM space_members m
                      WHERE m.space_id = s.id AND m.user_id = ?)
                        AS listing_caller_role,
@@ -1421,7 +1429,7 @@ class SqliteSpaceRepo:
                 HostedSpaceListing(
                     space=space,
                     member_count=int(d["listing_member_count"] or 0),
-                    follower_count=int(d["listing_follower_count"] or 0),
+                    follower_count=_opt_count(d["listing_follower_count"]),
                     caller_role=d["listing_caller_role"],
                     caller_banned=bool(d["listing_caller_banned"]),
                 )
@@ -1467,18 +1475,21 @@ class SqliteSpaceRepo:
 
     async def listing_counts(self, space_id: str) -> SpaceListingCounts | None:
         """The space's listing counts — members (:data:`MEMBER_COUNT_SQL`)
-        and followers (:data:`FOLLOWER_COUNT_SQL`) in one query; ``None`` for
-        an unknown id. The one builder every listing path shares (the GFS
-        publish, the paired-household directory, the space page)."""
+        and followers (:data:`LISTED_FOLLOWER_COUNT_SQL`: ``None`` for a
+        space that takes no followers) in one query; ``None`` for an unknown
+        id. The one builder every listing path shares (the GFS publish, the
+        paired-household directory, the space page)."""
         row = await self._db.fetchone(
-            f"SELECT {MEMBER_COUNT_SQL} AS members, {FOLLOWER_COUNT_SQL} AS followers"
+            f"SELECT {MEMBER_COUNT_SQL} AS members,"
+            f" {LISTED_FOLLOWER_COUNT_SQL} AS followers"
             " FROM spaces s WHERE s.id = ?",
             (space_id,),
         )
         if row is None:
             return None
         return SpaceListingCounts(
-            member_count=int(row["members"]), follower_count=int(row["followers"])
+            member_count=int(row["members"]),
+            follower_count=_opt_count(row["followers"]),
         )
 
     async def holds_roster(self, space_id: str) -> bool:
@@ -3493,6 +3504,13 @@ class SqliteSpaceRepo:
 
 
 # ─── Row → domain mapping ─────────────────────────────────────────────────
+
+
+def _opt_count(value: int | None) -> int | None:
+    """A count column that may be ``NULL`` (no number declared). Only the
+    follower count can be (``LISTED_FOLLOWER_COUNT_SQL``); a member count
+    always has a number."""
+    return None if value is None else int(value)
 
 
 def _row_to_space(row: dict | None) -> Space | None:

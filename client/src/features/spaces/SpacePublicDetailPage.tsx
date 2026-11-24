@@ -133,7 +133,7 @@ function headerMeta(entry: DirectoryEntry, host: string | null): string {
     parts.push(t(isOne(entry.member_count) ? 'space.header.members_one' : 'space.header.members',
       { count: String(entry.member_count) }))
   }
-  if (followersShown(entry.follower_count, entry.allow_subscribers)) {
+  if (followersShown(entry.follower_count)) {
     parts.push(followersLabel(entry.follower_count))
   }
   if (host) parts.push(t('space.public.hosted_by', { host }))
