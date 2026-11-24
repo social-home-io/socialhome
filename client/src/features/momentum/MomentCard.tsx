@@ -41,6 +41,7 @@ import { VideoMedia } from '@/components/VideoMedia'
 import { confirmDialog } from '@/components/confirm'
 import { currentUser } from '@/store/auth'
 import { namedPersonLabel, namedPersonPicture } from '@/store/householdUsers'
+import { MOMENT_DEFAULT_REACH, reachKey } from '@/store/momentLimits'
 import { formatLocale, isOne, t } from '@/i18n/i18n'
 import type { Moment } from '@/types'
 import { renderHashtagged } from './hashtags'
@@ -315,7 +316,10 @@ export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
       {mine && !page && (
         <Modal open={whoSees.value} onClose={() => { whoSees.value = false }}
           title={t('moment.card.who_sees')}>
-          <p>{t(currentUser.value?.protected ? 'moment.card.who_sees_protected' : 'moment.card.who_sees_body')}</p>
+          <p>{currentUser.value?.protected
+            ? t('moment.card.who_sees_protected')
+            : t(reachKey('moment.card.who_sees_body', m.reach ?? MOMENT_DEFAULT_REACH),
+              { n: String(m.reach ?? MOMENT_DEFAULT_REACH) })}</p>
           {m.is_public && <p>{t('moment.card.who_sees_public')}</p>}
         </Modal>
       )}

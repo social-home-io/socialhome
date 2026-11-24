@@ -302,8 +302,11 @@ export interface Moment {
    *  Saved list pages on it. */
   saved_at?:          string
   /** How far away it was written: 1 = this household or a paired one,
-   *  2–3 = relayed that many hops. */
+   *  2–5 = relayed that many hops. */
   hop_count?:         number
+  /** How many hops it goes (v_96, 1–5), fixed when it was written. Absent
+   *  from an older server: read it as 3. */
+  reach?:             number
   /** ``GET /api/moments?top_level=1`` only: the newest reply the caller
    *  may read (no counts on it), or ``null``. */
   latest_reply?:      Moment | null

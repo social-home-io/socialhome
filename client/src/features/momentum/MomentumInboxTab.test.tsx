@@ -78,7 +78,10 @@ describe('MomentumInboxTab list', () => {
     const first = render(<MomentumInboxTab tag={null} />)
     await waitFor(() => expect(first.container.textContent).toContain('No moments yet'))
     const entry = first.getByRole('button', { name: /Share a moment/ })
-    expect(entry.textContent).toContain('Paired households and theirs, up to 3 hops · 24 h')
+    expect(entry.textContent).toContain('Paired households and beyond, up to 3 hops · 24 h')
+    // The empty state is about everyone's moments, not the caller's reach.
+    expect(first.container.textContent).toContain('as far as its author chose, up to 5 hops')
+    expect(first.container.textContent).toContain('within your “Show moments up to”')
     first.unmount()
     signIn(true)
     const kid = render(<MomentumInboxTab tag={null} />)
@@ -89,6 +92,21 @@ describe('MomentumInboxTab list', () => {
     expect(kid.container.textContent).not.toContain('3 steps')
     expect(kid.container.textContent).toContain(
       'A moment is a short post for your household and the households you’re paired with.')
+  })
+
+  it.each([
+    [1, 'Your household and paired households · 24 h'],
+    [2, 'Paired households and beyond, up to 2 hops · 24 h'],
+    [5, 'Paired households and beyond, up to 5 hops · 24 h'],
+  ])('the composer entry uses the caller\'s reach (%i)', async (reach, line) => {
+    onGet(async (path) => path === '/api/moments/limits'
+      ? { next_allowed_at: null, reach, reach_max: 5 }
+      : [])
+    const { getByRole, container } = render(<MomentumInboxTab tag={null} />)
+    await waitFor(() => expect(container.textContent).toContain('No moments yet'))
+    await waitFor(() => expect(getByRole('button', { name: /Share a moment/ }).textContent)
+      .toContain(line))
+    expect(api.get).toHaveBeenCalledWith('/api/moments/limits')
   })
 })
 

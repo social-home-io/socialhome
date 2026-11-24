@@ -8,8 +8,10 @@
  *
  * What it says, before anything is written:
  *
- * * **Reach** — one honest line ("Paired households and theirs, up to 3
- *   hops · 24 h"; a protected account: "Your household and paired
+ * * **Reach** — one honest line ("Paired households and beyond, up to
+ *   {n} hops · 24 h" with the caller's reach from ``GET
+ *   /api/moments/limits``, a reply no further than the moment it answers;
+ *   reach 1 and a protected account: "Your household and paired
  *   households") with an (i) disclosure for the details, including how
  *   long followers keep it (the author's own setting). No "Change" link:
  *   ``max_hops`` only changes what *you* see, never how far yours go.
@@ -51,6 +53,7 @@ import { getMomentsPreferences, momentRetentionLabel } from '@/utils/preferences
 import { localClockTime } from '@/utils/relativeTime'
 import { currentUser } from '@/store/auth'
 import { namedPersonLabel } from '@/store/householdUsers'
+import { loadMomentLimits, reachKey, replyReach, shownReach } from '@/store/momentLimits'
 import {
   loadRegistrations,
   registrations,
@@ -97,12 +100,12 @@ function setNextAllowed(iso: unknown): void {
     typeof iso === 'string' && Date.parse(iso) > now.value ? iso : null
 }
 
-function loadLimits(seq: number): void {
-  api.get('/api/moments/limits')
-    .then((r: { next_allowed_at?: string | null } | null) => {
-      if (seq === openSeq) setNextAllowed(r?.next_allowed_at ?? null)
-    })
-    .catch(() => { /* unknown: the 429 still says it at Post */ })
+function loadLimits(seq: number, isReply: boolean): void {
+  // Unreadable: the 429 still says the time at Post, and the reach line
+  // says the default 3 hops (the server goes by the real one).
+  void loadMomentLimits().then((r) => {
+    if (r && seq === openSeq && !isReply) setNextAllowed(r.next_allowed_at ?? null)
+  })
 }
 
 function loadParent(seq: number, id: string): void {
@@ -162,8 +165,9 @@ export function openMomentumComposer(
     if (registrations.value.length > 0) loadGfsNames()
     if (parentId.value === null && !publicTouched.value) isPublic.value = defaultShare()
   })
-  if (parentMomentId === null) loadLimits(seq)
-  else if (!opts.parent) loadParent(seq, parentMomentId)
+  // A reply is exempt from the rate limit; the read gives its reach.
+  loadLimits(seq, parentMomentId !== null)
+  if (parentMomentId !== null && !opts.parent) loadParent(seq, parentMomentId)
 }
 
 /** The "share publicly" toggle applies: registered, not protected, and —
@@ -355,14 +359,19 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
   const showPublic = canSharePublic()
   const publicOn = showPublic && isPublic.value
 
-  const reachLine = isReply
-    ? t(isProtected ? 'moment.composer.reach_reply_protected' : 'moment.composer.reach_reply')
-    : t(isProtected ? 'moment.entry.reach_protected' : 'moment.entry.reach')
+  // How far it goes: the caller's reach, and a reply no further than the
+  // moment it answers (v_96).
+  const hops = isReply ? replyReach(parent.value?.reach) : shownReach()
+  const n = { n: String(hops) }
+  const reachLine = isProtected
+    ? t(isReply ? 'moment.composer.reach_reply_protected' : 'moment.entry.reach_protected')
+    : t(reachKey(isReply ? 'moment.composer.reach_reply' : 'moment.entry.reach', hops), n)
   const reachMore = isProtected
     ? t('moment.composer.reach_more_protected')
     : isReply
-      ? t('moment.composer.reach_more_reply')
-      : t('moment.composer.reach_more', {
+      ? t(reachKey('moment.composer.reach_more_reply', hops), n)
+      : t(reachKey('moment.composer.reach_more', hops), {
+        ...n,
         days: momentRetentionLabel(getMomentsPreferences().follower_retention_days),
       })
 

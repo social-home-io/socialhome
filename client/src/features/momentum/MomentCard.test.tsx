@@ -99,6 +99,20 @@ describe('MomentCard', () => {
     expect(await findByText(/up to 3 hops away/)).toBeTruthy()
   })
 
+  it.each([
+    [1, /^Your household and your paired households, no further\./],
+    [3, /^Your paired households and the households they’re paired with, up to 3 hops away; each person there decides how far they look\./],
+    [5, /up to 5 hops away; each person there decides how far they look\./],
+  ])('Who sees this says how far a moment with reach %i went', async (reach, body) => {
+    const { getByRole, findByRole } = renderCard(moment({ author_user_id: ME, reach }))
+    fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
+    await findByRole('menu')
+    fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
+    const dialog = await findByRole('dialog')
+    expect(dialog.querySelector('p')!.textContent).toMatch(body)
+    expect(dialog.textContent).not.toContain('up to 1 hops')
+  })
+
   it('provenance: paired household, hops away, via GFS — nothing for your own household', () => {
     const paired = renderCard(moment({ received_via: 'household' }))
     expect(paired.container.querySelector('.sh-moment-card__meta')?.textContent).toContain('Berger · paired')

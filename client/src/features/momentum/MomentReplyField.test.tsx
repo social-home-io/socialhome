@@ -56,7 +56,7 @@ describe('MomentReplyField', () => {
     const field = getByRole('textbox', { name: 'Write a reply' })
     expect(ref.current).toBe(field)
     expect(field.getAttribute('dir')).toBe('auto')
-    expect(container.textContent).toContain('Your reply goes to your paired households and theirs, like a moment.')
+    expect(container.textContent).toContain('Your reply goes to your paired households and beyond, up to 3 hops, like a moment.')
     expect((getByRole('button', { name: 'Reply' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
