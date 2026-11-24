@@ -204,7 +204,12 @@ The Social Home ↔ GFS link is split by direction:
     follower count exactly when one is present. A publish that declares
     `member_count` without `follower_count` clears the stored follower
     count, so flipping the switch (a config change, re-published at once)
-    updates every surface. They ride inside the signed body, so no
+    updates every surface. Receivers hold the same line whatever a sender
+    declares: the GFS stores no follower count for a row whose
+    `allow_subscribers` is false (a count-less publish from a household
+    that has not yet seen `listing_counts`, a cluster peer's row), and a
+    household's Discover cache drops one from a GFS listing that does not
+    take followers. They ride inside the signed body, so no
     relay or other household can change them on the way to the GFS (the
     signature is not served onward: a GFS can misreport them to its readers,
     as it could the name), and go only to a server whose

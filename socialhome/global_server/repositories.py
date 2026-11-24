@@ -408,12 +408,16 @@ class SqliteGfsFederationRepo:
                 -- or replayable publish, a peer that never got counts) — in
                 -- one statement, so a racing publish cannot wipe them. ISO
                 -- strings in UTC at fixed microsecond width compare in time
-                -- order.
+                -- order. A space that takes no followers has NO follower
+                -- count, whatever was declared or stamped before (owner
+                -- request 2026-11-24): a count-less publish that turns
+                -- followers off, or a peer's row, must not leave one.
                 member_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
                     global_spaces.member_count ELSE excluded.member_count END,
-                follower_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
-                    global_spaces.follower_count ELSE excluded.follower_count
-                    END,
+                follower_count = CASE
+                    WHEN excluded.allow_subscribers = 0 THEN NULL
+                    WHEN {_COUNTS_KEEP_SQL} THEN global_spaces.follower_count
+                    ELSE excluded.follower_count END,
                 counts_ts = CASE WHEN {_COUNTS_KEEP_SQL} THEN
                     global_spaces.counts_ts ELSE excluded.counts_ts END
             """,
@@ -447,7 +451,7 @@ class SqliteGfsFederationRepo:
                 ),
                 _dump_cert(space.join_contact),
                 space.member_count,
-                space.follower_count,
+                space.follower_count if space.allow_subscribers else None,
                 space.counts_ts,
             ),
         )
