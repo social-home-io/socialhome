@@ -73,6 +73,13 @@ describe('MomentumInboxTab list', () => {
       "That's everything from the last 24 hours. Moments from people you follow are kept for as long as their authors chose.")
   })
 
+  it('an empty inbox points at Discover to find people to follow', async () => {
+    onGet(async () => [])
+    const { findByRole } = render(<MomentumInboxTab tag={null} />)
+    const link = await findByRole('link', { name: 'Find people to follow' })
+    expect(link.getAttribute('href')).toBe('/momentum/discover')
+  })
+
   it('the composer entry says where a moment goes — narrower for a protected account', async () => {
     onGet(async () => [])
     const first = render(<MomentumInboxTab tag={null} />)

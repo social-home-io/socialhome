@@ -23267,13 +23267,37 @@ span.sh-hlv__who { cursor: default; }
 .sh-momentum-discover-sub {
   max-inline-size: 100%;
   font-size: var(--sh-font-size-sm);
-  overflow-wrap: anywhere;
-}
-.sh-momentum-discover-tag {
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sh-momentum-discover-row .sh-btn { min-height: 40px; }
+/* Discover sections (Friends, a GFS): heading + count on one line that
+   wraps on a phone, the hint under it, then the list. */
+.sh-discover-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-discover-section__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+}
+.sh-discover-section__count { font-size: var(--sh-font-size-sm); }
+/* One width for Follow and Following (and their translations) so a tap
+   never shifts the row. */
+.sh-follow-toggle {
+  min-inline-size: 7.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.sh-follow-toggle svg { inline-size: 16px; block-size: 16px; flex: none; }
 .sh-momentum-discover-bio {
   margin: 2px 0 0;
   color: var(--sh-text);
