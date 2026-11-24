@@ -529,7 +529,7 @@ class MomentPublicService(ProtectionGateMixin):
             uid, iid = row.get("user_id"), row.get("instance_id")
             if not isinstance(uid, str) or uid in seen or uid in user_ids:
                 continue
-            if iid in instance_ids:
+            if not isinstance(iid, str) or iid in instance_ids:
                 continue
             seen.add(uid)
             out.append(row)

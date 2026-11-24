@@ -83,16 +83,21 @@ const strangers = computed<MomentPublicDirectoryUser[]>(() => {
   })
 })
 
+/** Bumped per read, so an answer meant for an earlier visit (another
+ *  account) never lands after a newer read started. */
+let friendsRead = 0
+
 async function loadFriends(): Promise<void> {
+  const read = ++friendsRead
   friendsFailed.value = false
   try {
     const r = await api.get<FriendsPayload>('/api/friends')
     if (!r?.instance || !Array.isArray(r.instance.members) || !Array.isArray(r.households)) {
       throw new Error('unexpected /api/friends payload')
     }
-    friends.value = r
+    if (read === friendsRead) friends.value = r
   } catch {
-    friendsFailed.value = true
+    if (read === friendsRead) friendsFailed.value = true
   }
 }
 

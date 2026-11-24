@@ -301,7 +301,12 @@ export function PersonSheet() {
     try {
       if (followKind === 'gfs') {
         if (gfsFollow) await unfollowOnGfs(gfsFollow.gfs_id, p.user_id)
-        else if (viaGfs) await followOnGfs(viaGfs, p.user_id)
+        else if (viaGfs) await followOnGfs(viaGfs, p.user_id).catch(async (e: unknown) => {
+          // The household knows them after all (the lookup failed): it
+          // refused the GFS follow, nothing reached the GFS — follow at home.
+          if ((e as { code?: unknown })?.code !== 'FOLLOW_AT_HOME') throw e
+          await followUser(p.user_id)
+        })
       } else if (following) {
         await unfollowUser(p.user_id)
       } else {

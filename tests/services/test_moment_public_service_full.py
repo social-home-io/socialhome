@@ -235,13 +235,19 @@ async def test_fetch_directory_returns_users_list(repos):
             status=200,
             body={
                 "users": [
-                    {"user_id": "u-remote", "display_name": "Bob"},
+                    {
+                        "user_id": "u-remote",
+                        "instance_id": "i-b",
+                        "display_name": "Bob",
+                    },
                 ]
             },
         ),
     )
     users = await svc.fetch_directory("g1")
-    assert users == [{"user_id": "u-remote", "display_name": "Bob"}]
+    assert users == [
+        {"user_id": "u-remote", "instance_id": "i-b", "display_name": "Bob"}
+    ]
 
 
 async def test_fetch_directory_5xx_raises(repos):
@@ -797,6 +803,8 @@ async def test_fetch_directory_leaves_out_people_the_household_knows(repos, db):
         {"user_id": "u-stranger", "instance_id": "inst-far"},
         {"user_id": "u-stranger", "instance_id": "inst-far"},  # a repeat
         "not a row",
+        {"user_id": "u-odd", "instance_id": ["not", "hashable"]},
+        {"user_id": "u-nohome"},
     ]
     svc = _make_service(
         repos,
