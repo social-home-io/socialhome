@@ -11,7 +11,7 @@ const me = vi.hoisted(() => ({ value: { user_id: 'u1', restrictions: [] as strin
 vi.mock('@/store/auth', () => ({ currentUser: me }))
 
 import { api } from '@/api'
-import { _resetGfsConnectionsForTests, registrations } from '@/store/momentPublic'
+import { _resetGfsConnectionsForTests, parkedMoment, registrations } from '@/store/momentPublic'
 import { PublicSharingPanel } from './PublicSharingSettings'
 
 const CONNS = [
@@ -27,6 +27,7 @@ const row = (container: Element, name: string) =>
 beforeEach(() => {
   _resetGfsConnectionsForTests()
   registrations.value = []
+  parkedMoment.value = false
   me.value = { user_id: 'u1', restrictions: [] }
   confirmSpy.mockReset()
   for (const f of Object.values(api)) vi.mocked(f).mockReset()
@@ -152,6 +153,23 @@ describe('Public sharing — states', () => {
     fail = false
     fireEvent.click(await findByRole('button', { name: 'Try again' }))
     await waitFor(() => expect(container.textContent).toContain('Valley GFS'))
+  })
+
+  it('a moment kept from the composer gets a way back to it', async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/gfs/connections' ? CONNS : [])
+    const { container, queryByRole, rerender } = render(<PublicSharingPanel />)
+    await waitFor(() => expect(container.textContent).toContain('Valley GFS'))
+    expect(queryByRole('link', { name: 'Back to your moment' })).toBeNull()
+    parkedMoment.value = true
+    rerender(<PublicSharingPanel />)
+    const back = await waitFor(() => {
+      const a = queryByRole('link', { name: 'Back to your moment' })
+      expect(a).not.toBeNull()
+      return a as HTMLAnchorElement
+    })
+    // An in-app link the router takes, under the ingress prefix.
+    expect(back.getAttribute('href')).toBe('/momentum/new')
   })
 
   it('a protected account sees why, and no rows', async () => {

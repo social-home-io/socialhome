@@ -138,3 +138,30 @@ describe('GFS connections for public Momentum', () => {
     expect(mod.gfsFollowOf('u-else')).toBeUndefined()
   })
 })
+
+describe('public Momentum on sign-out', () => {
+  it('resetMomentPublic forgets registrations, follows, the GFS list and a kept moment', async () => {
+    const mod = await import('./momentPublic')
+    mod.registrations.value = [{ user_id: 'u1', gfs_id: 'g1', registered_at: '', default_share: true }]
+    mod.follows.value = [{
+      follower_user_id: 'u1', followed_user_id: 'u2', gfs_id: 'g1',
+      followed_username: 'b', followed_display_name: 'B', created_at: '',
+    }]
+    mod.gfsConnections.value = []
+    mod.parkedMoment.value = true
+    mod.resetMomentPublic()
+    expect(mod.registrations.value).toEqual([])
+    expect(mod.follows.value).toEqual([])
+    expect(mod.gfsConnections.value).toBeNull()
+    expect(mod.parkedMoment.value).toBe(false)
+  })
+
+  it('a registration whose GFS has not proved encrypted moments cannot carry them', async () => {
+    const mod = await import('./momentPublic')
+    const r = { user_id: 'u1', gfs_id: 'g1', registered_at: '', default_share: false }
+    expect(mod.canCarryPublicMoments({ ...r, delivery: 'encrypted' })).toBe(true)
+    expect(mod.canCarryPublicMoments({ ...r, delivery: 'unsupported_server' })).toBe(false)
+    // An older backend says nothing: the server decides.
+    expect(mod.canCarryPublicMoments(r)).toBe(true)
+  })
+})

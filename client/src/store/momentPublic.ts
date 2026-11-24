@@ -17,6 +17,17 @@ import type {
 
 export const registrations = signal<MomentPublicRegistration[]>([])
 export const follows = signal<MomentPublicFollow[]>([])
+/** A new moment was put aside in the composer to visit Settings › Public
+ *  sharing; the next "Share a moment" (``/momentum/new``) brings it back,
+ *  and the panel offers the way back while it waits. In memory only. */
+export const parkedMoment = signal<boolean>(false)
+
+/** Public moments can go through this registration: the GFS proved
+ *  ``encrypted_moments`` (v_62). Unknown (an older backend) counts as
+ *  yes — the server still decides. */
+export function canCarryPublicMoments(r: MomentPublicRegistration): boolean {
+  return r.delivery !== 'unsupported_server'
+}
 
 export async function loadRegistrations(): Promise<void> {
   try {
@@ -151,7 +162,16 @@ export function gfsFollowOf(userId: string): MomentPublicFollow | undefined {
   return follows.value.find((f) => f.followed_user_id === userId)
 }
 
-/** Tests only. */
+/** Sign-out: the next account must not see this one's registrations,
+ *  follows, GFS list or a moment put aside in the composer. */
+export function resetMomentPublic(): void {
+  registrations.value = []
+  follows.value = []
+  parkedMoment.value = false
+  _resetGfsConnectionsForTests()
+}
+
+/** Tests only (and part of :func:`resetMomentPublic`). */
 export function _resetGfsConnectionsForTests(): void {
   gfsLoading = null
   gfsConnections.value = null
