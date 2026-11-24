@@ -77,9 +77,12 @@ search, and a search is never ranked (`sort=followers` with `q` is
   households**, ties newest first. Households, not follower ids: a
   follow's `follower_user_id` is whatever the signed household says, so
   one household could make up any number of followers — it counts once
-  toward the order, and follower ids never break a tie. (The label stays
+  toward the order, and follower ids never break a tie. The label stays
   the public follower count, so an author with many followers in few
-  households may sit below one with fewer.) The order is one grouped count
+  households may sit below one with fewer — **owner decision
+  2026-11-24**: rank by follower households, label with the existing
+  public follower count (showing "followed by N households" would be a
+  new public number). The order is one grouped count
   over `gfs_moment_follows`; each node keeps only the ordered ids for
   `RANKED_DIRECTORY_TTL_S` (5 minutes), recounted by one request at a time
   while the others wait for it — visitors can't make it recount. The rows
