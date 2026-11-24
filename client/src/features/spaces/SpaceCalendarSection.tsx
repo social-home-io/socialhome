@@ -44,6 +44,7 @@ import { currentWeekStart } from '@/utils/week'
 import { announceQueued, isQueuedWrite } from '@/utils/contentWrite'
 import { pendingDeletes, undoableDelete } from '@/utils/undoableDelete'
 import { AccessNote } from './AccessNote'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 /** Week needs room for seven readable columns. */
 export const WIDE_QUERY = CALENDAR_WIDE_QUERY
@@ -198,7 +199,7 @@ export function SpaceCalendarSection({ spaceId, canWrite, adminOnly, archived }:
     const canReport = e.created_by !== me
     return (
       <>
-        {e.description && <p class="sh-cal-row__desc">{e.description}</p>}
+        {e.description && <p class="sh-cal-row__desc"><LinkifiedText text={e.description} /></p>}
         <div class="sh-event-times">
           <span>{t('event.starts')} {bounds.starts}</span>
           <span>{t('event.ends')} {bounds.ends}</span>

@@ -1,6 +1,6 @@
 """Read a page's preview metadata out of its HTML ``<head>``.
 
-Pure and synchronous (CPU-bound on a 512 KiB page — callers run it via
+Pure and synchronous (CPU-bound on a head of up to 2 MiB — callers run it via
 ``asyncio.to_thread``). Uses the standard library's tolerant
 :class:`html.parser.HTMLParser`; nothing is executed or rendered, and the
 parser stops at ``</head>`` / ``<body>`` so a page's body is never walked.

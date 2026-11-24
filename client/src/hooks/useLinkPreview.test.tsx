@@ -55,6 +55,14 @@ describe('useLinkPreview', () => {
     expect(state.current!.loading).toBe(false)
   })
 
+  it('asks for no card when the card would open another page', async () => {
+    const { state } = await mount('see https://en.wikipedia.org/wiki/Mercury_(planet)')
+    await settle()
+    expect(post).not.toHaveBeenCalled()
+    expect(state.current!.url).toBeNull()
+    expect(state.current!.mismatch).toBe(true)
+  })
+
   it('does nothing without a link', async () => {
     const { state } = await mount('no link here')
     await settle()
@@ -103,6 +111,8 @@ describe('useLinkPreview', () => {
     await settle()
     expect(post).toHaveBeenCalledTimes(1)
     expect(state.current!.url).toBeNull()
+    // The composer's www. hint must not promise a card now.
+    expect(state.current!.off).toBe(true)
     mod.resetLinkPreviewSession()
   })
 })

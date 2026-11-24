@@ -45,6 +45,7 @@ import { addBase } from '@/baseUrl'
 import { areaLabel, areaShortLabel, peerAreaLabel, radiusLabel, type AreaVerdict } from '@/utils/localArea'
 import { distanceLabel, hintLabel, hintVerdict, pinDistanceKm } from '@/utils/placePin'
 import { PIN_DOT_KM } from '@/components/LocalAreaPicker'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 type AboutAction = 'open' | Exclude<DiscoverAction, null>
 
@@ -454,7 +455,7 @@ export default function SpacePublicDetailPage() {
       {entry.description && (
         <section class="sh-space-public__section">
           <h2>{t('space.public.about')}</h2>
-          <p>{entry.description}</p>
+          <p><LinkifiedText text={entry.description} /></p>
         </section>
       )}
 

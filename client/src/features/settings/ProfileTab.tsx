@@ -35,6 +35,7 @@ import { currentUser } from '@/store/auth'
 import type { User } from '@/types'
 import { HANDLE_INPUT_ID, HandleEditor, handleBaseline } from './HandleEditor'
 import { ProtectedAccountSection } from './ProtectedAccountSection'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 /** The fields of the one form, in save (and focus) order. */
 export type ProfileField = 'name' | 'bio' | 'handle'
@@ -369,7 +370,7 @@ function ProfileGlance({ user }: { user: User | null }) {
         <p class="sh-conn-eyebrow">{t('settings.profile.how_others_see')}</p>
         <h2 id="sh-profile-glance-name" class="sh-profile-glance__name">{name}</h2>
         <p class="sh-profile-glance__handle">@{handleBaseline(user)}</p>
-        {user?.bio && <p class="sh-profile-glance__bio">{user.bio}</p>}
+        {user?.bio && <p class="sh-profile-glance__bio"><LinkifiedText text={user.bio} /></p>}
         {isHaUser && (
           <span class="sh-profile-source sh-profile-source--ha">
             🏠 {t('settings.profile.source_ha')}

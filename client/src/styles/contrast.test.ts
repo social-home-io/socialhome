@@ -140,3 +140,23 @@ describe('highlight viewer chrome', () => {
     expect(onBlack('#F08A4B')).toBeGreaterThanOrEqual(3)
   })
 })
+
+describe('links in user text', () => {
+  it('the shared link colour never beats a container (own DM bubble)', () => {
+    // Exactly one class: (0,1,0) beats the bare ``a { text-decoration:
+    // none }`` reset and loses to ``.sh-message--mine a`` (0,1,1).
+    const shared = rules().find(([sel]) => sel === '.sh-ext-link')
+    expect(shared?.[1]).toMatch(/text-decoration\s*:\s*underline/)
+    expect(rules().some(([sel]) => /(?:^|,)\s*(?:a\.sh-ext-link|:where\(a\.sh-ext-link\))/.test(sel)))
+      .toBe(false)
+    const mine = rules().find(([sel]) => sel === '.sh-message--mine a')
+    expect(mine?.[1]).toMatch(/color\s*:\s*var\(--sh-on-primary-fill\)/)
+  })
+
+  it('caption links over pictures keep the caption ink and take taps', () => {
+    const cap = rules().find(([sel]) => sel.includes('.sh-gviewer-caption a'))
+    expect(cap?.[0]).toContain('.sh-lightbox-meta-line a')
+    expect(cap?.[1]).toMatch(/color\s*:\s*inherit/)
+    expect(cap?.[1]).toMatch(/pointer-events\s*:\s*auto/)
+  })
+})

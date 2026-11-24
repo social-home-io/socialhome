@@ -36,6 +36,7 @@ import {
   cardAction, canClose, closesLabel, endedLabel, gamePath, inLobby, isStarter, playersLabel,
   seatedLabel, starterLabel, type AppLook, type SpaceTable,
 } from './spaceGames'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 /** Join refusals that mean "this app is off here" — ask for it. (A
  *  missing app answers a plain 404: the toast, and the re-read list turns
@@ -196,7 +197,7 @@ export function SpaceGameCard({
           {appNote && <p class="sh-game-card__line sh-game-card__meta">{appNote}</p>}
         </div>
       </div>
-      {table.note && <p class="sh-game-card__note">{table.note}</p>}
+      {table.note && <p class="sh-game-card__note"><LinkifiedText text={table.note} /></p>}
       <div class="sh-game-card__foot">
         <span class="sh-game-card__seated">{seatedLabel(table)}</span>
         <div class="sh-game-card__actions">
