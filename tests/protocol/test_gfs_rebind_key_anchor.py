@@ -114,7 +114,7 @@ async def test_a_server_with_another_key_cannot_move_the_pinned_id(
         assert svc.known_instance_ids(conn) == frozenset({"gfs-0"})
         # Nothing the impostor signed is trusted.
         assert trusted is False
-        assert svc._anon_publish.get("conn-1") is False
+        assert svc._envelope_relay.get("conn-1") is not True
         assert any(
             "pinned key" in r.getMessage() and r.levelno == logging.WARNING
             for r in caplog.records
@@ -143,7 +143,7 @@ async def test_an_impostor_claiming_the_pinned_key_cannot_move_the_pinned_id(
         conn = await household.get("conn-1")
         assert conn is not None and conn.gfs_instance_id == "gfs-0"
         assert trusted is False
-        assert svc._anon_publish.get("conn-1") is False
+        assert svc._envelope_relay.get("conn-1") is not True
     finally:
         await impostor.close()
 
@@ -162,7 +162,7 @@ async def test_the_same_server_under_the_pinned_key_is_followed_to_its_new_id(
         conn = await household.get("conn-1")
         assert conn is not None and conn.gfs_instance_id == "gfs-shared"
         assert trusted is True
-        assert svc._anon_publish.get("conn-1") is True
+        assert svc._envelope_relay.get("conn-1") is True
     finally:
         await moved.close()
 

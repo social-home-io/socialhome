@@ -31,11 +31,10 @@ body, or strip it to deny the relay:
 * **Only a signed block counts.** The capability is trusted only when
   ``capabilities`` + ``capabilities_sig`` + ``capabilities_sig_suite`` verify
   against the GFS identity key this household pinned at pair time
-  (:mod:`socialhome.capabilities_sig`). The bare top-level
-  ``anonymous_publish`` mirror is informational and never acted on.
-* **The cache ratchets up.** Once verified, a later fetch without the block
-  does not downgrade it for the rest of the process — a GFS cannot lose a
-  capability its build has.
+  (:mod:`socialhome.capabilities_sig`). A bare top-level flag is never
+  acted on.
+* **Never a sticky "no".** Only a verified ``True`` is cached; anything else
+  stays unknown and is re-probed on the next attempt.
 * **https:// at pair time.** A GFS URL must be ``https://`` unless its host is
   loopback / RFC1918 / link-local, so the pinning fetch itself can't be
   rewritten on-path.
@@ -518,7 +517,6 @@ class GfsConnectionService:
 
     __slots__ = (
         "_addressee_key",
-        "_anon_publish",
         "_approval_retry",
         "_authority_rotation",
         "_caps_warned",
@@ -568,7 +566,6 @@ class GfsConnectionService:
         "_repo",
         "_rotation_warned",
         "_sealed_highlight_stream",
-        "_space_key_pull",
         "_space_media",
         "_space_repo",
         "_subscriber_seats",
@@ -608,17 +605,13 @@ class GfsConnectionService:
         self._icon_repo = None
         self._own_instance_id = ""
         self._own_signing_key = b""
-        # Per-connection GFS capability cache, RAM-only and deliberately
-        # NOT persisted: ``anonymous_publish`` is a property of the REMOTE
-        # server's build, not of this household's data, so a column would
-        # go stale the moment an operator upgrades their GFS. It is
-        # (re)learned from the SIGNED capability block on ``GET /gfs/info``
-        # at pair time and on every GFS-WS (re)connect, plus once on demand
-        # when a publish finds it unknown. Only a verified ``True`` lets a
-        # publish go out; anything else sends nothing (never an identified
-        # body). Once ``True`` under a verified signature the entry RATCHETS
-        # (see :meth:`_apply_capability`).
-        self._anon_publish: dict[str, bool] = {}
+        # Per-connection GFS capability caches, RAM-only and deliberately
+        # NOT persisted: a capability is a property of the REMOTE server's
+        # build, not of this household's data, so a column would go stale the
+        # moment an operator upgrades their GFS. Each is (re)learned from the
+        # SIGNED capability block on ``GET /gfs/info`` at pair time and on
+        # every GFS-WS (re)connect, plus once on demand
+        # (:meth:`_signed_capability_supported`).
         # Same one-shot discipline for the capability-block warning (missing
         # block / failed verification / unknown suite): a household publishing
         # fifty times must not emit fifty copies.
@@ -627,7 +620,7 @@ class GfsConnectionService:
         # connection — the negative TTL (:data:`GFS_INFO_NEGATIVE_TTL_S`).
         # Cleared on the next successful fetch.
         self._info_failed_at: dict[str, float] = {}
-        # Same RAM-only, ratchet-up discipline as ``_anon_publish``, for
+        # RAM-only, never a sticky "no", for
         # the ``envelope_relay`` capability the §D2b invite bootstrap
         # needs (:class:`socialhome.services.gfs_envelope_sender
         # .GfsEnvelopeSender`). A build cannot lose the capability, so a
@@ -689,10 +682,6 @@ class GfsConnectionService:
         # reaction totals and pushes them to connected followers that
         # declared ``ops: ["counts"]`` — never queued.
         self._moment_counts: dict[str, bool] = {}
-        # …and ``space_key_pull`` (#5b): nothing asks for a key any more
-        # (v_96); kept as the proof the GFS serves ``/gfs/pages``
-        # (:meth:`viewer_pages_supported`).
-        self._space_key_pull: dict[str, bool] = {}
         # …and ``join_contact`` (v_84): the GFS serves a listing's
         # authority-signed join contact. Sent only to a server that proved it.
         self._join_contact: dict[str, bool] = {}
@@ -935,7 +924,6 @@ class GfsConnectionService:
     def _forget_listing(self, target_id: str) -> None:
         """Drop every RAM cache of one listing target."""
         for cache in (
-            self._anon_publish,
             self._envelope_relay,
             self._envelope_media,
             self._envelope_mailbox,
@@ -950,7 +938,6 @@ class GfsConnectionService:
             self._space_media,
             self._moment_reactions,
             self._moment_counts,
-            self._space_key_pull,
             self._join_contact,
             self._subscriber_seats,
             self._listing_counts,
@@ -1998,8 +1985,8 @@ class GfsConnectionService:
 
         Never raises — every caller is on a best-effort path (a reconnect
         hook or a relay fan-out). A successful fetch refreshes the RAM-only
-        ``anonymous_publish`` capability cache for *conn* (from the SIGNED
-        block only, see :meth:`_record_capabilities`); a failure records only
+        capability caches for *conn* (from the SIGNED block only, see
+        :meth:`_record_capabilities`); a failure records only
         a short retry suppression (:data:`GFS_INFO_NEGATIVE_TTL_S`), never a
         capability answer, so one blip can't downgrade this household's
         privacy for the rest of the process.
@@ -2296,9 +2283,9 @@ class GfsConnectionService:
     def _record_capabilities(self, conn: GfsConnection, info: dict) -> None:
         """Update the capability cache for *conn* from a ``/gfs/info`` body.
 
-        The bare top-level ``anonymous_publish`` flag is IGNORED: it rides an
+        Only the signed block counts: a bare top-level flag rides an
         unauthenticated endpoint, so an on-path attacker could forge or strip
-        it. Only the signed block counts.
+        it.
 
         A signed ``envelope_relay`` is cached too (True only — the same
         "never a sticky no" rule as :meth:`_signed_capability_supported`),
@@ -2306,9 +2293,6 @@ class GfsConnectionService:
         envelopes without probing every GFS on each read.
         """
         caps = self._verified_capabilities(conn, info)
-        self._apply_capability(
-            conn, caps is not None and caps.get("anonymous_publish") is True
-        )
         if caps is not None and caps.get("envelope_relay") is True:
             self._envelope_relay[conn.id] = True
         if caps is not None:
@@ -2469,33 +2453,6 @@ class GfsConnectionService:
             return None
         return caps
 
-    def _apply_capability(self, conn: GfsConnection, verified: bool) -> None:
-        """Write the verified capability into the cache, ratcheting UP only.
-
-        A GFS cannot legitimately lose ``anonymous_publish`` — the capability
-        is a property of its build, and builds don't travel backwards. So once
-        a connection has been seen advertising it under a VALID signature,
-        a later fetch that lacks it is an attack (or a broken proxy) and is
-        ignored for the rest of the process rather than silently stopping
-        every future relay to that GFS. The ratchet is RAM-only:
-        a restart legitimately starts from "unknown" again.
-        """
-        if verified:
-            self._anon_publish[conn.id] = True
-            return
-        if self._anon_publish.get(conn.id) is True:
-            log.warning(
-                "GFS %r (%s) previously advertised anonymous_publish under a "
-                "valid signature and no longer does — capability downgrade "
-                "ignored. A connection server "
-                "cannot lose this capability, so suspect tampering or a "
-                "proxy rewriting /gfs/info.",
-                conn.display_name,
-                conn.inbox_url,
-            )
-            return
-        self._anon_publish[conn.id] = False
-
     def _warn_capabilities(self, conn: GfsConnection, detail: str) -> None:
         """WARN once per connection about an untrusted capability block.
 
@@ -2513,34 +2470,6 @@ class GfsConnectionService:
             conn.inbox_url,
             detail,
         )
-
-    async def _anonymous_publish_supported(self, conn: GfsConnection) -> bool:
-        """Whether *conn*'s GFS proved ``anonymous_publish`` on /gfs/info.
-
-        The reference capability of the signed-block machinery (verify,
-        ratchet, negative TTL): no household request is gated on it since the
-        space-keyed ``/gfs/publish`` went (v_96); it is removed with the GFS's
-        legacy routes. Answers from the cache when it is warm (filled at pair
-        time and on every WS reconnect); on a cold miss probes ``/gfs/info``
-        ONCE. An unreachable GFS answers ``False`` (and lands in
-        ``_info_failed_at``, :meth:`capability_unknown`), its failure
-        suppressed for :data:`GFS_INFO_NEGATIVE_TTL_S`.
-        """
-        if self._listing_failed(conn):
-            return False
-        await self._listing_recheck(conn)
-        if self._listing_failed(conn):
-            return False
-        cached = self._anon_publish.get(conn.id)
-        if cached is not None:
-            return cached
-        failed_at = self._info_failed_at.get(conn.id)
-        if failed_at is not None and time.monotonic() - failed_at < (
-            GFS_INFO_NEGATIVE_TTL_S
-        ):
-            return False
-        await self._fetch_gfs_info(conn)
-        return self._anon_publish.get(conn.id, False)
 
     async def envelope_relay_supported(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s GFS proved ``envelope_relay`` on /gfs/info.
@@ -2693,8 +2622,7 @@ class GfsConnectionService:
     ) -> bool:
         """Whether *conn*'s GFS proved capability *name* under a VALID signature.
 
-        Same shape as :meth:`_anonymous_publish_supported`: answered from the
-        RAM cache when warm, probed once on a cold miss, and suppressed for
+        Answered from the RAM cache when warm, probed once on a cold miss, and suppressed for
         :data:`GFS_INFO_NEGATIVE_TTL_S` after an unreachable probe. Only a
         ``True`` under a valid signature is cached — an unsigned or stripped
         block is "unknown", re-probed next time, never a sticky "no". One
@@ -4375,13 +4303,14 @@ class GfsConnectionService:
         """Whether *conn*'s GFS serves the JSON the pinned viewer renders a
         global space's page from (``GET /gfs/pages/spaces/{id}``, #1109).
 
-        No flag of its own: ``space_key_pull`` (#1137) shipped after those
+        No flag of its own: ``subscriber_seats`` (v_96) shipped after those
         routes, so a valid signature over it proves them too (no new key
-        when an existing one already proves it). An older GFS, or one this
-        household can't read the capabilities of: the space's link stays
-        that GFS's own ``/spaces/{id}`` page."""
+        when an existing one already proves it; the ``space_key_pull`` flag
+        that proved them before went with the GFS's space-keyed routes). An
+        older GFS, or one this household can't read the capabilities of:
+        the space's link stays that GFS's own ``/spaces/{id}`` page."""
         return await self._signed_capability_supported(
-            conn, "space_key_pull", self._space_key_pull
+            conn, "subscriber_seats", self._subscriber_seats
         )
 
     async def _relay_targets(self, space_id: str) -> list[GfsConnection]:

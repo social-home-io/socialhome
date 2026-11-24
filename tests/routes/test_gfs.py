@@ -930,7 +930,7 @@ async def test_gfs_servers_get_links_a_live_listing_to_the_pinned_viewer(client)
     await repo.publish_space("sp-1", "gfs-1")
     await repo.publish_space("sp-1", "gfs-2")
     svc = client.app[gfs_connection_service_key]
-    svc._space_key_pull["gfs-1"] = True  # gfs-1 proved it; gfs-2 can't be read
+    svc._subscriber_seats["gfs-1"] = True  # gfs-1 proved it; gfs-2 can't be read
     svc._info_failed_at["gfs-2"] = time.monotonic()
     r = await client.get("/api/spaces/sp-1/gfs-servers", headers=_auth(client._tok))
     assert r.status == 200

@@ -1,18 +1,16 @@
 """Signed GFS capability block — pure, low-level, dependency-light.
 
 ``GET /gfs/info`` is the capability channel for the GFS↔HFS leg (that leg has
-no ``proto_version`` negotiation), and the capability that matters is
-``anonymous_publish``: it tells a household that ``POST /gfs/publish``
-authorizes purely on the space-authority signature inside the opaque payload,
-so the household can stop sending ``from_instance`` plus its own transport
-signature.
+no ``proto_version`` negotiation): every anonymous or optional request a
+household makes to a GFS (the opaque channels, the envelope relay, invite
+links, encrypted moments, …) is gated on a capability the server proves
+there. (The first one, ``anonymous_publish`` of the space-keyed
+``POST /gfs/publish``, went with that route in v_96.)
 
 A BARE flag on an unauthenticated endpoint is not enough. An on-path attacker
-(or a GFS reachable over plain ``http://``) could simply strip the flag and
-every household would "safely" fall back to the legacy identified body — the
-body that carries a household-signed, third-party-provable "household X
-relayed into space Y" artefact. The fallback is the exact harm the anonymous
-relay exists to prevent, so the downgrade must be authenticated away: the GFS
+(or a GFS reachable over plain ``http://``) could strip or forge a flag and
+push a household onto a path that reveals more, so the capability must be
+authenticated: the GFS
 signs its capability block with its OWN identity key, whose public half the
 household pinned (TOFU) at pair time, and the household trusts the capability
 only when that signature verifies.
