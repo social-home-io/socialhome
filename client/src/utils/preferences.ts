@@ -11,17 +11,33 @@ import { currentUser } from '@/store/auth'
 
 export type LandingPath = '/' | '/feed' | '/dashboard'
 
-export type MomentsHops = 1 | 2 | 3
+/** 1–5 hops (server: ``MOMENT_MAX_HOPS`` = ``MOMENT_MAX_REACH``). */
+export type MomentsHops = 1 | 2 | 3 | 4 | 5
 
 export interface MomentsPreferences {
   /** Per-user max-hops visibility (§Momentum-relay-policy). 1 = only
-   *  moments authored by direct peers; 3 (default) = the wire cap, so
-   *  every relayed moment is visible. */
+   *  moments authored by direct peers; 3 = the default; up to 5 (v_96). */
   max_hops?: MomentsHops
   /** How long people who follow this user keep their new moments, in
    *  days (decision 6d). The server clamps to [1, 30] and defaults to 7
    *  (``parse_moment_preferences``). */
   follower_retention_days?: number
+  /** How far this user's own moments go, 1–5 hops (v_96, default 3);
+   *  the household maximum and child protection bound it on the server. */
+  reach?: MomentsHops
+}
+
+/** Server: ``MOMENT_DEFAULT_REACH``. */
+export const MOMENT_DEFAULT_REACH = 3
+/** Server: ``MOMENT_MAX_REACH`` (= ``MOMENT_MAX_HOPS``). */
+export const MOMENT_MAX_REACH = 5
+
+/** A ``moments`` hop count as the server reads it (``_strict_int``): a
+ *  whole number clamps to 1–``MOMENT_MAX_REACH``, anything else is
+ *  the default ``MOMENT_DEFAULT_REACH``. */
+function hopsOf(v: unknown): MomentsHops {
+  if (typeof v !== 'number' || !Number.isInteger(v)) return MOMENT_DEFAULT_REACH
+  return Math.min(MOMENT_MAX_REACH, Math.max(1, v)) as MomentsHops
 }
 
 /** Server: ``MOMENT_DEFAULT_RETENTION_DAYS``. */
@@ -41,13 +57,13 @@ export function momentRetentionLabel(days: number): string {
  *  applied, so the SPA shows what the server will act on. */
 export function getMomentsPreferences(): Required<MomentsPreferences> {
   const raw = (getPreferences().moments ?? {}) as MomentsPreferences
-  const hops = Number(raw.max_hops)
   const days = Number(raw.follower_retention_days)
   return {
-    max_hops: (hops === 1 || hops === 2 ? hops : 3) as MomentsHops,
+    max_hops: hopsOf(raw.max_hops),
     follower_retention_days: Number.isFinite(days) && raw.follower_retention_days != null
       ? Math.min(MOMENT_RETENTION_MAX, Math.max(MOMENT_RETENTION_MIN, Math.trunc(days)))
       : MOMENT_RETENTION_DEFAULT,
+    reach: hopsOf(raw.reach),
   }
 }
 

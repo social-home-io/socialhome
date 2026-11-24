@@ -18,6 +18,7 @@ vi.mock('@/utils/videoDuration', () => ({
 import { api } from '@/api'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
+import { myMomentReach } from '@/store/momentLimits'
 import { registrations } from '@/store/momentPublic'
 import { clearTextDraft } from '@/store/textDrafts'
 import type { Moment } from '@/types'
@@ -32,7 +33,7 @@ function parent(extra: Partial<Moment> = {}): Moment {
     media_url: null, media_type: null, duration_ms: null, parent_moment_id: null,
     origin_instance_id: 'self', created_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    reaction_count: 0, reply_count: 0, ...extra,
+    reaction_count: 0, reply_count: 0, reach: 3, ...extra,
   }
 }
 
@@ -56,7 +57,7 @@ describe('MomentReplyField', () => {
     const field = getByRole('textbox', { name: 'Write a reply' })
     expect(ref.current).toBe(field)
     expect(field.getAttribute('dir')).toBe('auto')
-    expect(container.textContent).toContain('Your reply goes to your paired households and theirs, like a moment.')
+    expect(container.textContent).toContain('Your reply goes to your paired households and beyond, up to 3 hops, like a moment.')
     expect((getByRole('button', { name: 'Reply' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
@@ -64,6 +65,29 @@ describe('MomentReplyField', () => {
     currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
     const { container } = renderField(parent())
     expect(container.textContent).toContain('Your reply goes to your household and paired households, like a moment.')
+  })
+
+  it.each([
+    // [what the limits read says, the parent's reach, protected, the line]
+    [5, 2, false, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
+    [2, 5, false, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
+    [4, 4, false, 'Your reply goes to your paired households and beyond, up to 4 hops, like a moment.'],
+    [1, 4, false, 'Your reply goes to your household and paired households only, like a moment.'],
+    [5, 1, false, 'Your reply goes to your household and paired households only, like a moment.'],
+    [1, 3, true, 'Your reply goes to your household and paired households, like a moment.'],
+  ])('own reach %i (read from the limits) under a reach-%i moment, protected %s', async (own, reach, prot, line) => {
+    myMomentReach.value = null
+    vi.mocked(api.get).mockResolvedValue({ next_allowed_at: null, reach: own, reach_max: 5 })
+    if (prot) currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
+    try {
+      const { container } = renderField(parent({ reach }))
+      await waitFor(() => expect(myMomentReach.value).toBe(own))
+      await waitFor(() => expect(container.querySelector('.sh-moment-replyfield__hint')!.textContent).toBe(line))
+      expect(api.get).toHaveBeenCalledWith('/api/moments/limits')
+    } finally {
+      vi.mocked(api.get).mockReset()
+      myMomentReach.value = null
+    }
   })
 
   it('posts the reply, clears the field and hands the new reply up', async () => {

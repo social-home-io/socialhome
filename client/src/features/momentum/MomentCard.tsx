@@ -41,6 +41,7 @@ import { VideoMedia } from '@/components/VideoMedia'
 import { confirmDialog } from '@/components/confirm'
 import { currentUser } from '@/store/auth'
 import { namedPersonLabel, namedPersonPicture } from '@/store/householdUsers'
+import { momentReach, reachText } from '@/store/momentLimits'
 import { formatLocale, isOne, t } from '@/i18n/i18n'
 import type { Moment } from '@/types'
 import { renderHashtagged } from './hashtags'
@@ -315,7 +316,14 @@ export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
       {mine && !page && (
         <Modal open={whoSees.value} onClose={() => { whoSees.value = false }}
           title={t('moment.card.who_sees')}>
-          <p>{t(currentUser.value?.protected ? 'moment.card.who_sees_protected' : 'moment.card.who_sees_body')}</p>
+          {/* The moment's own reach (v_96) says how far it went. A
+              protected author's reach-1 moment keeps the protected
+              wording; one written before the protection (reach > 1) says
+              how far it really went — protecting later doesn't pull it
+              back. */}
+          <p>{currentUser.value?.protected && momentReach(m) === 1
+            ? t('moment.card.who_sees_protected')
+            : reachText('moment.card.who_sees_body', momentReach(m))}</p>
           {m.is_public && <p>{t('moment.card.who_sees_public')}</p>}
         </Modal>
       )}

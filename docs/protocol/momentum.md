@@ -271,14 +271,19 @@ landed: the signed wire shape (creates and deletes), the receiver refusals,
 the relay rules (``hop < min(reach, MOMENT_MAX_HOPS)``, the relay clamp, one
 closer re-relay, reach-carrying copies only to v_96), the totals gate, the
 relayed outbox key, the ``moments.reach`` column and the person / household
-reach (``moments.reach`` / ``moments.reach_max``, no route or UI yet).
+reach (``moments.reach`` / ``moments.reach_max``).
 Phase 2 (still v_96) has landed too: ``MOMENT_MAX_HOPS`` 5 with the
 viewer's ``max_hops`` 1–5 (default 3), ``MAX_RETURN_TOKENS`` 4 with the
 per-source rate on four-token reactions, ``moment_look_hops`` (decision C,
 no migration) and hop ≥ 4 copies only to v_96. Phase 3 (still v_96, no
 new wire field) has landed the storage rule's follower branch and the
-forward-only guarantees below. Still to come: the routes and the UI (the
-settings screen still offers ``max_hops`` 1–3).
+forward-only guarantees below. Phase 4 (no wire change) has landed the
+routes and the UI: ``GET /api/moments/limits`` carries the caller's
+``reach`` and the household ``reach_max``, admins set the maximum with
+``PUT /api/admin/moments/reach-max``, every moment item carries its row's
+``reach``, and Settings › Momentum offers "Show moments up to" and "How
+far my moments go" 1–5 (see [api.md](../api.md)); every text that said
+"up to 3 hops" now says the moment's or the person's real reach.
 
 ### Rules
 

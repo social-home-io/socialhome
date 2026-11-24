@@ -54,10 +54,15 @@ const REG_OFF: MomentPublicRegistration = { ...REG, default_share: false }
 
 let regs: MomentPublicRegistration[] = [REG]
 let nextAllowed: string | null = null
+/** The caller's reach from ``/api/moments/limits`` (``undefined`` = a
+ *  response that doesn't say). */
+let limitReach: number | undefined
 
 function routeGet(path: string) {
   if (path === '/api/moments/public/registrations') return Promise.resolve(regs)
-  if (path === '/api/moments/limits') return Promise.resolve({ next_allowed_at: nextAllowed })
+  if (path === '/api/moments/limits') {
+    return Promise.resolve({ next_allowed_at: nextAllowed, reach: limitReach, reach_max: 5 })
+  }
   if (path === '/api/gfs/connections') return Promise.resolve([{ id: 'g1', display_name: 'Demo GFS', status: 'active' }])
   return Promise.reject(new Error(`unexpected GET ${path}`))
 }
@@ -94,6 +99,7 @@ describe('MomentumComposerDialog', () => {
   beforeEach(() => {
     regs = [REG]
     nextAllowed = null
+    limitReach = undefined
     registrations.value = []
     currentUser.value = { user_id: 'u1', username: 'me', display_name: 'Me' } as User
     mockApi.get.mockReset()
@@ -185,7 +191,7 @@ describe('MomentumComposerDialog', () => {
     const { container } = render(<MomentumComposerDialog />)
     await openAndSettle()
     const reach = container.querySelector('.sh-momentum-composer-reach')!
-    expect(reach.textContent).toContain('Paired households and theirs, up to 3 hops')
+    expect(reach.textContent).toContain('Paired households and beyond, up to 3 hops · 24 h')
     // Never a "Change" link next to reach: max_hops only changes what you see.
     expect(reach.querySelector('a')).toBeNull()
     const info = reach.querySelector('button[aria-expanded]') as HTMLButtonElement
@@ -196,6 +202,37 @@ describe('MomentumComposerDialog', () => {
     // How long followers keep it: the author's own setting (#1175).
     expect(more.textContent).toMatch(/keep it for \d+\sdays \(your setting\)/)
     expect(more.textContent).toContain('only changes what reaches you')
+  })
+
+  it.each([
+    [1, 'Your household and paired households · 24 h', /and no further\. They see it/],
+    [3, 'Paired households and beyond, up to 3 hops · 24 h', /up to 3 hops away; each person there decides how far they look/],
+    [5, 'Paired households and beyond, up to 5 hops · 24 h', /up to 5 hops away; each person there decides how far they look/],
+  ])('reach %i: says how far the caller\'s moments really go', async (n, line, more) => {
+    limitReach = n
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const reach = container.querySelector('.sh-momentum-composer-reach')!
+    await waitFor(() => expect(reach.textContent).toContain(line))
+    expect(reach.textContent).not.toContain('up to 1 hops')
+    await act(async () => { fireEvent.click(reach.querySelector('button[aria-expanded]')!) })
+    expect(container.querySelector('.sh-momentum-composer-reach-more')!.textContent).toMatch(more)
+  })
+
+  it.each([
+    // [own reach, the parent's reach, the line]
+    [5, 2, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
+    [2, 4, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
+    [5, 1, 'Your reply goes to your household and paired households only, like a moment.'],
+  ])('a reply goes no further than the caller (%i) or its parent (%i)', async (own, parentReach, line) => {
+    limitReach = own
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle('m-parent', { parent: { ...PARENT, reach: parentReach } })
+    const reach = container.querySelector('.sh-momentum-composer-reach')!
+    await waitFor(() => expect(reach.textContent).toContain(line))
+    await act(async () => { fireEvent.click(reach.querySelector('button[aria-expanded]')!) })
+    expect(container.querySelector('.sh-momentum-composer-reach-more')!.textContent)
+      .toContain('never further than the moment it answers')
   })
 
   it('a protected account is told its moments reach its household and paired households only', async () => {
@@ -236,7 +273,7 @@ describe('MomentumComposerDialog', () => {
     nextAllowed = inMinutes(9)
     const { container } = render(<MomentumComposerDialog />)
     await openAndSettle('m-parent', { parent: PARENT })
-    expect(mockApi.get).not.toHaveBeenCalledWith('/api/moments/limits')
+    // Limits are read for the reach only; the next allowed time never holds a reply.
     expect(container.querySelector('.sh-momentum-composer-limit')).toBeNull()
     expect(submitButton(container).disabled).toBe(false)
   })
@@ -306,7 +343,7 @@ describe('MomentumComposerDialog', () => {
     expect(quote.textContent).toContain('Anna Berger')
     expect(quote.textContent).toContain('Erster Frost heute Morgen')
     expect(container.querySelector('.sh-momentum-composer-reach')!.textContent)
-      .toContain('Your reply goes to your paired households and theirs, like a moment')
+      .toContain('Your reply goes to your paired households and beyond, up to 3 hops, like a moment')
   })
 
   it('a reply to a moment that is not public offers no public toggle', async () => {

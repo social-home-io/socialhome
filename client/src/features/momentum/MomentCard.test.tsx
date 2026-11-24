@@ -13,6 +13,7 @@ const openReport = vi.hoisted(() => vi.fn())
 vi.mock('@/components/ReportDialog', () => ({ openReport }))
 
 import { api } from '@/api'
+import { currentUser } from '@/store/auth'
 import type { Moment } from '@/types'
 import { MomentCard, clipLength, reactionMode } from './MomentCard'
 
@@ -24,7 +25,7 @@ function moment(extra: Partial<Moment> = {}): Moment {
     media_url: null, media_type: null, duration_ms: null, parent_moment_id: null,
     origin_instance_id: 'peer-o', created_at: new Date(Date.now() - 3_600_000).toISOString(),
     expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    reaction_count: 0, reply_count: 0, received_via: 'self', hop_count: 1,
+    reaction_count: 0, reply_count: 0, reach: 3, received_via: 'self', hop_count: 1,
     reactions_reach: 'author', reaction_counts: {}, reaction_totals_at: null, my_reaction: null,
     author: { display_name: 'Bob Berger', picture_url: null, household: 'Berger' },
     ...extra,
@@ -97,6 +98,39 @@ describe('MomentCard', () => {
     expect(items).toEqual(['Reply', 'Copy text', 'Who sees this', 'Delete'])
     fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
     expect(await findByText(/up to 3 hops away/)).toBeTruthy()
+  })
+
+  it.each([
+    [1, /^Your household and your paired households, no further\./],
+    [3, /^Your paired households and the households they’re paired with, up to 3 hops away; each person there decides how far they look\./],
+    [5, /up to 5 hops away; each person there decides how far they look\./],
+  ])('Who sees this says how far a moment with reach %i went', async (reach, body) => {
+    const { getByRole, findByRole } = renderCard(moment({ author_user_id: ME, reach }))
+    fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
+    await findByRole('menu')
+    fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
+    const dialog = await findByRole('dialog')
+    expect(dialog.querySelector('p')!.textContent).toMatch(body)
+    expect(dialog.textContent).not.toContain('up to 1 hops')
+  })
+
+  it.each([
+    // Written before the protection: it says how far it really went.
+    [3, /up to 3 hops away/],
+    // What the server sends for a protected author: the protected text.
+    [1, /^Your household and your paired households\. It isn't passed on further\./],
+  ])('Who sees this for a protected author’s moment with reach %i', async (reach, body) => {
+    currentUser.value = { user_id: ME, username: 'me', protected: true } as never
+    try {
+      const { getByRole, findByRole } = renderCard(moment({ author_user_id: ME, reach }))
+      fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
+      await findByRole('menu')
+      fireEvent.click(getByRole('menuitem', { name: 'Who sees this' }))
+      const dialog = await findByRole('dialog')
+      expect(dialog.querySelector('p')!.textContent).toMatch(body)
+    } finally {
+      currentUser.value = null
+    }
   })
 
   it('provenance: paired household, hops away, via GFS — nothing for your own household', () => {

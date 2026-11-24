@@ -46,7 +46,7 @@ function moment(id: string, author: string, extra: Partial<Moment> = {}): Moment
     media_url: null, media_type: null, duration_ms: null, parent_moment_id: null,
     origin_instance_id: 'peer-o', created_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    reaction_count: 0, reply_count: 0, ...extra,
+    reaction_count: 0, reply_count: 0, reach: 3, ...extra,
   }
 }
 
@@ -183,19 +183,66 @@ describe('MomentumDetailPage status of your own moment', () => {
     asAuthor({ is_public: false })
     const { findByRole, container } = render(<MomentumDetailPage />)
     const band = await findByRole('group', { name: 'Who sees this' })
-    expect(band.textContent).toContain('Your household and paired households, up to 3 hops')
+    expect(band.textContent).toContain('Paired households and beyond, up to 3 hops')
     expect(band.textContent).toMatch(/followers keep it 7\sdays/)
     expect(container.textContent).not.toMatch(/Stop sharing|Make public|Share publicly|Copy link/)
   })
 
-  it('a protected account’s moment stays with its household and paired households', async () => {
-    currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
-    asAuthor({ is_public: false })
+  it.each([
+    [1, 'Your household and your paired households'],
+    [3, 'Paired households and beyond, up to 3 hops'],
+    [5, 'Paired households and beyond, up to 5 hops'],
+  ])('a moment with reach %i says how far it went', async (reach, title) => {
+    asAuthor({ is_public: false, reach })
     const { findByRole } = render(<MomentumDetailPage />)
     const band = await findByRole('group', { name: 'Who sees this' })
-    expect(band.textContent).toContain('Your household and your paired households')
-    expect(band.textContent).not.toContain('3 hops')
+    expect(band.querySelector('.sh-moment-status__title')!.textContent).toBe(title)
+    expect(band.textContent).not.toContain('up to 1 hops')
+  })
+
+  it.each([
+    [1, /^Also your household and paired households · followers keep it 7\sdays$/],
+    [4, /^Also paired households and beyond, up to 4 hops · followers keep it 7\sdays$/],
+  ])('a public moment with reach %i says how far its household copy went', async (reach, sub) => {
+    asAuthor({ is_public: true, reach }, true)
+    const { findByRole } = render(<MomentumDetailPage />)
+    const band = await findByRole('group', { name: 'Who sees this' })
+    expect(band.querySelector('.sh-moment-status__sub')!.textContent).toMatch(sub)
+  })
+
+  it('a protected account’s moment stays with its household and paired households', async () => {
+    // reach 1 is what the server sends for a protected author: the band
+    // keeps the protected wording, like the composer — no followers line.
+    currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
+    asAuthor({ is_public: false, reach: 1 })
+    const { findByRole } = render(<MomentumDetailPage />)
+    const band = await findByRole('group', { name: 'Who sees this' })
+    expect(band.querySelector('.sh-moment-status__title')!.textContent)
+      .toBe('Your household and your paired households')
+    expect(band.querySelector('.sh-moment-status__sub')!.textContent)
+      .toMatch(/^They see it until /)
+    expect(band.textContent).not.toContain('hops')
     expect(band.textContent).not.toContain('followers')
+  })
+
+  it('a reach-3 moment shown to a now-protected author still says 3 hops', async () => {
+    // The moment went 3 hops when it was written; protecting the account
+    // later doesn't pull it back, so the band must not understate it.
+    currentUser.value = { user_id: 'u-me', username: 'me', protected: true } as never
+    asAuthor({ is_public: false, reach: 3 })
+    const { findByRole } = render(<MomentumDetailPage />)
+    const band = await findByRole('group', { name: 'Who sees this' })
+    expect(band.querySelector('.sh-moment-status__title')!.textContent)
+      .toBe('Paired households and beyond, up to 3 hops')
+  })
+
+  it('a reach-1 moment of an unprotected author says how long followers keep it', async () => {
+    asAuthor({ is_public: false, reach: 1 })
+    const { findByRole } = render(<MomentumDetailPage />)
+    const band = await findByRole('group', { name: 'Who sees this' })
+    expect(band.querySelector('.sh-moment-status__title')!.textContent)
+      .toBe('Your household and your paired households')
+    expect(band.querySelector('.sh-moment-status__sub')!.textContent).toContain('followers keep it')
   })
 
   it('a public moment names its GFS and copies the share link — never "Stop sharing"', async () => {
@@ -431,7 +478,7 @@ describe('MomentumDetailPage replies', () => {
     vi.mocked(api.post).mockResolvedValue(reply('r-new', 'u-me', 'Me'))
     const { findByRole, getByRole, container } = render(<MomentumDetailPage />)
     const field = await findByRole('textbox', { name: 'Write a reply' })
-    expect(container.textContent).toContain('Your reply goes to your paired households and theirs, like a moment.')
+    expect(container.textContent).toContain('Your reply goes to your paired households and beyond, up to 3 hops, like a moment.')
     expect(container.querySelector('[role="switch"]')).toBeNull()
     fireEvent.input(field, { target: { value: 'Gefunden!' } })
     fireEvent.click(getByRole('button', { name: 'Reply' }))
@@ -440,6 +487,20 @@ describe('MomentumDetailPage replies', () => {
     }))
     await waitFor(() => expect(container.querySelector('#moment-reply-r-new')).not.toBeNull())
     expect((field as HTMLTextAreaElement).value).toBe('')
+  })
+
+  it.each([
+    // [own reach, the moment's reach, the hint]
+    [5, 2, 'Your reply goes to your paired households and beyond, up to 2 hops, like a moment.'],
+    [4, 5, 'Your reply goes to your paired households and beyond, up to 4 hops, like a moment.'],
+    [5, 1, 'Your reply goes to your household and paired households only, like a moment.'],
+  ])('the reply field says a reply goes no further than you (%i) or the moment (%i)', async (own, reach, hint) => {
+    serve({ '/api/moments/m-amaka': thread([], { reach }) }, {
+      '/api/moments/limits': { next_allowed_at: null, reach: own, reach_max: 5 },
+    })
+    const { findByRole, container } = render(<MomentumDetailPage />)
+    await findByRole('textbox', { name: 'Write a reply' })
+    await waitFor(() => expect(container.textContent).toContain(hint))
   })
 
   it('offers the public switch only under a public moment, never pre-ticked', async () => {

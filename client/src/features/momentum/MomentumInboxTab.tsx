@@ -7,9 +7,10 @@
  * cursor (B14). A hashtag filter (``/momentum?tag=…``, the host's chip)
  * goes to the server with the list.
  *
- * On top, the composer entry with the honest reach sub-line — where a
- * moment goes, narrower for a protected account (its moments reach its
- * household and paired households only). States: skeleton, error card
+ * On top, the composer entry with the honest reach sub-line — how far the
+ * caller's moments go (their reach from ``GET /api/moments/limits``),
+ * narrower for a protected account (its moments reach its household and
+ * paired households only). States: skeleton, error card
  * with Try again, stale notice after a failed refresh, empty. At the end,
  * what "everything" means: the last 24 hours, and moments from people
  * you follow kept as long as their authors chose (1–30 days, per author).
@@ -28,6 +29,7 @@ import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } f
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import { householdDisplayName, householdPictureUrl, loadHouseholdUsers } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
+import { loadMomentLimits, reachText, shownReach } from '@/store/momentLimits'
 import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { t } from '@/i18n/i18n'
@@ -102,6 +104,9 @@ function drop(id: string) {
 export default function MomentumInboxTab({ tag }: { tag: string | null }) {
   const me = currentUser.value?.user_id
 
+  // The entry's reach line: how far the caller's moments go (v_96).
+  useEffect(() => { void loadMomentLimits() }, [])
+
   useEffect(() => {
     listTag = tag
     loading.value = true
@@ -143,7 +148,9 @@ export default function MomentumInboxTab({ tag }: { tag: string | null }) {
         <span class="sh-momentum-entry__text">
           <span class="sh-momentum-entry__prompt">{t('moment.composer.placeholder')}</span>
           <span id="sh-momentum-entry-reach" class="sh-momentum-entry__reach">
-            {t(currentUser.value?.protected ? 'moment.entry.reach_protected' : 'moment.entry.reach')}
+            {currentUser.value?.protected
+              ? t('moment.entry.reach_protected')
+              : reachText('moment.entry.reach', shownReach())}
           </span>
         </span>
         <svg class="sh-momentum-entry__icon" width="22" height="22" viewBox="0 0 24 24" fill="none"

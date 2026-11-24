@@ -28,7 +28,7 @@ function saved(id: string, savedAgoMs: number, extra: Partial<Moment> = {}): Mom
     origin_instance_id: 'peer-o',
     created_at: new Date(created).toISOString(),
     expires_at: new Date(created + 7 * DAY).toISOString(),
-    reaction_count: 0, reply_count: 0, received_via: 'household',
+    reaction_count: 0, reply_count: 0, reach: 3, received_via: 'household',
     author: { display_name: 'Amaka Okafor', picture_url: null },
     saved_by_me: true, can_save: true,
     saved_at: new Date(Date.now() - savedAgoMs).toISOString(),
