@@ -2392,6 +2392,24 @@ async def test_the_owner_still_publishes_after_a_restart_before_heal(env):
     assert await env.owner.svc.publish_current(SPACE_ID, 3, "cmVzdGFydA") == 1
 
 
+@pytest.mark.security
+async def test_the_owner_still_issues_grants_after_a_restart_before_heal(env):
+    """P5 (v_96): an owner rekey right after a restart — before this process
+    re-registered the channel (the GFS unreachable) — still issues each
+    seat a grant naming the chosen capable servers, the same fallback the
+    owner's publish-only grant takes; with none, a member or follower would
+    drop its seat (``drop_stale``) and read nothing."""
+    _go_global(env)
+    await _channel_ready(env)
+    before = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert before is not None
+    env.owner.svc._registered.clear()  # a fresh process
+    grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert grant is not None
+    assert grant["gfs_ids"] == before["gfs_ids"]
+    assert await env.member.svc.accept_grant(SPACE_ID, grant)
+
+
 async def test_a_global_grant_takes_its_seat_once_the_config_says_global(env):
     """A grant that arrived before the tier change seats us when the
     config is applied (no wait for the next reconnect)."""
