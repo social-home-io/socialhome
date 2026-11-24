@@ -20,6 +20,7 @@ Usage::
     python .claude/skills/federation-demo/harness.py pair    # all pairwise pairings
     python .claude/skills/federation-demo/harness.py traffic # generate posts/moments/...
     python .claude/skills/federation-demo/harness.py verify  # assertions across all 3
+    python .claude/skills/federation-demo/harness.py moment-reach  # after relay-pair: v_96 reach 1 + hop-4 forward-only
     python .claude/skills/federation-demo/harness.py unpair  # a unpairs c; both drop it; re-pair
     python .claude/skills/federation-demo/harness.py unpair-offline  # same with c down; c drops a on restart
     python .claude/skills/federation-demo/harness.py local-community  # after gfs-pair (also the tail of all)
@@ -15973,6 +15974,491 @@ def cmd_visibility() -> None:
     print("visibility: ok (per-pair user-visibility filter works both ways)")
 
 
+# ─── moment-reach (v_96) ───────────────────────────────────────────────────
+
+
+def _reach_user(state: dict, label: str, stem: str) -> tuple[str, str]:
+    """A fresh non-admin user on ``label`` for this run — ``(user_id,
+    token)``. Fresh, so the 15-min moment rate limit, earlier follows and
+    earlier preferences never get in the way; the run counter in ``state``
+    keeps the username unique across re-runs."""
+    info = state["instances"][label]
+    base = f"http://127.0.0.1:{info['port']}"
+    run = int(state.get("moment_reach_runs") or 0)
+    username, password = f"{stem}{run}", f"harness-pwd-{stem}{run}"
+    s, prov = _request(
+        f"{base}/api/admin/users",
+        token=info["token"],
+        method="POST",
+        body={
+            "username": username,
+            "password": password,
+            "display_name": f"{stem.title()} {run}",
+            "is_admin": False,
+        },
+    )
+    _must(f"moment-reach: provision {username}({label})", s, prov, ok=(201,))
+    s, login = _request(
+        f"{base}/api/auth/token",
+        method="POST",
+        body={"username": username, "password": password},
+    )
+    _must(f"moment-reach: {username} login({label})", s, login)
+    return prov["user_id"], login["token"]
+
+
+def _set_moments_prefs(label: str, token: str, **moments: int) -> None:
+    """``PATCH /api/me`` with the whole ``moments`` block (max_hops,
+    follower_retention_days, reach — defaults 3 / 7 / 3) as the SPA sends
+    it."""
+    block = {"max_hops": 3, "follower_retention_days": 7, "reach": 3, **moments}
+    port = _load()["instances"][label]["port"]
+    s, me = _request(
+        f"http://127.0.0.1:{port}/api/me",
+        token=token,
+        method="PATCH",
+        body={"preferences": {"moments": block}},
+    )
+    _must(f"moment-reach: moments preferences({label}) {block}", s, me)
+
+
+def _moment_row(label: str, moment_id: str) -> tuple | None:
+    """``(hop_count, reach)`` of ``moment_id`` on ``label``, or ``None``."""
+    rows = _rows(
+        label, "SELECT hop_count, reach FROM moments WHERE id = ?", (moment_id,)
+    )
+    return rows[0] if rows else None
+
+
+def _await_moment_row(label: str, moment_id: str, *, timeout: float) -> tuple:
+    deadline = time.monotonic() + timeout
+    while True:
+        row = _moment_row(label, moment_id)
+        if row is not None:
+            return row
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                f"moment-reach: {label} never stored moment {moment_id} within "
+                f"{timeout:.0f} s — check {_instance_dir(label) / 'log.txt'}"
+            )
+        time.sleep(1.0)
+
+
+def _assert_no_moment_row(label: str, moment_id: str, *, window: float, why: str):
+    """Poll ``label`` for ``window`` seconds: ``moment_id`` must never land."""
+    deadline = time.monotonic() + window
+    while time.monotonic() < deadline:
+        row = _moment_row(label, moment_id)
+        if row is not None:
+            raise SystemExit(
+                f"moment-reach: {label} stored moment {moment_id} "
+                f"(hop_count, reach) = {row} — {why}"
+            )
+        time.sleep(1.0)
+
+
+def _inject_relayed_moment(
+    state: dict,
+    *,
+    author_uid: str,
+    hop: int,
+    reach: int,
+    origin: str = "d",
+    relay: str = "b",
+    to: str = "c",
+) -> str:
+    """POST a ``MOMENT_CREATED`` to ``to``'s inbox exactly as ``relay`` would
+    forward a copy at ``hop`` of a moment ``origin``'s ``author_uid`` wrote
+    at ``reach`` — returns its moment id.
+
+    The topology has no path that long, so the step builds the copy the
+    relays would have built, from the households' own keys (read under each
+    one's KEK, like :func:`_check_binary_media_https`):
+
+    * the payload ``origin``'s ``MomentFederationOutbound._on_created``
+      signs — an owner-bound id for the author, the v1 fields, ``reach``
+      (v3 bytes) — signed with ``origin``'s identity seed, plus its v_67
+      ``origin_keywrap_*`` fields (its key-wrap key and binding signature
+      from ``instance_identity``);
+    * one return token per relay before ``to`` (``hop`` − 1), each minted
+      with the relay's token key: the earlier (fictional) relays' with
+      random keys — tokens are opaque to everyone but their minter — and
+      the last one with ``relay``'s real key, from its ``routing_secret``;
+    * ``hop_count`` = ``hop``, sealed under ``relay``'s session key for
+      ``to`` and signed with ``relay``'s identity seed, POSTed to the inbox
+      URL ``relay`` holds for ``to`` — the §24.11 pipeline sees an ordinary
+      envelope from ``relay``.
+    """
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.federation.encoder import FederationEncoder
+    from socialhome.federation.moment_reaction_route import (
+        RETURN_TOKEN_SUITE_AESGCM_256,
+        mint_return_token,
+        origin_keywrap_fields,
+        return_token_key,
+    )
+    from socialhome.federation.owner_bound_id import (
+        MOMENT_KIND,
+        mint_owner_bound_id,
+    )
+    from socialhome.infrastructure.key_manager import KeyManager
+    from socialhome.moment_origin import reach_marks_of, sign_moment_origin
+
+    import orjson
+    import uuid
+
+    insts = state["instances"]
+    origin_iid = insts[origin]["instance_id"]
+    relay_iid = insts[relay]["instance_id"]
+    to_iid = insts[to]["instance_id"]
+
+    origin_kek = KeyManager.from_data_dir(_instance_dir(origin))
+    seed_wire, pk_hex, kw_pub_hex, kw_sig = _rows(
+        origin,
+        "SELECT identity_private_key, identity_public_key, keywrap_public_key, "
+        "keywrap_sig FROM instance_identity WHERE id='self'",
+    )[0]
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=7)
+    moment_id = mint_owner_bound_id(MOMENT_KIND, space_id="", owner_user_id=author_uid)
+    payload: dict[str, Any] = {
+        "moment_id": moment_id,
+        "author_user_id": author_uid,
+        "content": f"[moment-reach] a hop-{hop} copy {moment_id[:8]}",
+        "media_url": None,
+        "media_type": None,
+        "duration_ms": None,
+        "parent_moment_id": None,
+        "origin_instance_id": origin_iid,
+        "expires_at": expires.isoformat(),
+        "occurred_at": now.isoformat(),
+        "hop_count": 1,
+        **reach_marks_of(reach),
+    }
+    signed = sign_moment_origin(
+        seed=origin_kek.decrypt(seed_wire),
+        identity_pk=bytes.fromhex(pk_hex),
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=payload,
+    )
+    signed.update(origin_keywrap_fields(bytes.fromhex(kw_pub_hex), kw_sig))
+
+    # The return-token chain: relay k (hop k) mints the token for the copy
+    # it hands to relay k + 1; the last relay is ``relay`` itself.
+    (routing_secret,) = _rows(
+        relay, "SELECT routing_secret FROM instance_identity WHERE id='self'"
+    )[0]
+    path = [origin_iid] + [secrets.token_hex(32) for _ in range(hop - 2)]
+    path += [relay_iid, to_iid]
+    tokens = []
+    for k in range(1, hop):
+        key = (
+            return_token_key(routing_secret)
+            if path[k] == relay_iid
+            else secrets.token_bytes(32)
+        )
+        tokens.append(
+            mint_return_token(
+                key=key,
+                moment_id=moment_id,
+                next_hop=path[k + 1],
+                prev_hop=path[k - 1],
+                expires_at_s=int(expires.timestamp()),
+                hop=k,
+                reach=reach,
+            )
+        )
+    signed["rt"] = tokens
+    signed["rt_suite"] = RETURN_TOKEN_SUITE_AESGCM_256
+    signed["hop_count"] = hop
+
+    relay_kek = KeyManager.from_data_dir(_instance_dir(relay))
+    (relay_seed_wire,) = _rows(
+        relay, "SELECT identity_private_key FROM instance_identity WHERE id='self'"
+    )[0]
+    row = _rows(
+        relay,
+        "SELECT remote_inbox_url, key_self_to_remote, sig_suite "
+        "FROM remote_instances WHERE id = ? AND status = 'confirmed'",
+        (to_iid,),
+    )
+    if not row or not row[0][0]:
+        raise SystemExit(f"moment-reach: {relay} holds no confirmed pair with {to}")
+    inbox_url, wrapped_key, sig_suite = row[0]
+    encoder = FederationEncoder(relay_kek.decrypt(relay_seed_wire))
+    suite = sig_suite or "ed25519"
+    envelope: dict[str, Any] = {
+        "msg_id": str(uuid.uuid4()),
+        "event_type": FederationEventType.MOMENT_CREATED.value,
+        "from_instance": relay_iid,
+        "to_instance": to_iid,
+        "timestamp": now.isoformat(),
+        "encrypted_payload": encoder.encrypt_payload(
+            orjson.dumps(signed).decode("utf-8"), relay_kek.decrypt(wrapped_key)
+        ),
+        "space_id": None,
+        "proto_version": 1,
+        "sig_suite": suite,
+    }
+    # Signed like ``FederationService._seal_payload_json``: every field but
+    # ``signatures``, compact orjson in this key order.
+    envelope["signatures"] = encoder.sign_envelope_all(
+        orjson.dumps(envelope), suite=suite
+    )
+    req = urllib.request.Request(
+        inbox_url,
+        data=orjson.dumps(envelope),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            status = r.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    if not 200 <= status < 300:
+        raise SystemExit(
+            f"moment-reach: {to}'s inbox answered HTTP {status} to the hop-{hop} "
+            f"copy from {relay} — check {_instance_dir(to) / 'log.txt'}"
+        )
+    return moment_id
+
+
+def _moments_max_hops(label: str) -> dict[str, int]:
+    """Every active user's ``moments.max_hops`` on ``label`` (3 when unset),
+    as the preference parser reads it."""
+    out: dict[str, int] = {}
+    for username, prefs in _rows(
+        label,
+        "SELECT username, preferences_json FROM users "
+        "WHERE state = 'active' AND deleted_at IS NULL",
+    ):
+        try:
+            block = (json.loads(prefs or "{}") or {}).get("moments") or {}
+        except ValueError:
+            block = {}
+        value = block.get("max_hops") if isinstance(block, dict) else None
+        ok = isinstance(value, int) and not isinstance(value, bool)
+        out[username] = min(max(value, 1), 5) if ok else 3
+    return out
+
+
+def cmd_moment_reach() -> None:
+    """v_96 — how far a person's moments go, on the real wire.
+
+    Topology (after ``pair`` + ``relay-pair``): a↔b, b↔c, a↔c, b↔d, a↔d —
+    c is two hops from d.
+
+    1. **Reach 1 stops after the paired households.** A fresh user on d
+       sets ``moments.reach`` 1 (``PATCH /api/me``, the whole moments
+       block) and posts: a and b (d's pairs) store it at hop 1, reach 1;
+       c — two hops away, reachable through either — never does.
+    2. **A hop-4 household that nobody there looks at forwards and keeps
+       nothing.** No path is 4 hops long, so the step injects the copy a
+       relay would send (:func:`_inject_relayed_moment`: signed by d at
+       reach 5, return tokens, envelope from b to c at hop 4). c's people
+       look ≤ 3 hops and follow nobody on d, so c stores nothing — and
+       relays a hop-5 copy only toward a household that looks 5 hops
+       (decision C):
+       * negative control — a fresh user on a *follows* the author (a
+         follow keeps the author's moments whatever ``max_hops`` says, but
+         does not raise a's advertised ``moment_look_hops``, still 3): c
+         sends a no copy, so a stores nothing although its follower would
+         keep one;
+       * that user then raises "Show moments up to" to 5: a re-advertises
+         ``moment_look_hops`` 5 to c; a second injected moment reaches a
+         from c at hop 5 (c still keeps nothing) and that user sees it.
+    Afterwards both users go back to the defaults (reach 3, max_hops 3, no
+    follow), so a advertises 3 again.
+    """
+    state = _load()
+    insts = state["instances"]
+    for label in ("a", "b", "c", "d"):
+        if label not in insts:
+            raise SystemExit(f"moment-reach: no household {label} — run `up` first")
+    a_iid, b_iid, c_iid, d_iid = (insts[x]["instance_id"] for x in "abcd")
+    for x, y in (("a", d_iid), ("b", d_iid), ("b", c_iid), ("a", c_iid)):
+        if not _rows(
+            x,
+            "SELECT 1 FROM remote_instances WHERE id = ? AND status = 'confirmed'",
+            (y,),
+        ):
+            raise SystemExit(
+                "moment-reach: needs a↔b, b↔c, a↔c, b↔d and a↔d — run `pair` "
+                "and `relay-pair` first"
+            )
+    if _rows("c", "SELECT 1 FROM remote_instances WHERE id = ?", (d_iid,)):
+        raise SystemExit("moment-reach: c must not be paired with d")
+    state["moment_reach_runs"] = int(state.get("moment_reach_runs") or 0) + 1
+    _save(state)
+    a_url = f"http://127.0.0.1:{insts['a']['port']}"
+    d_url = f"http://127.0.0.1:{insts['d']['port']}"
+
+    # ── 1. reach 1 ─────────────────────────────────────────────────────
+    author_uid, author_tok = _reach_user(state, "d", "rhea")
+    _set_moments_prefs("d", author_tok, reach=1)
+    s, limits = _request(f"{d_url}/api/moments/limits", token=author_tok)
+    _must("moment-reach: limits(d)", s, limits)
+    if limits.get("reach") != 1:
+        raise SystemExit(f"moment-reach: limits after reach 1 say {limits!r}")
+    s, made = _request(
+        f"{d_url}/api/moments",
+        token=author_tok,
+        method="POST",
+        body={"content": "[moment-reach] only for d's paired households"},
+    )
+    _must("moment-reach: reach-1 moment(d)", s, made, ok=(201,))
+    m0 = made["id"]
+    if made.get("reach") != 1:
+        raise SystemExit(f"moment-reach: the reach-1 moment says reach {made!r}")
+    started = time.monotonic()
+    for label in ("a", "b"):
+        row = _await_moment_row(label, m0, timeout=30.0)
+        if tuple(row) != (1, 1):
+            raise SystemExit(
+                f"moment-reach: {label} holds the reach-1 moment at "
+                f"(hop_count, reach) = {row}, want (1, 1)"
+            )
+    landed = time.monotonic() - started
+    # c is reachable from d only through a or b: the relay would have come
+    # within seconds of the moment landing there.
+    _assert_no_moment_row(
+        "c",
+        m0,
+        window=max(10.0, 2 * landed),
+        why="a reach-1 moment must stop at d's paired households",
+    )
+    print(
+        f"  reach 1: d's moment landed on a and b at hop 1 (reach 1) in "
+        f"{landed:.1f} s; c (2 hops) never got it in the window after ✓"
+    )
+    _set_moments_prefs("d", author_tok)
+
+    # ── 2. hop 4: forward only ─────────────────────────────────────────
+    looks = {x: _moments_max_hops(x) for x in ("a", "c")}
+    for x in ("a", "c"):
+        far = {u: h for u, h in looks[x].items() if h > 3}
+        if far:
+            raise SystemExit(
+                f"moment-reach: {x} must look ≤ 3 hops before the step, "
+                f"but {far!r} look further"
+            )
+    if _rows(
+        "c",
+        "SELECT 1 FROM user_follows WHERE followed_user_id = ? "
+        "UNION ALL SELECT 1 FROM moment_public_follows WHERE followed_user_id = ?",
+        (author_uid, author_uid),
+    ):
+        raise SystemExit("moment-reach: someone on c follows d's author")
+
+    fan_uid, fan_tok = _reach_user(state, "a", "reachfan")
+    # The follow needs a to know the author (d's USERS_SYNC to a).
+    deadline = time.monotonic() + 30.0
+    while not _rows("a", "SELECT 1 FROM remote_users WHERE user_id = ?", (author_uid,)):
+        if time.monotonic() >= deadline:
+            raise SystemExit("moment-reach: a never learned d's new user")
+        time.sleep(1.0)
+    s, body = _request(
+        f"{a_url}/api/moments/follows",
+        token=fan_tok,
+        method="POST",
+        body={"user_id": author_uid},
+    )
+    _must("moment-reach: a's user follows d's author", s, body, ok=(200, 201, 204))
+    try:
+        c_off = _log_size("c")
+        m1 = _inject_relayed_moment(state, author_uid=author_uid, hop=4, reach=5)
+        _assert_no_moment_row(
+            "a",
+            m1,
+            window=10.0,
+            why="c sent a hop-5 copy to a household that looks only 3 hops "
+            "(a's follower would keep it, the look must not send it)",
+        )
+        if _moment_row("c", m1) is not None:
+            raise SystemExit("moment-reach: c stored the hop-4 copy")
+        refused = [
+            line
+            for line in _log_lines_matching("c", m1, offset=c_off)
+            if "refus" in line or "mismatch" in line
+        ]
+        if refused:
+            raise SystemExit(f"moment-reach: c refused the hop-4 copy: {refused!r}")
+        print(
+            "  hop 4, nobody on a looks 5: c kept nothing and sent a no "
+            "hop-5 copy (a's follower of the author did not raise a's look) ✓"
+        )
+
+        a_off = _log_size("a")
+        (seen_before,) = _rows(
+            "c",
+            "SELECT capabilities_seen_at FROM remote_instances WHERE id = ?",
+            (a_iid,),
+        )[0]
+        _set_moments_prefs("a", fan_tok, max_hops=5)
+        if not _await_log_lines("a", "moment_look_hops -> 5", offset=a_off):
+            raise SystemExit("moment-reach: a never re-advertised moment_look_hops 5")
+        deadline = time.monotonic() + 30.0
+        while (
+            _rows(
+                "c",
+                "SELECT capabilities_seen_at FROM remote_instances WHERE id = ?",
+                (a_iid,),
+            )[0][0]
+            == seen_before
+        ):
+            if time.monotonic() >= deadline:
+                raise SystemExit("moment-reach: c never heard a's new look")
+            time.sleep(1.0)
+        time.sleep(1.0)  # the look is kept right after the seen stamp
+        print("  a's user looks 5 hops: a told c moment_look_hops 5 ✓")
+
+        c_off = _log_size("c")
+        m2 = _inject_relayed_moment(state, author_uid=author_uid, hop=4, reach=5)
+        row = _await_moment_row("a", m2, timeout=30.0)
+        if tuple(row) != (5, 5):
+            raise SystemExit(
+                f"moment-reach: a holds the relayed copy at (hop_count, reach) "
+                f"= {row}, want (5, 5)"
+            )
+        if _moment_row("c", m2) is not None:
+            raise SystemExit("moment-reach: c stored the hop-4 copy it relayed")
+        if _moment_row("b", m2) is not None:
+            raise SystemExit("moment-reach: b (look 3) holds the hop-5 copy")
+        for line in _log_lines_matching("c", m2, offset=c_off):
+            if "refus" in line or "mismatch" in line:
+                raise SystemExit(f"moment-reach: c refused the copy: {line!r}")
+        s, feed = _request(f"{a_url}/api/moments", token=fan_tok)
+        _must("moment-reach: a's looker reads moments", s, feed)
+        items = feed if isinstance(feed, list) else (feed.get("moments") or [])
+        mine = next((m for m in items if m.get("id") == m2), None)
+        if mine is None or mine.get("reach") != 5:
+            raise SystemExit(
+                f"moment-reach: a's max_hops-5 user does not see the hop-5 "
+                f"moment with reach 5 (got {mine!r})"
+            )
+        print(
+            "  hop 4 → c kept nothing and relayed a hop-5 copy to a only; a "
+            "stores it at hop 5 (reach 5), its max_hops-5 user sees it, b "
+            "holds none ✓"
+        )
+    finally:
+        a_off = _log_size("a")
+        _set_moments_prefs("a", fan_tok)
+        _raw_request(
+            f"{a_url}/api/moments/follows/{author_uid}",
+            token=fan_tok,
+            method="DELETE",
+        )
+    if _moments_max_hops("a").get(f"reachfan{state['moment_reach_runs']}") != 3:
+        raise SystemExit("moment-reach: a's looker did not go back to 3 hops")
+    if not _await_log_lines("a", "moment_look_hops -> 3", offset=a_off):
+        raise SystemExit("moment-reach: a never re-advertised moment_look_hops 3")
+    state["moment_reach_ran"] = True
+    _save(state)
+    print("moment-reach: ok (reach 1 stays paired; hop 4 forwards only, v_96)")
+
+
 @_offline_step
 def cmd_sync_https_fallback() -> None:
     """§25.6 HTTPS chunk-stream fallback (Part C).
@@ -28050,6 +28536,12 @@ def main() -> None:
         # HIGHLIGHT_* gates) while a positive control on Gamma
         # confirms the filter is per-peer rather than global.
         cmd_visibility()
+        # ``moment-reach`` (v_96): a reach-1 moment from a fresh d user
+        # lands on a and b (d's pairs) and never on c (2 hops); then a
+        # hop-4 copy injected from b to c — c keeps nothing and relays a
+        # hop-5 copy only once a's people look 5 hops (a follower on a does
+        # not raise a's look). Needs ``relay-pair`` (a↔d).
+        cmd_moment_reach()
         # ``invite-redeem`` exercises the
         # ``SPACE_INVITE_TOKEN_REDEEM`` federation flow: Carol mints
         # a token on c, Alice pastes it on a, a's /api/spaces/join
