@@ -402,7 +402,8 @@ class MomentArchiveUsageView(BaseView):
 class MomentArchiveCapView(BaseView):
     """``PUT /api/admin/moments/archive-cap`` — body ``{cap_bytes: int}``
     (≥ 0; ``0`` = no limit). Admins only (403 otherwise); 422 for a value
-    that isn't a whole number ≥ 0. Returns ``{cap_bytes}``."""
+    that isn't a whole number ≥ 0, or a body that isn't a JSON object.
+    Returns ``{cap_bytes}``."""
 
     async def put(self) -> web.Response:
         ctx = self.user
@@ -410,7 +411,8 @@ class MomentArchiveCapView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         body = await self.body()
         cap = await self.svc(moment_archive_service_key).set_cap_bytes(
-            body.get("cap_bytes"), actor_is_admin=ctx.is_admin
+            body.get("cap_bytes") if isinstance(body, dict) else None,
+            actor_is_admin=ctx.is_admin,
         )
         return self._json({"cap_bytes": cap})
 
@@ -418,8 +420,8 @@ class MomentArchiveCapView(BaseView):
 class MomentReachMaxView(BaseView):
     """``PUT /api/admin/moments/reach-max`` — body ``{reach_max: int}``
     (1–5; 5 = no limit): the household's maximum reach (v_96). Admins only
-    (403 otherwise); 422 for anything but a whole number 1–5. Returns
-    ``{reach_max}``."""
+    (403 otherwise); 422 for anything but a whole number 1–5 (a body that
+    isn't a JSON object included). Returns ``{reach_max}``."""
 
     async def put(self) -> web.Response:
         ctx = self.user
@@ -427,7 +429,8 @@ class MomentReachMaxView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         body = await self.body()
         value = await self.svc(moment_service_key).set_reach_max(
-            body.get("reach_max"), actor_is_admin=ctx.is_admin
+            body.get("reach_max") if isinstance(body, dict) else None,
+            actor_is_admin=ctx.is_admin,
         )
         return self._json({"reach_max": value})
 

@@ -209,6 +209,19 @@ async def test_reach_max_rejects_anything_but_1_to_5(client):
     assert (await _limits(client, h))["reach_max"] == 5
 
 
+async def test_reach_max_rejects_a_body_that_is_not_an_object(client):
+    h = _auth(client._tok)
+    # Raw bodies: aiohttp's ``json=None`` would send no body at all (a 400).
+    for bad in ("[]", "null", '"x"', '[{"reach_max": 2}]'):
+        r = await client.put(
+            "/api/admin/moments/reach-max",
+            data=bad,
+            headers={**h, "Content-Type": "application/json"},
+        )
+        assert r.status == 422, bad
+    assert (await _limits(client, h))["reach_max"] == 5
+
+
 async def test_only_an_admin_sets_the_reach_max(client):
     eve = await _eve(client)
     r = await client.put(
@@ -1572,6 +1585,17 @@ async def test_archive_usage_and_the_admin_cap(client):
     for bad in (-5, "1", None, 1.5, True):
         r = await client.put(
             "/api/admin/moments/archive-cap", json={"cap_bytes": bad}, headers=h
+        )
+        assert r.status == 422, bad
+
+
+async def test_archive_cap_rejects_a_body_that_is_not_an_object(client):
+    h = _auth(client._tok)
+    for bad in ("[]", "null", '"x"', '[{"cap_bytes": 10}]'):
+        r = await client.put(
+            "/api/admin/moments/archive-cap",
+            data=bad,
+            headers={**h, "Content-Type": "application/json"},
         )
         assert r.status == 422, bad
 
