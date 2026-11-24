@@ -4156,6 +4156,259 @@ def cmd_space_follow_paired() -> None:
     print("space-follow-paired: ok (follow is an auto-approved join, leave is own)")
 
 
+def _db_write(label: str, statements: list[tuple[str, tuple]]) -> None:
+    """Write ``label``'s SQLite DB behind the backend's back — only for a
+    step that has to fast-forward the clock or tamper with a sender."""
+    import sqlite3
+
+    con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
+    try:
+        for sql, params in statements:
+            con.execute(sql, params)
+        con.commit()
+    finally:
+        con.close()
+
+
+@_offline_step
+def cmd_space_follow_rotation() -> None:
+    """v_96 P5 — the person-ID anchor and the owed / immediate rotations.
+
+    a creates a ``public`` invite-only space with followers on.
+
+    1. **Squat refused.** b's person carries a wrong identity anchor (the
+       harness rewrites it on b), so b's follow names a user id b's identity
+       key does not derive with that anchor: a refuses it
+       ("is not proven by the household's identity key") and seats nobody.
+       With the anchor put back (and b's 15-minute pending follow expired)
+       the same person follows and is seated — no lockout.
+    2. c follows too. **Unfollow without rotation:** b leaves; a tombstones
+       the seat, the key epoch stays, and a now owes a rotation.
+    3. **Owed rotation paid by the sweep.** The harness moves b's
+       ``removed_at`` and the current key's ``created_at`` back past 24 h on
+       a and restarts a (the hourly sweep ticks at start): a rotates once,
+       the debt is gone and c (still following) holds the new epoch.
+    4. **A ban rotates at once.** a bans c: the epoch moves within seconds.
+
+    Prereq: ``up`` + ``pair`` (a↔b, a↔c paired).
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    step = "space-follow-rotation"
+    a, b, c = (state["instances"][x] for x in ("a", "b", "c"))
+    nonce = secrets.token_hex(3)
+
+    s, sp = _as(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Follow rotation {nonce}",
+            "description": "public, invite only, followers allowed",
+            "space_type": "public",
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must(f"{step}: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _as(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True}},
+    )
+    _must(f"{step}: a enables followers", s, patched, ok=(200,))
+    print(f"  a: public invite-only space {space_id[:8]}…, followers on")
+
+    for label in ("b", "c"):
+        _poll(
+            f"{label} to list a's space in its paired directory",
+            lambda label=label: any(
+                r.get("space_id") == space_id
+                for r in (_as(state, label, "GET", "/api/peer_spaces")[1] or [])
+                if isinstance(r, dict)
+            ),
+            timeout=30.0,
+        )
+
+    def seat_on_a(user_id: str, tombstoned: int) -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id=?"
+            " AND user_id=? AND tombstoned=?",
+            (space_id, user_id, tombstoned),
+        )
+
+    def epoch_on(label: str) -> int:
+        return int(
+            _rows(
+                label, "SELECT MAX(epoch) FROM space_keys WHERE space_id=?", (space_id,)
+            )[0][0]
+            or 0
+        )
+
+    def owed_on_a() -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT m.user_id FROM space_remote_members m JOIN space_keys k"
+            " ON k.space_id=m.space_id AND k.epoch=(SELECT MAX(epoch) FROM"
+            " space_keys WHERE space_id=m.space_id) WHERE m.space_id=?"
+            " AND m.tombstoned=1 AND m.role='subscriber'"
+            " AND datetime(m.removed_at) >= datetime(k.created_at)",
+            (space_id,),
+        )
+
+    # 1. Squat refused: b's follow names b's user id with an anchor that
+    #    does not derive it under b's identity key.
+    (anchor_before,) = _rows(
+        "b", "SELECT identity_anchor FROM users WHERE user_id=?", (b["user_id"],)
+    )[0]
+    a_off = _log_size("a")
+    _db_write(
+        "b",
+        [
+            (
+                "UPDATE users SET identity_anchor=? WHERE user_id=?",
+                (f"squat-{nonce}", b["user_id"]),
+            )
+        ],
+    )
+    try:
+        s, body = _as(state, "b", "POST", f"/api/spaces/{space_id}/subscribe", {})
+        _must(f"{step}: b's unprovable follow is sent", s, body, ok=(200,))
+        _poll(
+            "a to refuse b's unprovable follow",
+            lambda: _log_lines_matching(
+                "a",
+                "is not proven by the household's identity key",
+                offset=a_off,
+            ),
+            timeout=30.0,
+        )
+    finally:
+        _db_write(
+            "b",
+            [
+                (
+                    "UPDATE users SET identity_anchor=? WHERE user_id=?",
+                    (anchor_before, b["user_id"]),
+                )
+            ],
+        )
+    time.sleep(3.0)
+    if seat_on_a(b["user_id"], 0) or _rows(
+        "a",
+        "SELECT 1 FROM space_invite_tokens WHERE space_id=? AND bound_user_id=?",
+        (space_id, b["user_id"]),
+    ):
+        raise SystemExit(f"{step}: a seated / answered b's unprovable follow")
+    print("  squat refused: a seats nobody for a user id b cannot prove ✓")
+    # b's own follow row waits 15 minutes for an answer that never comes
+    # (a refusal is silent); expire it rather than wait.
+    _db_write(
+        "b",
+        [
+            (
+                "DELETE FROM space_join_requests WHERE space_id=? AND user_id=?"
+                " AND status='pending'",
+                (space_id, b["user_id"]),
+            )
+        ],
+    )
+
+    # 2. b (anchor restored) and c follow; both seated.
+    for label in ("b", "c"):
+        who = state["instances"][label]
+        s, body = _as(state, label, "POST", f"/api/spaces/{space_id}/subscribe", {})
+        _must(f"{step}: {label} follows", s, body, ok=(200,))
+        _poll(
+            f"a to hold {label}'s subscriber seat",
+            lambda who=who: [
+                r for r in seat_on_a(who["user_id"], 0) if r[0] == "subscriber"
+            ],
+            timeout=45.0,
+        )
+        _poll(
+            f"{label} to hold the space key",
+            lambda label=label: epoch_on(label) >= 1,
+            timeout=45.0,
+        )
+    print("  b (proof restored, no lockout) and c follow and are seated ✓")
+
+    epoch0 = epoch_on("a")
+    s, left = _as(state, "b", "DELETE", f"/api/spaces/{space_id}/subscribe")
+    _must(f"{step}: b unfollows", s, left, ok=(200,))
+    _poll(
+        "a to tombstone b's seat",
+        lambda: seat_on_a(b["user_id"], 1) and not seat_on_a(b["user_id"], 0),
+        timeout=45.0,
+    )
+    time.sleep(3.0)
+    if epoch_on("a") != epoch0:
+        raise SystemExit(
+            f"{step}: b's unfollow rotated the key ({epoch0} → {epoch_on('a')})"
+        )
+    if [r[0] for r in owed_on_a()] != [b["user_id"]]:
+        raise SystemExit(f"{step}: a owes no rotation for b's leave: {owed_on_a()!r}")
+    print(f"  unfollow: no rotation (epoch {epoch0}), a owes one ✓")
+
+    # 3. Fast-forward the debt past 24 h and restart a: its sweep pays it.
+    _kill_household("a", a)
+    _db_write(
+        "a",
+        [
+            (
+                "UPDATE space_remote_members SET removed_at="
+                "datetime(removed_at, '-25 hours') WHERE space_id=? AND user_id=?",
+                (space_id, b["user_id"]),
+            ),
+            (
+                "UPDATE space_keys SET created_at=strftime("
+                "'%Y-%m-%dT%H:%M:%S+00:00', created_at, '-26 hours')"
+                " WHERE space_id=? AND epoch=?",
+                (space_id, epoch0),
+            ),
+        ],
+    )
+    if [r[0] for r in owed_on_a()] != [b["user_id"]]:
+        raise SystemExit(f"{step}: the fast-forward lost a's debt: {owed_on_a()!r}")
+    a["pid"] = _spawn("a", a["port"])
+    _save(state)
+    _wait_ready(a["port"])
+    print(f"  a restarted with a 25 h-old debt: pid={a['pid']}")
+    _poll(
+        "a's sweep to pay the owed rotation",
+        lambda: epoch_on("a") == epoch0 + 1,
+        timeout=60.0,
+    )
+    if owed_on_a():
+        raise SystemExit(f"{step}: a still owes after paying: {owed_on_a()!r}")
+    _poll("c to hold the new epoch", lambda: epoch_on("c") >= epoch0 + 1, timeout=90.0)
+    time.sleep(3.0)
+    if epoch_on("a") != epoch0 + 1:
+        raise SystemExit(f"{step}: the sweep rotated more than once ({epoch_on('a')})")
+    print(f"  owed rotation paid once (epoch {epoch0} → {epoch0 + 1}), c has it ✓")
+
+    # 4. A ban rotates at once.
+    epoch1 = epoch_on("a")
+    s, body = _as(
+        state, "a", "POST", f"/api/spaces/{space_id}/ban", {"user_id": c["user_id"]}
+    )
+    _must(f"{step}: a bans c", s, body, ok=(200,))
+    _poll(
+        "a to rotate at once on c's ban",
+        lambda: epoch_on("a") == epoch1 + 1,
+        timeout=20.0,
+    )
+    print(f"  ban: rotated at once (epoch {epoch1} → {epoch1 + 1}) ✓")
+    print(
+        f"{step}: ok (squat refused, unfollow owes, the sweep pays once, "
+        "a ban rotates at once)"
+    )
+
+
 def _follower_comment_round(
     state: dict,
     *,
@@ -28669,6 +28922,10 @@ def main() -> None:
         # space — an auto-approved join for the read-only role; leaving
         # tombstones the seat without rotating the content key.
         cmd_space_follow_paired()
+        # ``space-follow-rotation`` (v_96 P5): a squat (an id b cannot prove)
+        # is refused, an unfollow owes the rotation, the sweep (a restarted
+        # with a fast-forwarded debt) pays it once, a ban rotates at once.
+        cmd_space_follow_rotation()
         # ``space-reaction`` (v_93): in the same space a and c react to a
         # post of a's and a takes its reaction back — a, b and c show the
         # same reactions after each change.
