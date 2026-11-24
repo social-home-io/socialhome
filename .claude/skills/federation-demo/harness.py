@@ -51,6 +51,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -16105,7 +16106,6 @@ def _inject_relayed_moment(
     from socialhome.moment_origin import reach_marks_of, sign_moment_origin
 
     import orjson
-    import uuid
 
     insts = state["instances"]
     origin_iid = insts[origin]["instance_id"]
@@ -16297,6 +16297,7 @@ def cmd_moment_reach() -> None:
     # ── 1. reach 1 ─────────────────────────────────────────────────────
     author_uid, author_tok = _reach_user(state, "d", "rhea")
     _set_moments_prefs("d", author_tok, reach=1)
+    c_off = _log_size("c")
     s, limits = _request(f"{d_url}/api/moments/limits", token=author_tok)
     _must("moment-reach: limits(d)", s, limits)
     if limits.get("reach") != 1:
@@ -16328,6 +16329,18 @@ def cmd_moment_reach() -> None:
         window=max(10.0, 2 * landed),
         why="a reach-1 moment must stop at d's paired households",
     )
+    # Stopped by the senders (a and b never relay it), not by c refusing a
+    # relayed copy — a sender-side regression must not pass here.
+    refused = [
+        line
+        for line in _log_lines_matching("c", m0, offset=c_off)
+        if "refus" in line or "mismatch" in line or "no_relay" in line
+    ]
+    if refused:
+        raise SystemExit(
+            f"moment-reach: c was sent the reach-1 moment and refused it: "
+            f"{refused!r}"
+        )
     print(
         f"  reach 1: d's moment landed on a and b at hop 1 (reach 1) in "
         f"{landed:.1f} s; c (2 hops) never got it in the window after ✓"
@@ -16410,24 +16423,41 @@ def cmd_moment_reach() -> None:
             if time.monotonic() >= deadline:
                 raise SystemExit("moment-reach: c never heard a's new look")
             time.sleep(1.0)
-        time.sleep(1.0)  # the look is kept right after the seen stamp
         print("  a's user looks 5 hops: a told c moment_look_hops 5 ✓")
 
+        # c keeps the look in memory just after the seen stamp, so a copy
+        # injected in between finds it unknown: inject again (a fresh moment)
+        # until one lands on a, on a short deadline.
         c_off = _log_size("c")
-        m2 = _inject_relayed_moment(state, author_uid=author_uid, hop=4, reach=5)
-        row = _await_moment_row("a", m2, timeout=30.0)
+        injected: list[str] = []
+        row = None
+        deadline = time.monotonic() + 30.0
+        while row is None:
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    f"moment-reach: a never stored a hop-5 copy of "
+                    f"{injected!r} — check {_instance_dir('c') / 'log.txt'}"
+                )
+            m2 = _inject_relayed_moment(state, author_uid=author_uid, hop=4, reach=5)
+            injected.append(m2)
+            try_until = min(deadline, time.monotonic() + 5.0)
+            while (row := _moment_row("a", m2)) is None:
+                if time.monotonic() >= try_until:
+                    break
+                time.sleep(0.5)
         if tuple(row) != (5, 5):
             raise SystemExit(
                 f"moment-reach: a holds the relayed copy at (hop_count, reach) "
                 f"= {row}, want (5, 5)"
             )
-        if _moment_row("c", m2) is not None:
-            raise SystemExit("moment-reach: c stored the hop-4 copy it relayed")
-        if _moment_row("b", m2) is not None:
-            raise SystemExit("moment-reach: b (look 3) holds the hop-5 copy")
-        for line in _log_lines_matching("c", m2, offset=c_off):
-            if "refus" in line or "mismatch" in line:
-                raise SystemExit(f"moment-reach: c refused the copy: {line!r}")
+        for mid in injected:
+            if _moment_row("c", mid) is not None:
+                raise SystemExit("moment-reach: c stored the hop-4 copy it relayed")
+            for line in _log_lines_matching("c", mid, offset=c_off):
+                if "refus" in line or "mismatch" in line:
+                    raise SystemExit(f"moment-reach: c refused the copy: {line!r}")
+        # (b sent the injected copy to c, so it never comes back to b — that
+        # is the sender exclusion, not the look gate: nothing to check.)
         s, feed = _request(f"{a_url}/api/moments", token=fan_tok)
         _must("moment-reach: a's looker reads moments", s, feed)
         items = feed if isinstance(feed, list) else (feed.get("moments") or [])
@@ -16439,23 +16469,25 @@ def cmd_moment_reach() -> None:
             )
         print(
             "  hop 4 → c kept nothing and relayed a hop-5 copy to a only; a "
-            "stores it at hop 5 (reach 5), its max_hops-5 user sees it, b "
-            "holds none ✓"
+            "stores it at hop 5 (reach 5), its max_hops-5 user sees it ✓"
         )
     finally:
         a_off = _log_size("a")
         _set_moments_prefs("a", fan_tok)
-        _raw_request(
+        s, body = _raw_request(
             f"{a_url}/api/moments/follows/{author_uid}",
             token=fan_tok,
             method="DELETE",
         )
+        if s not in (200, 204, 404):
+            raise SystemExit(
+                f"moment-reach: a's user could not unfollow d's author: "
+                f"HTTP {s} {body!r}"
+            )
     if _moments_max_hops("a").get(f"reachfan{state['moment_reach_runs']}") != 3:
         raise SystemExit("moment-reach: a's looker did not go back to 3 hops")
     if not _await_log_lines("a", "moment_look_hops -> 3", offset=a_off):
         raise SystemExit("moment-reach: a never re-advertised moment_look_hops 3")
-    state["moment_reach_ran"] = True
-    _save(state)
     print("moment-reach: ok (reach 1 stays paired; hop 4 forwards only, v_96)")
 
 
