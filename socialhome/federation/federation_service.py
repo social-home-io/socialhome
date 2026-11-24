@@ -1908,6 +1908,37 @@ class FederationService:
                 out.add(iid)
         return frozenset(out)
 
+    async def gfs_reached_followers(
+        self, space_id: str, instance_ids: Collection[str]
+    ) -> frozenset[str]:
+        """The households of *instance_ids* only the HOST reaches (v_96): a
+        follower household (no writer seat) whose one row here is a
+        space-session seat (it came through a GFS). A delegated admin holds
+        no row and no card for one, so the owner passes the admin's rekey
+        on to exactly these (``SpaceService.relay_admin_rekey_to_followers``)
+        — the owner-side mirror of :meth:`channel_reached_followers`. A
+        household holding a writer seat, a paired one, one we hold no row
+        for and ourselves are never in it."""
+        if self._space_remote_member_repo is None:
+            return frozenset()
+        writers: frozenset[str] | None = None
+        out: set[str] = set()
+        for iid in instance_ids:
+            if iid == self._own_instance_id:
+                continue
+            peer = await self._federation_repo.get_instance(iid)
+            if peer is None or peer.source is not InstanceSource.SPACE_SESSION:
+                continue
+            if writers is None:
+                writers = frozenset(
+                    await self._space_remote_member_repo.list_instances_with_roles(
+                        space_id, _WRITER_ROLE_VALUES
+                    )
+                )
+            if iid not in writers:
+                out.add(iid)
+        return frozenset(out)
+
     async def space_member_version(self, instance_id: str) -> int:
         """The protocol version of a space member household, which may be
         mesh-only: its ``remote_instances`` row's, else the version claim it

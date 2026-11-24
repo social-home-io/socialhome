@@ -1566,6 +1566,12 @@ class PrivateSpaceInviteHandler:
                 )
             else:
                 await self._writer_certs.drop_stale_channel(space_id)
+        # v_96 — a seed-holding delegated admin's rotation cannot reach a
+        # follower that came through a GFS; the owner, which holds its
+        # space-session row, passes the same signed rekey on (a no-op on
+        # any other household).
+        if authority_verified and not is_owner and self._space_service is not None:
+            await self._space_service.relay_admin_rekey_to_followers(space_id, meta)
 
     async def _on_admin_key_share(self, event: FederationEvent) -> None:
         """Delegated-admin signing-seed share from the space owner (v_22).

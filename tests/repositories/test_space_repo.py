@@ -2791,3 +2791,111 @@ async def test_holds_roster_only_with_a_local_member_seat(env):
     assert await env.repo.holds_roster("a") is True
     assert await env.repo.holds_roster("f") is False
     assert await env.repo.holds_roster("nope") is False
+
+
+# ── P5 (v_96): pruning settled remote approvals ──────────────────────────
+
+
+async def _approved_remote_request(
+    env, space_id, user_id, *, household, reviewed_by=None, days_ago: float
+) -> str:
+    rid = await env.repo.save_join_request(
+        space_id, user_id, ttl_days=7, remote_applicant_instance_id=household
+    )
+    assert await env.repo.answer_join_request(rid, "approved", reviewed_by=reviewed_by)
+    await env.db.enqueue(
+        "UPDATE space_join_requests SET reviewed_at=datetime('now', ?) WHERE id=?",
+        (f"-{days_ago} days", rid),
+    )
+    return rid
+
+
+async def _bound_token(
+    env, space_id, user_id, *, household, spent: bool, days_ago: float, live=False
+) -> str:
+    expires = datetime.now(UTC) + (timedelta(hours=1) if live else -timedelta(hours=1))
+    token = await env.repo.create_invite_token(
+        space_id,
+        created_by=user_id,
+        uses=1,
+        expires_at=expires.isoformat(),
+        role="subscriber",
+        bound_instance_id=household,
+        bound_user_id=user_id,
+    )
+    await env.db.enqueue(
+        "UPDATE space_invite_tokens SET created_at=datetime('now', ?),"
+        " uses_remaining=? WHERE token=?",
+        (f"-{days_ago} days", 0 if spent else 1, token),
+    )
+    return token
+
+
+async def _token_exists(env, token) -> bool:
+    return await env.repo.get_invite_token_space_id(token) is not None
+
+
+async def test_prune_settled_remote_approvals_drops_old_follow_rows(env):
+    """An automatic (follow) approval is pruned once it is past the window
+    an approval is honoured for (``has_approved_join_request``) and no
+    live token bound to that household and person is left; an admin's
+    approval, a pending request, a young approval and one whose bound
+    token can still be redeemed stay."""
+    await env.repo.save(_space("sp-p"))
+    old = await _approved_remote_request(
+        env, "sp-p", "u-old", household="h1", days_ago=8
+    )
+    young = await _approved_remote_request(
+        env, "sp-p", "u-young", household="h1", days_ago=6
+    )
+    admin = await _approved_remote_request(
+        env, "sp-p", "u-adm", household="h1", reviewed_by="uid-admin", days_ago=30
+    )
+    held = await _approved_remote_request(
+        env, "sp-p", "u-held", household="h2", days_ago=8
+    )
+    await _bound_token(
+        env, "sp-p", "u-held", household="h2", spent=False, days_ago=0, live=True
+    )
+    pending = await env.repo.save_join_request(
+        "sp-p", "u-pend", ttl_days=7, remote_applicant_instance_id="h3"
+    )
+    pruned = await env.repo.prune_settled_remote_approvals(older_than_days=7)
+    assert pruned == 1
+    assert await env.repo.get_join_request(old) is None
+    for kept in (young, admin, held, pending):
+        assert await env.repo.get_join_request(kept) is not None
+    assert not await env.repo.has_approved_join_request(
+        "sp-p", "u-old", remote_applicant_instance_id="h1", within_days=7
+    )
+
+
+async def test_prune_settled_remote_approvals_drops_dead_bound_tokens(env):
+    """A bound (approval) token that is spent or expired goes once it is
+    older than the window — a lost ACK's retry reads a spent token's space
+    (``get_invite_token_space_id``) only within the relay queue's day. A
+    live bound token, a young dead one and an ordinary link stay."""
+    await env.repo.save(_space("sp-t"))
+    spent_old = await _bound_token(
+        env, "sp-t", "u1", household="h1", spent=True, days_ago=8
+    )
+    expired_old = await _bound_token(
+        env, "sp-t", "u2", household="h1", spent=False, days_ago=8
+    )
+    live_old = await _bound_token(
+        env, "sp-t", "u3", household="h1", spent=False, days_ago=8, live=True
+    )
+    spent_young = await _bound_token(
+        env, "sp-t", "u4", household="h1", spent=True, days_ago=1
+    )
+    link = await env.repo.create_invite_token("sp-t", "uid-alice", uses=1)
+    await env.db.enqueue(
+        "UPDATE space_invite_tokens SET created_at=datetime('now', '-30 days'),"
+        " uses_remaining=0 WHERE token=?",
+        (link,),
+    )
+    assert await env.repo.prune_settled_remote_approvals(older_than_days=7) == 2
+    assert not await _token_exists(env, spent_old)
+    assert not await _token_exists(env, expired_old)
+    for kept in (live_old, spent_young, link):
+        assert await _token_exists(env, kept)

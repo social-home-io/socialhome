@@ -318,6 +318,7 @@ from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
 from .local_community import (
+    APPROVAL_HONOURED_DAYS,
     LocalAreaBudget,
     hosted_local_area,
     join_location_for,
@@ -722,6 +723,7 @@ class SpaceService(
         "_delegation_blocked_told",
         "_federation",
         "_federation_repo",
+        "_followers_rekeyed",
         "_gallery",
         "_gfs",
         "_gfs_join",
@@ -783,6 +785,10 @@ class SpaceService(
         #: D1 notices told per space (monotonic seconds), see
         #: :meth:`_tell_owner_delegation_blocked`.
         self._delegation_blocked_told: dict[str, float] = {}
+        #: The newest epoch per space whose delegated-admin rekey this
+        #: owner re-sent to its GFS-reached followers
+        #: (:meth:`relay_admin_rekey_to_followers`).
+        self._followers_rekeyed: dict[str, int] = {}
         self._own_instance_id = own_instance_id
         # When both are set, a deleted space post's media file(s) are
         # removed once the post row + its gallery system-album mirror are
@@ -7559,6 +7565,79 @@ class SpaceService(
                     space_id,
                 )
 
+    async def relay_admin_rekey_to_followers(self, space_id: str, meta: dict) -> int:
+        """Owner side (v_96): re-send a seed-holding delegated admin's rekey
+        to the follower households only the owner reaches. Returns how many.
+
+        The admin holds no row or mailbox card for a follower that came
+        through a GFS, and sync does not carry the key, so its rotation
+        alone leaves that follower reading nothing until the owner rotates.
+        The owner, which applied the rekey (``meta`` — the admin's
+        authority-signed ``space_content_key``, unchanged), sends it over the
+        ordinary member rekey path (each copy with the household's own
+        writer cert / channel grant for the epoch) to exactly the
+        follower-only households it holds a space-session row for. A writer
+        household is reached by the admin's own broadcast; a paired or
+        mesh follower too.
+
+        Only on the owner, only for another household's rotation, only when
+        ``meta`` is the key it now holds at its current epoch (a rekey that
+        lost the smallest-``rotated_by`` tiebreak is not passed on), and
+        once per epoch per space in this process (a repeat or another
+        relay's copy sends nothing). Never raises out of the fan-out."""
+        if self._federation is None or self._space_crypto is None:
+            return 0
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id != self._own_instance_id:
+            return 0
+        rotated_by = meta.get("rotated_by")
+        if not isinstance(rotated_by, str) or rotated_by in (
+            "",
+            self._own_instance_id,
+        ):
+            return 0
+        exported = await self._space_crypto.export_current_key(space_id)
+        if exported is None:
+            return 0
+        epoch, raw_key = exported
+        try:
+            held = int(meta.get("epoch", -1)) == epoch and base64.b64decode(
+                str(meta.get("key_base64") or ""), validate=True
+            ) == bytes(raw_key)
+        except TypeError, ValueError, binascii.Error:
+            return 0
+        if not held or self._followers_rekeyed.get(space_id, -1) >= epoch:
+            return 0
+        self._followers_rekeyed[space_id] = epoch
+        targets = sorted(
+            await self._federation.gfs_reached_followers(
+                space_id, await self._spaces.list_member_instances(space_id)
+            )
+        )
+        if not targets:
+            return 0
+        per_peer = (
+            self._writer_certs.peer_payload_hook(space_id, epoch=epoch)
+            if self._writer_certs is not None
+            else None
+        )
+        try:
+            await self._federation.broadcast_to_space_members(
+                space_id,
+                FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+                {"space_id": space_id, "space_content_key": dict(meta)},
+                per_peer=per_peer,
+                only_instances=targets,
+            )
+        except Exception:
+            log.exception(
+                "relay_admin_rekey_to_followers: rekey to %d follower "
+                "household(s) of %s failed",
+                len(targets),
+                space_id,
+            )
+        return len(targets)
+
     async def invite_remote_user(
         self,
         space_id: str,
@@ -8977,11 +9056,24 @@ class SpaceService(
     async def expire_due_join_requests(self) -> int:
         """Mark pending join requests past ``expires_at`` expired (both the
         host's and our own outgoing ones). Frees their slot under the cap of
-        requests from the GFS (v_84). Returns how many."""
+        requests from the GFS (v_84). Returns how many.
+
+        The same sweep prunes what a settled remote approval leaves behind
+        (v_96: GFS follows add up to 120 approved rows and bound tokens per
+        hour per space): a follow's approved row and a bound token once
+        neither can be used any more — past the window an approval is
+        honoured for (:data:`APPROVAL_HONOURED_DAYS`, which outlives every
+        bound token's expiry), the token spent or expired
+        (``prune_settled_remote_approvals``)."""
         expired = 0
         for row in await self._spaces.list_expired_join_requests():
             if await self._spaces.answer_join_request(str(row["id"]), "expired"):
                 expired += 1
+        pruned = await self._spaces.prune_settled_remote_approvals(
+            older_than_days=APPROVAL_HONOURED_DAYS
+        )
+        if pruned:
+            log.info("join requests: pruned %d settled approval row(s)", pruned)
         return expired
 
     async def request_join_remote(

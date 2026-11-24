@@ -7216,3 +7216,25 @@ async def test_fan_out_tries_every_follower_without_a_channel_or_for_keys(
     events are never skipped (no channel carries them)."""
     tried = await _fan_out(monkeypatch, channel=channel, event_type=event_type)
     assert tried == ["follower-gfs", "follower-mesh", "member-mesh"]
+
+
+async def test_gfs_reached_followers_names_follower_only_seat_households():
+    """v_96 (P5) — the households only the owner reaches (it holds their
+    space-session row): follower-only ones seated through a GFS. A paired
+    follower, a seat household holding a writer seat, one we hold no row
+    for, and ourselves are not in it."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    rows = {}
+    for name in ("gfs-fan", "gfs-writer", "paired-fan"):
+        row, _ = _make_remote_instance(km, session_key=b"\x01" * 32)
+        if name != "paired-fan":
+            row = dataclasses.replace(row, source=InstanceSource.SPACE_SESSION)
+        await fed_repo.save_instance(row)
+        rows[name] = row.id
+    svc, _ = _make_service(federation_repo=fed_repo)
+    svc.attach_space_write_gate(_ChannelSpaces(False), _Seats({rows["gfs-writer"]}))
+    got = await svc.gfs_reached_followers(
+        "sp", [*rows.values(), "unknown-house", svc.own_instance_id]
+    )
+    assert got == frozenset({rows["gfs-fan"]})

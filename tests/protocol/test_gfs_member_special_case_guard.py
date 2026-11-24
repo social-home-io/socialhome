@@ -332,7 +332,9 @@ _COUNTS: dict[str, dict[str, int]] = {
     "SPACE_SESSION": {
         "socialhome/app.py": 1,
         "socialhome/domain/federation.py": 3,
-        "socialhome/federation/federation_service.py": 18,
+        # +1 (v_96): gfs_reached_followers — the follower households only
+        # the host reaches (it re-sends a delegated admin's rekey to them).
+        "socialhome/federation/federation_service.py": 19,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
         "socialhome/federation/routed_envelope.py": 1,

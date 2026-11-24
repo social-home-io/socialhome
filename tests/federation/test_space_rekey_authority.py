@@ -302,3 +302,64 @@ async def test_unknown_space_drops(tmp_dir):
         space_crypto.import_key.assert_not_awaited()
     finally:
         await db.shutdown()
+
+
+# ── P5 (v_96): the owner passes an admin's rekey on to GFS followers ────────
+
+
+@pytest.mark.security
+async def test_an_applied_admin_rekey_is_handed_to_the_follower_relay(tmp_dir):
+    """A delegated admin's authority-signed rekey, once applied, goes to
+    ``SpaceService.relay_admin_rekey_to_followers`` (which acts only on the
+    owner) with the signed meta unchanged; the owner's own rekey and a
+    dropped one never do."""
+    h, _space_crypto, seed, db = await _make_handler(tmp_dir)
+    space_service = AsyncMock()
+    h.attach_space_service(space_service)
+    try:
+        payload = _signed_rekey_payload(seed=seed, epoch=9, rotated_by=ADMIN)
+        await h._on_key_exchange_rekey(
+            _event(
+                FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+                payload,
+                from_instance=ADMIN,
+            )
+        )
+        space_service.relay_admin_rekey_to_followers.assert_awaited_once_with(
+            SPACE_ID, payload["space_content_key"]
+        )
+        space_service.reset_mock()
+        # The owner's own rekey: its broadcast already reached them.
+        await h._on_key_exchange_rekey(
+            _event(
+                FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+                {
+                    "space_id": SPACE_ID,
+                    "space_content_key": {
+                        "epoch": 10,
+                        "key_suite": "aesgcm-256",
+                        "key_base64": _key_b64(),
+                    },
+                },
+                from_instance=OWNER,
+            )
+        )
+        # A forged one (non-owner, unsigned) is dropped before it.
+        await h._on_key_exchange_rekey(
+            _event(
+                FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+                {
+                    "space_id": SPACE_ID,
+                    "space_content_key": {
+                        "epoch": 11,
+                        "key_suite": "aesgcm-256",
+                        "key_base64": _key_b64(),
+                        "rotated_by": ADMIN,
+                    },
+                },
+                from_instance=ADMIN,
+            )
+        )
+        space_service.relay_admin_rekey_to_followers.assert_not_awaited()
+    finally:
+        await db.shutdown()
