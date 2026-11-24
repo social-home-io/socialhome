@@ -332,6 +332,19 @@ describe('renderMarkdown — bare links are clickable', () => {
     }
   })
 
+  test.each([
+    ['[x](https://evil.example/**@anna**)'],
+    ['[x](https://evil.example/ *@anna* c)'],
+    ['[x](https://evil.example/**b**)'],
+  ])('bold / italic never reach into a markdown href: %s', (src) => {
+    const html = renderMarkdown(src, { mentions: new Set(['anna']), interactive: true })
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    for (const a of doc.querySelectorAll('a')) {
+      expect(a.getAttributeNames().sort()).toEqual(['href', 'rel', 'target'])
+      expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+    }
+  })
+
   test('a mention inside a URL is not a button inside the link', () => {
     const html = renderMarkdown('https://social.example/@anna', {
       mentions: new Set(['anna']), interactive: true,

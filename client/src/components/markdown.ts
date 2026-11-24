@@ -69,7 +69,7 @@ function _mapText(
 // text, so ``&`` only ever starts an entity: ``&amp;`` (a literal ``&``,
 // part of a query) continues the link, every other entity (``&lt;``,
 // ``&gt;``, ``&quot;``, ``&#39;`` — a ``<>"'`` in the source) ends it,
-// as do whitespace and ``()[]{}`` / backtick — the same stop set as the
+// as do whitespace, control characters (which the server refuses anyway) and ``()[]{}`` / backtick — the same stop set as the
 // server's ``domain.link_preview.first_url``, so the link and its card
 // agree on where the URL ends.
 // eslint-disable-next-line no-control-regex
@@ -164,7 +164,10 @@ function _safeHref(href: string): string | null {
   // markup an earlier pass made (``[x](https://a/`b`)`` puts a <code> tag
   // into the href) — it would end the attribute and drop ``rel``.
   if (/[<>"]/.test(read)) return null
-  return read
+  // The bold / italic passes run after the link pass over the whole
+  // string; a ``*`` left in an href would let them put ``<strong>`` into
+  // the attribute (``[x](https://a/**@anna**)``). ``%2A`` is the same URL.
+  return read.replace(/\*/g, '%2A')
 }
 
 /** Render a markdown-ish string to safe HTML. */
