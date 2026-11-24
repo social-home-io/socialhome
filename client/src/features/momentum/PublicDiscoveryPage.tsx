@@ -33,7 +33,7 @@ import { isRestricted } from '@/components/ProtectedNotice'
 import { Spinner } from '@/components/Spinner'
 import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
 import { relativeDocsTime } from '@/utils/relativeTime'
-import { formatLocale, t } from '@/i18n/i18n'
+import { formatLocale, isOne, t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import { isBlocked, loadBlocks } from '@/store/blocks'
 import { loadFollows as loadHouseholdFollows } from '@/store/follows'
@@ -46,6 +46,7 @@ import {
   loadFollows,
   loadGfsConnections,
   unfollowUser,
+  type DirectorySort,
 } from '@/store/momentPublic'
 import { fold, type FriendsPayload, type Person } from '@/features/friends/friendsModel'
 import type { MomentPublicDirectoryUser } from '@/types'
@@ -58,9 +59,22 @@ const loading = signal(true)
 const searchQuery = signal('')
 const busyUser = signal<string | null>(null)
 
-/** The last directory each GFS answered with, and when — kept for the
- *  session so an unreachable GFS still shows who was there, with its age. */
-const directoryCache = new Map<string, { users: MomentPublicDirectoryUser[], at: number }>()
+/** The order asked of the GFS (owner, 2026-11-24: most followed first). */
+const sortOrder = signal<DirectorySort>('followers')
+/** Whether the shown list came from a GFS that ranks — it echoed the order
+ *  asked for. Only then are the sort buttons offered (an older GFS lists
+ *  newest first whatever was asked). */
+const ranks = signal(false)
+/** The polite announcement after the person changed the order. */
+const sortSaid = signal('')
+
+interface CachedDirectory { users: MomentPublicDirectoryUser[], sort: DirectorySort | null, at: number }
+
+/** The last directory each GFS answered with per order, and when — kept
+ *  for the session so an unreachable GFS still shows who was there, with
+ *  its age. */
+const directoryCache = new Map<string, CachedDirectory>()
+const cacheKey = (gfsId: string, sort: DirectorySort) => `${gfsId}|${sort}`
 /** The GFS whose directory read just failed (unreachable ≠ "no one
  *  signed up"), else null. */
 const directoryFailed = signal<string | null>(null)
@@ -101,21 +115,60 @@ async function loadFriends(): Promise<void> {
   }
 }
 
-async function loadDirectory(gfsId: string): Promise<void> {
+/** Bumped per directory read: only the newest read's answer (or failure)
+ *  lands, whatever order the answers come back in. */
+let directoryRead = 0
+
+async function loadDirectory(gfsId: string, gfsChanged = false): Promise<void> {
+  const sort = sortOrder.value
+  const read = ++directoryRead
+  const current = () => read === directoryRead
+  const cached = directoryCache.get(cacheKey(gfsId, sort))
   loading.value = true
-  directory.value = directoryCache.get(gfsId)?.users ?? []
+  directory.value = cached?.users ?? []
+  // Another GFS may not rank: no sort chips until it says it does.
+  if (cached) ranks.value = cached.sort !== null
+  else if (gfsChanged) ranks.value = false
   try {
-    const users = await fetchGfsDirectory(gfsId)
-    directoryCache.set(gfsId, { users, at: Date.now() })
-    if (selectedGfs.value === gfsId) {
-      directory.value = users
+    const page = await fetchGfsDirectory(gfsId, sort)
+    directoryCache.set(cacheKey(gfsId, sort), { ...page, at: Date.now() })
+    if (current()) {
+      directory.value = page.users
+      ranks.value = page.sort !== null
       directoryFailed.value = null
     }
   } catch {
-    if (selectedGfs.value === gfsId) directoryFailed.value = gfsId
+    if (current()) directoryFailed.value = gfsId
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
+}
+
+/** The person picked an order: read it and say so. */
+function chooseSort(sort: DirectorySort): void {
+  if (sortOrder.value === sort || !selectedGfs.value) return
+  sortOrder.value = sort
+  sortSaid.value = t(sort === 'followers'
+    ? 'moment.discover.sorted_followers' : 'moment.discover.sorted_new')
+  void loadDirectory(selectedGfs.value)
+}
+
+/** "1.2K followers" / "1 follower"; nothing for 0 or no count. */
+function followersLabel(n: number | undefined): string | null {
+  if (!n) return null
+  const count = compactNumber(formatLocale()).format(n)
+  return t(isOne(n) ? 'moment.discover.followers_one' : 'moment.discover.followers', { count })
+}
+
+let compactFormat: { locale: string, format: Intl.NumberFormat } | null = null
+function compactNumber(locale: string): Intl.NumberFormat {
+  if (compactFormat?.locale !== locale) {
+    compactFormat = {
+      locale,
+      format: new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }),
+    }
+  }
+  return compactFormat.format
 }
 
 async function bootstrapGfs(): Promise<void> {
@@ -142,6 +195,7 @@ export default function PublicDiscoveryPage() {
     // Fresh per visit and per account: a list read for someone who signed
     // out since is never shown, not even while this one loads.
     friends.value = null
+    searchQuery.value = ''
     void loadFriends()
     void loadHouseholdFollows()
     void loadBlocks()
@@ -182,7 +236,7 @@ export default function PublicDiscoveryPage() {
             onChange={(ev) => {
               const next = (ev.currentTarget as HTMLSelectElement).value
               selectedGfs.value = next
-              void loadDirectory(next)
+              void loadDirectory(next, true)
             }}
           >
             {gfses.map((g) => (
@@ -242,7 +296,7 @@ function GfsSection() {
 
   const gfsId = selectedGfs.value
   const unreachable = directoryFailed.value !== null && directoryFailed.value === gfsId
-  const cached = gfsId ? directoryCache.get(gfsId) : undefined
+  const cached = gfsId ? directoryCache.get(cacheKey(gfsId, sortOrder.value)) : undefined
   const gfsName = gfses.find(g => g.id === gfsId)?.display_name ?? 'GFS'
 
   const isFollowing = (userId: string) =>
@@ -279,7 +333,25 @@ function GfsSection() {
         <h2 id={GFS_HEADING_ID} class="sh-momentum-discover__title">
           {t('moment.discover.heading', { gfs: gfsName })}
         </h2>
+        {ranks.value && (
+          // Toggle buttons, not tabs: they reorder one list.
+          <div class="sh-discover-sort" role="group" aria-label={t('moment.discover.sort_label')}>
+            {(['followers', 'new'] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                class={`sh-chip${sortOrder.value === s ? ' sh-chip--active' : ''}`}
+                aria-pressed={sortOrder.value === s ? 'true' : 'false'}
+                aria-disabled={unreachable ? 'true' : undefined}
+                onClick={() => { if (!unreachable) chooseSort(s) }}
+              >
+                {t(s === 'followers' ? 'moment.discover.sort_followers' : 'moment.discover.sort_new')}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
+      <p role="status" class="sh-discover-sort__said sr-only">{sortSaid.value}</p>
       <p class="sh-muted sh-momentum-discover__note">
         {t('moment.discover.follow_note', { gfs: gfsName })}
       </p>
@@ -307,6 +379,7 @@ function GfsSection() {
         <ul class="sh-momentum-discover-list" aria-labelledby={GFS_HEADING_ID}>
           {rows.map((u) => {
             const name = u.display_name || u.username
+            const followers = followersLabel(u.follower_count)
             return (
               <li key={u.user_id} class="sh-momentum-discover-row">
                 <Avatar src={discoveryAvatarUrl(u)} name={name} size={40} />
@@ -317,6 +390,7 @@ function GfsSection() {
                   </button>
                   <span class="sh-muted sh-momentum-discover-sub">
                     <bdi dir="auto">@{u.username}</bdi>
+                    {followers && ` · ${followers}`}
                   </span>
                   {u.bio && <p class="sh-momentum-discover-bio" dir="auto">{u.bio}</p>}
                 </div>
@@ -345,6 +419,9 @@ export function _resetDiscoverForTests(): void {
   friends.value = null
   friendsFailed.value = false
   busyUser.value = null
+  sortOrder.value = 'followers'
+  ranks.value = false
+  sortSaid.value = ''
 }
 
 /** Our own picture-proxy path, as the backend emits it (signed). */

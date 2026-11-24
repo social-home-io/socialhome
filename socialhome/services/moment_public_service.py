@@ -25,11 +25,15 @@ from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..domain.moment_public import (
+    DIRECTORY_SORT_FOLLOWERS,
+    DIRECTORY_SORTS,
+    MomentPublicDirectoryPage,
     MomentPublicFollow,
     MomentPublicRegistration,
     public_author_bio,
     public_author_name,
     public_picture_digest,
+    shown_follower_count,
 )
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
@@ -48,6 +52,11 @@ if TYPE_CHECKING:
     from .moment_public_key_outbound import MomentPublicKeyOutbound
 
 log = logging.getLogger(__name__)
+
+#: Directory row fields the page shows and searches — kept only as text.
+_DIRECTORY_TEXT_FIELDS = ("display_name", "username", "bio")
+#: A GFS directory answer holds at most this many rows; more are dropped.
+DIRECTORY_MAX_ROWS = 200
 
 
 class MomentPublicError(Exception):
@@ -478,16 +487,26 @@ class MomentPublicService(ProtectionGateMixin):
         gfs_id: str,
         *,
         q: str | None = None,
+        sort: str | None = None,
         viewer_user_id: str | None = None,
-    ) -> list[dict]:
+    ) -> MomentPublicDirectoryPage:
         """Fetch the GFS public-user directory (anon GET) for
         *viewer_user_id*, without the people this household knows
         (:meth:`_strangers`).
 
         Optional ``q`` substring filter on display_name + username; the
         server-side filter is delegated to the GFS so big directories
-        don't ship in full.
+        don't ship in full. Optional ``sort`` (one of
+        :data:`DIRECTORY_SORTS`, else ``ValueError``): the page's ``sort``
+        is set only when the GFS echoed exactly that order, and each row
+        keeps a ``follower_count`` only when it is a plausible count
+        (:func:`shown_follower_count`) — both are display data, used for
+        nothing else.
         """
+        if sort is not None and sort not in DIRECTORY_SORTS:
+            raise ValueError(f"unknown directory sort {sort!r}")
+        if q and sort == DIRECTORY_SORT_FOLLOWERS:
+            raise ValueError("a search is listed newest first, not ranked")
         if viewer_user_id is not None:
             # §CP.R: a protected account never browses a GFS, even with a
             # stale client that still offers it.
@@ -498,7 +517,7 @@ class MomentPublicService(ProtectionGateMixin):
         try:
             async with self._client().get(
                 f"{conn.inbox_url}/gfs/moments/users",
-                params={"q": q} if q else None,
+                params={k: v for k, v in (("q", q), ("sort", sort)) if v} or None,
                 allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -507,12 +526,24 @@ class MomentPublicService(ProtectionGateMixin):
                         f"GFS directory fetch failed: HTTP {resp.status}"
                     )
                 payload = await resp.json()
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, ValueError) as exc:
+            # ValueError: a body that isn't JSON — the GFS's fault (502),
+            # not a bad request of ours.
             raise MomentPublicError(f"GFS directory request failed: {exc}") from exc
-        users = payload.get("users")
-        if not isinstance(users, list):
-            return []
-        return await self._strangers(users)
+        if not isinstance(payload, dict) or not isinstance(payload.get("users"), list):
+            return MomentPublicDirectoryPage(users=())
+        echoed = payload.get("sort")
+        rows = []
+        for raw in await self._strangers(payload["users"]):
+            row = {k: v for k, v in raw.items() if k != "follower_count"}
+            count = shown_follower_count(raw.get("follower_count"))
+            if count is not None:
+                row["follower_count"] = count
+            rows.append(row)
+        return MomentPublicDirectoryPage(
+            users=tuple(rows),
+            sort=sort if sort is not None and echoed == sort else None,
+        )
 
     async def _strangers(self, rows: list) -> list[dict]:
         """The directory rows worth a GFS follow: well-formed, once each, and
@@ -532,7 +563,18 @@ class MomentPublicService(ProtectionGateMixin):
             if not isinstance(iid, str) or iid in instance_ids:
                 continue
             seen.add(uid)
-            out.append(row)
+            # The text the page shows and searches is text, or nothing.
+            out.append(
+                {
+                    **row,
+                    **{
+                        k: (row[k] if isinstance(row.get(k), str) else None)
+                        for k in _DIRECTORY_TEXT_FIELDS
+                    },
+                }
+            )
+            if len(out) >= DIRECTORY_MAX_ROWS:
+                break
         return out
 
     async def _people_at_home(self) -> tuple[set[str], set[str]]:

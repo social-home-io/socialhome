@@ -493,6 +493,24 @@ await check('router-keeps-prefix', async () => {
   await go('/momentum')
   await go('/momentum/yours')
   await history(() => page.goBack(), '/momentum')
+  // Discover is always a tab (Momentum discovery). It lists the household's
+  // friends, or — with nobody to follow yet — points at Connections; that
+  // link keeps the prefix too.
+  await go('/momentum/discover')
+  await step('Discover shows Friends or the way to Connections', page.waitForFunction(() =>
+    !!document.querySelector('.sh-momentum-discover #sh-discover-friends-heading')))
+  const toConnections = await page.evaluate(() => {
+    const a = [...document.querySelectorAll('.sh-momentum-discover a[href]')]
+      .find(el => new URL(el.href).pathname.endsWith('/connections'))
+    a?.click()
+    return !!a
+  })
+  if (toConnections) {
+    await step(`navigation to ${PREFIX}/connections`,
+      page.waitForFunction(want => location.pathname === want, {}, PREFIX + '/connections'))
+    await settled(page)
+    seen.push(pathOf(page))
+  }
   // Highlights tabs are links (/highlights, /highlights/archive): the tab
   // URL keeps the prefix through a reload and Back.
   await go('/highlights')

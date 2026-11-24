@@ -49,13 +49,15 @@ class _StubSession:
         self.body = body or {}
         self.posts: list[tuple[str, dict]] = []
         self.gets: list[str] = []
+        self.params: list[dict | None] = []
 
     def post(self, url, *, json=None, **_kw):
         self.posts.append((url, json or {}))
         return _StubResp(self.status, self.body)
 
-    def get(self, url, **_kw):
+    def get(self, url, *, params=None, **_kw):
         self.gets.append(url)
+        self.params.append(params)
         return _StubResp(self.status, self.body)
 
 
@@ -244,10 +246,128 @@ async def test_fetch_directory_returns_users_list(repos):
             },
         ),
     )
-    users = await svc.fetch_directory("g1")
+    users = list((await svc.fetch_directory("g1")).users)
     assert users == [
-        {"user_id": "u-remote", "instance_id": "i-b", "display_name": "Bob"}
+        {
+            "user_id": "u-remote",
+            "instance_id": "i-b",
+            "display_name": "Bob",
+            "username": None,
+            "bio": None,
+        }
     ]
+
+
+async def test_fetch_directory_keeps_text_fields_text_and_at_most_200_rows(repos):
+    """The GFS chose every field: what the page shows and searches is text
+    or nothing, and an answer holds at most 200 rows."""
+    rows = [
+        {"user_id": f"x{i}", "instance_id": f"i{i}", "display_name": f"P{i}"}
+        for i in range(250)
+    ]
+    rows[0] = {
+        "user_id": "x0",
+        "instance_id": "i0",
+        "display_name": {"evil": 1},
+        "username": ["a"],
+        "bio": 7,
+    }
+    sess = _StubSession(status=200, body={"users": rows})
+    svc = _make_service(repos, session=sess)
+    users = (await svc.fetch_directory("g1")).users
+    assert len(users) == 200
+    assert (users[0]["display_name"], users[0]["username"], users[0]["bio"]) == (
+        None,
+        None,
+        None,
+    )
+    assert users[1]["display_name"] == "P1"
+
+
+def _ranked_body(sort, counts):
+    return {
+        "sort": sort,
+        "users": [
+            {"user_id": f"x{i}", "instance_id": f"i{i}", "follower_count": n}
+            for i, n in enumerate(counts)
+        ],
+    }
+
+
+async def test_fetch_directory_asks_for_a_sort_and_trusts_only_a_matching_echo(
+    repos,
+):
+    sess = _StubSession(status=200, body=_ranked_body("followers", [5]))
+    svc = _make_service(repos, session=sess)
+    page = await svc.fetch_directory("g1", sort="followers")
+    assert sess.params[-1] == {"sort": "followers"}
+    assert page.sort == "followers"
+    # An older GFS ignores the parameter: no echo, so no ranking claimed.
+    sess.body = {"users": []}
+    assert (await svc.fetch_directory("g1", sort="followers")).sort is None
+    # An echo that is not what was asked for is not believed either.
+    sess.body = _ranked_body("new", [])
+    assert (await svc.fetch_directory("g1", sort="followers")).sort is None
+    sess.body = _ranked_body(["followers"], [])
+    assert (await svc.fetch_directory("g1", sort="followers")).sort is None
+    # No sort asked: none sent, none claimed.
+    sess.body = _ranked_body("followers", [])
+    assert (await svc.fetch_directory("g1")).sort is None
+    assert sess.params[-1] is None
+
+
+async def test_fetch_directory_refuses_an_unknown_sort(repos):
+    sess = _StubSession(status=200, body={"users": []})
+    svc = _make_service(repos, session=sess)
+    with pytest.raises(ValueError):
+        await svc.fetch_directory("g1", sort="recent")
+    # A search is never ranked (the GFS refuses it too): ours to refuse, 422.
+    with pytest.raises(ValueError):
+        await svc.fetch_directory("g1", q="bern", sort="followers")
+    assert sess.gets == []
+
+
+async def test_fetch_directory_keeps_only_plausible_follower_counts(repos):
+    """The GFS's counts are display data: a non-negative integer of sane size
+    or nothing."""
+    counts = [3, -1, "5", True, 10**12, 2.5, None, 0]
+    sess = _StubSession(status=200, body=_ranked_body("followers", counts))
+    svc = _make_service(repos, session=sess)
+    users = (await svc.fetch_directory("g1", sort="followers")).users
+    kept = {u["user_id"]: u.get("follower_count") for u in users}
+    assert kept == {
+        "x0": 3,
+        "x1": None,
+        "x2": None,
+        "x3": None,
+        "x4": None,
+        "x5": None,
+        "x6": None,
+        "x7": 0,
+    }
+    assert all("follower_count" not in u for u in users if kept[u["user_id"]] is None)
+
+
+async def test_fetch_directory_survives_a_body_that_is_not_an_object(repos):
+    sess = _StubSession(status=200, body=None)
+    sess.body = ["not", "an", "object"]
+    svc = _make_service(repos, session=sess)
+    page = await svc.fetch_directory("g1", sort="followers")
+    assert page.users == () and page.sort is None
+
+
+async def test_fetch_directory_bad_json_is_a_gfs_failure(repos):
+    """A GFS answering 200 with junk is a GFS failure (502), not our 422."""
+
+    class _BadJson(_StubResp):
+        async def json(self):
+            raise ValueError("not json")
+
+    sess = _StubSession(status=200)
+    sess.get = lambda url, **_kw: _BadJson(200)
+    svc = _make_service(repos, session=sess)
+    with pytest.raises(MomentPublicError):
+        await svc.fetch_directory("g1", sort="followers")
 
 
 async def test_fetch_directory_5xx_raises(repos):
@@ -811,7 +931,7 @@ async def test_fetch_directory_leaves_out_people_the_household_knows(repos, db):
         session=_StubSession(status=200, body={"users": rows}),
         federation=SqliteFederationRepo(db),
     )
-    users = await svc.fetch_directory("g1")
+    users = list((await svc.fetch_directory("g1")).users)
     assert [u["user_id"] for u in users] == ["u-sam", "u-stranger"]
 
 
@@ -836,7 +956,7 @@ async def test_fetch_directory_refuses_a_protected_viewer(repos):
     with pytest.raises(AccountProtectedError):
         await svc.fetch_directory("g1", viewer_user_id="u-kid")
     assert sess.gets == []
-    assert await svc.fetch_directory("g1", viewer_user_id="u1") == []
+    assert (await svc.fetch_directory("g1", viewer_user_id="u1")).users == ()
 
 
 async def test_follow_refuses_someone_the_household_knows(repos, db):

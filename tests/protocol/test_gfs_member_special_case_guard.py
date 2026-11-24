@@ -305,6 +305,10 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "non-space exclusion",
             "friends",
         ),
+        "socialhome/services/moment_public_service.py": (
+            "non-space exclusion",
+            "one Follow: a friend gets the household follow, not a GFS one",
+        ),
         "socialhome/services/online_status_service.py": (
             "non-space exclusion",
             "presence",
@@ -406,6 +410,7 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/services/calendar_service.py": 1,
         "socialhome/services/dm_routing_service.py": 1,
         "socialhome/services/friends_service.py": 2,
+        "socialhome/services/moment_public_service.py": 1,
         "socialhome/services/online_status_service.py": 3,
         "socialhome/services/peer_directory_service.py": 1,
         "socialhome/services/peer_outbound.py": 1,
