@@ -7585,11 +7585,7 @@ class SpaceService(
         lost the smallest-``rotated_by`` tiebreak is not passed on), and
         once per epoch per space in this process (a repeat or another
         relay's copy sends nothing). Never raises out of the fan-out."""
-        if (
-            self._federation is None
-            or self._space_crypto is None
-            or self._remote_members is None
-        ):
+        if self._federation is None or self._space_crypto is None:
             return 0
         space = await self._spaces.get(space_id)
         if space is None or space.owner_instance_id != self._own_instance_id:
@@ -7613,18 +7609,11 @@ class SpaceService(
         if not held or self._followers_rekeyed.get(space_id, -1) >= epoch:
             return 0
         self._followers_rekeyed[space_id] = epoch
-        writers = set(
-            await self._remote_members.list_instances_with_roles(
-                space_id, frozenset(r.value for r in WRITER_ROLES)
+        targets = sorted(
+            await self._federation.gfs_reached_followers(
+                space_id, await self._spaces.list_member_instances(space_id)
             )
         )
-        targets = [
-            iid
-            for iid in await self._spaces.list_member_instances(space_id)
-            if iid not in writers
-            and iid != self._own_instance_id
-            and await self._federation.is_space_session_peer(iid)
-        ]
         if not targets:
             return 0
         per_peer = (

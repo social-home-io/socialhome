@@ -1316,8 +1316,11 @@ async def _relay_setup(stack):
     await _seat_household(
         stack, space.id, "gfs-writer", SpaceRole.SUBSCRIBER, user_id="u-w2"
     )
-    sessions = {"gfs-fan", "gfs-writer"}
-    stack.fed.is_space_session_peer = AsyncMock(side_effect=lambda i: i in sessions)
+    # What FederationService.gfs_reached_followers answers (tested there):
+    # follower-only households seated through a GFS.
+    stack.fed.gfs_reached_followers = AsyncMock(
+        side_effect=lambda _sid, ids: frozenset(i for i in ids if i == "gfs-fan")
+    )
     stack.svc.attach_space_crypto_service(
         SimpleNamespace(export_current_key=AsyncMock(return_value=(4, _RAW_KEY)))
     )
