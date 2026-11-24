@@ -5300,8 +5300,12 @@ class FederationInboundService(ProtectionGateMixin):
         # their name to that follower.
         if self._moment_repo is None:  # pragma: no cover — always wired
             return True
-        pins = await self._moment_repo.public_follow_pins(author_user_id)
-        if pins and origin_instance_id not in _instance_ids_of(pins):
+        # A pin that doesn't decode (an older directory sent none) proves
+        # nothing: it neither binds the author nor refuses their moments.
+        homes = _instance_ids_of(
+            await self._moment_repo.public_follow_pins(author_user_id)
+        )
+        if homes and origin_instance_id not in homes:
             log.warning(
                 "moment by GFS-followed author %s from %s, not the household "
                 "the follow pinned — refusing",

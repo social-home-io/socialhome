@@ -429,7 +429,14 @@ below):
   unpaired) cannot be bound without a new wire field (an author anchor —
   ``derive_user_id(origin_pk, anchor)``), so a household within reach
   could still post in that id to its followers — as it can today to
-  anyone whose ``max_hops`` covers it. Recorded as a follow-up;
+  anyone whose ``max_hops`` covers it. The increment is narrow: the look
+  stays ``max_hops``-only, so such a copy only arrives at a hop someone
+  here already looks at; what is new is that a follower with a lower
+  ``max_hops`` sees it too. An unpair drops the household's
+  ``remote_users`` rows, so its authors become unbound. A pin that does
+  not decode binds nothing. The pin is what the GFS directory said; the
+  GFS register route binding ``home_instance_pk`` to the registering
+  household is a follow-up too;
 * rows kept for a follower stay until they expire when the follow ends
   (unfollow, block, removal): nobody can read them (the reads apply the
   rule per viewer), and they go at ``expires_at`` (≤ 30 days);

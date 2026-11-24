@@ -609,3 +609,20 @@ async def test_a_household_cannot_post_as_an_author_followed_through_a_gfs(env):
     assert await _count(db, "moments", "id", "m-genuine") == 1
     inbox = await app[moment_service_key].list_inbox(viewer_user_id="u-anna")
     assert [m.id for m in inbox] == ["m-genuine"]
+
+
+async def test_an_unreadable_pin_binds_nothing_and_blocks_nothing(env):
+    """A follow whose pinned key doesn't decode (an older directory sent
+    none) proves nothing — the author's moments are neither bound to it
+    nor refused, and still pass on."""
+    app, db, sent, _fetched, _media = env
+    await _follow_star_via_gfs(db)
+    await db.enqueue("UPDATE moment_public_follows SET followed_instance_pk=''")
+    await _deliver(
+        app,
+        FET.MOMENT_CREATED,
+        _star_moment(
+            "m-star", seed=ORIGIN_KEY.private_key, pk=ORIGIN_KEY.public_key, hop=2
+        ),
+    )
+    assert _relayed(sent, "m-star") != []
