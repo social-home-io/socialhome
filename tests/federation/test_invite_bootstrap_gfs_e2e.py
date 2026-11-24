@@ -37,6 +37,7 @@ from socialhome.crypto import (
     b64url_decode,
     b64url_encode,
     derive_instance_id,
+    derive_user_id,
     generate_identity_keypair,
     generate_x25519_keypair,
     sign_ed25519,
@@ -496,7 +497,9 @@ async def _household(
         federation._mailbox_sender_check = directory.sender_allowed
         fed_transport._mailbox_targets = directory.target_for
 
-    user_id = f"{name}-user-id"
+    # Minted like every household mints its people (P5 person-ID anchor:
+    # a host seats a redeemer only for an id that derives from its key).
+    user_id = derive_user_id(ident.public_key, f"{name}user")
     await user_repo.save(
         User(
             user_id=user_id,

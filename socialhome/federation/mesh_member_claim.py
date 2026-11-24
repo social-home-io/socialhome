@@ -33,9 +33,14 @@ there is no ``*_suite`` tag.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..crypto import derive_instance_id
 from ..domain.federation_capabilities import OURS
+
+if TYPE_CHECKING:
+    from ..domain.federation import FederationEvent
+    from .federation_service import FederationService
 
 #: Wire key of the claimed ``proto_version``.
 MESH_CLAIM_VERSION_FIELD: str = "member_proto_version"
@@ -90,3 +95,23 @@ def parse_mesh_member_claim(
     except ValueError:
         return None
     return MeshMemberClaim(proto_version=version, identity_pk=pk)
+
+
+async def sender_identity_pk(
+    federation: FederationService | None, event: FederationEvent
+) -> bytes | None:
+    """The identity key we hold for ``event``'s sending household: the one
+    pinned on its ``remote_instances`` row (paired or ``space_session``),
+    else — for an event unwrapped from ``SPACE_ROUTED`` — the key its
+    origin-authenticated mesh claim carries, which derives to the sender
+    (:func:`parse_mesh_member_claim`). ``None`` when neither exists, so a
+    caller proving a person against it (``user_id_proven``) fails closed."""
+    if federation is None:
+        return None
+    pinned = await federation.peer_identity_public_key(event.from_instance)
+    if pinned is not None:
+        return pinned
+    if getattr(event, "routed_path", None) is None:
+        return None
+    claim = parse_mesh_member_claim(event.payload, instance_id=event.from_instance)
+    return claim.identity_pk if claim is not None else None

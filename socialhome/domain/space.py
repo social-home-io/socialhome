@@ -1759,7 +1759,8 @@ def takes_follows(space: Space | None, own_instance_id: str) -> bool:
 
 #: The host's automatic approval of a remote follow (v_96) —
 #: ``SpaceService.approve_remote_follow``: keyword-only ``space_id``,
-#: ``instance_id``, ``user_id``, ``request_id``, ``applicant_pk``,
+#: ``instance_id``, ``user_id``, ``request_id``, ``applicant_identity_pk``,
+#: ``applicant_anchor`` (the P5 person-ID proof), ``applicant_pk``,
 #: ``area_verdict``, ``gfs_relay``; ``True`` when it approved.
 FollowApprover = Callable[..., Awaitable[bool]]
 

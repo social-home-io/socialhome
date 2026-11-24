@@ -240,10 +240,14 @@ class SpaceAuthorship:
         change to a row that user already owns, never for a new write.
 
         The seat must be the user's own household's: never one of OUR
-        people, nor a user also seated (now or before) under another
-        household. A user id belongs to one household; a seat taken under
-        somebody else's id is no proof of acting for them (P4 adversarial
-        review — the own-comment delete needs no switch, owner decision F6).
+        people, nor a user holding a LIVE seat under another household. A
+        user id belongs to one household; a seat taken under somebody else's
+        id is no proof of acting for them (P4 adversarial review — the
+        own-comment delete needs no switch, owner decision F6). Receivers
+        see no anchors: they trust the seats the host seated, which since P5
+        proves every seated id (``user_id_proven``); only a legacy pre-proof
+        seat can put one id under two households, and once an admin removes
+        it (a tombstone) it no longer blocks the real one.
         """
         sender = str(event.from_instance or "")
         if not user_id or not sender or not space_id:
@@ -258,7 +262,7 @@ class SpaceAuthorship:
     async def _users_own_household(
         self, space_id: str, sender: str, user_id: str
     ) -> bool:
-        """``user_id`` is not one of our people and holds no seat in
+        """``user_id`` is not one of our people and holds no live seat in
         ``space_id`` under any household but ``sender`` — see
         :meth:`acts_for`."""
         if await user_id_of_another_household(
@@ -270,7 +274,8 @@ class SpaceAuthorship:
         ):
             log.warning(
                 "space %s: %s holds a seat for %s, which is one of our people "
-                "or seated under another household — not its own; refusing",
+                "or holds a live seat under another household — not its own; "
+                "refusing",
                 space_id,
                 sender,
                 user_id,

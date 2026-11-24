@@ -590,9 +590,11 @@ async def test_latest_display_name_reads_any_seat_tombstones_included(repo):
     assert await repo.latest_display_name("u1") == "Zoe"
 
 
-async def test_instances_of_user_lists_every_household_tombstones_included(repo):
-    """A person's seats in a space under any household, ended ones too —
-    what the follow approver checks before seating them (v_96)."""
+async def test_live_instances_of_user_lists_only_live_seats(repo):
+    """A person's LIVE seats in a space under any household — what a
+    receiver checks before trusting a seat to act for them. A tombstone
+    does not count: an admin removing a (legacy, pre-proof) squat seat
+    clears it, so nobody is locked out for good."""
     for iid in ("i-a", "i-b"):
         await repo.add(
             space_id="sp1",
@@ -605,5 +607,6 @@ async def test_instances_of_user_lists_every_household_tombstones_included(repo)
         space_id="sp1", instance_id="i-c", user_id="u2", user_pk=None, display_name=None
     )
     await repo.remove("sp1", "i-b", "u1")
-    assert await repo.list_instances_of_user("sp1", "u1") == {"i-a", "i-b"}
-    assert await repo.list_instances_of_user("sp1", "u-none") == set()
+    assert await repo.list_live_instances_of_user("sp1", "u1") == {"i-a"}
+    assert await repo.list_live_instances_of_user("sp1", "u2") == {"i-c"}
+    assert await repo.list_live_instances_of_user("sp1", "u-none") == set()

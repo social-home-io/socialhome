@@ -86,7 +86,7 @@ def svc():
     seats.get.return_value = SimpleNamespace(role="member", tombstoned=False)
     seats.list_for_instance.return_value = []
     # ...and under no other household.
-    seats.list_instances_of_user.return_value = {"peer-1"}
+    seats.list_live_instances_of_user.return_value = {"peer-1"}
     s = FederationInboundService(
         bus=bus,  # type: ignore[arg-type]
         conversation_repo=convo,

@@ -83,12 +83,14 @@ from ..services.local_community import (
     file_remote_join_request,
     pending_join_request_id,
 )
+from ..services.space_member_guard import user_id_proven
 from .inbound_validator import RELAY_QUEUE_TTL_SECONDS, RELAY_TIMESTAMP_SKEW_SECONDS
 from .invite_bootstrap import (
     KIND_JOIN_REQUEST,
     KIND_JOIN_REQUEST_ANSWER,
     InviteBootstrapHint,
     RelayEnvelopeSender,
+    body_identity_pk,
     seal_bootstrap_envelope,
     validate_bootstrap_body,
     verify_peer_keywrap,
@@ -290,6 +292,10 @@ class GfsJoinRequestCoordinator:
             "user_display_name": name[:MAX_NAME_CHARS],
             "user_public_key": getattr(user, "public_key", None),
         }
+        if user is not None:
+            # P5 — proves ``user_id`` against ``identity_pk``: a follow is
+            # approved on it (the redeem of the token proves again).
+            body["user_anchor"] = user.identity_anchor or user.username
         if text:
             body["message"] = text
         if requested_role is not None:
@@ -557,6 +563,24 @@ class GfsJoinRequestCoordinator:
                 space_id,
             )
             return await self._refuse_busy(body, gfs_url=gfs_url)
+        applicant_identity_pk = body_identity_pk(body)
+        applicant_anchor = body.get("user_anchor")
+        if follow and not user_id_proven(
+            applicant_identity_pk, applicant_anchor, user_id
+        ):
+            # P5 — a follow is approved on its own, so it must prove its
+            # person first: before the ban, the pending request and the
+            # space budget, dropped the same silent way whatever that id
+            # holds. A member request is reviewed by an admin; the token an
+            # approval mints is bound to the person and its redeem proves.
+            log.info(
+                "gfs follow from %s for space %s refused: user id %s is not "
+                "proven by the household's identity key",
+                applicant,
+                space_id,
+                user_id,
+            )
+            return {"ok": True, "filed": False}
         if await self._spaces.is_banned(space_id, user_id):
             log.info(
                 "gfs join request from %s refused: applicant banned from %s",
@@ -614,6 +638,8 @@ class GfsJoinRequestCoordinator:
                 instance_id=applicant,
                 user_id=user_id,
                 request_id=request_id,
+                applicant_identity_pk=applicant_identity_pk,
+                applicant_anchor=applicant_anchor,
                 applicant_pk=applicant_pk,
                 area_verdict=None,
                 gfs_relay=gfs_relay,
