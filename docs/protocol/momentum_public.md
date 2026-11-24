@@ -1226,13 +1226,16 @@ identical bytes-for-bytes to the sender's canonical encoding.
   filters the list in the browser, so the GFS never learns what someone
   searched for), rendering avatar via
   `GET /api/gfs/{gfs_id}/moments/users/{user_id}/picture` so the UI
-  renders even when the home instance is NAT-shielded. The tab shows only
-  with an active GFS and never for a protected account. A GFS that doesn't
+  renders even when the home instance is NAT-shielded. A GFS that doesn't
   answer keeps the list it last gave in this session, labelled with its
   age, next to an inline error with Try again — never "no one signed up".
-  People from the viewer's own or a paired household (matched by
-  `instance_id` against `GET /api/friends`, read locally) are marked
-  "Paired" instead of offering a GFS follow, and the page says that a
+  Above the GFS list Discover shows your **Friends** with the household
+  follow, and the tab is always there (a protected account sees Friends
+  only and never reads a GFS) — see [Momentum discovery](momentum_discovery.md).
+  The proxy leaves out of the directory everyone this household knows —
+  its own users and household, and the people and households it is
+  socially paired with, matched by `user_id` *and* by household because
+  the GFS chose every field — and drops repeats; the page says that a
   follow tells the GFS who follows whom.
 * **One Follow** (owner decision 7). The person sheet offers exactly one
   Follow per person: the household follow (`POST /api/moments/follows`,
@@ -1241,8 +1244,10 @@ identical bytes-for-bytes to the sender's canonical encoding.
   (`POST /api/moments/public/follows`) only for someone known through a
   GFS alone — a Discover row, or a moment that arrived via the GFS — and
   its line says the GFS learns the follow. Following a paired person never
-  goes to the GFS; a GFS follow left over from before pairing is named on
-  the sheet, with Stop, rather than kept silently.
+  goes to the GFS — `POST /api/moments/public/follows` refuses a local user
+  or a paired household's person with `409 FOLLOW_AT_HOME`; a GFS follow
+  left over from before pairing is named on the sheet, with Stop, rather
+  than kept silently.
 * **Public sharing** (registrations, "Make new moments public" — off
   unless chosen —, Leave) lives in Settings › Privacy
   (`/settings#public-sharing`; the old `/momentum/public/sharing`

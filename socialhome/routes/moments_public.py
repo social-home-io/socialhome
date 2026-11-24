@@ -191,7 +191,9 @@ class GfsUserDirectoryProxyView(BaseView):
         gfs_id = self.match("gfs_id")
         q = self.request.query.get("q") or None
         try:
-            users = await svc.fetch_directory(gfs_id, q=q)
+            users = await svc.fetch_directory(
+                gfs_id, q=q, viewer_user_id=self.user.user_id
+            )
         except MomentPublicError as exc:
             raise web.HTTPBadGateway(text=f'{{"error":"{exc!s}"}}') from exc
         for row in users:

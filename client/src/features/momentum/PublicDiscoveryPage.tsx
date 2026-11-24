@@ -7,9 +7,11 @@
  *   household. Shown to everyone, a protected account included.
  * * **On a GFS** — people sharing publicly on one of this household's
  *   GFSes, with the GFS follow; the hint under its heading says the GFS
- *   learns who you follow. Each person shows once: you, and the people of
- *   your own and paired households, are in Friends, not here (decision 7,
- *   "one Follow"). Not for a protected account.
+ *   learns who you follow. Each person shows once: the household's proxy
+ *   leaves out you and the people of your own and paired households
+ *   (``MomentPublicService.fetch_directory``) — they are in Friends — and
+ *   refuses a GFS follow of them (decision 7, "one Follow"). Not for a
+ *   protected account.
  *
  * Friends comes first, unless you have no friends yet and a GFS: then the
  * GFS list leads and Friends is one line under it. No friends and no GFS is
@@ -45,7 +47,7 @@ import {
   loadGfsConnections,
   unfollowUser,
 } from '@/store/momentPublic'
-import type { FriendsPayload, Person } from '@/features/friends/friendsModel'
+import { fold, type FriendsPayload, type Person } from '@/features/friends/friendsModel'
 import type { MomentPublicDirectoryUser } from '@/types'
 import { DiscoverFriends, discoverFriends } from './DiscoverFriends'
 import { FollowToggle, toggleFollow } from './FollowToggle'
@@ -67,29 +69,17 @@ const directoryFailed = signal<string | null>(null)
 const friends = signal<FriendsPayload | null>(null)
 const friendsFailed = signal(false)
 
-/** Households whose people are in Friends: our own and the paired ones.
- *  ``null`` = not known; then only you are left out of the GFS list. */
-const friendInstances = computed<Set<string> | null>(() => {
-  const f = friends.value
-  if (!f) return null
-  const ids = f.households.map((h) => h.instance_id)
-  if (f.instance.instance_id) ids.push(f.instance.instance_id)
-  return new Set(ids)
-})
-
-/** The GFS rows to list: not you, not someone Friends already offers, and
- *  matching the search. */
+/** The GFS rows to list. The household's proxy already left out everyone
+ *  it knows — you, your household and your paired households' people (by
+ *  ``user_id`` and household, whatever the GFS claims) — so they stay in
+ *  Friends with the household follow, even while Friends is loading or
+ *  failed. Here: people you blocked go too, and the search filters. */
 const strangers = computed<MomentPublicDirectoryUser[]>(() => {
   const me = currentUser.value?.user_id ?? null
-  const known = friendInstances.value
-  const q = searchQuery.value.trim().toLowerCase()
+  const q = fold(searchQuery.value.trim())
   return directory.value.filter((u) => {
-    if (me && u.user_id === me) return false
-    if (known?.has(u.instance_id)) return false
-    return !q
-      || (u.display_name ?? '').toLowerCase().includes(q)
-      || (u.username ?? '').toLowerCase().includes(q)
-      || (u.bio ?? '').toLowerCase().includes(q)
+    if ((me && u.user_id === me) || isBlocked(u.user_id)) return false
+    return !q || [u.display_name, u.username, u.bio].some((s) => !!s && fold(s).includes(q))
   })
 })
 
@@ -144,11 +134,14 @@ export default function PublicDiscoveryPage() {
   const me = currentUser.value?.user_id ?? null
   const restricted = isRestricted('public_moments')
   useEffect(() => {
+    // Fresh per visit and per account: a list read for someone who signed
+    // out since is never shown, not even while this one loads.
+    friends.value = null
     void loadFriends()
     void loadHouseholdFollows()
     void loadBlocks()
     if (!restricted) void bootstrapGfs()
-  }, [restricted])
+  }, [restricted, me])
 
   const people: Person[] | null = friends.value
     ? discoverFriends(friends.value, { selfId: me, locale: formatLocale(), hidden: isBlocked })
@@ -255,7 +248,7 @@ function GfsSection() {
     busyUser.value = user.user_id
     try {
       await toggleFollow(
-        user.display_name || user.username, isFollowing(user.user_id),
+        user.user_id, user.display_name || user.username, isFollowing(user.user_id),
         () => followUser(gfsId, user.user_id), () => unfollowUser(gfsId, user.user_id),
       )
     } finally {

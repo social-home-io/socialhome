@@ -85,7 +85,7 @@ describe('DiscoverFriends', () => {
     expect(container.textContent).toContain('stays between your households')
     const list = getByRole('list', { name: 'Friends' })
     expect(list.querySelectorAll('li').length).toBe(5)
-    expect(getByRole('button', { name: 'Following Daan' }).getAttribute('aria-pressed')).toBe('true')
+    expect(getByRole('button', { name: 'Follow Daan' }).getAttribute('aria-pressed')).toBe('true')
     expect(getByRole('button', { name: 'Follow Ben' }).getAttribute('aria-pressed')).toBe('false')
     // Each row says which household the person lives in.
     expect(list.querySelector('li')!.textContent).toContain('Alpha House')
@@ -97,8 +97,8 @@ describe('DiscoverFriends', () => {
     const before = [...getByRole('list', { name: 'Friends' }).querySelectorAll('li')].map((li) => li.textContent)
     fireEvent.click(getByRole('button', { name: 'Follow Femi' }))
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/moments/follows', { user_id: 'u-femi' }))
-    const on = await waitFor(() => getByRole('button', { name: 'Following Femi' }))
-    expect(on.getAttribute('aria-pressed')).toBe('true')
+    await waitFor(() =>
+      expect(getByRole('button', { name: 'Follow Femi' }).getAttribute('aria-pressed')).toBe('true'))
     const after = [...getByRole('list', { name: 'Friends' }).querySelectorAll('li')]
       .map((li) => li.textContent!.replace('Following', 'Follow'))
     expect(after).toEqual(before)
@@ -110,7 +110,7 @@ describe('DiscoverFriends', () => {
     vi.mocked(api.delete).mockResolvedValue({})
     vi.mocked(api.post).mockResolvedValue({})
     const { getByRole } = render(<DiscoverFriends people={people()} query="" />)
-    fireEvent.click(getByRole('button', { name: 'Following Daan' }))
+    fireEvent.click(getByRole('button', { name: 'Follow Daan' }))
     await waitFor(() => expect(api.delete).toHaveBeenCalledWith('/api/moments/follows/u-daan'))
     await waitFor(() => expect(showToastSpy).toHaveBeenCalled())
     const [message, kind, opts] = showToastSpy.mock.calls[0]
@@ -119,7 +119,8 @@ describe('DiscoverFriends', () => {
     expect(opts.action.label).toBe('Undo')
     opts.action.onClick()
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/moments/follows', { user_id: 'u-daan' }))
-    await waitFor(() => expect(getByRole('button', { name: 'Following Daan' })).toBeTruthy())
+    await waitFor(() =>
+      expect(getByRole('button', { name: 'Follow Daan' }).getAttribute('aria-pressed')).toBe('true'))
   })
 
   it('a failed follow says so and keeps the button as it was', async () => {
@@ -159,7 +160,7 @@ describe('DiscoverFriends', () => {
 
   it('a search with no friend matching says so', () => {
     const { container } = render(<DiscoverFriends people={people()} query="xyz" />)
-    expect(container.textContent).toContain('No users match your search.')
+    expect(container.textContent).toContain('No friends match your search.')
   })
 
   it('no friends: one card pointing at Connections', () => {

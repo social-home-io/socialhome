@@ -11,6 +11,7 @@ const me = vi.hoisted(() => ({ value: { user_id: 'u-me', restrictions: [] as str
 vi.mock('@/store/auth', () => ({ currentUser: me }))
 
 import { api } from '@/api'
+import { blockedUserIds } from '@/store/blocks'
 import { _resetGfsConnectionsForTests, follows } from '@/store/momentPublic'
 import PublicDiscoveryPage, { _resetDiscoverForTests } from './PublicDiscoveryPage'
 
@@ -135,9 +136,8 @@ describe('Discover tab', () => {
     display_name: name, picture_url: null, bio: null, picture_digest: null, ...over,
   })
   const marco = person('u-marco', 'Marco Rossi', 'i-rossi', { bio: 'Pizza and bikes' })
-  const sophie = person('u-sophie', 'Sophie Keller', 'i-keller')
-  const lena = person('u-lena', 'Lena Berger', 'i-own')
   const meRow = person('u-me', 'Me Myself', 'i-own')
+  const blockedRow = person('u-bert', 'Blocked Bert', 'i-far')
   const member = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
     user_id: id, username: name.toLowerCase(), remote_username: name.toLowerCase(),
     display_name: name, picture_url: null, ...extra,
@@ -169,12 +169,16 @@ describe('Discover tab', () => {
     follows.value = []
     gfses = [gfs('g1', 'Demo GFS')]
     withFriends = true
+    blockedUserIds.value = new Set(['u-bert'])
     vi.mocked(api.get).mockImplementation(async (path: string) => {
       if (path === '/api/gfs/connections') return gfses
-      if (path === '/api/gfs/g1/moments/users') return { users: [meRow, marco, sophie, lena] }
+      // The household's proxy already left out your friends; a stale one
+      // might still list you, and someone you blocked stays the client's job.
+      if (path === '/api/gfs/g1/moments/users') return { users: [meRow, marco, blockedRow] }
       if (path === '/api/friends') return friendsPayload(withFriends)
       if (path === '/api/moments/public/follows') return []
       if (path === '/api/moments/follows') return { follows: [] }
+      if (path === '/api/blocks') return { blocks: [{ user_id: 'u-bert', blocked_at: '' }] }
       return path === '/api/friends' ? NO_FRIENDS : []
     })
   })
@@ -186,10 +190,10 @@ describe('Discover tab', () => {
     const gfsList = await findByRole('list', { name: 'People sharing on Demo GFS' })
     await waitFor(() => expect(gfsList.textContent).toContain('Marco Rossi'))
     expect(headings(container)).toEqual(['Friends', 'People sharing on Demo GFS'])
-    // You, your own household and paired people are in Friends, not the GFS list.
-    expect(gfsList.textContent).not.toContain('Sophie Keller')
-    expect(gfsList.textContent).not.toContain('Lena Berger')
+    // You and people you blocked are never in the GFS list; your friends are
+    // in Friends (the proxy dropped them from the directory).
     expect(gfsList.textContent).not.toContain('Me Myself')
+    expect(gfsList.textContent).not.toContain('Blocked Bert')
     const friendsList = getByRole('list', { name: 'Friends' })
     expect(friendsList.textContent).toContain('Sophie Keller')
     expect(friendsList.textContent).toContain('Lena Berger')
@@ -215,8 +219,8 @@ describe('Discover tab', () => {
     fireEvent.click(btn)
     await waitFor(() => expect(api.post).toHaveBeenCalledWith(
       '/api/moments/public/follows', { gfs_id: 'g1', followed_user_id: 'u-marco' }))
-    const on = await findByRole('button', { name: 'Following Marco Rossi' })
-    expect(on.getAttribute('aria-pressed')).toBe('true')
+    await waitFor(async () => expect((await findByRole('button', { name: 'Follow Marco Rossi' }))
+      .getAttribute('aria-pressed')).toBe('true'))
   })
 
   it('a name opens the person sheet, as someone known through this GFS', async () => {
@@ -272,6 +276,20 @@ describe('Discover tab', () => {
     expect((await findByRole('alert')).textContent).toContain("Couldn't load your friends")
     const gfsList = await findByRole('list', { name: 'People sharing on Demo GFS' })
     await waitFor(() => expect(gfsList.textContent).toContain('Marco Rossi'))
+  })
+
+  it('never shows the friends read on an earlier visit (another account)', async () => {
+    const first = render(<PublicDiscoveryPage />)
+    await waitFor(() => expect(first.container.textContent).toContain('Sophie Keller'))
+    first.unmount()
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === '/api/gfs/connections') return gfses
+      if (path === '/api/friends') throw new Error('offline')
+      return []
+    })
+    const { findByRole, container } = render(<PublicDiscoveryPage />)
+    expect((await findByRole('alert')).textContent).toContain("Couldn't load your friends")
+    expect(container.textContent).not.toContain('Sophie Keller')
   })
 
   it('friends but no GFS: Friends, then a short line about a GFS', async () => {

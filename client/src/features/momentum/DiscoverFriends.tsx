@@ -15,14 +15,14 @@
  * * No one yet: one card pointing at Connections. A failed load: an inline
  *   error with Try again, for this section only.
  */
-import { useState } from 'preact/hooks'
+import { useRef, useState } from 'preact/hooks'
 import { addBase } from '@/baseUrl'
 import { Avatar } from '@/components/Avatar'
 import { LoadErrorState } from '@/components/LoadErrorState'
 import { openPerson } from '@/components/PersonSheet'
 import { Spinner } from '@/components/Spinner'
 import {
-  COLLAPSE_OVER, COLLAPSED_SHOWN, buildModel, collatorFor, fold, matches,
+  COLLAPSE_OVER, COLLAPSED_SHOWN, buildModel, collatorFor, fold, matches, personSheetPerson,
   type FriendsPayload, type Person,
 } from '@/features/friends/friendsModel'
 import { t } from '@/i18n/i18n'
@@ -59,6 +59,7 @@ const HEADING_ID = 'sh-discover-friends-heading'
 export function DiscoverFriends({ people, query, failed = false, onRetry }: Props) {
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
+  const inFlight = useRef(false)
 
   const heading = <h2 id={HEADING_ID} class="sh-momentum-discover__title">{t('moment.discover.friends_heading')}</h2>
 
@@ -102,28 +103,22 @@ export function DiscoverFriends({ people, query, failed = false, onRetry }: Prop
   const listId = `${HEADING_ID}-list`
 
   const onToggle = async (p: Person) => {
-    if (busy) return
+    // The ref answers at once; ``busy`` only after the next render.
+    if (inFlight.current) return
+    inFlight.current = true
     setBusy(p.user_id)
     try {
       await toggleFollow(
-        p.shown, following.has(p.user_id),
+        p.user_id, p.shown, following.has(p.user_id),
         () => followUser(p.user_id), () => unfollowUser(p.user_id),
       )
     } finally {
+      inFlight.current = false
       setBusy(null)
     }
   }
 
-  const open = (p: Person) => {
-    openPerson(p.user_id, {
-      person: {
-        ...p.member,
-        username: p.isLocal ? (p.member as { username: string }).username : null,
-        is_local: p.isLocal,
-        household: p.home,
-      },
-    })
-  }
+  const open = (p: Person) => openPerson(p.user_id, { person: personSheetPerson(p) })
 
   return (
     <section class="sh-discover-section" aria-labelledby={HEADING_ID}>
@@ -135,7 +130,7 @@ export function DiscoverFriends({ people, query, failed = false, onRetry }: Prop
       </div>
       <p class="sh-muted sh-momentum-discover__note">{t('moment.discover.friends_hint')}</p>
       {shown.length === 0
-        ? <p class="sh-muted">{t('moment.discover.no_match')}</p>
+        ? <p class="sh-muted">{t('moment.discover.friends_no_match')}</p>
         : (
           <ul id={listId} class="sh-momentum-discover-list" aria-labelledby={HEADING_ID}>
             {shown.map((p) => (

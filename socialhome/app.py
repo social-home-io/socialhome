@@ -4316,6 +4316,7 @@ def create_app(config: Config | None = None) -> web.Application:
         user_repo,
         repos.gfs_connection,
         profile_picture_repo=profile_picture_repo,
+        federation_repo=repos.federation,
     )
     moment_public_outbound = MomentPublicOutbound(
         bus=bus,
