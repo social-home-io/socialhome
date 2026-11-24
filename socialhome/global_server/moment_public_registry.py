@@ -133,6 +133,25 @@ MOMENT_SEEN_TTL_S: float = float(RATCHET_STEP_S + MOMENT_STEP_SLACK_S)
 #: early — and a forgotten one can be re-posted only until its step ends.
 MOMENT_SEEN_MAX: int = 200_000
 
+#: The directory's orders (``GET /gfs/moments/users?sort=``): newest
+#: registration first (the default), or most followed first.
+DIRECTORY_SORT_NEW = "new"
+DIRECTORY_SORT_FOLLOWERS = "followers"
+DIRECTORY_SORTS: frozenset[str] = frozenset(
+    {DIRECTORY_SORT_NEW, DIRECTORY_SORT_FOLLOWERS}
+)
+
+#: How long a node keeps the most-followed list (one count over the whole
+#: follow graph — ~0.2–0.5 s at 1 M follows) before counting again.
+RANKED_DIRECTORY_TTL_S: float = 300.0
+
+
+def ranked_clock() -> float:
+    """The clock the most-followed list ages by (monotonic; tests move it
+    without moving the event loop's)."""
+    return time.monotonic()
+
+
 #: Public moments (creates + deletes) one author household may publish per
 #: minute, across the whole cluster (each node allows its
 #: :func:`~.public.node_share`). A household's users can post a top-level
@@ -234,6 +253,7 @@ class MomentPublicRegistry:
         "_key_requests",
         "_mailbox",
         "_publishes",
+        "_ranked",
         "_reaction_seen",
         "_reactions_author",
         "_reactions_household",
@@ -304,6 +324,8 @@ class MomentPublicRegistry:
             ttl_s=MOMENT_SEEN_TTL_S, cap=MOMENT_SEEN_MAX
         )
         self._tasks: set[asyncio.Task] = set()
+        #: (monotonic time, the most-followed list) — :meth:`list_directory`.
+        self._ranked: tuple[float, list[tuple[GfsUserRegistration, int]]] | None = None
 
     # ── Registration ────────────────────────────────────────────────────
 
@@ -351,9 +373,23 @@ class MomentPublicRegistry:
         )
 
     async def list_directory(
-        self, *, q: str | None = None, limit: int = 200
-    ) -> list[GfsUserRegistration]:
-        return await self._users.list_active(q=q, limit=limit)
+        self, *, q: str | None = None, limit: int = 200, sort: str = DIRECTORY_SORT_NEW
+    ) -> list[tuple[GfsUserRegistration, int]]:
+        """Active authors with their follower counts (the number each
+        author's public page already shows): newest first, or most followed
+        first. The most-followed list without a search is one count over the
+        whole follow graph, so each node keeps it for
+        :data:`RANKED_DIRECTORY_TTL_S` — visitors can't make it recount."""
+        if sort == DIRECTORY_SORT_FOLLOWERS:
+            if q:
+                return await self._users.list_most_followed(q=q, limit=limit)
+            now = ranked_clock()
+            if self._ranked is None or now - self._ranked[0] >= RANKED_DIRECTORY_TTL_S:
+                self._ranked = (now, await self._users.list_most_followed(limit=200))
+            return self._ranked[1][: max(1, min(int(limit), 200))]
+        regs = await self._users.list_active(q=q, limit=limit)
+        counts = await self._follows.follower_counts([r.user_id for r in regs])
+        return [(r, counts.get(r.user_id, 0)) for r in regs]
 
     async def set_picture_digest(
         self, *, user_id: str, picture_digest: str | None

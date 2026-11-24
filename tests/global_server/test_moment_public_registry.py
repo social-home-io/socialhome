@@ -93,7 +93,7 @@ async def test_register_user_then_directory_lists_them(gfs_setup):
     )
     assert user.status == "active"
     listing = await reg.list_directory()
-    assert [u.user_id for u in listing] == ["u-author"]
+    assert [(u.user_id, n) for u, n in listing] == [("u-author", 0)]
     got = await reg.get_registration("u-author")
     assert got is not None and got.username == "alice"
 

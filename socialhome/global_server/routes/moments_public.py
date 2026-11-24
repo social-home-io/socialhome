@@ -65,7 +65,11 @@ from ..domain import GfsUserPicture
 from ..html_page import html_response
 from ..link_preview import person_handoff
 from ..moment_media import MediaRefused
-from ..moment_public_registry import envelope_step_current
+from ..moment_public_registry import (
+    DIRECTORY_SORT_NEW,
+    DIRECTORY_SORTS,
+    envelope_step_current,
+)
 from ..page_models import load_person_page
 from .base import GfsBaseView
 from .rtc import RELAY_AUTH_MAX_SKEW_SECONDS, _rtc_authenticate
@@ -642,20 +646,30 @@ class GfsUserDirectoryView(GfsBaseView):
     Optional query params:
     * ``q`` — substring filter on ``display_name`` / ``username``.
     * ``limit`` — page cap (1..200, default 200).
+    * ``sort`` — ``new`` (newest registration first, the default) or
+      ``followers`` (most followed first); anything else is 422.
+
+    Each row carries ``follower_count`` — the number the author's public
+    page already shows — and the response echoes ``sort``, so a household
+    can tell this server ranks (an older one ignores ``sort``).
     """
 
     async def get(self) -> web.Response:
         registry = self.svc(K.gfs_moment_public_registry_key)
         q = self.request.query.get("q") or None
+        sort = self.request.query.get("sort") or DIRECTORY_SORT_NEW
+        if sort not in DIRECTORY_SORTS:
+            return web.json_response({"error": "invalid_sort"}, status=422)
         try:
             limit = int(self.request.query.get("limit", "200"))
         except ValueError:
             limit = 200
-        regs = await registry.list_directory(q=q, limit=limit)
+        rows = await registry.list_directory(q=q, limit=limit, sort=sort)
         return web.json_response(
             {
-                "users": [_user_dict(r) for r in regs],
-                "count": len(regs),
+                "users": [{**_user_dict(r), "follower_count": n} for r, n in rows],
+                "count": len(rows),
+                "sort": sort,
             }
         )
 

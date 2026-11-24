@@ -399,7 +399,7 @@ async def test_directory_ranking_is_kept_for_a_while(client, monkeypatch):
     """The ranked list is one grouped count over every follow; each node
     keeps it for RANKED_DIRECTORY_TTL_S so visitors can't make it recount."""
     now = [1000.0]
-    monkeypatch.setattr(registry_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(registry_mod, "ranked_clock", lambda: now[0])
     await _seed_ranked(client)
     first = await (await client.get("/gfs/moments/users?sort=followers")).json()
     registry = client._app[gfs_moment_public_registry_key]
