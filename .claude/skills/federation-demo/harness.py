@@ -4332,7 +4332,10 @@ def cmd_space_follow_rotation() -> None:
         )
         _poll(
             f"{label} to hold the space key",
-            lambda label=label: epoch_on(label) >= 1,
+            # The first key is epoch 0: a row is what proves it arrived.
+            lambda label=label: _rows(
+                label, "SELECT 1 FROM space_keys WHERE space_id=?", (space_id,)
+            ),
             timeout=45.0,
         )
     print("  b (proof restored, no lockout) and c follow and are seated ✓")
