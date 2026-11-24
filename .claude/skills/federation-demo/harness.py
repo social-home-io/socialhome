@@ -7191,9 +7191,11 @@ def cmd_gfs_invite_link_content() -> None:
         f"({len(e_bytes) // 1024} KiB rendition, served by e's /cover) ✓"
     )
 
-    # 7. v_80 — a photo post reaches e through the GFS media cache: the
-    #    relay can't carry the bytes, so a seals the file once, uploads it
-    #    once to the GFS and e's copy of the post carries ``media_refs``.
+    # 7. v_80 — a photo post in a's global space: a seals the file once and
+    #    uploads it once to the GFS under the space's channel, and e's copy
+    #    of the post carries ``media_refs``. e holds a MEMBER seat, so a's
+    #    household push (v_87 relay media frames) reaches it too, usually
+    #    before the upload lands — either transport is fine for e.
     state["gfs_invite_photo"] = _picture_via_gfs_media_cache(
         state,
         author="a",
@@ -7201,6 +7203,7 @@ def cmd_gfs_invite_link_content() -> None:
         reader="e",
         space_id=space_id,
         step="gfs-invite-link-content",
+        member_push_ok=True,
     )
 
     state["gfs_invite_post_id"] = post_id
@@ -7222,6 +7225,7 @@ def _picture_via_gfs_media_cache(
     space_id: str,
     step: str,
     timeout: float = 90.0,
+    member_push_ok: bool = False,
 ) -> str:
     """v_80 — *author* posts a ~0.7 MB photo in *space_id*; *reader*, which
     reads the space only through the GFS (a link-joined member or a
@@ -7234,6 +7238,15 @@ def _picture_via_gfs_media_cache(
     * *reader*'s ``space_media_refs`` row names the same blob;
     * *reader*'s log: ``fetched blob <id> … from GFS`` — it came from the
       cache, not from any other transport.
+
+    *member_push_ok*: *reader* holds a MEMBER seat (link-joined), so since
+    v_87 the author's household push (``SPACE_MEDIA_BLOB`` in sealed relay
+    media frames) reaches it as well, and usually first: its GFS prefetch
+    runs on the post's arrival, before the queued upload lands, and the
+    10 s retry then finds the file stored. Either transport is accepted for
+    *reader*'s copy (logged as such); the GFS must still hold the one
+    upload under the channel. A follower (the default) gets no push, so it
+    must fetch from the GFS.
 
     Returns the file name."""
     a = state["instances"][author]
@@ -7336,20 +7349,29 @@ def _picture_via_gfs_media_cache(
         )
         if "from GFS" in line
     ]
-    if not uploaded or not fetched:
+    pushed = (
+        _log_lines_matching(
+            reader, f"SPACE_MEDIA_BLOB: stored {local_name}", offset=reader_off
+        )
+        if member_push_ok
+        else []
+    )
+    if not uploaded or not (fetched or pushed):
         raise SystemExit(
             f"{step}: no upload ({len(uploaded)}) / GFS fetch ({len(fetched)}) "
-            f"logged for blob {blob_id[:12]}",
+            f"/ member push ({len(pushed)}) logged for blob {blob_id[:12]}",
         )
     print(
         f"  {author} uploaded {filename} ({size // 1024} KiB) once as blob "
         f"{blob_id[:12]}… ({suite}, {blob_size // 1024} KiB padded) — the GFS "
         f"holds it under the space's channel {channel_id[:8]}…, never the space ✓"
     )
-    print(
-        f"  {reader} fetched it from the GFS media cache as "
-        f"{local_name[:15]}…, byte-identical ({size} bytes) ✓"
+    how = (
+        "fetched it from the GFS media cache"
+        if fetched
+        else "got it by the author's household push (member seat)"
     )
+    print(f"  {reader} {how} as {local_name[:15]}…, byte-identical ({size} bytes) ✓")
     return filename
 
 

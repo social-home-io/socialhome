@@ -1040,10 +1040,10 @@ python .claude/skills/federation-demo/harness.py gfs-up
 python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-traffic
 python .claude/skills/federation-demo/harness.py gfs-invite-link   # first: e must still be a stranger to a (a GFS follow seats e — a space_session row for a)
-python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-space-follow
-python .claude/skills/federation-demo/harness.py gfs-global-channel
+python .claude/skills/federation-demo/harness.py gfs-global-channel   # before gfs-invite-link-content: its key rotation 429s the next minute's epoch notices to this GFS, and the new channel's notice waits behind it in the retry queue
 python .claude/skills/federation-demo/harness.py gfs-authority-rotate
+python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-member-mesh
 python .claude/skills/federation-demo/harness.py members-mesh-restart
 python .claude/skills/federation-demo/harness.py gfs-moderator-parity
