@@ -2226,7 +2226,7 @@ class GfsChannelService:
         return await self._post_item(conn, item.space_id, item.payload)
 
     async def _first_attempt(self, conn: GfsConnection, item: GfsPublish) -> bool:
-        if self._retry.pending(conn.id):
+        if self._retry.pending(conn.id, item.space_id):
             self._retry.enqueue(conn.id, item)
             return False
         outcome = await self._send(conn, item)

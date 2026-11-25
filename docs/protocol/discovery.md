@@ -1656,7 +1656,9 @@ registration sets any epoch up to 2^62 (channel epochs carry a secret offset,
 see below); after that the epoch
 rises by at most one per 60 s since the last raise (a notice ahead of that
 allowance gets `429` + `Retry-After`, and the household's retry queue lands
-it). A seed holder — the only party with the channel key — can therefore
+it — the queue keeps order per (server, space), so a notice waiting there
+never holds back another space's first notice to the same server, whose
+seats would be refused until it lands). A seed holder — the only party with the channel key — can therefore
 inflate by at most 1 440 epochs a day, and only until an authority rotation
 starts a fresh channel; anything it gains it already had (it can derive
 every writer key). Passes and anonymous publishes are admitted at the

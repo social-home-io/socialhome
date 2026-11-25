@@ -144,7 +144,7 @@ async def test_the_queue_gives_up_after_its_budget(fast, caplog):
     send = _ScriptedSend([TRANSIENT] * (budget + 5))
     queue = GfsPublishRetryQueue(send)
     queue.enqueue("g1", _item(1))
-    queue.enqueue("g1", _item(2, space_id="sp-2"))
+    queue.enqueue("g1", _item(2))  # same space: behind the failing head
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         await queue.start()
         try:
@@ -154,7 +154,6 @@ async def test_the_queue_gives_up_after_its_budget(fast, caplog):
     assert len(send.calls) == budget
     assert "giving up on 2 GFS publish(es) to g1" in caplog.text
     assert "space_post_public@sp-1" in caplog.text
-    assert "space_post_public@sp-2" in caplog.text
 
 
 async def test_retry_after_sets_the_next_attempt(fast):
@@ -163,7 +162,7 @@ async def test_retry_after_sets_the_next_attempt(fast):
     queue = GfsPublishRetryQueue(_ScriptedSend([]))
     before = time.monotonic()
     queue.enqueue("g1", _item(), retry_after_s=42.0)
-    due = queue._queues["g1"].due_at
+    due = queue._queues[("g1", "sp-1")].due_at
     assert 42.0 <= due - before < 43.0
 
 
@@ -178,7 +177,7 @@ async def test_retry_after_on_a_retry_sets_the_next_attempt(fast):
                 break
             await asyncio.sleep(0.01)
         await asyncio.sleep(0.01)
-        due_in = queue._queues["g1"].due_at - time.monotonic()
+        due_in = queue._queues[("g1", "sp-1")].due_at - time.monotonic()
     finally:
         await queue.stop()
     assert 29.0 < due_in <= 30.0
@@ -208,7 +207,7 @@ async def test_the_queued_payload_is_a_private_copy():
     payload = {"space_id": "sp-1", "tags": ["a"]}
     queue.enqueue("g1", GfsPublish("sp-1", "space_post_public", payload))
     payload["tags"].append("b")
-    assert queue._queues["g1"].items[0].payload == {
+    assert queue._queues[("g1", "sp-1")].items[0].payload == {
         "space_id": "sp-1",
         "tags": ["a"],
     }
@@ -227,10 +226,10 @@ async def test_caps_refuse_new_work(monkeypatch, caplog):
 
 async def test_pending_reports_a_waiting_gfs():
     queue = GfsPublishRetryQueue(_ScriptedSend([]))
-    assert not queue.pending("g1")
+    assert not queue.pending("g1", "sp-1")
     queue.enqueue("g1", _item())
-    assert queue.pending("g1")
-    assert not queue.pending("g2")
+    assert queue.pending("g1", "sp-1")
+    assert not queue.pending("g2", "sp-1")
 
 
 async def test_stop_drops_pending_work_and_refuses_new(caplog):
@@ -274,3 +273,46 @@ async def test_one_gfs_cannot_crowd_out_the_others(monkeypatch, caplog):
         assert not queue.enqueue("dead", _item(3))
         assert queue.enqueue("alive", _item(4))
     assert "retry queue for dead is full" in caplog.text
+
+
+async def test_pending_is_per_connection_and_space():
+    """Order is kept per (connection, space): a space's failing head (e.g.
+    an epoch notice the GFS's one-epoch-a-minute bound answered 429) never
+    holds back another space's first send to the same GFS."""
+    queue = GfsPublishRetryQueue(_ScriptedSend([]))
+    queue.enqueue("g1", _item(space_id="sp-1"))
+    assert queue.pending("g1", "sp-1")
+    assert not queue.pending("g1", "sp-2")
+    assert not queue.pending("g2", "sp-1")
+
+
+async def test_one_spaces_failing_head_does_not_hold_back_another_space(fast):
+    """sp-1 never gets through (its head is retried until the budget is
+    spent); sp-2's item to the same GFS goes out all the same, and sp-1
+    keeps its own order."""
+    sent: list[int] = []
+
+    async def send(conn_id, item):
+        sent.append(item.payload["n"])
+        return TRANSIENT if item.space_id == "sp-1" else DELIVERED
+
+    queue = GfsPublishRetryQueue(send)
+    queue.enqueue("g1", _item(1, space_id="sp-1"))
+    queue.enqueue("g1", _item(3, space_id="sp-1"))
+    queue.enqueue("g1", _item(2, space_id="sp-2"))
+    await queue.start()
+    try:
+        await _idle(queue)
+    finally:
+        await queue.stop()
+    assert 2 in sent
+    assert 3 not in sent  # behind its own space's failing head
+
+
+async def test_the_per_connection_cap_counts_every_space(monkeypatch):
+    monkeypatch.setattr(mod, "GFS_PUBLISH_RETRY_MAX_PENDING", 10)
+    monkeypatch.setattr(mod, "GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN", 2)
+    queue = GfsPublishRetryQueue(_ScriptedSend([]))
+    assert queue.enqueue("g1", _item(1, space_id="sp-1"))
+    assert queue.enqueue("g1", _item(2, space_id="sp-2"))
+    assert not queue.enqueue("g1", _item(3, space_id="sp-3"))
