@@ -30,7 +30,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.gfs_mailbox import OwnMailbox
 from socialhome.domain.gfs_server import GFS_KEY_SUITE_ED25519, GfsServer
-from socialhome.domain.space import SpaceRole
+from socialhome.domain.space import WRITER_ROLES, SpaceRole
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys, new_mailbox_root
 from socialhome.federation.member_card import build_card, verify_card
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
@@ -39,6 +39,10 @@ from socialhome.services.gfs_envelope_sender import normalize_gfs_base
 from socialhome.services.space_member_directory import (
     HELLO_RESNAPSHOT_S,
     SpaceMemberDirectory,
+)
+from socialhome.services.space_writer_households import (
+    SEAT_ROLES,
+    SpaceWriterHouseholds,
 )
 
 GFS = "https://gfs.example.org"
@@ -215,6 +219,16 @@ class FakeFederationRepo:
         self.proto_set.append((instance_id, version))
 
 
+class _RoleSeats:
+    """A roster mirror by role: instance id -> the role of its live seat."""
+
+    def __init__(self, roles: dict[str, str]) -> None:
+        self._roles = roles
+
+    async def list_instances_with_roles(self, space_id, roles):
+        return [i for i, r in self._roles.items() if r in roles]
+
+
 class FakeWriters:
     def __init__(self) -> None:
         self.writers: dict[str, set[str]] = {}
@@ -381,7 +395,7 @@ class World:
         self.dir = SpaceMemberDirectory(
             space_repo=self.spaces,
             federation_repo=self.fed_repo,
-            writer_households=self.writers,
+            seated_households=self.writers,
             mailboxes=self.mailboxes,
             instance_id=self.me["id"],
             identity_seed=self.me["seed"],
@@ -508,18 +522,59 @@ async def test_a_mailbox_less_card_is_not_a_delta_for_a_mailbox_only_recipient()
     assert _ids(delta_a) == {c["id"]}
 
 
-async def test_a_follower_household_never_receives_a_directory():
+async def test_a_household_without_a_live_seat_never_receives_a_directory():
+    w = World()
+    a, rowonly = _hh(), _hh()
+    w.member(a, rowonly)
+    w.writers.writers[SPACE] = {a["id"]}  # the roster holds no seat of it
+    await w.card_from(rowonly, _card(rowonly, gfs=GFS))
+    await w.card_from(a, _card(a, gfs=GFS))
+    await w.dir.reconcile(SPACE)
+    assert w.fed.directories, "the seated household got its directory"
+    assert all(d["to"] != rowonly["id"] for d in w.fed.directories)
+    # ... and its card is not passed on to the seated households either.
+    assert all(rowonly["id"] not in _ids(d) for d in w.fed.directories)
+
+
+def _role_world(roles_of, *, roles=SEAT_ROLES):
+    """A world whose roster mirror answers by ROLE through the real
+    :class:`SpaceWriterHouseholds` (not the fake's set)."""
     w = World()
     a, follower = _hh(), _hh()
     w.member(a, follower)
-    w.writers.writers[SPACE] = {a["id"]}  # the follower holds no writer seat
+    w.dir._seat_holders = SpaceWriterHouseholds(
+        _RoleSeats({a["id"]: "member", follower["id"]: roles_of}),
+        own_instance_id=w.me["id"],
+        roles=roles,
+    )
+    return w, a, follower
+
+
+async def test_a_follower_household_gets_the_directory_like_a_member():
+    """Same path (owner 2026-11-24): a follower's seat is a seat — it gets
+    the directory (the host's card and every seated household's) and its
+    card goes to the members, exactly like a member household."""
+    w, a, follower = _role_world("subscriber")
     await w.card_from(follower, _card(follower, gfs=GFS))
     await w.card_from(a, _card(a, gfs=GFS))
     await w.dir.reconcile(SPACE)
-    assert w.fed.directories, "the writer got its directory"
+    to_follower = [d for d in w.fed.directories if d["to"] == follower["id"]]
+    assert to_follower, "the follower got its directory"
+    # The host's card in its snapshot, the member's in the delta after it.
+    assert {w.me["id"], a["id"]} <= set().union(*(_ids(d) for d in to_follower))
+    to_member = [d for d in w.fed.directories if d["to"] == a["id"]]
+    assert any(follower["id"] in _ids(d) for d in to_member)
+
+
+async def test_the_writer_role_rule_alone_would_leave_the_follower_out():
+    """The regression the same-path rule closes: with writer seats only
+    (the pre-v_96 wiring) the follower got no directory at all."""
+    w, a, follower = _role_world("subscriber", roles=WRITER_ROLES)
+    await w.card_from(follower, _card(follower, gfs=GFS))
+    await w.card_from(a, _card(a, gfs=GFS))
+    await w.dir.reconcile(SPACE)
+    assert w.fed.directories
     assert all(d["to"] != follower["id"] for d in w.fed.directories)
-    # ... and the follower's card is not passed on to the writers either.
-    assert all(follower["id"] not in _ids(d) for d in w.fed.directories)
 
 
 async def test_a_recipient_below_v89_is_skipped():
@@ -1765,11 +1820,22 @@ async def test_a_seated_snapshot_and_a_joiners_delta_reach_a_member_in_order(
     assert held == host.spaces.doc(SPACE, host.me["id"])["dir_seq"]
 
 
-async def test_a_follower_or_a_space_we_left_echoes_no_directory():
+async def test_a_space_we_left_echoes_no_directory():
     w, host = _member_world()
-    w.spaces.local[SPACE] = []  # no person of ours holds a writer seat
+    w.spaces.local[SPACE] = []  # no person of ours holds a seat
     assert await w.dir.directory_seq(SPACE, host["id"]) is None
     assert await w.dir.directory_seq(SPACE, _hh()["id"]) is None  # not the host
+
+
+async def test_a_follower_echoes_its_directory_and_gives_its_card_like_a_member():
+    """Same path: a follower's §25.6 BEGIN echoes ``dir_seq`` (0 before its
+    first snapshot) so the host repairs a snapshot it never got, and it
+    gives the host its card ("seated") like a member."""
+    w, host = _member_world()
+    w.spaces.local_role = SpaceRole.SUBSCRIBER
+    assert await w.dir.directory_seq(SPACE, host["id"]) == 0
+    await w.dir.seated(SPACE, host["id"], host_proto=89)
+    assert [c["to"] for c in w.fed.cards] == [host["id"]]
 
 
 async def test_a_member_missing_its_directory_asks_the_host_at_once():
@@ -2765,15 +2831,16 @@ async def test_an_admins_frame_names_the_households_it_seated():
 # ── Review round 3 (#1361) ───────────────────────────────────────────────
 
 
-async def test_a_waiting_card_survives_a_seat_event_that_is_no_members_seat():
-    """A follower of household X goes live first (a row, no writer seat):
+async def test_a_waiting_card_survives_a_seat_event_our_roster_does_not_hold():
+    """A seat event for household X arrives before our roster holds the
+    seat (a row only):
     the waiting card stays where it is, and is taken when X's member seat
     arrives."""
     x = _hh()
     m, owner, _admin = _invitee_with()
     await m.directory({"cards": [_card(x).to_wire()]})
     assert x["id"] in m.spaces.doc(SPACE, owner["id"])["wait"]
-    m.member(x)  # the roster's row for the follower seat
+    m.member(x)  # a row, no seat in our roster yet
     await m.dir._on_seat_change(
         SpaceRemoteSeatLive(space_id=SPACE, instance_id=x["id"], user_id="bob")
     )
@@ -2783,11 +2850,11 @@ async def test_a_waiting_card_survives_a_seat_event_that_is_no_members_seat():
     assert await m.dir.card_of(SPACE, x["id"]) is not None
 
 
-async def test_a_card_waits_while_the_household_holds_only_a_followers_seat():
-    """A row alone is not a member's seat: no card on it, no lazy seat."""
+async def test_a_card_waits_while_the_household_holds_only_a_row():
+    """A row alone is not a seat: no card on it, no lazy seat."""
     x = _hh()
     m, _owner, admin = _invitee_with()
-    m.member(x)  # X only follows the space here
+    m.member(x)  # a row, no seat in our roster
     m.mailboxes.add_box(GFS)
     await m.directory({"cards": [_card(x).to_wire()]}, sender=admin["id"])
     assert "card" not in m.spaces.doc(SPACE, x["id"])
@@ -3233,7 +3300,7 @@ async def test_a_restart_keeps_our_card_where_it_moved():
     again = SpaceMemberDirectory(
         space_repo=w.spaces,
         federation_repo=w.fed_repo,
-        writer_households=w.writers,
+        seated_households=w.writers,
         mailboxes=w.mailboxes,
         instance_id=w.me["id"],
         identity_seed=w.me["seed"],

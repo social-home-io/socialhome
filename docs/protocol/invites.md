@@ -274,7 +274,8 @@ sealed ACK. Both keep the other's card on the pair's `space_instances` row,
 and later envelopes to a household whose card names a mailbox go to the
 mailbox id instead of the instance id. Once seated the redeemer also sends
 `SPACE_MEMBER_CARD`, and the host passes the cards on to the space's
-writer members in `SPACE_MAILBOX_DIRECTORY`, so every member can reach it.
+seated households (followers included, v_96) in `SPACE_MAILBOX_DIRECTORY`,
+so every member can reach it.
 An older issuer ignores the field. See [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 **The ACK always fits the relay.** A 1200 px space cover is dimension-capped,

@@ -1567,7 +1567,8 @@ RFC 9578 A.2 test vectors are mandatory tests (`tests/test_privacy_pass.py`).
 Every v_89 household that reaches a space through a GFS — and every member
 of such a space — signs one small **member card** and hands it to the
 space's host (sealed redeem / ACK field `card`, or `SPACE_MEMBER_CARD`); the
-host passes it on to writer-seat members in `SPACE_MAILBOX_DIRECTORY`
+host passes it on to the space's seated households (followers included
+since v_96) in `SPACE_MAILBOX_DIRECTORY`
 ([`protocol/gfs-relay.md`](protocol/gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89)).
 It replaces v_88's per-space directory entry (never released). The card is
 `{instance_id, identity_pk, keywrap_pk, keywrap_sig, proto_version, rev,

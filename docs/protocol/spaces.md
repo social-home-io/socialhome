@@ -706,10 +706,15 @@ pre-v_96 GFS followers that hold no roster). The app may group followers as
 Everyone in the space sees the same roster, followers included, with their
 role: the owner, admins, members and followers. Roster gossip
 (`SPACE_MEMBER_JOINED` / `_LEFT`), the roster snapshot and the digest treat
-a follower seat like any other seat. The mailbox directory stays a member
-surface (writer households only, the existing rule): a follower is reached
-through its own seat, not listed as a directory card. A GFS sees the
-channel's seats (identified, without the space id).
+a follower seat like any other seat — and so does the **mailbox
+directory** (v_96, same path): a follower household gives the host its
+member card, gets the host's directory (the host's card, the acting hosts'
+and every seated household's) and is listed in it like a member household,
+so its own traffic (comments, reactions, syncs) and the traffic to it ride
+the GFS mailboxes, never the instance-addressed relay. Cards are keys and
+addresses, not rights: what a follower may read or write stays the role's
+business (reader cert, inbound writer gate). A GFS sees the channel's
+seats (identified, without the space id) and mailbox ids.
 
 ### Cost (v_96)
 
