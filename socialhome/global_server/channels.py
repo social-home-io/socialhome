@@ -382,7 +382,8 @@ class GfsChannelService:
         # bounds new rows), still before any signature work. A refresh of a
         # known one — an owner re-registering every channel it runs on a
         # reconnect, many at once — is no new row; it is bounded by the
-        # per-address limit on every channel route.
+        # per-address limit on every channel route (which also bounds the
+        # one indexed read an unknown-id flood now costs before its 429).
         if existing is None and not self._allow(self._register_limiter, client_ip):
             raise ChannelRateLimited()
         try:

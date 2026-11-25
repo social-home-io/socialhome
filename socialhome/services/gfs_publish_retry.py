@@ -289,16 +289,24 @@ class GfsPublishRetryQueue:
                 continue
 
     async def _run_due(self) -> None:
-        """Retry every connection whose head item is due, in order."""
+        """Retry every (connection, space) whose head item is due, in order.
+        A connection that just failed without a ``Retry-After`` (unreachable,
+        5xx: the server, not one space's bound) has its other spaces skipped
+        for the rest of the pass, uncounted — one probe a pass per dead
+        server, and another server's retries are not held behind it."""
+        down: set[str] = set()
         for key in list(self._queues):
             conn = self._queues.get(key)
-            if conn is None or conn.due_at > time.monotonic():
+            if conn is None or conn.due_at > time.monotonic() or key[0] in down:
                 continue
-            await self._drain_conn(key, conn)
+            if await self._drain_conn(key, conn):
+                down.add(key[0])
             if self._stop.is_set():
                 return
 
-    async def _drain_conn(self, key: tuple[str, str], conn: _ConnQueue) -> None:
+    async def _drain_conn(self, key: tuple[str, str], conn: _ConnQueue) -> bool:
+        """Send *key*'s items in order. Returns whether it stopped on a
+        transient failure of the server itself (no ``Retry-After``)."""
         conn_id = key[0]
         while conn.items and not self._stop.is_set():
             item = conn.items[0]
@@ -337,9 +345,10 @@ class GfsPublishRetryQueue:
                 conn.items.clear()
                 break
             conn.due_at = self._due(conn.retries_done, outcome.retry_after_s)
-            return
+            return outcome.retry_after_s is None
         if not conn.items and self._queues.get(key) is conn:
             del self._queues[key]
             self._conn_full_logged.discard(conn_id)
             if not self._queues:
                 self._full_logged = False
+        return False

@@ -355,6 +355,16 @@ async def test_a_refresh_of_a_known_channel_spends_no_register_budget(gfs) -> No
         assert resp.status == 200
     resp = await gfs.post("/gfs/channels/register", json=_Channel().register())
     assert resp.status == 429
+    # Past the spent budget a known id is still judged on its key: another
+    # key is 409 (no re-pin), a bad signature 403 — neither is a 429.
+    other = _Channel()
+    other.id = known[0].id
+    resp = await gfs.post("/gfs/channels/register", json=other.register())
+    assert resp.status == 409
+    body = known[1].register()
+    body["channel_sig"] = known[2].register()["channel_sig"]
+    resp = await gfs.post("/gfs/channels/register", json=body)
+    assert resp.status == 403
 
 
 async def test_a_body_naming_a_space_is_malformed(gfs) -> None:

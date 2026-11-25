@@ -2440,3 +2440,33 @@ async def test_a_global_config_change_does_not_resubscribe_a_seated_household(en
     await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
     await env.member.svc.wait_idle()
     assert not await repo.has_subscription(channel_id, env.member.h.instance_id)
+
+
+async def test_a_waiting_space_does_not_hold_back_another_spaces_first_send(
+    env, monkeypatch
+):
+    """A space's item waiting in the retry queue for a GFS (its epoch notice
+    hit the one-epoch-a-minute bound) holds back only that space's later
+    items there; another space's first send to the same GFS goes at once —
+    a new channel's first epoch notice must not wait a minute behind it."""
+    svc = env.other.svc
+    conn = svc._conn_repo.conn
+    sent: list[str] = []
+
+    async def _send(_self, c, item):
+        sent.append(item.space_id)
+        return chan_mod.PublishOutcome.delivered()
+
+    monkeypatch.setattr(type(svc), "_send", _send)
+
+    def _item(space_id):
+        return chan_mod.GfsPublish(
+            space_id=space_id, event_type=chan_mod._KIND_NOTICE, payload={"epoch": 1}
+        )
+
+    assert svc._retry.enqueue(conn.id, _item("sp-waiting"))
+    assert await svc._first_attempt(conn, _item("sp-new"))
+    assert sent == ["sp-new"]
+    # The waiting space's next item still queues behind its head.
+    assert not await svc._first_attempt(conn, _item("sp-waiting"))
+    assert sent == ["sp-new"]

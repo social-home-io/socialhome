@@ -316,3 +316,48 @@ async def test_the_per_connection_cap_counts_every_space(monkeypatch):
     assert queue.enqueue("g1", _item(1, space_id="sp-1"))
     assert queue.enqueue("g1", _item(2, space_id="sp-2"))
     assert not queue.enqueue("g1", _item(3, space_id="sp-3"))
+
+
+async def test_an_unreachable_gfs_costs_one_probe_per_pass_not_one_per_space(fast):
+    """A connection-level failure (no ``Retry-After``: unreachable, 5xx)
+    skips that GFS's other spaces for the rest of the pass, uncounted — a
+    dead server costs one timeout a pass, and another GFS's due retries
+    are not held behind it."""
+    calls: list[str] = []
+
+    async def send(conn_id, item):
+        calls.append(conn_id)
+        return TRANSIENT if conn_id == "dead" else DELIVERED
+
+    queue = GfsPublishRetryQueue(send)
+    for n, sp in enumerate(("sp-1", "sp-2", "sp-3")):
+        queue.enqueue("dead", _item(n, space_id=sp))
+    queue.enqueue("alive", _item(9, space_id="sp-9"))
+    await queue._run_due()
+    assert calls.count("dead") == 1
+    assert "alive" in calls
+    assert not queue.pending("alive", "sp-9")
+    # The skipped spaces spent no retry of their budget.
+    assert all(
+        q.retries_done == 0
+        for (cid, sp), q in queue._queues.items()
+        if cid == "dead" and sp != "sp-1"
+    )
+
+
+async def test_a_429_of_one_space_does_not_skip_the_gfs_other_spaces(fast):
+    """A 429 with ``Retry-After`` is that space's own bound (an epoch
+    notice too soon): the GFS's other spaces still go in the same pass."""
+    calls: list[str] = []
+
+    async def send(conn_id, item):
+        calls.append(item.space_id)
+        if item.space_id == "sp-1":
+            return PublishOutcome.transient(60.0)
+        return DELIVERED
+
+    queue = GfsPublishRetryQueue(send)
+    queue.enqueue("g1", _item(1, space_id="sp-1"))
+    queue.enqueue("g1", _item(2, space_id="sp-2"))
+    await queue._run_due()
+    assert calls == ["sp-1", "sp-2"]
