@@ -2470,3 +2470,40 @@ async def test_a_waiting_space_does_not_hold_back_another_spaces_first_send(
     # The waiting space's next item still queues behind its head.
     assert not await svc._first_attempt(conn, _item("sp-waiting"))
     assert sent == ["sp-new"]
+
+
+async def test_a_subscribe_the_gfs_says_not_yet_to_is_retried_until_seated(
+    env, monkeypatch
+):
+    """The owner rotated again while its notice waits out the step bound: a
+    member's subscribe with the new pass gets 429 + Retry-After (not yet).
+    It goes into the retry queue like a notice — never a 403 given up on —
+    and takes the seat when retried; a replay whose grant moved on is
+    dropped (the newer grant subscribes itself)."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    svc = env.other.svc
+    real = GfsChannelService._post
+    answers = [chan_mod.PublishOutcome.transient(30.0)]
+
+    async def not_yet(self, client, url, body, conn):
+        if url.endswith("/subscribe") and answers:
+            return answers.pop()
+        return await real(self, client, url, body, conn)
+
+    monkeypatch.setattr(GfsChannelService, "_post", not_yet)
+    conn = (await svc._capable())[0]
+    assert await svc.subscribe(SPACE_ID) == 0
+    assert svc._retry.pending(conn.id, SPACE_ID)
+    grant = await svc.current_grant(SPACE_ID)
+    item = chan_mod.GfsPublish(
+        space_id=SPACE_ID,
+        event_type=chan_mod._KIND_SUBSCRIBE,
+        payload={"channel_id": grant.channel_id, "epoch": grant.epoch},
+    )
+    # The retry (what the queue sends when due) takes the seat.
+    assert (await svc._retry_send(conn.id, item)).kind == "delivered"
+    assert (SPACE_ID, grant.channel_id, grant.epoch) in svc._seated
+    # A replay for a grant that is no longer current is dropped.
+    stale = replace(item, payload={"channel_id": grant.channel_id, "epoch": 1})
+    assert (await svc._retry_send(conn.id, stale)).kind == "permanent"

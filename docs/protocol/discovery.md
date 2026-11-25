@@ -1751,7 +1751,11 @@ nothing. The seats are therefore **the member households connected to the
 channel's server** — the owner's opt-in — and a household removed at a
 rotation (no new pass) drops out after the grace even though its row
 remains. They re-subscribe when a new grant arrives and on every GFS
-(re)connect. The server needs no change for this: a pass is a pass.
+(re)connect. The server needs no change for this: a pass is a pass. A pass
+whose epoch the server has not opened YET (the owner rotated again while
+its notice waits out the step bound) is answered `429` + `Retry-After`,
+and the household's retry queue sends the subscribe again — only while that
+grant is still its current one.
 
 **Members follow the owner's option, defensively.** A member never takes a
 seat on, or publishes into, the channel of a private space whose stored

@@ -503,6 +503,37 @@ async def test_subscribe_needs_a_pass_for_this_household_and_an_open_epoch(gfs) 
     await _seat(gfs, gfs.member, 3)
 
 
+async def test_a_pass_for_an_epoch_not_open_yet_is_a_429_not_a_refusal(gfs) -> None:
+    """The owner rotated twice within a minute: its notice for the newest
+    epoch waits out the one-epoch-a-minute bound (429) while members already
+    hold passes for it. Such a pass — valid, AHEAD of the open epochs, or
+    for a channel whose first notice has not landed — is "not yet": 429 with
+    ``Retry-After``, so the household retries, never a 403 it gives up on.
+    A closed (older) epoch stays a refusal."""
+    resp = await gfs.post("/gfs/channels/register", json=gfs.ch.register())
+    assert resp.status == 201
+    # No notice yet: nothing is open, the pass is not yet usable.
+    resp = await gfs.post(
+        "/gfs/channels/subscribe", json=_subscribe_body(gfs.ch, gfs.member, 3)
+    )
+    assert resp.status == 429
+    assert int(resp.headers["Retry-After"]) >= 1
+    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3))
+    assert resp.status == 200
+    # Open: 3 and 4; 5 is ahead — not yet.
+    resp = await gfs.post(
+        "/gfs/channels/subscribe", json=_subscribe_body(gfs.ch, gfs.member, 5)
+    )
+    assert resp.status == 429
+    assert int(resp.headers["Retry-After"]) >= 1
+    # A closed epoch: refused.
+    await _refused(
+        await gfs.post(
+            "/gfs/channels/subscribe", json=_subscribe_body(gfs.ch, gfs.member, 1)
+        )
+    )
+
+
 async def test_unsubscribe_drops_the_seat(gfs) -> None:
     await _ready(gfs)
     await _seat(gfs, gfs.member)

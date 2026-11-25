@@ -169,6 +169,10 @@ class ChannelPinned(Exception):
     """The channel id is pinned to another key — ``409``. There is no re-pin."""
 
 
+#: The least ``Retry-After`` for a pass whose epoch is not open YET.
+SUBSCRIBE_NOT_YET_RETRY_S: int = 5
+
+
 class ChannelEpochTooSoon(Exception):
     """The notice's epoch is ahead by more than the time-bounded allowance;
     ``retry_after_s`` says when it lands — ``429``."""
@@ -508,7 +512,15 @@ class GfsChannelService:
         except (InvalidChannelSignature, UnsupportedChannelSuite, ValueError) as exc:
             raise PermissionError(f"pass refused: {exc}") from exc
         now = self._now()
-        if req.channel_pass.epoch not in _open_epochs(ch, now=now):
+        epoch = req.channel_pass.epoch
+        if epoch not in _open_epochs(ch, now=now):
+            if ch.epoch is None or epoch > ch.epoch + 1:
+                # A valid pass AHEAD of the open epochs (the owner rotated
+                # again while its notice waits out the step bound, or the
+                # channel's first notice has not landed): not yet — 429 with
+                # when to retry, never a refusal the member gives up on.
+                wait = 0 if ch.epoch is None else ch.step_allowance(epoch - 1, now=now)
+                raise ChannelEpochTooSoon(max(SUBSCRIBE_NOT_YET_RETRY_S, wait))
             raise PermissionError("pass epoch is not open here")
         if (
             not await self._channels.has_subscription(req.channel_id, inst.instance_id)

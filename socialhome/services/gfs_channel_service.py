@@ -204,6 +204,10 @@ RETIRE_RETRY_MAX_S: float = 6 * 3600.0
 #: Queue-item kinds of the channel retry queue.
 _KIND_ANON = "channel_item_anon"
 _KIND_NOTICE = "channel_epoch_notice"
+#: Our seat for the current grant: a server that answers "not yet" (the
+#: pass's epoch is ahead of the ones it has open — the owner's notice waits
+#: out the step bound) gets it again from the retry queue.
+_KIND_SUBSCRIBE = "channel_subscribe"
 
 #: Random offset (seconds, either way) on an anonymous request's ``ts`` — the
 #: same as the space member publish: whole seconds, so a sub-second clock offset
@@ -1610,7 +1614,9 @@ class GfsChannelService:
                         parsed = None
                     held = parsed if isinstance(parsed, dict) else None
                 if outcome.kind != "delivered":
-                    log.warning(
+                    # A 429 is the one-epoch-a-minute bound the retry queue
+                    # waits out (its give-up is the WARNING).
+                    (log.info if resp.status == 429 else log.warning)(
                         "gfs.channel: GFS %s answered HTTP %d (%s) on epoch",
                         conn.id,
                         resp.status,
@@ -1878,36 +1884,55 @@ class GfsChannelService:
             # A publish-only member never takes a seat.
             return 0
         done = 0
-        channel_pass = grant.channel_pass
+        item = GfsPublish(
+            space_id=space_id,
+            event_type=_KIND_SUBSCRIBE,
+            payload={"channel_id": grant.channel_id, "epoch": grant.epoch},
+        )
         for conn in await self._capable_in(grant.gfs_ids):
             if only is not None and conn.id != only:
                 continue
-
-            async def _subscribe(conn: GfsConnection = conn) -> PublishOutcome:
-                req = ChannelSubscribeRequest(
-                    instance_id=self._own_instance_id,
-                    gfs_instance_id=conn.gfs_instance_id,
-                    gfs_key=self._gfs.addressee_key_for(conn),
-                    channel_id=grant.channel_id,
-                    ts=datetime.now(UTC).isoformat(),
-                    signature="",
-                    channel_pass=channel_pass,
-                )
-                sig = sign_ed25519(self._own_seed, canonical(req.signing_payload()))
-                body = replace(req, signature=b64url_encode(sig)).to_wire()
-                return await self._post(
-                    self._gfs.client(),
-                    f"{conn.inbox_url}{CHANNEL_SUBSCRIBE_ROUTE}",
-                    body,
-                    conn,
-                )
-
-            outcome = await self._keyed(conn, _subscribe)
-            if outcome.kind == "delivered":
+            # The one send path: a "not yet" (429) is retried from the queue.
+            if await self._first_attempt(conn, item):
                 done += 1
-        if done:
-            self._seated.add((space_id, grant.channel_id, grant.epoch))
         return done
+
+    async def _post_subscribe(
+        self, conn: GfsConnection, space_id: str, data: dict
+    ) -> PublishOutcome:
+        """Take our seat with the pass of the grant *data* names — only while
+        it is still the current one (a replay for an older grant is dropped:
+        the newer grant subscribes itself)."""
+        space = await self._spaces.get(space_id)
+        grant = await self.current_grant(space_id)
+        if (
+            space is None
+            or not channel_on(space)
+            or grant is None
+            or grant.channel_pass is None
+            or grant.channel_id != data.get("channel_id")
+            or grant.epoch != data.get("epoch")
+        ):
+            return PublishOutcome.permanent()
+        req = ChannelSubscribeRequest(
+            instance_id=self._own_instance_id,
+            gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
+            channel_id=grant.channel_id,
+            ts=datetime.now(UTC).isoformat(),
+            signature="",
+            channel_pass=grant.channel_pass,
+        )
+        sig = sign_ed25519(self._own_seed, canonical(req.signing_payload()))
+        outcome = await self._post(
+            self._gfs.client(),
+            f"{conn.inbox_url}{CHANNEL_SUBSCRIBE_ROUTE}",
+            replace(req, signature=b64url_encode(sig)).to_wire(),
+            conn,
+        )
+        if outcome.kind == "delivered":
+            self._seated.add((space_id, grant.channel_id, grant.epoch))
+        return outcome
 
     async def _unsubscribe_all(self, channel_id: str, gfs_ids: tuple[str, ...]) -> None:
         for conn in await self._capable_in(gfs_ids):
@@ -2174,7 +2199,9 @@ class GfsChannelService:
                 if refused_gfs_key(body, resp.status, resp.reason):
                     self._gfs.forget_addressee_key(conn)
                 if outcome.kind != "delivered":
-                    log.warning(
+                    # A 429 is backpressure the retry queue honours (its
+                    # give-up is the WARNING); anything else is a fault.
+                    (log.info if resp.status == 429 else log.warning)(
                         "gfs.channel: GFS %s answered HTTP %d (%s) on %s",
                         conn.id,
                         resp.status,
@@ -2223,6 +2250,8 @@ class GfsChannelService:
     async def _send_once(self, conn: GfsConnection, item: GfsPublish) -> PublishOutcome:
         if item.event_type == _KIND_NOTICE:
             return await self._post_notice(conn, item.space_id, item.payload)
+        if item.event_type == _KIND_SUBSCRIBE:
+            return await self._post_subscribe(conn, item.space_id, item.payload)
         return await self._post_item(conn, item.space_id, item.payload)
 
     async def _first_attempt(self, conn: GfsConnection, item: GfsPublish) -> bool:

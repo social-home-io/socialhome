@@ -124,6 +124,8 @@ class ChannelSubscribeView(_ChannelView):
         req = await self._parse(ChannelSubscribeRequest)
         try:
             await svc.subscribe(req)
+        except ChannelEpochTooSoon as exc:
+            return self._limited(exc.retry_after_s)
         except PermissionError as exc:
             return self._refused("subscribe", req.channel_id, exc)
         return web.json_response({"status": "subscribed"})
