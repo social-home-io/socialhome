@@ -7247,6 +7247,21 @@ async def test_a_followers_directory_seat_is_no_path_in_a_channel_space():
     assert await svc.channel_reached_followers("sp", list(rows.values())) == frozenset()
 
 
+async def test_a_mesh_reached_follower_with_a_directory_seat_is_still_tried():
+    """A directory seat is no path of its own — but a follower that claimed
+    its version over the mesh is reachable (no channel seat needed): its
+    lazy seat must not turn the mesh path off."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    row, _ = _make_remote_instance(km, session_key=b"\x01" * 32)
+    row = dataclasses.replace(row, source=InstanceSource.SPACE_SESSION, relay_via=None)
+    await fed_repo.save_instance(row)
+    fed_repo.mesh_claims = {row.id: 96}
+    svc, _ = _make_service(federation_repo=fed_repo)
+    svc.attach_space_write_gate(_ChannelSpaces(True), _Seats(set()))
+    assert await svc.channel_reached_followers("sp", [row.id]) == frozenset()
+
+
 async def test_gfs_reached_followers_names_follower_only_seat_households():
     """v_96 (P5) — the households only the owner reaches (it holds their
     space-session row): follower-only ones seated through a GFS. A paired

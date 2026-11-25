@@ -70,8 +70,12 @@ class SpaceMemberProfileFederationOutbound:
             log.debug("sm-profile-outbound: list peers failed: %s", exc, exc_info=True)
             return
         own = getattr(self._federation, "_own_instance_id", "")
+        # v_96: the follower households a fan-out does not try in a space
+        # with a channel (reached at their channel seat and by the host) —
+        # the same skip as ``broadcast_to_space_members``, never N × M.
+        skip = await self._federation.channel_reached_followers(event.space_id, peers)
         for instance_id in peers:
-            if not instance_id or instance_id == own:
+            if not instance_id or instance_id == own or instance_id in skip:
                 continue
             try:
                 await self._federation.send_event(

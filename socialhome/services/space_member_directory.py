@@ -1989,10 +1989,11 @@ class SpaceMemberDirectory:
             for i, c in sorted(listed.items())
             if i != to and (everything or c.mailbox is not None)
         ]
-        # Mailbox cards first, and within each, ours and the writer seats'
-        # before followers': followers are listed too (v_96), so a popular
-        # space passes the bound on followers alone, and the cut must never
-        # cost a member the card of a host or another member.
+        # Ours and the writer seats' cards first (mailbox cards first within
+        # each): followers are listed too (v_96), so a popular space passes
+        # the bound on followers alone, and the cut must never cost anyone
+        # the card of a host or a member — a paired member's mailbox-less
+        # card included.
         writers = {self._instance_id}
         if self._seats is not None:
             writers |= set(
@@ -2000,7 +2001,7 @@ class SpaceMemberDirectory:
                     space_id, _WRITER_ROLE_VALUES
                 )
             )
-        picked.sort(key=lambda c: (c.mailbox is None, c.instance_id not in writers))
+        picked.sort(key=lambda c: (c.instance_id not in writers, c.mailbox is None))
         if len(picked) > SNAPSHOT_MAX:
             log.warning(
                 "directory: a snapshot holds %d cards — sending the first %d",

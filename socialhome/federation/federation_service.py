@@ -1894,14 +1894,15 @@ class FederationService:
 
         async def _unreached(iid: str) -> bool:
             peer = await self._federation_repo.get_instance(iid)
-            if peer is not None:
-                # A directory seat (a member card's lazy space-session row,
-                # no ``relay_via``) is the follower's mailbox address, not a
-                # path beside its channel seat: still skipped, or every
-                # member would copy every item to every follower (N × M).
-                return peer.source is InstanceSource.SPACE_SESSION and not (
-                    peer.relay_via
-                )
+            # A directory seat (a member card's lazy space-session row, no
+            # ``relay_via``) is the follower's mailbox address, not a path
+            # beside its channel seat — judged like no row, or every member
+            # would copy every item to every follower (N × M). A follower
+            # that claimed its version over the mesh stays reachable.
+            if peer is not None and not (
+                peer.source is InstanceSource.SPACE_SESSION and not peer.relay_via
+            ):
+                return False
             claim = await self._federation_repo.get_space_member_version(iid)
             # A version claimed over the mesh: reachable.
             return claim is None or claim[0] <= 0

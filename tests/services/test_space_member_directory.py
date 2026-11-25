@@ -654,7 +654,9 @@ async def test_a_card_with_a_lower_rev_does_not_replace_a_newer_one():
 
 
 async def test_snapshot_is_bounded_and_carries_mailbox_cards_first(monkeypatch):
-    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 2)
+    """Our own (the host's) card first, then mailbox cards before the
+    others."""
+    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 3)
     w = World()
     r, m1, m2, n1, n2 = (_hh() for _ in range(5))
     w.member(r, m1, m2, n1, n2)
@@ -665,7 +667,7 @@ async def test_snapshot_is_bounded_and_carries_mailbox_cards_first(monkeypatch):
     await w.dir.reconcile(SPACE, snapshot_to={r["id"]})
     (snap,) = w.fed.to(r["id"])
     assert snap["payload"]["snapshot"] is True
-    assert _ids(snap) == {m1["id"], m2["id"]}
+    assert _ids(snap) == {w.me["id"], m1["id"], m2["id"]}
 
 
 async def test_a_bounded_snapshot_keeps_the_writers_cards_before_followers(
@@ -674,20 +676,22 @@ async def test_a_bounded_snapshot_keeps_the_writers_cards_before_followers(
     """v_96: followers are listed too, so a popular space passes
     ``SNAPSHOT_MAX`` on followers alone. The cut never drops a writer's
     card for a follower's: writer seats (hosts and members) go first."""
-    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 2)
+    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 3)
     fans = [_hh() for _ in range(4)]
     w1, w2 = _hh(), _hh()
     roles = {h["id"]: "subscriber" for h in fans}
     roles |= {w1["id"]: "member", w2["id"]: "admin"}
     w = World(roles=roles)
     w.member(w1, w2, *fans)
-    for h in (w1, w2, *fans):
+    # A paired member has no mailbox card: it still beats every follower.
+    w.spaces.put_card(SPACE, _card(w1, gfs=None))
+    for h in (w2, *fans):
         w.spaces.put_card(SPACE, _card(h, gfs=GFS))
     w.writers.writers[SPACE] = set(roles)  # seat_all: all told us "seated"
     w.seat_all()
     await w.dir.reconcile(SPACE, snapshot_to={fans[0]["id"]})
     (snap,) = [d for d in w.fed.to(fans[0]["id"]) if d["payload"].get("cards")]
-    assert _ids(snap) == {w1["id"], w2["id"]}
+    assert _ids(snap) == {w.me["id"], w1["id"], w2["id"]}
 
 
 async def test_a_household_that_stops_being_a_writer_is_removed_once():
