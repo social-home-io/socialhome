@@ -30,12 +30,17 @@ from socialhome.domain.space_sync_page import StoredSyncPage, state_with_page
 from socialhome.domain.space_sync_status import SpaceSyncState
 from socialhome.federation.sync.space.page_state import BucketRows
 from socialhome.federation.sync.space.pages import (
+    PAGE_KEY_WAIT_MAX,
     PAGE_PUSH_AAD,
     PAGE_PUSH_INTERVAL_S,
     SyncPageService,
 )
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
+from socialhome.services.pending_decrypts_cache import (
+    KEY_WAIT_MAX_AHEAD,
+    PendingDecryptsCache,
+)
+from socialhome.services.space_crypto_service import MissingEpochKey
 from socialhome.sync_page import (
     MAX_FETCH_BYTES,
     MAX_FETCH_ROWS,
@@ -787,15 +792,20 @@ async def test_a_page_that_does_not_open_is_a_one_line_refusal(caplog):
 class _KeyLater:
     """The content key of the page's epoch lands only after the page: the
     page of a household that rotated while we were away (a delegated
-    admin's rekey racing its own sync push)."""
+    admin's rekey racing its own sync push). Raises the real
+    :class:`MissingEpochKey` (what ``decrypt_chunk`` raises)."""
 
-    def __init__(self, inner: _Crypto) -> None:
+    def __init__(self, inner: _Crypto, *, held: int | None = 6) -> None:
         self.inner = inner
         self.have = False
+        self.held = held
+
+    async def get_current_epoch(self, space_id):
+        return self.held
 
     async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
         if not self.have:
-            raise RuntimeError(
+            raise MissingEpochKey(
                 f"SpaceContentEncryption: missing epoch {epoch} for space {space_id!r}"
             )
         return await self.inner.decrypt_chunk(
@@ -803,29 +813,101 @@ class _KeyLater:
         )
 
 
-async def test_a_page_ahead_of_its_key_waits_for_the_key_and_is_taken(caplog):
-    """A page sealed under an epoch whose key has not landed yet is no
-    refusal (no WARNING): it is parked like a sync chunk and taken the
-    moment ``SpaceContentKeyImported`` fires for that epoch."""
+def _key_wait_env(*, held: int | None = 6, seated: bool = True):
     env = _Env(own=ME, seed=None)
-    later = _KeyLater(env.crypto)
+    later = _KeyLater(env.crypto, held=held)
     env.svc._crypto = later
     bus = EventBus()
-    env.svc.attach_pending_decrypts(PendingDecryptsCache(bus=bus))
+    cache = PendingDecryptsCache(bus=bus, max_entries=PAGE_KEY_WAIT_MAX)
+    env.svc.attach_pending_decrypts(cache)
+    if seated:
+        env.spaces.local = ["u-me"]
+        env.spaces.members = [
+            SpaceMember(
+                space_id=SPACE,
+                user_id="u-me",
+                role=SpaceRole.MEMBER.value,
+                joined_at="2026-01-01T00:00:00+00:00",
+            )
+        ]
+    return env, later, bus, cache
+
+
+async def _key_lands(env, later, bus, epoch) -> None:
+    later.have = True
+    await bus.publish(SpaceContentKeyImported(space_id=SPACE, epoch=epoch))
+    await env.svc.wait_idle()
+
+
+async def test_a_page_ahead_of_its_key_waits_for_the_key_and_is_taken(caplog):
+    """A page sealed under an epoch whose key has not landed yet is no
+    refusal (no WARNING): it is parked in the pages' own hold and taken the
+    moment ``SpaceContentKeyImported`` fires for that epoch."""
+    env, later, bus, cache = _key_wait_env()
     page = _signed(vector=_vec(2), seq=50, issued_at=T0)
     sealed = await _sealed_for_member(page)
     with caplog.at_level(logging.INFO):
         assert not await env.svc.receive(
             space_id=SPACE, sync_id="s-1", provider=HOST, sealed=sealed
         )
+        # The same page again (a push and a catch-up): parked once.
+        await env.svc.receive(
+            space_id=SPACE, sync_id="s-1", provider=HOST, sealed=sealed
+        )
     await env.svc.wait_idle()
     assert "does not open" not in caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(cache) == 1
     assert env.held() is None
-    later.have = True
-    await bus.publish(SpaceContentKeyImported(space_id=SPACE, epoch=sealed["epoch"]))
-    await env.svc.wait_idle()
+    await _key_lands(env, later, bus, sealed["epoch"])
     assert env.held() == page
+
+
+@pytest.mark.parametrize("held", [7, 8, 7 - KEY_WAIT_MAX_AHEAD - 1])
+async def test_a_page_outside_the_key_wait_window_is_not_parked(held):
+    """The epoch is plaintext and read before anything is verified: only
+    an epoch after our newest key and at most ``KEY_WAIT_MAX_AHEAD`` past
+    it is held (at or below ours, a rekey never brings it); else the next
+    sync brings the page."""
+    env, _later, _bus, cache = _key_wait_env(held=held)
+    sealed = await _sealed_for_member(_signed(vector=_vec(2), seq=50, issued_at=T0))
+    assert sealed["epoch"] == 7
+    assert not await env.svc.receive(
+        space_id=SPACE, sync_id="s-1", provider=HOST, sealed=sealed
+    )
+    assert len(cache) == 0
+
+
+async def test_a_household_no_longer_seated_takes_no_parked_page():
+    """Our seat ends (or becomes a follower's) before the key lands: the
+    replay re-checks it — no page to a follower."""
+    env, later, bus, _cache = _key_wait_env()
+    sealed = await _sealed_for_member(_signed(vector=_vec(2), seq=50, issued_at=T0))
+    await env.svc.receive(space_id=SPACE, sync_id="s-1", provider=HOST, sealed=sealed)
+    env.spaces.members = []
+    await _key_lands(env, later, bus, sealed["epoch"])
+    assert env.held() is None
+
+
+async def test_any_other_decrypt_failure_is_still_a_refusal(caplog):
+    env = _Env(own=ME, seed=None)
+
+    class _Broken(_Crypto):
+        async def decrypt_chunk(self, **_kw):
+            raise RuntimeError("KEK unwrap failed")
+
+    env.svc._crypto = _Broken()
+    with caplog.at_level(logging.WARNING):
+        assert not await env.svc.receive(
+            space_id=SPACE,
+            sync_id="s-1",
+            provider=HOST,
+            sealed=await _sealed_for_member(
+                _signed(vector=_vec(2), seq=50, issued_at=T0)
+            ),
+        )
+    await env.svc.wait_idle()
+    assert "does not open (RuntimeError)" in caplog.text
 
 
 async def test_equivocation_is_detected_logged_and_flagged(caplog):

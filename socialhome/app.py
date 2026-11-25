@@ -132,7 +132,7 @@ from .federation.sync.dm_history import (
 from .federation.sync.space.file_gate import CatchUpFileGates, SpaceFileBudget
 from .federation.sync.space.host_contact import HostContact
 from .federation.sync.space.page_state import PageStateHasher
-from .federation.sync.space.pages import SyncPageService
+from .federation.sync.space.pages import PAGE_KEY_WAIT_MAX, SyncPageService
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
@@ -2575,7 +2575,7 @@ def _wire_federation_stack(
         federation_service=federation_service,
         host_contact=host_contact,
         own_instance_id=identity.instance_id,
-        pending_decrypts=app[K.pending_decrypts_cache_key],
+        bus=bus,
     )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
@@ -2733,7 +2733,7 @@ def _build_sync_pages(
     federation_service: FederationService,
     host_contact: HostContact,
     own_instance_id: str,
-    pending_decrypts: PendingDecryptsCache | None = None,
+    bus: EventBus,
 ) -> SyncPageService:
     """v_95 sync pages (``docs/protocol/sync-pages.md``): the signer pushes
     each new page (at most hourly) to every member household as
@@ -2752,8 +2752,11 @@ def _build_sync_pages(
     )
     provider.attach_sync_pages(pages)
     receiver.attach_sync_pages(pages)
-    if pending_decrypts is not None:
-        pages.attach_pending_decrypts(pending_decrypts)
+    # A page that beat its epoch's key is parked in a hold of its own: it
+    # can never evict a §25.6 sync chunk parked in the shared cache.
+    pages.attach_pending_decrypts(
+        PendingDecryptsCache(bus=bus, max_entries=PAGE_KEY_WAIT_MAX)
+    )
     scheduler.attach_sync_pages(pages.ref_for, pages.buckets_for, pages.have_for)
     status.attach_pages(pages.position)
 

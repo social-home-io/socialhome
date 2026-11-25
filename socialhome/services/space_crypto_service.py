@@ -502,7 +502,7 @@ class SpaceContentEncryption(BusPublisherMixin):
         when the AAD doesn't match."""
         key = await self._repo.get(space_id, epoch)
         if key is None:
-            raise RuntimeError(
+            raise MissingEpochKey(
                 f"SpaceContentEncryption: missing epoch {epoch} for space {space_id!r}"
             )
         raw = self._kek.decrypt(

@@ -68,6 +68,13 @@ log = logging.getLogger(__name__)
 #: the rare deployment that sees larger pending sets.
 DEFAULT_MAX_ENTRIES: int = 256
 
+#: How far past our newest content epoch a frame (a channel item, a sync
+#: page) may claim to be and still be held for its key (two quick
+#: rotations in a row). The epoch is plaintext: past it, or at / below the
+#: newest key we hold (a rekey delivers the new current key, so an older
+#: missing one never comes), a frame is not held — sync covers it.
+KEY_WAIT_MAX_AHEAD: int = 2
+
 
 class PendingDecryptsCache:
     """FIFO cache of redeliver callables, drained on key arrival."""

@@ -59,6 +59,7 @@ from socialhome.domain.space import (
 )
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.federation.pairing_gfs_reach import PairingGfsReach
+from socialhome.federation.sync.space.pages import PAGE_KEY_WAIT_MAX
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.infrastructure.gfs_route_discovery_scheduler import (
     GfsRouteDiscoveryScheduler,
@@ -253,6 +254,11 @@ async def test_sync_pages_wire_the_verified_member_fetch(tmp_dir):
         assert scheduler._sync_page_have == pages.have_for
         assert pages._apply_verified.__name__ == "apply_verified"
         assert pages._silent.__name__ == "is_silent"
+        # A page ahead of its key waits in a hold of its own (never the
+        # shared cache the §25.6 chunks park in).
+        hold = pages._pending_decrypts
+        assert hold is not None and hold is not app[K.pending_decrypts_cache_key]
+        assert hold._max == PAGE_KEY_WAIT_MAX
 
 
 async def test_cleanup_publishes_queued_highlight_events(tmp_dir, monkeypatch):

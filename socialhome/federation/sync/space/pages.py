@@ -73,6 +73,8 @@ from ....domain.space_sync_page import (
     SyncPagePosition,
 )
 from ....services.inbound_media_store import media_basename
+from ....services.pending_decrypts_cache import KEY_WAIT_MAX_AHEAD
+from ....services.space_crypto_service import MissingEpochKey
 from ....services.space_writer_households import holds_member_seat
 from ....sync_page import (
     COMMIT_SPECS,
@@ -137,10 +139,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+#: Pages parked for their key at once (their own hold: a page can never
+#: evict a §25.6 sync chunk parked in the shared cache). One per (space,
+#: provider, epoch).
+PAGE_KEY_WAIT_MAX: int = 32
+
+
 class _KeyNotYet(Exception):
-    """The page is sealed under a content-key epoch we do not hold yet
-    (``decrypt_chunk`` raises ``RuntimeError`` naming a "missing epoch" — the
-    same signal the §25.6 chunk receiver parks on)."""
+    """The page is sealed under a content-key epoch we do not hold
+    (``decrypt_chunk`` raises :class:`MissingEpochKey`)."""
 
     def __init__(self, epoch: int) -> None:
         super().__init__(epoch)
@@ -201,6 +208,8 @@ class _Crypto(Protocol):
     async def decrypt_chunk(
         self, *, space_id: str, epoch: int, sync_id: str, ciphertext: str
     ) -> bytes: ...
+
+    async def get_current_epoch(self, space_id: str) -> int | None: ...
 
 
 class _PageSender(Protocol):
@@ -872,6 +881,7 @@ class SyncPageService:
         "_on_change",
         "_own_instance_id",
         "_parked",
+        "_parked_keys",
         "_pending_decrypts",
         "_probes",
         "_push_pending",
@@ -950,6 +960,8 @@ class SyncPageService:
         #: (:meth:`attach_pending_decrypts`); ``None``: such a page waits
         #: for the next sync instead.
         self._pending_decrypts: PendingDecryptsCache | None = None
+        #: (space, provider, epoch) of every page parked now: one each.
+        self._parked_keys: set[tuple[str, str, int]] = set()
         #: Phase 3 verified fetch (:meth:`attach_member_fetch`); ``None``:
         #: not wired — only the hosts are asked.
         self._seats: _DeliverySeats | None = None
@@ -1552,29 +1564,8 @@ class SyncPageService:
         except _KeyNotYet as exc:
             # No refusal: the page is ahead of its key (a household that
             # rotated while we were away pushes or syncs before its rekey
-            # lands here). It is taken when the key lands, else at the
-            # next sync — the page held stays meanwhile.
-            log.info(
-                "sync page: the page of space %s from %s is sealed under "
-                "epoch %d, whose key has not landed yet — %s",
-                space_id,
-                provider,
-                exc.epoch,
-                "taken when it does"
-                if self._pending_decrypts is not None
-                else "waits for the next sync",
-            )
-            if self._pending_decrypts is not None:
-
-                async def _again() -> None:
-                    await self.receive(
-                        space_id=space_id,
-                        sync_id=sync_id,
-                        provider=provider,
-                        sealed=sealed,
-                    )
-
-                self._pending_decrypts.stash(space_id, exc.epoch, _again)
+            # lands here). The page held stays meanwhile.
+            await self._park_for_key(space_id, sync_id, provider, sealed, exc.epoch)
             return False
         except (PageRefused, UnsupportedPageSuite, UnsupportedPageSealSuite) as exc:
             log.warning(
@@ -1591,6 +1582,55 @@ class SyncPageService:
                 provider,
             )
             return False
+
+    async def _park_for_key(
+        self,
+        space_id: str,
+        sync_id: str,
+        provider: str,
+        sealed: object,
+        epoch: int,
+    ) -> None:
+        """Hold a page sealed under *epoch* until its key lands — only for an
+        epoch AFTER the newest key we hold and at most
+        :data:`KEY_WAIT_MAX_AHEAD` past it (the epoch is plaintext and is
+        read before anything is verified), once per (space, provider,
+        epoch); else it waits for the next sync. The replay re-checks our
+        own seat ("no page to a follower")."""
+        held = await self._crypto.get_current_epoch(space_id)
+        key = (space_id, provider, epoch)
+        if (
+            self._pending_decrypts is None
+            or (held is not None and not held < epoch <= held + KEY_WAIT_MAX_AHEAD)
+            or key in self._parked_keys
+        ):
+            log.info(
+                "sync page: the page of space %s from %s is sealed under epoch "
+                "%d, whose key we do not hold (ours %s) — the next sync brings it",
+                space_id,
+                provider,
+                epoch,
+                held,
+            )
+            return
+        log.info(
+            "sync page: the page of space %s from %s is sealed under epoch %d, "
+            "whose key has not landed yet — taken when it does",
+            space_id,
+            provider,
+            epoch,
+        )
+        self._parked_keys.add(key)
+
+        async def _again() -> None:
+            self._parked_keys.discard(key)
+            if not await holds_member_seat(self._spaces, space_id):  # type: ignore[arg-type]
+                return
+            await self.receive(
+                space_id=space_id, sync_id=sync_id, provider=provider, sealed=sealed
+            )
+
+        self._pending_decrypts.stash(space_id, epoch, _again)
 
     async def _receive(
         self, space_id: str, sync_id: str, provider: str, sealed: object
@@ -1616,12 +1656,8 @@ class SyncPageService:
             plaintext = await self._crypto.decrypt_chunk(
                 space_id=space_id, epoch=epoch, sync_id=sync_id, ciphertext=ciphertext
             )
-        except RuntimeError as exc:
-            if "missing epoch" in str(exc):
-                raise _KeyNotYet(epoch) from exc
-            raise PageRefused(
-                f"page_sealed does not open ({type(exc).__name__})"
-            ) from exc
+        except MissingEpochKey as exc:
+            raise _KeyNotYet(epoch) from exc
         except Exception as exc:
             raise PageRefused(
                 f"page_sealed does not open ({type(exc).__name__})"
@@ -1744,8 +1780,9 @@ class SyncPageService:
 
     def attach_pending_decrypts(self, cache: PendingDecryptsCache) -> None:
         """Park a page sealed under an epoch whose content key has not
-        landed yet, and take it the moment the key does — the cache the
-        §25.6 chunk receiver parks its chunks in (one path for both)."""
+        landed yet, and take it the moment the key does (the
+        :class:`PendingDecryptsCache` mechanism of the §25.6 chunks, in a
+        hold of its own of :data:`PAGE_KEY_WAIT_MAX`)."""
         self._pending_decrypts = cache
 
     def attach_hosts(self, hosts: Callable[[Space], Awaitable[list[str]]]) -> None:

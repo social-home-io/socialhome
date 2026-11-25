@@ -92,6 +92,7 @@ from .inbound_media_store import media_basename, space_media_refs
 from .link_preview_service import (
     space_wire_link_preview,
 )
+from .pending_decrypts_cache import KEY_WAIT_MAX_AHEAD
 from .space_crypto_service import MissingEpochKey
 from .space_item_author import (
     UnsupportedItemAuthorSigSuite,
@@ -134,11 +135,6 @@ log = logging.getLogger(__name__)
 #: oldest dropped first. A reader needs a handful: the items that beat one
 #: rekey to this household.
 RELAY_KEY_WAIT_MAX_FRAMES: int = 64
-
-
-#: How far past our newest content epoch a frame may claim to be and still
-#: be held for its key (two quick rotations in a row).
-KEY_WAIT_MAX_AHEAD: int = 2
 
 
 @dataclass(slots=True, frozen=True)
