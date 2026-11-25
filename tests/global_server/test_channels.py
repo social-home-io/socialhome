@@ -340,6 +340,23 @@ async def test_register_is_rate_limited_per_address(gfs) -> None:
     assert resp.status == 429
 
 
+@pytest.mark.security
+async def test_a_refresh_of_a_known_channel_spends_no_register_budget(gfs) -> None:
+    """An owner re-registers (refreshes) every channel it runs on a reconnect
+    or restart — many at once for a household with many channel spaces.
+    That is no new row: it does not spend the per-address register budget,
+    which bounds new channels only. A new one past the budget is still 429."""
+    known = [_Channel() for _ in range(CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP)]
+    for ch in known:
+        resp = await gfs.post("/gfs/channels/register", json=ch.register())
+        assert resp.status == 201
+    for ch in known:  # the burst of refreshes
+        resp = await gfs.post("/gfs/channels/register", json=ch.register())
+        assert resp.status == 200
+    resp = await gfs.post("/gfs/channels/register", json=_Channel().register())
+    assert resp.status == 429
+
+
 async def test_a_body_naming_a_space_is_malformed(gfs) -> None:
     body = gfs.ch.register()
     body["space_id"] = SPACE_ID

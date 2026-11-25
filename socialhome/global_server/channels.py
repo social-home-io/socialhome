@@ -106,10 +106,11 @@ log = logging.getLogger(__name__)
 #: How far an anonymous statement's ``ts`` may be from this server's clock.
 CHANNEL_TS_SKEW_S: int = 300
 
-#: Channel registrations per client address per minute. A household
-#: registers a channel once per private space (and again only on an
+#: NEW channel registrations per client address per minute. A household
+#: registers a channel once per channel space (and again only on an
 #: authority rotation), so this is far above honest use while bounding how
-#: many rows one address can create.
+#: many rows one address can create. A refresh of a known channel (an
+#: owner re-registering all of its channels on a reconnect) spends none.
 CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP: int = 10
 
 #: Channel seats one registered household may hold. Far above what a family
@@ -376,14 +377,19 @@ class GfsChannelService:
         :class:`ChannelBusy` (the server-wide cap)."""
         self._addressed(req.gfs_instance_id, req.gfs_key)
         self._fresh(req.ts)
-        if not self._allow(self._register_limiter, client_ip):
+        existing = await self._channels.get(req.channel_id)
+        # Only a NEW channel spends the per-address register budget (it
+        # bounds new rows), still before any signature work. A refresh of a
+        # known one — an owner re-registering every channel it runs on a
+        # reconnect, many at once — is no new row; it is bounded by the
+        # per-address limit on every channel route.
+        if existing is None and not self._allow(self._register_limiter, client_ip):
             raise ChannelRateLimited()
         try:
             verify_register(req)
         except (InvalidChannelSignature, UnsupportedChannelSuite) as exc:
             raise PermissionError(f"registration refused: {exc}") from exc
         now = self._now()
-        existing = await self._channels.get(req.channel_id)
         if existing is None:
             if await self._channels.count() >= self._max_channels:
                 log.warning(
