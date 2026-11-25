@@ -339,7 +339,9 @@ class GfsChannelService:
         self._space_service: object | None = None
         self._inbound: SpacePublicInbound | None = None
         self._sync: _SyncScheduler | None = None
-        self._retry = GfsPublishRetryQueue(self._retry_send)
+        self._retry = GfsPublishRetryQueue(
+            self._retry_send, solo_kinds=frozenset({_KIND_SUBSCRIBE})
+        )
         #: channel id → ``gfs_instance_id``s that confirmed our registration
         #: in this process (the owner's grants name only these).
         self._registered: dict[str, set[str]] = {}
@@ -1913,7 +1915,9 @@ class GfsChannelService:
             or grant.channel_id != data.get("channel_id")
             or grant.epoch != data.get("epoch")
         ):
-            return PublishOutcome.permanent()
+            # Superseded (a newer grant subscribes itself) or gone: nothing
+            # is left to send — done, not a refusal.
+            return PublishOutcome.delivered()
         req = ChannelSubscribeRequest(
             instance_id=self._own_instance_id,
             gfs_instance_id=conn.gfs_instance_id,
@@ -1929,6 +1933,7 @@ class GfsChannelService:
             f"{conn.inbox_url}{CHANNEL_SUBSCRIBE_ROUTE}",
             replace(req, signature=b64url_encode(sig)).to_wire(),
             conn,
+            queued=True,
         )
         if outcome.kind == "delivered":
             self._seated.add((space_id, grant.channel_id, grant.epoch))
@@ -2188,7 +2193,12 @@ class GfsChannelService:
         url: str,
         body: dict,
         conn: GfsConnection,
+        *,
+        queued: bool = False,
     ) -> PublishOutcome:
+        """One POST. *queued*: the caller's retry queue honours a 429 (it is
+        backpressure, logged at INFO; the queue's give-up is the WARNING) —
+        every other failure, and any 429 nobody retries, is a WARNING."""
         try:
             async with client.post(
                 url, json=body, allow_redirects=False, timeout=_HTTP_TIMEOUT
@@ -2201,7 +2211,7 @@ class GfsChannelService:
                 if outcome.kind != "delivered":
                     # A 429 is backpressure the retry queue honours (its
                     # give-up is the WARNING); anything else is a fault.
-                    (log.info if resp.status == 429 else log.warning)(
+                    (log.info if queued and resp.status == 429 else log.warning)(
                         "gfs.channel: GFS %s answered HTTP %d (%s) on %s",
                         conn.id,
                         resp.status,
@@ -2228,7 +2238,7 @@ class GfsChannelService:
             async with self._gfs.anon_session(conn) as client:
                 if client is None:
                     return PublishOutcome.permanent()
-                return await self._post(client, url, body, conn)
+                return await self._post(client, url, body, conn, queued=True)
         except OutboundFetchRefused as exc:
             return refusal_outcome(exc)
 

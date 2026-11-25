@@ -519,7 +519,9 @@ class GfsChannelService:
                 # again while its notice waits out the step bound, or the
                 # channel's first notice has not landed): not yet — 429 with
                 # when to retry, never a refusal the member gives up on.
-                wait = 0 if ch.epoch is None else ch.step_allowance(epoch - 1, now=now)
+                # Open once the owner's notice for THIS epoch lands (the
+                # owner announces the newest epoch only).
+                wait = 0 if ch.epoch is None else ch.step_allowance(epoch, now=now)
                 raise ChannelEpochTooSoon(max(SUBSCRIBE_NOT_YET_RETRY_S, wait))
             raise PermissionError("pass epoch is not open here")
         if (

@@ -58,6 +58,7 @@ from socialhome.global_server.channels import (
     CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
     CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP,
     CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP,
+    SUBSCRIBE_NOT_YET_RETRY_S,
     ChannelRateLimited,
     _is_channel_path,
 )
@@ -517,15 +518,19 @@ async def test_a_pass_for_an_epoch_not_open_yet_is_a_429_not_a_refusal(gfs) -> N
         "/gfs/channels/subscribe", json=_subscribe_body(gfs.ch, gfs.member, 3)
     )
     assert resp.status == 429
-    assert int(resp.headers["Retry-After"]) >= 1
+    assert int(resp.headers["Retry-After"]) == SUBSCRIBE_NOT_YET_RETRY_S
     resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3))
     assert resp.status == 200
-    # Open: 3 and 4; 5 is ahead — not yet.
+    # Open: 3 and 4; 5 is ahead — not yet: open once the notice for 5 may
+    # land, two steps (2 x 60 s) after the raise to 3 just now.
     resp = await gfs.post(
         "/gfs/channels/subscribe", json=_subscribe_body(gfs.ch, gfs.member, 5)
     )
     assert resp.status == 429
-    assert int(resp.headers["Retry-After"]) >= 1
+    assert 110 <= int(resp.headers["Retry-After"]) <= 120
+    # "Not yet" creates nothing: no seat row.
+    repo = gfs.app_[gfs_channel_repo_key]
+    assert not await repo.has_subscription(gfs.ch.id, gfs.member.instance_id)
     # A closed epoch: refused.
     await _refused(
         await gfs.post(

@@ -161,13 +161,20 @@ class GfsPublishRetryQueue:
         "_full_logged",
         "_queues",
         "_send",
+        "_solo",
         "_stop",
         "_task",
         "_wake",
     )
 
-    def __init__(self, send: PublishSender) -> None:
+    def __init__(
+        self, send: PublishSender, *, solo_kinds: frozenset[str] = frozenset()
+    ) -> None:
+        """*solo_kinds*: kinds (``event_type``) that give up ALONE — the
+        items queued behind such a head keep their own attempts (a seat
+        request that never lands must not take content down with it)."""
         self._send = send
+        self._solo = solo_kinds
         self._queues: dict[tuple[str, str], _ConnQueue] = {}
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -225,6 +232,8 @@ class GfsPublishRetryQueue:
         )
         key = (conn_id, item.space_id)
         conn = self._queues.get(key)
+        if conn is not None and queued in conn.items:
+            return True  # the same send is already waiting: once is enough
         if conn is None:
             conn = _ConnQueue(due_at=self._due(0, retry_after_s))
             self._queues[key] = conn
@@ -333,6 +342,21 @@ class GfsPublishRetryQueue:
                 )
                 continue
             conn.retries_done += 1
+            if (
+                conn.retries_done >= len(GFS_PUBLISH_RETRY_BACKOFF_S)
+                and item.event_type in self._solo
+            ):
+                conn.items.popleft()
+                conn.retries_done = 0
+                log.warning(
+                    "GFS publish retry: giving up on %s@%s to %s after %d"
+                    " retries (what waited behind it goes on)",
+                    item.event_type,
+                    item.space_id,
+                    conn_id,
+                    len(GFS_PUBLISH_RETRY_BACKOFF_S),
+                )
+                continue
             if conn.retries_done >= len(GFS_PUBLISH_RETRY_BACKOFF_S):
                 log.warning(
                     "GFS publish retry: giving up on %d GFS publish(es) to %s"

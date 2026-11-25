@@ -361,3 +361,42 @@ async def test_a_429_of_one_space_does_not_skip_the_gfs_other_spaces(fast):
     queue.enqueue("g1", _item(2, space_id="sp-2"))
     await queue._run_due()
     assert calls == ["sp-1", "sp-2"]
+
+
+async def test_the_same_send_waiting_twice_is_queued_once():
+    """Callers that ask again while a send waits (a subscribe on every
+    config change) add nothing: one queued item, one POST when it lands."""
+    queue = GfsPublishRetryQueue(_ScriptedSend([]))
+    assert queue.enqueue("g1", _item(1))
+    assert queue.enqueue("g1", _item(1))
+    assert len(queue._queues[("g1", "sp-1")].items) == 1
+    assert queue.enqueue("g1", _item(2))
+    assert len(queue._queues[("g1", "sp-1")].items) == 2
+
+
+async def test_a_solo_kind_gives_up_alone_and_what_waited_behind_it_goes_on(
+    fast, caplog
+):
+    """A seat request that never lands must not take the content queued
+    behind it down with it: the solo head gives up alone."""
+    budget = len(mod.GFS_PUBLISH_RETRY_BACKOFF_S)
+    sent: list[str] = []
+
+    async def send(conn_id, item):
+        sent.append(item.event_type)
+        return TRANSIENT if item.event_type == "channel_subscribe" else DELIVERED
+
+    queue = GfsPublishRetryQueue(send, solo_kinds=frozenset({"channel_subscribe"}))
+    queue.enqueue(
+        "g1", GfsPublish(space_id="sp-1", event_type="channel_subscribe", payload={})
+    )
+    queue.enqueue("g1", _item(2))
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        await queue.start()
+        try:
+            await _idle(queue)
+        finally:
+            await queue.stop()
+    assert sent.count("channel_subscribe") == budget
+    assert sent[-1] == "space_post_public"  # it went on
+    assert "giving up on channel_subscribe@sp-1" in caplog.text

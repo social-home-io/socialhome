@@ -2486,10 +2486,10 @@ async def test_a_subscribe_the_gfs_says_not_yet_to_is_retried_until_seated(
     real = GfsChannelService._post
     answers = [chan_mod.PublishOutcome.transient(30.0)]
 
-    async def not_yet(self, client, url, body, conn):
+    async def not_yet(self, client, url, body, conn, **kw):
         if url.endswith("/subscribe") and answers:
             return answers.pop()
-        return await real(self, client, url, body, conn)
+        return await real(self, client, url, body, conn, **kw)
 
     monkeypatch.setattr(GfsChannelService, "_post", not_yet)
     conn = (await svc._capable())[0]
@@ -2504,6 +2504,9 @@ async def test_a_subscribe_the_gfs_says_not_yet_to_is_retried_until_seated(
     # The retry (what the queue sends when due) takes the seat.
     assert (await svc._retry_send(conn.id, item)).kind == "delivered"
     assert (SPACE_ID, grant.channel_id, grant.epoch) in svc._seated
-    # A replay for a grant that is no longer current is dropped.
+    # A replay for a grant that is no longer current has nothing left to
+    # send: done (no refusal WARNING), and it seats nothing.
+    svc._seated.clear()
     stale = replace(item, payload={"channel_id": grant.channel_id, "epoch": 1})
-    assert (await svc._retry_send(conn.id, stale)).kind == "permanent"
+    assert (await svc._retry_send(conn.id, stale)).kind == "delivered"
+    assert not svc._seated
