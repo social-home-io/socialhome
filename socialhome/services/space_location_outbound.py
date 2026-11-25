@@ -501,7 +501,7 @@ class SpaceLocationOutbound:
                 space_id,
                 FederationEventType.SPACE_LOCATION_UPDATED,
                 payload,
-                only_instances=await self._members.writer_households(space_id),
+                only_instances=await self._members.households(space_id),
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(

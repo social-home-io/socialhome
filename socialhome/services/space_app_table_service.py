@@ -689,7 +689,7 @@ class SpaceTableService(BusPublisherMixin):
                             ),
                         )
                     )
-        targets = await self._writers.writer_households(space_id)
+        targets = await self._writers.households(space_id)
         if not targets:
             return
         try:

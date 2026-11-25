@@ -11,6 +11,7 @@ import time
 from types import SimpleNamespace
 
 import orjson
+import pytest
 
 from socialhome.crypto import (
     b64url_encode,
@@ -30,7 +31,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.gfs_mailbox import OwnMailbox
 from socialhome.domain.gfs_server import GFS_KEY_SUITE_ED25519, GfsServer
-from socialhome.domain.space import WRITER_ROLES, SpaceRole
+from socialhome.domain.space import SpaceRole
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys, new_mailbox_root
 from socialhome.federation.member_card import build_card, verify_card
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
@@ -39,10 +40,6 @@ from socialhome.services.gfs_envelope_sender import normalize_gfs_base
 from socialhome.services.space_member_directory import (
     HELLO_RESNAPSHOT_S,
     SpaceMemberDirectory,
-)
-from socialhome.services.space_writer_households import (
-    SEAT_ROLES,
-    SpaceWriterHouseholds,
 )
 
 GFS = "https://gfs.example.org"
@@ -200,6 +197,18 @@ class FakeSeats:
         return []
 
 
+class _RoleSeats(FakeSeats):
+    """The roster mirror by ROLE (instance id -> the role of its live seat),
+    for the directory's own default seat set (production wiring)."""
+
+    def __init__(self, roles: dict[str, str]) -> None:
+        super().__init__()
+        self._roles = roles
+
+    async def list_instances_with_roles(self, space_id, roles):
+        return [i for i, r in self._roles.items() if r in roles]
+
+
 class FakeFederationRepo:
     def __init__(self) -> None:
         self.instances: dict[str, SimpleNamespace] = {}
@@ -219,16 +228,6 @@ class FakeFederationRepo:
         self.proto_set.append((instance_id, version))
 
 
-class _RoleSeats:
-    """A roster mirror by role: instance id -> the role of its live seat."""
-
-    def __init__(self, roles: dict[str, str]) -> None:
-        self._roles = roles
-
-    async def list_instances_with_roles(self, space_id, roles):
-        return [i for i, r in self._roles.items() if r in roles]
-
-
 class FakeWriters:
     def __init__(self) -> None:
         self.writers: dict[str, set[str]] = {}
@@ -236,7 +235,7 @@ class FakeWriters:
         #: (``_invitee_with`` narrows it to the ones it names).
         self.everyone = True
 
-    async def writer_households(self, space_id):
+    async def households(self, space_id):
         return frozenset(self.writers.get(space_id, set()))
 
     async def may_receive(self, space_id, instance_id):
@@ -381,7 +380,12 @@ def _event(event_type, sender, to, payload, space_id=SPACE) -> FederationEvent:
 class World:
     """One household (``me``) running the directory, with fakes around it."""
 
-    def __init__(self, *, host: dict | None = None) -> None:
+    def __init__(
+        self, *, host: dict | None = None, roles: dict[str, str] | None = None
+    ) -> None:
+        """*roles* (instance id -> role): the roster mirror answers by role
+        and the directory builds its own seat set from it, exactly as
+        production does (no ``seated_households`` passed)."""
         self.me = _hh()
         self.host = host or self.me
         self.spaces = FakeSpaceRepo()
@@ -389,13 +393,13 @@ class World:
         self.writers = FakeWriters()
         self.mailboxes = FakeMailboxes()
         self.fed = FakeFederation()
-        self.seats = FakeSeats()
+        self.seats = FakeSeats() if roles is None else _RoleSeats(roles)
         self.seated: list[str] = []
         self._seq = 0
         self.dir = SpaceMemberDirectory(
             space_repo=self.spaces,
             federation_repo=self.fed_repo,
-            seated_households=self.writers,
+            seated_households=self.writers if roles is None else None,
             mailboxes=self.mailboxes,
             instance_id=self.me["id"],
             identity_seed=self.me["seed"],
@@ -536,17 +540,12 @@ async def test_a_household_without_a_live_seat_never_receives_a_directory():
     assert all(rowonly["id"] not in _ids(d) for d in w.fed.directories)
 
 
-def _role_world(roles_of, *, roles=SEAT_ROLES):
-    """A world whose roster mirror answers by ROLE through the real
-    :class:`SpaceWriterHouseholds` (not the fake's set)."""
-    w = World()
+def _role_world():
+    """A member *a* and a follower, the roster mirror answering by role and
+    the directory wired as in production (its own seat set)."""
     a, follower = _hh(), _hh()
+    w = World(roles={a["id"]: "member", follower["id"]: "subscriber"})
     w.member(a, follower)
-    w.dir._seat_holders = SpaceWriterHouseholds(
-        _RoleSeats({a["id"]: "member", follower["id"]: roles_of}),
-        own_instance_id=w.me["id"],
-        roles=roles,
-    )
     return w, a, follower
 
 
@@ -554,7 +553,7 @@ async def test_a_follower_household_gets_the_directory_like_a_member():
     """Same path (owner 2026-11-24): a follower's seat is a seat — it gets
     the directory (the host's card and every seated household's) and its
     card goes to the members, exactly like a member household."""
-    w, a, follower = _role_world("subscriber")
+    w, a, follower = _role_world()
     await w.card_from(follower, _card(follower, gfs=GFS))
     await w.card_from(a, _card(a, gfs=GFS))
     await w.dir.reconcile(SPACE)
@@ -566,15 +565,25 @@ async def test_a_follower_household_gets_the_directory_like_a_member():
     assert any(follower["id"] in _ids(d) for d in to_member)
 
 
-async def test_the_writer_role_rule_alone_would_leave_the_follower_out():
-    """The regression the same-path rule closes: with writer seats only
-    (the pre-v_96 wiring) the follower got no directory at all."""
-    w, a, follower = _role_world("subscriber", roles=WRITER_ROLES)
-    await w.card_from(follower, _card(follower, gfs=GFS))
-    await w.card_from(a, _card(a, gfs=GFS))
-    await w.dir.reconcile(SPACE)
-    assert w.fed.directories
-    assert all(d["to"] != follower["id"] for d in w.fed.directories)
+async def test_the_directory_counts_every_seat_by_default():
+    """Production builds the directory without ``seated_households``: its
+    own seat set is every role (a follower's too), from the roster mirror —
+    the policy lives in the service, not at a call site."""
+    w, a, follower = _role_world()
+    assert await w.dir._seat_holders.may_receive(SPACE, follower["id"])
+    assert await w.dir._seat_holders.may_receive(SPACE, a["id"])
+    assert not await w.dir._seat_holders.may_receive(SPACE, _hh()["id"])
+    with pytest.raises(ValueError):
+        SpaceMemberDirectory(
+            space_repo=w.spaces,
+            federation_repo=w.fed_repo,
+            mailboxes=w.mailboxes,
+            instance_id=w.me["id"],
+            identity_seed=w.me["seed"],
+            identity_pk=w.me["pk"],
+            keywrap_pk=w.me["kw_pub"],
+            keywrap_sig=w.me["kw_sig"],
+        )
 
 
 async def test_a_recipient_below_v89_is_skipped():

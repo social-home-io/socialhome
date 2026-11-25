@@ -1877,8 +1877,11 @@ class FederationService:
     ) -> frozenset[str]:
         """The households of *instance_ids* a fan-out from here does not try
         to reach (v_96): in a space that runs an opaque channel here, those
-        holding no writer seat (followers) for which we hold neither a peer
-        row nor a mesh claim — a follower that came through a GFS. We have
+        holding no writer seat (followers) for which we hold no path of
+        our own — no peer row, or only the lazy directory seat its member
+        card made (a ``space_session`` row without ``relay_via``: its
+        mailbox address, not a path beside the channel), and no mesh claim
+        — a follower that came through a GFS. We have
         no path to one but a mesh route discovery per event (N × M at a
         global space's scale); it is reached through its channel seat, or
         by the host, which holds its space-session row. A member household
@@ -1890,8 +1893,15 @@ class FederationService:
             return frozenset()
 
         async def _unreached(iid: str) -> bool:
-            if await self._federation_repo.get_instance(iid) is not None:
-                return False
+            peer = await self._federation_repo.get_instance(iid)
+            if peer is not None:
+                # A directory seat (a member card's lazy space-session row,
+                # no ``relay_via``) is the follower's mailbox address, not a
+                # path beside its channel seat: still skipped, or every
+                # member would copy every item to every follower (N × M).
+                return peer.source is InstanceSource.SPACE_SESSION and not (
+                    peer.relay_via
+                )
             claim = await self._federation_repo.get_space_member_version(iid)
             # A version claimed over the mesh: reachable.
             return claim is None or claim[0] <= 0

@@ -52,7 +52,7 @@ class SpaceWriterHouseholds:
         self._own_instance_id = own_instance_id
         self._roles = frozenset(r.value for r in roles)
 
-    async def writer_households(self, space_id: str) -> frozenset[str]:
+    async def households(self, space_id: str) -> frozenset[str]:
         """Every other household holding a live seat of our roles (writer
         seats by default) in ``space_id``."""
         ids = await self._seats.list_instances_with_roles(space_id, self._roles)
@@ -61,7 +61,7 @@ class SpaceWriterHouseholds:
     async def may_receive(self, space_id: str, instance_id: str) -> bool:
         """Whether household ``instance_id`` holds a seat of our roles (a
         member's seat by default) in ``space_id``."""
-        return instance_id in await self.writer_households(space_id)
+        return instance_id in await self.households(space_id)
 
 
 async def holds_member_seat(

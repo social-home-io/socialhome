@@ -34,7 +34,7 @@ async def test_member_households_leave_out_followers_and_ourselves():
         }
     )
     members = SpaceWriterHouseholds(seats, own_instance_id="me")
-    assert await members.writer_households("sp") == {"house-a", "house-m"}
+    assert await members.households("sp") == {"house-a", "house-m"}
     assert "subscriber" not in seats.asked[0]
     assert await members.may_receive("sp", "house-m")
     assert not await members.may_receive("sp", "house-f")
@@ -46,7 +46,7 @@ async def test_the_seat_set_counts_every_role_a_followers_included():
     like a member, so its seat counts; ourselves still never."""
     seats = _Seats({"house-m": "member", "house-f": "subscriber", "me": "owner"})
     seated = SpaceWriterHouseholds(seats, own_instance_id="me", roles=SEAT_ROLES)
-    assert await seated.writer_households("sp") == {"house-m", "house-f"}
+    assert await seated.households("sp") == {"house-m", "house-f"}
     assert seats.asked[0] == {r.value for r in SpaceRole}
     assert await seated.may_receive("sp", "house-f")
     assert not await seated.may_receive("sp", "me")

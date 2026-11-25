@@ -119,10 +119,6 @@ from socialhome.services.gfs_relay_inbound import (
 from socialhome.services.peer_unpair_service import PeerUnpairService
 from socialhome.services.space_member_directory import SpaceMemberDirectory
 from socialhome.services.space_service import SpaceService
-from socialhome.services.space_writer_households import (
-    SEAT_ROLES,
-    SpaceWriterHouseholds,
-)
 
 try:
     import pytest_socket  # noqa: F401
@@ -480,9 +476,6 @@ async def _household(
         directory = SpaceMemberDirectory(
             space_repo=space_repo,
             federation_repo=federation_repo,
-            seated_households=SpaceWriterHouseholds(
-                remote_members, own_instance_id=instance_id, roles=SEAT_ROLES
-            ),
             mailboxes=mailbox_service,
             instance_id=instance_id,
             identity_seed=ident.private_key,
@@ -2116,16 +2109,15 @@ async def test_space_content_rides_the_mailbox_and_the_gfs_sees_no_instance_id(
         assert leak not in wire
 
 
-async def test_a_follow_seated_household_reaches_the_host_only_at_its_mailbox(
-    mailbox_households, gfs
-):
+async def test_a_follow_seated_household_holds_the_hosts_card(mailbox_households, gfs):
     """Same path (owner 2026-11-24): a follower is a member with the
     read-only role on every path. A household already seated in one of the
     host's spaces that then FOLLOWS another takes that seat over the pair
     it has (no sealed bootstrap, so no card in an ACK): the host's member
     directory must give it the host's card exactly like a member household,
     or every frame of the followed space falls back to the
-    instance-addressed relay and the GFS sees both instance ids."""
+    instance-addressed relay and the GFS sees both instance ids (the
+    traffic itself: ``tests/protocol/test_gfs_seated_space_mailbox_only``)."""
     a, b = mailbox_households
     for h in (a, b):  # the direct §D2 redeem over the existing seat
         h.coordinator.attach_to(h.federation)
@@ -2151,23 +2143,10 @@ async def test_a_follow_seated_household_reaches_the_host_only_at_its_mailbox(
     assert (await _rows(a))[(followed.id, b.instance_id)].get("card", {}).get(
         "instance_id"
     ) == b.instance_id, "the follower holds no card of the host"
-    a_mailbox, b_mailbox = _mailbox_of(a, gfs), _mailbox_of(b, gfs)
-
-    gfs.mailbox.clear()
-    a.received.clear()
-    await b.federation.broadcast_to_space_members(
-        followed.id, FederationEventType.SPACE_POST_CREATED, _post_payload()
-    )
-    await gfs.drain()
-    assert [e.payload["content"] for e in a.received] == [POST_MARKER]
-    await a.federation.broadcast_to_space_members(
-        followed.id, FederationEventType.SPACE_COMMENT_CREATED, {"content": "c"}
-    )
-    await gfs.drain()
-    assert [to for to, _ in gfs.mailbox] == [a_mailbox, b_mailbox]
-    wire = json.dumps(gfs.mailbox)
-    for leak in (a.instance_id, b.instance_id, followed.id):
-        assert leak not in wire
+    # ... and the host holds the follower's, which members get in turn.
+    assert (await _rows(b))[(followed.id, a.instance_id)]["card"][
+        "instance_id"
+    ] == a.instance_id
 
 
 async def test_one_mailbox_serves_every_space_of_the_household(mailbox_households, gfs):

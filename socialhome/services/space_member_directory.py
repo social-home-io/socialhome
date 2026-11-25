@@ -1,7 +1,8 @@
 """Member key cards and the host-signed member directory (v_89).
 
 Owner decision 2026-11-09: every space member is equal however its
-household is reached, so ANY writer member — not only the host — must be
+household is reached, so ANY seated household — a member's or, since
+v_96, a follower's (same path) — not only the host — must be
 able to reach a household that reaches the space only through a GFS, and a
 GFS-only household must be able to check who is talking to it. This service
 does both on top of the household's ONE mailbox per GFS
@@ -283,7 +284,6 @@ class SpaceMemberDirectory:
         *,
         space_repo: AbstractSpaceRepo,
         federation_repo: AbstractFederationRepo,
-        seated_households: SpaceWriterHouseholds,
         mailboxes: GfsMailboxService,
         instance_id: str,
         identity_seed: bytes,
@@ -291,11 +291,21 @@ class SpaceMemberDirectory:
         keywrap_pk: bytes,
         keywrap_sig: str,
         remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
+        seated_households: SpaceWriterHouseholds | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._spaces = space_repo
         self._federation_repo = federation_repo
+        if seated_households is None:
+            if remote_member_repo is None:
+                raise ValueError(
+                    "the member directory needs the roster mirror "
+                    "(remote_member_repo) or seated_households"
+                )
+            seated_households = SpaceWriterHouseholds(
+                remote_member_repo, own_instance_id=instance_id, roles=SEAT_ROLES
+            )
         #: Every live seat of a space, a follower's included
         #: (``roles=SEAT_ROLES``): a follower is reached like a member.
         self._seat_holders = seated_households
@@ -1746,7 +1756,7 @@ class SpaceMemberDirectory:
         """Seated households at v_89 (every role, a follower's included)."""
         assert self._federation is not None
         out = []
-        for inst in sorted(await self._seat_holders.writer_households(space_id)):
+        for inst in sorted(await self._seat_holders.households(space_id)):
             if await self._federation.space_member_supports(
                 inst, min_version=FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH
             ):

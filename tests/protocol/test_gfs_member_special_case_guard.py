@@ -334,7 +334,10 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/domain/federation.py": 3,
         # +1 (v_96): gfs_reached_followers — the follower households only
         # the host reaches (it re-sends a delegated admin's rekey to them).
-        "socialhome/federation/federation_service.py": 19,
+        # +1 (v_96 same path): channel_reached_followers treats a follower's
+        # lazy directory seat (no relay_via) as its mailbox address, not a
+        # path beside its channel seat (follower subset, no N × M copy).
+        "socialhome/federation/federation_service.py": 20,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
         "socialhome/federation/routed_envelope.py": 1,

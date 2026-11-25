@@ -1569,16 +1569,22 @@ its id, comments and reactions by theirs), so a household seated on two
 servers or also reached over federation still applies an item once. Two duplicates remain, both
 deduped on receipt and accepted for P3: a GFS-reached MEMBER (it has a
 mailbox card in the directory) still gets the federation copy through the
-v_91 multi upload next to its channel frame — a GFS-reached FOLLOWER has no
-card and is reached only through its seat; and a household that held a
+v_91 multi upload next to its channel frame — a GFS-reached FOLLOWER holds
+a card too since the same-path fix (the member directory serves every seat,
+so its own traffic and the traffic to it ride the mailboxes, never the
+instance-addressed relay), but a non-host household's lazy seat from that
+card is only its mailbox address: content still reaches it through its
+channel seat; and a household that held a
 space-keyed seat before the space got a channel keeps it (and still applies
 a space-keyed item from a member below v_96) until P6/P7 remove that path.
 A third: the host's OWN items also reach a GFS-reached follower over
 federation (it holds the follower's space-session row) — one multi upload
 per GFS per host item; the same deferred lever. A non-host household does
 not try a GFS-reached follower at all in a space with a channel
-(`FederationService.channel_reached_followers`: no peer row, no mesh claim,
-no writer seat — never for the content key or the roster), nor queues it
+(`FederationService.channel_reached_followers`: no writer seat and no path
+of its own — no peer row, or only the lazy directory seat a card made (a
+`space_session` row without `relay_via`), and no mesh claim — never for the
+content key or the roster), nor queues it
 pictures it did not ask for, nor tries it in the mesh-announce sweep. A
 delegated admin's rotation reaches such a follower through the owner, which
 re-sends the admin's signed rekey to the follower-only households it holds

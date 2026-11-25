@@ -485,7 +485,7 @@ from .services.space_service import own_inviter_proof
 from .services.space_summary_service import SpaceSummaryService
 from .services.space_sync_status import SpaceSyncStatusService
 from .services.space_writer_cert_service import SpaceWriterCertService
-from .services.space_writer_households import SEAT_ROLES, SpaceWriterHouseholds
+from .services.space_writer_households import SpaceWriterHouseholds
 from .services.space_zone_outbound import SpaceZoneOutbound
 from .services.space_zone_service import SpaceZoneService
 from .services.sticky_federation_outbound import StickyFederationOutbound
@@ -1138,10 +1138,6 @@ def _build_gfs_mailboxes(
     directory = SpaceMemberDirectory(
         space_repo=repos.space,
         federation_repo=repos.federation,
-        # Every seat, a follower's too: a follower is reached like a member.
-        seated_households=SpaceWriterHouseholds(
-            repos.space_remote_member, own_instance_id=instance_id, roles=SEAT_ROLES
-        ),
         mailboxes=mailboxes,
         instance_id=instance_id,
         identity_seed=identity.identity_seed,
@@ -2793,7 +2789,7 @@ def _build_sync_pages(
     writers = SpaceWriterHouseholds(seat_repo, own_instance_id=own_instance_id)
 
     async def _writers(space_id: str) -> set[str]:
-        return set(await writers.writer_households(space_id))
+        return set(await writers.households(space_id))
 
     pages.attach_push(sender=federation_service, writers=_writers)
     federation_service._event_registry.register(
