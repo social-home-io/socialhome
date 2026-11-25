@@ -515,8 +515,8 @@ selects it in two cases:
   back unless that one fails too
   ([gfs-relay.md](protocol/gfs-relay.md), "Failover").
   **Member directory.** `SpaceMemberDirectory` on the host passes the
-  cards it holds to the space's writer-seat member households (never
-  followers); a member seats each carded household lazily as a
+  cards it holds to every seated household (followers too since v_96,
+  same path); a member seats each carded household lazily as a
   `space_session` row with no `relay_via` (static-static keys from the
   card's key-wrap key), so its own fan-out reaches that household's
   mailbox. A seat is not a pairing: a pairing handshake between the

@@ -1344,7 +1344,13 @@ member's card and no host hop.
   `SNAPSHOT_MAX` + 1); the member tracks the indices it got, and only a
   complete snapshot moves its `dir_seq`: a lost (or repeated) part leaves
   it behind, so its next sync echo gets a fresh snapshot.
-  **Scale limit:** a directory of more than 2 900 households is sent
+  Within the bound, ours and the writer seats' cards go before
+  followers' (v_96: followers are listed too, so a popular space passes
+  500 on followers alone, and the cut never costs a member a host's or
+  another member's card). A follower whose card was cut is reached at its
+  channel seat and by the host; one that misses a writer's card takes that
+  writer's frames through the host hop. **Scale limit:** a directory of
+  more than 2 900 households (followers counted) is sent
   without `members` and then drops nobody — a lost removal is repaired
   only up to that size. The member replaces its directory
   wholesale: a carded household not in `members` loses its card, row and

@@ -24,6 +24,7 @@ from aiohttp.test_utils import TestServer
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.space import JoinMode, SpaceType
+from socialhome.federation import gfs_relay_transport as grt
 from tests.federation.test_invite_bootstrap_gfs_e2e import (
     POST_MARKER,
     _FakeGfs,
@@ -36,9 +37,40 @@ from tests.federation.test_invite_bootstrap_gfs_e2e import (
 
 pytestmark = pytest.mark.security
 
+#: The only envelopes of the follow itself that may go instance-addressed,
+#: each for a reason that holds for a MEMBER's join over an existing seat
+#: alike (no follower special case): the §D2 redeem and its ACK carry no
+#: routing ``space_id`` (a SPACE_* event without one never rides a
+#: mailbox — the receiver refuses it there), and the joiner's first
+#: ``SPACE_MEMBER_CARD`` ("seated") goes before the host's directory for
+#: that space has reached it (a card of space X is never used for Y).
+SETUP_ALLOWED: frozenset[str] = frozenset(
+    {
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM.value,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK.value,
+        FederationEventType.SPACE_MEMBER_CARD.value,
+    }
+)
+
 
 @pytest.fixture
-async def seated(tmp_path):
+def instance_addressed(monkeypatch) -> list[str]:
+    """Every envelope the instance-addressed relay carries (event types)."""
+    seen: list[str] = []
+    send = grt.GfsRelayTransport.send
+
+    async def _spy(self, *, instance, envelope_dict, gfs_url=None):
+        seen.append(str(envelope_dict.get("event_type")))
+        return await send(
+            self, instance=instance, envelope_dict=envelope_dict, gfs_url=gfs_url
+        )
+
+    monkeypatch.setattr(grt.GfsRelayTransport, "send", _spy)
+    return seen
+
+
+@pytest.fixture
+async def seated(tmp_path, instance_addressed):
     gfs = _FakeGfs()
     server = TestServer(gfs.app())
     await server.start_server()
@@ -50,6 +82,7 @@ async def seated(tmp_path):
         for h in (a, b):  # the direct §D2 redeem over the existing seat
             h.coordinator.attach_to(h.federation)
         member_space = await _join(a, b, gfs)
+        instance_addressed.clear()  # the first link's bootstrap: by design
         followed = await b.space_service.create_space(
             owner_username=b.username,
             name="Followed",
@@ -70,9 +103,20 @@ async def seated(tmp_path):
     await server.close()
 
 
-async def test_no_envelope_of_a_seated_space_is_instance_addressed(seated):
+async def test_the_follow_over_an_existing_seat_goes_instance_addressed_only_to_seat(
+    seated, instance_addressed
+):
+    """The follow itself: the redeem, its ACK and the first card only."""
+    assert instance_addressed, "the follow went over the relay"
+    assert set(instance_addressed) <= SETUP_ALLOWED
+
+
+async def test_no_envelope_of_a_seated_space_is_instance_addressed(
+    seated, instance_addressed
+):
     gfs, a, b, spaces = seated
     mailboxes = {_mailbox_of(a, gfs), _mailbox_of(b, gfs)}
+    instance_addressed.clear()
     gfs.mailbox.clear()
     a.received.clear()
     for space in spaces:
@@ -87,8 +131,9 @@ async def test_no_envelope_of_a_seated_space_is_instance_addressed(seated):
     assert [e.payload["content"] for e in a.received] == [POST_MARKER] * 2
     addressed = [to for to, _ in gfs.mailbox]
     assert addressed, "the traffic crossed the GFS"
-    instance_addressed = [
-        to for to in addressed if to in (a.instance_id, b.instance_id)
-    ]
-    assert instance_addressed == []
+    seen_after = list(instance_addressed)
+    by_id = [to for to in addressed if to in (a.instance_id, b.instance_id)]
+    assert by_id == []
     assert set(addressed) <= mailboxes
+    # Nothing at all went through the instance-addressed relay.
+    assert seen_after == []

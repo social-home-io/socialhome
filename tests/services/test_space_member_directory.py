@@ -196,6 +196,9 @@ class FakeSeats:
             return [SimpleNamespace(role=SpaceRole.ADMIN.value)]
         return []
 
+    async def list_instances_with_roles(self, space_id, roles):
+        return sorted(self.admins.get(space_id, set()))
+
 
 class _RoleSeats(FakeSeats):
     """The roster mirror by ROLE (instance id -> the role of its live seat),
@@ -663,6 +666,28 @@ async def test_snapshot_is_bounded_and_carries_mailbox_cards_first(monkeypatch):
     (snap,) = w.fed.to(r["id"])
     assert snap["payload"]["snapshot"] is True
     assert _ids(snap) == {m1["id"], m2["id"]}
+
+
+async def test_a_bounded_snapshot_keeps_the_writers_cards_before_followers(
+    monkeypatch,
+):
+    """v_96: followers are listed too, so a popular space passes
+    ``SNAPSHOT_MAX`` on followers alone. The cut never drops a writer's
+    card for a follower's: writer seats (hosts and members) go first."""
+    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 2)
+    fans = [_hh() for _ in range(4)]
+    w1, w2 = _hh(), _hh()
+    roles = {h["id"]: "subscriber" for h in fans}
+    roles |= {w1["id"]: "member", w2["id"]: "admin"}
+    w = World(roles=roles)
+    w.member(w1, w2, *fans)
+    for h in (w1, w2, *fans):
+        w.spaces.put_card(SPACE, _card(h, gfs=GFS))
+    w.writers.writers[SPACE] = set(roles)  # seat_all: all told us "seated"
+    w.seat_all()
+    await w.dir.reconcile(SPACE, snapshot_to={fans[0]["id"]})
+    (snap,) = [d for d in w.fed.to(fans[0]["id"]) if d["payload"].get("cards")]
+    assert _ids(snap) == {w1["id"], w2["id"]}
 
 
 async def test_a_household_that_stops_being_a_writer_is_removed_once():

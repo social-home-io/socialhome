@@ -76,7 +76,7 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
 from ..domain.member_card import InvalidMemberCard, MemberCard, parse_card
-from ..domain.space import SpaceRole
+from ..domain.space import WRITER_ROLES, SpaceRole
 from ..federation.gfs_relay_transport import MailboxTarget
 from ..federation.host_equivalence import acting_hosts, serves_as_host
 from ..federation.member_card import build_card, verify_card
@@ -96,6 +96,9 @@ if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
 
 log = logging.getLogger(__name__)
+
+#: The writer seats' roles, as the roster mirror stores them.
+_WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
 #: Most cards one directory snapshot carries in all (and a receiver takes).
 SNAPSHOT_MAX: int = 500
@@ -392,7 +395,7 @@ class SpaceMemberDirectory:
             )
 
     async def _seat_ended(self, space_id: str, instance_id: str) -> None:
-        """The roster ended *instance_id*'s last member seat in *space_id*:
+        """The roster ended *instance_id*'s last seat in *space_id*:
         a card a directory gave us goes with it, and its lazy seat ends once
         no space we share justifies it — on a household acting as host too
         (the owner removed a household a delegated admin seated). The
@@ -1564,7 +1567,7 @@ class SpaceMemberDirectory:
         self, space_id: str, card: MemberCard, flag: bool
     ) -> None:
         """Owner side: list a card a delegated admin passed on, for a
-        household our roster holds a member's seat for."""
+        household our roster holds a seat for (any role)."""
         inst = card.instance_id
         await self._spaces.add_space_instance(space_id, inst)
         changed = await self._store(space_id, card)
@@ -1986,7 +1989,18 @@ class SpaceMemberDirectory:
             for i, c in sorted(listed.items())
             if i != to and (everything or c.mailbox is not None)
         ]
-        picked.sort(key=lambda c: c.mailbox is None)
+        # Mailbox cards first, and within each, ours and the writer seats'
+        # before followers': followers are listed too (v_96), so a popular
+        # space passes the bound on followers alone, and the cut must never
+        # cost a member the card of a host or another member.
+        writers = {self._instance_id}
+        if self._seats is not None:
+            writers |= set(
+                await self._seats.list_instances_with_roles(
+                    space_id, _WRITER_ROLE_VALUES
+                )
+            )
+        picked.sort(key=lambda c: (c.mailbox is None, c.instance_id not in writers))
         if len(picked) > SNAPSHOT_MAX:
             log.warning(
                 "directory: a snapshot holds %d cards — sending the first %d",
@@ -2052,7 +2066,7 @@ class SpaceMemberDirectory:
 
     async def _adopt_waiting(self, space_id: str) -> None:
         """Backstop of :meth:`_adopt`: a waiting card whose household holds
-        a member's seat by now (a seat event we missed)."""
+        a seat by now (a seat event we missed)."""
         for host in await self._hosts(space_id):
             wait = (await self._doc(space_id, host)).get("wait")
             for inst in sorted(wait) if isinstance(wait, dict) else []:
@@ -2162,7 +2176,7 @@ class SpaceMemberDirectory:
         if card is not None and card.instance_id == sender:
             # The roster decides, at once: a card only a household that no
             # longer acts as host listed, or one of a household our roster
-            # holds no member's seat for, counts for nothing.
+            # holds no seat for, counts for nothing.
             return await self._usable(space_id, sender, doc, hosts)
         # A card of another space counts only where the roster is ours to
         # trust: the sender acts as the space's host here (a second space

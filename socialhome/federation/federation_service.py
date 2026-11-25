@@ -1913,9 +1913,10 @@ class FederationService:
     ) -> frozenset[str]:
         """The households of *instance_ids* only the HOST reaches (v_96): a
         follower household (no writer seat) whose one row here is a
-        space-session seat (it came through a GFS). A delegated admin holds
-        no row and no card for one, so the owner passes the admin's rekey
-        on to exactly these (``SpaceService.relay_admin_rekey_to_followers``)
+        space-session seat (it came through a GFS). A delegated admin may
+        hold no row or card for one (no mailbox, or the owner's directory
+        has not reached it), so the owner passes the admin's rekey on to
+        exactly these (``SpaceService.relay_admin_rekey_to_followers``)
         — the owner-side mirror of :meth:`channel_reached_followers`. A
         household holding a writer seat, a paired one, one we hold no row
         for and ourselves are never in it."""

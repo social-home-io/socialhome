@@ -1451,7 +1451,7 @@ from __future__ import annotations
 #:   keywrap_sig, proto_version, rev, mailbox | null, sig_suite, sig}``) and
 #:   gives it to the host once — in the sealed redeem / ACK, else
 #:   ``SPACE_MEMBER_CARD``. The host passes the cards on to writer-seat
-#:   member households only in ``SPACE_MAILBOX_DIRECTORY`` (a bounded
+#:   member households (every seat since v_96) in ``SPACE_MAILBOX_DIRECTORY`` (a bounded
 #:   snapshot to a newcomer, deltas after). A member seats a carded
 #:   household lazily, so ANY member's fan-out reaches its mailbox, and a
 #:   GFS-reached household takes a mailbox frame only from a sender whose
@@ -1620,8 +1620,10 @@ from __future__ import annotations
 #:   member; a follow is an auto-approved join. A writer cert gains a
 #:   signed ``reader`` field (a follower that may comment or react), and
 #:   the follower switches decide what a reader cert may carry. Global
-#:   spaces use the opaque channel for members and followers alike. No new
-#:   event type. Breaking — no follower back-compat.
+#:   spaces use the opaque channel for members and followers alike; the
+#:   member directory serves a follower household like a member's (its
+#:   card to the host, the directory to it), so its traffic rides the GFS
+#:   mailboxes. No new event type. Breaking — no follower back-compat.
 #:   **Fallback**: a peer below v_96 cannot follow and is issued no reader
 #:   cert (it could not verify one: the signature covers ``reader``); a
 #:   follower household below v_96 gets no cert and no writer key. A

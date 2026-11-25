@@ -7543,9 +7543,13 @@ class SpaceService(
         """Owner side (v_96): re-send a seed-holding delegated admin's rekey
         to the follower households only the owner reaches. Returns how many.
 
-        The admin holds no row or mailbox card for a follower that came
-        through a GFS, and sync does not carry the key, so its rotation
-        alone leaves that follower reading nothing until the owner rotates.
+        The admin reaches a follower that came through a GFS only through
+        the follower's directory card (same path since v_96: held when the
+        follower has a mailbox and the owner's directory reached the
+        admin), and sync does not carry the key — so this is the backstop
+        for a follower without one, which the admin's rotation alone would
+        leave reading nothing until the owner rotates (a duplicate copy is
+        applied once: same key, same epoch).
         The owner, which applied the rekey (``meta`` — the admin's
         authority-signed ``space_content_key``, unchanged), sends it over the
         ordinary member rekey path (each copy with the household's own
