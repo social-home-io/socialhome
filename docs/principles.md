@@ -1202,7 +1202,7 @@ concedes, exactly:
    one GFS mailbox (GFS URL, mailbox id, mailbox key) — so its traffic and
    the traffic to it ride the mailboxes, never the instance-addressed relay
    (the GFS sees neither household's instance id). A card is keys and an
-   address, never a right.
+   address, never a right. (Owner sign-off 2026-11-25.)
 3. **The owner publishes into its own channel** (relaxes the v_51 rule that
    the owner never publishes there). It sends its own household's items,
    moderation outcomes and items whose author could not reach the channel,
