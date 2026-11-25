@@ -79,6 +79,11 @@ checked against the signed page, not against who delivered it.
   from any member-seated provider to one household whose BEGIN named an
   older page. Never to a follower-only household, never to a non-member;
   a GFS relays it sealed, as content.
+  A page sealed under an epoch whose content key has not landed at the
+  receiver yet (a household that rotated while the receiver was away
+  syncs before its rekey arrives) is no refusal: it is parked in the same
+  pending-decrypts cache as a §25.6 chunk and taken when
+  `SpaceContentKeyImported` fires for that epoch.
 - `SPACE_SYNC_BEGIN`: `page` (a reference to the requester's newest page)
   and `buckets` (≤ 8: the listings the stream should end with; Phase 2 on
   the incremental BEGIN to an acting host). Phase 3 as built adds `rows:

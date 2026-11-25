@@ -15,6 +15,7 @@ import pytest
 
 from socialhome.canonical_json import canonical_str
 from socialhome.crypto import ed25519_public_key
+from socialhome.domain.events import SpaceContentKeyImported
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.space import (
@@ -33,6 +34,8 @@ from socialhome.federation.sync.space.pages import (
     PAGE_PUSH_INTERVAL_S,
     SyncPageService,
 )
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
 from socialhome.sync_page import (
     MAX_FETCH_BYTES,
     MAX_FETCH_ROWS,
@@ -779,6 +782,50 @@ async def test_a_page_that_does_not_open_is_a_one_line_refusal(caplog):
         )
     await env.svc.wait_idle()
     assert "does not open" in caplog.text and "Traceback" not in caplog.text
+
+
+class _KeyLater:
+    """The content key of the page's epoch lands only after the page: the
+    page of a household that rotated while we were away (a delegated
+    admin's rekey racing its own sync push)."""
+
+    def __init__(self, inner: _Crypto) -> None:
+        self.inner = inner
+        self.have = False
+
+    async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
+        if not self.have:
+            raise RuntimeError(
+                f"SpaceContentEncryption: missing epoch {epoch} for space {space_id!r}"
+            )
+        return await self.inner.decrypt_chunk(
+            space_id=space_id, epoch=epoch, sync_id=sync_id, ciphertext=ciphertext
+        )
+
+
+async def test_a_page_ahead_of_its_key_waits_for_the_key_and_is_taken(caplog):
+    """A page sealed under an epoch whose key has not landed yet is no
+    refusal (no WARNING): it is parked like a sync chunk and taken the
+    moment ``SpaceContentKeyImported`` fires for that epoch."""
+    env = _Env(own=ME, seed=None)
+    later = _KeyLater(env.crypto)
+    env.svc._crypto = later
+    bus = EventBus()
+    env.svc.attach_pending_decrypts(PendingDecryptsCache(bus=bus))
+    page = _signed(vector=_vec(2), seq=50, issued_at=T0)
+    sealed = await _sealed_for_member(page)
+    with caplog.at_level(logging.INFO):
+        assert not await env.svc.receive(
+            space_id=SPACE, sync_id="s-1", provider=HOST, sealed=sealed
+        )
+    await env.svc.wait_idle()
+    assert "does not open" not in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert env.held() is None
+    later.have = True
+    await bus.publish(SpaceContentKeyImported(space_id=SPACE, epoch=sealed["epoch"]))
+    await env.svc.wait_idle()
+    assert env.held() == page
 
 
 async def test_equivocation_is_detected_logged_and_flagged(caplog):

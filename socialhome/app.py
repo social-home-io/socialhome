@@ -2575,6 +2575,7 @@ def _wire_federation_stack(
         federation_service=federation_service,
         host_contact=host_contact,
         own_instance_id=identity.instance_id,
+        pending_decrypts=app[K.pending_decrypts_cache_key],
     )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
@@ -2732,6 +2733,7 @@ def _build_sync_pages(
     federation_service: FederationService,
     host_contact: HostContact,
     own_instance_id: str,
+    pending_decrypts: PendingDecryptsCache | None = None,
 ) -> SyncPageService:
     """v_95 sync pages (``docs/protocol/sync-pages.md``): the signer pushes
     each new page (at most hourly) to every member household as
@@ -2750,6 +2752,8 @@ def _build_sync_pages(
     )
     provider.attach_sync_pages(pages)
     receiver.attach_sync_pages(pages)
+    if pending_decrypts is not None:
+        pages.attach_pending_decrypts(pending_decrypts)
     scheduler.attach_sync_pages(pages.ref_for, pages.buckets_for, pages.have_for)
     status.attach_pages(pages.position)
 

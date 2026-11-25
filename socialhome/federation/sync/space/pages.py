@@ -130,10 +130,22 @@ if TYPE_CHECKING:
     from ....domain.federation import FederationEvent
     from ....domain.space import Space
     from ....repositories.space_sync_page_repo import AbstractSpaceSyncPageRepo
+    from ....services.pending_decrypts_cache import PendingDecryptsCache
     from .exporter import ResourceExporter
     from .page_state import PageStateHasher
 
 log = logging.getLogger(__name__)
+
+
+class _KeyNotYet(Exception):
+    """The page is sealed under a content-key epoch we do not hold yet
+    (``decrypt_chunk`` raises ``RuntimeError`` naming a "missing epoch" — the
+    same signal the §25.6 chunk receiver parks on)."""
+
+    def __init__(self, epoch: int) -> None:
+        super().__init__(epoch)
+        self.epoch = epoch
+
 
 #: The ``page_sealed`` of a ``SPACE_SYNC_PAGE`` is never larger than this
 #: (a ≤ 1 KiB page + an 8 KiB vector, base64 and AES-GCM overhead).
@@ -860,6 +872,7 @@ class SyncPageService:
         "_on_change",
         "_own_instance_id",
         "_parked",
+        "_pending_decrypts",
         "_probes",
         "_push_pending",
         "_pushed",
@@ -933,6 +946,10 @@ class SyncPageService:
         self._checks: OrderedDict[str, _Compare] = OrderedDict()
         #: space → the (epoch, signer) whose equivocation we saw.
         self._conflicts: OrderedDict[str, tuple[int, str]] = OrderedDict()
+        #: Parks a page that arrived ahead of its epoch's content key
+        #: (:meth:`attach_pending_decrypts`); ``None``: such a page waits
+        #: for the next sync instead.
+        self._pending_decrypts: PendingDecryptsCache | None = None
         #: Phase 3 verified fetch (:meth:`attach_member_fetch`); ``None``:
         #: not wired — only the hosts are asked.
         self._seats: _DeliverySeats | None = None
@@ -1532,6 +1549,33 @@ class SyncPageService:
             if not stored:
                 await self._compare_if_unjudged(space_id)
             return stored
+        except _KeyNotYet as exc:
+            # No refusal: the page is ahead of its key (a household that
+            # rotated while we were away pushes or syncs before its rekey
+            # lands here). It is taken when the key lands, else at the
+            # next sync — the page held stays meanwhile.
+            log.info(
+                "sync page: the page of space %s from %s is sealed under "
+                "epoch %d, whose key has not landed yet — %s",
+                space_id,
+                provider,
+                exc.epoch,
+                "taken when it does"
+                if self._pending_decrypts is not None
+                else "waits for the next sync",
+            )
+            if self._pending_decrypts is not None:
+
+                async def _again() -> None:
+                    await self.receive(
+                        space_id=space_id,
+                        sync_id=sync_id,
+                        provider=provider,
+                        sealed=sealed,
+                    )
+
+                self._pending_decrypts.stash(space_id, exc.epoch, _again)
+            return False
         except (PageRefused, UnsupportedPageSuite, UnsupportedPageSealSuite) as exc:
             log.warning(
                 "sync page: refused the page of space %s from %s: %s",
@@ -1572,6 +1616,12 @@ class SyncPageService:
             plaintext = await self._crypto.decrypt_chunk(
                 space_id=space_id, epoch=epoch, sync_id=sync_id, ciphertext=ciphertext
             )
+        except RuntimeError as exc:
+            if "missing epoch" in str(exc):
+                raise _KeyNotYet(epoch) from exc
+            raise PageRefused(
+                f"page_sealed does not open ({type(exc).__name__})"
+            ) from exc
         except Exception as exc:
             raise PageRefused(
                 f"page_sealed does not open ({type(exc).__name__})"
@@ -1691,6 +1741,12 @@ class SyncPageService:
             log.exception("sync page: status update for %s failed", space_id)
 
     # ─── Compare (member) ─────────────────────────────────────────────
+
+    def attach_pending_decrypts(self, cache: PendingDecryptsCache) -> None:
+        """Park a page sealed under an epoch whose content key has not
+        landed yet, and take it the moment the key does — the cache the
+        §25.6 chunk receiver parks its chunks in (one path for both)."""
+        self._pending_decrypts = cache
 
     def attach_hosts(self, hosts: Callable[[Space], Awaitable[list[str]]]) -> None:
         """``hosts(space)`` — the households acting as the space's host here:
