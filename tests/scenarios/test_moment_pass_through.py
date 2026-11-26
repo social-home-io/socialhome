@@ -193,13 +193,19 @@ async def test_a_mixed_household_stores_a_far_moment_for_the_adult_only(db, env)
 # ── Per-author relay cap: forwarding only, never storing ────────────────
 
 
-async def test_over_the_author_relay_cap_a_moment_is_still_stored(env, monkeypatch):
+async def test_over_the_author_relay_cap_a_moment_is_still_stored(env):
     """The cap stops this household passing a flood on; the people here
-    who look (``max_hops=1``, hop 1) still get every moment."""
-    monkeypatch.setattr(outbound_mod, "MOMENT_RELAY_AUTHOR_CAP", 2)
+    who look (``max_hops=1``, hop 1) still get every moment. Three top-level
+    moments signed in one 15-min window: the third is over the posting rate
+    limit (1 + 1 of slack)."""
+    # A window boundary an hour ago, so all three share a slot.
+    _slot_start = datetime.fromtimestamp(
+        (datetime.now(UTC).timestamp() // 900 - 4) * 900, UTC
+    )
     for n in range(3):
         ev = _moment_event(hop_count=1)
         ev.payload["moment_id"] = f"m-{n}"
+        ev.payload["occurred_at"] = _slot_start.isoformat()
         await env["inbound"]._on_moment_created(ev)
     for n in range(3):
         assert await env["moments"].get(f"m-{n}") is not None
@@ -211,6 +217,7 @@ async def test_over_the_author_relay_cap_a_moment_is_still_stored(env, monkeypat
     # A second copy of the capped (stored) moment is no free pass.
     ev = _moment_event(hop_count=1)
     ev.payload["moment_id"] = "m-2"
+    ev.payload["occurred_at"] = _slot_start.isoformat()
     await env["inbound"]._on_moment_created(ev)
     relayed = {
         c.kwargs["payload"]["moment_id"]

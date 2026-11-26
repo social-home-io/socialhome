@@ -176,7 +176,9 @@ always derived from the *current* content.
 
 ## Rate limit
 
-One **top-level** moment per author per 15 minutes.
+One **top-level** moment per author per 15 minutes (``MOMENT_RATE_WINDOW``,
+``domain/moment.py``); relaying households hold a signed author to the same
+rule (see [Relay rules: per-author cap](#relay-rules-per-author-cap)).
 ``moment_repo.count_recent_for_author`` ignores rows where
 ``parent_moment_id IS NOT NULL`` so back-and-forth replies are
 unconstrained. Reactions are exempt.
@@ -272,39 +274,57 @@ copy cost (n−1) + (n−1)(n−2) + (n−1)(n−2)(n−3) envelopes per moment
 
 ### Relay rules: per-author cap
 
-Owner decision 2026-11-24 ("cap per author"; no admin cap on how far
-people look). With reach up to 5 hops, one author could make every
-household within 5 hops pass on a flood. So a household **forwards** at
-most ``MOMENT_RELAY_AUTHOR_CAP`` (30) moments of one author per
-``MOMENT_RELAY_AUTHOR_WINDOW_S`` (1 h, sliding), in
-``MomentFederationOutbound.relay_inbound``. Local policy: nothing on the
-wire changes, no protocol bump, no sync change.
+Owner decisions 2026-11-24 ("cap per author", based on the posting rate
+limit; no admin cap on how far people look). With reach up to 5 hops, one
+author could make every household within 5 hops pass on a flood. The
+author's household already takes at most one top-level moment per person
+per 15 minutes ([Rate limit](#rate-limit), `429 MOMENT_RATE_LIMIT`); a
+relaying household holds the **signed author** to the same rule, from the
+same constant (``MOMENT_RATE_WINDOW`` in ``domain/moment.py``), in
+``MomentFederationOutbound.relay_inbound``. Anything above it comes from a
+household ignoring the rule, so dropping the forward is safe. Local
+policy: nothing on the wire changes, no protocol bump, no sync change.
 
-* **Key: the signed author.** The budget is per (``origin_instance_id``,
+* **Key: the signed author.** Budgets are per (``origin_instance_id``,
   ``author_user_id``) — both inside the origin signature — never the
   neighbour that handed the copy over, so relaying through many
   households doesn't launder a flood. The origin is in the key so a
   household naming another household's person (whose home we don't know
   yet) spends only its own budget, never theirs.
-* **What counts.** Every first forward of a create — stored here or not
-  (a stored copy is no licence to forward; a refused create leaves no
-  seen-map mark, so each later copy of it is charged again). Deletes of
-  moments this household neither relayed nor stored, or whose create it
-  capped, count on a budget of their own, the same size — posting never
-  starves deletes, and a delete for a made-up id (new everywhere) can't
-  travel uncapped, at any claimed hop. Free: a delete of a moment whose
-  create this household relayed lately (seen-map, 48 h) or that wiped a
-  moment stored here (a capped delete is never resent, so dropping one
-  would leave the moment on every household behind us for weeks); a
-  closer copy of a moment already relayed (bounded by the seen-map: at
-  most two gated and two ungated waves per moment); totals (every
-  receiver already budgets them per origin, and they are relayed only for
-  a moment held or relayed here). A copy is charged even when the look
-  gate then hands it to nobody.
+* **Top-level moments: the posting rate limit, signed.** At most
+  ``MOMENT_RELAY_PER_RATE_WINDOW`` (2: one, plus one of slack for an origin
+  clock stepped back or a re-send after our restart) new top-level moments
+  per author per 15-minute slot of their **signed** ``occurred_at``
+  (``moment_rate_slot``). Two moments an honest household let through are
+  at least 15 minutes apart by its own clock, so they never share a slot
+  (no clock skew between households enters). Counting by the signed time,
+  not by arrival, means an outbox backlog — an hour of moments delivered
+  at once after we were offline — all goes. A moment signed more than
+  300 s ahead of our clock (the §24.11 envelope skew) is not relayed: it
+  would open slots no honest author has; past slots are already bounded by
+  the 48 h relay age.
+* **Replies: 30 an hour.** The origin doesn't rate-limit replies, so they
+  get ``MOMENT_RELAY_AUTHOR_CAP`` (30) forwards per author per sliding hour
+  of arrival — a lively hour of replies.
+* **Deletes.** Free: a delete of a moment whose create this household
+  relayed lately (seen-map, 48 h) or that wiped a moment stored here (a
+  capped delete is never resent, so dropping one would leave the moment on
+  every household behind us for weeks). Charged, 30 an hour on a budget of
+  their own (posting never starves deletes): a delete of a moment this
+  household neither relayed nor stored, or whose create it capped — a
+  delete for a made-up id is new everywhere and would otherwise travel
+  uncapped, at any claimed hop.
+* **Not counted twice.** A copy of a moment already relayed is dropped by
+  the seen-map before any budget, and a closer copy is relayed again free
+  (bounded there: at most two gated and two ungated waves per moment);
+  totals are free (every receiver already budgets them per origin, and
+  they are relayed only for a moment held or relayed here). A stored copy
+  is no licence to forward: a refused create leaves no seen-map mark, so
+  each later copy of it is charged again. A copy is charged even when the
+  look gate then hands it to nobody.
 * **Over the cap.** The forward is dropped: nothing is said to the sender,
-  a later copy of that create is charged again (it goes once the window
-  frees up), and an INFO line is logged at most once per window per
-  author (ids quoted and cut to 64 characters).
+  and an INFO line is logged at most once per window per author and kind
+  (ids quoted and cut to 64 characters).
 * **Forwarding only, never storing.** The inbound handler stores a moment
   for the people here who look (``max_hops``, follows) before the relay
   runs; the cap doesn't touch that. Storing costs only this household,
@@ -314,59 +334,68 @@ wire changes, no protocol bump, no sync change.
   becomes *d − 1* envelopes at every hop.
 * **Nobody is exempt, nobody needs to be.** The author's own household
   never relays its own moments (its fan-out is the origin path, under the
-  origin's own one-top-level-per-15-min limit). The origin's directly
-  paired households get every moment it sends (that is the origin's own
-  upload, between households that chose to pair), and are capped like any
-  relay when they pass them on — the first and biggest amplification
-  point.
-* **Memory.** The shared ``RateLimiter`` with ``max_keys`` =
-  ``RELAY_AUTHOR_KEYS_MAX`` (10 000, least recently touched dropped
-  first — a refused key is touched by every refusal, so ordinary traffic
-  doesn't evict it; a flood of 10 000 new keys can, which only resets
-  budgets). Keys are a 16-byte digest of (kind, origin, author), so a
-  peer-chosen id can't make one large: a few hundred authors with a stamp
-  or two each for honest traffic, ≈ 10–15 MB at worst. In memory only, no table, no migration; a restart
-  forgets the budgets (at most one more window's worth).
+  posting rate limit). The origin's directly paired households get every
+  moment it sends (that is the origin's own upload, between households
+  that chose to pair), and are capped like any relay when they pass them
+  on — the first and biggest amplification point.
+* **Memory.** The shared ``RateLimiter`` with ``max_keys`` (least recently
+  touched dropped first — a refused key is touched by every refusal, so
+  ordinary traffic doesn't evict it; a flood of new keys can, which only
+  resets budgets): rate slots ``RELAY_SLOT_KEYS_MAX`` (50 000, like the
+  seen-map: every top-level moment relayed in 48 h, ≤ 2 stamps, ~0.3 KB
+  each ≈ 15 MB at worst), reply / delete budgets ``RELAY_AUTHOR_KEYS_MAX``
+  (10 000, ≤ 30 stamps ≈ 10–15 MB at worst). Keys are a 16-byte digest,
+  so a peer-chosen id can't make one large. In memory only, no table, no
+  migration; a restart forgets them.
 
-**Values against normal use.** The origin takes at most 4 top-level
-moments per person an hour (one per 15 min); replies are not limited
-there, so 30 leaves room for an hour of lively replies. An honest author
-never meets the cap; only an origin that ignores its own limit does.
+**Cost.** Nothing is added on the wire. Per relaying household and
+author: top-level ≤ 2 new moments per 15-minute slot of signed time — at
+most 8 an hour going forward, and once per 48 h a back-dated burst of up
+to 2 × 193 slots ≈ 390 (the 48 h relay age bounds the past); replies
+≤ 30 an hour; deletes of unknown moments ≤ 30 an hour. Each forward goes
+to *d* − 1 peers: at *d* = 10 and the steady maximum (8 + 30 creates,
+30 deletes) ≈ 340 create envelopes ≈ 0.9 MB (2.5 KB each) plus 270 delete
+envelopes (< 1 KB) an hour. Free traffic rides on those: one delete per
+relayed or stored moment, a closer copy at most two gated and two ungated
+waves per moment (hard bound ≈ 4 × that; honest meshes see the first
+wave), and after our restart one delete per moment of that author stored
+here. An honest author (≤ 4 top-level an hour) never meets the cap.
+Network-wide, a flooding origin at 1 moment a second, reach 5, *d* = 10
+tree (≈ 74 000 envelopes per moment): uncapped ≈ 3 600 × 74 000 ≈ 266
+million envelopes an hour; capped, every hop past the first carries at
+most 8 top-level + 30 replies of it, ≈ 38 × 74 000 ≈ 2.8 million (first
+waves) — plus the origin's own *d* direct copies, which its paired
+households can stop by unpairing or banning it. These numbers hold for a
+flooder with one identity (below).
 
-**Cost.** Nothing is added on the wire. Per relaying household, one
-author's charged forwards are at most 30 creates + 30 unknown-moment
-deletes an hour, each to *d* − 1 peers: at *d* = 10, 270 create envelopes
-≈ 0.7 MB (2.5 KB each) plus 270 delete envelopes (< 1 KB). The free
-traffic rides on those: one delete per relayed or stored moment, and a
-closer copy at most two gated and two ungated waves per moment — so the
-hard bound is ≈ 4 × (270 + 270) envelopes per author an hour, plus, after
-a restart of this household (which forgets which creates it capped), one
-delete per moment of that author stored here; honest meshes see the
-first wave only. Network-wide, a flooding origin at 1 moment a second,
-reach 5, *d* = 10 tree (≈ 74 000 envelopes per moment): uncapped
-≈ 3 600 × 74 000 ≈ 266 million envelopes an hour; capped, every hop past
-the first carries at most 30 of them, ≈ 30 × 74 000 ≈ 2.2 million (first
-waves; the closer-copy and delete multipliers above apply to both) — plus
-the origin's own *d* direct copies, which its paired households can stop
-by unpairing or banning it. These numbers hold for a flooder with one
-identity; one that mints identities is not bounded by this cap (below).
+**Open (recommendations, not built).**
 
-**Left out.** A per-neighbour cap (an honest relay forwards everyone's
-moments; it would throttle them). A per-origin cap and anything against
-minted identities: author ids and household keys are free to make, so no
-per-identity cap stops a household that mints them — a paired neighbour
-minting a fresh origin key per 30 moments is relayed at its full inbound
-rate. That is bounded by the per-household inbound budget (600 envelopes
-a minute over the inbox and the GFS legs) and by banning or unpairing
-that household (relay policy); a second budget per neighbour for origins
-we hold no key for is a possible follow-up. Also left out: an admin
-setting for the cap, capping storage (above), refusing over-long author
-ids at the inbound handler (the cap's keys and log line are bounded
-anyway). Residual: a pass-through household (it stores nothing) that
-forgot relaying a create (48 h, a restart) charges that moment's delete
-to the delete budget — an author deleting more than 30 such old moments
-in an hour leaves the rest on households behind it that got them only
-through this one, until they expire.
+* *Many fresh author identities from one malicious household.* Author ids
+  are free to mint, so every per-author cap is bypassed by a household
+  that mints authors — its paired neighbours relay each new author's
+  first moments at full rate. Today's bound is that household's inbound
+  budget (600 envelopes a minute over the inbox and the GFS legs) and
+  banning or unpairing it (relay policy).
+* *A per-origin-household cap.* Recommended next step, cheap: the same
+  slot rule keyed on the signed origin alone, sized for a household's
+  people (e.g. 2 × the number of people a household plausibly has, say
+  20 per 15-minute slot) — it stops one household minting authors under
+  its own key. It doesn't stop minting origin keys (also free, but each
+  new origin needs a paired household willing to relay it as hop 2, which
+  then shows up as that neighbour); against that, a per-neighbour budget
+  for origins we hold no key for is the backstop. Neither is built: no
+  flood has been seen, and a household-size number is a guess the owner
+  should make.
+
+**Left out.** A per-neighbour cap on every relay (an honest relay
+forwards everyone's moments; it would throttle them), an admin setting
+for the cap, capping storage (above), refusing over-long author ids at the
+inbound handler (the cap's keys and log line are bounded anyway).
+Residual: a pass-through household (it stores nothing) that forgot
+relaying a create (48 h, a restart) charges that moment's delete to the
+delete budget — an author deleting more than 30 such old moments in an
+hour leaves the rest on households behind it that got them only through
+this one, until they expire.
 
 ## Reach — how far a person's moments go (v_96)
 
@@ -1466,8 +1495,9 @@ the one place a reply is written.
   ``tests/protocol/test_moment_reach.py`` and
   ``tests/protocol/test_moment_forward_only.py``.
 - Per-author relay cap: ``MomentFederationOutbound._author_budget_allows``
-  (``MOMENT_RELAY_AUTHOR_CAP``, ``MOMENT_RELAY_AUTHOR_WINDOW_S``,
-  ``RELAY_AUTHOR_KEYS_MAX``) on the shared ``socialhome/rate_limiter.py``
+  (``MOMENT_RELAY_PER_RATE_WINDOW`` over ``domain/moment.py``
+  ``MOMENT_RATE_WINDOW`` / ``moment_rate_slot``; ``MOMENT_RELAY_AUTHOR_CAP``
+  for replies and deletes) on the shared ``socialhome/rate_limiter.py``
   (``max_keys``).
 - Domain: `socialhome/domain/moment.py` (caps + dataclasses);
   events at `socialhome/domain/events.py`.

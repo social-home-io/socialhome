@@ -21,6 +21,7 @@ from socialhome.domain.federation import (
 from socialhome.domain.federation_retention import relayed_moment_key
 from socialhome.moment_origin import NO_RELAY_FIELD, REACH_FIELD, verify_moment_origin
 from socialhome.services import moment_federation_outbound as outbound_mod
+from socialhome.services import moment_service
 from socialhome.services.moment_federation_outbound import (
     MomentFederationOutbound,
 )
@@ -664,14 +665,15 @@ async def test_the_seen_map_is_bounded(stack, monkeypatch):
     for i in range(5):
         await out.relay_inbound(
             event_type=FederationEventType.MOMENT_CREATED,
-            payload=_relayed({"moment_id": f"m-{i}"}),
+            # One author each: the per-author relay cap is not under test.
+            payload=_relayed({"moment_id": f"m-{i}", "author_user_id": f"a-{i}"}),
             from_instance="peer-sender",
         )
     assert len(out._relayed) == 3
     # The oldest fell out: a late copy of it is relayed once more.
     await out.relay_inbound(
         event_type=FederationEventType.MOMENT_CREATED,
-        payload=_relayed({"moment_id": "m-0"}),
+        payload=_relayed({"moment_id": "m-0", "author_user_id": "a-0"}),
         from_instance="peer-sender",
     )
     assert fed.send_event.await_count == 6
@@ -1555,10 +1557,27 @@ async def test_a_hop_4_5_delete_follows_the_farthest_look_since_our_start(stack)
 
 
 async def _relay_create(out, n: int, sender: str = "peer-sender", **over) -> int:
+    """A reply (the hourly budget); top-level moments: :func:`_relay_top`."""
     return await out.relay_inbound(
         event_type=FederationEventType.MOMENT_CREATED,
-        payload=_relayed({"moment_id": f"m-{n}", **over}),
+        payload=_relayed({"moment_id": f"m-{n}", "parent_moment_id": "p", **over}),
         from_instance=sender,
+    )
+
+
+#: A rate-window boundary an hour ago, so slots are predictable.
+_SLOT_START = datetime.fromtimestamp(
+    (datetime.now(UTC).timestamp() // 900 - 4) * 900, UTC
+)
+
+
+async def _relay_top(out, n: int, minute: float, **over) -> int:
+    """A top-level moment signed *minute* minutes after a slot start."""
+    occurred = (_SLOT_START + timedelta(minutes=minute)).isoformat()
+    return await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_relayed({"moment_id": f"t-{n}", "occurred_at": occurred, **over}),
+        from_instance="peer-sender",
     )
 
 
@@ -1573,9 +1592,13 @@ def capped(stack, monkeypatch):
 
 
 def test_the_cap_values():
-    """30 relayed moments per author an hour: one top-level moment per
-    15 min (4 an hour, the origin's own limit) plus a lively hour of
-    replies; memory bounded at 10 000 authors."""
+    """Top-level: the posting rate limit, one per 15 min (+1 slack) — the
+    same constant the API enforces. Replies: a lively hour, 30. Memory
+    bounded at 10 000 authors / 50 000 slots."""
+    assert outbound_mod.MOMENT_RATE_WINDOW == moment_service.MOMENT_RATE_WINDOW
+    assert outbound_mod.MOMENT_RATE_WINDOW == timedelta(minutes=15)
+    assert outbound_mod.MOMENT_RELAY_PER_RATE_WINDOW == 2
+    assert outbound_mod.RELAY_SLOT_KEYS_MAX == outbound_mod.RELAY_SEEN_MAX
     assert outbound_mod.MOMENT_RELAY_AUTHOR_CAP == 30
     assert outbound_mod.MOMENT_RELAY_AUTHOR_WINDOW_S == 3600
     assert outbound_mod.RELAY_AUTHOR_KEYS_MAX == 10_000
@@ -1768,6 +1791,50 @@ async def test_a_made_up_delete_claiming_closer_is_charged_again(capped):
         )
     ]
     assert sent == [1, 1, 0, 0]
+
+
+async def test_top_level_moments_follow_the_posting_rate_limit(stack):
+    """One per 15-min slot of the signed time, plus one of slack: a third
+    in the same slot comes only from a household ignoring the rule."""
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    sent = [await _relay_top(out, n, minute) for n, minute in enumerate((0, 5, 10))]
+    assert sent == [1, 1, 0]
+    # The next slot opens by the signed time, not by when copies arrive: an
+    # outbox backlog delivering an hour of moments at once all goes.
+    backlog = [await _relay_top(out, 10 + k, 15 * k + 1) for k in range(1, 4)]
+    assert backlog == [1, 1, 1]
+
+
+async def test_honest_moments_15_minutes_apart_never_share_a_slot(stack):
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    sent = [await _relay_top(out, n, 7.5 + 15 * n) for n in range(4)]
+    assert sent == [1, 1, 1, 1]
+
+
+async def test_a_re_sent_top_level_moment_does_not_count_twice(stack):
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    assert await _relay_top(out, 0, 0) == 1
+    assert await _relay_top(out, 0, 0) == 0  # seen-map: same moment
+    assert await _relay_top(out, 1, 1) == 1  # the slot still has its slack
+
+
+async def test_top_level_and_replies_have_separate_budgets(capped):
+    out, _fed, _clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    assert await _relay_top(out, 0, 0) == 1
+
+
+async def test_a_top_level_moment_signed_in_the_future_is_not_relayed(stack):
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    ahead = (datetime.now(UTC) + timedelta(minutes=6)).isoformat()
+    assert await _relay_top(out, 0, 0, occurred_at=ahead) == 0
+    near = (datetime.now(UTC) + timedelta(minutes=4)).isoformat()
+    assert await _relay_top(out, 1, 0, occurred_at=near) == 1
 
 
 async def test_totals_are_not_charged(stack, monkeypatch):

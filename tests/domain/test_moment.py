@@ -26,6 +26,7 @@ from socialhome.domain.moment import (
     MOMENT_MAX_LIFETIME_DAYS,
     MOMENT_MAX_REACH,
     MOMENT_MIN_RETENTION_DAYS,
+    MOMENT_RATE_WINDOW,
     MOMENT_REACTION_MAX_EMOJI_BYTES,
     MOMENT_RELAY_MAX_AGE_HOURS,
     REACTION_REACH_AUTHOR,
@@ -38,6 +39,7 @@ from socialhome.domain.moment import (
     extract_hashtags,
     is_valid_moment_reaction,
     merged_reaction_view,
+    moment_rate_slot,
     moment_too_old_to_relay,
     normalize_hashtag,
     reaction_counts_valid,
@@ -273,3 +275,41 @@ def test_reach_defaults_and_bounds():
     assert created.reach == MOMENT_DEFAULT_REACH
     deleted = MomentDeleted(moment_id="m", author_user_id="u", origin_instance_id="o")
     assert deleted.reach is None  # legacy row: unmarked, as before v_96
+
+
+# ── moment_rate_slot: the posting rate limit, as relays apply it ─────────
+
+
+def test_moments_a_rate_window_apart_never_share_a_slot():
+    start = datetime(2026, 11, 24, 12, 7, 30, tzinfo=UTC)
+    slots = {
+        moment_rate_slot((start + k * MOMENT_RATE_WINDOW).isoformat(), now=start)
+        for k in range(-8, 1)
+    }
+    assert len(slots) == 9
+
+
+def test_one_window_is_one_slot():
+    now = datetime(2026, 11, 24, 12, 30, tzinfo=UTC)
+    a = moment_rate_slot(datetime(2026, 11, 24, 12, 0, tzinfo=UTC).isoformat(), now=now)
+    b = moment_rate_slot(
+        datetime(2026, 11, 24, 12, 14, 59, tzinfo=UTC).isoformat(), now=now
+    )
+    c = moment_rate_slot(
+        datetime(2026, 11, 24, 12, 15, tzinfo=UTC).isoformat(), now=now
+    )
+    assert a == b != c
+
+
+@pytest.mark.parametrize("value", [None, "", "not a time"])
+def test_no_slot_without_a_time(value):
+    assert moment_rate_slot(value) is None
+
+
+def test_no_slot_for_a_moment_signed_in_the_future():
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+    assert moment_rate_slot((now + timedelta(seconds=301)).isoformat(), now=now) is None
+    assert (
+        moment_rate_slot((now + timedelta(seconds=299)).isoformat(), now=now)
+        is not None
+    )
