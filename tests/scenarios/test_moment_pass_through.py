@@ -208,3 +208,19 @@ async def test_over_the_author_relay_cap_a_moment_is_still_stored(env, monkeypat
         for c in env["federation"].send_event.call_args_list
     }
     assert relayed == {"m-0", "m-1"}
+
+
+async def test_a_delete_of_a_held_moment_goes_on_whatever_the_cap(env, monkeypatch):
+    """The relay forgot the create (seen-map: 48 h, lost on restart) and
+    the author's budgets are spent: the delete of a moment held here still
+    goes on — else households further on keep it for weeks."""
+    await env["inbound"]._on_moment_created(_moment_event(hop_count=1))
+    assert await env["moments"].get("m-pass") is not None
+    env["outbound"]._relayed.clear()
+    monkeypatch.setattr(outbound_mod, "MOMENT_RELAY_AUTHOR_CAP", 0)
+    env["federation"].send_event.reset_mock()
+    ev = _moment_event(hop_count=1)
+    ev.event_type = FederationEventType.MOMENT_DELETED
+    await env["inbound"]._on_moment_deleted(ev)
+    sent = [c.kwargs for c in env["federation"].send_event.call_args_list]
+    assert [c["event_type"] for c in sent] == [FederationEventType.MOMENT_DELETED]

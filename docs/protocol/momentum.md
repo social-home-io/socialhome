@@ -286,17 +286,25 @@ wire changes, no protocol bump, no sync change.
   households doesn't launder a flood. The origin is in the key so a
   household naming another household's person (whose home we don't know
   yet) spends only its own budget, never theirs.
-* **What counts.** The first forward of a create, and of a delete for a
-  moment whose create we did not relay (a delete for a made-up id is new
-  everywhere, so it would otherwise travel uncapped). Free: a closer copy
-  of a moment already relayed (same moment, at most one more wave), a
-  delete of a moment we relayed (it must follow its moment), and totals
-  (every receiver already budgets them per origin, and they are relayed
-  only for a moment held or relayed here).
+* **What counts.** The first forward of a create this household didn't
+  hold yet. Deletes of moments it never held nor relayed (a delete for a
+  made-up id is new everywhere, so it would otherwise travel uncapped)
+  count on a budget of their own, the same size — posting never starves
+  deletes. Free: anything about a moment this household knows — a delete
+  that removed a row held here or follows a create relayed lately (a
+  delete must always follow its moment; a capped delete is never resent,
+  so dropping one would leave the moment on every household behind us for
+  weeks), a replayed create of a moment held here (after a restart a
+  neighbour can't spend the author's budget with old copies), a closer
+  copy of a moment already relayed (bounded by the seen-map: at most two
+  gated and two ungated waves per moment) — and totals (every receiver
+  already budgets them per origin, and they are relayed only for a moment
+  held or relayed here). A copy is charged even when the look gate then
+  hands it to nobody.
 * **Over the cap.** The forward is dropped: nothing is said to the sender,
-  the seen-map keeps no mark (a copy arriving once the window frees up is
-  relayed as usual), and an INFO line is logged at most once per window
-  per author.
+  the seen-map keeps no mark (a later copy of that create, once the window
+  frees up, is relayed as usual), and an INFO line is logged at most once
+  per window per author (ids quoted and cut to 64 characters).
 * **Forwarding only, never storing.** The inbound handler stores a moment
   for the people here who look (``max_hops``, follows) before the relay
   runs; the cap doesn't touch that. Storing costs only this household,
@@ -313,9 +321,11 @@ wire changes, no protocol bump, no sync change.
   point.
 * **Memory.** The shared ``RateLimiter`` with ``max_keys`` =
   ``RELAY_AUTHOR_KEYS_MAX`` (10 000, least recently touched dropped
-  first — a busy author's key is touched by every refusal, so it stays):
-  a few hundred authors with a stamp or two each for honest traffic,
-  ≈ 15 MB at worst. In memory only, no table, no migration; a restart
+  first — a refused key is touched by every refusal, so ordinary traffic
+  doesn't evict it; a flood of 10 000 new keys can, which only resets
+  budgets). Keys are a 16-byte digest of (kind, origin, author), so a
+  peer-chosen id can't make one large: a few hundred authors with a stamp
+  or two each for honest traffic, ≈ 10–15 MB at worst. In memory only, no table, no migration; a restart
   forgets the budgets (at most one more window's worth).
 
 **Values against normal use.** The origin takes at most 4 top-level
@@ -324,21 +334,33 @@ there, so 30 leaves room for an hour of lively replies. An honest author
 never meets the cap; only an origin that ignores its own limit does.
 
 **Cost.** Nothing is added on the wire. Per relaying household, one
-author costs at most 30 × (*d* − 1) forwarded envelopes an hour — at
-*d* = 10 that is 270 envelopes ≈ 0.7 MB (2.5 KB each). Network-wide, a
-flooding origin at 1 moment a second, reach 5, *d* = 10 tree
-(≈ 74 000 envelopes per moment): uncapped ≈ 3 600 × 74 000 ≈ 266 million
-envelopes an hour; capped, every hop past the first carries at most 30 of
-them, ≈ 30 × 74 000 ≈ 2.2 million — and the origin's own *d* direct
-copies, which its paired households can stop by unpairing or banning it.
+author's charged forwards are at most 30 creates + 30 unknown-moment
+deletes an hour, each to *d* − 1 peers: at *d* = 10, 270 create envelopes
+≈ 0.7 MB (2.5 KB each) plus 270 delete envelopes (< 1 KB). The free
+traffic rides on those: one delete per relayed moment, and a closer copy
+at most two gated and two ungated waves per moment — so the hard bound is
+≈ 4 × (270 + 270) envelopes per author an hour, honest meshes see the
+first wave only. Network-wide, a flooding origin at 1 moment a second,
+reach 5, *d* = 10 tree (≈ 74 000 envelopes per moment): uncapped
+≈ 3 600 × 74 000 ≈ 266 million envelopes an hour; capped, every hop past
+the first carries at most 30 of them, ≈ 30 × 74 000 ≈ 2.2 million (first
+waves; the closer-copy and delete multipliers above apply to both) — plus
+the origin's own *d* direct copies, which its paired households can stop
+by unpairing or banning it. These numbers hold for a flooder with one
+identity; one that mints identities is not bounded by this cap (below).
 
 **Left out.** A per-neighbour cap (an honest relay forwards everyone's
 moments; it would throttle them). A per-origin cap and anything against
 minted identities: author ids and household keys are free to make, so no
-per-identity cap stops a household that mints them — that is bounded by
-the per-household inbound budget (600 envelopes a minute over the inbox
-and the GFS legs) and by banning or unpairing that household (relay
-policy). An admin setting for the cap, and capping storage (above).
+per-identity cap stops a household that mints them — a paired neighbour
+minting a fresh origin key per 30 moments is relayed at its full inbound
+rate. That is bounded by the per-household inbound budget (600 envelopes
+a minute over the inbox and the GFS legs) and by banning or unpairing
+that household (relay policy); a second budget per neighbour for origins
+we hold no key for is a possible follow-up. Also left out: an admin
+setting for the cap, capping storage (above), refusing over-long author
+ids at the inbound handler (the cap's keys and log line are bounded
+anyway).
 
 ## Reach — how far a person's moments go (v_96)
 

@@ -14,6 +14,7 @@ import fnmatch
 import ipaddress
 import math
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 
 from aiohttp import web
@@ -106,8 +107,9 @@ class RateLimiter:
         """``max_keys`` bounds a limiter keyed on identities a peer can mint
         (e.g. author ids): past it the key touched longest ago is dropped —
         its budget starts afresh, the only cost. A key being refused is
-        touched by every refusal, so it stays. ``None``: unbounded."""
-        self._windows: dict[str, list[float]] = {}
+        touched by every refusal, so ordinary traffic doesn't evict it (a
+        flood of ``max_keys`` new keys can). ``None``: unbounded."""
+        self._windows: OrderedDict[str, list[float]] = OrderedDict()
         self._monotonic = monotonic
         self._max_keys = max_keys
 
@@ -133,14 +135,13 @@ class RateLimiter:
         return allowed
 
     def _store(self, key: str, times: list[float]) -> None:
-        if self._max_keys is None:
-            self._windows[key] = times
-            return
-        # Re-insert so dict order is least-recently-touched first.
-        self._windows.pop(key, None)
         self._windows[key] = times
+        if self._max_keys is None:
+            return
+        # Least recently touched first.
+        self._windows.move_to_end(key)
         while len(self._windows) > self._max_keys:
-            del self._windows[next(iter(self._windows))]
+            self._windows.popitem(last=False)
 
     def has_room(self, key: str, *, limit: int, window_s: int) -> bool:
         """Whether :meth:`is_allowed` would allow ``key`` now. Pure read:

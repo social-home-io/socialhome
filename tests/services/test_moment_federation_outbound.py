@@ -1666,6 +1666,94 @@ async def test_over_the_cap_is_logged_once_per_window(capped, caplog):
     assert _lines() == 2
 
 
-def test_the_author_budget_is_bounded(stack):
-    out, _fed, _fed_repo, _user_repo = stack
-    assert out._author_budget._max_keys == outbound_mod.RELAY_AUTHOR_KEYS_MAX
+async def test_the_author_budgets_are_bounded(monkeypatch):
+    """Minted authors can't grow the budget map past its bound."""
+    monkeypatch.setattr(outbound_mod, "RELAY_AUTHOR_KEYS_MAX", 3)
+    monkeypatch.setattr(outbound_mod, "MOMENT_RELAY_AUTHOR_CAP", 1)
+    fed = _federation()
+    fed_repo = MagicMock()
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    out = MomentFederationOutbound(
+        bus=MagicMock(),
+        federation_service=fed,
+        federation_repo=fed_repo,
+        user_repo=MagicMock(),
+    )
+    for n in range(10):
+        await _relay_create(out, n, author_user_id=f"minted-{n}")
+        await _relay_create(out, 100 + n, author_user_id=f"minted-{n}")
+    assert out._author_budget.key_count == 3
+    assert out._cap_logged.key_count == 3
+
+
+async def test_a_delete_of_a_moment_held_here_always_goes(capped):
+    """After the seen-map forgot the create (48 h, a restart), a delete of a
+    moment this household holds still follows it — whatever the budgets
+    (else households further on keep a deleted moment for weeks)."""
+    out, _fed, _clock = capped
+    for n in range(2):
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload=_relayed({"moment_id": f"made-up-{n}"}),
+            from_instance="peer-sender",
+        )
+    sent = await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=_relayed({"moment_id": "held"}),
+        from_instance="peer-sender",
+        known=True,
+    )
+    assert sent == 1
+
+
+async def test_posting_never_starves_deletes(capped):
+    """Deletes of moments never seen here have a budget of their own."""
+    out, _fed, _clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    sent = await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=_relayed({"moment_id": "never-seen"}),
+        from_instance="peer-sender",
+    )
+    assert sent == 1
+
+
+async def test_a_replayed_create_of_a_held_moment_is_free(capped):
+    """After a restart a neighbour replaying an author's held moments can't
+    spend that author's budget."""
+    out, _fed, _clock = capped
+    for n in range(5):
+        assert await _relay_create_known(out, n) == 1
+    assert await _relay_create(out, 9) == 1
+
+
+async def _relay_create_known(out, n: int) -> int:
+    return await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_relayed({"moment_id": f"m-{n}"}),
+        from_instance="peer-sender",
+        known=True,
+    )
+
+
+async def test_totals_are_not_charged(stack, monkeypatch):
+    monkeypatch.setattr(outbound_mod, "MOMENT_RELAY_AUTHOR_CAP", 0)
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96})
+    assert await _relay_counts(out, held_reach=3) == 1
+
+
+async def test_the_cap_key_and_log_line_are_bounded_whatever_the_ids(capped, caplog):
+    """A peer-chosen author id (100 KB, a newline) is neither a 100 KB key
+    nor a forged log line."""
+    out, _fed, _clock = capped
+    caplog.set_level("INFO", logger=outbound_mod.__name__)
+    author = "evil\nFAKE LOG LINE " + "x" * 100_000
+    for n in range(3):
+        await _relay_create(out, n, author_user_id=author)
+    keys = list(out._author_budget._windows)
+    assert keys and all(len(k) == 32 for k in keys)
+    (line,) = [r.getMessage() for r in caplog.records if "relay cap" in r.getMessage()]
+    assert "\n" not in line
+    assert len(line) < 400
