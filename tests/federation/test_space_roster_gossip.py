@@ -19,6 +19,7 @@ guard), so out-of-order delivery converges deterministically.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -585,12 +586,15 @@ async def test_a_fully_applied_host_snapshot_is_noted_for_the_echo(tmp_dir):
 
 
 class _Replays:
-    """Records the §4.4 replays the handler asks for."""
+    """Records the pushes the handler asks for; ``gate`` holds them."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
+        self.gate: asyncio.Event | None = None
 
-    async def replay_space_to(self, *, space_id, instance_id, since) -> int:
+    async def push_own_rows_to(self, *, space_id, instance_id, since) -> int:
+        if self.gate is not None:
+            await self.gate.wait()
         self.calls.append((space_id, instance_id, since))
         return 1
 
@@ -608,17 +612,54 @@ async def test_a_household_the_hosts_snapshot_adds_gets_our_recent_rows(tmp_dir)
     j = FederationEventType.SPACE_MEMBER_JOINED
     joined = _entry(j, _signed_payload(j, seed=seed, member_version=4))
     assert MEMBER_INSTANCE not in await spaces.list_member_instances(SPACE_ID)
-    # Not the host's: merged (trust is the space key) but no replay.
+    # Not the host's: merged (trust is the space key) but no push.
     await h._on_space_roster_snapshot(_snapshot([joined], from_instance="p-other"))
+    await h.drain_pushes()
     assert replays.calls == []
     await spaces.remove_space_instance(SPACE_ID, MEMBER_INSTANCE)
     before = datetime.now(UTC)
     await h._on_space_roster_snapshot(_snapshot([joined]))
+    await h.drain_pushes()
     assert [(s, i) for s, i, _ in replays.calls] == [(SPACE_ID, MEMBER_INSTANCE)]
     since = datetime.fromisoformat(replays.calls[0][2])
     assert timedelta(minutes=29) < before - since < timedelta(minutes=31)
-    # Nothing added the second time: nothing replayed.
+    # Nothing added the second time: nothing pushed.
     await h._on_space_roster_snapshot(_snapshot([joined]))
+    await h.drain_pushes()
+    assert len(replays.calls) == 1
+    await db.shutdown()
+
+
+async def test_a_push_never_holds_up_the_snapshot_and_is_capped(tmp_dir, monkeypatch):
+    """The push runs in the background: the snapshot's own bookkeeping (the
+    roster version noted for the echo) never waits for it. One snapshot
+    pushes to at most ``MAX_GAINED_PUSHES`` households."""
+    monkeypatch.setattr(handler_module, "MAX_GAINED_PUSHES", 1)
+    h, _spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    noted = _NotingSpaceService()
+    h.attach_space_service(noted)
+    replays = _Replays()
+    replays.gate = asyncio.Event()
+    h.attach_space_resume(replays)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await h._on_space_roster_snapshot(
+        _versioned_snapshot(
+            [
+                _entry(j, _signed_payload(j, seed=seed, member_version=4)),
+                _entry(
+                    j,
+                    _signed_payload(
+                        j, seed=seed, member_version=5, instance_id="peer-y"
+                    ),
+                ),
+            ],
+            version=9,
+        )
+    )
+    assert noted.applied == [(SPACE_ID, OWNER, 9)]
+    assert replays.calls == []
+    replays.gate.set()
+    await h.drain_pushes()
     assert len(replays.calls) == 1
     await db.shutdown()
 
