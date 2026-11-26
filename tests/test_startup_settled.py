@@ -59,7 +59,7 @@ async def test_the_client_fixture_returns_after_the_startup_steps(
         ran.append("resync")
         return 0
 
-    monkeypatch.setattr(app_module, "request_capability_resync_if_upgraded", _resync)
+    monkeypatch.setattr(app_module, "request_capability_resync", _resync)
     _late(monkeypatch)
     app = create_app(_config(tmp_dir))
     await aiohttp_client(app)

@@ -26,8 +26,12 @@ from ..domain.gallery import (
 )
 from ..domain.highlight import HighlightAudience
 from ..domain.moment import (
+    MOMENT_DEFAULT_MAX_HOPS,
+    MOMENT_DEFAULT_REACH,
     MOMENT_DEFAULT_RETENTION_DAYS,
+    MOMENT_MAX_HOPS,
     MOMENT_MAX_LIFETIME_DAYS,
+    MOMENT_MAX_REACH,
     MOMENT_MIN_RETENTION_DAYS,
 )
 from ..domain.notification_kinds import NotifSettings
@@ -127,9 +131,14 @@ def _coerce_int(value: Any, default: int, lo: int, hi: int) -> int:
 # ─── Momentum visibility prefs (§Momentum-relay-policy) ─────────────────────
 
 
-#: Default per-user max-hops visibility — matches the global wire cap so
-#: new accounts see every moment that reached this instance.
-DEFAULT_MOMENT_MAX_HOPS: int = 3
+def _strict_int(value: Any, default: int, lo: int, hi: int) -> int:
+    """A ``moments`` number: only a real JSON integer counts (a bool, a
+    string or a fraction is *default*), clamped to ``[lo, hi]`` — the way
+    the moment repo's SQL reads ``max_hops`` (``_VIEWER_HOPS_SQL``), so the
+    feed and the advertised look agree."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return default
+    return min(max(value, lo), hi)
 
 
 @dataclass(slots=True, frozen=True)
@@ -139,20 +148,23 @@ class MomentPreferences:
     ``max_hops`` filters what the user sees; ``follower_retention_days``
     is how long people who follow them keep their new moments (decision 6d)
     — it sets the signed ``expires_at`` of every moment they write.
+    ``reach`` (v_96) is how many hops their moments go, 1–5, before the
+    household's ``moments.reach_max`` and child protection bound it.
     """
 
     max_hops: int
     follower_retention_days: int = MOMENT_DEFAULT_RETENTION_DAYS
+    reach: int = MOMENT_DEFAULT_REACH
 
 
 def parse_moment_preferences(preferences_json: str | None) -> MomentPreferences:
     """Pull the ``moments`` block out of a user's preferences blob.
 
     Returns a well-formed :class:`MomentPreferences` for any input.
-    ``max_hops`` clamps to ``[1, 3]`` since the wire cap is 3 and a value
+    ``max_hops`` clamps to ``[1, MOMENT_MAX_HOPS]`` (the wire cap) and a value
     < 1 would hide every moment including the user's own;
     ``follower_retention_days`` clamps to ``[1, 30]`` (30 is what every
-    v_65 receiver keeps at most).
+    v_65 receiver keeps at most); ``reach`` clamps to ``[1, 5]``, default 3.
     """
     blob: dict[str, Any] = {}
     try:
@@ -165,14 +177,19 @@ def parse_moment_preferences(preferences_json: str | None) -> MomentPreferences:
     raw = blob.get("moments")
     if not isinstance(raw, dict):
         raw = {}
-    max_hops = _coerce_int(raw.get("max_hops"), DEFAULT_MOMENT_MAX_HOPS, 1, 3)
-    retention = _coerce_int(
+    max_hops = _strict_int(
+        raw.get("max_hops"), MOMENT_DEFAULT_MAX_HOPS, 1, MOMENT_MAX_HOPS
+    )
+    retention = _strict_int(
         raw.get("follower_retention_days"),
         MOMENT_DEFAULT_RETENTION_DAYS,
         MOMENT_MIN_RETENTION_DAYS,
         MOMENT_MAX_LIFETIME_DAYS,
     )
-    return MomentPreferences(max_hops=max_hops, follower_retention_days=retention)
+    reach = _strict_int(raw.get("reach"), MOMENT_DEFAULT_REACH, 1, MOMENT_MAX_REACH)
+    return MomentPreferences(
+        max_hops=max_hops, follower_retention_days=retention, reach=reach
+    )
 
 
 # ─── Timetable home pins ────────────────────────────────────────────────────
@@ -326,7 +343,6 @@ def parse_gallery_seen(preferences_json: str | None) -> GallerySeen:
 __all__ = [
     "DEFAULT_HIGHLIGHTS_MAX_COUNT",
     "DEFAULT_HIGHLIGHTS_RETENTION_DAYS",
-    "DEFAULT_MOMENT_MAX_HOPS",
     "GALLERY_ON_THIS_DAY_KEY",
     "GALLERY_SEEN_KEY",
     "HA_AUTOMATION_EVENTS_KEY",

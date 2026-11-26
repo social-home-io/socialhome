@@ -15,10 +15,20 @@ from __future__ import annotations
 
 import dataclasses
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from socialhome.domain.events import (
+    CpProtectionDisabled,
+    CpProtectionEnabled,
+    PairingConfirmed,
+    PeerProtoVersionRaised,
+    UserDeprovisioned,
+    UserPreferencesPatched,
+    UserProfileUpdated,
+    UserProvisioned,
+)
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -26,7 +36,10 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import OURS as OUR_PROTO_VERSION
-from socialhome.services.capabilities_outbound import CapabilitiesOutbound
+from socialhome.services.capabilities_outbound import (
+    CAPABILITIES_OUTBOX_KEY,
+    CapabilitiesOutbound,
+)
 
 
 def _peer(instance_id: str, *, proto_version: int = 1) -> RemoteInstance:
@@ -391,3 +404,157 @@ async def test_no_keywrap_key_when_none_is_configured():
 
     assert "keywrap_pk" not in fed.send_event.await_args.kwargs["payload"]
     repo.get_instance.assert_not_awaited()
+
+
+# ── v_96 decision C: moment_look_hops ────────────────────────────────────
+
+
+def _look_outbound(peers: list[RemoteInstance], looks: list[int]):
+    """An outbound whose household looks ``looks[0]``, then ``looks[1]`` …"""
+    by_id = {p.id: p for p in peers}
+    repo = SimpleNamespace(
+        list_instances=AsyncMock(return_value=peers),
+        get_instance=AsyncMock(side_effect=lambda iid: by_id.get(iid)),
+        get_local_identity=AsyncMock(return_value=None),
+    )
+    moments = SimpleNamespace(moment_look_hops=AsyncMock(side_effect=looks))
+    fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
+    bus = SimpleNamespace(subscribe=MagicMock())
+    out = CapabilitiesOutbound(
+        federation_service=fed, federation_repo=repo, bus=bus, moment_repo=moments
+    )
+    return out, fed, bus, moments
+
+
+def _looks_sent(fed) -> dict[str, object]:
+    return {
+        c.kwargs["to_instance_id"]: c.kwargs["payload"].get("moment_look_hops")
+        for c in fed.send_event.await_args_list
+    }
+
+
+_V96 = _peer("inst-96", proto_version=96)
+_V95 = _peer("inst-95", proto_version=95)
+_SEAT = dataclasses.replace(
+    _peer("inst-seat", proto_version=96),
+    source=InstanceSource.SPACE_SESSION,
+    relay_via="https://gfs.example.org",
+)
+
+
+@pytest.mark.asyncio
+async def test_publish_carries_the_look_to_paired_households_only():
+    out, fed, _bus, moments = _look_outbound([_V96, _V95, _SEAT], [4])
+    assert await out.publish() == 3
+    assert _looks_sent(fed) == {"inst-96": 4, "inst-95": 4, "inst-seat": None}
+    seat = fed.send_event.await_args_list[2].kwargs["payload"]
+    assert "moment_look_hops" not in seat
+    assert moments.moment_look_hops.await_count == 1  # read once per fan-out
+
+
+@pytest.mark.asyncio
+async def test_a_changed_look_is_re_sent_to_v96_paired_households_only():
+    out, fed, _bus, _moments = _look_outbound([_V96, _V95, _SEAT], [3, 3, 5, 5])
+    await out.publish()
+    fed.send_event.reset_mock()
+    assert await out.refresh_moment_look() == 0  # 3 → 3: nothing sent
+    assert await out.refresh_moment_look() == 1  # 3 → 5
+    assert _looks_sent(fed) == {"inst-96": 5}
+    fed.send_event.reset_mock()
+    assert await out.refresh_moment_look() == 0  # 5 → 5
+    fed.send_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_a_moments_patch_recomputes_the_look():
+    out, _fed, _bus, moments = _look_outbound([_V96], [3, 3, 3])
+    await out.publish()
+    moments.moment_look_hops.reset_mock()
+    await out._on_look_input(
+        UserPreferencesPatched(user_id="u", keys=frozenset({"locale"}))
+    )
+    moments.moment_look_hops.assert_not_awaited()
+    await out._on_look_input(
+        UserPreferencesPatched(user_id="u", keys=frozenset({"moments"}))
+    )
+    await out._on_look_input(UserProvisioned(user_id="u", username="u", is_admin=False))
+    assert moments.moment_look_hops.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_wire_listens_to_whatever_may_change_the_look():
+    out, _fed, bus, _moments = _look_outbound([], [3])
+    out.wire()
+    kinds = {c.args[0] for c in bus.subscribe.call_args_list}
+    assert {
+        PairingConfirmed,
+        UserPreferencesPatched,
+        UserProvisioned,
+        UserProfileUpdated,
+        UserDeprovisioned,
+        CpProtectionEnabled,
+        CpProtectionDisabled,
+    } <= kinds
+    # An upgraded peer asks us itself (its startup capability resync).
+    assert PeerProtoVersionRaised not in kinds
+
+
+@pytest.mark.asyncio
+async def test_without_a_moment_repo_no_look_is_sent_or_listened_for():
+    repo = SimpleNamespace(
+        list_instances=AsyncMock(return_value=[_V96]),
+        get_instance=AsyncMock(return_value=_V96),
+        get_local_identity=AsyncMock(return_value=None),
+    )
+    fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
+    bus = SimpleNamespace(subscribe=MagicMock())
+    out = CapabilitiesOutbound(federation_service=fed, federation_repo=repo, bus=bus)
+    out.wire()
+    await out.publish()
+    assert "moment_look_hops" not in fed.send_event.await_args.kwargs["payload"]
+    assert await out.refresh_moment_look() == 0
+    assert {c.args[0] for c in bus.subscribe.call_args_list} == {PairingConfirmed}
+
+
+@pytest.mark.asyncio
+async def test_a_look_below_the_ungated_hops_is_advertised_as_3():
+    """Fable #4: a look under 3 is never used by a relay (hops 1–3 go to
+    everyone) — say 3, so it reveals nothing."""
+    out, fed, _bus, _moments = _look_outbound([_V96], [1])
+    await out.publish()
+    assert _looks_sent(fed) == {"inst-96": 3}
+
+
+@pytest.mark.asyncio
+async def test_a_change_below_3_is_not_re_sent():
+    """Fable #4: only a change of the advertised value is sent — a
+    protection toggle moving the look between 1 and 3 sends nothing."""
+    out, fed, _bus, _moments = _look_outbound([_V96], [3, 1, 2, 4])
+    await out.publish()
+    fed.send_event.reset_mock()
+    assert await out.refresh_moment_look() == 0  # 3 → 1: still says 3
+    assert await out.refresh_moment_look() == 0  # 1 → 2: still says 3
+    assert await out.refresh_moment_look() == 1  # → 4
+    assert _looks_sent(fed) == {"inst-96": 4}
+
+
+@pytest.mark.asyncio
+async def test_no_look_refresh_before_the_startup_publish():
+    """Fable #12: the startup publish carries the look — a refresh before
+    it sends nothing (and reads nothing)."""
+    out, fed, _bus, moments = _look_outbound([_V96], [5])
+    assert await out.refresh_moment_look() == 0
+    fed.send_event.assert_not_awaited()
+    moments.moment_look_hops.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capabilities_sends_are_latest_only_per_peer():
+    """Fable #3: every capabilities send carries one outbox key, so an
+    offline peer keeps one queued row — the newest look."""
+    out, fed, _bus, _moments = _look_outbound([_V96], [3, 3, 5])
+    await out.publish()
+    await out.resend_to("inst-96")
+    await out.refresh_moment_look()
+    keys = {c.kwargs.get("outbox_key") for c in fed.send_event.await_args_list}
+    assert keys == {CAPABILITIES_OUTBOX_KEY} == {"capabilities"}

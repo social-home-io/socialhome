@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.domain.child_protection import AccountProtectedError
+from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.moment_public_repo import (
     SqliteMomentPublicFollowRepo,
@@ -19,6 +21,7 @@ from socialhome.repositories.moment_public_repo import (
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.moment_public_service import (
     MomentPublicError,
+    MomentPublicFollowAtHomeError,
     MomentPublicService,
 )
 
@@ -46,13 +49,15 @@ class _StubSession:
         self.body = body or {}
         self.posts: list[tuple[str, dict]] = []
         self.gets: list[str] = []
+        self.params: list[dict | None] = []
 
     def post(self, url, *, json=None, **_kw):
         self.posts.append((url, json or {}))
         return _StubResp(self.status, self.body)
 
-    def get(self, url, **_kw):
+    def get(self, url, *, params=None, **_kw):
         self.gets.append(url)
+        self.params.append(params)
         return _StubResp(self.status, self.body)
 
 
@@ -76,9 +81,13 @@ async def repos(db):
     }
 
 
-def _make_service(repos, *, session):
+def _make_service(repos, *, session, federation=None):
     svc = MomentPublicService(
-        repos["regs"], repos["follows"], repos["users"], repos["gfs"]
+        repos["regs"],
+        repos["follows"],
+        repos["users"],
+        repos["gfs"],
+        federation_repo=federation,
     )
     svc.attach_session(session)
     svc.attach_identity(own_instance_id="inst-self", signing_key=b"\x01" * 32)
@@ -228,13 +237,137 @@ async def test_fetch_directory_returns_users_list(repos):
             status=200,
             body={
                 "users": [
-                    {"user_id": "u-remote", "display_name": "Bob"},
+                    {
+                        "user_id": "u-remote",
+                        "instance_id": "i-b",
+                        "display_name": "Bob",
+                    },
                 ]
             },
         ),
     )
-    users = await svc.fetch_directory("g1")
-    assert users == [{"user_id": "u-remote", "display_name": "Bob"}]
+    users = list((await svc.fetch_directory("g1")).users)
+    assert users == [
+        {
+            "user_id": "u-remote",
+            "instance_id": "i-b",
+            "display_name": "Bob",
+            "username": None,
+            "bio": None,
+        }
+    ]
+
+
+async def test_fetch_directory_keeps_text_fields_text_and_at_most_200_rows(repos):
+    """The GFS chose every field: what the page shows and searches is text
+    or nothing, and an answer holds at most 200 rows."""
+    rows = [
+        {"user_id": f"x{i}", "instance_id": f"i{i}", "display_name": f"P{i}"}
+        for i in range(250)
+    ]
+    rows[0] = {
+        "user_id": "x0",
+        "instance_id": "i0",
+        "display_name": {"evil": 1},
+        "username": ["a"],
+        "bio": 7,
+    }
+    sess = _StubSession(status=200, body={"users": rows})
+    svc = _make_service(repos, session=sess)
+    users = (await svc.fetch_directory("g1")).users
+    assert len(users) == 200
+    assert (users[0]["display_name"], users[0]["username"], users[0]["bio"]) == (
+        None,
+        None,
+        None,
+    )
+    assert users[1]["display_name"] == "P1"
+
+
+def _ranked_body(sort, counts):
+    return {
+        "sort": sort,
+        "users": [
+            {"user_id": f"x{i}", "instance_id": f"i{i}", "follower_count": n}
+            for i, n in enumerate(counts)
+        ],
+    }
+
+
+async def test_fetch_directory_asks_for_a_sort_and_trusts_only_a_matching_echo(
+    repos,
+):
+    sess = _StubSession(status=200, body=_ranked_body("followers", [5]))
+    svc = _make_service(repos, session=sess)
+    page = await svc.fetch_directory("g1", sort="followers")
+    assert sess.params[-1] == {"sort": "followers"}
+    assert page.sort == "followers"
+    # An older GFS ignores the parameter: no echo, so no ranking claimed.
+    sess.body = {"users": []}
+    assert (await svc.fetch_directory("g1", sort="followers")).sort is None
+    # An echo that is not what was asked for is not believed either.
+    sess.body = _ranked_body("new", [])
+    assert (await svc.fetch_directory("g1", sort="followers")).sort is None
+    sess.body = _ranked_body(["followers"], [])
+    assert (await svc.fetch_directory("g1", sort="followers")).sort is None
+    # No sort asked: none sent, none claimed.
+    sess.body = _ranked_body("followers", [])
+    assert (await svc.fetch_directory("g1")).sort is None
+    assert sess.params[-1] is None
+
+
+async def test_fetch_directory_refuses_an_unknown_sort(repos):
+    sess = _StubSession(status=200, body={"users": []})
+    svc = _make_service(repos, session=sess)
+    with pytest.raises(ValueError):
+        await svc.fetch_directory("g1", sort="recent")
+    # A search is never ranked (the GFS refuses it too): ours to refuse, 422.
+    with pytest.raises(ValueError):
+        await svc.fetch_directory("g1", q="bern", sort="followers")
+    assert sess.gets == []
+
+
+async def test_fetch_directory_keeps_only_plausible_follower_counts(repos):
+    """The GFS's counts are display data: a non-negative integer of sane size
+    or nothing."""
+    counts = [3, -1, "5", True, 10**12, 2.5, None, 0]
+    sess = _StubSession(status=200, body=_ranked_body("followers", counts))
+    svc = _make_service(repos, session=sess)
+    users = (await svc.fetch_directory("g1", sort="followers")).users
+    kept = {u["user_id"]: u.get("follower_count") for u in users}
+    assert kept == {
+        "x0": 3,
+        "x1": None,
+        "x2": None,
+        "x3": None,
+        "x4": None,
+        "x5": None,
+        "x6": None,
+        "x7": 0,
+    }
+    assert all("follower_count" not in u for u in users if kept[u["user_id"]] is None)
+
+
+async def test_fetch_directory_survives_a_body_that_is_not_an_object(repos):
+    sess = _StubSession(status=200, body=None)
+    sess.body = ["not", "an", "object"]
+    svc = _make_service(repos, session=sess)
+    page = await svc.fetch_directory("g1", sort="followers")
+    assert page.users == () and page.sort is None
+
+
+async def test_fetch_directory_bad_json_is_a_gfs_failure(repos):
+    """A GFS answering 200 with junk is a GFS failure (502), not our 422."""
+
+    class _BadJson(_StubResp):
+        async def json(self):
+            raise ValueError("not json")
+
+    sess = _StubSession(status=200)
+    sess.get = lambda url, **_kw: _BadJson(200)
+    svc = _make_service(repos, session=sess)
+    with pytest.raises(MomentPublicError):
+        await svc.fetch_directory("g1", sort="followers")
 
 
 async def test_fetch_directory_5xx_raises(repos):
@@ -752,3 +885,89 @@ async def test_re_registering_keeps_the_existing_setting(repos):
     await svc.register(user_id="u1", gfs_id="g1", default_share=True)
     reg = await svc.register(user_id="u1", gfs_id="g1")
     assert reg.default_share is True
+
+
+# ── one Follow: people this household knows never get a GFS follow ──────
+
+
+async def _seed_households(db) -> None:
+    """A paired household (inst-pal, Pat) and a household met only in a
+    shared space (inst-space, Sam)."""
+    for iid, source in (("inst-pal", "manual"), ("inst-space", "space_session")):
+        await db.enqueue(
+            "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+            " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+            " local_inbox_id, status, source) VALUES(?,?,?,?,?,?,?,'confirmed',?)",
+            (iid, iid, "aa" * 32, "x", "x", "https://x/inbox", f"in-{iid}", source),
+        )
+    for uid, iid, name in (
+        ("u-pat", "inst-pal", "pat"),
+        ("u-sam", "inst-space", "sam"),
+    ):
+        await db.enqueue(
+            "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+            " display_name) VALUES(?,?,?,?)",
+            (uid, iid, name, name.title()),
+        )
+
+
+async def test_fetch_directory_leaves_out_people_the_household_knows(repos, db):
+    await _seed_households(db)
+    rows = [
+        {"user_id": "u1", "instance_id": "inst-self"},  # a local user
+        {"user_id": "u-other", "instance_id": "inst-self"},  # our household
+        {"user_id": "u-pal2", "instance_id": "inst-pal"},  # a paired household
+        # A paired person under a made-up household — the GFS chose it.
+        {"user_id": "u-pat", "instance_id": "inst-forged"},
+        {"user_id": "u-sam", "instance_id": "inst-space"},  # space only: a stranger
+        {"user_id": "u-stranger", "instance_id": "inst-far"},
+        {"user_id": "u-stranger", "instance_id": "inst-far"},  # a repeat
+        "not a row",
+        {"user_id": "u-odd", "instance_id": ["not", "hashable"]},
+        {"user_id": "u-nohome"},
+    ]
+    svc = _make_service(
+        repos,
+        session=_StubSession(status=200, body={"users": rows}),
+        federation=SqliteFederationRepo(db),
+    )
+    users = list((await svc.fetch_directory("g1")).users)
+    assert [u["user_id"] for u in users] == ["u-sam", "u-stranger"]
+
+
+class _ProtectedCp:
+    """Stub ChildProtectionService: every listed user is protected."""
+
+    def __init__(self, protected: set[str]) -> None:
+        self._protected = protected
+
+    def register_gate(self, gate):
+        pass
+
+    async def require_unrestricted(self, user_id, capability):
+        if user_id in self._protected:
+            raise AccountProtectedError(capability)
+
+
+async def test_fetch_directory_refuses_a_protected_viewer(repos):
+    sess = _StubSession(status=200, body={"users": []})
+    svc = _make_service(repos, session=sess)
+    svc.attach_child_protection(_ProtectedCp({"u-kid"}))
+    with pytest.raises(AccountProtectedError):
+        await svc.fetch_directory("g1", viewer_user_id="u-kid")
+    assert sess.gets == []
+    assert (await svc.fetch_directory("g1", viewer_user_id="u1")).users == ()
+
+
+async def test_follow_refuses_someone_the_household_knows(repos, db):
+    await _seed_households(db)
+    sess = _StubSession(status=201, body={"user": {"display_name": "X"}})
+    svc = _make_service(repos, session=sess, federation=SqliteFederationRepo(db))
+    for known in ("u1", "u-pat"):
+        with pytest.raises(MomentPublicFollowAtHomeError):
+            await svc.follow(follower_user_id="u1", gfs_id="g1", followed_user_id=known)
+    assert sess.posts == []
+    # Someone met only in a shared space is not a friend: a GFS follow.
+    await svc.follow(follower_user_id="u1", gfs_id="g1", followed_user_id="u-sam")
+    assert sess.posts
+    assert sess.posts[0][0].endswith("/gfs/moments/users/u-sam/follow")

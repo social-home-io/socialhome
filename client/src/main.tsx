@@ -31,6 +31,7 @@ import { wireProtectionWs } from './store/protection'
 import { wireAppsWs } from './store/apps'
 import { wireMyStatusWs } from './store/myStatus'
 import { resetMomentPublic } from './store/momentPublic'
+import { resetFollows } from './store/follows'
 
 // Wire WebSocket event handlers to local stores BEFORE connecting so
 // no events get lost between connect() and the subscribe() calls.
@@ -62,14 +63,15 @@ wireMyStatusWs()
 // store/auth — that's what keeps the api↔auth dependency graph acyclic.
 setUnauthorizedHandler(logout)
 // Signing out forgets the household's shopping list (items, stores,
-// pending Undo deletes), task lists, sticky count and the person's public
-// Momentum state (GFS registrations, a moment put aside) so the next
-// account never sees them.
+// pending Undo deletes), task lists, sticky count, the person's public
+// Momentum state (GFS registrations, a moment put aside) and who they
+// follow, so the next account never sees them.
 onLogout(resetShopping)
 onLogout(resetTasks)
 onLogout(resetStickies)
 onLogout(resetModerationMine)
 onLogout(resetMomentPublic)
+onLogout(resetFollows)
 
 ws.connect()
 

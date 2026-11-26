@@ -7,11 +7,13 @@ from datetime import UTC, datetime, timedelta
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_retention import (
     CAPPED_DELETE_KEY_PREFIX,
+    EVICT_FIRST_KEY_PREFIXES,
     LONG_LIVED,
     LONG_LIVED_TTL,
     NEVER_DROP,
     OWN_DELETE_KEY_PREFIX,
     RELAYED_DELETE_KEY_PREFIX,
+    RELAYED_MOMENT_KEY_PREFIX,
     RETENTION_DAYS,
     SHORT_LIVED,
     SHORT_LIVED_TTL,
@@ -21,6 +23,7 @@ from socialhome.domain.federation_retention import (
     is_long_lived,
     moment_delete_key,
     relayed_delete_prefix,
+    relayed_moment_key,
     retention_expires_at,
     roster_snapshot_key_prefix,
     supersede_key,
@@ -274,6 +277,24 @@ def test_only_an_uncapped_moment_delete_is_long_lived():
     assert is_long_lived(MD, f"{RELAYED_DELETE_KEY_PREFIX}them:m1")
     assert not is_long_lived(MD, capped_delete_key("them", "m1"))
     assert not is_long_lived(FederationEventType.MOMENT_CREATED, None)
+
+
+def test_relayed_moment_rows_have_their_own_key():
+    """v_96 (F5): a relayed create or totals update is keyed per (kind,
+    origin, moment) under one prefix — latest-only per peer and moment, and
+    evicted first; never the delete class (not long-lived)."""
+    create = relayed_moment_key("create", "them", "m1")
+    counts = relayed_moment_key("counts", "them", "m1")
+    assert create == f"{RELAYED_MOMENT_KEY_PREFIX}create:them:m1"
+    assert counts == f"{RELAYED_MOMENT_KEY_PREFIX}counts:them:m1"
+    assert create != counts
+    assert RELAYED_MOMENT_KEY_PREFIX == "moment-relay:"
+    assert not create.startswith(RELAYED_DELETE_KEY_PREFIX)
+    assert not is_long_lived(FederationEventType.MOMENT_CREATED, create)
+    assert set(EVICT_FIRST_KEY_PREFIXES) == {
+        "moment-delete:relay",
+        RELAYED_MOMENT_KEY_PREFIX,
+    }
 
 
 def test_a_space_post_reaction_keeps_only_its_latest_toggle_queued():

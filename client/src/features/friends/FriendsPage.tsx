@@ -39,7 +39,7 @@ import { householdAdmins, loadHouseholdAdmins } from '@/features/connections/con
 import { fillNodes, joinNames } from '@/features/connections/richText'
 import { api } from '@/api'
 import {
-  FIND_OVER, buildModel, fold, matches, pairingSpan, peopleByLetter,
+  FIND_OVER, buildModel, fold, matches, pairingSpan, peopleByLetter, personSheetPerson,
   type FriendsModel, type FriendsPayload, type FriendsView, type Household, type Person,
 } from './friendsModel'
 import { PersonRow } from './PersonRow'
@@ -289,15 +289,7 @@ export default function FriendsPage() {
       openStatusEditor()
       return
     }
-    openPerson(p.user_id, {
-      person: {
-        ...p.member,
-        username: p.isLocal ? (p.member as { username: string }).username : null,
-        is_local: p.isLocal,
-        household: p.home,
-      },
-      onAliasChanged,
-    })
+    openPerson(p.user_id, { person: personSheetPerson(p), onAliasChanged })
   }
 
   // A failed load gets its own card with a retry — never an endless

@@ -25,7 +25,7 @@ function moment(id: string, author: string, extra: Partial<Moment> = {}): Moment
     media_url: null, media_type: null, duration_ms: null, parent_moment_id: null,
     origin_instance_id: 'peer-o', created_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    reaction_count: 0, reply_count: 0, ...extra,
+    reaction_count: 0, reply_count: 0, reach: 3, ...extra,
   }
 }
 
@@ -73,12 +73,22 @@ describe('MomentumInboxTab list', () => {
       "That's everything from the last 24 hours. Moments from people you follow are kept for as long as their authors chose.")
   })
 
+  it('an empty inbox points at Discover to find people to follow', async () => {
+    onGet(async () => [])
+    const { findByRole } = render(<MomentumInboxTab tag={null} />)
+    const link = await findByRole('link', { name: 'Find people to follow' })
+    expect(link.getAttribute('href')).toBe('/momentum/discover')
+  })
+
   it('the composer entry says where a moment goes — narrower for a protected account', async () => {
     onGet(async () => [])
     const first = render(<MomentumInboxTab tag={null} />)
     await waitFor(() => expect(first.container.textContent).toContain('No moments yet'))
     const entry = first.getByRole('button', { name: /Share a moment/ })
-    expect(entry.textContent).toContain('Paired households and theirs, up to 3 hops · 24 h')
+    expect(entry.textContent).toContain('Paired households and beyond, up to 3 steps · 24 h')
+    // The empty state is about everyone's moments, not the caller's reach.
+    expect(first.container.textContent).toContain('as far as its author chose, up to 5 steps')
+    expect(first.container.textContent).toContain('within your “Show moments up to”')
     first.unmount()
     signIn(true)
     const kid = render(<MomentumInboxTab tag={null} />)
@@ -89,6 +99,21 @@ describe('MomentumInboxTab list', () => {
     expect(kid.container.textContent).not.toContain('3 steps')
     expect(kid.container.textContent).toContain(
       'A moment is a short post for your household and the households you’re paired with.')
+  })
+
+  it.each([
+    [1, 'Your household and paired households · 24 h'],
+    [2, 'Paired households and beyond, up to 2 steps · 24 h'],
+    [5, 'Paired households and beyond, up to 5 steps · 24 h'],
+  ])('the composer entry uses the caller\'s reach (%i)', async (reach, line) => {
+    onGet(async (path) => path === '/api/moments/limits'
+      ? { next_allowed_at: null, reach, reach_max: 5 }
+      : [])
+    const { getByRole, container } = render(<MomentumInboxTab tag={null} />)
+    await waitFor(() => expect(container.textContent).toContain('No moments yet'))
+    await waitFor(() => expect(getByRole('button', { name: /Share a moment/ }).textContent)
+      .toContain(line))
+    expect(api.get).toHaveBeenCalledWith('/api/moments/limits')
   })
 })
 

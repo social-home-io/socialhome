@@ -76,6 +76,7 @@ describe('MomentumPage tabs', () => {
     expect(links.map(a => [a.textContent, a.getAttribute('href')])).toEqual([
       ['Moments', '/momentum'],
       ['Yours', '/momentum/yours'],
+      ['Discover', '/momentum/discover'],
     ])
     expect(links[1].getAttribute('aria-current')).toBe('page')
     expect(links[0].getAttribute('aria-current')).toBeNull()
@@ -117,7 +118,7 @@ describe('MomentumPage tabs', () => {
     expect(document.activeElement).toBe(btn)
   })
 
-  it('Discover joins the tabs once a GFS is connected', async () => {
+  it('Discover is a tab with a GFS', async () => {
     withGfs([{ id: 'g1', display_name: 'Demo GFS', status: 'active' }])
     where.url = '/momentum'; where.path = '/momentum'
     const { getByRole } = render(<MomentumPage />)
@@ -126,22 +127,25 @@ describe('MomentumPage tabs', () => {
     expect(nav.querySelectorAll('a')[2].getAttribute('href')).toBe('/momentum/discover')
   })
 
-  it('no Discover tab without an active GFS', async () => {
+  it('Discover is a tab without a GFS too — friends need none', async () => {
     withGfs([{ id: 'g1', display_name: 'Pending GFS', status: 'pending' }])
     where.url = '/momentum'; where.path = '/momentum'
     const { getByRole } = render(<MomentumPage />)
     await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/gfs/connections'))
     await Promise.resolve()
-    expect(tabNames(getByRole('navigation', { name: 'Momentum sections' }))).toEqual(['Moments', 'Yours'])
+    expect(tabNames(getByRole('navigation', { name: 'Momentum sections' })))
+      .toEqual(['Moments', 'Yours', 'Discover'])
   })
 
-  it('no Discover tab for a protected account, even with a GFS', async () => {
+  it('a protected account has Discover for its friends, and no GFS is read', async () => {
     me.value = { user_id: 'u-kid', protected: true, restrictions: ['public_moments'] }
     withGfs([{ id: 'g1', display_name: 'Demo GFS', status: 'active' }])
     where.url = '/momentum'; where.path = '/momentum'
     const { getByRole } = render(<MomentumPage />)
     await new Promise(r => setTimeout(r, 0))
-    expect(tabNames(getByRole('navigation', { name: 'Momentum sections' }))).toEqual(['Moments', 'Yours'])
+    expect(tabNames(getByRole('navigation', { name: 'Momentum sections' })))
+      .toEqual(['Moments', 'Yours', 'Discover'])
+    expect(api.get).not.toHaveBeenCalledWith('/api/gfs/connections')
   })
 
   it('/momentum/discover shows Discover as the open tab', async () => {

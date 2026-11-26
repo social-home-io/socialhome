@@ -266,6 +266,7 @@ from .moments import (
     MomentFollowsDetailView,
     MomentHashtagsView,
     MomentLimitsView,
+    MomentReachMaxView,
     MomentReactionView,
     MomentReportView,
     MomentSaveView,
@@ -1144,6 +1145,7 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/moments/archive", MomentArchiveView)
     app.router.add_view("/api/moments/archive/usage", MomentArchiveUsageView)
     app.router.add_view("/api/admin/moments/archive-cap", MomentArchiveCapView)
+    app.router.add_view("/api/admin/moments/reach-max", MomentReachMaxView)
     app.router.add_view("/api/moments/hashtags", MomentHashtagsView)
     app.router.add_view("/api/moments/limits", MomentLimitsView)
     app.router.add_view(

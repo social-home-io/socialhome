@@ -13,8 +13,13 @@ from socialhome.domain.events import (
     MomentDeleted,
     MomentReactionChanged,
 )
-from socialhome.domain.federation import FederationEventType, RemoteInstance
-from socialhome.moment_origin import NO_RELAY_FIELD, verify_moment_origin
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    RemoteInstance,
+)
+from socialhome.domain.federation_retention import relayed_moment_key
+from socialhome.moment_origin import NO_RELAY_FIELD, REACH_FIELD, verify_moment_origin
 from socialhome.services import moment_federation_outbound as outbound_mod
 from socialhome.services.moment_federation_outbound import (
     MomentFederationOutbound,
@@ -50,9 +55,10 @@ class _FakeVisibilityRepo:
         return frozenset(self._hidden.get(peer_id, set()))
 
 
-def _peer(iid: str) -> RemoteInstance:
+def _peer(iid: str, source: InstanceSource = InstanceSource.MANUAL) -> RemoteInstance:
     inst = MagicMock(spec=RemoteInstance)
     inst.id = iid
+    inst.source = source
     return inst
 
 
@@ -251,7 +257,9 @@ async def test_relay_inbound_bumps_hop_and_excludes_origin_and_sender(stack):
     )
     sent = [c.kwargs for c in fed.send_event.call_args_list]
     assert {c["to_instance_id"] for c in sent} == {"peer-onward"}
-    assert all(c["payload"]["hop_count"] == 2 for c in sent)
+    # v_96 relay clamp: a copy not sent by its origin is at least hop 2,
+    # whatever it claims — passed on as hop 3.
+    assert all(c["payload"]["hop_count"] == 3 for c in sent)
 
 
 async def test_relay_inbound_stops_at_max_hops(stack):
@@ -323,7 +331,7 @@ async def test_relay_inbound_still_relays_household_arrival(stack):
     await out.relay_inbound(
         event_type=FederationEventType.MOMENT_CREATED,
         payload=payload,
-        from_instance="peer-sender",
+        from_instance="peer-origin",
     )
     sent = [c.kwargs for c in fed.send_event.call_args_list]
     assert {c["to_instance_id"] for c in sent} == {"peer-onward"}
@@ -598,15 +606,15 @@ async def test_a_second_copy_of_a_relayed_moment_is_not_relayed_again(stack):
 
 async def test_a_copy_from_closer_to_the_origin_is_relayed_again(stack):
     """First seen at hop 2 (relayed on with 3: one more hop of reach),
-    then at hop 1 — relaying that one reaches two more hops, so it goes.
-    A later hop-2 copy adds nothing."""
+    then at hop 1 from the origin itself — relaying that one reaches two
+    more hops, so it goes. A later copy adds nothing."""
     out, fed, fed_repo, _user_repo = stack
     fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
-    for hop in (2, 1, 2, 1):
+    for hop, sender in ((2, "peer-sender"), (1, "peer-origin"), (2, "peer-sender")):
         await out.relay_inbound(
             event_type=FederationEventType.MOMENT_CREATED,
             payload=_relayed({"hop_count": hop}),
-            from_instance="peer-sender",
+            from_instance=sender,
         )
     hops = [c.kwargs["payload"]["hop_count"] for c in fed.send_event.call_args_list]
     assert hops == [3, 2]
@@ -802,7 +810,7 @@ class _FakeRouter:
         return {"origin_keywrap_pk": "kw", "origin_keywrap_suite": "x25519"}
 
     def stamp_relayed_create(
-        self, payload, *, received_hop, from_instance, to_instance
+        self, payload, *, received_hop, reach, from_instance, to_instance
     ):
         self.stamped.append(to_instance)
         return {**payload, "rt": [f"tok-for-{to_instance}"]}
@@ -935,3 +943,609 @@ async def test_a_reaction_to_a_paired_author_keeps_the_direct_path(stack):
         fed.send_event.call_args.kwargs["event_type"]
         is FederationEventType.MOMENT_REACTED
     )
+
+
+# ─── v_96: reach ──────────────────────────────────────────────────────────
+
+FET = FederationEventType
+
+#: Paired households by the version they advertise.
+_VERSIONS = {"p37": 37, "p38": 38, "p95": 95, "p96": 96}
+
+
+def _versioned(fed, fed_repo, versions=None, looks=None, highs=None) -> None:
+    versions = versions or _VERSIONS
+    looks = looks or {}
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer(iid) for iid in versions]
+    )
+    # How far each peer said its people look (in memory, decision C), and
+    # the farthest it said since our start (deletes, review F1).
+    fed.peer_moment_look_hops = looks.get
+    fed.peer_moment_look_high = (highs if highs is not None else looks).get
+
+    async def _supports(instance_id, *, min_version):
+        return versions.get(instance_id, 0) >= min_version
+
+    fed.peer_supports = _supports
+
+
+def _sent(fed) -> list[dict]:
+    return [c.kwargs for c in fed.send_event.call_args_list]
+
+
+def _targets(fed) -> set[str]:
+    return {c["to_instance_id"] for c in _sent(fed)}
+
+
+def _reach_event(reach: int) -> MomentCreated:
+    return MomentCreated(
+        moment_id="m-1",
+        author_user_id="uid-author",
+        content="hello",
+        media_url=None,
+        media_type=None,
+        duration_ms=None,
+        parent_moment_id=None,
+        parent_author_user_id=None,
+        origin_instance_id="self",
+        expires_at="2026-06-01T00:00:00+00:00",
+        reach=reach,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reach", "mark", "targets"),
+    [
+        # Reach 1: the v_38 no_relay mark, to households that honour it.
+        (1, {NO_RELAY_FIELD: True}, {"p38", "p95", "p96"}),
+        # Reach 2: only to v_96 (an older one would relay it to hop 3).
+        (2, {REACH_FIELD: 2}, {"p96"}),
+        # Reach 3: nothing new, to everyone.
+        (3, {}, {"p37", "p38", "p95", "p96"}),
+        # Reach 4–5: to every paired household (a direct delivery).
+        (4, {REACH_FIELD: 4}, {"p37", "p38", "p95", "p96"}),
+        (5, {REACH_FIELD: 5}, {"p37", "p38", "p95", "p96"}),
+    ],
+)
+@pytest.mark.parametrize("kind", ["create", "delete"])
+async def test_the_origin_signs_the_reach_and_gates_it(
+    stack, reach, mark, targets, kind
+):
+    """A create and its delete carry the same signed mark and go to the same
+    households."""
+    out, fed, fed_repo, user_repo = stack
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    _versioned(fed, fed_repo)
+    if kind == "create":
+        await out._on_created(_reach_event(reach))
+        et = FET.MOMENT_CREATED
+    else:
+        await out._on_deleted(
+            MomentDeleted(
+                moment_id="m-1",
+                author_user_id="uid-author",
+                origin_instance_id="self",
+                reach=reach,
+            )
+        )
+        et = FET.MOMENT_DELETED
+    assert _targets(fed) == targets
+    for call in _sent(fed):
+        payload = call["payload"]
+        assert {
+            k: payload[k] for k in (NO_RELAY_FIELD, REACH_FIELD) if k in payload
+        } == (mark)
+        assert verify_moment_origin(
+            identity_pk=_KEY.public_key, event_type=et, payload=payload
+        )
+
+
+async def test_a_protected_accounts_delete_is_no_relay(stack):
+    """The leak on main: a protected account's delete went unmarked and was
+    relayed 3 hops. Its row's reach is 1, so the delete is ``no_relay``."""
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_ProtectedAuthorCp())
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    _versioned(fed, fed_repo)
+    await out._on_deleted(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="uid-kid",
+            origin_instance_id="self",
+            reach=1,
+        )
+    )
+    assert _targets(fed) == {"p38", "p95", "p96"}
+    assert all(c["payload"][NO_RELAY_FIELD] is True for c in _sent(fed))
+
+
+@pytest.mark.parametrize(
+    ("row_reach", "author", "no_relay"),
+    [
+        # B: posted at reach 3 before its author became protected — it went
+        # 3 hops, so its delete goes as far, unmarked.
+        (3, "uid-kid", False),
+        # A row written before v_96 by an author not protected: 3 hops.
+        (None, "uid-author", False),
+        # A row written before v_96 by a protected author: its create went
+        # ``no_relay`` (one hop), so its delete does too — as on main.
+        # Accepted edge: an author protected only after posting a legacy
+        # moment gets a one-hop delete for it.
+        (None, "uid-kid", True),
+    ],
+)
+async def test_a_delete_follows_the_row(stack, row_reach, author, no_relay):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_ProtectedAuthorCp())
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    _versioned(fed, fed_repo)
+    await out._on_deleted(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id=author,
+            origin_instance_id="self",
+            reach=row_reach,
+        )
+    )
+    if no_relay:
+        assert _targets(fed) == {"p38", "p95", "p96"}
+        assert all(c["payload"][NO_RELAY_FIELD] is True for c in _sent(fed))
+    else:
+        assert _targets(fed) == {"p37", "p38", "p95", "p96"}
+        for call in _sent(fed):
+            assert NO_RELAY_FIELD not in call["payload"]
+            assert REACH_FIELD not in call["payload"]
+
+
+async def test_a_protected_accounts_create_is_one_hop_whatever_the_event_says(
+    stack,
+):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_ProtectedAuthorCp())
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    _versioned(fed, fed_repo)
+    event = _reach_event(5)
+    await out._on_created(
+        MomentCreated(**{**_fields(event), "author_user_id": "uid-kid"})
+    )
+    assert all(c["payload"][NO_RELAY_FIELD] is True for c in _sent(fed))
+    assert all(REACH_FIELD not in c["payload"] for c in _sent(fed))
+
+
+def _fields(event) -> dict:
+    return {f: getattr(event, f) for f in event.__dataclass_fields__}
+
+
+async def test_a_chosen_reach_1_carries_no_key_wrap_key(stack):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_reaction_router(_FakeRouter("peer-x"))
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    _versioned(fed, fed_repo)
+    await out._on_created(_reach_event(1))
+    assert all("origin_keywrap_pk" not in c["payload"] for c in _sent(fed))
+    fed.send_event.reset_mock()
+    await out._on_created(_reach_event(4))
+    assert all("origin_keywrap_pk" in c["payload"] for c in _sent(fed))
+
+
+def _hop_payload(reach: int | None, hop: int, **over) -> dict:
+    payload = _relayed({"hop_count": hop, **over})
+    if reach == 1:
+        payload[NO_RELAY_FIELD] = True
+    elif reach is not None and reach != 3:
+        payload[REACH_FIELD] = reach
+    return payload
+
+
+# (reach, hop it arrives at, from the origin itself) → forwarded at hop …
+# Relays stop at ``min(reach, MOMENT_MAX_HOPS)`` — the cap is 5 (v_96); the
+# peer here looks 5 hops, so hops 4–5 reach it (decision C).
+_REACH_TABLE = [
+    (1, 1, True, None),
+    (2, 1, True, 2),
+    (2, 2, False, None),
+    (3, 1, True, 2),
+    (3, 2, False, 3),
+    (3, 3, False, None),
+    (4, 1, True, 2),
+    (4, 2, False, 3),
+    (4, 3, False, 4),
+    (4, 4, False, None),
+    (5, 1, True, 2),
+    (5, 2, False, 3),
+    (5, 3, False, 4),
+    (5, 4, False, 5),
+    (5, 5, False, None),
+]
+
+
+@pytest.mark.parametrize(("reach", "hop", "from_origin", "forwarded"), _REACH_TABLE)
+@pytest.mark.parametrize("et", [FET.MOMENT_CREATED, FET.MOMENT_DELETED])
+async def test_a_relay_honours_the_reach_at_each_hop(
+    stack, reach, hop, from_origin, forwarded, et
+):
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96}, looks={"p96": 5})
+    await out.relay_inbound(
+        event_type=et,
+        payload=_hop_payload(reach, hop),
+        from_instance="peer-origin" if from_origin else "peer-sender",
+    )
+    hops = [c["payload"]["hop_count"] for c in _sent(fed)]
+    assert hops == ([] if forwarded is None else [forwarded])
+    assert outbound_mod.MOMENT_MAX_HOPS == 5
+
+
+# ── Decision C: hops 4–5 only toward who looks ──────────────────────────
+
+#: v_96 peers by how far they look (``None``: not heard since our start), and an older one
+#: that (impossibly) claims to look 5 hops.
+_LOOK_VERSIONS = {"l1": 96, "l3": 96, "l4": 96, "l5": 96, "lx": 96, "old5": 95}
+_LOOKS = {"l1": 1, "l3": 3, "l4": 4, "l5": 5, "lx": None, "old5": 5}
+
+
+@pytest.mark.parametrize(
+    ("hop", "targets"),
+    [
+        # Hops 1–3 are unchanged: every (v_96, for a reach-carrying copy)
+        # peer, whatever it looks.
+        (1, {"l1", "l3", "l4", "l5", "lx"}),
+        (2, {"l1", "l3", "l4", "l5", "lx"}),
+        # Hop 4 / 5: only a v_96 peer that looks that far — never one that
+        # has not said since our start, never an older one.
+        (3, {"l4", "l5"}),
+        (4, {"l5"}),
+    ],
+)
+@pytest.mark.parametrize(
+    "et", [FET.MOMENT_CREATED, FET.MOMENT_DELETED, FET.MOMENT_REACTIONS_COUNTED]
+)
+async def test_hops_4_and_5_go_only_to_households_that_look_that_far(
+    stack, hop, targets, et
+):
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, _LOOK_VERSIONS, looks=_LOOKS)
+    sender = "peer-origin" if hop == 1 else "peer-sender"
+    if et is FET.MOMENT_REACTIONS_COUNTED:
+        await _relay_counts(
+            out, held_reach=5, over={"hop_count": hop}, from_instance=sender
+        )
+    else:
+        await out.relay_inbound(
+            event_type=et, payload=_hop_payload(5, hop), from_instance=sender
+        )
+    if et is FET.MOMENT_DELETED and hop >= 3:
+        # A delete also goes to a paired household whose look is unknown.
+        targets = targets | {"lx"}
+    assert _targets(fed) == targets
+    assert {c["payload"]["hop_count"] for c in _sent(fed)} == {hop + 1}
+
+
+@pytest.mark.parametrize("hop", [3, 4])
+async def test_a_hop_4_5_delete_with_an_unknown_look_goes_only_to_paired_v96(
+    stack, hop
+):
+    """After our restart a delete at hop 4–5 still reaches a directly
+    paired v_96 household whose look is unknown — not a known look below the
+    hop, not an older household, not one seated from an invite link."""
+    out, fed, fed_repo, _ = stack
+    _versioned(
+        fed, fed_repo, {"lx": 96, "l3": 96, "oldx": 95, "seat": 96}, looks={"l3": 3}
+    )
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[
+            _peer("lx"),
+            _peer("l3"),
+            _peer("oldx"),
+            _peer("seat", InstanceSource.SPACE_SESSION),
+        ]
+    )
+    await out.relay_inbound(
+        event_type=FET.MOMENT_DELETED,
+        payload=_hop_payload(5, hop),
+        from_instance="peer-sender",
+    )
+    assert _targets(fed) == {"lx"}
+
+
+async def test_a_hop_4_copy_goes_only_to_v96_whatever_its_marks(stack):
+    """A copy at hop ≥ 4 is always a reach-4–5 one (it carries ``reach``),
+    but the version gate stands on its own: an older household refuses any
+    hop above 3, so it is never sent one."""
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"old5": 95, "l5": 96}, looks={"old5": 5, "l5": 5})
+    payload = _hop_payload(5, 3)
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED, payload=payload, from_instance="peer-sender"
+    )
+    assert _targets(fed) == {"l5"}
+
+
+async def test_the_origins_own_send_ignores_how_far_peers_look(stack):
+    """The bound is on relays: the origin's hop-1 copy of a reach-5 moment
+    still goes to every paired household, even one that looks 1 hop."""
+    out, fed, fed_repo, user_repo = stack
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    _versioned(fed, fed_repo, {"l1": 96, "lx": 96}, looks={"l1": 1})
+    await out._on_created(_reach_event(5))
+    assert _targets(fed) == {"l1", "lx"}
+
+
+async def test_the_relay_clamp_forwards_a_relayed_copy_claiming_hop_1_as_hop_3(
+    stack,
+):
+    """F1: hop_count is outside the signature. A copy not sent by its origin
+    is at least 2 hops away whatever it claims, so it goes on as hop 3."""
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96})
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(3, 1),
+        from_instance="peer-sender",
+    )
+    assert [c["payload"]["hop_count"] for c in _sent(fed)] == [3]
+
+
+async def test_a_relayed_reach_2_copy_claiming_hop_1_goes_nowhere(stack):
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96})
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(2, 1),
+        from_instance="peer-sender",
+    )
+    fed.send_event.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {REACH_FIELD: 3},
+        {REACH_FIELD: 1},
+        {REACH_FIELD: 7},
+        {REACH_FIELD: True},
+        {REACH_FIELD: "5"},
+        {REACH_FIELD: 5, NO_RELAY_FIELD: True},
+    ],
+)
+async def test_an_invalid_reach_is_never_relayed(stack, bad):
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96})
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_relayed(bad),
+        from_instance="peer-origin",
+    )
+    fed.send_event.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("reach", "targets"),
+    [(3, {"p37", "p38", "p95", "p96"}), (4, {"p96"}), (5, {"p96"})],
+)
+async def test_a_relayed_copy_carrying_reach_goes_only_to_v96(stack, reach, targets):
+    """An older household verifies the v1 bytes only and would drop a v3
+    copy — or, if it took it, relay it ignoring the reach."""
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo)
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(reach, 1),
+        from_instance="peer-origin",
+    )
+    assert _targets(fed) == targets
+
+
+async def test_a_closer_copy_is_relayed_again_at_most_once(stack):
+    """F8: a relay claiming hops 4, 3, 2, 2 gets one extra gated wave (toward
+    who looks past 3) and one ungated one — a gated wave never uses up the
+    ungated one — then nothing more."""
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96}, looks={"p96": 5})
+    for hop in (4, 3, 2, 2):
+        await out.relay_inbound(
+            event_type=FET.MOMENT_CREATED,
+            payload=_hop_payload(5, hop),
+            from_instance="peer-sender",
+        )
+    assert [c["payload"]["hop_count"] for c in _sent(fed)] == [5, 4, 3]
+
+
+@pytest.mark.parametrize("kind", ["create", "delete", "totals"])
+async def test_far_copies_never_stop_the_closer_one_reaching_default_lookers(
+    stack, kind
+):
+    """Fable #1: copies claiming hops 4 then 3 go only to who looks past 3
+    (here nobody) — the genuine hop-2 copy still reaches every default-look
+    household at hop 3 (create, delete and totals alike). Both said they
+    look 3 hops (a delete would also go to an unknown look)."""
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"pd": 96, "pe": 96}, looks={"pd": 3, "pe": 3})
+    event_type = {
+        "create": FET.MOMENT_CREATED,
+        "delete": FET.MOMENT_DELETED,
+        "totals": FET.MOMENT_REACTIONS_COUNTED,
+    }[kind]
+    if kind == "totals":
+        # Totals go on only for a create relayed here.
+        await out.relay_inbound(
+            event_type=FET.MOMENT_CREATED,
+            payload=_hop_payload(5, 1),
+            from_instance="peer-origin",
+        )
+        fed.send_event.reset_mock()
+    for hop in (4, 3, 2):
+        if kind == "totals":
+            await _relay_counts(
+                out,
+                over={"hop_count": hop, REACH_FIELD: 5},
+                from_instance="peer-sender",
+            )
+        else:
+            await out.relay_inbound(
+                event_type=event_type,
+                payload=_hop_payload(5, hop),
+                from_instance="peer-sender",
+            )
+    sent = _sent(fed)
+    assert {c["to_instance_id"] for c in sent} == {"pd", "pe"}
+    assert {c["payload"]["hop_count"] for c in sent} == {3}
+
+
+async def test_the_origins_own_copy_is_relayed_even_after_the_re_relay(stack):
+    """C: a relay can burn the one closer re-relay, but not the origin's
+    own copy — its hop 1 is envelope-authenticated."""
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96}, looks={"p96": 5})
+    for hop, sender in ((4, "peer-sender"), (3, "peer-sender"), (1, "peer-origin")):
+        await out.relay_inbound(
+            event_type=FET.MOMENT_CREATED,
+            payload=_hop_payload(5, hop),
+            from_instance=sender,
+        )
+    assert [c["payload"]["hop_count"] for c in _sent(fed)] == [5, 4, 2]
+    # Nothing closer than the origin's own copy: a later one is dropped.
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(5, 1),
+        from_instance="peer-origin",
+    )
+    assert len(_sent(fed)) == 3
+
+
+async def test_relayed_creates_and_totals_are_queued_under_the_relayed_key(stack):
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96})
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_relayed(),
+        from_instance="peer-origin",
+    )
+    await out.relay_inbound(
+        event_type=FET.MOMENT_REACTIONS_COUNTED,
+        payload=_counts(),
+        from_instance="peer-origin",
+        now_ms=_NOW_MS,
+    )
+    keys = [c["outbox_key"] for c in _sent(fed)]
+    assert keys == [
+        relayed_moment_key("create", "peer-origin", "m-1"),
+        relayed_moment_key("counts", "peer-origin", "m-1"),
+    ]
+
+
+_NOW_MS = 1_800_000_000_000
+
+
+def _counts(**over) -> dict:
+    payload = {
+        "moment_id": "m-1",
+        "author_user_id": "uid-author",
+        "origin_instance_id": "peer-origin",
+        "rev": _NOW_MS,
+        "counts": {"🔥": 1},
+        "total": 1,
+        "hop_count": 1,
+    }
+    payload.update(over)
+    return payload
+
+
+async def _relay_counts(out, **kw) -> int:
+    return await out.relay_inbound(
+        event_type=FET.MOMENT_REACTIONS_COUNTED,
+        payload=_counts(**kw.pop("over", {})),
+        from_instance=kw.pop("from_instance", "peer-origin"),
+        now_ms=_NOW_MS,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reach", "targets"),
+    [(2, {"p96"}), (3, {"p95", "p96"}), (4, {"p96"}), (5, {"p96"})],
+)
+async def test_totals_follow_a_relayed_create_and_its_reach(stack, reach, targets):
+    """A relay passes totals on only for a create it relayed (seen-map),
+    to v_69 households — v_96 only when the reach isn't 3 (S1: an older
+    household can't hold such a moment through this relay)."""
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p37": 37, "p95": 95, "p96": 96})
+    assert await _relay_counts(out) == 0  # create not relayed yet
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(reach, 1),
+        from_instance="peer-origin",
+    )
+    fed.send_event.reset_mock()
+    await _relay_counts(out)
+    assert _targets(fed) == targets
+
+
+async def test_totals_for_a_reach_2_moment_stop_at_hop_2(stack):
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96})
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(2, 1),
+        from_instance="peer-origin",
+    )
+    fed.send_event.reset_mock()
+    # A relay's totals copy is at hop ≥ 2 — at the moment's reach already.
+    assert await _relay_counts(out, from_instance="peer-sender") == 0
+
+
+@pytest.mark.parametrize(
+    ("held_hop", "held_reach", "relayed"),
+    [(1, 3, True), (2, 3, True), (1, 2, True), (2, 2, False), (1, 1, False)],
+)
+async def test_a_holder_passes_totals_on_only_within_the_moments_reach(
+    stack, held_hop, held_reach, relayed
+):
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96})
+    sent = await _relay_counts(
+        out,
+        held_reach=held_reach,
+        over={"hop_count": held_hop},
+        from_instance="peer-origin" if held_hop == 1 else "peer-sender",
+    )
+    assert (sent > 0) is relayed
+
+
+@pytest.mark.parametrize(("reach", "targets"), [(2, {"p96"}), (3, {"p95", "p96"})])
+async def test_the_origins_totals_follow_the_moments_reach(stack, reach, targets):
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p37": 37, "p95": 95, "p96": 96})
+    await out.fan_counts(
+        _counts(origin_instance_id="self"), author_user_id="uid-author", reach=reach
+    )
+    assert _targets(fed) == targets
+
+
+async def test_a_hop_4_5_delete_follows_the_farthest_look_since_our_start(stack):
+    """Review F1: a peer that once looked 5 hops (since our start) may hold
+    the moment; its look fell to 3 since. The delete still goes there, totals
+    and creates follow the current look."""
+    out, fed, fed_repo, _ = stack
+    _versioned(
+        fed,
+        fed_repo,
+        {"fell": 96, "low": 96},
+        looks={"fell": 3, "low": 3},
+        highs={"fell": 5, "low": 3},
+    )
+    await out.relay_inbound(
+        event_type=FET.MOMENT_DELETED,
+        payload=_hop_payload(5, 4),
+        from_instance="peer-sender",
+    )
+    assert _targets(fed) == {"fell"}
+    fed.send_event.reset_mock()
+    await out.relay_inbound(
+        event_type=FET.MOMENT_CREATED,
+        payload=_hop_payload(5, 4),
+        from_instance="peer-sender",
+    )
+    assert _targets(fed) == set()

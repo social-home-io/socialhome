@@ -13,7 +13,12 @@ from collections import deque
 import orjson
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
-from socialhome.domain.federation import FederationEventType
+from socialhome.domain.federation import (
+    DELIVERY_ERROR_RELAYED_ROW_DROPPED,
+    FederationEventType,
+)
+from socialhome.domain.federation_retention import relayed_moment_key
+from socialhome.domain.outbox import RelayedRowDropped
 from socialhome.federation.federation_service import (
     FederationService,
     _DeferredMeshSend,
@@ -349,3 +354,24 @@ async def test_a_deferred_mesh_send_queued_or_released_tells_the_sync_status():
     assert seen == [_SPACE]
     s.svc._release_deferred(list(s.svc._deferred_mesh_queues["mesh-x"]))
     assert seen == [_SPACE, _SPACE]
+
+
+async def test_a_relayed_row_the_full_outbox_drops_is_reported_as_such(monkeypatch):
+    """v_96 (D): when the outbox drops a relayed create / totals row rather
+    than evict one of our own, the send says so — not ``unknown_instance``."""
+    s = _Sender()
+    peer = await s.paired()
+    s.transport.send_ok = False
+
+    async def _full(**_kw):
+        raise RelayedRowDropped("full")
+
+    monkeypatch.setattr(s.outbox, "enqueue", _full)
+    result = await s.svc.send_event(
+        to_instance_id=peer,
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload={"moment_id": "m-1", "origin_instance_id": "far"},
+        outbox_key=relayed_moment_key("create", "far", "m-1"),
+    )
+    assert not result.ok
+    assert result.error == DELIVERY_ERROR_RELAYED_ROW_DROPPED

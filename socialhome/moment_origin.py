@@ -1,7 +1,7 @@
 """Origin signature for relayed ``MOMENT_*`` events (v_35).
 
-A moment fans out up to three hops: the author's household sends it to
-its paired peers, and each of them re-sends the same payload onward under
+A moment fans out up to ``MOMENT_MAX_HOPS``, bounded by its signed reach
+(v_96): the author's household sends it to its paired peers, and each of them re-sends the same payload onward under
 its *own* envelope signature. The §24.11 pipeline therefore authenticates
 only the last hop. ``origin_instance_id`` names the household the moment
 came from, but on a relayed delivery nothing tied that field to the
@@ -40,6 +40,15 @@ moment without the mark signs exactly the v1 bytes, so older receivers
 verify it unchanged; the origin never sends a marked moment to a household
 below v_38 at all (it might relay it).
 
+**v_96 — ``reach``.** A person chooses how far their moments go (1–5
+hops). Reach 1 is the ``no_relay`` mark above; reach 3 (the default) sends
+nothing new and signs the v1 bytes byte for byte; reach 2, 4 or 5 rides as
+``reach: N`` under the ``b"moment-origin:v3:"`` domain — the v1 fields plus
+``"reach": N`` — on creates and deletes alike, so a relay can neither strip,
+raise, lower nor add it. :func:`moment_reach_of` reads the reach a payload
+claims (``None`` = refuse: not an int in {2, 4, 5}, or together with
+``no_relay``); the legacy unsigned window refuses any ``reach``.
+
 **v_66 — the delete certificate.** A ``MOMENT_DELETED``'s signed fields plus
 its three origin-signature fields are, on their own, a self-verifying
 *delete certificate*: who deleted which moment, when, signed by the
@@ -65,6 +74,7 @@ from .crypto import (
     verify_ed25519,
 )
 from .domain.federation import FederationEventType
+from .domain.moment import MOMENT_DEFAULT_REACH, MOMENT_MAX_REACH
 
 #: Signature suite for the moment origin signature. Same tag vocabulary as
 #: ``Encoder.sig_suite``; Phase 2 of ``docs/crypto.md`` adds
@@ -85,8 +95,22 @@ _DOMAIN = b"moment-origin:v1:"
 #: mark can't be removed or added without breaking the signature.
 _DOMAIN_NO_RELAY = b"moment-origin:v2:"
 
+#: Signing domain of a moment carrying ``reach`` (v_96) — disjoint from v1
+#: and v2.
+_DOMAIN_REACH = b"moment-origin:v3:"
+
 #: Payload key marking a moment for direct delivery only (v_38).
 NO_RELAY_FIELD = "no_relay"
+
+#: Payload key carrying a moment's reach when it is 2, 4 or 5 (v_96). Reach
+#: 1 is :data:`NO_RELAY_FIELD`, reach 3 is the absence of both.
+REACH_FIELD = "reach"
+
+#: The values ``reach`` may carry on the wire: every reach but 1 (the
+#: ``no_relay`` mark) and :data:`MOMENT_DEFAULT_REACH` (no mark at all).
+_WIRE_REACHES: frozenset[int] = frozenset(range(2, MOMENT_MAX_REACH + 1)) - {
+    MOMENT_DEFAULT_REACH
+}
 
 
 def carries_no_relay(payload: dict[str, Any]) -> bool:
@@ -94,6 +118,53 @@ def carries_no_relay(payload: dict[str, Any]) -> bool:
     Relays and receivers treat a present key as the mark (fail closed); the
     signature decides whether it is genuine."""
     return NO_RELAY_FIELD in payload
+
+
+def moment_reach_of(payload: dict[str, Any]) -> int | None:
+    """The reach a ``MOMENT_CREATED`` / ``MOMENT_DELETED`` *payload* claims
+    (v_96): ``1`` for the ``no_relay`` mark, ``N`` for ``reach: N`` with N an
+    int (never a bool) in {2, 4, 5}, ``3`` for neither — or ``None`` for
+    anything else (``reach`` with ``no_relay``, ``reach: 3`` / ``1``, any
+    other value), which receivers and relays refuse. The origin signature
+    decides whether the claim is genuine."""
+    has_reach = REACH_FIELD in payload
+    if carries_no_relay(payload):
+        return None if has_reach else 1
+    if not has_reach:
+        return MOMENT_DEFAULT_REACH
+    value = payload[REACH_FIELD]
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value in _WIRE_REACHES else None
+
+
+def reach_marks_of(reach: int) -> dict[str, Any]:
+    """The payload marks the origin signs for a moment (or delete) of
+    *reach* hops (v_96) — the inverse of :func:`moment_reach_of`: 1 →
+    ``no_relay``, :data:`MOMENT_DEFAULT_REACH` → nothing, else ``reach: N``.
+    *reach* is clamped to 1…:data:`MOMENT_MAX_REACH` first."""
+    reach = max(1, min(int(reach), MOMENT_MAX_REACH))
+    if reach == 1:
+        return {NO_RELAY_FIELD: True}
+    if reach == MOMENT_DEFAULT_REACH:
+        return {}
+    return {REACH_FIELD: reach}
+
+
+def moment_hop_of(
+    payload: dict[str, Any], *, from_instance: str, origin: str
+) -> int | None:
+    """The hop a moment event arrived at, as a receiver or relay may take
+    it: ``hop_count`` is outside the origin signature, so a copy not sent by
+    its *origin* counts as at least 2 (the relay clamp, v_96). ``None`` when
+    the hop is missing, unparseable or not positive."""
+    try:
+        hop = int(payload.get("hop_count") or 0)
+    except TypeError, ValueError:
+        return None
+    if hop <= 0:
+        return None
+    return hop if from_instance == origin else max(hop, 2)
 
 
 #: The payload fields the origin signs, per event type. Everything the
@@ -150,6 +221,9 @@ def moment_origin_signing_bytes(
     if carries_no_relay(payload):
         signed[NO_RELAY_FIELD] = payload[NO_RELAY_FIELD]
         domain = _DOMAIN_NO_RELAY
+    elif REACH_FIELD in payload:
+        signed[REACH_FIELD] = payload[REACH_FIELD]
+        domain = _DOMAIN_REACH
     return domain + canonical_utf8_bytes(signed)
 
 
@@ -327,6 +401,9 @@ def check_relayed_moment_origin(
             return OriginCheck(
                 False, reason="unsigned, but the origin signs its moments"
             )
+        if REACH_FIELD in payload:
+            # v_96: an origin predating signing predates reach too.
+            return OriginCheck(False, reason="unsigned, but carries reach")
         return OriginCheck(True, legacy=True)
     shipped: bytes | None = None
     shipped_hex = payload.get(ORIGIN_IDENTITY_PK_FIELD)
@@ -372,6 +449,7 @@ __all__ = [
     "ORIGIN_IDENTITY_PK_FIELD",
     "ORIGIN_SIG_FIELD",
     "ORIGIN_SIG_SUITE_FIELD",
+    "REACH_FIELD",
     "SIGNED_MOMENT_EVENT_TYPES",
     "SUPPORTED_MOMENT_ORIGIN_SIG_SUITES",
     "OriginCheck",
@@ -380,7 +458,10 @@ __all__ = [
     "check_relayed_moment_origin",
     "delete_cert_of",
     "delete_cert_refusal",
+    "moment_hop_of",
     "moment_origin_signing_bytes",
+    "moment_reach_of",
+    "reach_marks_of",
     "sign_moment_origin",
     "verify_moment_origin",
 ]

@@ -33,7 +33,7 @@ function mine(id: string, ageMs: number, extra: Partial<Moment> = {}): Moment {
     origin_instance_id: 'here',
     created_at: new Date(created).toISOString(),
     expires_at: new Date(created + 7 * DAY).toISOString(),
-    reaction_count: 2, reply_count: 1, received_via: 'self',
+    reaction_count: 2, reply_count: 1, reach: 3, received_via: 'self',
     author: { display_name: 'Me', picture_url: null },
     ...extra,
   }

@@ -1322,7 +1322,8 @@ def make_persist_replay(*, federation_repo) -> InboundStep:
 #: Sender-side gates suppress most direct-delivery envelopes before
 #: they leave the source — this map is the receiver-side backstop for
 #: envelopes that arrive via mesh relay (``MomentFederationOutbound``
-#: 3-hop relay) where the relaying instance has no visibility into
+#: relay, up to ``MOMENT_MAX_HOPS`` bounded by the signed reach) where
+#: the relaying instance has no visibility into
 #: the originator's per-pair hide policy.
 _AUTHOR_FIELD_FOR_INBOUND: dict[str, str] = {
     # NB: ``user_updated`` is deliberately NOT in this map. It is the

@@ -523,6 +523,22 @@ describe('PersonSheet — one Follow (decision 7)', () => {
     expect(apiMock.post).not.toHaveBeenCalledWith('/api/moments/public/follows', expect.anything())
   })
 
+  it('a GFS follow the household refuses (a friend) becomes the household follow', async () => {
+    // The lookup failed, so the sheet offered a GFS follow; the server knows
+    // better (409 FOLLOW_AT_HOME) and nothing reached the GFS.
+    apiDefaults(path => (path === '/api/gfs/connections' ? [DEMO] : path === '/api/moments/public/follows' ? [] : undefined))
+    apiMock.post
+      .mockRejectedValueOnce(Object.assign(new Error('a friend'), { code: 'FOLLOW_AT_HOME' }))
+      .mockResolvedValueOnce({})
+    render(<PersonSheet />)
+    await act(async () => { openPerson('u-noor', { person: noor }) })
+    await waitFor(() => expect(followRow().textContent).toContain('Demo GFS'))
+    await act(async () => { fireEvent.click(followRow()) })
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith('/api/moments/follows', { user_id: 'u-noor' }))
+    expect(toastSpy).toHaveBeenCalledWith('Following Noor Haddad', 'success')
+  })
+
   it('own household: the same Follow label as everyone else', async () => {
     render(<PersonSheet />)
     await act(async () => { openPerson('u-oma', { person: oma() }) })

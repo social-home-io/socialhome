@@ -1,14 +1,14 @@
 """Signed reaction totals of a moment (v_69, owner decision 10).
 
 Only a moment's author household holds every reaction to it — paired,
-2–3-hop (v_67) and GFS followers' (v_68) all reach it — so only it can say
+further hops (v_67) and GFS followers' (v_68) all reach it — so only it can say
 how many people reacted. It re-broadcasts the **totals**: per-emoji counts
 (the :data:`~socialhome.domain.moment.MOMENT_COUNTS_MAX_EMOJIS` most used)
 and the total over every emoji. Never who reacted.
 
 On the mesh the totals ride ``MOMENT_REACTIONS_COUNTED`` (hop-encrypted like
 every federation payload, §25.8.21) and are relayed like a
-``MOMENT_CREATED``, so every household down the 3-hop mesh must be able to
+``MOMENT_CREATED``, so every household down the mesh must be able to
 check them against the author's household — a relay must not be able to
 inflate or zero a count. The origin signs them with its existing Ed25519
 **identity** key (no new key — the receiver verifies against the key it

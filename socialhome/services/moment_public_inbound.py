@@ -64,6 +64,7 @@ from cryptography.exceptions import InvalidTag
 
 from ..domain.events import MomentCreated, MomentDeleted
 from ..domain.moment import (
+    GFS_DELETE_HOP,
     MOMENT_MAX_LIFETIME_DAYS,
     Moment,
     clamp_moment_expiry,
@@ -531,6 +532,20 @@ class MomentPublicInbound:
                 env.get("moment_id"),
             )
             return
+        if not await self._moments.has_visible_recipient(
+            author_user_id=str(env["author_user_id"]),
+            hop_count=1,
+            via_gfs=True,
+        ):
+            # Kept only if someone here will see it — the mesh's storage rule
+            # (v_96). The follower may be removed, protected (never sees a
+            # GFS moment) or block the author, and nobody else here may see
+            # it either: no row, no file fetched.
+            log.info(
+                "moment_public.inbound: moment %s — nobody here will see it, not kept",
+                env.get("moment_id"),
+            )
+            return
         if (
             stored is None
             and follow is not None
@@ -640,6 +655,9 @@ class MomentPublicInbound:
             expires_at=(
                 datetime.now(UTC) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
             ).isoformat(),
+            # v_96: above every mesh hop — the mesh copy of this delete must
+            # still be relayed on when it arrives later.
+            hop_count=GFS_DELETE_HOP,
         )
         if existing is None:
             return outcome.changed

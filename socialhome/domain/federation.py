@@ -559,7 +559,7 @@ class FederationEventType(str, enum.Enum):
     HIGHLIGHT_FRAME_REACTED = "highlight_frame_reacted"
     HIGHLIGHT_FRAME_REACTION_REMOVED = "highlight_frame_reaction_removed"
 
-    # ── Momentum (§Momentum) — household-broadcast posts with 3-hop relay ──
+    # ── Momentum (§Momentum) — household-broadcast posts relayed up to 5 hops ──
     MOMENT_CREATED = "moment_created"
     MOMENT_DELETED = "moment_deleted"
     MOMENT_REACTED = "moment_reacted"
@@ -1672,6 +1672,13 @@ DELIVERY_ERROR_QUEUED: str = "delivery_failed"
 #: way: that newer send delivers (or queues) the current state, so queueing
 #: this older one would only land it afterwards and roll the peer back.
 DELIVERY_ERROR_SUPERSEDED: str = "superseded"
+
+
+#: :attr:`DeliveryResult.error` value meaning "the peer's outbox is full of
+#: this household's own events, and this row we only relay (a stranger's
+#: moment create or totals, v_96) was dropped rather than evict one of
+#: them" — a terminal miss for this peer, by design.
+DELIVERY_ERROR_RELAYED_ROW_DROPPED: str = "relayed_row_dropped"
 
 
 #: :attr:`DeliveryResult.error` value meaning "queued in the mesh target's

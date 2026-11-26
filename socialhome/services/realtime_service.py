@@ -1969,10 +1969,12 @@ class RealtimeService:
         # moment from outside the household and its paired households (a
         # stranger's through a GFS, or one relayed from 2+ hops away) never
         # reaches a protected account's sockets (§CP.R, decision 14), not
-        # even as a refresh hint.
+        # even as a refresh hint. Nor does it reach anyone who blocked its
+        # author (§Privacy, §CP.F2) — a row kept for one follower is not news
+        # for them.
         withheld = await self._protected_unless_in_circle(
             event.received_via, event.hop_count
-        )
+        ) | await self._blocked_or_counterparts(event.author_user_id)
         await self._broadcast_household(
             {
                 "type": "moment.created",
