@@ -339,6 +339,7 @@ from .services.calendar_service import (
 )
 from .services.call_service import CallSignalingService, StaleCallCleanupScheduler
 from .services.capabilities_outbound import CapabilitiesOutbound
+from .services.capability_resync import request_capability_resync
 from .services.child_protection_service import ChildProtectionService
 from .services.corner_service import CornerService
 from .services.dashboard_display_service import DashboardDisplayService
@@ -435,7 +436,6 @@ from .services.recovery_reconnect_service import RecoveryReconnectService
 from .services.relay_policy import RelayPolicy
 from .services.report_scope import ReportScope
 from .services.report_service import ReportService
-from .services.resync_on_upgrade import request_capability_resync_if_upgraded
 from .services.schedule_calendar_bridge import ScheduleCalendarBridge
 from .services.schedule_federation_outbound import ScheduleFederationOutbound
 from .services.search_service import SearchService
@@ -2386,6 +2386,8 @@ def _wire_federation_stack(
         # v_54 — our key-wrap key for peers we opt into the GFS relay with.
         keywrap_public_key=identity.keywrap_public_key,
         keywrap_sig=identity.keywrap_sig,
+        # v_96 — how far our people look for moments (decision C).
+        moment_repo=moment_repo,
     )
     capabilities_outbound.wire()
     app[K.capabilities_outbound_key] = capabilities_outbound
@@ -4282,7 +4284,11 @@ def create_app(config: Config | None = None) -> web.Application:
         media_refs=repos.media_reference,
         federation_repo=repos.federation,
         gfs_delete_log=gfs_connection_service,
+        # v_96: the household's maximum reach (``moments.reach_max``).
+        config_repo=repos.instance_config,
     )
+    # §CP.R (v_96): a protected account's moments go one hop.
+    moment_service.attach_child_protection(child_protection_service)
     # Your own moments stay in your archive (decision 6a); the household's
     # per-person media cap is enforced on the same hourly retention tick.
     moment_archive_service = MomentArchiveService(
@@ -4321,6 +4327,7 @@ def create_app(config: Config | None = None) -> web.Application:
         user_repo,
         repos.gfs_connection,
         profile_picture_repo=profile_picture_repo,
+        federation_repo=repos.federation,
     )
     moment_public_outbound = MomentPublicOutbound(
         bus=bus,
@@ -6592,8 +6599,8 @@ def create_app(config: Config | None = None) -> web.Application:
             if cap_outbound is not None:
                 await cap_outbound.publish()
 
-        async def _resync_capabilities_if_upgraded() -> None:
-            await request_capability_resync_if_upgraded(
+        async def _resync_capabilities() -> None:
+            await request_capability_resync(
                 federation=federation_service,
                 federation_repo=federation_repo,
                 identity_repo=federation_repo,
@@ -6604,7 +6611,7 @@ def create_app(config: Config | None = None) -> web.Application:
             [
                 ("post-restore reconnect", recovery_reconnect_service.maybe_reconnect),
                 ("capabilities announcement", _announce_capabilities),
-                ("capability re-sync on upgrade", _resync_capabilities_if_upgraded),
+                ("capability re-sync", _resync_capabilities),
             ]
         )
         await startup_announcer.start()

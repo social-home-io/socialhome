@@ -3,8 +3,9 @@
  * place a reply is written (``/momentum/{id}/reply`` focuses it).
  *
  * Says where the reply goes, as the composer does (#1188): a reply is a
- * moment of its own from your household, 3 hops out (your household and
- * paired households for a protected account). The public switch shows only
+ * moment of its own from your household, as far as your reach and never
+ * further than the moment it answers (v_96; your household and paired
+ * households for a protected account). The public switch shows only
  * under a public moment you could share publicly anyway (decision 2), and
  * is never pre-ticked — "Make new moments public" is for new moments.
  *
@@ -14,7 +15,7 @@
  * waits while it uploads. A picture alone is a reply.
  */
 import type { Ref } from 'preact'
-import { useId, useRef } from 'preact/hooks'
+import { useEffect, useId, useRef } from 'preact/hooks'
 import { useSignal } from '@preact/signals'
 import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
@@ -25,6 +26,7 @@ import { showToast } from '@/components/Toast'
 import { UploadProgressBar } from '@/components/UploadProgress'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
+import { loadMomentLimits, reachText, replyReach } from '@/store/momentLimits'
 import { registrations } from '@/store/momentPublic'
 import { clearTextDraft, textDraft } from '@/store/textDrafts'
 import type { Moment } from '@/types'
@@ -57,6 +59,10 @@ export function MomentReplyField({ parent, inputRef, onPosted }: Props) {
   const isProtected = me?.protected === true
   const registered = registrations.value.length > 0
   const showPublic = registered && !isRestricted('public_moments') && parent.is_public === true
+  // No further than the caller's reach, nor than the moment it answers.
+  const hops = replyReach(parent)
+
+  useEffect(() => { void loadMomentLimits() }, [])
 
   const onPick = async (ev: Event) => {
     const input = ev.currentTarget as HTMLInputElement
@@ -168,7 +174,9 @@ export function MomentReplyField({ parent, inputRef, onPosted }: Props) {
         </div>
       )}
       <p id={hintId} class="sh-moment-replyfield__hint">
-        {t(isProtected ? 'moment.composer.reach_reply_protected' : 'moment.composer.reach_reply')}
+        {isProtected
+          ? t('moment.composer.reach_reply_protected')
+          : reachText('moment.composer.reach_reply', hops)}
       </p>
       {showPublic && (
         <label class="sh-moment-replyfield__public">

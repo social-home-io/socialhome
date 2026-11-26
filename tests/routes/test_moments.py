@@ -131,7 +131,7 @@ async def test_limits_before_and_after_a_moment(client):
     """``GET /api/moments/limits`` tells the composer before writing."""
     r = await client.get("/api/moments/limits", headers=_auth(client._tok))
     assert r.status == 200
-    assert await r.json() == {"next_allowed_at": None}
+    assert await r.json() == {"next_allowed_at": None, "reach": 3, "reach_max": 5}
     r = await client.post(
         "/api/moments", json={"content": "one"}, headers=_auth(client._tok)
     )
@@ -172,6 +172,86 @@ async def test_limits_ignore_replies(client):
 async def test_limits_require_login(client):
     r = await client.get("/api/moments/limits")
     assert r.status == 401
+
+
+# ── Reach (v_96) ─────────────────────────────────────────────────────────
+
+
+async def _limits(client, headers) -> dict:
+    r = await client.get("/api/moments/limits", headers=headers)
+    assert r.status == 200
+    return await r.json()
+
+
+async def test_limits_carry_the_callers_reach_within_the_household_max(client):
+    h = _auth(client._tok)
+    r = await client.patch(
+        "/api/me", json={"preferences": {"moments": {"reach": 4}}}, headers=h
+    )
+    assert r.status == 200, await r.text()
+    assert (await _limits(client, h))["reach"] == 4
+    r = await client.put(
+        "/api/admin/moments/reach-max", json={"reach_max": 2}, headers=h
+    )
+    assert r.status == 200
+    assert await r.json() == {"reach_max": 2}
+    body = await _limits(client, h)
+    assert (body["reach"], body["reach_max"]) == (2, 2)
+
+
+async def test_reach_max_rejects_anything_but_1_to_5(client):
+    h = _auth(client._tok)
+    for bad in (0, 6, -1, "3", None, 2.5, True):
+        r = await client.put(
+            "/api/admin/moments/reach-max", json={"reach_max": bad}, headers=h
+        )
+        assert r.status == 422, bad
+    assert (await _limits(client, h))["reach_max"] == 5
+
+
+async def test_reach_max_rejects_a_body_that_is_not_an_object(client):
+    h = _auth(client._tok)
+    # Raw bodies: aiohttp's ``json=None`` would send no body at all (a 400).
+    for bad in ("[]", "null", '"x"', '[{"reach_max": 2}]'):
+        r = await client.put(
+            "/api/admin/moments/reach-max",
+            data=bad,
+            headers={**h, "Content-Type": "application/json"},
+        )
+        assert r.status == 422, bad
+    assert (await _limits(client, h))["reach_max"] == 5
+
+
+async def test_only_an_admin_sets_the_reach_max(client):
+    eve = await _eve(client)
+    r = await client.put(
+        "/api/admin/moments/reach-max", json={"reach_max": 1}, headers=eve
+    )
+    assert r.status == 403
+    assert (await _limits(client, eve))["reach_max"] == 5
+    r = await client.put("/api/admin/moments/reach-max", json={"reach_max": 1})
+    assert r.status == 401
+
+
+async def test_a_moment_says_how_far_it_went(client):
+    h = _auth(client._tok)
+    await client.patch(
+        "/api/me", json={"preferences": {"moments": {"reach": 2}}}, headers=h
+    )
+    r = await client.post("/api/moments", json={"content": "near"}, headers=h)
+    assert r.status == 201
+    body = await r.json()
+    assert body["reach"] == 2
+    items = await (await client.get("/api/moments", headers=h)).json()
+    assert items[0]["reach"] == 2
+    detail = await (await client.get(f"/api/moments/{body['id']}", headers=h)).json()
+    assert detail["moment"]["reach"] == 2
+
+
+async def test_a_row_without_a_reach_reads_as_3(client):
+    await _own_row(client, "m-old", client._uid, age_days=0.1)
+    items = await (await client.get("/api/moments", headers=_auth(client._tok))).json()
+    assert [m["reach"] for m in items if m["id"] == "m-old"] == [3]
 
 
 async def test_video_over_15s_rejected(client):
@@ -1505,6 +1585,17 @@ async def test_archive_usage_and_the_admin_cap(client):
     for bad in (-5, "1", None, 1.5, True):
         r = await client.put(
             "/api/admin/moments/archive-cap", json={"cap_bytes": bad}, headers=h
+        )
+        assert r.status == 422, bad
+
+
+async def test_archive_cap_rejects_a_body_that_is_not_an_object(client):
+    h = _auth(client._tok)
+    for bad in ("[]", "null", '"x"', '[{"cap_bytes": 10}]'):
+        r = await client.put(
+            "/api/admin/moments/archive-cap",
+            data=bad,
+            headers={**h, "Content-Type": "application/json"},
         )
         assert r.status == 422, bad
 

@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from ..domain.moment_public import DIRECTORY_SORT_FOLLOWERS, DIRECTORY_SORT_NEW
 from ..moment_public_seal import (
     FRAME_MOMENT,
     FRAME_MOMENT_COUNTS,
@@ -132,6 +133,17 @@ MOMENT_SEEN_TTL_S: float = float(RATCHET_STEP_S + MOMENT_STEP_SLACK_S)
 #: ~190 000 public moments a day per GFS before the oldest are forgotten
 #: early — and a forgotten one can be re-posted only until its step ends.
 MOMENT_SEEN_MAX: int = 200_000
+
+#: How long a node keeps the most-followed list (one count over the whole
+#: follow graph — ~0.05–0.5 s at 1 M follows) before counting again.
+RANKED_DIRECTORY_TTL_S: float = 300.0
+
+
+def ranked_clock() -> float:
+    """The clock the most-followed list ages by (monotonic; tests move it
+    without moving the event loop's)."""
+    return time.monotonic()
+
 
 #: Public moments (creates + deletes) one author household may publish per
 #: minute, across the whole cluster (each node allows its
@@ -234,6 +246,8 @@ class MomentPublicRegistry:
         "_key_requests",
         "_mailbox",
         "_publishes",
+        "_ranked",
+        "_ranked_lock",
         "_reaction_seen",
         "_reactions_author",
         "_reactions_household",
@@ -304,6 +318,9 @@ class MomentPublicRegistry:
             ttl_s=MOMENT_SEEN_TTL_S, cap=MOMENT_SEEN_MAX
         )
         self._tasks: set[asyncio.Task] = set()
+        #: (monotonic time, the most-followed ids) — :meth:`_ranked_ids`.
+        self._ranked: tuple[float, list[str]] | None = None
+        self._ranked_lock = asyncio.Lock()
 
     # ── Registration ────────────────────────────────────────────────────
 
@@ -351,9 +368,47 @@ class MomentPublicRegistry:
         )
 
     async def list_directory(
-        self, *, q: str | None = None, limit: int = 200
-    ) -> list[GfsUserRegistration]:
-        return await self._users.list_active(q=q, limit=limit)
+        self, *, q: str | None = None, limit: int = 200, sort: str = DIRECTORY_SORT_NEW
+    ) -> list[tuple[GfsUserRegistration, int]]:
+        """Active authors with their follower counts (the number each
+        author's public page already shows): newest first, or most followed
+        first (by follower households — see
+        :meth:`~.repositories.SqliteGfsUserRegistrationRepo.most_followed_ids`).
+
+        The most-followed *order* is one count over the whole follow graph,
+        so each node keeps only the ids for :data:`RANKED_DIRECTORY_TTL_S`,
+        one recount at a time — visitors can't make it recount. The rows and
+        counts are read live on every request (≤ 200, by primary key and
+        index), so an author who leaves or is suspended is gone at once.
+        A search is not ranked (``ValueError``): it would need a recount."""
+        if sort == DIRECTORY_SORT_FOLLOWERS:
+            if q:
+                raise ValueError("a search is listed newest first")
+            ids = (await self._ranked_ids())[: max(1, min(int(limit), 200))]
+            by_id = {r.user_id: r for r in await self._users.list_active_by_ids(ids)}
+            regs = [by_id[i] for i in ids if i in by_id]
+        else:
+            regs = await self._users.list_active(q=q, limit=limit)
+        counts = await self._follows.follower_counts([r.user_id for r in regs])
+        return [(r, counts.get(r.user_id, 0)) for r in regs]
+
+    async def _ranked_ids(self) -> list[str]:
+        """The most-followed ids, recounted at most once per
+        :data:`RANKED_DIRECTORY_TTL_S` on this node and by one request at a
+        time (the others wait for its answer)."""
+        if (
+            self._ranked is not None
+            and ranked_clock() - self._ranked[0] < RANKED_DIRECTORY_TTL_S
+        ):
+            return self._ranked[1]
+        async with self._ranked_lock:
+            if (
+                self._ranked is None
+                or ranked_clock() - self._ranked[0] >= RANKED_DIRECTORY_TTL_S
+            ):
+                ids = await self._users.most_followed_ids(limit=200)
+                self._ranked = (ranked_clock(), ids)
+            return self._ranked[1]
 
     async def set_picture_digest(
         self, *, user_id: str, picture_digest: str | None

@@ -396,6 +396,47 @@ describe('PostCard link preview', () => {
     expect(container.querySelector('.sh-link-preview-remove')).toBeNull()
   })
 
+  it('hides a card that would open another page than the text links', () => {
+    // UX review: ``first_url`` stops at "(", the text links the whole
+    // ``…_(planet)`` URL — the Mercury disambiguation card must not show.
+    const post: FeedPost = {
+      ...mockPost,
+      content: 'Planet: https://en.wikipedia.org/wiki/Mercury_(planet) is hot.',
+      link_preview: {
+        url: 'https://en.wikipedia.org/wiki/Mercury',
+        title: 'Mercury - Wikipedia',
+        description: null,
+        site_name: null,
+        thumbnail_url: null,
+      },
+    }
+    const { container } = render(<PostCard post={post} />)
+    const link = container.querySelector('.sh-post-body a') as HTMLAnchorElement
+    expect(link.getAttribute('href')).toBe('https://en.wikipedia.org/wiki/Mercury_(planet)')
+    expect(container.querySelector('.sh-link-preview')).toBeNull()
+  })
+
+  it('an edit that adds a link says cards are made when a post is written', () => {
+    const post: FeedPost = { ...mockPost, content: 'Recipe for tonight' }
+    const { container, getByText } = render(
+      <PostCard post={post} onEdit={async () => true} onDelete={() => {}} />,
+    )
+    fireEvent.click(container.querySelector('[aria-label="Post actions"]')!)
+    fireEvent.click(getByText('Edit'))
+    const input = container.querySelector('.sh-post-edit-input') as HTMLTextAreaElement
+    expect(container.querySelector('.sh-post-edit-hint')).toBeNull()
+    fireEvent.input(input, { target: { value: 'Recipe for tonight' + ' https://example.com/r' } })
+    const hint = container.querySelector('.sh-post-edit-hint')!
+    expect(hint.textContent).toBe('Link previews are made when a post is first written.')
+    expect(input.getAttribute('aria-describedby')).toBe(hint.id)
+    // A mailto link never gets a card: no hint.
+    fireEvent.input(input, { target: { value: 'Recipe [mail](mailto:a@b.example)' } })
+    expect(container.querySelector('.sh-post-edit-hint')).toBeNull()
+    // Back to no new link: the hint goes away.
+    fireEvent.input(input, { target: { value: 'Recipe for tomorrow' } })
+    expect(container.querySelector('.sh-post-edit-hint')).toBeNull()
+  })
+
   it('renders no card without a preview', () => {
     const { container } = render(<PostCard post={mockPost} />)
     expect(container.querySelector('.sh-link-preview')).toBeNull()

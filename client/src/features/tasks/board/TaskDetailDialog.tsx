@@ -28,6 +28,7 @@ import { PriorityIcon, PRIORITIES, priorityLabel } from './priority'
 import { labelColorClass } from './labels'
 import { LabelsInput } from './LabelsInput'
 import { joinNames, statusLabel } from './TaskCard'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 /** The backend's assignee cap. */
 const MAX_ASSIGNEES = 10
@@ -116,7 +117,7 @@ export function TaskDetailDialog({
             <dd class="sh-task-view__name">{base.title}</dd>
             <dt>{t('tasks.edit.description')}</dt>
             {notes
-              ? <dd class="sh-task-edit__notes">{base.description}</dd>
+              ? <dd class="sh-task-edit__notes"><LinkifiedText text={base.description ?? ''} /></dd>
               : <dd class="sh-task-edit__empty">{t('tasks.edit.no_notes')}</dd>}
             <dt>{t('tasks.edit.due')}</dt>
             {base.due_date

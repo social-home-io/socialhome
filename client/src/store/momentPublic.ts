@@ -115,13 +115,35 @@ export async function unfollowUser(
   )
 }
 
+/** The GFS directory's orders (Discover's sort buttons). */
+export type DirectorySort = 'followers' | 'new'
+
+export interface DirectoryPage {
+  users: MomentPublicDirectoryUser[]
+  /** The order the GFS says it used — only when it is the one asked for;
+   *  ``null`` for a GFS that doesn't rank (older). A label, nothing more. */
+  sort: DirectorySort | null
+}
+
+/** A follower count worth showing: a whole number from 0 to 1e9. The GFS
+ *  sends it; it labels a row and is never used for anything else. */
+function shownCount(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw <= 1e9
+    ? raw : undefined
+}
+
 export async function fetchGfsDirectory(
   gfsId: string,
-): Promise<MomentPublicDirectoryUser[]> {
-  const data = (await api.get(`/api/gfs/${gfsId}/moments/users`)) as {
-    users?: MomentPublicDirectoryUser[]
+  sort: DirectorySort,
+): Promise<DirectoryPage> {
+  const data = (await api.get(`/api/gfs/${gfsId}/moments/users`, { sort })) as {
+    users?: unknown, sort?: unknown,
+  } | null
+  const rows = Array.isArray(data?.users) ? data.users as MomentPublicDirectoryUser[] : []
+  return {
+    users: rows.map((u) => ({ ...u, follower_count: shownCount(u.follower_count) })),
+    sort: data?.sort === sort ? sort : null,
   }
-  return data.users ?? []
 }
 
 /** This household's active GFS connections (``null`` = not read yet or

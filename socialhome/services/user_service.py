@@ -28,6 +28,7 @@ from ..domain.events import (
     UserBlocked,
     UserDeprovisioned,
     UserFollowed,
+    UserPreferencesPatched,
     UserProfileUpdated,
     UserProvisioned,
     UserStatusChanged,
@@ -57,6 +58,10 @@ from .user_preferences import HA_AUTOMATION_EVENTS_KEY, parse_ha_automation_even
 log = logging.getLogger(__name__)
 
 _USERNAME_MAX_LENGTH = 32
+
+#: The one preferences key :meth:`UserService.patch_preferences` merges one
+#: level deep (its ``reach`` is a privacy setting a partial writer must keep).
+_DEEP_MERGED_PREFERENCE = "moments"
 
 #: Display-name / bio length caps applied by :meth:`patch_profile`.
 DISPLAY_NAME_MAX_LENGTH = 64
@@ -608,6 +613,13 @@ class UserService(ProtectionGateMixin):
         Unknown keys are allowed — the frontend owns the schema. ``None``
         values explicitly remove a key.
 
+        One key merges one level deep: ``moments``. When both the stored and
+        the patched value are objects, the patched sub-keys win (``None``
+        removes one) and the ones left out are kept — so a client that writes
+        the block without ``reach`` (an older SPA tab, the HA app webview)
+        can't silently widen how far the person's moments go. Either side
+        not an object → replaced, like every other key.
+
         One key is the server's: :data:`HA_AUTOMATION_EVENTS_KEY` (D14) must
         be a boolean, and turning it on is refused for a protected account
         (:attr:`ProtectedCapability.HA_AUTOMATIONS`) — nothing is saved then.
@@ -629,6 +641,13 @@ class UserService(ProtectionGateMixin):
         for key, value in patch.items():
             if value is None:
                 prefs.pop(key, None)
+            elif (
+                key == _DEEP_MERGED_PREFERENCE
+                and isinstance(value, dict)
+                and isinstance(prefs.get(key), dict)
+            ):
+                merged = {**prefs[key], **value}
+                prefs[key] = {k: v for k, v in merged.items() if v is not None}
             else:
                 prefs[key] = value
         new_user = replace(
@@ -636,6 +655,10 @@ class UserService(ProtectionGateMixin):
             preferences_json=orjson.dumps(prefs, option=orjson.OPT_SORT_KEYS).decode(),
         )
         await self._repo.save(new_user)
+        if patch:
+            await self._bus.publish(
+                UserPreferencesPatched(user_id=user.user_id, keys=frozenset(patch))
+            )
         return new_user
 
     async def set_status(

@@ -88,3 +88,16 @@ describe('renderHashtagged', () => {
     expect(normalizeHashtag('Kürbisfest'.normalize('NFD'))).toBe('kürbisfest')
   })
 })
+
+describe('renderHashtagged — links', () => {
+  it('links web links; a #fragment in a link is no tag', () => {
+    const onTag = vi.fn()
+    const out = renderHashtagged('#walk see https://example.org/p#top and #home', onTag)
+    const { container } = render(<>{out}</>)
+    const ext = container.querySelector('a.sh-ext-link') as HTMLAnchorElement
+    expect(ext.getAttribute('href')).toBe('https://example.org/p#top')
+    expect(ext.getAttribute('rel')).toBe('noopener noreferrer nofollow ugc')
+    const tags = [...container.querySelectorAll('a.sh-hashtag')].map(a => a.textContent)
+    expect(tags).toEqual(['#walk', '#home'])
+  })
+})

@@ -14,12 +14,19 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from socialhome.crypto import b64url_encode, derive_instance_id, sign_ed25519
 from socialhome.domain.events import MomentCreated
-from socialhome.domain.moment import MOMENT_MAX_LIFETIME_DAYS, Moment
+from socialhome.domain.moment import (
+    GFS_DELETE_HOP,
+    MOMENT_MAX_LIFETIME_DAYS,
+    MOMENT_MAX_REACH,
+    Moment,
+    MomentTombstone,
+)
 from socialhome.global_server.envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.moment_public_seal import item_key, seal_body, sign_wire
@@ -709,6 +716,29 @@ async def test_a_public_delete_for_an_unseen_moment_is_held_thirty_days(db):
     assert abs((held - want).total_seconds()) < 60
 
 
+@pytest.mark.parametrize("held", [True, False])
+async def test_a_gfs_delete_never_suppresses_the_mesh_copy(db, held):
+    """v_96: a delete that came through a GFS sits above every mesh hop, so
+    the mesh copy of the same delete arriving later is ``CLOSER`` — it is
+    relayed on to the households that hold the moment over the mesh."""
+    inbound, _ = await _env(db)
+    if held:
+        await _create(inbound, _moment("m-both", sent_at=int(time.time())))
+    await _deliver_delete(inbound, _delete("m-both", sent_at=int(time.time())))
+    repo = SqliteMomentRepo(db)
+    tomb = await repo.get("m-both", include_deleted=True)
+    assert tomb is not None and tomb.deleted_at is not None
+    assert tomb.hop_count == GFS_DELETE_HOP > MOMENT_MAX_REACH
+    mesh = await repo.tombstone(
+        "m-both",
+        author_user_id=tomb.author_user_id,
+        origin_instance_id=tomb.origin_instance_id,
+        expires_at=tomb.expires_at,
+        hop_count=MOMENT_MAX_REACH,
+    )
+    assert mesh is MomentTombstone.CLOSER
+
+
 # ── Delete certificates (v_66) ─────────────────────────────────────────
 
 
@@ -813,3 +843,57 @@ async def test_a_moment_reaction_frame_goes_to_the_router(db):
     inbound.attach_reactions(reactions)  # type: ignore[arg-type]
     await inbound.handle(frame, gfs_id="g1")
     assert reactions.frames == [(frame, "g1")]
+
+
+# ── Storage rule (v_96): kept only when someone here will see it ─────────
+
+
+@pytest.mark.parametrize(
+    "gone",
+    [
+        "UPDATE users SET state='inactive' WHERE user_id='u1'",
+        (
+            "UPDATE users SET deleted_at=datetime('now'), state='inactive'"
+            " WHERE user_id='u1'"
+        ),
+        # A protected account never sees a moment that came through a GFS.
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='u1'",
+        (
+            "INSERT INTO user_blocks(blocker_user_id, blocked_user_id)"
+            " VALUES('u1', 'u-noor')"
+        ),
+    ],
+)
+async def test_a_moment_nobody_here_will_see_is_not_kept(db, gone):
+    """The GFS path keeps a moment by the same rule as the mesh
+    (``has_visible_recipient``): a follow row alone is not enough when its
+    follower is removed, protected or blocks the author — no row, no file.
+    (A guardian block binds only a protected account, which a GFS moment
+    never counts for anyway.)"""
+    inbound, _follows = await _env(db)
+    await db.enqueue(gone)
+    await _create(inbound, _moment("m-unseen"))
+    assert await _stored(db, "m-unseen") is None
+
+
+async def test_a_housemate_who_will_see_it_keeps_it(db):
+    """A protected follower alone keeps nothing, but an adult housemate
+    sees public moments the household holds — so it is kept."""
+    inbound, _follows = await _env(db)
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name, state)"
+        " VALUES('u-adult', 'adult', 'Adult', 'active')"
+    )
+    await _create(inbound, _moment("m-seen"))
+    assert await _stored(db, "m-seen") is not None
+
+
+async def test_a_picture_nobody_here_will_see_is_not_fetched(db):
+    inbound, _ = await _env(db)
+    media = _MediaIn()
+    inbound.attach_media(media)
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    await _create(inbound, _moment("m-pic", media=_MEDIA, media_type="image"))
+    assert media.jobs == []
+    assert await _stored(db, "m-pic") is None

@@ -52,6 +52,7 @@ import {
   namedPersonLabel,
   namedPersonPicture,
 } from '@/store/householdUsers'
+import { momentReach, reachText } from '@/store/momentLimits'
 import { loadRegistrations, registrations } from '@/store/momentPublic'
 import { markSeen } from '@/store/notifications'
 import { useTitle } from '@/store/pageTitle'
@@ -64,6 +65,7 @@ import { loadGfsNames, publicOnLabel } from './gfsNames'
 import { renderHashtagged } from './hashtags'
 import { MomentCard, relativeTime } from './MomentCard'
 import { MomentReplyField } from './MomentReplyField'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 const detail = signal<MomentDetail | null>(null)
 /** Why there is no moment to show: ``gone`` (404 — deleted, expired or
@@ -353,7 +355,7 @@ export default function MomentumDetailPage() {
           someone with no household connection. */}
       {!isAuthor && m.author?.bio && (
         <p class="sh-momentum-detail-bio" data-testid="moment-author-bio" dir="auto">
-          {m.author.bio}
+          <LinkifiedText text={m.author.bio} />
         </p>
       )}
       {ended && !isAuthor && (
@@ -387,6 +389,8 @@ function StatusBand({ m, ended }: { m: Moment; ended: boolean }) {
   const isPublic = m.is_public === true && !isProtected && !ended
   const days = momentRetentionLabel(getMomentsPreferences().follower_retention_days)
   const time = untilTime(m.expires_at)
+  // How far this moment went (v_96), fixed when it was written.
+  const hops = momentReach(m)
 
   const copyShareLink = async () => {
     // A link that opens THIS moment for anyone who has it — the key is in
@@ -413,12 +417,14 @@ function StatusBand({ m, ended }: { m: Moment; ended: boolean }) {
     sub = null
   } else if (isPublic) {
     title = publicOnLabel(registrations.value)
-    sub = t('moment.detail.status_public_also', { days })
-  } else if (isProtected) {
+    sub = reachText('moment.detail.status_public_also', hops, { days })
+  } else if (isProtected && hops === 1) {
+    // A protected author's reach-1 moment keeps the protected wording; one
+    // written before the protection (reach > 1) says how far it really went.
     title = t('moment.detail.status_reach_protected')
     sub = t('moment.detail.status_until_protected', { time })
   } else {
-    title = t('moment.detail.status_reach')
+    title = reachText('moment.detail.status_reach', hops)
     sub = t('moment.detail.status_until', { time, days })
   }
 

@@ -211,6 +211,17 @@ export function buildModel(
   }
 }
 
+/** What the person sheet (``openPerson``) needs to show *p* without a
+ *  lookup: their row, username (local people only), and household. */
+export function personSheetPerson(p: Person) {
+  return {
+    ...p.member,
+    username: p.isLocal ? (p.member as LocalMember).username : null,
+    is_local: p.isLocal,
+    household: p.home,
+  }
+}
+
 /** Does *p* match the folded query? Name, real name, username and the
  *  household's name all count, so "okafor" finds the whole family. */
 export function matches(p: Person, foldedQuery: string): boolean {

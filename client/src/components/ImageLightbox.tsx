@@ -20,6 +20,7 @@ import { safeHref } from '@/utils/safeHref'
 import { formatDayKey } from '@/utils/calendar'
 import { restoreFocus } from '@/utils/focus'
 import { focusableWithin } from './Modal'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 export interface LightboxItem {
   id?:            string
@@ -248,7 +249,7 @@ export function ImageLightbox() {
 
       <div class="sh-lightbox-meta">
         <div class="sh-lightbox-meta-line">
-          {item.caption && <strong>{item.caption}</strong>}
+          {item.caption && <strong><LinkifiedText text={item.caption} /></strong>}
           {item.taken_at && (
             <time class="sh-muted">
               {/* ``taken_at`` is the camera's calendar day (``YYYY-MM-DD``):

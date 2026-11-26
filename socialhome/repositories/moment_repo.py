@@ -39,6 +39,8 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.moment import (
+    MOMENT_DEFAULT_MAX_HOPS,
+    MOMENT_MAX_HOPS,
     Moment,
     MomentReaction,
     MomentReactionRoute,
@@ -50,13 +52,16 @@ from ..domain.moment import (
     reaction_counts_valid,
 )
 from .base import row_to_dict, rows_to_dicts
-from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
+from .cp_repo import (
+    GUARDIAN_BLOCK_COUNTERPARTS_SQL,
+    guardian_block_counterparts_sql,
+)
 
 #: A protected account (§CP.R) sees moments from its own household and its
 #: directly paired households only — the circle its own ``no_relay`` moments
 #: reach (owner decision 14, 2026-10-25). Never one that arrived through a
 #: GFS (``received_via = 'gfs'`` — a stranger's public moment another member
-#: of the household follows), never one relayed from 2–3 hops away
+#: of the household follows), never one relayed from 2+ hops away
 #: (``hop_count > 1``; the inbound handler stores a relayed copy at hop ≥ 2
 #: whatever the relay claims). Moments written here are hop 1. Read-time, per
 #: viewer: the row is household-wide. Binds the viewer once.
@@ -93,29 +98,54 @@ _PRUNABLE_SQL = (
     + _SAVED_BY_ANYONE_SQL
 )
 
-#: The viewer follows the moment's author — on a paired household
-#: (``user_follows``) or through a GFS (``moment_public_follows``): both are
-#: a follow, so both keep the author's moments until their ``expires_at``
-#: (decision 6d). Binds the viewer twice.
-_FOLLOWS_AUTHOR_SQL = """
+
+def follows_author_sql(follower: str = "?", author: str = "m.author_user_id") -> str:
+    """*follower* follows *author* — on a paired household (``user_follows``)
+    or through a GFS (``moment_public_follows``): both are a follow. Each
+    argument is a SQL expression — a bind placeholder or a column of the
+    outer query; the one fragment the reads and the storage rule share."""
+    return f"""
     (
         EXISTS (
             SELECT 1 FROM user_follows
-             WHERE follower_user_id = ? AND followed_user_id = m.author_user_id
+             WHERE follower_user_id = {follower} AND followed_user_id = {author}
         )
         OR EXISTS (
             SELECT 1 FROM moment_public_follows
-             WHERE follower_user_id = ? AND followed_user_id = m.author_user_id
+             WHERE follower_user_id = {follower} AND followed_user_id = {author}
         )
     )
 """
 
+
+#: The viewer follows the moment's author: a follow keeps the author's
+#: moments until their ``expires_at`` (decision 6d). Binds the viewer twice.
+_FOLLOWS_AUTHOR_SQL = follows_author_sql()
+
+#: A current person of this household (``users AS u``): active and not
+#: deleted. The storage rule (:meth:`SqliteMomentRepo.has_visible_recipient`)
+#: and the look (:meth:`SqliteMomentRepo.moment_look_hops`) count the same
+#: people, so a removed person neither keeps moments here nor widens the look.
+_LOCAL_PERSON_SQL = "u.state = 'active' AND u.deleted_at IS NULL"
+
+#: Within the viewer's reach of sight: the row's ``hop_count`` is at most the
+#: viewer's ``max_hops``, or the viewer follows the author — a follow shows
+#: the author's moments whatever the viewer's ``max_hops`` (v_96; the same
+#: rule :meth:`SqliteMomentRepo.has_visible_recipient` stores by, so "stored"
+#: and "seen" stay one rule). Child protection (:data:`_PROTECTED_CIRCLE_SQL`)
+#: still applies on top. Binds the viewer twice, then the hop cap — the cap
+#: must stay the last placeholder (every ``count("?") - 1`` bind helper below
+#: relies on it), which is why ``hop_count <= ?`` comes after the EXISTS.
+_WITHIN_HOPS_SQL = f"({_FOLLOWS_AUTHOR_SQL} OR m.hop_count <= ?)"
+
 #: What the inbox shows a viewer — the one rule :meth:`list_visible_to` and
 #: :meth:`get_readable` share, so a detail read can never show what the
 #: inbox hides: no personal block (§Privacy) or guardian block (§CP.F2,
-#: either way) between viewer and author; younger than 24 h, or the viewer
-#: follows the author (then until its ``expires_at``); not expired or deleted;
-#: within the viewer's ``max_hops``; and, for a protected account (§CP.R),
+#: either way) between viewer and author; not expired or deleted; the viewer
+#: follows the author (then until its ``expires_at``, whatever their
+#: ``max_hops`` — :data:`_WITHIN_HOPS_SQL`), or it is younger than 24 h and
+#: within their ``max_hops`` — ``(24 h ∨ F) ∧ (F ∨ hops)`` written as
+#: ``F ∨ (24 h ∧ hops)``, one follow check; and, for a protected account (§CP.R),
 #: only a moment from its household or a paired one
 #: (:data:`_PROTECTED_CIRCLE_SQL`) — the row is household-wide, so the
 #: filter is per viewer. Binds the viewer
@@ -126,13 +156,15 @@ _VISIBLE_SQL = f"""
         SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
     )
     AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
-    AND (
-        (julianday('now') - julianday(m.created_at)) * 24 < 24
-        OR {_FOLLOWS_AUTHOR_SQL}
-    )
     AND datetime(m.expires_at) > datetime('now')
     AND m.deleted_at IS NULL
-    AND m.hop_count <= ?
+    AND (
+        {_FOLLOWS_AUTHOR_SQL}
+        OR (
+            (julianday('now') - julianday(m.created_at)) * 24 < 24
+            AND m.hop_count <= ?
+        )
+    )
 """
 
 #: How many times :data:`_VISIBLE_SQL` binds the viewer (every placeholder
@@ -143,7 +175,8 @@ _VISIBLE_VIEWER_BINDS = _VISIBLE_SQL.count("?") - 1
 #: and past its expiry, for them only — still never across a personal or
 #: guardian block (§CP.F2), never one from outside a protected account's
 #: circle (§CP.R — a save made before protection was turned on stays
-#: hidden), within the viewer's ``max_hops``. Binds the viewer
+#: hidden), within the viewer's ``max_hops`` unless they follow the author
+#: (:data:`_WITHIN_HOPS_SQL`). Binds the viewer
 #: :data:`_SAVED_VIEWER_BINDS` times, then the hop cap.
 _SAVED_READABLE_SQL = f"""
     EXISTS (
@@ -156,7 +189,7 @@ _SAVED_READABLE_SQL = f"""
     )
     AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
     AND m.deleted_at IS NULL
-    AND m.hop_count <= ?
+    AND {_WITHIN_HOPS_SQL}
 """
 
 #: How many times :data:`_SAVED_READABLE_SQL` binds the viewer.
@@ -178,10 +211,26 @@ _READABLE_SQL = f"""
 """
 
 
+#: One person's ``moments.max_hops`` (``u`` = their ``users`` row) as the
+#: parser reads it (:func:`~socialhome.services.user_preferences
+#: .parse_moment_preferences`): an integer clamped to
+#: ``[1, MOMENT_MAX_HOPS]``, anything else — missing, a bool, a string, a
+#: fraction, a blob that isn't JSON — the default. Bind
+#: :data:`_VIEWER_HOPS_PARAMS`.
+_VIEWER_HOPS_SQL = """
+    (CASE WHEN json_valid(u.preferences_json)
+           AND json_type(u.preferences_json, '$.moments.max_hops') = 'integer'
+          THEN MAX(1, MIN(CAST(json_extract(
+                   u.preferences_json, '$.moments.max_hops') AS INTEGER), ?))
+          ELSE ? END)
+"""
+_VIEWER_HOPS_PARAMS: tuple[int, int] = (MOMENT_MAX_HOPS, MOMENT_DEFAULT_MAX_HOPS)
+
+
 def _capped_hops(max_hops: int) -> int:
-    """``max_hops`` clamped to the wire cap [1, 3] (below 1 would hide even
-    the viewer's own)."""
-    return max(1, min(int(max_hops), 3))
+    """``max_hops`` clamped to the wire cap ``[1, MOMENT_MAX_HOPS]`` (below 1
+    would hide even the viewer's own)."""
+    return max(1, min(int(max_hops), MOMENT_MAX_HOPS))
 
 
 def _saved_params(viewer_user_id: str, max_hops: int) -> tuple:
@@ -201,10 +250,11 @@ def _readable_params(viewer_user_id: str, max_hops: int) -> tuple:
 
 #: What one viewer may read of a *thread*: the inbox rule without its
 #: 24-hour window. A reply drops out for a personal or guardian block, child
-#: protection (§CP.R), the viewer's ``max_hops`` or expiry — never because
+#: protection (§CP.R), the viewer's ``max_hops`` (unless they follow whoever
+#: wrote it, :data:`_WITHIN_HOPS_SQL`) or expiry — never because
 #: it is a day old and the viewer doesn't follow whoever wrote it, which
 #: would empty a thread whose root (a followed author's) is still readable
-#: and shrink its count. Binds the viewer, then the hop cap; bind with
+#: and shrink its count. Binds the viewer, then the hop cap (last); bind with
 #: :func:`_thread_params`.
 _THREAD_READABLE_SQL = f"""
     (
@@ -218,7 +268,7 @@ _THREAD_READABLE_SQL = f"""
         AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
         AND datetime(m.expires_at) > datetime('now')
         AND m.deleted_at IS NULL
-        AND m.hop_count <= ?
+        AND {_WITHIN_HOPS_SQL}
       )
     )
 """
@@ -226,8 +276,8 @@ _THREAD_READABLE_SQL = f"""
 
 def _thread_params(viewer_user_id: str, max_hops: int) -> tuple:
     """Bindings for :data:`_THREAD_READABLE_SQL`: the viewer for every
-    placeholder but the last, then ``max_hops`` clamped to [1, 3]."""
-    capped_hops = max(1, min(int(max_hops), 3))
+    placeholder but the last, then ``max_hops`` clamped (:func:`_capped_hops`)."""
+    capped_hops = _capped_hops(max_hops)
     return (*(viewer_user_id,) * (_THREAD_READABLE_SQL.count("?") - 1), capped_hops)
 
 
@@ -248,6 +298,7 @@ class AbstractMomentRepo(Protocol):
         author_user_id: str,
         origin_instance_id: str,
         expires_at: str,
+        hop_count: int = 1,
     ) -> MomentTombstone: ...
     async def delete_by_author(self, author_user_id: str) -> int: ...
     async def list_visible_to(
@@ -257,7 +308,7 @@ class AbstractMomentRepo(Protocol):
         before: str | None = None,
         limit: int = 50,
         tag: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
         top_level: bool = False,
     ) -> list[Moment]: ...
     async def latest_replies(
@@ -265,7 +316,7 @@ class AbstractMomentRepo(Protocol):
         parent_ids: list[str],
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, Moment]: ...
     async def list_public_for(
         self,
@@ -278,14 +329,14 @@ class AbstractMomentRepo(Protocol):
         parent_moment_id: str,
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[Moment]: ...
     async def get_readable(
         self,
         moment_id: str,
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> Moment | None: ...
     async def mark_public(self, moment_id: str) -> None: ...
     async def latest_top_level_at(
@@ -299,7 +350,10 @@ class AbstractMomentRepo(Protocol):
         *,
         author_user_id: str,
         hop_count: int,
+        via_gfs: bool = False,
     ) -> bool: ...
+    async def moment_look_hops(self) -> int: ...
+    async def public_follow_pins(self, author_user_id: str) -> frozenset[str]: ...
 
     # Reactions -----------------------------------------------------------
     async def set_reaction(
@@ -362,7 +416,7 @@ class AbstractMomentRepo(Protocol):
         moment_ids: list[str],
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, dict[str, int]]: ...
 
     # Hashtags ------------------------------------------------------------
@@ -372,7 +426,7 @@ class AbstractMomentRepo(Protocol):
         viewer_user_id: str,
         *,
         limit: int = 20,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[tuple[str, int]]: ...
 
     # Retention -----------------------------------------------------------
@@ -400,7 +454,7 @@ class AbstractMomentRepo(Protocol):
         *,
         before: str | None = None,
         limit: int = 50,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[SavedMoment]: ...
     async def list_saved_media(
         self, user_id: str | None = None
@@ -431,8 +485,8 @@ class SqliteMomentRepo:
                 id, author_user_id, content, media_url, media_type,
                 duration_ms, parent_moment_id, origin_instance_id,
                 created_at, expires_at, hop_count, is_public,
-                received_via, received_via_gfs_id
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                received_via, received_via_gfs_id, reach
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -442,7 +496,8 @@ class SqliteMomentRepo:
                 hop_count=excluded.hop_count,
                 is_public=excluded.is_public,
                 received_via=excluded.received_via,
-                received_via_gfs_id=excluded.received_via_gfs_id
+                received_via_gfs_id=excluded.received_via_gfs_id,
+                reach=excluded.reach
             WHERE moments.deleted_at IS NULL
             """,
             (
@@ -460,6 +515,7 @@ class SqliteMomentRepo:
                 int(moment.is_public),
                 moment.received_via,
                 moment.received_via_gfs_id,
+                moment.reach,
             ),
         )
         # DELETE-INSERT keeps the tag set in sync with the latest
@@ -507,8 +563,17 @@ class SqliteMomentRepo:
         author_user_id: str,
         origin_instance_id: str,
         expires_at: str,
+        hop_count: int = 1,
     ) -> MomentTombstone:
         """Record that ``moment_id`` was deleted, stored or not.
+
+        ``hop_count`` is the hop this copy of the delete came at (v_96): a
+        new tombstone and a wiped moment take it (the delete's hop, not the
+        create's — a far delete wiping a moment held closer must leave room
+        for the genuine one), and a held tombstone lowered by a closer copy
+        reports :attr:`MomentTombstone.CLOSER` — so a far copy landing first
+        never suppresses the genuine closer one. Once a tombstone, the hop
+        only ever goes down.
 
         A stored row is wiped in place and keeps its own ``expires_at`` (a
         replay of its create carries the same expiry, so it is refused for
@@ -523,15 +588,27 @@ class SqliteMomentRepo:
 
         def _run(conn) -> MomentTombstone:
             if _tombstone_rows(conn, "id=?", (moment_id,)) > 0:
+                conn.execute(
+                    "UPDATE moments SET hop_count=? WHERE id=?",
+                    (hop_count, moment_id),
+                )
                 return MomentTombstone.REMOVED
             cur = conn.execute(
                 "INSERT OR IGNORE INTO moments(id, author_user_id, content,"
-                " origin_instance_id, expires_at, received_via, deleted_at)"
-                " VALUES(?, ?, '', ?, ?, 'household', datetime('now'))",
-                (moment_id, author_user_id, origin_instance_id, expires_at),
+                " origin_instance_id, expires_at, received_via, deleted_at,"
+                " hop_count)"
+                " VALUES(?, ?, '', ?, ?, 'household', datetime('now'), ?)",
+                (moment_id, author_user_id, origin_instance_id, expires_at, hop_count),
             )
             if cur.rowcount > 0:
                 return MomentTombstone.RECORDED
+            lowered = conn.execute(
+                "UPDATE moments SET hop_count=? WHERE id=?"
+                " AND deleted_at IS NOT NULL AND hop_count>?",
+                (hop_count, moment_id, hop_count),
+            )
+            if lowered.rowcount > 0:
+                return MomentTombstone.CLOSER
             return MomentTombstone.ALREADY
 
         return await self._db.transact(_run)
@@ -557,7 +634,7 @@ class SqliteMomentRepo:
         before: str | None = None,
         limit: int = 50,
         tag: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
         top_level: bool = False,
     ) -> list[Moment]:
         """One query covers blocks, retention, hop visibility, and
@@ -570,7 +647,7 @@ class SqliteMomentRepo:
           author — directly or through a GFS — (then until the moment's
           ``expires_at``, the author's choice of 1–30 days).
         * The row's ``hop_count`` is ≤ the viewer's ``max_hops``
-          preference (default 3 = the wire cap, so all rows pass).
+          preference (default 3), or the viewer follows the author.
         * ``before`` is an ISO-8601 ``created_at`` cursor; ``NULL``
           fetches from newest.
         * ``tag`` (lowercase) restricts the result to moments tagged
@@ -580,10 +657,9 @@ class SqliteMomentRepo:
         """
         limit = max(1, min(int(limit), 100))
         normalised_tag = normalize_hashtag(tag) if tag else None
-        # Clamp ``max_hops`` to [1, 3]: the wire cap is 3 and a
-        # value below 1 would hide every row including the user's
-        # own moments.
-        capped_hops = max(1, min(int(max_hops), 3))
+        # Clamp ``max_hops`` to [1, MOMENT_MAX_HOPS]: a value below 1
+        # would hide every row including the user's own moments.
+        capped_hops = _capped_hops(max_hops)
         rows = await self._db.fetchall(
             f"""
             SELECT m.* FROM moments AS m
@@ -617,44 +693,100 @@ class SqliteMomentRepo:
         *,
         author_user_id: str,
         hop_count: int,
+        via_gfs: bool = False,
     ) -> bool:
-        """True iff at least one local user can see this moment under
-        their preferences and block list. Used by the inbound
-        federation handler to skip the local persist when no one
+        """True iff at least one local user will see this moment — the
+        storage rule (``docs/protocol/momentum.md`` § Storage). Used by the
+        inbound federation handler to skip the local persist when no one
         wants the row (pure pass-through — relay continues).
 
-        A user "can see" iff:
-        * The author is NOT on their :table:`user_blocks` row.
-        * Their ``moments.max_hops`` preference (read from
-          ``users.preferences_json``) is ≥ ``hop_count``.
+        A user "will see" it iff:
+        * They are a current person here (:data:`_LOCAL_PERSON_SQL` —
+          active, not deleted; the same people :meth:`moment_look_hops`
+          counts).
+        * No personal block (:table:`user_blocks`) and no guardian block
+          (§CP.F2, either way) separates them from the author.
         * They are not a protected account (§CP.R), or the moment is from a
-          paired household (``hop_count`` 1) — a protected account sees no
-          moment from further away, so a household of only protected
-          accounts passes a 2–3-hop moment on without storing it.
+          paired household (``hop_count`` 1) and did not come through a GFS
+          (``via_gfs`` — the GFS inbound path asks with it) — a protected
+          account sees no moment from further away or through a GFS
+          (:data:`_PROTECTED_CIRCLE_SQL`), whomever it follows.
+        * Their ``moments.max_hops`` preference (read from
+          ``users.preferences_json``) is ≥ ``hop_count``, **or** they follow
+          the author (``user_follows`` / ``moment_public_follows``) — a
+          follow shows the author's moments whatever ``max_hops`` says, the
+          same rule the reads apply (:data:`_WITHIN_HOPS_SQL`).
 
-        The preference is parsed inline via SQLite's ``json_extract``
-        so we don't have to load every user just to compute the
-        gate. Rows without a ``moments.max_hops`` key default to the
-        wire cap of 3 (most-permissive — matches new accounts).
+        The GFS path asks at hop 1 (a GFS row is stored at hop 1), so any
+        current, unblocked adult here keeps it — not only its follower —
+        exactly as the reads show a GFS moment to every adult for 24 h.
+
+        The preference is read inline (:data:`_VIEWER_HOPS_SQL`) so we
+        don't have to load every user just to compute the gate. Rows
+        without a usable ``moments.max_hops`` default to
+        :data:`MOMENT_DEFAULT_MAX_HOPS` (3 — matches new accounts).
         """
+        hop = int(hop_count)
+        protected_counts = int(hop <= 1 and not via_gfs)
         row = await self._db.fetchone(
-            """
+            f"""
             SELECT 1 FROM users AS u
-             WHERE NOT EXISTS (
+             WHERE {_LOCAL_PERSON_SQL}
+               AND NOT EXISTS (
                  SELECT 1 FROM user_blocks
                   WHERE blocker_user_id = u.user_id
                     AND blocked_user_id = ?
              )
-               AND COALESCE(
-                   json_extract(u.preferences_json, '$.moments.max_hops'),
-                   3
-               ) >= ?
-               AND (u.child_protection_enabled = 0 OR ? <= 1)
+               AND ? NOT IN ({guardian_block_counterparts_sql("u.user_id")})
+               AND (u.child_protection_enabled = 0 OR ? = 1)
+               AND (
+                 {_VIEWER_HOPS_SQL} >= ?
+                 OR {follows_author_sql("u.user_id", "?")}
+               )
              LIMIT 1
             """,
-            (author_user_id, int(hop_count), int(hop_count)),
+            (
+                author_user_id,
+                author_user_id,
+                protected_counts,
+                *_VIEWER_HOPS_PARAMS,
+                hop,
+                author_user_id,
+                author_user_id,
+            ),
         )
         return row is not None
+
+    async def moment_look_hops(self) -> int:
+        """v_96 (decision C) — how far this household looks: the widest
+        ``moments.max_hops`` among its active, non-protected people
+        (:data:`_VIEWER_HOPS_SQL`: 1–5, 3 for anyone who chose nothing), or
+        ``1`` when there is none — a protected account sees hop 1 only,
+        whatever its preference. Paired households send a hop-4 or hop-5
+        copy only to a household that looks that far."""
+        row = await self._db.fetchone(
+            f"""
+            SELECT MAX({_VIEWER_HOPS_SQL}) AS look FROM users AS u
+             WHERE u.child_protection_enabled = 0
+               AND {_LOCAL_PERSON_SQL}
+            """,
+            _VIEWER_HOPS_PARAMS,
+        )
+        look = row["look"] if row is not None else None
+        return int(look) if look is not None else 1
+
+    async def public_follow_pins(self, author_user_id: str) -> frozenset[str]:
+        """The home-household keys (64-hex Ed25519) pinned for
+        *author_user_id* by anyone here who follows them through a GFS
+        (``moment_public_follows.followed_instance_pk``) — empty when nobody
+        does. The mesh inbound binds such an author's moments to that
+        household."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT followed_instance_pk FROM moment_public_follows"
+            " WHERE followed_user_id = ?",
+            (author_user_id,),
+        )
+        return frozenset(str(r["followed_instance_pk"]) for r in rows)
 
     async def list_public_for(
         self,
@@ -702,7 +834,7 @@ class SqliteMomentRepo:
         moment_id: str,
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> Moment | None:
         """``moment_id`` iff *viewer_user_id* may read it: its author (while
         it is live, or from their archive once expired), or anyone the inbox
@@ -720,7 +852,7 @@ class SqliteMomentRepo:
         parent_moment_id: str,
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[Moment]:
         """Replies in chronological order so the thread reads top-down.
 
@@ -748,7 +880,7 @@ class SqliteMomentRepo:
         parent_ids: list[str],
         viewer_user_id: str,
         *,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, Moment]:
         """``{root id: its newest reply}`` that *viewer_user_id* may read
         (:data:`_THREAD_READABLE_SQL`, the rule :meth:`list_replies` and the
@@ -786,11 +918,16 @@ class SqliteMomentRepo:
     ) -> str | None:
         """``created_at`` of the author's newest top-level moment since
         ``since_iso``, or ``None``. Top-level moments only — replies are
-        exempt from the rate limit."""
+        exempt from the rate limit (a reply's tombstone keeps its parent).
+        A deleted one (its tombstone keeps ``created_at``) still counts: a
+        delete never gives the slot back (owner 2026-11-24), the rule
+        relays hold a signed author to. Only moments written here
+        (``received_via='self'``) — a delivered row never blocks a local
+        person."""
         row = await self._db.fetchone(
             "SELECT MAX(created_at) AS last FROM moments "
             "WHERE author_user_id=? AND created_at>=? "
-            "AND parent_moment_id IS NULL AND deleted_at IS NULL",
+            "AND parent_moment_id IS NULL AND received_via='self'",
             (author_user_id, since_iso),
         )
         return str(row["last"]) if row and row["last"] is not None else None
@@ -1075,7 +1212,7 @@ class SqliteMomentRepo:
         moment_ids: list[str],
         *,
         viewer_user_id: str | None = None,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> dict[str, dict[str, int]]:
         """Aggregate reactions + replies for the given moment ids.
 
@@ -1140,7 +1277,7 @@ class SqliteMomentRepo:
         viewer_user_id: str,
         *,
         limit: int = 20,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[tuple[str, int]]:
         """Return ``[(tag, n), …]`` of the most-used tags inside the
         viewer's visible window.
@@ -1153,7 +1290,7 @@ class SqliteMomentRepo:
         alphabetically so the order is stable for equal counts.
         """
         limit = max(1, min(int(limit), 50))
-        capped_hops = max(1, min(int(max_hops), 3))
+        capped_hops = _capped_hops(max_hops)
         rows = await self._db.fetchall(
             f"""
             SELECT mh.tag AS tag, COUNT(*) AS n
@@ -1314,7 +1451,7 @@ class SqliteMomentRepo:
         *,
         before: str | None = None,
         limit: int = 50,
-        max_hops: int = 3,
+        max_hops: int = MOMENT_DEFAULT_MAX_HOPS,
     ) -> list[SavedMoment]:
         """*user_id*'s saved moments they may still read
         (:data:`_SAVED_READABLE_SQL`), newest save first. ``before`` is the
@@ -1410,8 +1547,9 @@ def _tombstone_rows(conn, where: str, params: tuple) -> int:
     and ``expires_at`` (what a tombstone must remember); drops content,
     media, tags, reactions, every save (migration 0124's trigger) and the
     reaction route (0125's trigger), in this same transaction; detaches
-    replies (``parent_moment_id`` →
-    NULL, as the old hard delete's ``ON DELETE SET NULL`` did). Returns the
+    live replies (``parent_moment_id`` → NULL, as the old hard delete's
+    ``ON DELETE SET NULL`` did). The tombstone keeps its own parent, so a
+    deleted reply is still a reply to the posting rate limit. Returns the
     number of live moments tombstoned. ``where`` is a fixed column
     predicate from this module, never caller input.
     """
@@ -1426,12 +1564,13 @@ def _tombstone_rows(conn, where: str, params: tuple) -> int:
         conn.execute("DELETE FROM moment_hashtags WHERE moment_id=?", (mid,))
         conn.execute("DELETE FROM moment_reactions WHERE moment_id=?", (mid,))
         conn.execute(
-            "UPDATE moments SET parent_moment_id=NULL WHERE parent_moment_id=?",
+            "UPDATE moments SET parent_moment_id=NULL"
+            " WHERE parent_moment_id=? AND deleted_at IS NULL",
             (mid,),
         )
         conn.execute(
             "UPDATE moments SET content='', media_url=NULL, media_type=NULL,"
-            " duration_ms=NULL, parent_moment_id=NULL, is_public=0,"
+            " duration_ms=NULL, is_public=0,"
             " deleted_at=datetime('now') WHERE id=?",
             (mid,),
         )
@@ -1518,4 +1657,7 @@ def _row_to_moment(row: dict | None) -> Moment | None:
         received_via=row.get("received_via") or "self",
         received_via_gfs_id=row.get("received_via_gfs_id"),
         deleted_at=row.get("deleted_at"),
+        # v_96: NULL — every row from before migration 0154 — stays None
+        # (it went 3 hops; its delete and totals go unmarked).
+        reach=int(row["reach"]) if row.get("reach") is not None else None,
     )

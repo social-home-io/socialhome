@@ -66,6 +66,7 @@ import { openAliasDialog } from './AliasDialog'
 import { openCallTypePicker } from './CallTypePickerDialog'
 import { openStatusEditor } from './StatusEditor'
 import { isRestricted } from './ProtectedNotice'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 /** Where a person lives, as ``GET /api/friends/{user_id}`` returns it. */
 export interface PersonHousehold {
@@ -301,7 +302,12 @@ export function PersonSheet() {
     try {
       if (followKind === 'gfs') {
         if (gfsFollow) await unfollowOnGfs(gfsFollow.gfs_id, p.user_id)
-        else if (viaGfs) await followOnGfs(viaGfs, p.user_id)
+        else if (viaGfs) await followOnGfs(viaGfs, p.user_id).catch(async (e: unknown) => {
+          // The household knows them after all (the lookup failed): it
+          // refused the GFS follow, nothing reached the GFS — follow at home.
+          if ((e as { code?: unknown })?.code !== 'FOLLOW_AT_HOME') throw e
+          await followUser(p.user_id)
+        })
       } else if (following) {
         await unfollowUser(p.user_id)
       } else {
@@ -436,7 +442,7 @@ export function PersonSheet() {
                   {until && <span class="sh-person-sheet__until">· {until}</span>}
                 </p>
               )}
-              {p.bio && <p class="sh-person-sheet__bio">{p.bio}</p>}
+              {p.bio && <p class="sh-person-sheet__bio"><LinkifiedText text={p.bio} /></p>}
             </div>
           )}
 

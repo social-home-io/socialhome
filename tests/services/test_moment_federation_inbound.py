@@ -633,3 +633,149 @@ async def test_moment_created_keeps_a_local_media_ref(db, bus, inbound):
     m = await svc._moment_repo.get("m-fed-1")
     assert m is not None
     assert (m.media_url, m.media_type) == ("api/media/abc.webp", "image")
+
+
+# ── v_96 reach ────────────────────────────────────────────────────────────
+
+
+def _signed(event_type, *, hop: int, **over) -> dict:
+    """A payload signed by its origin ``peer-a``, at *hop*."""
+    payload = (
+        _create_payload(**over)
+        if event_type is FederationEventType.MOMENT_CREATED
+        else {
+            "moment_id": "m-fed-1",
+            "author_user_id": "uid-remote",
+            "origin_instance_id": "peer-a",
+            "occurred_at": datetime.now(UTC).isoformat(),
+            **over,
+        }
+    )
+    signed = sign_moment_origin(
+        seed=ORIGIN_KEY.private_key,
+        identity_pk=ORIGIN_KEY.public_key,
+        event_type=event_type,
+        payload=payload,
+    )
+    return {**signed, "hop_count": hop}
+
+
+@pytest.mark.parametrize(
+    ("mark", "reach"),
+    [({}, 3), ({"no_relay": True}, 1), ({"reach": 2}, 2), ({"reach": 5}, 5)],
+)
+async def test_a_moment_is_stored_with_its_signed_reach(db, bus, inbound, mark, reach):
+    svc, relay = inbound
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            _signed(FederationEventType.MOMENT_CREATED, hop=1, **mark),
+        )
+    )
+    assert (await svc._moment_repo.get("m-fed-1")).reach == reach
+    relay.relay_inbound.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "et", [FederationEventType.MOMENT_CREATED, FederationEventType.MOMENT_DELETED]
+)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"reach": 3},
+        {"reach": 1},
+        {"reach": 9},
+        {"reach": "2"},
+        {"reach": True},
+        {"reach": 2, "no_relay": True},
+    ],
+)
+async def test_an_invalid_reach_is_refused(db, bus, inbound, caplog, et, bad):
+    """Neither stored, tombstoned nor relayed — even straight from the
+    origin (its envelope binds it, but the value is no reach at all)."""
+    svc, relay = inbound
+    handler = (
+        svc._on_moment_created
+        if et is FederationEventType.MOMENT_CREATED
+        else svc._on_moment_deleted
+    )
+    with caplog.at_level("WARNING"):
+        await handler(_event(et, _signed(et, hop=1, **bad)))
+    assert await svc._moment_repo.get("m-fed-1", include_deleted=True) is None
+    relay.relay_inbound.assert_not_called()
+    assert any("reach" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "et", [FederationEventType.MOMENT_CREATED, FederationEventType.MOMENT_DELETED]
+)
+@pytest.mark.parametrize(
+    ("reach", "hop", "from_origin", "taken"),
+    [
+        (2, 1, True, True),
+        (2, 2, False, True),
+        # A relay's copy is at hop ≥ 2 whatever it claims.
+        (2, 1, False, True),
+        (2, 3, False, False),
+        (3, 3, False, True),
+        (1, 2, True, False),
+    ],
+)
+async def test_a_copy_beyond_its_reach_is_refused(
+    db, bus, inbound, et, reach, hop, from_origin, taken
+):
+    svc, relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    mark = {} if reach == 3 else {"no_relay": True} if reach == 1 else {"reach": reach}
+    handler = (
+        svc._on_moment_created
+        if et is FederationEventType.MOMENT_CREATED
+        else svc._on_moment_deleted
+    )
+    await handler(
+        _event(
+            et,
+            _signed(et, hop=hop, **mark),
+            from_instance="peer-a" if from_origin else "peer-relayer",
+        )
+    )
+    held = await svc._moment_repo.get("m-fed-1", include_deleted=True)
+    assert (held is not None) is taken
+    assert relay.relay_inbound.await_count == (1 if taken else 0)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(
+            lambda p: {k: v for k, v in p.items() if k != "reach"}, id="strip"
+        ),
+        pytest.param(lambda p: {**p, "reach": 5}, id="raise"),
+    ],
+)
+async def test_a_relay_that_changes_reach_breaks_the_origin_signature(
+    db, bus, inbound, tamper
+):
+    svc, relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    payload = tamper(_signed(FederationEventType.MOMENT_CREATED, hop=2, reach=2))
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED, payload, from_instance="peer-relayer"
+        )
+    )
+    assert await svc._moment_repo.get("m-fed-1") is None
+    relay.relay_inbound.assert_not_called()
+
+
+async def test_a_relay_that_adds_reach_breaks_the_origin_signature(db, bus, inbound):
+    svc, relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    payload = {**_signed(FederationEventType.MOMENT_CREATED, hop=2), "reach": 5}
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED, payload, from_instance="peer-relayer"
+        )
+    )
+    assert await svc._moment_repo.get("m-fed-1") is None
+    relay.relay_inbound.assert_not_called()

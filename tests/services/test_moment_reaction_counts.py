@@ -107,15 +107,17 @@ class _Fed:
 class _Outbound:
     def __init__(self) -> None:
         self.fanned: list[dict] = []
+        self.fanned_reach: list[int] = []
         self.relayed: list[dict] = []
         #: (moment id, origin) whose create this household relayed.
         self.relayed_creates: set[tuple[str, str]] = set()
         self.fail = False
 
-    async def fan_counts(self, payload, *, author_user_id):
+    async def fan_counts(self, payload, *, author_user_id, reach=3):
         if self.fail:
             raise RuntimeError("outbox down")
         self.fanned.append(payload)
+        self.fanned_reach.append(reach)
         return 1
 
     async def relay_inbound(self, **kw):
@@ -323,7 +325,8 @@ async def test_receiver_keeps_newer_totals_publishes_and_relays(svc):
     assert bus.events[0].received_via == "household"
     # The held row's hop keeps the hint from a protected account (§CP.R).
     assert bus.events[0].hop_count == 2
-    assert out.relayed[0]["holds_moment"] is True
+    # Held within its reach (a row from before v_96: reach 3).
+    assert out.relayed[0]["held_reach"] == 3
     await counts._on_counted(_event(_payload(_ms(800))))  # older
     assert repo.summaries["m-far"].rev == _ms(900)
     assert len(bus.events) == 1
@@ -469,3 +472,40 @@ async def test_a_relay_only_household_passes_on_newer_revs_only(svc):
     assert len(out.relayed) == 2  # not newer than the last passed on
     await counts._on_counted(_event(_payload(_ms(950))))
     assert len(out.relayed) == 3
+
+
+# ── v_96 reach ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("reach", "no_relay"), [(1, True), (2, False), (5, False), (None, False)]
+)
+async def test_the_origins_totals_follow_the_rows_reach(svc, reach, no_relay):
+    """Totals go as far as the moment: reach 1 (protected or chosen) is
+    ``no_relay``; the reach gates where they are sent. A row written before
+    v_96 (``None``) goes unmarked, as it did then."""
+    counts, repo, out, _bus, clock = svc
+    repo.own = [replace(_moment(), reach=reach)]
+    repo.tallies["m-1"] = {"🔥": 1}
+    clock[0] = _ms(601)
+    assert await counts.tick() == 1
+    assert out.fanned_reach == [reach]
+    assert ("no_relay" in out.fanned[0]) is no_relay
+
+
+@pytest.mark.parametrize(
+    ("hop", "reach", "holds"),
+    [(1, 3, True), (2, 3, True), (1, 2, True), (2, 2, False), (3, 3, False)],
+)
+async def test_a_held_moment_passes_totals_on_only_within_its_reach(
+    svc, hop, reach, holds
+):
+    counts, repo, out, _bus, clock = svc
+    repo.held["m-far"] = replace(
+        _moment("m-far", via="household", author="u-noor"), hop_count=hop, reach=reach
+    )
+    clock[0] = _ms(1000)
+    await counts._on_counted(_event(_payload(_ms(900))))
+    assert repo.summaries["m-far"].total == 1  # kept either way
+    # Held within its reach ⇒ the reach is passed; otherwise not held.
+    assert out.relayed[0]["held_reach"] == (reach if holds else None)

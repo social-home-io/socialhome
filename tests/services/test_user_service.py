@@ -18,6 +18,7 @@ from socialhome.domain.child_protection import (
     ProtectedCapability,
 )
 from socialhome.domain.events import (
+    UserPreferencesPatched,
     UserProfileUpdated,
     UserProvisioned,
     UserStatusChanged,
@@ -169,6 +170,57 @@ async def test_patch_preferences(stack):
     u2 = await stack.user_svc.patch_preferences("pascal", {"theme": None, "tz": "UTC"})
     prefs2 = json.loads(u2.preferences_json)
     assert "theme" not in prefs2 and prefs2["tz"] == "UTC"
+
+
+async def test_patch_preferences_merges_the_moments_block_one_level_deep(stack):
+    """A client that writes ``moments`` without ``reach`` (an older SPA tab,
+    the HA app webview) must not reset the person's reach to the default."""
+    await stack.provision_user("pascal")
+    await stack.user_svc.patch_preferences(
+        "pascal", {"moments": {"reach": 1, "max_hops": 3}}
+    )
+    u = await stack.user_svc.patch_preferences("pascal", {"moments": {"max_hops": 2}})
+    assert json.loads(u.preferences_json)["moments"] == {"reach": 1, "max_hops": 2}
+    # A null sub-key removes just that sub-key.
+    u = await stack.user_svc.patch_preferences("pascal", {"moments": {"reach": None}})
+    assert json.loads(u.preferences_json)["moments"] == {"max_hops": 2}
+
+
+async def test_patch_preferences_replaces_a_moments_value_that_is_not_an_object(
+    stack,
+):
+    await stack.provision_user("pascal")
+    await stack.user_svc.patch_preferences("pascal", {"moments": "junk"})
+    u = await stack.user_svc.patch_preferences("pascal", {"moments": {"reach": 2}})
+    assert json.loads(u.preferences_json)["moments"] == {"reach": 2}
+    u = await stack.user_svc.patch_preferences("pascal", {"moments": [1]})
+    assert json.loads(u.preferences_json)["moments"] == [1]
+
+
+async def test_patch_preferences_other_keys_stay_top_level_only(stack):
+    await stack.provision_user("pascal")
+    await stack.user_svc.patch_preferences("pascal", {"ui": {"a": 1, "b": 2}})
+    u = await stack.user_svc.patch_preferences("pascal", {"ui": {"a": 3}})
+    assert json.loads(u.preferences_json)["ui"] == {"a": 3}
+
+
+async def test_patch_preferences_announces_the_keys_it_touched(stack):
+    """v_96: a ``moments`` patch may change how far this household looks for
+    moments — the patch says which top-level keys it set or removed."""
+    user = await stack.provision_user("pascal")
+    seen: list[UserPreferencesPatched] = []
+
+    async def _record(event: UserPreferencesPatched) -> None:
+        seen.append(event)
+
+    stack.bus.subscribe(UserPreferencesPatched, _record)
+    await stack.user_svc.patch_preferences(
+        "pascal", {"moments": {"max_hops": 5}, "theme": None}
+    )
+    await stack.user_svc.patch_preferences("pascal", {})
+    assert [(e.user_id, e.keys) for e in seen] == [
+        (user.user_id, frozenset({"moments", "theme"}))
+    ]
 
 
 class _FakeProtection:

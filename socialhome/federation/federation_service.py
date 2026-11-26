@@ -71,6 +71,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_RELAY_CHUNK_RESIZE,
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
+    DELIVERY_ERROR_RELAYED_ROW_DROPPED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DELIVERY_ERROR_ROUTED_SEND_FAILED,
     DELIVERY_ERROR_SUPERSEDED,
@@ -100,7 +101,13 @@ from ..domain.media_chunking import (
     routed_media_chunk_bytes,
 )
 from ..domain.media_validator import validate_inbound_media_meta
-from ..domain.outbox import DeliveryOutcome, OutboxEntry, OutboxPayload, RetryAfter
+from ..domain.outbox import (
+    DeliveryOutcome,
+    OutboxEntry,
+    OutboxPayload,
+    RelayedRowDropped,
+    RetryAfter,
+)
 from ..domain.relay_media_frame import relay_event_payload_limit
 from ..domain.space import WRITER_ROLES, parse_have_seq
 from ..infrastructure.event_bus import EventBus
@@ -494,6 +501,7 @@ class FederationService:
         "_media_relay_inbound_pipeline",
         "_mesh_claim_answer",
         "_mesh_claim_answer_tasks",
+        "_moment_looks",
         "_online_status_service",
         "_outbox_payload_key",
         "_outbox_repo",
@@ -613,6 +621,16 @@ class FederationService:
         #: diagnostics, never persisted, never sent anywhere. Bounded by
         #: the number of paired peers.
         self._relay_accepted_at: dict[str, str] = {}
+        #: v_96 decision C — peer instance_id → how far its people look for
+        #: moments (``moment_look_hops``, 1–5), as it last advertised in
+        #: ``INSTANCE_CAPABILITIES_UPDATED``. In memory only: re-learned
+        #: after our restart through the startup capabilities resync
+        #: (:func:`~socialhome.services.capability_resync
+        #: .request_capability_resync`); forgotten on unpair
+        #: (:meth:`note_unpaired`). Bounded by the number of paired peers.
+        #: Each value is ``(look now, farthest look said since our start)``
+        #: — a delete follows the farthest (adversarial review F1).
+        self._moment_looks: dict[str, tuple[int, int]] = {}
         #: (peer instance_id, supersede key) → ticket of the newest
         #: :meth:`send_event` of that latest-only state still in flight.
         #: Only the newest send's outcome touches the outbox (an older one
@@ -752,8 +770,10 @@ class FederationService:
         :meth:`~socialhome.services.peer_unpair_service.PeerUnpairService.purge`
         BEFORE the row goes — a frame the DataChannel delivers between the
         delete and the :class:`PeerUnpaired` event must already count —
-        and again from that event.
+        and again from that event. Also forgets how far its people look for
+        moments (a re-paired household says it again).
         """
+        self._moment_looks.pop(instance_id, None)
         now = time.monotonic()
         self._unpaired_at = {
             iid: at
@@ -1061,6 +1081,21 @@ class FederationService:
             event_type, space_id=space_id, payload=payload
         ) or moment_delete_key(
             event_type, payload, own_instance_id=self._own_instance_id
+        )
+
+    @staticmethod
+    def _relayed_row_dropped(
+        instance_id: str, event_type: FederationEventType
+    ) -> DeliveryResult:
+        """v_96 (D): the outbox dropped a relayed moment row rather than
+        evict one of our own events — by design, so DEBUG."""
+        log.debug(
+            "outbox full, relayed row dropped: %s for %s", event_type.value, instance_id
+        )
+        return DeliveryResult(
+            instance_id=instance_id,
+            ok=False,
+            error=DELIVERY_ERROR_RELAYED_ROW_DROPPED,
         )
 
     def _claim_state_send(self, instance_id: str, state_key: str | None) -> int | None:
@@ -1787,6 +1822,28 @@ class FederationService:
             and await self._transport.relay_media_ready(instance)
         )
 
+    def set_peer_moment_look_hops(self, instance_id: str, look: int) -> None:
+        """Keep how far *instance_id*'s people look for moments (v_96,
+        decision C) — validated by the caller (an integer 1–5) — and the
+        farthest it has said since our start."""
+        _, high = self._moment_looks.get(instance_id, (look, look))
+        self._moment_looks[instance_id] = (look, max(high, look))
+
+    def peer_moment_look_hops(self, instance_id: str) -> int | None:
+        """How far *instance_id*'s people look for moments, or ``None`` when
+        it has not said since our start (older, or not heard from yet) — a
+        relay then sends it no hop-4–5 copy."""
+        looks = self._moment_looks.get(instance_id)
+        return None if looks is None else looks[0]
+
+    def peer_moment_look_high(self, instance_id: str) -> int | None:
+        """The farthest *instance_id*'s people said they look since our
+        start, or ``None`` when not heard. A hop-4–5 delete follows it: a
+        household that looked that far may still hold the moment (a follower
+        there reads it whatever its ``max_hops``) after its look fell."""
+        looks = self._moment_looks.get(instance_id)
+        return None if looks is None else looks[1]
+
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         """``True`` iff the named peer's advertised ``proto_version`` is
         at least ``min_version``.
@@ -2497,14 +2554,17 @@ class FederationService:
         # Migration 0145: the payload is stored ONCE (KEK-wrapped) for every
         # recipient this send fails to reach; the row only references it and
         # is sealed for this peer when it is sent.
-        queued = await self._outbox_repo.enqueue(
-            instance_id=to_instance_id,
-            event_type=event_type,
-            payload_json="",
-            msg_id=msg_id,
-            supersede_key=state_key,
-            payload_ref=self._outbox_payload(event_type, space_id, payload),
-        )
+        try:
+            queued = await self._outbox_repo.enqueue(
+                instance_id=to_instance_id,
+                event_type=event_type,
+                payload_json="",
+                msg_id=msg_id,
+                supersede_key=state_key,
+                payload_ref=self._outbox_payload(event_type, space_id, payload),
+            )
+        except RelayedRowDropped:
+            return self._relayed_row_dropped(to_instance_id, event_type)
         if queued is None:
             # The pairing ended while this send was in flight (an unpair
             # purged the peer between our lookup and here) — nothing was
@@ -2594,13 +2654,16 @@ class FederationService:
             state_key,
             self._claim_state_send(to_instance_id, state_key),
         )
-        row_id = await self._outbox_repo.enqueue(
-            instance_id=to_instance_id,
-            event_type=event_type,
-            payload_json="",
-            supersede_key=state_key,
-            payload_ref=self._outbox_payload(event_type, space_id, payload),
-        )
+        try:
+            row_id = await self._outbox_repo.enqueue(
+                instance_id=to_instance_id,
+                event_type=event_type,
+                payload_json="",
+                supersede_key=state_key,
+                payload_ref=self._outbox_payload(event_type, space_id, payload),
+            )
+        except RelayedRowDropped:
+            return self._relayed_row_dropped(to_instance_id, event_type)
         if row_id is None:
             return DeliveryResult(
                 instance_id=to_instance_id, ok=False, error="unknown_instance"
