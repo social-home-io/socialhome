@@ -13,6 +13,7 @@ import base64
 import io
 import random
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1631,19 +1632,19 @@ async def test_apply_remote_admin_action_archive(stack):
 
 
 async def test_apply_remote_admin_action_ban(stack):
+    """A remote admin's forwarded ban of a person of ANOTHER household runs
+    on the host. (One of the owner household's people is refused — P7b
+    Fable re-review I-A, ``test_a_forwarded_ban_never_names_the_owner_households_people``.)"""
     space = await _host_space_with_remote_admin(stack)
-    victim = await _user(stack, "victimlocal")
-    await stack.svc.add_member(
-        space.id, actor_username="alicehost", user_id=victim.user_id, role="member"
-    )
-    await stack.svc.apply_remote_admin_action(
+    outcome = await stack.svc.apply_remote_admin_action(
         space.id,
         actor_instance_id="instance-A",
         actor_user_id="u-admin",
         action="ban",
-        params={"user_id": victim.user_id, "reason": "nope"},
+        params={"user_id": "u-far-victim", "reason": "nope"},
     )
-    assert await stack.space_repo.get_member(space.id, victim.user_id) is None
+    assert outcome is RemoteAdminOutcome.EXECUTED
+    assert await stack.space_repo.is_banned(space.id, "u-far-victim") is True
 
 
 async def test_apply_remote_admin_action_rejects_non_admin(stack):
@@ -1742,10 +1743,9 @@ async def test_apply_remote_admin_action_unarchive(stack):
 
 async def test_apply_remote_admin_action_unban(stack):
     space = await _host_space_with_remote_admin(stack)
-    victim = await _user(stack, "victimlocal")
-    await stack.svc.add_member(
-        space.id, actor_username="alicehost", user_id=victim.user_id, role="member"
-    )
+    # A person of another household (one of the owner household's is not
+    # the remote admin's at all — P7b Fable re-review I-A).
+    victim = SimpleNamespace(user_id="u-far-victim")
     # P7b finding 5: the owner's own ban is not the remote admin's to lift.
     await stack.svc.ban(space.id, actor_username="alicehost", user_id=victim.user_id)
     outcome = await stack.svc.apply_remote_admin_action(

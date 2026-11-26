@@ -2904,6 +2904,24 @@ async def test_ban_household_and_unban(env):
     assert await env.repo.list_household_bans("sp-hh") == []
 
 
+async def test_a_re_ban_never_changes_who_banned(env):
+    """P7b Fable review I1: the first banner stays — a re-ban (an admin's,
+    a forwarded one, gossip or a sync stream) must not turn the owner's ban
+    into an admin's, which an admin could then lift. A ban whose banner is
+    unknown (NULL, before migration 0157) takes the first named one."""
+    await env.repo.save(_space("sp-reban"))
+    await env.repo.ban_member("sp-reban", "uid-x", "uid-owner", reason="a")
+    await env.repo.ban_member("sp-reban", "uid-x", "uid-admin", reason="b")
+    assert await env.repo.ban_banned_by("sp-reban", user_id="uid-x") == "uid-owner"
+    await env.repo.ban_household("sp-reban", "inst-x", banned_by="uid-owner")
+    await env.repo.ban_household("sp-reban", "inst-x", banned_by=None)
+    await env.repo.ban_household("sp-reban", "inst-x", banned_by="uid-admin")
+    assert await env.repo.ban_banned_by("sp-reban", instance_id="inst-x") == "uid-owner"
+    await env.repo.ban_household("sp-reban", "inst-y")
+    await env.repo.ban_household("sp-reban", "inst-y", banned_by="uid-admin")
+    assert await env.repo.ban_banned_by("sp-reban", instance_id="inst-y") == "uid-admin"
+
+
 async def test_a_banned_household_consumes_nothing(env):
     """The household ban rides the same atomic consume as the person ban:
     no use spent, for any person of that household."""

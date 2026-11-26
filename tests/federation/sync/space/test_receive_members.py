@@ -59,6 +59,24 @@ async def test_bans(setup):
     assert c.bans == [("sp-1", "u-x", "admin-a", "spam")]
 
 
+async def test_the_owners_synced_ban_takes_over_the_banner(setup):
+    """Final review I2: the host's catch-up stream marks the OWNER's own
+    bans (banner = the owner person) so they take over an earlier admin's;
+    an admin's ban in the same stream keeps the first banner."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "bans",
+        [
+            {"user_id": "u-x", "banned_by": "u-owner"},
+            {"user_id": "u-y", "banned_by": "admin-a"},
+            {"instance_id": "peer-bad", "banned_by": "u-owner"},
+        ],
+    )
+    assert c.owner_bans == [True, False, True]
+
+
 async def test_a_synced_ban_of_a_seated_member_is_published(setup, bus):
     """Like the live ban: the seat's dependents (space chat, GFS seats)
     hear of it. A ban of someone not seated here publishes nothing."""

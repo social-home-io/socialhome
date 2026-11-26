@@ -55,6 +55,7 @@ const ABOUT_LABEL: Record<AboutAction, () => string> = {
   follow: () => t('spaces.discover.follow'),
   pending: () => t('space.public.request_pending'),
   joining: () => t('spaces.discover.joining'),
+  following: () => t('spaces.discover.following'),
 }
 
 /** Shown when the space's owner has NOT opted into read-only followers
@@ -218,12 +219,23 @@ export default function SpacePublicDetailPage() {
     // A local community another household hosts: the request carries our
     // approximate location — ask first, send nothing without a yes.
     const carries = joinCarriesLocation(entry)
-    if (action === 'join' && carries && !await askLocationConsent(hostLabel(entry))) return
+    if ((action === 'join' || action === 'follow') && carries
+      && !await askLocationConsent(hostLabel(entry))) return
     try {
       if (action === 'follow') {
-        await api.post(`/api/spaces/${entry.space_id}/subscribe`, {})
-        showToast(t('spaces.browse.followed_toast', { name: entry.name }), 'success')
-        patch({ already_subscribed: true })
+        // Hosted here: followed at once. Elsewhere: its host approves the
+        // follow on its own — "Following…" until the seat is made.
+        const r = await api.post(
+          `/api/spaces/${entry.space_id}/subscribe`,
+          carries ? { share_location: true } : {},
+        ) as { subscribed?: boolean; pending?: boolean } | undefined
+        if (r?.pending) {
+          showToast(t('spaces.browse.follow_pending_toast', { name: entry.name }), 'success')
+          patch({ request_pending: true, request_busy: false })
+        } else {
+          showToast(t('spaces.browse.followed_toast', { name: entry.name }), 'success')
+          patch({ already_subscribed: true })
+        }
       } else if (entry.scope === 'household' || entry.host_instance_id === 'local') {
         // Open to join here: seated at once (``joined``) — or, when the
         // space takes requests after all, the request is now pending.
@@ -338,7 +350,7 @@ export default function SpacePublicDetailPage() {
     ? { lat: entry.lat, lon: entry.lon, radius_km: entry.radius_km ?? null }
     : null
   const hint = entry.scope === 'global' ? hintVerdict(entry, householdHome.value) : null
-  const joining = action === 'join' || action === 'request'
+  const joining = action === 'join' || action === 'request' || action === 'follow'
 
   return (
     <div class="sh-space-public">
@@ -392,14 +404,17 @@ export default function SpacePublicDetailPage() {
         <div class="sh-space-public__cta-row">
           <Button
             onClick={() => void onPrimary(entry, action)}
-            disabled={action === 'pending' || action === 'joining'}
+            disabled={action === 'pending' || action === 'joining' || action === 'following'}
           >
             {primaryLabel}
           </Button>
         </div>
       )}
-      {action === 'request' && entry.request_busy && (
+      {(action === 'request' || action === 'follow') && entry.request_busy && (
         <p class="sh-muted sh-space-public__busy-note" role="status"><span aria-hidden="true">⏳</span> {t('space.public.busy')}</p>
+      )}
+      {action === 'following' && (
+        <p class="sh-muted sh-space-public__busy-note" role="status">{t('space.public.following_note')}</p>
       )}
       {joining && entry.scope === 'global' && (
         <p class="sh-muted sh-space-public__rules-note">{t('space.public.follow_rules')}</p>

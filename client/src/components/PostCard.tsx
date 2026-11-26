@@ -21,7 +21,7 @@ import { PollUI } from './PollUI'
 import { ReactionPicker } from './ReactionPicker'
 import { ScheduleUI } from './ScheduleUI'
 import { currentUser } from '@/store/auth'
-import { spaceMentionRender } from '@/store/spaceMembers'
+import { spaceMentionRender, viewerMayComment, viewerMayReact } from '@/store/spaceMembers'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import { personHint } from '@/utils/personHint'
 import { PersonButton, openSpaceMention } from './PersonButton'
@@ -130,6 +130,10 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
   const foldable = reactionChips
     .slice(MAX_REACTION_CHIPS)
     .filter(([emoji]) => !mine(emoji)).length
+  // A follower reacts / comments only behind the owner's switches (the
+  // server refuses otherwise): no control that would be refused.
+  const mayReact = viewerMayReact(spaceId)
+  const mayComment = viewerMayComment(spaceId)
   const shownChips = allReactions
     ? reactionChips
     : reactionChips.filter(([emoji], i) => i < MAX_REACTION_CHIPS || mine(emoji))
@@ -364,7 +368,8 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
               <button key={emoji}
                 class={`sh-reaction-chip${mine(emoji) ? ' sh-reaction-chip--mine' : ''}`}
                 aria-pressed={mine(emoji)}
-                onClick={() => onReact?.(emoji)}>
+                disabled={!mayReact}
+                onClick={() => { if (mayReact) onReact?.(emoji) }}>
                 {emoji} {count}
               </button>
             ))}
@@ -381,7 +386,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
                 {allReactions ? '−' : `+${foldable}`}
               </button>
             )}
-            <div class="sh-reaction-add-wrap">
+            {mayReact && <div class="sh-reaction-add-wrap">
               <button
                 ref={reactionAddRef}
                 class="sh-reaction-add"
@@ -403,13 +408,13 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
                   onClose={() => { reactionPickerFor.value = null }}
                 />
               )}
-            </div>
+            </div>}
           </div>
           {/* Comment count chip — invites a click on cold posts
            *  ("💬 Comment") and reads as a normal sentence on warm
            *  ones ("💬 1 comment" / "💬 5 comments") rather than the
            *  bare-number format that read like a count badge. */}
-          <button
+          {(mayComment || post.comment_count > 0) && <button
             class="sh-comment-btn"
             onClick={onComment}
             aria-label={
@@ -421,7 +426,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
             💬 {post.comment_count === 0
               ? t('post.comment')
               : t(isOne(post.comment_count) ? 'post.comments_one' : 'post.comments', { n: String(post.comment_count) })}
-          </button>
+          </button>}
         </div>
       )}
       {/* Latest-comment preview — a one-liner that surfaces engagement

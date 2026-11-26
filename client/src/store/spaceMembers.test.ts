@@ -114,3 +114,33 @@ describe('space.member.profile_updated frame', () => {
     expect(m.spaceMembers.value).toBe(before)
   })
 })
+
+describe('viewerMayComment / viewerMayReact (P8)', () => {
+  it('a member always writes; a follower only behind the owner switches', async () => {
+    const m = await import('./spaceMembers')
+    // Outside a space, and a member by the detail's role: yes.
+    expect(m.viewerMayComment(null)).toBe(true)
+    m.setSpaceFollowerWrites('sp', { role: 'member', comment: false, react: false })
+    expect(m.viewerMayComment('sp')).toBe(true)
+    expect(m.viewerMayReact('sp')).toBe(true)
+    // A follower (by the detail's my_role): each switch on its own.
+    m.setSpaceFollowerWrites('sp', { role: 'subscriber', comment: false, react: true })
+    expect(m.viewerMayComment('sp')).toBe(false)
+    expect(m.viewerMayReact('sp')).toBe(true)
+    m.setSpaceFollowerWrites('sp', { role: 'subscriber', comment: true, react: false })
+    expect(m.viewerMayComment('sp')).toBe(true)
+    expect(m.viewerMayReact('sp')).toBe(false)
+  })
+
+  it('the roster names a follower too; unknown switches read as off', async () => {
+    const m = await import('./spaceMembers')
+    m.spaceMembers.value = {
+      sp2: new Map([['u-mem', { user_id: 'u-mem', role: 'subscriber' } as never]]),
+    }
+    expect(m.viewerMayComment('sp2')).toBe(false)
+    expect(m.viewerMayReact('sp2')).toBe(false)
+    // The roster wins over a stale detail role.
+    m.setSpaceFollowerWrites('sp2', { role: 'member', comment: false, react: false })
+    expect(m.viewerMayComment('sp2')).toBe(false)
+  })
+})

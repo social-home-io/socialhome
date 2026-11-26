@@ -28,11 +28,12 @@ from ...domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
-    SpaceRole,
     SpaceType,
 )
 from ...federation.host_equivalence import (
+    is_owner_ban,
     may_sign_pages,
+    owner_user_id_here,
     touches_owner_household,
 )
 from ...federation.sync_manager import SYNC_REJECT_NOT_SEATED
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
         AbstractSpaceRemoteMemberRepo,
     )
     from ...repositories.space_repo import AbstractSpaceRepo
+    from ...repositories.user_repo import AbstractUserRepo
     from ..space_service import SpaceService
 
 log = logging.getLogger(__name__)
@@ -73,6 +75,7 @@ class SpaceMembershipInboundHandlers:
         "_seat_repo",
         "_space_repo",
         "_space_service",
+        "_users",
     )
 
     def __init__(
@@ -81,9 +84,15 @@ class SpaceMembershipInboundHandlers:
         bus: EventBus,
         space_repo: AbstractSpaceRepo,
         seat_repo: AbstractSpaceRemoteMemberRepo | None = None,
+        users: AbstractUserRepo | None = None,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
+        #: Our own people: on the owner household they are the owner
+        #: household's people, which only the owner bans or unbans (P7b
+        #: Fable review C1). ``None``: every person-ban from a non-owner is
+        #: refused there (fail closed).
+        self._users = users
         #: The roster mirror, so a ban from the delegated admin household
         #: that invited us counts like the host's while delegation is on
         #: (:mod:`socialhome.federation.host_equivalence`). ``None``: only
@@ -474,14 +483,26 @@ class SpaceMembershipInboundHandlers:
     async def _names_the_owner_household(
         self, event: FederationEvent, space_id: str, user_id: str
     ) -> bool:
-        """A ban / unban from anyone but the owner (a trusted inviting
-        admin) that names a user of the owner household: refused — only the
-        owner decides about its own people."""
+        """A ban / unban from anyone but the owner (a seed-holding admin)
+        that names a person of the owner household: refused — only the
+        owner decides about its own people.
+
+        Three readings, one per place we can be: the owner's seat (any
+        household; a stub may lack ``owner_user_id``); on the OWNER
+        household itself, any of our own people (P7b Fable review C1 — the
+        host keeps neither ``owner_user_id`` nor remote seat rows for its
+        own people, so the roster-mirror check below missed there); and on
+        a member household, the owner household's seats in our mirror
+        (:func:`touches_owner_household`)."""
         space = await self._space_repo.get(space_id)
         if space is None or event.from_instance == space.owner_instance_id:
             return False
-        if await touches_owner_household(
-            self._space_repo, self._seat_repo, space, user_id=user_id
+        if (
+            user_id == await self._owner_user_id(space_id)
+            or await self._our_person_on_the_owner(space, user_id)
+            or await touches_owner_household(
+                self._space_repo, self._seat_repo, space, user_id=user_id
+            )
         ):
             log.warning(
                 "%s for %s from %s names the owner household's user — dropping",
@@ -491,6 +512,37 @@ class SpaceMembershipInboundHandlers:
             )
             return True
         return False
+
+    async def _our_person_on_the_owner(self, space: Space, user_id: str) -> bool:
+        """On the owner household: is ``user_id`` one of our people (seated
+        or not)? Without the user directory every id counts (fail closed)."""
+        own = self._federation.own_instance_id if self._federation else None
+        if not own or space.owner_instance_id != own:
+            return False
+        if self._users is None:
+            return True
+        return await self._users.get_by_user_id(user_id) is not None
+
+    async def _claims_the_owner_as_banner(
+        self, event: FederationEvent, space_id: str, banned_by: str | None
+    ) -> bool:
+        """A ban from anyone but the owner household naming the OWNER as its
+        banner (P7b Fable review M2): the sender's word, and it would make a
+        ban no admin may lift, blamed on the owner. Refused."""
+        if not banned_by:
+            return False
+        space = await self._space_repo.get(space_id)
+        if space is None or event.from_instance == space.owner_instance_id:
+            return False
+        if banned_by != await self._owner_user_id(space_id):
+            return False
+        log.warning(
+            "%s for %s from %s names the owner as its banner — dropping",
+            event.event_type,
+            space_id,
+            event.from_instance,
+        )
+        return True
 
     async def _on_banned(self, event: FederationEvent) -> None:
         """A person or household ban (P7b) from a seed holder of the space:
@@ -506,12 +558,26 @@ class SpaceMembershipInboundHandlers:
             return
         reason = str(event.payload.get("reason") or "")[:500] or None
         banned_by = event.payload.get("banned_by")
+        if await self._claims_the_owner_as_banner(
+            event, space_id, str(banned_by) if banned_by else None
+        ):
+            return
+        # The owner household's ban becomes the owner's even over an
+        # earlier admin's (re-review I-B); anyone else's keeps the first.
+        space = await self._space_repo.get(space_id)
+        owner_ban = space is not None and await is_owner_ban(
+            self._space_repo,
+            space,
+            event.from_instance,
+            str(banned_by) if banned_by else None,
+        )
         if instance_id:
             await self._space_repo.ban_household(
                 space_id,
                 instance_id,
                 reason=reason,
                 banned_by=str(banned_by) if banned_by else None,
+                owner_ban=owner_ban,
             )
             return
         await self._space_repo.ban_member(
@@ -519,6 +585,7 @@ class SpaceMembershipInboundHandlers:
             user_id=user_id,
             banned_by=str(banned_by) if banned_by else event.from_instance,
             reason=reason,
+            owner_ban=owner_ban,
         )
         await self._bus.publish(
             RemoteSpaceMemberBanned(
@@ -570,12 +637,8 @@ class SpaceMembershipInboundHandlers:
         return True
 
     async def _owner_user_id(self, space_id: str) -> str | None:
-        """The owner's user id here: the ``owner`` seat on the host, else the
-        one the host's roster recorded on a stub."""
-        for member in await self._space_repo.list_members(space_id):
-            if member.role == SpaceRole.OWNER:
-                return str(member.user_id)
-        return await self._space_repo.get_owner_user_id(space_id)
+        """The owner's user id here (:func:`owner_user_id_here`)."""
+        return await owner_user_id_here(self._space_repo, space_id)
 
     async def _on_age_gate(self, event: FederationEvent) -> None:
         """§CP.F1 — the host set/changed the space's min_age.

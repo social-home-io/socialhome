@@ -893,7 +893,7 @@ class SpaceSyncReceiver(
         elif resource == "member_pictures":
             await self._persist_member_pictures(space_id, records, provider=provider)
         elif resource == "bans":
-            await self._persist_bans(space_id, records)
+            await self._persist_bans(space_id, records, provider=provider)
         elif resource == "posts":
             await self._persist_posts(space_id, records, provider=provider)
         elif resource == "posts_deleted":

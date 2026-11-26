@@ -247,13 +247,41 @@ async def touches_owner_household(
     return False
 
 
+async def owner_user_id_here(
+    space_repo: AbstractSpaceRepo, space_id: str
+) -> str | None:
+    """The space owner's user id as this household knows it: the ``owner``
+    seat in our roster (the host's own), else the one the host's roster
+    recorded on a stub; ``None`` until known."""
+    for member in await space_repo.list_members(space_id):
+        if member.role == SpaceRole.OWNER:
+            return str(member.user_id)
+    return await space_repo.get_owner_user_id(space_id)
+
+
+async def is_owner_ban(
+    space_repo: AbstractSpaceRepo, space: Space, sender: str, banned_by: str | None
+) -> bool:
+    """Whether a ban arriving from ``sender`` (a signed event's sender or a
+    sync stream's provider) is the OWNER's own: from the owner household
+    AND naming the owner person as its banner. Only then does it take over
+    an earlier banner (an admin of the owner household re-banning is still
+    an admin's ban). Unknown owner → no."""
+    if not banned_by or sender != space.owner_instance_id:
+        return False
+    owner = await owner_user_id_here(space_repo, space.id)
+    return owner is not None and banned_by == owner
+
+
 __all__ = [
     "acting_hosts",
     "acts_as_host",
     "holds_local_admin_seat",
+    "is_owner_ban",
     "is_trusted_inviter",
     "may_sign_pages",
     "owner_statement_current",
+    "owner_user_id_here",
     "serves_as_host",
     "touches_owner_household",
 ]

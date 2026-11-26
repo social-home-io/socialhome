@@ -6154,6 +6154,113 @@ async def test_remote_admin_action_executes_when_delegation_on(stack):
     assert refreshed.name == "From Remote Admin"
 
 
+async def test_a_forwarded_ban_never_names_the_owner_households_people(stack):
+    """P7b Fable re-review I-A: on the host, a remote admin's forwarded
+    ``ban`` / ``unban`` naming one of the owner household's people (not only
+    the owner) is refused — only the owner decides about its own people."""
+    from socialhome.domain.space import RemoteAdminOutcome
+
+    space = await _host_space_with_remote_admin(stack, delegation=True)
+    spouse = await stack.provision_user("ownerspouse")
+    await stack.space_svc.add_member(
+        space.id, actor_username="alicehost", user_id=spouse.user_id, role="member"
+    )
+    unseated = await stack.provision_user("ownerkid")
+    for uid in (spouse.user_id, unseated.user_id):
+        outcome = await stack.space_svc.apply_remote_admin_action(
+            space.id,
+            actor_instance_id="instance-A",
+            actor_user_id="u-admin",
+            action="ban",
+            params={"user_id": uid},
+        )
+        assert outcome is RemoteAdminOutcome.DROPPED
+        assert await stack.space_repo.is_banned(space.id, uid) is False
+    assert await stack.space_repo.get_member(space.id, spouse.user_id) is not None
+    # The owner bans one of them; the admin can't lift it either.
+    await stack.space_svc.ban(
+        space.id, actor_username="alicehost", user_id=unseated.user_id
+    )
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="unban",
+        params={"user_id": unseated.user_id},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert await stack.space_repo.is_banned(space.id, unseated.user_id) is True
+    # Another household's person is still the admin's to ban.
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"user_id": "u-stranger"},
+    )
+    assert outcome is RemoteAdminOutcome.EXECUTED
+
+
+async def test_a_forwarded_ban_of_an_unseated_person_or_household_lands(stack):
+    """Owner fork B: a forwarded ban names someone with no seat here (a
+    household that only asked to join, a person who already left) — it
+    lands on the host; the owner household stays refused."""
+    from socialhome.domain.space import RemoteAdminOutcome
+
+    space = await _host_space_with_remote_admin(stack, delegation=True)
+    for params in ({"user_id": "u-gone"}, {"instance_id": "h-asking"}):
+        outcome = await stack.space_svc.apply_remote_admin_action(
+            space.id,
+            actor_instance_id="instance-A",
+            actor_user_id="u-admin",
+            action="ban",
+            params=params,
+        )
+        assert outcome is RemoteAdminOutcome.EXECUTED, params
+    assert await stack.space_repo.is_banned(space.id, "u-gone") is True
+    assert await stack.space_repo.is_household_banned(space.id, "h-asking") is True
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"instance_id": space.owner_instance_id},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert (
+        await stack.space_repo.is_household_banned(space.id, space.owner_instance_id)
+        is False
+    )
+
+
+async def test_the_owners_re_ban_makes_the_ban_the_owners(stack):
+    """P7b Fable re-review I-B: an admin banned X first; the owner bans X
+    too — the ban is now the owner's, so the admin can no longer lift it."""
+    from socialhome.domain.space import RemoteAdminOutcome
+
+    space = await _host_space_with_remote_admin(stack, delegation=True)
+    await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"user_id": "u-x"},
+    )
+    assert await stack.space_repo.ban_banned_by(space.id, user_id="u-x") == "u-admin"
+    await stack.space_svc.ban(space.id, actor_username="alicehost", user_id="u-x")
+    owner = await stack.space_svc.owner_user_id(space)
+    assert await stack.space_repo.ban_banned_by(space.id, user_id="u-x") == owner
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="unban",
+        params={"user_id": "u-x"},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert await stack.space_repo.is_banned(space.id, "u-x") is True
+
+
 async def test_remote_admin_action_needs_approval_when_delegation_off(stack):
     """Delegation OFF + a valid remote admin → NEEDS_OWNER_APPROVAL and the
     action did NOT run (config unchanged)."""

@@ -23,7 +23,7 @@ import { parseSpaceRole, roleChangeOptions, type SpaceRole } from '@/features/sp
 import { AdminGrantCheck } from './AdminGrantCheck'
 import { Modal } from './Modal'
 import { Button } from './Button'
-import { ConfirmDialog } from './ConfirmDialog'
+import { BanDialog, banErrorCopy, type BanTarget } from './BanDialog'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
 
@@ -34,9 +34,11 @@ const memberInstanceId = signal<string | null>(null)
 const actorRole = signal<SpaceRole | undefined>(undefined)
 const adminsActForOwner = signal(false)
 const spaceId = signal('')
-const showBanConfirm = signal(false)
-const showHouseholdBanConfirm = signal(false)
+const banning = signal<BanTarget | null>(null)
 const householdName = signal<string | null>(null)
+const memberName = signal('')
+const ownerHousehold = signal(false)
+const householdPeople = signal<string[]>([])
 const roleError = signal<string | null>(null)
 const roleBusy = signal(false)
 
@@ -50,6 +52,10 @@ export function openMemberActions(
   actForOwner = false,
   /** A remote seat's household name, for the household-ban confirm. */
   household: string | null = null,
+  /** Who the sheet acts on (its title), whether they belong to the owner
+   *  household (an admin of another household may not ban them) and the
+   *  names of their household's seated people (the household confirm). */
+  who: { name?: string; ownerHousehold?: boolean; people?: string[] } = {},
 ) {
   spaceId.value = sid
   memberUserId.value = userId
@@ -58,6 +64,10 @@ export function openMemberActions(
   actorRole.value = viewerRole
   adminsActForOwner.value = actForOwner
   householdName.value = household
+  memberName.value = who.name ?? ''
+  ownerHousehold.value = who.ownerHousehold === true
+  householdPeople.value = who.people ?? []
+  banning.value = null
   roleError.value = null
   roleBusy.value = false
   open.value = true
@@ -120,24 +130,6 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
   }
   const roleOptions = roleChangeOptions(actorRole.value, parseSpaceRole(memberRole.value))
 
-  const ban = async () => {
-    try {
-      await api.post(`/api/spaces/${spaceId.value}/ban`, { user_id: memberUserId.value })
-      showToast(t('member_actions.banned'), 'info')
-      showBanConfirm.value = false; open.value = false; onUpdate()
-    } catch (e: any) { showToast(e.message || t('member_actions.failed'), 'error') }
-  }
-
-  // A household ban: everyone from that household leaves the space and
-  // none of its people can join or follow again until it is lifted.
-  const banHousehold = async () => {
-    try {
-      await api.post(`/api/spaces/${spaceId.value}/ban`, { instance_id: memberInstanceId.value })
-      showToast(t('member_actions.household_banned'), 'info')
-      showHouseholdBanConfirm.value = false; open.value = false; onUpdate()
-    } catch (e: any) { showToast(e.message || t('member_actions.failed'), 'error') }
-  }
-
   const remove = async () => {
     try {
       const path = memberInstanceId.value
@@ -152,18 +144,25 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
       await api.delete(path)
       showToast(t('member_actions.removed'), 'info')
       open.value = false; onUpdate()
-    } catch (e: any) { showToast(e.message || t('member_actions.failed'), 'error') }
+    } catch (e: unknown) { showToast(banErrorCopy(e), 'error') }
   }
 
   // Anyone but the owner can be banned — a person of this household or of
-  // another one (the server ends a remote seat too). A remote seat also
-  // offers banning its whole household.
-  const canBan = memberRole.value !== 'owner'
+  // another one (the server ends a remote seat too); never, by an admin of
+  // another household, a person of the owner household (the server would
+  // refuse). A remote seat also offers banning its whole household.
+  const canBan = memberRole.value !== 'owner' && !ownerHousehold.value
   const canBanHousehold = canBan && !!memberInstanceId.value
+  const name = memberName.value || t('member_actions.title')
 
   return (
     <>
-      <Modal open={open.value} onClose={() => open.value = false} title={t('member_actions.title')}>
+      <Modal open={open.value && banning.value === null} onClose={() => open.value = false} title={name}>
+        {memberInstanceId.value && householdName.value && (
+          <p class="sh-muted sh-member-actions-household">
+            {t('member_actions.from_household', { household: householdName.value })}
+          </p>
+        )}
         <div class="sh-member-actions">
           {roleOptions.length > 0 && (
             <div class="sh-member-actions-roles" role="group"
@@ -191,29 +190,36 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
               )}
             </div>
           )}
-          <Button variant="secondary" onClick={remove}>{t('member_actions.remove')}</Button>
-          {canBan && (
-            <Button variant="danger" onClick={() => showBanConfirm.value = true}>{t('member_actions.ban')}</Button>
-          )}
-          {canBanHousehold && (
-            <Button variant="danger" data-action="ban-household"
-                    onClick={() => showHouseholdBanConfirm.value = true}>
-              {t('member_actions.ban_household')}
-            </Button>
-          )}
+          <div class="sh-member-actions-leave" role="group"
+               aria-label={t('member_actions.remove_or_ban')}>
+            {canBan && <span class="sh-member-actions-label">{t('member_actions.remove_or_ban')}</span>}
+            {canBan && <p class="sh-muted sh-member-actions-hint">{t('member_actions.remove_or_ban_hint')}</p>}
+            <Button variant="secondary" onClick={remove}>{t('member_actions.remove')}</Button>
+            {canBan && (
+              <Button variant="danger" data-action="ban"
+                      onClick={() => banning.value = {
+                        kind: 'person', spaceId: spaceId.value,
+                        userId: memberUserId.value, name: memberName.value || undefined,
+                      }}>
+                {t('member_actions.ban')}
+              </Button>
+            )}
+            {canBanHousehold && (
+              <Button variant="danger" data-action="ban-household"
+                      onClick={() => banning.value = {
+                        kind: 'household', spaceId: spaceId.value,
+                        instanceId: memberInstanceId.value ?? undefined,
+                        household: householdName.value, people: householdPeople.value,
+                      }}>
+                {t('member_actions.ban_household')}
+              </Button>
+            )}
+          </div>
         </div>
       </Modal>
-      <ConfirmDialog open={showBanConfirm.value} title={t('member_actions.ban_title')}
-        message={t('member_actions.ban_body')}
-        confirmLabel={t('member_actions.ban')} destructive onConfirm={ban}
-        onCancel={() => showBanConfirm.value = false} />
-      <ConfirmDialog open={showHouseholdBanConfirm.value}
-        title={t('member_actions.ban_household_title')}
-        message={t('member_actions.ban_household_body', {
-          household: householdName.value || t('member_actions.this_household'),
-        })}
-        confirmLabel={t('member_actions.ban_household')} destructive onConfirm={banHousehold}
-        onCancel={() => showHouseholdBanConfirm.value = false} />
+      <BanDialog target={banning.value}
+                 onClose={() => banning.value = null}
+                 onBanned={() => { banning.value = null; open.value = false; onUpdate() }} />
     </>
   )
 }

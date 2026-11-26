@@ -5527,9 +5527,9 @@ class NotificationService(ProtectionGateMixin):
             return
         members = await self._space_members(event.space_id)
         blocked = await self._withheld_from(event.user_id)
-        # A follower's reduced roster lists the members, never another
-        # follower (owner decision 13): a follower joining is news to the
-        # members only.
+        # A follower joining is news to the members only: followers see
+        # each other in the roster (D3, v_96), but a bell for every new
+        # follower would be noise to the other followers.
         followers_too = event.role in WRITER_ROLES
         for member in members:
             if member.user_id == event.user_id:

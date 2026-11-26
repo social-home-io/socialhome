@@ -9,6 +9,7 @@
  * types the UI doesn't offer are preserved.
  */
 import { SpaceAgeGating } from '@/features/child-protection/SpaceAgeGating'
+import { SpaceBanList } from '@/components/SpaceBanList'
 import { addBase } from '@/baseUrl'
 import { t } from '@/i18n/i18n'
 import type { Space } from '@/types'
@@ -38,9 +39,11 @@ export function parseRetention(text: string): number | null | undefined {
   return n > 0 ? n : null
 }
 
-export function ModerationSection({ space, isRemoteSpace, onUpdate }: {
+export function ModerationSection({ space, isRemoteSpace, isOwner = false, onUpdate }: {
   space: Space
   isRemoteSpace: boolean
+  /** The viewer owns the space: every ban is theirs to lift. */
+  isOwner?: boolean
   onUpdate: () => void
 }) {
   const storedDays = space.retention_days ?? null
@@ -101,6 +104,13 @@ export function ModerationSection({ space, isRemoteSpace, onUpdate }: {
             </div>
           </fieldset>
         )}
+      </fieldset>
+      {/* Who is banned (owner decision C: here, not under Members). */}
+      <fieldset class="sh-form-fieldset" data-testid="space-bans-settings">
+        <legend>{t('space.members.banned_heading')}</legend>
+        <p class="sh-ss-hint">{t('bans.intro')}</p>
+        <SpaceBanList spaceId={space.id} viewerIsOwner={isOwner}
+                      ownerInstanceId={space.owner_instance_id ?? null} />
       </fieldset>
       {/* The age gate is enforced by the host on join — host-local. */}
       {!isRemoteSpace && (

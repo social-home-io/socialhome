@@ -369,7 +369,7 @@ class SpaceDetailView(BaseView):
                 "join_mode": space.join_mode.value,
                 "category": normalize_category(space.category),
                 # The caller's own role here — the SPA's admin / follower
-                # UI reads it (a follower is not listed in ``/members``).
+                # UI reads it before the roster loads.
                 "my_role": member.role,
                 # Members (never followers) and followers: the roster's own
                 # counts when this household holds it (a member seat here),
@@ -953,9 +953,10 @@ class SpaceMembersView(BaseView):
         seat = await self.svc(space_service_key).require_reader(
             space_id, self.user.user_id
         )
-        # Owner decision 13: a follower reads the posts but is an outsider
-        # to the people — they see the members (never another follower)
-        # by name, picture and role, nothing about when they are around.
+        # D3 (v_96): everyone in the space sees the same roster, followers
+        # included. A follower still learns nothing about when anyone is
+        # around (owner decision 13): no presence, join time or location
+        # opt-in on its rows.
         follower = seat.role not in WRITER_ROLES
         members = await self.svc(space_repo_key).list_members(space_id)
         # §D1b — federated peers who accepted a cross-household invite
@@ -967,13 +968,6 @@ class SpaceMembersView(BaseView):
         remote_members = (
             await remote_repo.list_for_space(space_id) if remote_repo else []
         )
-        if follower:
-            members = [m for m in members if m.role in WRITER_ROLES]
-            remote_members = [
-                rm
-                for rm in remote_members
-                if (rm.role or SpaceRole.MEMBER) in WRITER_ROLES
-            ]
         # Resolve global display_name + viewer's personal alias for each
         # member in two bulk calls (no N+1).
         user_repo = self.svc(user_repo_key)
@@ -2328,17 +2322,43 @@ class SpaceBanListView(BaseView):
             await repo.list_bans(space_id), space_id=space_id
         )
         fed_repo = self.svc(federation_repo_key)
-        households = []
+        names: dict[str, str | None] = {}
+
+        async def household_name(instance_id: str | None) -> str | None:
+            if not instance_id:
+                return None
+            if instance_id not in names:
+                peer = await fed_repo.get_instance(instance_id)
+                names[instance_id] = peer.display_name if peer else None
+            return names[instance_id]
+
+        rows = []
+        for p in people:
+            iid = await space_svc.banned_household_of(space_id, str(p["user_id"]))
+            rows.append(
+                {
+                    **p,
+                    "kind": "person",
+                    "instance_id": iid,
+                    "household_name": await household_name(iid),
+                    # An admin gets no Unban the server would refuse.
+                    "banned_by_owner": await space_svc.ban_made_by_owner(
+                        space, p.get("banned_by")
+                    ),
+                }
+            )
         for row in await repo.list_household_bans(space_id):
-            peer = await fed_repo.get_instance(str(row["instance_id"]))
-            households.append(
+            rows.append(
                 {
                     **row,
                     "kind": "household",
-                    "household_name": peer.display_name if peer else None,
+                    "household_name": await household_name(str(row["instance_id"])),
+                    "banned_by_owner": await space_svc.ban_made_by_owner(
+                        space, row.get("banned_by")
+                    ),
                 }
             )
-        return web.json_response([{**p, "kind": "person"} for p in people] + households)
+        return web.json_response(rows)
 
 
 class SpaceHouseholdUnbanView(BaseView):

@@ -269,6 +269,11 @@ export function MembersSection({ space, isRemoteSpace, members, onUpdate }: Prop
         <p class="sh-ss-hint">
           {followers ? t('space.followers.members_only_note') : t('space.followers.off_note')}
         </p>
+        {followers && (
+          <p class="sh-ss-hint" data-testid="space-followers-visible">
+            {t('space.followers.visible_note')}
+          </p>
+        )}
       </fieldset>
 
       <fieldset class="sh-form-fieldset">

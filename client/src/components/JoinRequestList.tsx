@@ -7,11 +7,12 @@
  * ``space.join.approved`` / ``space.join.denied`` WS events so the
  * list stays live when another admin acts elsewhere.
  */
-import { useEffect } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { AdminGrantCheck } from './AdminGrantCheck'
+import { BanDialog, type BanTarget } from './BanDialog'
 import { Avatar } from './Avatar'
 import { Button } from './Button'
 import { showToast } from './Toast'
@@ -101,6 +102,9 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
   }, [spaceId])
 
   const rows = requestsBySpace.value[spaceId] ?? []
+  // A household that keeps asking (owner decision B): ban it from its
+  // request — it needs no seat — and the request is declined with it.
+  const [banning, setBanning] = useState<{ target: BanTarget; request: JoinRequest } | null>(null)
 
   const act = async (request: JoinRequest, action: 'approve' | 'deny') => {
     try {
@@ -115,6 +119,21 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
       requestsBySpace.value = {
         ...requestsBySpace.value,
         [spaceId]: rows.filter(r => r.id !== request.id),
+      }
+    } catch (e: unknown) {
+      showToast((e as Error).message || t('join_requests.failed'), 'error')
+    }
+  }
+
+  // After a household ban its request is declined too — the ban's toast
+  // already said it; only a failure speaks.
+  const declineQuietly = async (request: JoinRequest) => {
+    try {
+      await api.post(`/api/spaces/${spaceId}/join-requests/${request.id}/deny`, {})
+      const now = requestsBySpace.value[spaceId] ?? []
+      requestsBySpace.value = {
+        ...requestsBySpace.value,
+        [spaceId]: now.filter(x => x.id !== request.id),
       }
     } catch (e: unknown) {
       showToast((e as Error).message || t('join_requests.failed'), 'error')
@@ -144,7 +163,16 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
     }
   }
 
-  if (rows.length === 0) return null
+  // The ban dialog stays while a live reload empties the list.
+  const banDialog = (
+    <BanDialog target={banning?.target ?? null} onClose={() => setBanning(null)}
+               onBanned={() => {
+                 const request = banning?.request
+                 setBanning(null)
+                 if (request) void declineQuietly(request)
+               }} />
+  )
+  if (rows.length === 0) return banning ? banDialog : null
 
   return (
     <div class="sh-join-requests sh-card" aria-label={t('join_requests.aria')}>
@@ -211,10 +239,25 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
               <Button variant="secondary" onClick={() => act(r, 'deny')}>
                 {t('join_requests.decline')}
               </Button>
+              {/* An admin elevation is a member already: banned from the member sheet. */}
+              {r.remote_applicant_instance_id && r.requested_role !== 'admin' && (
+                <Button variant="secondary" data-action="ban-requesting-household"
+                        onClick={() => setBanning({
+                          request: r,
+                          target: {
+                            kind: 'household', spaceId,
+                            instanceId: r.remote_applicant_instance_id ?? undefined,
+                            household: r.unverified_household ?? null,
+                          },
+                        })}>
+                  {t('member_actions.ban_household')}
+                </Button>
+              )}
             </div>
           </div>
         )
       })}
+      {banDialog}
     </div>
   )
 }

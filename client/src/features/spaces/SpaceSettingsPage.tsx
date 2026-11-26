@@ -172,8 +172,8 @@ export default function SpaceSettingsPage() {
     space?.owner_instance_id && instanceConfig.value?.instance_id
     && space.owner_instance_id !== instanceConfig.value.instance_id
   )
-  // The detail's ``my_role`` is the viewer's seat (a follower's roster
-  // doesn't list followers); the roster row backs it up.
+  // The detail's ``my_role`` is the viewer's seat, known before the roster
+  // loads; the roster row backs it up.
   const myRole = space?.my_role ?? me?.role
   const viewer = space ? settingsViewer(myRole, isRemoteSpace) : null
   const isOwner = myRole === 'owner'
@@ -357,7 +357,8 @@ export default function SpaceSettingsPage() {
       case 'location':
         return <LocationSection space={space} isRemoteSpace={isRemoteSpace} onUpdate={refresh} />
       case 'moderation':
-        return <ModerationSection space={space} isRemoteSpace={isRemoteSpace} onUpdate={refresh} />
+        return <ModerationSection space={space} isRemoteSpace={isRemoteSpace} isOwner={isOwner}
+                                  onUpdate={refresh} />
       case 'bots':
         return (
           <div class="sh-ss-card">

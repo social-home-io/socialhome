@@ -142,6 +142,11 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # Read-only: the owner's user_id (the members route's ``is_owner``
         # flag). Mutates nothing.
         "owner_user_id",
+        # Read-only: the ban list route's hints (whether a ban is the
+        # owner's, a banned person's household); the route gates on
+        # ``_require_admin_or_owner`` first. Mutate nothing.
+        "ban_made_by_owner",
+        "banned_household_of",
         # Pure reads.
         # Deliberately ungated and reachable with NO session: the invite
         # token IS the credential, so whoever holds it can already redeem

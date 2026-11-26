@@ -15,7 +15,7 @@ vi.mock('@/components/PersonSheet', () => ({
   openPerson: (...args: unknown[]) => openPersonSpy(...args),
 }))
 
-import { spaceMembers } from '@/store/spaceMembers'
+import { setSpaceFollowerWrites, spaceFollowerWrites, spaceMembers } from '@/store/spaceMembers'
 import { clearTextDraft } from '@/store/textDrafts'
 import { CommentThread, commentFieldCap } from './CommentThread'
 
@@ -45,6 +45,7 @@ beforeEach(() => {
   cleanup()
   me.is_admin = false
   spaceMembers.value = {}
+  spaceFollowerWrites.value = {}
   for (const post of ['p-1', 'p-a', 'p-b']) {
     clearTextDraft(`comment:${post}`)
     clearTextDraft(`comment:${post}:reply:c-1`)
@@ -62,6 +63,38 @@ describe('CommentThread', () => {
       seatMe(role)
       expect(menuItems('sp-1')).toEqual(['Edit', 'Delete', 'Report'])
     })
+
+  it('a follower with the comment switch off: no field, no Reply, no Edit — Delete of its own stays (P8)', () => {
+    seatMe('subscriber')
+    setSpaceFollowerWrites('sp-1', { role: 'subscriber', comment: false, react: false })
+    const mine = { ...(others as object), id: 'c-2', author: 'u-me' } as never
+    const r = render(
+      <CommentThread comments={[mine, others]} spaceId="sp-1" postId="p-1" onReply={vi.fn()}
+        onDelete={vi.fn()} onEdit={vi.fn()} />,
+    )
+    expect(r.container.querySelector('#sh-comment-new-input')).toBeNull()
+    expect(r.queryByText('Reply')).toBeNull()
+    expect(r.getByText('Only members comment here. As a follower you can read along.')).toBeTruthy()
+    const btn = r.container.querySelectorAll('.sh-comment-overflow')[0]
+    fireEvent.click(btn)
+    const items = Array.from(r.container.querySelectorAll('[role=menuitem]')).map(b => b.textContent)
+    expect(items).toEqual(['Delete'])
+  })
+
+  it('a follower with the comment switch on comments, replies and edits its own', () => {
+    seatMe('subscriber')
+    setSpaceFollowerWrites('sp-1', { role: 'subscriber', comment: true, react: false })
+    const mine = { ...(others as object), id: 'c-2', author: 'u-me' } as never
+    const r = render(
+      <CommentThread comments={[mine]} spaceId="sp-1" postId="p-1" onReply={vi.fn()}
+        onDelete={vi.fn()} onEdit={vi.fn()} />,
+    )
+    expect(r.container.querySelector('#sh-comment-new-input')).not.toBeNull()
+    expect(r.queryByText('Reply')).not.toBeNull()
+    fireEvent.click(r.container.querySelector('.sh-comment-overflow')!)
+    const items = Array.from(r.container.querySelectorAll('[role=menuitem]')).map(b => b.textContent)
+    expect(items).toEqual(['Edit', 'Delete'])
+  })
 
   it('a plain space member may only report somebody else\'s comment', () => {
     seatMe('member')

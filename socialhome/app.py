@@ -1968,6 +1968,7 @@ def _wire_federation_stack(
         bus=bus,
         space_repo=space_repo,
         seat_repo=space_remote_member_repo,
+        users=user_repo,
     )
     space_membership_handlers.attach_to(federation_service)
     app[K.space_membership_handlers_key] = space_membership_handlers
@@ -3814,7 +3815,6 @@ def create_app(config: Config | None = None) -> web.Application:
         conversation_repo=conversation_repo,
         media_transcode_repo=repos.media_transcode,
         cp_repo=repos.cp,
-        remote_member_repo=repos.space_remote_member,
         gallery_repo=repos.gallery,
     )
     realtime_service.wire()

@@ -58,9 +58,15 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   HOST_UNREACHABLE: (body) => body.reason === 'unknown_host'
     ? t('space.host.unknown')
     : t('space.host.unreachable'),
-  HOST_TOO_OLD: (body) => body.feature === 'role_change'
-    ? t('space.member.role_host_too_old')
-    : t('moderation.error.host_too_old'),
+  HOST_TOO_OLD: (body) => {
+    switch (body.feature) {
+      case 'role_change': return t('space.member.role_host_too_old')
+      case 'follow': return t('space.follow.host_too_old')
+      case 'ban': return t('space.member.ban_host_too_old')
+      case 'invite_link': return t('invite.error.host_too_old')
+      default: return t('moderation.error.host_too_old')
+    }
+  },
   // Spaces: joining, following, writing.
   ALREADY_MEMBER: () => t('error.already_member'),
   GFS_RELAY_NOT_ALLOWED: () => t('error.gfs_relay_not_allowed'),
@@ -92,6 +98,11 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   },
   USER_ALREADY_MEMBER: () => t('error.user_already_member'),
   BANNED: () => t('error.banned'),
+  // A ban that may not be made, and the owner's ban an admin may not lift.
+  BAN_NOT_ALLOWED: (_b, p) => p.target === 'household'
+    ? t('error.ban_not_allowed_household')
+    : t('error.ban_not_allowed_person'),
+  OWNER_BAN: () => t('error.owner_ban'),
   USER_BANNED: () => t('error.user_banned'),
   INVITE_ONLY: () => t('error.invite_only'),
   INVITE_EXPIRED: () => t('error.invite_expired'),
