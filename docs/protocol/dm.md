@@ -96,6 +96,10 @@ household and the conversation's remote seats
   for them, not the payload's.
 - **`DM_HISTORY_REQUEST`** — `from_instance` holds no seat in the
   conversation (nothing is sent back, not even `DM_HISTORY_COMPLETE`).
+  The requester never asks a household about a conversation whose people
+  here are hidden from it (the per-pair visibility hide list, the same rule
+  the provider applies): that household was never told of it, and the
+  request itself would tell it.
 - **`DM_HISTORY_CHUNK` / `_COMPLETE`** — `from_instance` holds no seat;
   per message, the sender is not a seated user of `from_instance` — except
   that a group's authority may hand over rows of members seated on other

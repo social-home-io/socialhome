@@ -147,3 +147,55 @@ async def test_rate_limit_expires_after_window(bus, queue):
     # Backdate the recorded timestamp beyond the window.
     sched._last_request_at[("peer-a", "conv-1")] -= RATE_LIMIT_SECONDS + 1
     assert await sched._enqueue_for_peer("peer-a") == 1
+
+
+class _Member:
+    def __init__(self, username):
+        self.username = username
+
+
+class _MembersRepo(_FakeConvRepo):
+    def __init__(self, convs_by_instance, members):
+        super().__init__(convs_by_instance)
+        self._members = members
+
+    async def list_members(self, conversation_id):
+        return [_Member(u) for u in self._members.get(conversation_id, [])]
+
+
+class _Users:
+    async def get(self, username):
+        return type("U", (), {"user_id": f"uid-{username}"})()
+
+
+class _Visibility:
+    def __init__(self, hidden):
+        self._hidden = hidden
+
+    async def hidden_user_ids_for_peer(self, peer_id):
+        return frozenset(self._hidden.get(peer_id, ()))
+
+
+async def test_never_asks_a_peer_about_a_conversation_hidden_from_it(bus, queue):
+    """P9 (demo audit, the ``visibility`` step): a person here hidden from a
+    household had a DM with it that it was never told of — asking it for
+    that conversation's history tells it, and it refuses ("holds no seat").
+    The scheduler applies the provider's own visibility rule."""
+    fed = _FakeFederation()
+    repo = _MembersRepo(
+        {"peer-a": ["conv-hidden", "conv-open"]},
+        {"conv-hidden": ["ada"], "conv-open": ["amy"]},
+    )
+    sched = DmHistoryScheduler(
+        bus=bus,
+        federation=fed,
+        conversation_repo=repo,
+        queue=queue,
+        own_instance_id="self",
+        user_repo=_Users(),
+        visibility_repo=_Visibility({"peer-a": {"uid-ada"}}),
+    )
+    await queue.start()
+    assert await sched._enqueue_for_peer("peer-a") == 1
+    await asyncio.sleep(0.05)
+    assert [s["payload"]["conversation_id"] for s in fed.sent] == ["conv-open"]

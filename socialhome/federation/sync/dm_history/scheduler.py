@@ -22,11 +22,17 @@ from typing import TYPE_CHECKING
 from ....domain.events import ConnectionReachable, PairingConfirmed
 from ....domain.federation import FederationEventType
 from ....infrastructure.reconnect_queue import P4_DM
+from ....services.visibility import VisibilityMixin
+from .provider import local_user_ids_of
 
 if TYPE_CHECKING:
     from ....infrastructure.event_bus import EventBus
     from ....infrastructure.reconnect_queue import ReconnectSyncQueue
     from ....repositories.conversation_repo import AbstractConversationRepo
+    from ....repositories.peer_user_visibility_repo import (
+        AbstractPeerUserVisibilityRepo,
+    )
+    from ....repositories.user_repo import AbstractUserRepo
     from ...federation_service import FederationService
 
 
@@ -39,9 +45,11 @@ log = logging.getLogger(__name__)
 RATE_LIMIT_SECONDS: float = 3600.0
 
 
-class DmHistoryScheduler:
+class DmHistoryScheduler(VisibilityMixin):
     """Subscribes to pair + reachability events and enqueues history
-    requests for the affected conversations.
+    requests for the affected conversations — never for one whose people
+    are hidden from the peer (the provider's own visibility rule): the
+    peer was never told of it, and the request itself would.
     """
 
     __slots__ = (
@@ -51,6 +59,7 @@ class DmHistoryScheduler:
         "_last_request_at",
         "_own_instance_id",
         "_queue",
+        "_user_repo",
     )
 
     def __init__(
@@ -61,7 +70,11 @@ class DmHistoryScheduler:
         conversation_repo: AbstractConversationRepo,
         queue: ReconnectSyncQueue,
         own_instance_id: str,
+        user_repo: AbstractUserRepo | None = None,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
+        self._user_repo = user_repo
+        self._visibility_repo = visibility_repo
         self._bus = bus
         self._federation = federation
         self._conversation_repo = conversation_repo
@@ -115,8 +128,22 @@ class DmHistoryScheduler:
             )
             return 0
 
+        hidden = await self.hidden_for_peer(instance_id)
         enqueued = 0
         for conv_id in conversation_ids:
+            if (
+                hidden
+                and self._user_repo is not None
+                and (
+                    await local_user_ids_of(
+                        self._conversation_repo, self._user_repo, conv_id
+                    )
+                )
+                & hidden
+            ):
+                # A person here is hidden from that household: it was never
+                # told of the conversation, and asking would tell it.
+                continue
             if not self._rate_limit_allow(instance_id, conv_id):
                 continue
             self._queue.enqueue(

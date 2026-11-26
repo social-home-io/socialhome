@@ -2617,6 +2617,8 @@ def _wire_federation_stack(
         conversation_repo=conversation_repo,
         queue=reconnect_queue,
         own_instance_id=identity.instance_id,
+        user_repo=user_repo,
+        visibility_repo=peer_user_visibility_repo,
     )
     dm_history_scheduler.wire()
     # v_37 cross-household groups: the membership authority's roster /
