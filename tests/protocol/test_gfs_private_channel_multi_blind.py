@@ -158,6 +158,14 @@ class _Spaces:
     async def get_space_seed(self, space_id):
         return self.seed
 
+    # Every household in this world holds a seat in the space (a person of
+    # ours on the roster): a household with none takes no channel seat.
+    async def list_local_member_user_ids(self, space_id):
+        return ["u-local"]
+
+    async def list_members(self, space_id):
+        return [SimpleNamespace(user_id="u-local", role="member")]
+
     async def list_all(self):
         return [self.space]
 
