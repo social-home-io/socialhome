@@ -1431,7 +1431,7 @@
   "space.member.role_forwarded": "Sent to the space's host. The new role shows once the host applies it.",
   "space.member.role_host_too_old": "This space's host household needs an update before roles can be changed from here.",
   "space.member.ban_host_too_old": "This space's host household needs an update before a household can be banned from here.",
-  "space.follow.host_too_old": "This space's home household needs an update before you can follow it.",
+  "space.follow.host_too_old": "This space's host household needs an update before you can follow it.",
   "space.member.load_failed": "Couldn't load the members.",
   "space.host.unreachable": "Couldn't reach the space's host household. Nothing was sent — try again later.",
   "space.host.unknown": "This space's host household isn't known here yet.",

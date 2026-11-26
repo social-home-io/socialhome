@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 import { PostCard } from './PostCard'
 import type { FeedPost } from '@/types'
-import { setSpaceFollowerWrites, spaceMembers } from '@/store/spaceMembers'
+import { setSpaceFollowerWrites, spaceFollowerWrites, spaceMembers } from '@/store/spaceMembers'
 import { householdUsers } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
 
@@ -25,6 +25,8 @@ const mockPost: FeedPost = {
   created_at: new Date().toISOString(),
   edited_at: null,
 }
+
+afterEach(() => { spaceFollowerWrites.value = {} })
 
 describe('PostCard', () => {
   it('puts the metaEnd slot after the time (pinned too)', () => {

@@ -36,7 +36,7 @@ describe('apiErrorMessage — known codes', () => {
   it('says a follow needs the host updated, not a review (HOST_TOO_OLD, P8)', () => {
     expect(apiErrorMessage(409, '/api/spaces/s/subscribe', {
       code: 'HOST_TOO_OLD', detail: 'x', feature: 'follow',
-    })).toBe("This space's home household needs an update before you can follow it.")
+    })).toBe("This space's host household needs an update before you can follow it.")
     expect(apiErrorMessage(409, '/api/spaces/s/invite-tokens', {
       code: 'HOST_TOO_OLD', detail: 'x', feature: 'invite_link',
     })).toBe("The space's home household needs to update Social Home first.")

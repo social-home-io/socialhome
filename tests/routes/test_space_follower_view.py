@@ -1,9 +1,9 @@
 """A follower's (``subscriber``) view of a space is reduced (owner
 decision 13, 2026-10-18).
 
-A follower reads the posts, but is an outsider to the people: elsewhere
-the space chat refuses them, the GFS listing is hidden from them and the
-roster never syncs to a follower-only household. So:
+A follower reads the posts and is on the roster like any seat (roster
+gossip and snapshots reach follower households too, D3), but takes no part
+in the people's whereabouts or governance: the space chat refuses them. So:
 
 * ``GET /api/spaces/{id}/members`` shows a follower the same roster as a
   member (v_96, D3: followers are visible to everyone in the space — every

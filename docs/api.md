@@ -332,8 +332,9 @@ with its own uniform gate: the landing page (`GET /api/spaces/{id}`),
 the [space chat](./protocol/space-chat.md) answers a caller with no seat
 `403` (a follower, who has a seat, still gets its `404`).
 
-**Followers see less.** A follower reads the posts but is an outsider to
-the space's *people* (the chat refuses them too): `GET …/members` lists them
+**Followers see less.** A follower reads the posts and is listed with the
+space's people, but takes no part in their whereabouts or governance (the
+chat refuses them too): `GET …/members` lists them
 the same seats as anyone in the space (members and followers, themselves
 included — v_96, followers are visible to everyone in the space) but without
 presence (`is_online`, `is_idle`, `last_seen_at`), `joined_at` or

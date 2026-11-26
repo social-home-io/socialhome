@@ -3161,12 +3161,14 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   min-width: 36px;
   justify-content: center;
 }
-.sh-reaction-chip:hover {
+.sh-reaction-chip:hover:not(:disabled) {
   background: var(--sh-primary-soft);
   border-color: var(--sh-primary);
   color: var(--sh-primary-text);
 }
-.sh-reaction-chip:active { transform: scale(0.96); }
+.sh-reaction-chip:active:not(:disabled) { transform: scale(0.96); }
+/* A count the viewer may not add to (a follower without reactions). */
+.sh-reaction-chip:disabled { cursor: default; }
 .sh-reaction-add {
   color: var(--sh-text-muted);
   font-weight: 600;

@@ -145,8 +145,7 @@ interface Props {
   adminsActForOwner?: boolean
   /** The space takes followers (``features.allow_subscribers``): the
    *  Followers group shows, with its count, even while empty. Off: only
-   *  the members (and their count) — unless a follower seat is still
-   *  listed, which then shows as it is. */
+   *  the members and their count (owner decision). */
   takesFollowers?: boolean
 }
 
@@ -409,7 +408,7 @@ export function SpaceMemberList({
   // the space sees who follows). The members' count never counts them.
   const seated = members.value.filter(m => !isFollower(parseSpaceRole(m.role)))
   const followers = members.value.filter(m => isFollower(parseSpaceRole(m.role)))
-  const followersShown = takesFollowers || followers.length > 0
+  const followersShown = takesFollowers
 
   return (
     <>
