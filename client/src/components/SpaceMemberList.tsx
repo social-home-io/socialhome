@@ -86,8 +86,15 @@ interface Member {
 }
 
 export interface Ban {
-  user_id: string
-  banned_by: string
+  /** ``person``: one person's ban; ``household``: a whole household's. */
+  kind?: 'person' | 'household'
+  /** A person ban's id (absent on a household ban). */
+  user_id?: string
+  /** A household ban's household. */
+  instance_id?: string
+  /** A household ban: the paired household's name, null if unknown here. */
+  household_name?: string | null
+  banned_by?: string
   banned_at: string
   reason?: string | null
   /** Server-resolved: the per-space name, else the person's household
@@ -99,9 +106,15 @@ export interface Ban {
   picture_url?: string | null
 }
 
+export function isHouseholdBan(b: Ban): boolean {
+  return b.kind === 'household'
+}
+
 /** A banned person's label: the name the server resolved (a remote
- *  person's too), else the viewer's nickname, else "Someone". */
+ *  person's too), else the viewer's nickname, else "Someone". A banned
+ *  household: its name, else "A household". */
 export function banName(b: Ban): string {
+  if (isHouseholdBan(b)) return b.household_name || t('space.members.unknown_household')
   return personLabel(b.display_name, b.personal_alias)
 }
 
@@ -228,10 +241,12 @@ export function SpaceMemberList({
     return null
   }
 
-  const unban = async (userId: string) => {
+  const unban = async (b: Ban) => {
     try {
-      await api.delete(`/api/spaces/${spaceId}/bans/${userId}`)
-      showToast(t('space.members.unbanned'), 'success')
+      await api.delete(isHouseholdBan(b)
+        ? `/api/spaces/${spaceId}/household-bans/${encodeURIComponent(b.instance_id ?? '')}`
+        : `/api/spaces/${spaceId}/bans/${encodeURIComponent(b.user_id ?? '')}`)
+      showToast(t(isHouseholdBan(b) ? 'space.members.household_unbanned' : 'space.members.unbanned'), 'success')
       reload()
     } catch (e: any) {
       showToast(e.message || t('space.members.unban_failed'), 'error')
@@ -423,6 +438,7 @@ export function SpaceMemberList({
                   onClick={() => openMemberActions(
                     spaceId, m.user_id, m.is_owner ? 'owner' : m.role,
                     m.instance_id ?? null, viewerRole, adminsActForOwner,
+                    m.household_name ?? null,
                   )}
                 >
                   ···
@@ -435,18 +451,23 @@ export function SpaceMemberList({
           <>
             <h2 class="sh-settings-section-heading">{t('space.members.banned_heading')}</h2>
             {bans.value.map(b => (
-              <div key={b.user_id} class="sh-member-row sh-member-row--banned">
+              <div key={isHouseholdBan(b) ? `h:${b.instance_id}` : `p:${b.user_id}`}
+                   class="sh-member-row sh-member-row--banned"
+                   data-ban-kind={isHouseholdBan(b) ? 'household' : 'person'}>
                 <Avatar name={banName(b)} src={b.picture_url ?? null} size={32} />
                 <div class="sh-member-info">
                   <span class="sh-member-name">{banName(b)}</span>
-                  <span class="sh-badge sh-badge--danger">{t('space.members.banned_badge')}</span>
+                  <span class="sh-badge sh-badge--danger">
+                    {t(isHouseholdBan(b) ? 'space.members.household_banned_badge' : 'space.members.banned_badge')}
+                  </span>
                   {b.reason && (
                     <span class="sh-muted">{b.reason}</span>
                   )}
                 </div>
                 <Button
                   variant="secondary"
-                  onClick={() => unban(b.user_id)}
+                  aria-label={t('space.members.unban_aria', { name: banName(b) })}
+                  onClick={() => unban(b)}
                 >
                   {t('space.members.unban')}
                 </Button>
