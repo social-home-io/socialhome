@@ -771,7 +771,8 @@ class until somebody classifies it on purpose.
 | Space content key (`SPACE_KEY_EXCHANGE` / `_ACK` / `_REKEY`) | sent | **accepted** |
 | Space seed delegation (`SPACE_ADMIN_KEY_SHARE`, v_94) | sent to an admin household the owner approved, while delegation is on | **accepted** — only from the acting host, only with a live admin seat of our own, only a seed that is the private half of the pinned key; never in a multi frame |
 | Catch-up sync chunks (`SPACE_SYNC_BEGIN` … `_COMPLETE`) | sent | **accepted** |
-| Direct-sync RTC signalling (`SPACE_SYNC_OFFER` / `_ANSWER` / `_ICE` / `_DIRECT_*`) | never | rejected — it exists to negotiate a *direct* connection, and neither household has the other's address by design |
+| Direct-sync RTC signalling (`SPACE_SYNC_OFFER` / `_ANSWER` / `_ICE` / `_DIRECT_READY`) | never | rejected — it exists to negotiate a *direct* connection, and neither household has the other's address by design |
+| A host's capacity refusal of a sync BEGIN (`SPACE_SYNC_DIRECT_FAILED` with `too_many_sessions` / `node_capacity` / `rate_limited`, v_96) | sent, at most one per space per 10 min | **accepted** — only for a BEGIN we sent to that household (it becomes `SpaceSyncDeferred`); any other `_DIRECT_FAILED` from a seat is ignored, and only a party to a session may end it |
 | Join requests (`SPACE_JOIN_REQUEST*`) | excluded | rejected — they are already a member; this is the ask-an-admin flow |
 | A second invite token from the same household (`SPACE_INVITE_TOKEN_REDEEM` / `_ACK` / `_DENY`) | sent | **accepted** — the pair now exists, so `request_redeem` takes the direct-peer branch and the token is still the whole authorization |
 | Cross-household admin action (`SPACE_REMOTE_ADMIN_KICK` / `_ACTION`) | sent | **accepted** — the host re-validates `space_remote_members.role`, so this authenticates the sender without authorizing them |

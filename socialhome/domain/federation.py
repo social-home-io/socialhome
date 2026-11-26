@@ -841,10 +841,11 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         # ── Catch-up sync (§25.6) ──
         #: The chunked backfill that populates a fresh seat. The RTC
         #: *signalling* half of sync (``SPACE_SYNC_OFFER`` / ``_ANSWER`` /
-        #: ``_ICE`` / ``_DIRECT_READY`` / ``_DIRECT_FAILED``) is
-        #: deliberately absent: it exists to negotiate a DIRECT peer
-        #: connection, and the whole point of §D2b is that these two
-        #: households never learn each other's address.
+        #: ``_ICE`` / ``_DIRECT_READY``) is deliberately absent: it exists to
+        #: negotiate a DIRECT peer connection, and the whole point of §D2b
+        #: is that these two households never learn each other's address.
+        #: ``_DIRECT_FAILED`` is listed above only for a BEGIN's capacity
+        #: refusal (v_96); its handler ignores anything else from a seat.
         #: v_95: the signed sync page pushed to every member household —
         #: a GFS-seated one included (members equal on any path).
         FederationEventType.SPACE_SYNC_PAGE,

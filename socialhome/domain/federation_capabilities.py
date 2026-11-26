@@ -1628,8 +1628,11 @@ from __future__ import annotations
 #:   cert (it could not verify one: the signature covers ``reader``); a
 #:   follower household below v_96 gets no cert and no writer key. A
 #:   member household below v_96 refuses a follower's relayed comment or
-#:   reaction. Space-scoped. Labelled "Follow spaces with
-#:   one seat on every path".
+#:   reaction. Also at v_96 (``MIN_FOR_SESSION_SYNC_REFUSAL``): a
+#:   household seated from an invite link takes the host's capacity
+#:   refusal of its sync BEGIN (``SPACE_SYNC_DIRECT_FAILED``, at most one
+#:   per space per 10 min); an older one gets silence, as before.
+#:   Space-scoped. Labelled "Follow spaces with one seat on every path".
 #: * **v_96** (2026-11-23) — **moment reach** (``docs/protocol/momentum.md``,
 #:   "Reach"): a person chooses how far their moments go (1–5 hops, default
 #:   3, capped by the household's ``moments.reach_max``; a protected account
@@ -2407,6 +2410,12 @@ class FederationCapability:
     #: above it. Reach 1 keeps :attr:`MIN_FOR_MOMENT_NO_RELAY`; reach 4–5
     #: from the origin goes to every peer.
     MIN_FOR_MOMENT_REACH = 96
+    #: v_96 — a household seated from an invite link takes the host's
+    #: capacity refusal of its sync BEGIN (``SPACE_SYNC_DIRECT_FAILED`` with
+    #: ``too_many_sessions`` / ``node_capacity`` / ``rate_limited``, at most
+    #: one per space per 10 min); an older one refuses the event at its
+    #: peer-class step, so it gets nothing, as before.
+    MIN_FOR_SESSION_SYNC_REFUSAL = 96
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so

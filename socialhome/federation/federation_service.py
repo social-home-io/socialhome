@@ -5817,7 +5817,7 @@ class FederationService:
                 decision.next_event is FederationEventType.SPACE_SYNC_DIRECT_FAILED
                 and await self.is_space_session_peer(event.from_instance)
                 and not await self._session_peer_hears_refusal(
-                    event.from_instance, decision.next_payload
+                    event.from_instance, space_id, decision.next_payload
                 )
             ):
                 # A household seated from an invite link negotiates no
@@ -6305,17 +6305,23 @@ class FederationService:
         )
 
     async def _session_peer_hears_refusal(
-        self, instance_id: str, payload: dict | None
+        self, instance_id: str, space_id: str, payload: dict | None
     ) -> bool:
         """An invite-link household takes a BEGIN's capacity refusal
         (:data:`_BEGIN_REFUSALS`) from v_96 on — the requester turns it into
         :class:`SpaceSyncDeferred` and asks again shortly instead of waiting
-        for its next periodic sync."""
-        return (payload or {}).get("reason") in _BEGIN_REFUSALS and (
-            await self.peer_supports(
+        for its next periodic sync. At most one answer per (household,
+        space) per ``SESSION_REFUSAL_ANSWER_GAP_S``: anyone holding an
+        invite link must not turn a spent BEGIN budget into a relayed answer
+        per BEGIN."""
+        return (
+            (payload or {}).get("reason") in _BEGIN_REFUSALS
+            and await self.peer_supports(
                 instance_id,
-                min_version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
+                min_version=FederationCapability.MIN_FOR_SESSION_SYNC_REFUSAL,
             )
+            and self._sync_manager is not None
+            and self._sync_manager.may_answer_session_refusal(instance_id, space_id)
         )
 
     async def _handle_space_sync_direct_failed(self, event) -> None:
@@ -6344,6 +6350,18 @@ class FederationService:
         # anything (v_96); nothing else may close a session or start a relay.
         session_peer = await self.is_space_session_peer(event.from_instance)
         session = self._sync_manager.get_session(sync_id)
+        if session is not None and event.from_instance not in (
+            session.requester_instance_id,
+            session.provider_instance_id,
+        ):
+            # Only a party to the session may end it or turn it into a relay
+            # sync — however the event reached us (a host hop included).
+            log.info(
+                "space sync %s: DIRECT_FAILED from %s, no party to it — ignored",
+                sync_id,
+                event.from_instance,
+            )
+            return
         if session_peer and (
             session is not None or event.payload.get("reason") not in _BEGIN_REFUSALS
         ):

@@ -1613,8 +1613,12 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
 - A provider that refuses a BEGIN from a household seated from an invite
   link for capacity (`too_many_sessions` / `node_capacity` /
   `rate_limited`) answers it with that `SPACE_SYNC_DIRECT_FAILED` once the
-  household is at v_96: the requester turns it into `SpaceSyncDeferred` and
-  asks again shortly, exactly as a paired member does. Before v_96 the
+  household is at v_96 (`MIN_FOR_SESSION_SYNC_REFUSAL`), at most once per
+  space per 10 min (`SESSION_REFUSAL_ANSWER_GAP_S`; later refusals in the
+  window are silence, so an invite link buys no relayed answer per BEGIN):
+  the requester turns it into `SpaceSyncDeferred` and asks again shortly,
+  exactly as a paired member does. Any `_DIRECT_FAILED`, from any
+  household, ends or relays a session only when its sender is a party to it. Before v_96 the
   refusal was silence and the household waited for its next periodic sync
   (30 min) — e.g. a role change's catch-up colliding with the reconnect
   syncs of many spaces was lost. `SPACE_SYNC_DIRECT_FAILED` is the one

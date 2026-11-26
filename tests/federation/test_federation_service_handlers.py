@@ -1471,6 +1471,7 @@ async def test_handle_direct_failed_requester_routes_begin_via_mesh(svc, caplog)
     send_routed = _attach_mesh(svc, target="mesh-provider")
     session = SimpleNamespace(
         sync_id="s1",
+        requester_instance_id="self-iid",
         provider_instance_id="mesh-provider",
     )
     svc._sync_manager = MagicMock()
@@ -1502,6 +1503,7 @@ async def test_handle_direct_failed_requester_confirmed_uses_plain_send_event(sv
     send_routed = _attach_mesh(svc, target="paired-provider")
     session = SimpleNamespace(
         sync_id="s1",
+        requester_instance_id="self-iid",
         provider_instance_id="paired-provider",
     )
     svc._sync_manager = MagicMock()
@@ -1756,6 +1758,7 @@ async def test_handle_direct_failed_as_provider_skips_retry(svc):
     this side is the wrong direction."""
     session = SimpleNamespace(
         sync_id="s1",
+        requester_instance_id="peer-1",  # the requester sent it
         provider_instance_id="self-iid",  # local IS the provider
     )
     svc._sync_manager = MagicMock()
@@ -2594,7 +2597,9 @@ async def test_an_invite_link_peer_cannot_drive_a_relay_retry(svc, reason):
     _session_peer(svc)
     svc._sync_manager = MagicMock()
     svc._sync_manager.get_session = MagicMock(
-        return_value=SimpleNamespace(provider_instance_id="self-iid")
+        return_value=SimpleNamespace(
+            requester_instance_id="host", provider_instance_id="self-iid"
+        )
     )
     svc._own_instance_id = "self-iid"
     svc._sync_manager.close_session = MagicMock()
@@ -2608,3 +2613,87 @@ async def test_an_invite_link_peer_cannot_drive_a_relay_retry(svc, reason):
     svc._sync_manager.trigger_relay_sync.assert_not_awaited()
     svc._sync_manager.close_session.assert_not_called()
     svc._bus.publish.assert_not_awaited()
+
+
+async def test_direct_failed_from_no_party_to_the_session_is_ignored(svc):
+    """P9 review F2: a DIRECT_FAILED may reach us through a host hop from a
+    household that is neither side of the session; it neither closes the
+    session nor turns it into a relay sync."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(
+            sync_id="s1",
+            requester_instance_id="peer-1",
+            provider_instance_id="self-iid",
+        )
+    )
+    svc._own_instance_id = "self-iid"
+    svc._sync_manager.close_session = MagicMock()
+    svc._sync_manager.trigger_relay_sync = AsyncMock()
+    await svc._handle_space_sync_direct_failed(
+        _event("SPACE_SYNC_DIRECT_FAILED", {"sync_id": "s1"}, from_instance="stranger")
+    )
+    svc._sync_manager.close_session.assert_not_called()
+    svc._sync_manager.trigger_relay_sync.assert_not_awaited()
+
+
+@pytest.mark.parametrize("pending_from", [None, "someone-else"])
+async def test_an_invite_link_refusal_without_our_request_is_dropped(svc, pending_from):
+    """P9 review F4: a session peer's capacity refusal naming no BEGIN we
+    sent to it (none pending, or one to another provider) defers nothing
+    and starts no relay."""
+    _session_peer(svc)
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=None)
+    svc._sync_manager.pending_sync_request = MagicMock(
+        return_value=None
+        if pending_from is None
+        else PendingSyncRequest(
+            sync_id="s1", space_id="sp", provider_instance_id=pending_from, created_at=0
+        )
+    )
+    svc._sync_manager.trigger_relay_sync = AsyncMock()
+    await svc._handle_space_sync_direct_failed(
+        _event(
+            "SPACE_SYNC_DIRECT_FAILED",
+            {"sync_id": "s1", "reason": "rate_limited"},
+            from_instance="host",
+        )
+    )
+    svc._bus.publish.assert_not_awaited()
+    svc._sync_manager.trigger_relay_sync.assert_not_awaited()
+
+
+async def test_an_invite_link_household_hears_one_refusal_per_space_window(
+    svc, monkeypatch
+):
+    """P9 review F1: a spent BEGIN budget is answered once per space per
+    window to an invite-link household, then silence — not one relayed
+    answer per BEGIN."""
+    svc._sync_manager = SyncSessionManager(federation_repo=MagicMock())
+    monkeypatch.setattr(
+        SyncSessionManager,
+        "begin_session",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                accepted=False,
+                next_event=FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+                next_payload={"sync_id": "s", "reason": "rate_limited"},
+            )
+        ),
+    )
+    _session_peer(svc)
+    monkeypatch.setattr(
+        FederationService, "peer_supports", AsyncMock(return_value=True)
+    )
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ) as send:
+        for _ in range(4):
+            await svc._handle_space_sync_begin(_begin())
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN", {"sync_id": "t", "space_id": "sp2"}, space_id="sp2"
+            )
+        )
+    assert send.await_count == 2  # one per space
