@@ -498,8 +498,8 @@ async def test_member_banned_persists_and_publishes(bus, repo, handlers):
     repo.spaces["sp-1"] = _host_space(owner_instance_id="peer-a")
     captured: list[RemoteSpaceMemberBanned] = []
     bus.subscribe(RemoteSpaceMemberBanned, captured.append)
-    await handlers._on_banned(_ban(user_id="u-1", banned_by="admin-a", reason="spam"))
-    assert repo.bans == [("sp-1", "u-1", "admin-a", "spam")]
+    await handlers._on_banned(_ban(user_id="u-1", banned_by="admin-a"))
+    assert repo.bans == [("sp-1", "u-1", "admin-a", None)]
     assert captured[0].user_id == "u-1"
 
 
@@ -521,8 +521,8 @@ async def test_member_unbanned_removes_ban(repo, handlers):
 async def test_household_ban_and_unban_land(repo, handlers):
     """P7b — a household ban names an instance, never a person."""
     repo.spaces["sp-1"] = _host_space(owner_instance_id="peer-a")
-    await handlers._on_banned(_ban(instance_id="peer-bad", reason="spam"))
-    assert repo.household_bans == [("sp-1", "peer-bad", "spam")]
+    await handlers._on_banned(_ban(instance_id="peer-bad"))
+    assert repo.household_bans == [("sp-1", "peer-bad", None)]
     assert repo.bans == []
     await handlers._on_unbanned(_ban(banned=False, instance_id="peer-bad"))
     assert repo.household_unbans == [("sp-1", "peer-bad")]
@@ -798,7 +798,7 @@ async def test_member_banned_missing_user_id_is_noop(repo, handlers):
     captured: list[RemoteSpaceMemberBanned] = []
     bus = handlers._bus
     bus.subscribe(RemoteSpaceMemberBanned, captured.append)
-    await handlers._on_banned(_ban(reason="x"))
+    await handlers._on_banned(_ban(banned_by="x"))
     assert repo.bans == []
     assert captured == []
 

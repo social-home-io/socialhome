@@ -44,12 +44,17 @@ class _Spaces:
     def __init__(self, spaces: dict[str, _Space], banned=()) -> None:
         self._spaces = spaces
         self.banned = set(banned)
+        #: P7b household bans: (space_id, instance_id).
+        self.household_banned: set[tuple[str, str]] = set()
 
     async def get(self, space_id: str):
         return self._spaces.get(space_id)
 
     async def is_banned(self, space_id: str, user_id: str) -> bool:
         return (space_id, user_id) in self.banned
+
+    async def is_household_banned(self, space_id: str, instance_id: str) -> bool:
+        return (space_id, instance_id) in self.household_banned
 
 
 class _Seats:
@@ -1282,6 +1287,23 @@ async def test_a_known_follower_is_refused_while_its_switch_is_off():
     assert not await refused("u-author")
     assert not await refused("u-unknown")
     assert not await refused("")
+
+
+async def test_a_banned_households_items_are_refused_on_the_gfs_relay():
+    """P7b — an item relayed through the GFS (no §24.11 ban step for its
+    origin) from a household banned here: refused with a seat, and refused
+    by a follower-only receiver that knows no seat of it (on the cert alone
+    it would take it)."""
+    auth = _access_authorship()
+    auth._spaces.household_banned.add((SPACE, AUTHOR_HOUSE))
+    assert not await _seat_ok(auth, AUTHOR_HOUSE, "u-author")
+    for author in ("u-author", "u-unknown"):
+        assert await auth.known_follower_refused(
+            origin_instance_id=AUTHOR_HOUSE,
+            space_id=SPACE,
+            author_user_id=author,
+            subscriber_ok=True,
+        )
 
 
 # ── may_author_writer: the strict create rule of the v_55 space chat ───

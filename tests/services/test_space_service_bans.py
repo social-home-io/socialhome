@@ -224,7 +224,8 @@ async def test_a_household_ban_and_its_unban_are_signed_to_every_member(stack):
     [(t1, p1, kw1), (t2, p2, kw2)] = _ban_broadcasts(stack)
     assert t1 == FederationEventType.SPACE_MEMBER_BANNED
     assert p1["instance_id"] == PEER and "user_id" not in p1
-    assert p1["reason"] == "spam"
+    # The free-text reason stays on the household that wrote it.
+    assert "reason" not in p1
     assert t2 == FederationEventType.SPACE_MEMBER_UNBANNED
     assert p2["instance_id"] == PEER
     for t, p in ((t1, p1), (t2, p2)):

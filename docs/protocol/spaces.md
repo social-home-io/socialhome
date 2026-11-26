@@ -784,9 +784,13 @@ the space authority seed and broadcast to every member household
 
 ```json
 {"space_id": "…", "user_id": "…" | "instance_id": "…",
- "reason": "…", "banned_by": "…",
+ "banned_by": "…",
  "authority_sig": "…", "authority_sig_suite": "ed25519"}
 ```
+
+The free-text reason stays on the household that wrote it (followers of a
+public space are strangers); the catch-up `bans` rows still carry it, as
+they did before.
 
 A receiver applies it only when the sender is a seed holder in its own view
 (the owner, or — delegation on — a household with a live `admin` seat in its
@@ -820,6 +824,19 @@ seats: *k* notices + *k* LEFT entries and one ban event per member
 household + **one** rotation (*k* person bans would rotate *k* times). At
 10 000 followers that is ≈ 6 MB per ban broadcast; bans are rare admin
 actions. An unban costs one small event per member household.
+
+**Content through the GFS relay.** An item a member publishes through a
+GFS channel meets no §24.11 ban step for its origin household, so the item
+checks themselves (`SpaceAuthorship.item_seat_admits` /
+`known_follower_refused`) refuse a banned person or anyone of a banned
+household — a follower-only receiver too, which takes an author it has no
+seat for on the writer cert alone.
+
+**Limit.** A household ban binds the household's identity key (its
+`instance_id` derives from it). A household that mints a new key is a new
+household with new people: it can come back through a link its people still
+hold, a directory join or a follow, like any stranger. Revoke links you
+shared with it; a household ban stops a household that keeps its identity.
 
 **Left out.** Ordering of a ban and its unban racing on the wire (no
 version: the replay cache and the seed-holder sender rule bound it); a

@@ -666,7 +666,6 @@ def signed_ban_event(
     seed: bytes,
     user_id: str | None = None,
     instance_id: str | None = None,
-    reason: str | None = None,
     banned_by: str | None = None,
 ) -> tuple[FederationEventType, dict]:
     """One ban / unban event (P7b), authority-signed with *seed*: a person
@@ -684,7 +683,8 @@ def signed_ban_event(
     if instance_id is not None:
         payload["instance_id"] = instance_id
     if banned:
-        payload["reason"] = reason
+        # The free-text reason stays with the household that wrote it (P7b
+        # review): followers in a public space are strangers.
         payload["banned_by"] = banned_by
     payload.update(
         sign_authority_event(
@@ -6452,7 +6452,7 @@ class SpaceService(
             reason=reason,
         )
         await self._emit_ban(
-            space, banned=True, user_id=user_id, reason=reason, banned_by=actor.user_id
+            space, banned=True, user_id=user_id, banned_by=actor.user_id
         )
         if remote_seat is not None:
             # The banned user is seated on ANOTHER household. ``ban_member``
@@ -6591,6 +6591,11 @@ class SpaceService(
                 {"instance_id": instance_id, "reason": reason},
             ):
                 return
+        # The row first: from here every seating path refuses the household,
+        # so the seats listed next are all it will ever hold (no join or
+        # follow slips in between). The direct notices are not ban-filtered,
+        # so each seat is still told.
+        await self._spaces.ban_household(space_id, instance_id, reason=reason)
         ending: list[SpaceRemoteMember] = (
             await self._remote_members.list_for_instance(
                 space_id, instance_id, include_tombstoned=False
@@ -6598,10 +6603,6 @@ class SpaceService(
             if self._remote_members is not None
             else []
         )
-        # The row first: from here every seating path refuses the household
-        # (no join or follow slips in while the notices are in flight). The
-        # direct notices are not ban-filtered, so each seat is still told.
-        await self._spaces.ban_household(space_id, instance_id, reason=reason)
         if ending and self._federation is not None:
             for seat in ending:
                 await self._tell_removed_household(space_id, instance_id, seat.user_id)
@@ -6610,7 +6611,6 @@ class SpaceService(
             space,
             banned=True,
             instance_id=instance_id,
-            reason=reason,
             banned_by=actor.user_id if actor is not None else None,
         )
         await self._bus.publish(
@@ -6708,7 +6708,6 @@ class SpaceService(
         banned: bool,
         user_id: str | None = None,
         instance_id: str | None = None,
-        reason: str | None = None,
         banned_by: str | None = None,
     ) -> None:
         """Tell every member household of a ban / unban (P7b), signed with
@@ -6733,7 +6732,6 @@ class SpaceService(
             seed=seed,
             user_id=user_id,
             instance_id=instance_id,
-            reason=reason,
             banned_by=banned_by,
         )
         try:
