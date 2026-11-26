@@ -89,3 +89,16 @@ def test_the_space_whose_wait_ends_first_gives_way_when_every_slot_is_taken():
     # Expecting a space already waiting takes no second slot.
     pending.expect("mid")
     assert pending.waiting("new")
+
+
+def test_the_live_audience_is_pinned_by_the_first_fanout_until_the_wait_ends():
+    pending = PendingRosterFanout()
+    assert pending.expect("sp") is True
+    assert pending.expect("sp") is False  # already waiting
+    first = pending.audience("sp", frozenset({"host", "x"}))
+    assert first == {"host", "x"}
+    # Gained since: left to the resend. Gone since: dropped.
+    assert pending.audience("sp", frozenset({"host", "new"})) == {"host"}
+    pending.end("sp")
+    pending.expect("sp")
+    assert pending.audience("sp", frozenset({"host", "new"})) == {"host", "new"}

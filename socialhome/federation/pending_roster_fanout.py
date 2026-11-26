@@ -16,7 +16,11 @@ every fan-out to that space is remembered with the member households it was
 planned for; then each goes once more — through the same
 ``broadcast_to_space_members`` gates — to exactly the member households the
 roster added. Nobody gets an item twice, and the total sent is what a
-complete roster would have sent at the time.
+complete roster would have sent at the time. While the space waits, a
+fan-out goes live only to the households the first kept one reached
+(:meth:`PendingRosterFanout.audience`): one the roster gains meanwhile gets
+every kept fan-out from the resend, in order, so a delete never reaches it
+before its post — and no write waits for the resend.
 
 All or nothing: when a bound refuses one fan-out, the space's whole wait is
 dropped — replaying a post without the later delete that was not kept would
@@ -83,7 +87,7 @@ class PendingFanout:
 class PendingRosterFanout:
     """Fan-outs to spaces whose roster this household still waits for."""
 
-    __slots__ = ("_clock", "_hold", "_max_spaces", "_ttl", "_waiting")
+    __slots__ = ("_audience", "_clock", "_hold", "_max_spaces", "_ttl", "_waiting")
 
     def __init__(
         self,
@@ -99,6 +103,9 @@ class PendingRosterFanout:
         self._clock = clock
         #: ``space_id`` → when the wait ends (``clock`` time).
         self._waiting: dict[str, float] = {}
+        #: ``space_id`` → the member households the first kept fan-out
+        #: reached (:meth:`audience`).
+        self._audience: dict[str, frozenset[str]] = {}
         self._hold: BoundedHold[PendingFanout] = BoundedHold(
             ttl_seconds=ttl_seconds,
             max_entries=max_spaces * max_per_space,
@@ -113,14 +120,26 @@ class PendingRosterFanout:
         for space_id in [s for s, end in self._waiting.items() if end <= now]:
             self.end(space_id)
 
-    def expect(self, space_id: str) -> None:
+    def expect(self, space_id: str) -> bool:
         """This household is joining ``space_id``: remember its fan-outs
         until :meth:`end`. With every slot taken, the space whose wait ends
-        first gives way."""
+        first gives way. ``True`` when this started the wait (it was not
+        already waiting)."""
         self._purge()
-        if space_id not in self._waiting and len(self._waiting) >= self._max_spaces:
+        started = space_id not in self._waiting
+        if started and len(self._waiting) >= self._max_spaces:
             self.end(min(self._waiting, key=self._waiting.__getitem__))
         self._waiting[space_id] = self._clock() + self._ttl
+        return started
+
+    def audience(self, space_id: str, members: frozenset[str]) -> frozenset[str]:
+        """Who a fan-out to waiting ``space_id`` goes to live, of the
+        current ``members``: those the first kept fan-out reached (pinned
+        by the first call) and still listed. A household the roster gains
+        meanwhile gets every kept fan-out from the resend, in order —
+        never a later one live before an earlier one resent."""
+        pinned = self._audience.setdefault(space_id, members)
+        return pinned & members
 
     def waiting(self, space_id: str) -> bool:
         """Whether a fan-out to ``space_id`` is to be remembered."""
@@ -155,6 +174,7 @@ class PendingRosterFanout:
     def end(self, space_id: str) -> None:
         """Stop waiting for ``space_id`` and forget what was kept for it."""
         self._waiting.pop(space_id, None)
+        self._audience.pop(space_id, None)
         self._hold.release(self._key(space_id))
 
     @staticmethod

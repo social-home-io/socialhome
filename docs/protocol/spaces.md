@@ -626,10 +626,15 @@ member household, not only on the host:
   (in memory: 16 spaces, 64 calls and 8 MiB at most); then, in a
   background task, each call goes once more, through the same gates, to
   exactly the member households the snapshot added
-  (`federation/pending_roster_fanout.py`). A live broadcast to the space
-  waits for that task, so a delete never overtakes its post. All or
-  nothing: when a bound refuses a call, the space's wait is dropped (a post
-  kept without its later delete would bring it back). A call narrowed with
+  (`federation/pending_roster_fanout.py`). While the space waits, each
+  call goes live only to the households the first kept call reached (a
+  household the roster gains meanwhile, by gossip or an earlier snapshot
+  part, gets every kept call from the resend, in order), and a call made
+  while the resend runs is kept and resent after the earlier ones: a
+  delete never overtakes its post, and no write waits for the resend. All
+  or nothing: when a bound refuses a call, the space's wait is dropped (a
+  post kept without its later delete would bring it back) and that call
+  goes to the whole roster. A call narrowed with
   `only_instances` (space chat, zones, live location) is not kept — its
   audience came from the same stale roster — and, like pictures and files
   (the receiver asks with `SPACE_MEDIA_WANTED`), reaches the added
@@ -638,7 +643,10 @@ member household, not only on the host:
   join), and before this a newcomer's first post reached the other members
   only at their next §25.6 catch-up — up to the 30-minute tick. Only an
   invitation from the owner starts the wait (a delegated admin sends no
-  snapshot); a resend that fails is skipped, the next one still goes.
+  snapshot, so a household it invites still waits for its catch-up); a
+  resend that fails is skipped, the next one still goes. A household seated
+  over the GFS relay that the snapshot adds gets a resent post's pictures
+  by asking (`SPACE_MEDIA_WANTED`), not pushed with it.
 - **Repair on a digest mismatch, in reply to an admitted BEGIN.** The host
   never sends a roster snapshot on its own timer. Every `SPACE_SYNC_BEGIN` a
   member household (this version) sends to the space's host — direct, the

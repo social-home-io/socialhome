@@ -4068,14 +4068,15 @@ class FederationService:
             results=tuple(results),
         )
 
-    def expect_space_roster(self, space_id: str) -> None:
+    def expect_space_roster(self, space_id: str) -> bool:
         """This household is accepting an invitation to ``space_id``: its
         roster is the invitation's, which lacks every household seated
         since. Until the host's roster snapshot lands
         (:meth:`space_roster_landed`), each fan-out to the space is
         remembered so it can reach the households that snapshot adds
-        (:mod:`~socialhome.federation.pending_roster_fanout`)."""
-        self._pending_roster_fanout.expect(space_id)
+        (:mod:`~socialhome.federation.pending_roster_fanout`). ``True``
+        when this started the wait (the space was not already waiting)."""
+        return self._pending_roster_fanout.expect(space_id)
 
     def cancel_space_roster_wait(self, space_id: str) -> None:
         """The join of ``space_id`` did not happen (the accept failed):
@@ -4108,10 +4109,10 @@ class FederationService:
         applies again), each fan-out kept while ``space_id`` waited for its
         roster, to the member households now listed that it was not
         planned for — and to no one else. The wait lasts until nothing is
-        left, so a fan-out made meanwhile is kept too (and, the roster being
-        whole now, reaches everyone already); a live broadcast to the space
-        waits for this task, so nothing overtakes an item resent here.
-        Never raises."""
+        left, so a fan-out made meanwhile is kept too and sent here to the
+        households its live send left out, after every earlier one: nothing
+        a live broadcast sends overtakes an item resent here, and no live
+        broadcast waits for this task. Never raises."""
         pending = self._pending_roster_fanout
         try:
             while fanouts := pending.take(space_id):
@@ -4161,10 +4162,11 @@ class FederationService:
         finally:
             pending.end(space_id)
 
-    def _keep_for_roster(self, space_id: str, fanout: PendingFanout) -> None:
-        """Keep *fanout* while *space_id* waits for its roster. Never fails
-        the broadcast: a payload that cannot be sized ends the wait (all or
-        nothing), as a bound reached does."""
+    def _keep_for_roster(self, space_id: str, fanout: PendingFanout) -> bool:
+        """Keep *fanout* while *space_id* waits for its roster; ``False`` when
+        it was not (the wait is over, and the fan-out goes to the whole
+        roster). Never fails the broadcast: a payload that cannot be sized
+        ends the wait (all or nothing), as a bound reached does."""
         try:
             size = _deferred_payload_size(fanout.payload)
             if fanout.legacy_payload is not None:
@@ -4178,13 +4180,15 @@ class FederationService:
                 exc_info=True,
             )
             self._pending_roster_fanout.end(space_id)
-            return
+            return False
         if not self._pending_roster_fanout.record(space_id, fanout, size=size):
             log.info(
                 "space %s: too much sent before our roster arrived — the "
                 "members it adds get it from their catch-up",
                 space_id,
             )
+            return False
+        return True
 
     async def broadcast_to_space_members(
         self,
@@ -4250,32 +4254,35 @@ class FederationService:
         events that MUST always ship and degrade noisily on older
         peers).
         """
-        replay = self._roster_replays.get(space_id)
-        if replay is not None and replay is not asyncio.current_task():
-            # Items made before our roster arrived are being resent to the
-            # households it added: never overtake them (a delete before its
-            # post).
-            await asyncio.wait({replay})
         # We just joined and our roster may lack households seated since our
         # invitation: keep this fan-out for them (:meth:`space_roster_landed`).
         # A narrowed one is not kept — see ``pending_roster_fanout``.
-        keep = only_instances is None and self._pending_roster_fanout.waiting(space_id)
+        pending = self._pending_roster_fanout
+        keep = only_instances is None and pending.waiting(space_id)
         instance_ids = await self._federation_repo.list_member_instance_ids(
             space_id,
         )
-        if keep and self._pending_roster_fanout.waiting(space_id):
-            self._keep_for_roster(
+        if keep and pending.waiting(space_id):
+            # Live only to the households the first kept fan-out reached: one
+            # the roster gains meanwhile gets every kept fan-out from the
+            # resend, in order — a delete never before its post. Never
+            # blocks: a fan-out made while the resend runs is kept and sent
+            # by it too.
+            audience = pending.audience(space_id, frozenset(instance_ids))
+            pinned = [iid for iid in instance_ids if iid in audience]
+            if self._keep_for_roster(
                 space_id,
                 PendingFanout(
                     event_type=event_type,
                     payload=payload,
-                    reached=frozenset(instance_ids),
+                    reached=audience,
                     min_proto_version=min_proto_version,
                     legacy_payload=legacy_payload,
                     legacy_below=legacy_below,
                     per_peer=per_peer,
                 ),
-            )
+            ):
+                instance_ids = pinned
         elif keep:
             # The wait ended while we read the roster (the snapshot landed
             # and was resent): what we read may be the stale one — read the

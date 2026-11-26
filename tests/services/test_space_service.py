@@ -6665,7 +6665,7 @@ async def test_accept_remote_invite_waits_for_the_hosts_roster_before_the_accept
     fed = MagicMock()
     fed._own_instance_id = stack.iid
     fed.expect_space_roster = MagicMock(
-        side_effect=lambda sid: order.append(f"expect:{sid}")
+        side_effect=lambda sid: order.append(f"expect:{sid}") or True
     )
 
     async def _send(**kw):
@@ -6702,6 +6702,23 @@ async def test_accept_remote_invite_waits_for_the_hosts_roster_before_the_accept
             token="tok-roster-wait-2", user_id=user.user_id
         )
     fed.cancel_space_roster_wait.assert_called_once_with(space_id)
+
+    # A failed accept never ends a wait it did not start (another local
+    # member's accept of the same space is still waiting on the roster).
+    fed.cancel_space_roster_wait.reset_mock()
+    fed.expect_space_roster.side_effect = lambda sid: False
+    await stack.space_repo.save_remote_invitation(
+        space_id,
+        invited_by="remote-owner",
+        remote_instance_id=host_instance,
+        remote_user_id=user.user_id,
+        invite_token="tok-roster-wait-3",
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.accept_remote_invite(
+            token="tok-roster-wait-3", user_id=user.user_id
+        )
+    fed.cancel_space_roster_wait.assert_not_called()
 
     # A delegated admin's invitation: only the owner sends the snapshot, so
     # there is nothing to wait for.

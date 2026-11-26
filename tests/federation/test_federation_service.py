@@ -7333,10 +7333,11 @@ async def test_a_live_broadcast_never_overtakes_an_item_being_resent():
         fed_repo.add_space_member("sp-join", "inst-a")
         svc.space_roster_landed("sp-join")
         await asyncio.sleep(0)
-        delete = asyncio.create_task(_post(svc, "p1-deleted"))
-        await asyncio.sleep(0)
+        # The delete does not wait for the resend (it goes live to the
+        # households the post reached, and the resend takes it on after the
+        # post).
+        await asyncio.wait_for(_post(svc, "p1-deleted"), timeout=1.0)
         gate.set()
-        await delete
         await svc.drain_roster_replays()
     to_a = [p["id"] for t, _, p in sent if t == "inst-a"]
     assert to_a == ["p1", "p1-deleted"]
@@ -7402,3 +7403,34 @@ async def test_a_roster_landing_while_the_roster_is_read_is_not_missed():
     with patch.object(FederationService, "send_with_mesh_fallback", _send):
         await _post(svc, "p1")
     assert sorted(t for t, _, _ in sent) == ["inst-a", "inst-b"]
+
+
+@pytest.mark.asyncio
+async def test_a_household_the_roster_gains_before_it_landed_gets_items_in_order():
+    """The roster may grow before the snapshot is fully applied (live
+    gossip, an earlier snapshot part): a delete made then must not reach
+    the new household live before its post is resent there."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc.expect_space_roster("sp-join")
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1")
+        fed_repo.add_space_member("sp-join", "inst-a")
+        await _post(svc, "p1-deleted")
+        assert [p["id"] for t, _, p in sent if t == "inst-a"] == []
+        await _land(svc)
+    assert [p["id"] for t, _, p in sent if t == "inst-a"] == ["p1", "p1-deleted"]
+    assert [p["id"] for t, _, p in sent if t == "inst-b"] == ["p1", "p1-deleted"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_fanout_goes_to_the_whole_roster():
+    """When a bound ends the wait, the fan-out that hit it is not held back
+    to the pinned households: it reaches the whole current roster."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc._pending_roster_fanout = PendingRosterFanout(max_per_space=1)
+    svc.expect_space_roster("sp-join")
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1")
+        fed_repo.add_space_member("sp-join", "inst-a")
+        await _post(svc, "p2")
+    assert sorted(t for t, _, p in sent if p == {"id": "p2"}) == ["inst-a", "inst-b"]

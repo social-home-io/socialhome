@@ -7650,6 +7650,7 @@ class SpaceService(
         ):
             accept_payload.update(mesh_member_claim(self._federation.own_identity_pk))
         fresh_seat = opened is not None and await self._spaces.get(space_id) is None
+        roster_wait_started = False
         try:
             if opened is not None and join is not None:
                 await seat_join_stub(
@@ -7674,7 +7675,7 @@ class SpaceService(
             # delegated admin's invitation gets no snapshot: no wait.)
             seated = await self._spaces.get(space_id)
             if seated is not None and seated.owner_instance_id == host_instance:
-                self._federation.expect_space_roster(space_id)
+                roster_wait_started = self._federation.expect_space_roster(space_id)
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=host_instance,
                 event_type=FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
@@ -7705,8 +7706,10 @@ class SpaceService(
                     result.error,
                 )
         except Exception:
-            # No seat, so no roster is coming: nothing to keep for one.
-            self._federation.cancel_space_roster_wait(space_id)
+            # No seat, so no roster is coming: nothing to keep for one. (A
+            # wait another local member's accept started stays.)
+            if roster_wait_started:
+                self._federation.cancel_space_roster_wait(space_id)
             if fresh_seat:
                 log.warning(
                     "space %s: accept failed — rolling back the stub seated "
