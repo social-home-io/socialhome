@@ -43,7 +43,7 @@ import logging
 import secrets
 import uuid
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -1151,17 +1151,23 @@ class SpaceInviteTokenRedeemCoordinator:
                     and self._writer_certs is not None
                 ):
                     await self._writer_certs.accept(space_id, meta.get("writer_cert"))
-                was_member = (
-                    await self._spaces.get_member(space_id, viewer_user_id) is not None
-                )
-                member = SpaceMember(
-                    space_id=space_id,
-                    user_id=viewer_user_id,
-                    role=role_str,
-                    joined_at=datetime.now(UTC).isoformat(),
+                held = await self._spaces.get_member(space_id, viewer_user_id)
+                member = (
+                    # A step up over our follower seat keeps its per-space
+                    # name, picture, location opt-in and history window.
+                    replace(held, role=role_str)
+                    if held is not None
+                    else SpaceMember(
+                        space_id=space_id,
+                        user_id=viewer_user_id,
+                        role=role_str,
+                        joined_at=datetime.now(UTC).isoformat(),
+                    )
                 )
                 await self._spaces.save_member(member)
-                if not was_member:
+                if held is None or held.role != role_str:
+                    # A new seat, or a follower stepping up: what a new
+                    # member needs at once hangs off the joined event.
                     joined = member
                 # v_51 — our private-space channel grant for that epoch, taken
                 # only now that our person is seated: taking it subscribes at

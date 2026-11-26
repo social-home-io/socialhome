@@ -4049,3 +4049,43 @@ async def test_a_follower_replaying_a_dead_member_token_stays_a_follower(token_o
     )
     assert ack is None and reason is not None and reservation is None
     assert env.issuer_members.live[key]["role"] == SpaceRole.SUBSCRIBER.value
+
+
+async def test_a_step_up_ack_keeps_our_seats_own_fields_and_announces_it():
+    """Final review M1: the ACK of a follower's step up re-seats our own
+    person as a member over the follower seat — keeping its per-space name
+    and opt-ins — and publishes SpaceMemberJoined (a new writer seat)."""
+    coord = _make_coordinator()
+    spaces = coord._spaces
+    spaces.members.append(
+        SpaceMember(
+            space_id="sp-1",
+            user_id=U_LOCAL,
+            role=SpaceRole.SUBSCRIBER.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+            space_display_name="Fanny",
+            location_share_enabled=True,
+        )
+    )
+    await coord._seat_local_after_ack(
+        {
+            "space_id": "sp-1",
+            "role": SpaceRole.MEMBER.value,
+            "space_meta": {
+                "name": "Shared",
+                "owner_instance_id": "issuer-1",
+                "owner_username": "owner",
+                "identity_public_key": "aa" * 32,
+                "roster": [],
+            },
+        },
+        viewer_user_id=U_LOCAL,
+        issuer_instance_id="issuer-1",
+    )
+    saved = spaces.members[-1]
+    assert saved.role == SpaceRole.MEMBER.value
+    assert saved.space_display_name == "Fanny"
+    assert saved.location_share_enabled is True
+    assert saved.joined_at == "2026-01-01T00:00:00+00:00"
+    published = [c.args[0] for c in coord._bus.publish.await_args_list]
+    assert any(type(e).__name__ == "SpaceMemberJoined" for e in published)

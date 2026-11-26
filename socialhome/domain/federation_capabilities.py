@@ -2400,10 +2400,11 @@ class FederationCapability:
     MIN_FOR_SYNC_PAGES = 95
     #: v_96 — a household at or above it can follow a space (an
     #: auto-approved join with role ``subscriber``), is sent a signed
-    #: ``reader`` writer cert / subscriber grant, and sees subscriber seats
-    #: only as the acting host or an admin household (members get a
-    #: ``follower_count``). Below it: the peer cannot follow and gets no
-    #: reader cert; a behind member keeps the federation content path.
+    #: ``reader`` writer cert / subscriber grant, and holds follower seats
+    #: like any seat (every household of the space sees who follows — the
+    #: sign-off "members know who follows"). Below it: the peer cannot
+    #: follow and gets no reader cert; a behind member keeps the federation
+    #: content path.
     MIN_FOR_SUBSCRIBER_SEATS = 96
     #: v_96 — moment reach: a reach-2 moment (its delete, its totals) and a
     #: relayed copy carrying a signed ``reach`` go only to a household at or

@@ -377,7 +377,10 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/services/space_media_sync_service.py": 2,
     },
     "is_space_session_peer": {
-        "socialhome/federation/federation_service.py": 3,
+        # +1 (P9): _handle_space_sync_direct_failed takes from an invite-link
+        # household only a capacity refusal of a BEGIN we sent — a
+        # transport rule (no direct connection), not a member special case.
+        "socialhome/federation/federation_service.py": 4,
         "socialhome/federation/sync/space/provider.py": 1,
         "socialhome/federation/sync/space/scheduler.py": 1,
     },

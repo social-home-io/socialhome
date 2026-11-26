@@ -446,7 +446,8 @@ them, so the host is no longer a single point of failure and a link-joined
 member reaches every subscriber live. **There is one mode, and it is
 anonymous** (owner decision 2026-11-09, v_90): the trusted / strict
 `gfs_publish_mode` and the identified `POST /gfs/member-publish` are gone.
-The request (`POST /gfs/member-publish-anon`) carries no household id, no
+The request (since v_96 the channel's `POST /gfs/channels/publish-anon`;
+before it `POST /gfs/member-publish-anon`) carries no household id, no
 household signature and no plaintext writer cert — it is authorized by the
 epoch's writer group key, which every household allowed to publish anything
 in the space shares (posters and commenters alike) and nobody else holds.
@@ -466,8 +467,8 @@ publish: **the GFS must not learn which household published.**
   exact key set, so nothing can ride alongside the ciphertext in plaintext;
   the writer cert (which names the household and its scope) never leaves
   the ciphertext (pinned by
-  `tests/protocol/test_gfs_member_publish_blind.py` and
-  `tests/protocol/test_gfs_member_publish_strict_blind.py`).
+  `tests/protocol/test_gfs_global_channel_blind.py` and
+  `tests/protocol/test_gfs_private_channel_blind.py`).
 - **It learns the space's subscriber set**, in which writers look exactly
   like followers: a household with a writer seat auto-subscribes to the
   fan-out of each of its public/global spaces on every capable server, with
@@ -570,7 +571,7 @@ connected to. **What that concedes, exactly:**
   publish there is not refused.
 
 Pinned by `tests/protocol/test_gfs_multi_listing_blind.py` and
-`tests/protocol/test_gfs_member_publish_strict_blind.py`.
+`tests/protocol/test_gfs_global_channel_blind.py`.
 
 ### Sign-off: a private space's opaque channel shows the server its link-joined households (v_51)
 

@@ -17,7 +17,7 @@
 --   (2) Alternative rejected: leaving it inert — an identity-bound record of
 --       which GFS operators know this household follows which space, kept at
 --       rest (and in backups) with no reader; the owner asked to remove it.
---       Seats still held on a GFS die with that GFS's own table (GFS 0032).
+--       Seats still held on a GFS die with that GFS's own table (GFS 0033).
 --   (3) Smallest change: one DROP (its index goes with it); no column drops
 --       on ``spaces`` (``mirror_gfs_id`` / ``gfs_rotation_seq`` stay inert).
 

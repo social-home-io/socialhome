@@ -893,10 +893,14 @@ household with new people: it can come back through a link its people still
 hold, a directory join or a follow, like any stranger. Revoke links you
 shared with it; a household ban stops a household that keeps its identity.
 
-**Left out.** Ordering of a ban and its unban racing on the wire (no
-version: the replay cache and the seed-holder sender rule bound it); a
-household offline past its outbox retention during an unban keeps a stale
-row (the `bans` stream adds rows, it does not delete them).
+**Ban and unban converge on the owner's list** (owner decision A,
+2026-11-26; [sync.md](./sync.md)): after a clean `bans` stream from a v_96
+owner, a household lifts every ban the owner's list no longer names — a
+missed unban and a ban / unban that crossed on the wire both converge there.
+Residuals (stated in sync.md): an owner below v_96 lifts nothing; a household
+whose acting host is a delegated admin is repaired only by the owner's
+stream; a delegated admin's fresh ban not yet at the owner can be lifted
+until it arrives.
 
 ## Two kinds of follower (v_30)
 

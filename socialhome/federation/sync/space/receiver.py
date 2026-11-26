@@ -50,6 +50,7 @@ import orjson as _orjson
 from ....crypto import derive_instance_id
 from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent
+from ....domain.federation_capabilities import FederationCapability
 from ....domain.space import ContentAction, parse_have_seq
 from ....infrastructure.event_bus import EventBus
 from ....services.space_media_names import SpaceMediaNamer
@@ -784,6 +785,15 @@ class SpaceSyncReceiver(
         open streams are tracked (the oldest dropped: no lift, as before)."""
         space = await self._space_repo.get(space_id)
         if space is None or space.owner_instance_id != provider:
+            return
+        # Only an owner at v_96: an older owner never takes a delegated
+        # admin's ban (live ban gossip goes to v_96 households only) and
+        # streams no household bans, so its list would lift those here.
+        # Unknown version: no lift (fail closed).
+        if self._peer_version is None or (
+            await self._peer_version(provider)
+            < FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+        ):
             return
         entry = self._owner_bans_seen.get(sync_id)
         if entry is None:

@@ -1052,8 +1052,11 @@ missed (sync used to only add), and a ban / unban that crossed on the wire,
 converge at the owner's next sync. A delegated admin's stream never lifts a
 ban (it may lag the owner's latest ban). Residuals: an owner household below
 this change sends no empty list, so the last lifted ban of a space stays
-until its next ban; and a delegated admin's fresh ban that has not reached
-the owner yet can be lifted on a member household by the owner's sync, then
+until its next ban, and only an owner at v_96 lifts at all (an older owner
+never took a delegated admin's ban nor streams household bans); a household
+whose acting host is a delegated admin is repaired only when it also syncs
+with the owner; and a delegated admin's fresh ban that has not reached the
+owner yet can be lifted on a member household by the owner's sync, then
 comes back with the admin's gossip or the owner's next list.
 A follower household (no writer seat) gets `bans` without each ban's
 free-text `reason` — who is banned (its authorship checks) and by whom

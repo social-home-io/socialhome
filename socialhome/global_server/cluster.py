@@ -1883,7 +1883,7 @@ class ClusterService:
             cert=space.authority_cert,
             stored_cert=existing.authority_cert if existing else None,
         )
-        # A peer's ``subscriber_count`` is its own relay-seat bookkeeping:
+        # A peer's ``subscriber_count`` is inert since v_96 (no space-keyed relay):
         # ``upsert_space`` never overwrites ours with it. A peer's counts are
         # taken only with a stamp (an OLDER node gossips none, a node that
         # never got counts gossips ``null``) that is not in the future (a

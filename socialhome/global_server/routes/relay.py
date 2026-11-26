@@ -62,7 +62,7 @@ def public_space_dict(space) -> dict:
     """
     body = asdict(space)
     # Members and followers as the owner declared them (``None`` = no
-    # number). ``subscriber_count`` is this server's relay-seat bookkeeping,
+    # number). ``subscriber_count`` is an inert column (the v_96 removal of the space-keyed relay),
     # not a member count — an older household reads
     # ``subscriber_count or member_count``, so it must not be served; nor
     # the internal last-writer-wins stamp.

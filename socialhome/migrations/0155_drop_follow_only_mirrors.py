@@ -1,8 +1,7 @@
 """0155 — delete the GFS follow-only mirrors of global spaces.
 
-Follows 0153; 0154 is reserved by the open main PR #1430 (moment reach),
-which must merge first — ``run_migrations`` never applies a number below
-the highest one a database already ran. Re-check before the final PR.
+Follows 0154 (main's moment reach, #1430) — ``run_migrations`` never
+applies a number below the highest one a database already ran.
 
 Before v_96 a household followed a global space it was not a member of by
 mirroring the space's GFS listing into a local stub
