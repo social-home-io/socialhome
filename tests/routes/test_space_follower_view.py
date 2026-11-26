@@ -5,10 +5,11 @@ A follower reads the posts, but is an outsider to the people: elsewhere
 the space chat refuses them, the GFS listing is hidden from them and the
 roster never syncs to a follower-only household. So:
 
-* ``GET /api/spaces/{id}/members`` shows a follower the space's members
-  only — never another follower — by name, picture and role, without
-  session presence (online / idle / last seen), join time or the
-  location-share opt-in.
+* ``GET /api/spaces/{id}/members`` shows a follower the same roster as a
+  member (v_96, D3: followers are visible to everyone in the space — every
+  seat, themselves included) by name, picture and role, without session
+  presence (online / idle / last seen), join time or the location-share
+  opt-in.
 * ``GET /api/spaces/{id}/proposals``, ``/presence`` (the map pins) and
   ``/zones`` are for members only: a follower gets the same 403 as an
   outsider.
@@ -74,23 +75,29 @@ async def _roster(client, headers) -> list[dict]:
     return await r.json()
 
 
-async def test_follower_roster_lists_members_without_presence(seeded):
+async def test_follower_roster_lists_every_seat_without_presence(seeded):
+    """D3 (v_96): a follower sees the same roster as a member — every seat,
+    other followers and themselves included — but never presence."""
     client, hdr = seeded
     rows = await _roster(client, hdr["follower"])
     assert {r["user_id"] for r in rows} == {
         _OWNER[1],
         _MEMBER[1],
+        _FOLLOWER[1],
+        _OTHER_FOLLOWER[1],
         "uid-r-member",
+        "uid-r-follower",
     }
     for row in rows:
         for key in _WITHHELD:
             assert key not in row, (row["user_id"], key)
-        assert row["role"] != "subscriber"
     by_id = {r["user_id"]: r for r in rows}
     assert by_id[_OWNER[1]]["role"] == "owner"
     assert by_id[_OWNER[1]]["is_owner"] is True
     assert by_id[_MEMBER[1]]["display_name"] == "Mia"
     assert by_id["uid-r-member"]["household_name"] is None
+    for uid in (_FOLLOWER[1], _OTHER_FOLLOWER[1], "uid-r-follower"):
+        assert by_id[uid]["role"] == "subscriber"
 
 
 async def test_member_roster_is_unchanged(seeded):

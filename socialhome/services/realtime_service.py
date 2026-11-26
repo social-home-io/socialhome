@@ -154,7 +154,6 @@ from ..domain.space import (
     SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
     SpaceModerationItem,
-    SpaceRole,
 )
 from ..domain.timetable import to_wire_dict as timetable_to_wire_dict
 from ..domain.user import _picture_url
@@ -173,7 +172,6 @@ if TYPE_CHECKING:
     from ..repositories.cp_repo import AbstractCpRepo
     from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
-    from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 
 log = logging.getLogger(__name__)
 
@@ -206,7 +204,6 @@ class RealtimeService:
         "_gallery_repo",
         "_media_signer",
         "_media_transcode_repo",
-        "_remote_members",
         "_space_repo",
         "_user_repo",
         "_ws",
@@ -223,7 +220,6 @@ class RealtimeService:
         media_signer: MediaUrlSigner | None = None,
         media_transcode_repo: AbstractMediaTranscodeRepo | None = None,
         cp_repo: AbstractCpRepo | None = None,
-        remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
         gallery_repo: AbstractGalleryRepo | None = None,
     ) -> None:
         self._bus = bus
@@ -253,11 +249,6 @@ class RealtimeService:
         # to admins, the account itself and its guardians only — never the
         # whole household. Optional for test stacks without CP.
         self._cp_repo = cp_repo
-        # The roles of seats on other households — a per-space profile
-        # frame about a remote follower reaches the members only, like a
-        # local one. Without it a remote subject counts as unknown (members
-        # only: fail closed).
-        self._remote_members = remote_member_repo
         # A private album's frames (D7) reach only the people who see it —
         # even an id-only frame tells that an album exists and is busy.
         # Without it every household frame reaches everyone (test stacks).
@@ -710,8 +701,6 @@ class RealtimeService:
             # §CP.F2: a guardian-block counterpart sees this member by
             # name only (``GET /api/spaces/{id}/members`` does the same).
             withheld=await self._guardian_block_counterparts(event.user_id),
-            # A follower's own profile is the members' business only.
-            members_only=not await self._is_writer_seat(event.space_id, event.user_id),
         )
 
     async def _on_pairing_accept_received(
@@ -1057,7 +1046,6 @@ class RealtimeService:
                 "user_id": event.user_id,
                 "role": event.role,
             },
-            members_only=event.role not in WRITER_ROLES,
         )
 
     async def _on_space_member_left(self, event: SpaceMemberLeft) -> None:
@@ -1068,8 +1056,6 @@ class RealtimeService:
                 "space_id": event.space_id,
                 "user_id": event.user_id,
             },
-            # Unknown role (``None``) counts as a follower's: fail closed.
-            members_only=event.role not in WRITER_ROLES,
         )
 
     # ── Bot persona lifecycle ───────────────────────────────────────────
@@ -2087,9 +2073,9 @@ class RealtimeService:
         """Fan ``payload`` out to the space's local seats. ``members_only``
         leaves its followers out — for frames about the space's people
         (governance, whereabouts) that a follower may not read either
-        (owner decision 13), and for roster frames about a follower
-        (joined / left / profile): a follower's reduced roster lists the
-        members, never another follower."""
+        (owner decision 13). Roster frames (joined / left / profile) reach
+        every seat: the roster is the same for everyone in the space,
+        followers included (D3, v_96)."""
         if self._media_signer is not None:
             sign_media_urls_in(payload, self._media_signer, extra_fields=("url",))
         if members_only:
@@ -2103,20 +2089,6 @@ class RealtimeService:
         return await self._ws.broadcast_to_users(
             [uid for uid in ids if uid not in withheld], payload
         )
-
-    async def _is_writer_seat(self, space_id: str, user_id: str) -> bool:
-        """Does ``user_id`` hold a member's seat (not a follower's) in
-        ``space_id`` — locally, or on another household? Unknown → False,
-        so a roster frame about them reaches the members only."""
-        local = await self._space_repo.get_member(space_id, user_id)
-        if local is not None:
-            return local.role in WRITER_ROLES
-        if self._remote_members is None:
-            return False
-        for seat in await self._remote_members.list_for_space(space_id):
-            if seat.user_id == user_id:
-                return (seat.role or SpaceRole.MEMBER) in WRITER_ROLES
-        return False
 
     async def _broadcast_household_admins(self, payload: dict) -> int:
         """Household fan-out narrowed to admins — for frames about

@@ -334,7 +334,8 @@ the [space chat](./protocol/space-chat.md) answers a caller with no seat
 
 **Followers see less.** A follower reads the posts but is an outsider to
 the space's *people* (the chat refuses them too): `GET …/members` lists them
-the members only — never another follower, nor themselves — without
+the same seats as anyone in the space (members and followers, themselves
+included — v_96, followers are visible to everyone in the space) but without
 presence (`is_online`, `is_idle`, `last_seen_at`), `joined_at` or
 `location_share_enabled`; and `GET …/proposals`, `…/presence` (the map
 pins) and `…/zones` need a **member's** seat (owner, admin, moderator,
@@ -347,14 +348,12 @@ may_be_missing, unsent_posts, page?}}`, the `sync` field of
 `{seq, at, signer_role, match, missing, differing_buckets, conflict}` from
 the newest signed sync page held, absent without one, see
 [protocol/sync-pages.md](protocol/sync-pages.md#phase-2-as-built-v_95)) and
-`space_location_updated` frames skip followers likewise, and so do the
-roster frames about a follower — `space.member.joined`,
-`space.member.left` and `space.member.profile_updated` whose subject holds
-a follower's seat (here or on another household; an unknown subject counts
-as one) reach the members only — and the "X joined" bell for a new
-follower rings the members only. A frame about a member still reaches
-everyone. `GET /api/spaces/{id}` carries `my_role` so a follower's SPA
-still knows who it is.
+`space_location_updated` frames skip followers likewise. The roster frames
+— `space.member.joined`, `space.member.left` and
+`space.member.profile_updated` — reach every seat, followers included, like
+the roster itself; only the "X joined" bell for a new follower rings the
+members only. `GET /api/spaces/{id}` carries `my_role` so a follower's SPA
+knows who it is before the roster loads.
 
 **Space CRUD**
 
@@ -399,7 +398,7 @@ migration `0101`). Automatic seats publish the usual roster event but **no**
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST | `/api/spaces/{id}/members` | List / invite. GET needs a seat (any role, followers included) — `403 FORBIDDEN` otherwise; a **follower** gets the reduced roster (members only, no presence / `joined_at` / `location_share_enabled` — see *Followers see less* above). Each listed row (local and remote seats) carries `mention` — the exact @-token (without `@`) a composer inserts to mention that member, unique in the space (`handle`, or `handle@<user_id prefix>` when two members share a handle; `null` when the member has no token-safe handle) — and remote rows add `instance_id` (that household's ID; absent / `null` on a row of this household) and `household_name` (that household's name as this one knows it — paired with it or met through the space; `null` if unknown). The owner's "Let admins act for me" switch (`features.delegated_admin_authority`) reads the rows with `role: "admin"` and an `instance_id` to show, before it is turned on, which other households are handed the right to act for the space. Every row has `is_owner`; on a member household the owner's mirrored seat is reported with `role: "owner"` once the host's roster named it. Someone a guardian block (§CP.F2) separates from the caller, either way, shows by name only (`picture_hash` / `picture_url` `null`, offline). |
+| GET / POST | `/api/spaces/{id}/members` | List / invite. GET needs a seat (any role, followers included) — `403 FORBIDDEN` otherwise; a **follower** gets every seat without presence / `joined_at` / `location_share_enabled` (see *Followers see less* above). Each listed row (local and remote seats) carries `mention` — the exact @-token (without `@`) a composer inserts to mention that member, unique in the space (`handle`, or `handle@<user_id prefix>` when two members share a handle; `null` when the member has no token-safe handle) — and remote rows add `instance_id` (that household's ID; absent / `null` on a row of this household) and `household_name` (that household's name as this one knows it — paired with it or met through the space; `null` if unknown). The owner's "Let admins act for me" switch (`features.delegated_admin_authority`) reads the rows with `role: "admin"` and an `instance_id` to show, before it is turned on, which other households are handed the right to act for the space. Every row has `is_owner`; on a member household the owner's mirrored seat is reported with `role: "owner"` once the host's roster named it. Someone a guardian block (§CP.F2) separates from the caller, either way, shows by name only (`picture_hash` / `picture_url` `null`, offline). |
 | GET / PATCH / DELETE | `/api/spaces/{id}/members/me` | Self member profile. |
 | POST / DELETE | `/api/spaces/{id}/members/me/picture` | Space-specific avatar. |
 | GET / PATCH / DELETE | `/api/spaces/{id}/members/{user_id}` | Admin-only ops. `PATCH {"role":"admin"\|"moderator"\|"member"}` changes a role: the owner sets any of them, an admin moves a member only between `member` and `moderator` (403 otherwise; 422 for any other role). On a member household the change is forwarded to the space's host (v_47): **202** `{"user_id","role","forwarded":true}` — the host re-checks it and the new role arrives with its roster update (a refused one never does); 409 `HOST_TOO_OLD` (`feature: "role_change"`) when the host is below v_47; 503 `HOST_UNREACHABLE` (`reason: "unreachable"` / `"unknown_host"`) when the forward reached nobody and was not queued (also for every other forwarded admin action). |
