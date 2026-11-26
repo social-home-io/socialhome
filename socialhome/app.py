@@ -1968,6 +1968,7 @@ def _wire_federation_stack(
         bus=bus,
         space_repo=space_repo,
         seat_repo=space_remote_member_repo,
+        users=user_repo,
     )
     space_membership_handlers.attach_to(federation_service)
     app[K.space_membership_handlers_key] = space_membership_handlers

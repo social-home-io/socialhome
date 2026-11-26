@@ -40,8 +40,19 @@ class _FakeRegistry:
 
 
 class _FakeFederationService:
-    def __init__(self) -> None:
+    def __init__(self, own_instance_id: str = "self") -> None:
+        self.own_instance_id = own_instance_id
         self._event_registry = _FakeRegistry()
+
+
+class _FakeUsers:
+    """Our own people, by user id (the owner household's, on the owner)."""
+
+    def __init__(self, user_ids: set[str]) -> None:
+        self._ids = user_ids
+
+    async def get_by_user_id(self, user_id):
+        return object() if user_id in self._ids else None
 
 
 class _FakeSpaceRepo:
@@ -582,9 +593,12 @@ async def test_a_delegated_admins_signed_ban_reaches_the_owner(bus, repo):
     space = _host_space(owner_instance_id="self-owner")
     repo.spaces["sp-1"] = replace_features(space, delegated_admin_authority=True)
     h = SpaceMembershipInboundHandlers(
-        bus=bus, space_repo=repo, seat_repo=_AdminSeats({"admin-house"})
+        bus=bus,
+        space_repo=repo,
+        seat_repo=_AdminSeats({"admin-house"}),
+        users=_FakeUsers({"u-owner"}),
     )
-    h.attach_to(_FakeFederationService())
+    h.attach_to(_FakeFederationService("self-owner"))
     await h._on_banned(_ban(user_id="u-x", from_instance="admin-house"))
     await h._on_banned(_ban(instance_id="peer-bad", from_instance="admin-house"))
     assert repo.bans == [("sp-1", "u-x", "admin-house", None)]
@@ -1030,9 +1044,12 @@ async def test_an_admin_household_cannot_lift_the_owners_ban(bus, repo):
     repo.spaces["sp-1"] = replace_features(space, delegated_admin_authority=True)
     repo.banners = {("sp-1", "u-x"): "u-owner", ("sp-1", "peer-bad"): "u-admin"}
     h = SpaceMembershipInboundHandlers(
-        bus=bus, space_repo=repo, seat_repo=_AdminSeats({"admin-house"})
+        bus=bus,
+        space_repo=repo,
+        seat_repo=_AdminSeats({"admin-house"}),
+        users=_FakeUsers({"u-owner"}),
     )
-    h.attach_to(_FakeFederationService())
+    h.attach_to(_FakeFederationService("self-owner"))
     await h._on_unbanned(_ban(banned=False, user_id="u-x", from_instance="admin-house"))
     assert repo.unbans == []
     await h._on_unbanned(

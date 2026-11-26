@@ -2042,7 +2042,9 @@ class SqliteSpaceRepo:
                 VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(space_id, user_id) DO UPDATE SET
                     identity_pk=excluded.identity_pk,
-                    banned_by=excluded.banned_by,
+                    -- The first banner stays (P7b Fable review I1): a
+                    -- re-ban never turns the owner's ban into an admin's.
+                    banned_by=COALESCE(space_bans.banned_by, excluded.banned_by),
                     reason=excluded.reason
                 """,
                 (space_id, user_id, identity_pk, banned_by, reason),
@@ -2090,7 +2092,9 @@ class SqliteSpaceRepo:
             VALUES(?, ?, ?, ?)
             ON CONFLICT(space_id, instance_id) DO UPDATE SET
                 reason=excluded.reason,
-                banned_by=excluded.banned_by
+                -- The first banner stays (P7b Fable review I1); an unknown
+                -- one (NULL, before 0157) takes the first named.
+                banned_by=COALESCE(space_instance_bans.banned_by, excluded.banned_by)
             """,
             (space_id, instance_id, reason, banned_by),
         )
