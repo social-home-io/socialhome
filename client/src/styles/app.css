@@ -10967,6 +10967,7 @@ hr {
 }
 .sh-join-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sh-space-sm);
   justify-content: center;
 }
@@ -11205,8 +11206,11 @@ hr {
 .sh-member-row--banned .sh-avatar,
 .sh-member-row--banned .sh-member-name { opacity: 0.6; }
 .sh-ban-reason { color: var(--sh-text); font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
-.sh-ban-row-actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); justify-content: flex-end; }
+.sh-ban-row-actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); justify-content: flex-end; margin-inline-start: auto; }
 .sh-ban-list { display: flex; flex-direction: column; }
+/* Who and why keep a readable width; the buttons wrap below on a phone. */
+.sh-ban-list .sh-member-row { flex-wrap: wrap; }
+.sh-ban-list .sh-member-info { flex: 1 1 12rem; min-width: 0; }
 /* The ban confirm: an optional reason under the consequences. */
 .sh-ban-dialog__reason { display: flex; flex-direction: column; gap: var(--sh-space-xs); margin-top: var(--sh-space-sm); font-weight: 600; }
 .sh-ban-dialog__reason textarea { font: inherit; font-weight: 400; width: 100%; box-sizing: border-box; }
