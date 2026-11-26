@@ -1746,7 +1746,27 @@ async def test_apply_remote_admin_action_unban(stack):
     await stack.svc.add_member(
         space.id, actor_username="alicehost", user_id=victim.user_id, role="member"
     )
+    # P7b finding 5: the owner's own ban is not the remote admin's to lift.
     await stack.svc.ban(space.id, actor_username="alicehost", user_id=victim.user_id)
+    outcome = await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="unban",
+        params={"user_id": victim.user_id},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert await stack.space_repo.is_banned(space.id, victim.user_id) is True
+    # A ban the remote admin made (forwarded) it may lift again.
+    await stack.svc.unban(space.id, actor_username="alicehost", user_id=victim.user_id)
+    await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"user_id": victim.user_id},
+    )
+    assert await stack.space_repo.is_banned(space.id, victim.user_id) is True
     await stack.svc.apply_remote_admin_action(
         space.id,
         actor_instance_id="instance-A",

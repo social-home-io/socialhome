@@ -5694,14 +5694,27 @@ class SpaceService(
                 action,
             )
             return RemoteAdminOutcome.NEEDS_OWNER_APPROVAL
-        await self._run_admin_action(
-            space,
-            space.owner_username,
-            action,
-            params or {},
-            actor_instance_id=actor_instance_id,
-            actor_user_id=actor_user_id,
-        )
+        try:
+            await self._run_admin_action(
+                space,
+                space.owner_username,
+                action,
+                params or {},
+                actor_instance_id=actor_instance_id,
+                actor_user_id=actor_user_id,
+            )
+        except SpacePermissionError as exc:
+            # Refused for the forwarding admin (e.g. lifting the owner's
+            # ban, P7b) — dropped like any other refusal here.
+            log.info(
+                "apply_remote_admin_action: %r for space=%s from %s@%s refused: %s",
+                action,
+                space_id,
+                actor_user_id,
+                actor_instance_id,
+                exc,
+            )
+            return RemoteAdminOutcome.DROPPED
         return RemoteAdminOutcome.EXECUTED
 
     async def apply_approved_admin_action(
