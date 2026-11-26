@@ -2322,17 +2322,51 @@ class SpaceBanListView(BaseView):
             await repo.list_bans(space_id), space_id=space_id
         )
         fed_repo = self.svc(federation_repo_key)
-        households = []
+        seats = self.request.app.get(space_remote_member_repo_key)
+        users = self.svc(user_repo_key)
+        owner = await space_svc.owner_user_id(space)
+
+        async def household_name(instance_id: str | None) -> str | None:
+            peer = await fed_repo.get_instance(instance_id) if instance_id else None
+            return peer.display_name if peer else None
+
+        async def household_of(user_id: str) -> str | None:
+            """The banned person's household — from the seat they held here
+            (a tombstone too), else what we know of them — so the admin can
+            ban that whole household from the row (owner fork B)."""
+            seat = (
+                await seats.get_including_tombstones(space_id, "", user_id)
+                if seats is not None
+                else None
+            )
+            if seat is not None:
+                return seat.instance_id
+            remote = await users.get_remote(user_id)
+            return remote.instance_id if remote is not None else None
+
+        rows = []
+        for p in people:
+            iid = await household_of(str(p["user_id"]))
+            rows.append(
+                {
+                    **p,
+                    "kind": "person",
+                    "instance_id": iid,
+                    "household_name": await household_name(iid),
+                    # An admin gets no Unban the server would refuse.
+                    "banned_by_owner": bool(owner) and p.get("banned_by") == owner,
+                }
+            )
         for row in await repo.list_household_bans(space_id):
-            peer = await fed_repo.get_instance(str(row["instance_id"]))
-            households.append(
+            rows.append(
                 {
                     **row,
                     "kind": "household",
-                    "household_name": peer.display_name if peer else None,
+                    "household_name": await household_name(str(row["instance_id"])),
+                    "banned_by_owner": bool(owner) and row.get("banned_by") == owner,
                 }
             )
-        return web.json_response([{**p, "kind": "person"} for p in people] + households)
+        return web.json_response(rows)
 
 
 class SpaceHouseholdUnbanView(BaseView):

@@ -82,6 +82,49 @@ async def test_person_ban_rows_carry_their_kind(client):
     assert row["user_id"] == "ru-someone"
 
 
+async def test_a_person_ban_row_names_their_household_and_who_banned(client):
+    """Ban UX (P8): a person ban row carries the person's household (from
+    the seat they held, tombstones included) so the admin can ban the whole
+    household from it, and ``banned_by_owner`` so an admin isn't offered an
+    Unban the server would refuse."""
+    sid = await _space(client)
+    await _paired(client, "peer-noisy")
+    await client._db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id,"
+        " display_name, role, tombstoned) VALUES(?, 'peer-noisy', 'ru-x', 'X',"
+        " 'member', 1)",
+        (sid,),
+    )
+    for uid in ("ru-x", "ru-unknown"):
+        r = await client.post(
+            f"/api/spaces/{sid}/ban", json={"user_id": uid}, headers=_auth(client._tok)
+        )
+        assert r.status == 200, await r.text()
+    r = await client.get(f"/api/spaces/{sid}/bans", headers=_auth(client._tok))
+    rows = {b["user_id"]: b for b in await r.json()}
+    assert rows["ru-x"]["instance_id"] == "peer-noisy"
+    assert rows["ru-x"]["household_name"] == "Noisy Household"
+    assert rows["ru-unknown"]["instance_id"] is None
+    # The caller is the owner here: both are the owner's bans.
+    assert all(b["banned_by_owner"] is True for b in rows.values())
+
+
+async def test_an_unseated_household_can_be_banned(client):
+    """Owner fork B (2026-11-26): a household with no seat (it asked to join,
+    or its person already left) can be banned."""
+    sid = await _space(client)
+    await _paired(client, "peer-asking")
+    r = await client.post(
+        f"/api/spaces/{sid}/ban",
+        json={"instance_id": "peer-asking", "reason": "spam requests"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200, await r.text()
+    r = await client.get(f"/api/spaces/{sid}/bans", headers=_auth(client._tok))
+    [row] = await r.json()
+    assert row["banned_by_owner"] is True
+
+
 async def test_an_unknown_household_lists_without_a_name(client):
     sid = await _space(client)
     r = await client.post(

@@ -6201,6 +6201,38 @@ async def test_a_forwarded_ban_never_names_the_owner_households_people(stack):
     assert outcome is RemoteAdminOutcome.EXECUTED
 
 
+async def test_a_forwarded_ban_of_an_unseated_person_or_household_lands(stack):
+    """Owner fork B: a forwarded ban names someone with no seat here (a
+    household that only asked to join, a person who already left) — it
+    lands on the host; the owner household stays refused."""
+    from socialhome.domain.space import RemoteAdminOutcome
+
+    space = await _host_space_with_remote_admin(stack, delegation=True)
+    for params in ({"user_id": "u-gone"}, {"instance_id": "h-asking"}):
+        outcome = await stack.space_svc.apply_remote_admin_action(
+            space.id,
+            actor_instance_id="instance-A",
+            actor_user_id="u-admin",
+            action="ban",
+            params=params,
+        )
+        assert outcome is RemoteAdminOutcome.EXECUTED, params
+    assert await stack.space_repo.is_banned(space.id, "u-gone") is True
+    assert await stack.space_repo.is_household_banned(space.id, "h-asking") is True
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"instance_id": space.owner_instance_id},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert (
+        await stack.space_repo.is_household_banned(space.id, space.owner_instance_id)
+        is False
+    )
+
+
 async def test_the_owners_re_ban_makes_the_ban_the_owners(stack):
     """P7b Fable re-review I-B: an admin banned X first; the owner bans X
     too — the ban is now the owner's, so the admin can no longer lift it."""
