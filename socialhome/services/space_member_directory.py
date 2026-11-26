@@ -1790,6 +1790,64 @@ class SpaceMemberDirectory:
         self, space_id: str, to: str, cards: list[MemberCard], **extra: Any
     ) -> bool:
         assert self._federation is not None
+        result = await self._federation.broadcast_to_space_members(
+            space_id,
+            FederationEventType.SPACE_MAILBOX_DIRECTORY,
+            await self._payload(space_id, cards, **extra),
+            min_proto_version=FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH,
+            only_instances=frozenset({to}),
+        )
+        # Queued in the outbox counts: it redelivers on its own.
+        return result.attempted > 0 and not result.terminal_failures
+
+    async def _send_deltas(
+        self,
+        space_id: str,
+        to_all: set[str],
+        to_mbx: set[str],
+        delta: list[MemberCard],
+        for_mbx: list[MemberCard],
+        **extra: Any,
+    ) -> None:
+        """One delta to every household of *to_all* (every changed card)
+        and *to_mbx* (mailbox cards only), as ONE fan-out: the roster is
+        read and each household's reach judged once per change, not once
+        per recipient (that was O((N+F)²) per follow on the host). Each
+        copy leaves out the recipient's own card and builds on its class's
+        version (``base_seq`` in *extra* is per class: ``base_all`` /
+        ``base_mbx``). Bytes are unchanged: a directory frame is
+        single-recipient, one copy per seated household."""
+        assert self._federation is not None
+        base_all, base_mbx = extra.pop("base_all"), extra.pop("base_mbx")
+        payloads = {
+            True: await self._payload(space_id, delta, base_seq=base_all, **extra),
+            False: await self._payload(space_id, for_mbx, base_seq=base_mbx, **extra),
+        }
+
+        async def _copy(to: str, _payload: dict) -> dict:
+            src = payloads[to in to_all]
+            cards = [c for c in src["cards"] if c.get("instance_id") != to]
+            out = {**src, "cards": cards}
+            for key in ("gfs_reached", "via_seated"):
+                if key in src:
+                    if cards:
+                        out[key] = [i for i in src[key] if i != to]
+                    else:
+                        del out[key]
+            return out
+
+        await self._federation.broadcast_to_space_members(
+            space_id,
+            FederationEventType.SPACE_MAILBOX_DIRECTORY,
+            payloads[True],
+            min_proto_version=FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH,
+            only_instances=frozenset(to_all | to_mbx),
+            per_peer=_copy,
+        )
+
+    async def _payload(
+        self, space_id: str, cards: list[MemberCard], **extra: Any
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "space_id": space_id,
             "cards": [c.to_wire() for c in cards],
@@ -1817,15 +1875,7 @@ class SpaceMemberDirectory:
                         is True
                     ]
                 )
-        result = await self._federation.broadcast_to_space_members(
-            space_id,
-            FederationEventType.SPACE_MAILBOX_DIRECTORY,
-            payload,
-            min_proto_version=FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH,
-            only_instances=frozenset({to}),
-        )
-        # Queued in the outbox counts: it redelivers on its own.
-        return result.attempted > 0 and not result.terminal_failures
+        return payload
 
     async def reconcile(
         self,
@@ -1928,6 +1978,8 @@ class SpaceMemberDirectory:
         own_doc["own_rev"] = own.rev
         own_doc["own_digest"] = _content_digest(own)
         await self._put(space_id, self._instance_id, own_doc)
+        to_all: set[str] = set()
+        to_mbx: set[str] = set()
         for to in recipients:
             mine = cards.get(to)
             everything = mine is not None and mine.mailbox is not None
@@ -1938,19 +1990,23 @@ class SpaceMemberDirectory:
                 await self._send_snapshot(space_id, to, listed, version, everything)
                 continue
             relevant = list(delta.values()) if everything else for_mbx
-            out = [c for c in relevant if c.instance_id != to]
             # Sent even when it only held the recipient's own card (then
             # cardless): its ``dir_seq`` must keep up, or its next sync
             # would cost a full snapshot.
             if relevant or removed:
-                await self._send(
-                    space_id,
-                    to,
-                    out,
-                    removed=removed,
-                    dir_seq=seq,
-                    base_seq=base_all if everything else base_mbx,
-                )
+                (to_all if everything else to_mbx).add(to)
+        if to_all or to_mbx:
+            await self._send_deltas(
+                space_id,
+                to_all,
+                to_mbx,
+                list(delta.values()),
+                for_mbx,
+                removed=removed,
+                dir_seq=seq,
+                base_all=base_all,
+                base_mbx=base_mbx,
+            )
 
     async def _own_listed_card(self, space_id: str) -> MemberCard:
         """Our card as the directory of *space_id* (a space we host) lists

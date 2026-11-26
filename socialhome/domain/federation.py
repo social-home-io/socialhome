@@ -949,6 +949,8 @@ MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_SYNC_COMPLETE,
         FederationEventType.SPACE_SYNC_REQUEST_MORE,
         FederationEventType.SPACE_SYNC_REJECTED,
+        #: v_96 — the capacity refusal of one household's BEGIN.
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
         FederationEventType.SPACE_PARTITION_GAP,
         # ── Not one space's content ──
         #: Mesh routing (an inner envelope sealed to one target) and the
