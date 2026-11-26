@@ -769,7 +769,13 @@ carry it). An admin may lift an admin's ban (or one whose banner is
 unknown), never the owner's: refused on the household that runs the
 unban (`403`), on a host running a forwarded unban for the forwarding
 admin (unless the owner approved it), and by every receiver of an
-`SPACE_MEMBER_UNBANNED` that is not from the owner household.
+`SPACE_MEMBER_UNBANNED` that is not from the owner household. A re-ban
+never changes who banned (the first banner stays, on every path — local,
+forwarded, gossip, sync), so an admin can't turn the owner's ban into its
+own and then lift it; and a `SPACE_MEMBER_BANNED` from anyone but the owner
+household that names the owner as its banner is dropped. On the owner
+household itself, a seed-holding admin's ban or unban naming any of the
+owner household's people (seated or not) is dropped too.
 
 **What a household ban does.** On the household that runs it (the owner, or
 a seed-holding delegated admin): each live seat of the household is told
