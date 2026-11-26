@@ -3454,7 +3454,9 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   transition: color var(--sh-transition-fast), background var(--sh-transition-fast);
 }
 .sh-comment-overflow:hover { background: var(--sh-bg-secondary); color: var(--sh-text); }
-.sh-comment-overflow-wrap .sh-post-menu { right: 0; top: calc(100% + 4px); }
+/* The ··· sits by the time, on the left of the comment: open rightwards
+ * so the menu never runs off a phone screen. */
+.sh-comment-overflow-wrap .sh-post-menu { left: 0; right: auto; top: calc(100% + 4px); }
 /* The typing line lives between the comments list and the .sh-comment-new
    input row — keep its left padding aligned with the comment bodies and
    give it a slight italic feel so it reads as ambient state, not content. */
@@ -11163,6 +11165,18 @@ hr {
 .sh-member-list-header h2 {
   margin: 0;
   white-space: nowrap;
+}
+/* Followers: their own group under the members, same rows. */
+.sh-member-followers {
+  margin-top: var(--sh-space-lg);
+}
+.sh-member-followers > h2 {
+  margin: 0;
+  padding-block: var(--sh-space-xs);
+}
+.sh-member-followers__empty {
+  margin: 0;
+  padding: var(--sh-space-xs) var(--sh-space-md);
 }
 .sh-member-row {
   position: relative;
