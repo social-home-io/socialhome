@@ -1605,12 +1605,17 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
   `_handle_space_sync_direct_failed`); the provider only owns the retry when
   it was the one that sent DIRECT_FAILED (e.g. rate-limited).
 - A provider that refuses a BEGIN from a household seated from an invite
-  link sends it **no** `SPACE_SYNC_DIRECT_FAILED` — whatever the reason:
-  that household refuses every direct-sync signalling event by design
-  (`SPACE_SESSION_ALLOWED_EVENT_TYPES`), so the event was always dropped on
-  arrival. Behaviour-neutral: the requester never acted on it and asks
-  again on its next sync; only the bounced envelope (and its WARNING) is
-  gone.
+  link for capacity (`too_many_sessions` / `node_capacity` /
+  `rate_limited`) answers it with that `SPACE_SYNC_DIRECT_FAILED` once the
+  household is at v_96: the requester turns it into `SpaceSyncDeferred` and
+  asks again shortly, exactly as a paired member does. Before v_96 the
+  refusal was silence and the household waited for its next periodic sync
+  (30 min) — e.g. a role change's catch-up colliding with the reconnect
+  syncs of many spaces was lost. `SPACE_SYNC_DIRECT_FAILED` is the one
+  direct-sync event in `SPACE_SESSION_ALLOWED_EVENT_TYPES`; from such a
+  household its handler takes only a capacity refusal of a BEGIN we sent
+  (no session close, no relay retry — the pair negotiates no direct
+  connection). Any other reason, or an older household, still gets nothing.
 
 **Freeing the session.** When the end-of-stream sentinel lands, the
 requester sends `SPACE_SYNC_COMPLETE {sync_id, space_id, clean}` to the provider

@@ -2364,37 +2364,6 @@ def _refusing_manager(reason: str) -> MagicMock:
     return manager
 
 
-@pytest.mark.parametrize(
-    "reason", ["rate_limited", "too_many_sessions", "node_capacity"]
-)
-async def test_a_refused_begin_sends_no_signalling_to_an_invite_link_household(
-    svc, reason
-):
-    """A household seated from an invite link refuses every direct-sync
-    signalling event by design (``SPACE_SESSION_ALLOWED_EVENT_TYPES``) — a
-    capacity refusal sent as ``SPACE_SYNC_DIRECT_FAILED`` only bounced off its
-    peer-class step (a WARNING on its side, nothing learned). Not sent: it
-    asks again on its next sync."""
-    svc._sync_manager = _refusing_manager(reason)
-    with (
-        patch.object(
-            FederationService,
-            "is_space_session_peer",
-            new_callable=AsyncMock,
-            return_value=True,
-        ),
-        patch.object(
-            FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
-        ) as send,
-    ):
-        await svc._handle_space_sync_begin(
-            _event(
-                "SPACE_SYNC_BEGIN", {"sync_id": "s", "space_id": "sp"}, space_id="sp"
-            )
-        )
-    send.assert_not_awaited()
-
-
 async def test_a_refused_begin_still_reaches_a_paired_household(svc):
     svc._sync_manager = _refusing_manager("rate_limited")
     with (
@@ -2517,3 +2486,125 @@ async def test_send_with_mesh_fallback_hands_the_raw_body_choice_to_the_route(sv
     )
     assert result.ok
     assert [c.kwargs["raw_body_ok"] for c in send_routed.await_args_list] == [raw, raw]
+
+
+# ── P9: an invite-link household hears a capacity refusal of its BEGIN ──
+
+
+def _session_peer(svc) -> None:
+    svc._federation_repo.get_instance = AsyncMock(
+        return_value=SimpleNamespace(
+            status=PairingStatus.CONFIRMED, source=InstanceSource.SPACE_SESSION
+        ),
+    )
+
+
+def _refusing_begin(svc, reason: str) -> None:
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=False,
+            next_event=FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+            next_payload={"sync_id": "s", "reason": reason},
+        ),
+    )
+
+
+def _begin():
+    return _event("SPACE_SYNC_BEGIN", {"sync_id": "s", "space_id": "sp"}, space_id="sp")
+
+
+@pytest.mark.parametrize(
+    "reason", ["too_many_sessions", "node_capacity", "rate_limited"]
+)
+async def test_a_capacity_refused_begin_answers_an_invite_link_household(
+    svc, reason, monkeypatch
+):
+    """A household seated from an invite link used to get silence when its
+    BEGIN was refused for capacity, and waited for its next periodic sync
+    (30 min) — a role change's catch-up colliding with the reconnect syncs
+    of many spaces was lost. The refusal negotiates no direct connection,
+    so it is answered like any member's."""
+    _refusing_begin(svc, reason)
+    _session_peer(svc)
+    monkeypatch.setattr(
+        FederationService, "peer_supports", AsyncMock(return_value=True)
+    )
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ) as send:
+        await svc._handle_space_sync_begin(_begin())
+    send.assert_awaited_once()
+    assert send.await_args.kwargs["event_type"] is (
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED
+    )
+    assert send.await_args.kwargs["payload"]["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("reason", "supports"), [("ice_timeout", True), ("rate_limited", False)]
+)
+async def test_an_invite_link_household_gets_no_other_direct_failed(
+    svc, reason, supports, monkeypatch
+):
+    """Only a capacity refusal goes to an invite-link household, and only
+    to one at v_96 (an older one refuses the event at its peer-class step)."""
+    _refusing_begin(svc, reason)
+    _session_peer(svc)
+    monkeypatch.setattr(
+        FederationService, "peer_supports", AsyncMock(return_value=supports)
+    )
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ) as send:
+        await svc._handle_space_sync_begin(_begin())
+    send.assert_not_awaited()
+
+
+async def test_an_invite_link_host_refusal_defers_our_request(svc):
+    """The requester side: the invite-link host's capacity refusal is the
+    same deferral a paired host's is (the scheduler asks again shortly)."""
+    _session_peer(svc)
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=None)
+    svc._sync_manager.pending_sync_request = MagicMock(
+        return_value=PendingSyncRequest(
+            sync_id="s1", space_id="sp", provider_instance_id="host", created_at=0
+        )
+    )
+    svc._sync_manager.forget_sync_request = MagicMock()
+    svc._sync_manager.trigger_relay_sync = AsyncMock()
+    await svc._handle_space_sync_direct_failed(
+        _event(
+            "SPACE_SYNC_DIRECT_FAILED",
+            {"sync_id": "s1", "reason": "too_many_sessions"},
+            from_instance="host",
+        ),
+    )
+    published = svc._bus.publish.await_args.args[0]
+    assert isinstance(published, SpaceSyncDeferred)
+    svc._sync_manager.trigger_relay_sync.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reason", [None, "ice_timeout"])
+async def test_an_invite_link_peer_cannot_drive_a_relay_retry(svc, reason):
+    """Any other DIRECT_FAILED from an invite-link household is ignored:
+    the pair negotiates no direct connection, so there is nothing to fall
+    back from or to close."""
+    _session_peer(svc)
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(provider_instance_id="self-iid")
+    )
+    svc._own_instance_id = "self-iid"
+    svc._sync_manager.close_session = MagicMock()
+    svc._sync_manager.trigger_relay_sync = AsyncMock()
+    payload = {"sync_id": "s1"}
+    if reason:
+        payload["reason"] = reason
+    await svc._handle_space_sync_direct_failed(
+        _event("SPACE_SYNC_DIRECT_FAILED", payload, from_instance="host")
+    )
+    svc._sync_manager.trigger_relay_sync.assert_not_awaited()
+    svc._sync_manager.close_session.assert_not_called()
+    svc._bus.publish.assert_not_awaited()

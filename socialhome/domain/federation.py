@@ -720,6 +720,12 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: self-certifying; neither grants a right.
         FederationEventType.SPACE_MEMBER_CARD,
         FederationEventType.SPACE_MAILBOX_DIRECTORY,
+        #: v_96 — the host's capacity refusal of our sync BEGIN
+        #: (``too_many_sessions`` / ``node_capacity`` / ``rate_limited``), so
+        #: we ask again shortly instead of at the next periodic sync. Its
+        #: handler ignores every other DIRECT_FAILED from such a household:
+        #: the pair negotiates no direct connection.
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
         # ── Content ──
         #: The space's own posts, comments and every pillar rendered
         #: inside it. This is what "joined the space" means.

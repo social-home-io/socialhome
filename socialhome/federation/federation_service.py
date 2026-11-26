@@ -5816,15 +5816,19 @@ class FederationService:
             if (
                 decision.next_event is FederationEventType.SPACE_SYNC_DIRECT_FAILED
                 and await self.is_space_session_peer(event.from_instance)
+                and not await self._session_peer_hears_refusal(
+                    event.from_instance, decision.next_payload
+                )
             ):
-                # A household seated from an invite link refuses every
-                # direct-sync signalling event by design (§D2b: the pair
-                # never negotiates a direct connection), so this refusal
-                # would only bounce off its peer-class step. Nothing is sent;
-                # it asks again on its next sync.
+                # A household seated from an invite link negotiates no
+                # direct connection (§D2b), so the only DIRECT_FAILED it
+                # takes is a capacity refusal of its BEGIN (v_96) — the
+                # "ask again shortly" answer. Anything else, or an older
+                # household, would bounce off its peer-class step: it asks
+                # again on its next sync.
                 log.info(
                     "sync %s: BEGIN from invite-link household %s refused (%s) — "
-                    "no DIRECT_FAILED sent (closed to it); it asks again later",
+                    "no DIRECT_FAILED sent; it asks again later",
                     sync_id,
                     event.from_instance,
                     (decision.next_payload or {}).get("reason") or "refused",
@@ -6300,6 +6304,20 @@ class FederationService:
             name=f"space-sync-initial-{sync_id}",
         )
 
+    async def _session_peer_hears_refusal(
+        self, instance_id: str, payload: dict | None
+    ) -> bool:
+        """An invite-link household takes a BEGIN's capacity refusal
+        (:data:`_BEGIN_REFUSALS`) from v_96 on — the requester turns it into
+        :class:`SpaceSyncDeferred` and asks again shortly instead of waiting
+        for its next periodic sync."""
+        return (payload or {}).get("reason") in _BEGIN_REFUSALS and (
+            await self.peer_supports(
+                instance_id,
+                min_version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
+            )
+        )
+
     async def _handle_space_sync_direct_failed(self, event) -> None:
         """Direct path failed — fall back to relay sync (S-15).
 
@@ -6321,7 +6339,15 @@ class FederationService:
         sync_id = event.payload.get("sync_id") or ""
         if not sync_id:
             return
+        # An invite-link pair negotiates no direct connection (§D2b): from
+        # such a household only a capacity refusal of a BEGIN we sent means
+        # anything (v_96); nothing else may close a session or start a relay.
+        session_peer = await self.is_space_session_peer(event.from_instance)
         session = self._sync_manager.get_session(sync_id)
+        if session_peer and (
+            session is not None or event.payload.get("reason") not in _BEGIN_REFUSALS
+        ):
+            return
         if session is not None:
             if session.provider_instance_id == self._own_instance_id:
                 # Provider-side cleanup only — close the session, drop
@@ -6357,6 +6383,8 @@ class FederationService:
                     )
                 )
                 return
+        if session_peer:
+            return
         decision = await self._sync_manager.trigger_relay_sync(sync_id)
         if decision.next_event is not None:
             # The relay BEGIN is the protocol step a mesh-relayed session
