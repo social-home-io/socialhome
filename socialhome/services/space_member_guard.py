@@ -29,6 +29,9 @@ that hold the space repo under another slot name (themes, approvals).
 about the space's *people* (proposals, map pins, zones): a follower is an
 outsider there and gets the same 403.
 
+:func:`banned_from_space` is the one ban check (person or household) of
+every path that seats a person of another household.
+
 :func:`user_id_proven` is the person-ID anchor proof every path that seats
 a person another household names checks first (P5);
 :func:`user_id_of_another_household` is the receivers' rule for trusting a
@@ -163,6 +166,25 @@ async def require_member_seat(
     if member.role not in WRITER_ROLES:
         raise SpacePermissionError(NOT_A_SPACE_MEMBER)
     return member
+
+
+async def banned_from_space(
+    space_repo: AbstractSpaceRepo,
+    space_id: str,
+    *,
+    user_id: str | None = None,
+    instance_id: str | None = None,
+) -> bool:
+    """Whether ``space_id`` bans the person ``user_id`` or the household
+    ``instance_id`` (P7b). The one ban check of every path that seats a
+    person of another household — an invite-link redeem, a GFS join or
+    follow, a paired join request or follow, a private invite (sent or
+    accepted), an approval: a household ban covers every person of it."""
+    if user_id and await space_repo.is_banned(space_id, user_id):
+        return True
+    return bool(
+        instance_id and await space_repo.is_household_banned(space_id, instance_id)
+    )
 
 
 def user_id_proven(identity_pk: bytes | None, anchor: object, user_id: str) -> bool:

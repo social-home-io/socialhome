@@ -272,6 +272,12 @@ class AbstractSpaceRepo(Protocol):
     async def unban_member(self, space_id: str, user_id: str) -> None: ...
     async def is_banned(self, space_id: str, user_id: str) -> bool: ...
     async def list_bans(self, space_id: str) -> list[dict]: ...
+    async def ban_household(
+        self, space_id: str, instance_id: str, *, reason: str | None = None
+    ) -> None: ...
+    async def unban_household(self, space_id: str, instance_id: str) -> None: ...
+    async def is_household_banned(self, space_id: str, instance_id: str) -> bool: ...
+    async def list_household_bans(self, space_id: str) -> list[dict]: ...
 
     # ── Moderation queue ──────────────────────────────────────────────
     async def insert_moderation_item(self, item: SpaceModerationItem) -> None: ...
@@ -2054,6 +2060,44 @@ class SqliteSpaceRepo:
         )
         return rows_to_dicts(rows)
 
+    # A household ban (``space_instance_bans``, 0001) covers every person of
+    # that household. The §24.11 ban step and the space fan-out read the
+    # same table (``federation_repo``); seat removal is the service's job.
+
+    async def ban_household(
+        self, space_id: str, instance_id: str, *, reason: str | None = None
+    ) -> None:
+        await self._db.enqueue(
+            """
+            INSERT INTO space_instance_bans(space_id, instance_id, reason)
+            VALUES(?, ?, ?)
+            ON CONFLICT(space_id, instance_id) DO UPDATE SET
+                reason=excluded.reason
+            """,
+            (space_id, instance_id, reason),
+        )
+
+    async def unban_household(self, space_id: str, instance_id: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM space_instance_bans WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+
+    async def is_household_banned(self, space_id: str, instance_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM space_instance_bans WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+        return row is not None
+
+    async def list_household_bans(self, space_id: str) -> list[dict]:
+        rows = await self._db.fetchall(
+            "SELECT space_id, instance_id, banned_at, reason"
+            " FROM space_instance_bans WHERE space_id=? ORDER BY banned_at",
+            (space_id,),
+        )
+        return rows_to_dicts(rows)
+
     # ── Moderation queue ──────────────────────────────────────────────
 
     async def insert_moderation_item(
@@ -2514,7 +2558,8 @@ class SqliteSpaceRepo:
 
         Returns ``None`` if the token does not exist, has expired, has
         already been fully consumed, or — when ``redeemer_user_id`` is
-        given — that user is banned from the token's space.
+        given — that user is banned from the token's space, or (with
+        ``redeemer_instance_id``) that household is (P7b household ban).
 
         **``redeemer_user_id`` folds the §13.7 ban into the same atomic
         UPDATE.** The cross-instance redeem used to consume first and check
@@ -2556,6 +2601,15 @@ class SqliteSpaceRepo:
                                AND space_bans.user_id = ?
                         )
                    )
+                   AND (
+                        ? IS NULL
+                        OR NOT EXISTS (
+                            SELECT 1 FROM space_instance_bans
+                             WHERE space_instance_bans.space_id
+                                   = space_invite_tokens.space_id
+                               AND space_instance_bans.instance_id = ?
+                        )
+                   )
                    AND (bound_instance_id IS NULL OR bound_instance_id IS ?)
                    AND (bound_user_id IS NULL OR bound_user_id IS ?)
                 """,
@@ -2563,6 +2617,8 @@ class SqliteSpaceRepo:
                     token,
                     redeemer_user_id,
                     redeemer_user_id,
+                    redeemer_instance_id,
+                    redeemer_instance_id,
                     redeemer_instance_id,
                     redeemer_user_id,
                 ),
