@@ -29,8 +29,9 @@ as before.
 Memory only and bounded — spaces waiting, fan-outs per space, bytes, and a
 TTL: a household that just joined makes a handful of writes before its
 roster arrives (well under a second normally, seconds over a slow path). A
-restart, a host that never sends a snapshot (pre-v_32) or a bound reached
-falls back to the §25.6 catch-up, the behaviour before this existed.
+restart, a host that never sends a snapshot (pre-v_32; an invitation from
+a delegated admin, which starts no wait: only the owner sends one) or a
+bound reached falls back to the §25.6 catch-up, the behaviour before this existed.
 """
 
 from __future__ import annotations
@@ -63,7 +64,8 @@ _KIND = "roster-wait"
 @dataclass(slots=True, frozen=True)
 class PendingFanout:
     """One ``broadcast_to_space_members`` call, with the member households
-    it was planned for (module-local record; never stored or sent).
+    it was planned for (memory only; never stored or sent). ``payload`` is
+    held as given: callers build a fresh dict per broadcast.
 
     ``per_peer`` is called again when the fan-out is resent — the hooks
     that use it decide per household at call time, which stays right."""

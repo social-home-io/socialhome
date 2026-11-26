@@ -6703,6 +6703,35 @@ async def test_accept_remote_invite_waits_for_the_hosts_roster_before_the_accept
         )
     fed.cancel_space_roster_wait.assert_called_once_with(space_id)
 
+    # A delegated admin's invitation: only the owner sends the snapshot, so
+    # there is nothing to wait for.
+    fed.expect_space_roster.reset_mock()
+    fed.send_with_mesh_fallback = AsyncMock(return_value=MagicMock(ok=True, error=None))
+    await stack.space_repo.save(
+        Space(
+            id="sp-admin-invite",
+            name="Remote Club",
+            owner_instance_id="o" * 32,
+            owner_username="remote-owner",
+            identity_public_key="ab" * 32,
+            config_sequence=1,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    await stack.space_repo.save_remote_invitation(
+        "sp-admin-invite",
+        invited_by="remote-admin",
+        remote_instance_id=host_instance,
+        remote_user_id=user.user_id,
+        invite_token="tok-admin-invite",
+    )
+    await stack.space_svc.accept_remote_invite(
+        token="tok-admin-invite", user_id=user.user_id
+    )
+    fed.expect_space_roster.assert_not_called()
+
 
 # ── GFS-discovered space on-ramp (mirror → subscribe) ─────────────────────
 

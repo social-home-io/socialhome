@@ -7355,3 +7355,50 @@ async def test_a_refused_fanout_drops_the_whole_wait():
         fed_repo.add_space_member("sp-join", "inst-a")
         await _land(svc)
     assert [t for t, _, _ in sent] == ["inst-b", "inst-b"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_resend_does_not_drop_the_ones_after_it():
+    """A resend that raises must not stop a later delete from following its
+    post to the added households."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc.expect_space_roster("sp-join")
+    fail = False
+
+    async def _boom(_iid, payload):
+        if fail:
+            raise RuntimeError("hook failed")
+        return dict(payload)
+
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1")
+        await _post(svc, "p1-edit", per_peer=_boom)
+        await _post(svc, "p1-deleted")
+        fed_repo.add_space_member("sp-join", "inst-a")
+        fail = True
+        await _land(svc)
+    assert [p["id"] for t, _, p in sent if t == "inst-a"] == ["p1", "p1-deleted"]
+
+
+@pytest.mark.asyncio
+async def test_a_roster_landing_while_the_roster_is_read_is_not_missed():
+    """The wait ends (snapshot applied and resent) while a broadcast reads
+    the roster: it must read again and reach the whole roster."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc.expect_space_roster("sp-join")
+    real = fed_repo.list_member_instance_ids
+    calls = 0
+
+    async def _list(space_id):
+        nonlocal calls
+        calls += 1
+        ids = await real(space_id)
+        if calls == 1:
+            fed_repo.add_space_member("sp-join", "inst-a")
+            svc._pending_roster_fanout.end("sp-join")
+        return ids
+
+    fed_repo.list_member_instance_ids = _list
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1")
+    assert sorted(t for t, _, _ in sent) == ["inst-a", "inst-b"]

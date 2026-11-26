@@ -636,7 +636,9 @@ member household, not only on the host:
   households through their catch-up. No wire change: the cost is what a
   complete roster would have sent (≤ 64 items × added households, once per
   join), and before this a newcomer's first post reached the other members
-  only at their next §25.6 catch-up — up to the 30-minute tick.
+  only at their next §25.6 catch-up — up to the 30-minute tick. Only an
+  invitation from the owner starts the wait (a delegated admin sends no
+  snapshot); a resend that fails is skipped, the next one still goes.
 - **Repair on a digest mismatch, in reply to an admitted BEGIN.** The host
   never sends a roster snapshot on its own timer. Every `SPACE_SYNC_BEGIN` a
   member household (this version) sends to the space's host — direct, the
