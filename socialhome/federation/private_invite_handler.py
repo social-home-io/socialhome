@@ -2111,7 +2111,13 @@ class PrivateSpaceInviteHandler:
         # ``add_space_instance`` is an idempotent upsert and
         # ``broadcast_to_space_members`` already excludes our own household, so
         # a gossip row naming our instance is harmless.
-        if not tombstoned:
+        # SECURITY: only for a household that holds a live seat now. A stale
+        # JOINED the version guard refused (one at or below a removal we
+        # hold) must not make a removed household a broadcast target again;
+        # an equal-version repeat still restores a missing row.
+        if not tombstoned and await self._remote_members.list_for_instance(
+            space_id, instance_id, include_tombstoned=False
+        ):
             await self._space_repo.add_space_instance(space_id, instance_id)
 
     async def _removed_without_admin_seat(

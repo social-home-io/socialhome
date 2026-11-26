@@ -1845,3 +1845,41 @@ async def test_a_removed_household_cannot_seat_another_household(tmp_dir, caplog
         assert await rm.get(SPACE_ID, "peer-second", "uid-2") is not None
     finally:
         await db.shutdown()
+
+
+async def test_a_stale_joined_never_makes_a_removed_household_a_target(tmp_dir):
+    """SECURITY: a JOINED at or below a removal we hold is refused by the
+    version guard — and must not put the removed household back into
+    ``space_instances`` either, or every later fan-out (posts, rekeys)
+    reaches it again. A repeat of a live seat's JOINED still restores a
+    missing row."""
+    h, spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j, left = (
+        FederationEventType.SPACE_MEMBER_JOINED,
+        FederationEventType.SPACE_MEMBER_LEFT,
+    )
+    await h._on_space_member_joined(
+        _event(j, _signed_payload(j, seed=seed, member_version=4))
+    )
+    assert MEMBER_INSTANCE in await spaces.list_member_instances(SPACE_ID)
+    # The equal-version repeat restores a row that went missing.
+    await spaces.remove_space_instance(SPACE_ID, MEMBER_INSTANCE)
+    await h._on_space_member_joined(
+        _event(j, _signed_payload(j, seed=seed, member_version=4))
+    )
+    assert MEMBER_INSTANCE in await spaces.list_member_instances(SPACE_ID)
+    await h._on_space_member_left(
+        _event(left, _signed_payload(left, seed=seed, member_version=6))
+    )
+    assert MEMBER_INSTANCE not in await spaces.list_member_instances(SPACE_ID)
+    stale = _entry(j, _signed_payload(j, seed=seed, member_version=4))
+    await h._on_space_roster_snapshot(_snapshot([stale]))
+    await h._on_space_member_joined(
+        _event(j, _signed_payload(j, seed=seed, member_version=4))
+    )
+    seats = await remote.list_for_instance(
+        SPACE_ID, MEMBER_INSTANCE, include_tombstoned=True
+    )
+    assert [s.tombstoned for s in seats] == [True]
+    assert MEMBER_INSTANCE not in await spaces.list_member_instances(SPACE_ID)
+    await db.shutdown()
