@@ -2886,3 +2886,62 @@ async def test_prune_settled_remote_approvals_drops_dead_bound_tokens(env):
     assert not await _token_exists(env, expired_old)
     for kept in (live_old, spent_young, link):
         assert await _token_exists(env, kept)
+
+
+# ── Household bans (P7b) ──────────────────────────────────────────────
+
+
+async def test_ban_household_and_unban(env):
+    """A household ban is its own row; unban removes it."""
+    await env.repo.save(_space("sp-hh"))
+    await env.repo.ban_household("sp-hh", "inst-x", reason="spam")
+    assert await env.repo.is_household_banned("sp-hh", "inst-x") is True
+    assert await env.repo.is_household_banned("sp-hh", "inst-y") is False
+    rows = await env.repo.list_household_bans("sp-hh")
+    assert [(r["instance_id"], r["reason"]) for r in rows] == [("inst-x", "spam")]
+    await env.repo.unban_household("sp-hh", "inst-x")
+    assert await env.repo.is_household_banned("sp-hh", "inst-x") is False
+    assert await env.repo.list_household_bans("sp-hh") == []
+
+
+async def test_a_banned_household_consumes_nothing(env):
+    """The household ban rides the same atomic consume as the person ban:
+    no use spent, for any person of that household."""
+    await env.repo.save(_space("sp-hh-tok"))
+    token = await env.repo.create_invite_token("sp-hh-tok", "uid-alice", uses=5)
+    await env.repo.ban_household("sp-hh-tok", "inst-x")
+
+    assert (
+        await env.repo.consume_invite_token(
+            token, redeemer_user_id="uid-new", redeemer_instance_id="inst-x"
+        )
+        is None
+    )
+    row = await env.repo.consume_invite_token(
+        token, redeemer_user_id="uid-new", redeemer_instance_id="inst-y"
+    )
+    assert row is not None
+    assert row["uses_remaining"] == 4
+
+
+async def test_a_household_ban_in_another_space_does_not_block(env):
+    await env.repo.save(_space("sp-a"))
+    await env.repo.save(_space("sp-b"))
+    await env.repo.ban_household("sp-b", "inst-x")
+    token = await env.repo.create_invite_token("sp-a", "uid-alice", uses=1)
+    row = await env.repo.consume_invite_token(
+        token, redeemer_user_id="uid-new", redeemer_instance_id="inst-x"
+    )
+    assert row is not None
+
+
+async def test_a_household_ban_records_who_banned(env):
+    await env.repo.save(_space("sp-by"))
+    await env.repo.ban_household("sp-by", "inst-x", banned_by="uid-alice")
+    [row] = await env.repo.list_household_bans("sp-by")
+    assert row["banned_by"] == "uid-alice"
+    assert await env.repo.ban_banned_by("sp-by", instance_id="inst-x") == "uid-alice"
+    await env.repo.ban_member("sp-by", "uid-bob", "uid-carol")
+    assert await env.repo.ban_banned_by("sp-by", user_id="uid-bob") == "uid-carol"
+    assert await env.repo.ban_banned_by("sp-by", user_id="uid-nobody") is None
+    assert await env.repo.ban_banned_by("sp-by") is None

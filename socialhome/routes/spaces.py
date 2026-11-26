@@ -1601,19 +1601,35 @@ class SpaceMemberDetailView(BaseView):
 
 
 class SpaceBanView(BaseView):
-    """POST /api/spaces/{id}/ban — ban a member."""
+    """POST /api/spaces/{id}/ban — ban a person (``{user_id}``) or a whole
+    household (``{instance_id}``, P7b). Exactly one of the two, else 422."""
 
     async def post(self) -> web.Response:
         ctx = self.user
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         body = await self.body()
-        await svc.ban(
-            space_id,
-            actor_username=ctx.username,
-            user_id=body["user_id"],
-            reason=body.get("reason"),
-        )
+        user_id = body.get("user_id")
+        instance_id = body.get("instance_id")
+        reason = body.get("reason")
+        reason = reason if isinstance(reason, str) else None
+        named = [v for v in (user_id, instance_id) if v is not None]
+        if len(named) != 1 or not isinstance(named[0], str) or not named[0]:
+            raise ValueError("name exactly one of user_id / instance_id")
+        if instance_id is not None:
+            await svc.ban_household(
+                space_id,
+                actor_username=ctx.username,
+                instance_id=instance_id,
+                reason=reason,
+            )
+        else:
+            await svc.ban(
+                space_id,
+                actor_username=ctx.username,
+                user_id=user_id,
+                reason=reason,
+            )
         return web.json_response({"ok": True})
 
 
@@ -2305,10 +2321,37 @@ class SpaceBanListView(BaseView):
         space_id = self.match("id")
         space = await space_svc._require_space(space_id)
         await space_svc._require_admin_or_owner(space, ctx.username)
-        bans = await self.svc(space_repo_key).list_bans(space_id)
+        repo = self.svc(space_repo_key)
         # Named here, not in the repo rows: ``list_bans`` also feeds the
         # space-sync exporter, whose wire shape must not change.
-        return web.json_response(await self.with_people(bans, space_id=space_id))
+        people = await self.with_people(
+            await repo.list_bans(space_id), space_id=space_id
+        )
+        fed_repo = self.svc(federation_repo_key)
+        households = []
+        for row in await repo.list_household_bans(space_id):
+            peer = await fed_repo.get_instance(str(row["instance_id"]))
+            households.append(
+                {
+                    **row,
+                    "kind": "household",
+                    "household_name": peer.display_name if peer else None,
+                }
+            )
+        return web.json_response([{**p, "kind": "person"} for p in people] + households)
+
+
+class SpaceHouseholdUnbanView(BaseView):
+    """DELETE /api/spaces/{id}/household-bans/{instance_id} — lift a
+    household ban (admin, P7b)."""
+
+    async def delete(self) -> web.Response:
+        await self.svc(space_service_key).unban_household(
+            self.match("id"),
+            actor_username=self.user.username,
+            instance_id=self.match("instance_id"),
+        )
+        return web.json_response({"ok": True})
 
 
 class SpaceUnbanView(BaseView):

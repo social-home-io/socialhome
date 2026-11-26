@@ -1,6 +1,10 @@
 /**
  * MemberActionSheet — role/ban actions on space members (§23.98).
  *
+ * Ban removes one person; "Ban household" (a seat of another household)
+ * removes everyone from that household and keeps all of its people out —
+ * joining, following and invites alike — until the ban is lifted (P7b).
+ *
  * The role picker offers exactly what :func:`roleChangeOptions` allows
  * the viewer (the server's ``role_change_allowed`` matrix): the owner
  * sets admin / moderator / member, an admin moves a seat only between
@@ -31,6 +35,8 @@ const actorRole = signal<SpaceRole | undefined>(undefined)
 const adminsActForOwner = signal(false)
 const spaceId = signal('')
 const showBanConfirm = signal(false)
+const showHouseholdBanConfirm = signal(false)
+const householdName = signal<string | null>(null)
 const roleError = signal<string | null>(null)
 const roleBusy = signal(false)
 
@@ -42,6 +48,8 @@ export function openMemberActions(
   viewerRole?: SpaceRole,
   /** The space's "Let admins act for me" switch — see AdminGrantCheck. */
   actForOwner = false,
+  /** A remote seat's household name, for the household-ban confirm. */
+  household: string | null = null,
 ) {
   spaceId.value = sid
   memberUserId.value = userId
@@ -49,6 +57,7 @@ export function openMemberActions(
   memberInstanceId.value = instanceId
   actorRole.value = viewerRole
   adminsActForOwner.value = actForOwner
+  householdName.value = household
   roleError.value = null
   roleBusy.value = false
   open.value = true
@@ -119,6 +128,16 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
     } catch (e: any) { showToast(e.message || t('member_actions.failed'), 'error') }
   }
 
+  // A household ban: everyone from that household leaves the space and
+  // none of its people can join or follow again until it is lifted.
+  const banHousehold = async () => {
+    try {
+      await api.post(`/api/spaces/${spaceId.value}/ban`, { instance_id: memberInstanceId.value })
+      showToast(t('member_actions.household_banned'), 'info')
+      showHouseholdBanConfirm.value = false; open.value = false; onUpdate()
+    } catch (e: any) { showToast(e.message || t('member_actions.failed'), 'error') }
+  }
+
   const remove = async () => {
     try {
       const path = memberInstanceId.value
@@ -136,9 +155,11 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
     } catch (e: any) { showToast(e.message || t('member_actions.failed'), 'error') }
   }
 
-  // Ban only meaningful on the host side, and only for local members.
-  // Remote members are kicked via SPACE_REMOTE_MEMBER_REMOVED instead.
-  const canBan = !memberInstanceId.value
+  // Anyone but the owner can be banned — a person of this household or of
+  // another one (the server ends a remote seat too). A remote seat also
+  // offers banning its whole household.
+  const canBan = memberRole.value !== 'owner'
+  const canBanHousehold = canBan && !!memberInstanceId.value
 
   return (
     <>
@@ -174,12 +195,25 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
           {canBan && (
             <Button variant="danger" onClick={() => showBanConfirm.value = true}>{t('member_actions.ban')}</Button>
           )}
+          {canBanHousehold && (
+            <Button variant="danger" data-action="ban-household"
+                    onClick={() => showHouseholdBanConfirm.value = true}>
+              {t('member_actions.ban_household')}
+            </Button>
+          )}
         </div>
       </Modal>
       <ConfirmDialog open={showBanConfirm.value} title={t('member_actions.ban_title')}
         message={t('member_actions.ban_body')}
         confirmLabel={t('member_actions.ban')} destructive onConfirm={ban}
         onCancel={() => showBanConfirm.value = false} />
+      <ConfirmDialog open={showHouseholdBanConfirm.value}
+        title={t('member_actions.ban_household_title')}
+        message={t('member_actions.ban_household_body', {
+          household: householdName.value || t('member_actions.this_household'),
+        })}
+        confirmLabel={t('member_actions.ban_household')} destructive onConfirm={banHousehold}
+        onCancel={() => showHouseholdBanConfirm.value = false} />
     </>
   )
 }

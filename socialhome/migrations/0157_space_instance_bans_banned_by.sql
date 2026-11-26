@@ -1,0 +1,26 @@
+-- 0157 — who banned a household from a space (P7b).
+--
+-- A household ban (``space_instance_bans``, 0001) is now written by the owner
+-- or a seed-holding delegated admin and federated to every member household.
+-- Owner rule (review finding 5): an admin must not lift the OWNER's ban — so
+-- every holder of the row must know who banned. Person bans already record it
+-- (``space_bans.banned_by``, 0001); household bans had no such column.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path touching the table: the §24.11 ban step and the
+--       space fan-out read it (``federation_repo``: is_instance_banned /
+--       list_member_instance_ids / list_instances_in_space); the space repo
+--       writes / lists / clears it (``ban_household`` …, P7b); the sync
+--       ``bans`` exporter ships its rows; ``SpaceMembershipInboundHandlers``
+--       stores the signed live event. Nothing wrote it before P7b (tests only),
+--       so no production row lacks a banner except by this column's absence.
+--   (2) Alternatives rejected: putting the banner into ``reason`` (free text,
+--       admin-written, never trustworthy as an identity); storing household
+--       bans in ``space_bans`` under a sentinel ``user_id`` (that table is
+--       per person, read by every authorship check and the bans UI by user
+--       id); keeping it out of the database (the unban check runs on every
+--       holder, offline of the banner, so it must be stored).
+--   (3) Smallest change: one NULL-defaulted ADD COLUMN, no backfill (a NULL
+--       banner is "unknown": any admin may lift it, as before).
+
+ALTER TABLE space_instance_bans ADD COLUMN banned_by TEXT;

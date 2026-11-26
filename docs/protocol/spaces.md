@@ -741,6 +741,117 @@ entries in total (10 000 follows ≈ 50 GiB of GFS egress over the space's
 life). Accepted for one path (owner decision 2026-11-23); batching follow
 gossip is the lever if it shows up.
 
+## Bans: person and household (P7b)
+
+A ban keeps someone out of a space on **every** path: an invite link
+(paired, mesh or §D2b through a GFS), a GFS directory join request, a
+follow (paired, mesh or GFS), a private invitation, an admin's approval.
+Members and followers alike — a seat is a seat.
+
+- **Person ban** (`space_bans`, by `user_id`): one person. Since P5 a person
+  id is proven by its household's key, so the ban sticks to that person.
+- **Household ban** (`space_instance_bans`, by `instance_id`): every person
+  of that household, today's and any it mints later. Owner decision
+  2026-11-26: it also blocks explicit invites of its people — to let one of
+  them in, lift the household ban.
+
+**Who.** The owner and admins (moderators keep content authority only).
+Nobody bans the owner household or the owner's people (a delegated admin
+neither), and nobody bans their own household. A member household without
+the space seed forwards the action to the host (`SPACE_REMOTE_ADMIN_ACTION`
+`ban` / `unban` with `{instance_id}`; a host below v_96 answers
+`HOST_TOO_OLD` up front).
+
+**Only the owner lifts the owner's ban.** Every ban records who made it
+(`space_bans.banned_by`, and since migration 0157
+`space_instance_bans.banned_by`; the signed event and the `bans` stream
+carry it). An admin may lift an admin's ban (or one whose banner is
+unknown), never the owner's: refused on the household that runs the
+unban (`403`), on a host running a forwarded unban for the forwarding
+admin (unless the owner approved it), and by every receiver of an
+`SPACE_MEMBER_UNBANNED` that is not from the owner household.
+
+**What a household ban does.** On the household that runs it (the owner, or
+a seed-holding delegated admin): each live seat of the household is told
+(`SPACE_REMOTE_MEMBER_REMOVED`), the ban row lands, then every seat ends
+the way a removal ends it — tombstone, `space_instances` row dropped,
+authority-signed LEFT gossip — and the content key rotates **once** (not
+once per seat); an admin seat's authority key is retired on the owner, and
+a household left with no shared space loses its §D2b seat. The GFS learns
+nothing new: the household's channel grant ends with the rotation, the
+GFS still sees only channels and grants.
+
+**One check.** Every seating path asks `banned_from_space(space, user,
+household)`; the invite-link consume folds both bans into its one atomic
+UPDATE, so a banned redeemer spends no use and every refusal answers alike
+(no oracle). The §24.11 ban step (`space_instance_bans`, direct and
+`SPACE_ROUTED` origin) and the space fan-out stay the transport backstop.
+
+**How the list reaches the acting hosts.** A ban or unban is signed with
+the space authority seed and broadcast to every member household
+(`broadcast_to_space_members`, households at v_96+):
+
+```json
+{"space_id": "…", "user_id": "…" | "instance_id": "…",
+ "banned_by": "…",
+ "authority_sig": "…", "authority_sig_suite": "ed25519"}
+```
+
+The free-text reason stays on the household that wrote it (followers of a
+public space are strangers); the catch-up `bans` rows still carry it, as
+they did before.
+
+A receiver applies it only when the sender is a seed holder in its own view
+(the owner, or — delegation on — a household with a live `admin` seat in its
+roster mirror) **and** the signature verifies against the space key it pins;
+exactly one target; never the owner household's people unless from the
+owner. So the owner keeps a delegated admin's ban (its own links and
+directory refuse the person too), and an unban reaches members (who would
+otherwise keep refusing the person's items). The §25.6 `bans` resource
+carries household bans as `{space_id, instance_id, banned_at, reason}`
+(no `user_id`; an older receiver skips them) for catch-up.
+
+```mermaid
+sequenceDiagram
+    participant Admin as Owner / seed-holding admin
+    participant Bad as Banned household
+    participant M as Member households
+    participant G as GFS (channel)
+    Admin->>Bad: SPACE_REMOTE_MEMBER_REMOVED (each live seat)
+    Note over Admin: space_instance_bans row
+    Admin->>M: SPACE_MEMBER_BANNED {instance_id} (authority-signed)
+    Admin->>M: SPACE_MEMBER_LEFT per seat (authority-signed)
+    Admin->>M: SPACE_KEY_EXCHANGE_REKEY (one rotation)
+    Admin->>G: new channel epoch, no grant for Bad
+    Bad--xAdmin: redeem / join request / follow → refused alike
+```
+
+**Cost.** A person ban adds one small signed event per member household
+(≈ 0.6 KiB × the space's member + follower households — the same audience
+and size as the LEFT gossip it already sends). A household ban with *k*
+seats: *k* notices + *k* LEFT entries and one ban event per member
+household + **one** rotation (*k* person bans would rotate *k* times). At
+10 000 followers that is ≈ 6 MB per ban broadcast; bans are rare admin
+actions. An unban costs one small event per member household.
+
+**Content through the GFS relay.** An item a member publishes through a
+GFS channel meets no §24.11 ban step for its origin household, so the item
+checks themselves (`SpaceAuthorship.item_seat_admits` /
+`known_follower_refused`) refuse a banned person or anyone of a banned
+household — a follower-only receiver too, which takes an author it has no
+seat for on the writer cert alone.
+
+**Limit.** A household ban binds the household's identity key (its
+`instance_id` derives from it). A household that mints a new key is a new
+household with new people: it can come back through a link its people still
+hold, a directory join or a follow, like any stranger. Revoke links you
+shared with it; a household ban stops a household that keeps its identity.
+
+**Left out.** Ordering of a ban and its unban racing on the wire (no
+version: the replay cache and the seed-holder sender rule bound it); a
+household offline past its outbox retention during an unban keeps a stale
+row (the `bans` stream adds rows, it does not delete them).
+
 ## Two kinds of follower (v_30)
 
 > Superseded by [Followers (v_96)](#followers-v_96) for peers at v_96; kept
@@ -1067,9 +1178,11 @@ member household, not only on the host:
     behind what it issued; members keep the newer rows (strictly newer
     wins), and the mismatch lasts until the host's own changes pass them.
 
-  Bans also reach a member through the §25.6 sync's `bans` resource, and
-  `is_banned` is checked at every authorship check, so a banned user's
-  writes are refused even before its seat ends.
+  Bans also reach a member live (signed `SPACE_MEMBER_BANNED` /
+  `_UNBANNED`, [Bans](#bans-person-and-household-p7b)) and through the
+  §25.6 sync's `bans` resource, and `is_banned` is checked at every
+  authorship check, so a banned user's writes are refused even before its
+  seat ends.
 - **Older households (v_80) keep the echo.** A snapshot names the
   `roster_version` it is complete up to; a member that applied one echoes
   it as `roster_echo {roster_version, cert_epoch}` — a v_80 member only on
@@ -1237,10 +1350,14 @@ valid space-authority signature verified against
 `spaces.identity_public_key`.** Not from a paired peer, not from a member
 household, not from a household holding a Follower seat. Concretely:
 
-- `SPACE_MEMBER_ROLE_CHANGED`, `SPACE_MEMBER_BANNED`,
-  `SPACE_MEMBER_UNBANNED` and the `space_members` half of
+- `SPACE_MEMBER_ROLE_CHANGED` and the `space_members` half of
   `SPACE_REMOTE_MEMBER_REMOVED` are **host-only**. An unknown space is
   refused too — there is no owner to compare the sender against.
+- `SPACE_MEMBER_BANNED` / `SPACE_MEMBER_UNBANNED` (P7b) are
+  **authority-signed and from a seed holder**: the sender is the owner or,
+  delegation on, a household holding a live `admin` seat in the
+  receiver's roster mirror, and the payload carries a valid space-authority
+  signature over the target it names — see [Bans](#bans-person-and-household-p7b).
 - `SPACE_MEMBER_JOINED` / `SPACE_MEMBER_LEFT` (the v_23 roster gossip) are
   **authority-signed**, so a delegated admin can act while the owner is
   offline; the trust root is the signature, not the relay.

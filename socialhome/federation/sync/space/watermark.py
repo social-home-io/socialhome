@@ -153,7 +153,12 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   ``PollsExporter.unstamped_votes``): the crossing full stream brings
 #:   every poll's stamps, so votes it took unstamped while older are
 #:   ordered from then on.
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 87, 92, 94)
+#: * 96 — the ``bans`` resource also carries household bans (P7b:
+#:   ``{space_id, instance_id, banned_at, reason}``, no ``user_id``), which
+#:   a v_96 receiver stores and an older one skipped: the crossing full
+#:   stream brings them (the kept-full digest of ``bans`` would otherwise
+#:   hold back a list it already streamed to the older receiver).
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 87, 92, 94, 96)
 
 
 def sync_version_bucket(peer_version: int) -> int:

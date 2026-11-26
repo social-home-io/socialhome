@@ -1992,9 +1992,7 @@ def _gfs_cluster_channel(
         "writer_seed": b64url_decode(grant.writer_seed),
     }
     for index, seat in enumerate(seats):
-        _gfs_cluster_seat(
-            urls[(register_via + 1 + index) % len(urls)], channel, seat
-        )
+        _gfs_cluster_seat(urls[(register_via + 1 + index) % len(urls)], channel, seat)
     return channel
 
 
@@ -4404,6 +4402,251 @@ def cmd_gfs_space_follow() -> None:
 
 
 @_offline_step
+def cmd_gfs_space_bans() -> None:
+    """P7b — a person ban and a household ban hold on every path.
+
+    a creates a global invite-only space with followers on and mints a
+    member link. c and b (paired with a) join with the link; e (paired with
+    nobody) follows through the GFS.
+
+    1. **Person ban.** a bans b's person: b's seat ends on a and on b, and
+       c — a plain member — holds the ban (the signed
+       ``SPACE_MEMBER_BANNED`` reached it). b's link redeem is refused, and
+       b's follow is refused by a ("applicant banned").
+    2. **Household ban.** a bans household e: e's seat ends on a and on e
+       (told over the GFS), c holds the household ban, and neither a fresh
+       follow through the GFS nor the invite link (§D2b bootstrap through
+       the GFS) seats e again.
+    3. **Unban.** a lifts both bans; c drops both rows (the signed
+       ``SPACE_MEMBER_UNBANNED`` reached it). Nobody is re-seated.
+
+    Prereq: ``up`` + ``pair`` + ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    step = "gfs-space-bans"
+    a, b, c, e = (state["instances"][x] for x in ("a", "b", "c", "e"))
+    e_url = f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+    nonce = secrets.token_hex(3)
+
+    s, sp = _as(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Bans {nonce}",
+            "description": "global, invite only, followers allowed",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must(f"{step}: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _as(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True}},
+    )
+    _must(f"{step}: a enables followers", s, patched, ok=(200,))
+    s, link = _as(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/invite-tokens",
+        {"role": "member", "uses": 10, "via": "gfs"},
+    )
+    link = _must(f"{step}: a mints a member link", s, link, ok=(201,))
+    join_body = _join_body_from_blob(_decode_invite_blob(str(link["code"])))
+    state.setdefault("gfs", {})["bans_space_id"] = space_id
+    _save(state)
+    print(f"  a: global space {space_id[:8]}…, followers on, member link minted")
+
+    def join(label: str) -> tuple[int, Any]:
+        inst = state["instances"][label]
+        return _request(
+            f"http://127.0.0.1:{inst['port']}/api/spaces/join",
+            token=inst["token"],
+            method="POST",
+            body=join_body,
+            timeout=45.0,
+        )
+
+    def seat_on(label: str, user_id: str) -> list[tuple]:
+        return _rows(
+            label,
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, user_id),
+        )
+
+    def live_seat_on_a(user_id: str) -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id=?"
+            " AND user_id=? AND tombstoned=0",
+            (space_id, user_id),
+        )
+
+    for label in ("c", "b"):
+        s, joined = join(label)
+        _must(f"{step}: {label} joins with the link", s, joined, ok=(200, 201))
+        _poll(
+            f"a to seat {label}",
+            lambda label=label: live_seat_on_a(state["instances"][label]["user_id"]),
+            timeout=60.0,
+        )
+    print("  b and c joined with the link ✓")
+
+    # e follows through the GFS (paired with nobody).
+    _poll(
+        "e to list the space as followable",
+        lambda: (
+            _request(
+                f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST"
+            )
+            and any(
+                r.get("space_id") == space_id and r.get("gfs_followable")
+                for r in (
+                    _request(f"{e_url}/api/public_spaces", token=e["token"])[1] or []
+                )
+                if isinstance(r, dict)
+            )
+        ),
+        timeout=60.0,
+        interval=2.0,
+    )
+
+    def follow(label: str, *, may_refuse: bool = False) -> int:
+        """Send a follow; a banned household may already refuse it itself
+        (403 ``BANNED`` from a ban row it holds) — then nothing is sent."""
+        inst = state["instances"][label]
+        s, body = _request(
+            f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}/subscribe",
+            token=inst["token"],
+            method="POST",
+            body={},
+            timeout=30.0,
+        )
+        _must(
+            f"{step}: {label} sends a follow",
+            s,
+            body,
+            ok=(200, 403) if may_refuse else (200,),
+        )
+        return s
+
+    follow("e")
+    _poll(
+        "a to seat e as a follower", lambda: live_seat_on_a(e["user_id"]), timeout=90.0
+    )
+    _poll(
+        "e to hold its follower seat", lambda: seat_on("e", e["user_id"]), timeout=90.0
+    )
+    print("  e follows through the GFS ✓")
+
+    # 1. Person ban of b.
+    a_off = _log_size("a")
+    s, body = _as(
+        state, "a", "POST", f"/api/spaces/{space_id}/ban", {"user_id": b["user_id"]}
+    )
+    _must(f"{step}: a bans b's person", s, body, ok=(200,))
+    _poll("a to end b's seat", lambda: not live_seat_on_a(b["user_id"]), timeout=30.0)
+    _poll("b to lose its seat", lambda: not seat_on("b", b["user_id"]), timeout=60.0)
+    _poll(
+        "c to hold the person ban (signed event)",
+        lambda: _rows(
+            "c",
+            "SELECT 1 FROM space_bans WHERE space_id=? AND user_id=?",
+            (space_id, b["user_id"]),
+        ),
+        timeout=60.0,
+    )
+    s, refused = join("b")
+    if s in (200, 201):
+        raise SystemExit(f"{step}: banned b rejoined with the link: {refused!r}")
+    if follow("b", may_refuse=True) == 200:
+        _poll(
+            "a to refuse banned b's follow",
+            lambda: _log_lines_matching("a", "refused: applicant banned", offset=a_off),
+            timeout=30.0,
+        )
+    if live_seat_on_a(b["user_id"]) or seat_on("b", b["user_id"]):
+        raise SystemExit(f"{step}: banned b holds a seat again")
+    print(
+        f"  person ban: b lost its seat, c holds the ban, link ({s}) + follow refused ✓"
+    )
+
+    # 2. Household ban of e.
+    a_off = _log_size("a")
+    s, body = _as(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/ban",
+        {"instance_id": e["instance_id"]},
+    )
+    _must(f"{step}: a bans household e", s, body, ok=(200,))
+    _poll("a to end e's seat", lambda: not live_seat_on_a(e["user_id"]), timeout=30.0)
+    _poll("e to lose its seat", lambda: not seat_on("e", e["user_id"]), timeout=90.0)
+    _poll(
+        "c to hold the household ban (signed event)",
+        lambda: _rows(
+            "c",
+            "SELECT 1 FROM space_instance_bans WHERE space_id=? AND instance_id=?",
+            (space_id, e["instance_id"]),
+        ),
+        timeout=60.0,
+    )
+    if follow("e", may_refuse=True) == 200:
+        _poll(
+            "a to refuse banned household e's follow",
+            lambda: _log_lines_matching("a", "refused: applicant banned", offset=a_off),
+            timeout=90.0,
+        )
+    s, refused = join("e")
+    if s in (200, 201):
+        raise SystemExit(
+            f"{step}: banned household e rejoined with the link: {refused!r}"
+        )
+    if live_seat_on_a(e["user_id"]) or seat_on("e", e["user_id"]):
+        raise SystemExit(f"{step}: banned household e holds a seat again")
+    print(
+        f"  household ban: e lost its seat, c holds the ban, follow + link ({s}) refused ✓"
+    )
+
+    # 3. Unban both; the lifts reach c, nobody is re-seated.
+    s, body = _as(state, "a", "DELETE", f"/api/spaces/{space_id}/bans/{b['user_id']}")
+    _must(f"{step}: a unbans b", s, body, ok=(200,))
+    s, body = _as(
+        state,
+        "a",
+        "DELETE",
+        f"/api/spaces/{space_id}/household-bans/{e['instance_id']}",
+    )
+    _must(f"{step}: a unbans household e", s, body, ok=(200,))
+    _poll(
+        "c to drop both bans (signed unban)",
+        lambda: (
+            not _rows(
+                "c",
+                "SELECT 1 FROM space_bans WHERE space_id=? AND user_id=? UNION ALL"
+                " SELECT 1 FROM space_instance_bans WHERE space_id=? AND instance_id=?",
+                (space_id, b["user_id"], space_id, e["instance_id"]),
+            )
+        ),
+        timeout=60.0,
+    )
+    if live_seat_on_a(b["user_id"]) or live_seat_on_a(e["user_id"]):
+        raise SystemExit(f"{step}: an unban re-seated somebody")
+    print("  unban: c dropped both rows, nobody re-seated ✓")
+    print(f"{step}: ok (person + household bans hold on link, follow and GFS paths)")
+
+
 def cmd_gfs_global_channel() -> None:
     """v_96 (P3) — a GLOBAL space reaches its members and followers over the
     space's opaque channel, even with the host offline.
@@ -7323,7 +7566,9 @@ def _picture_via_gfs_media_cache(
     size = len(src.read_bytes())
     # Since v_96 the GFS keeps a space's media only under the space's opaque
     # channel: it learns the channel id, never the space.
-    channel = _rows(author, "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,))
+    channel = _rows(
+        author, "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,)
+    )
     channel_id = channel[0][0] if channel else None
     held = _gfs_rows(
         # The address is scope-bound: one blob, one owning scope.
@@ -7335,9 +7580,7 @@ def _picture_via_gfs_media_cache(
             f"{step}: the GFS holds no blob {blob_id[:12]} for the space's "
             f"channel {channel_id!r} (rows: {held!r})",
         )
-    if _gfs_rows(
-        "SELECT 1 FROM gfs_space_media WHERE scope_id = ?", (space_id,)
-    ):
+    if _gfs_rows("SELECT 1 FROM gfs_space_media WHERE scope_id = ?", (space_id,)):
         raise SystemExit(f"{step}: the GFS keeps media under the space id")
     uploaded = _log_lines_matching(
         author, f"uploaded blob {blob_id[:12]}", offset=author_off
@@ -13412,6 +13655,13 @@ _LOG_BENIGN: tuple[str, ...] = (
     # surfaces.
     "outbox: ",
     " returned HTTP ",
+    # The GFS's one-address spread warning (``global_server/client_spread``:
+    # a 5-min window of >= 600 requests with one address above half). Every
+    # demo household reaches the GFS from 127.0.0.1, so a busy window of the
+    # GFS chain (invite links + member mesh + moderator parity) crosses the
+    # count by construction — the line is right for a real GFS behind one
+    # proxy and says nothing about the demo. Narrowed to its own text.
+    "GFS: one client address (127.0.0.1) made ",
     # libdatachannel native ICE state-machine status lines. The
     # harness intentionally configures STUN against an external
     # endpoint while the instances themselves talk loopback-only,
@@ -25491,8 +25741,7 @@ def _admin_seed_probe(
         got = _authority_probe(rows_of, space_id, seed)
         if got != want:
             raise SystemExit(
-                f"{step}: GFS {name} pin answers {got} for {whose} "
-                f"(expected {want})"
+                f"{step}: GFS {name} pin answers {got} for {whose} (expected {want})"
             )
     names = " + ".join(n for n, _u, _r in _admin_seed_servers(state))
     verdict = "takes" if want == 200 else "refuses"
@@ -26525,6 +26774,11 @@ def main() -> None:
         # the channel under the switch; switch off → one rotation, refused;
         # e's own delete with the switch off reaches a and b.
         cmd_gfs_follower_comment()
+        # ``gfs-space-bans`` (P7b): a bans b's person and household e — both
+        # lose their seats, c holds both bans (signed events), and neither
+        # the link nor a follow (paired or through the GFS) seats them again;
+        # the unbans reach c too.
+        cmd_gfs_space_bans()
         # ``members-page-catchup`` (v_95, sync pages Phase 3): host c down,
         # b catches up c's posts and page from the plain member a, every row
         # verified against c's signed page. Restarts b and c.

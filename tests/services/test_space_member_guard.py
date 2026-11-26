@@ -7,6 +7,7 @@ from socialhome.domain.space import SpacePermissionError, SpaceRole
 from socialhome.services.space_member_guard import (
     NOT_A_SPACE_MEMBER,
     SpaceMemberGuardMixin,
+    banned_from_space,
     require_seat,
     user_id_of_another_household,
     user_id_proven,
@@ -221,3 +222,30 @@ def test_a_user_id_is_proven_only_by_its_households_key(pk, anchor, user_id, pro
     anchor it was minted from — ``derive_user_id(pk, anchor) == user_id`` —
     fail-closed on any malformed input."""
     assert user_id_proven(pk, anchor, user_id) is proven
+
+
+class _BanSpaces:
+    def __init__(self, people=(), households=()):
+        self.people = set(people)
+        self.households = set(households)
+
+    async def is_banned(self, space_id, user_id):
+        return (space_id, user_id) in self.people
+
+    async def is_household_banned(self, space_id, instance_id):
+        return (space_id, instance_id) in self.households
+
+
+async def test_banned_from_space_person_or_household():
+    """P7b — one check for every seating path: the person OR the household."""
+    repo = _BanSpaces(people={("s1", "u-bad")}, households={("s1", "inst-bad")})
+    assert await banned_from_space(repo, "s1", user_id="u-bad", instance_id="i")
+    assert await banned_from_space(repo, "s1", user_id="u-ok", instance_id="inst-bad")
+    assert await banned_from_space(repo, "s1", instance_id="inst-bad")
+    assert not await banned_from_space(repo, "s1", user_id="u-ok", instance_id="i")
+    # Another space's ban does not count.
+    assert not await banned_from_space(
+        repo, "s2", user_id="u-bad", instance_id="inst-bad"
+    )
+    # Nothing named: nothing banned.
+    assert not await banned_from_space(repo, "s1")

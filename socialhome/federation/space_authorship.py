@@ -108,7 +108,10 @@ from ..services.space_media_names import (
     feature_media_urls,
     renamed_media,
 )
-from ..services.space_member_guard import user_id_of_another_household
+from ..services.space_member_guard import (
+    banned_from_space,
+    user_id_of_another_household,
+)
 from ..services.space_writer_households import holds_member_seat
 from .host_equivalence import acts_as_host
 from .moderation_approval import (
@@ -347,7 +350,12 @@ class SpaceAuthorship:
         item is the author's own, never relayed for someone else."""
         if not author_user_id or not origin_instance_id or not space_id:
             return False
-        if await self._spaces.is_banned(space_id, author_user_id):
+        if await banned_from_space(
+            self._spaces,
+            space_id,
+            user_id=author_user_id,
+            instance_id=origin_instance_id,
+        ):
             return False
         seat = await self._seats.get(space_id, origin_instance_id, author_user_id)
         if seat is None:
@@ -379,7 +387,14 @@ class SpaceAuthorship:
         plain comment cert issued before v_96 (no ``reader`` flag)."""
         if not author_user_id or not space_id:
             return False
-        if await self._spaces.is_banned(space_id, author_user_id):
+        # A banned person, or anyone of a banned household (P7b): an item
+        # through the GFS relay meets no §24.11 ban step for its origin.
+        if await banned_from_space(
+            self._spaces,
+            space_id,
+            user_id=author_user_id,
+            instance_id=origin_instance_id or None,
+        ):
             return True
         seat = await self._seats.get(space_id, origin_instance_id, author_user_id)
         if seat is None:

@@ -24,11 +24,12 @@ from socialhome.authority_sig import (
     AUTHORITY_SIG_SUITE_ED25519,
     SUPPORTED_AUTHORITY_SIG_SUITES,
     UnsupportedAuthoritySuite,
+    authority_payload_verified,
     sign_authority_event,
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from socialhome.crypto import generate_space_keypair
+from socialhome.crypto import ed25519_public_key, generate_space_keypair
 
 
 def test_sign_then_verify_round_trips():
@@ -124,3 +125,42 @@ def test_space_crypto_service_reexports_same_objects():
     assert scs.strip_authority_sig_fields is strip_authority_sig_fields
     assert scs.UnsupportedAuthoritySuite is UnsupportedAuthoritySuite
     assert scs.AUTHORITY_SIG_SUITE_ED25519 == AUTHORITY_SIG_SUITE_ED25519
+
+
+def test_authority_payload_verified_round_trip_and_fails_closed():
+    seed = b"\x05" * 32
+    pk_hex = ed25519_public_key(seed).hex()
+    payload = {"space_id": "sp", "user_id": "u"}
+    payload.update(
+        sign_authority_event(
+            event_type="space_member_banned",
+            space_id="sp",
+            payload=dict(payload),
+            space_seed=seed,
+        )
+    )
+    kw = {"event_type": "space_member_banned", "space_id": "sp"}
+    assert authority_payload_verified(
+        payload=payload, space_public_key_hex=pk_hex, **kw
+    )
+    # Another target, another event type, another key, no or odd fields.
+    assert not authority_payload_verified(
+        payload={**payload, "user_id": "x"}, space_public_key_hex=pk_hex, **kw
+    )
+    assert not authority_payload_verified(
+        event_type="space_member_unbanned",
+        space_id="sp",
+        payload=payload,
+        space_public_key_hex=pk_hex,
+    )
+    assert not authority_payload_verified(
+        payload=payload, space_public_key_hex="zz", **kw
+    )
+    assert not authority_payload_verified(
+        payload={"space_id": "sp"}, space_public_key_hex=pk_hex, **kw
+    )
+    assert not authority_payload_verified(
+        payload={**payload, "authority_sig_suite": "rot13"},
+        space_public_key_hex=pk_hex,
+        **kw,
+    )

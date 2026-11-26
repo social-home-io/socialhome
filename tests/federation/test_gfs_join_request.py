@@ -1688,3 +1688,27 @@ async def test_an_approved_follow_answer_is_redeemed_as_a_subscriber(households,
     assert [(r["space_id"], r["role"]) for r in seen] == [(space.id, "subscriber")]
     assert (await a.space_repo.get_join_request(rid))["status"] == "approved"
     assert await a.space_service.list_joining_space_ids(a.user_id) == []
+
+
+async def test_a_banned_household_neither_joins_nor_follows_through_the_gfs(
+    households, gfs
+):
+    """P7b — a household ban covers every person of the household: a member
+    request and a follow from any of its (proven) people are dropped the
+    same silent way as a person ban."""
+    a, b = households
+    space = await _followable_space(b, gfs, a, join_mode=JoinMode.REQUEST)
+    await b.space_repo.ban_household(space.id, a.instance_id)
+    approve = _approver(b)
+    before = await _answers_to(gfs, a)
+    out = await b.gfsjoin.join.handle_body(
+        _signed(a, space_id=space.id, user_id=_uid(a, "fresh"), request_id="j")
+    )
+    assert out == {"ok": True, "filed": False}
+    out = await b.gfsjoin.join.handle_body(
+        _follow(a, space_id=space.id, user_id="fresh2", request_id="f")
+    )
+    assert out == {"ok": True, "filed": False}
+    approve.assert_not_awaited()
+    assert await b.space_repo.list_pending_join_requests(space.id) == []
+    assert await _answers_to(gfs, a) == before

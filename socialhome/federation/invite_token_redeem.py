@@ -88,7 +88,7 @@ from ..services.space_authority_pin import (
     owner_authority_cert_via,
     owner_statement_via,
 )
-from ..services.space_member_guard import user_id_proven
+from ..services.space_member_guard import banned_from_space, user_id_proven
 from ..services.space_service import (
     UnfittableImages,
     _coerce_min_age,
@@ -1843,7 +1843,12 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             if seat is None:
                 return None
-            if await self._spaces.is_banned(space_id, redeemer_user_id):
+            if await banned_from_space(
+                self._spaces,
+                space_id,
+                user_id=redeemer_user_id,
+                instance_id=redeemer_instance_id,
+            ):
                 return None, REDEEM_DENY_REASON
             role = str(seat.role or SpaceRole.MEMBER.value)
             if role not in REACKABLE_REMOTE_ROLES:

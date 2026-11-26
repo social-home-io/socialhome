@@ -344,6 +344,7 @@ from .space_crypto_service import (
 from .space_member_guard import (
     NOT_A_SPACE_MEMBER,
     SpaceMemberGuardMixin,
+    banned_from_space,
     require_seat,
     seat_of,
     user_id_proven,
@@ -643,6 +644,48 @@ def signed_roster_event(
     # Sign over the bare payload (no sig fields), then merge the two sig
     # fields in. strip_authority_sig_fields is used identically on the
     # verify side so the canonical bytes match.
+    payload.update(
+        sign_authority_event(
+            event_type=event_type.value,
+            space_id=space_id,
+            payload=strip_authority_sig_fields(payload),
+            space_seed=seed,
+        )
+    )
+    return event_type, payload
+
+
+#: The longest ban reason kept — the same cap a receiver applies (P7b).
+MAX_BAN_REASON_CHARS = 500
+
+
+def signed_ban_event(
+    space_id: str,
+    *,
+    banned: bool,
+    seed: bytes,
+    user_id: str | None = None,
+    instance_id: str | None = None,
+    banned_by: str | None = None,
+) -> tuple[FederationEventType, dict]:
+    """One ban / unban event (P7b), authority-signed with *seed*: a person
+    (``user_id``) or a household (``instance_id``). The one place its wire
+    shape is spelled, for :meth:`SpaceService._emit_ban` and the tests.
+    Changes no state."""
+    event_type = (
+        FederationEventType.SPACE_MEMBER_BANNED
+        if banned
+        else FederationEventType.SPACE_MEMBER_UNBANNED
+    )
+    payload: dict = {"space_id": space_id}
+    if user_id is not None:
+        payload["user_id"] = user_id
+    if instance_id is not None:
+        payload["instance_id"] = instance_id
+    if banned:
+        # The free-text reason stays with the household that wrote it (P7b
+        # review): followers in a public space are strangers.
+        payload["banned_by"] = banned_by
     payload.update(
         sign_authority_event(
             event_type=event_type.value,
@@ -5651,14 +5694,27 @@ class SpaceService(
                 action,
             )
             return RemoteAdminOutcome.NEEDS_OWNER_APPROVAL
-        await self._run_admin_action(
-            space,
-            space.owner_username,
-            action,
-            params or {},
-            actor_instance_id=actor_instance_id,
-            actor_user_id=actor_user_id,
-        )
+        try:
+            await self._run_admin_action(
+                space,
+                space.owner_username,
+                action,
+                params or {},
+                actor_instance_id=actor_instance_id,
+                actor_user_id=actor_user_id,
+            )
+        except SpacePermissionError as exc:
+            # Refused for the forwarding admin (e.g. lifting the owner's
+            # ban, P7b) — dropped like any other refusal here.
+            log.info(
+                "apply_remote_admin_action: %r for space=%s from %s@%s refused: %s",
+                action,
+                space_id,
+                actor_user_id,
+                actor_instance_id,
+                exc,
+            )
+            return RemoteAdminOutcome.DROPPED
         return RemoteAdminOutcome.EXECUTED
 
     async def apply_approved_admin_action(
@@ -5692,6 +5748,7 @@ class SpaceService(
             params or {},
             actor_instance_id=actor_instance_id,
             actor_user_id=actor_user_id,
+            owner_approved=True,
         )
 
     async def _run_admin_action(
@@ -5703,12 +5760,17 @@ class SpaceService(
         *,
         actor_instance_id: str = "",
         actor_user_id: str = "",
+        owner_approved: bool = False,
     ) -> None:
         """Run a forwarded admin action as the owner. The actor-role gate and
-        the delegation/approval decision have already passed."""
+        the delegation/approval decision have already passed. A ban / unban
+        is judged and recorded for the forwarding admin
+        (``actor_user_id``) unless the owner approved it (then it is the
+        owner's own)."""
         space_id = space.id
         owner = owner_username
         p = params
+        on_behalf_of = None if owner_approved else (actor_user_id or None)
         match action:
             case "update_config":
                 kwargs = {k: v for k, v in p.items() if k in self._REMOTE_CONFIG_FIELDS}
@@ -5790,20 +5852,47 @@ class SpaceService(
                 await self.unarchive_space(space_id, actor_username=owner)
             case "ban":
                 target_id = str(p.get("user_id") or "")
+                reason = p.get("reason")
+                household = str(p.get("instance_id") or "")
+                if household and not target_id:
+                    # P7b — a household ban (never on the owner household:
+                    # ``ban_household`` refuses it).
+                    await self.ban_household(
+                        space_id,
+                        actor_username=owner,
+                        instance_id=household,
+                        reason=reason if isinstance(reason, str) else None,
+                        on_behalf_of=on_behalf_of,
+                    )
+                    return
                 if not target_id:
                     return
-                reason = p.get("reason")
                 await self.ban(
                     space_id,
                     actor_username=owner,
                     user_id=target_id,
                     reason=reason if isinstance(reason, str) else None,
+                    on_behalf_of=on_behalf_of,
                 )
             case "unban":
                 target_id = str(p.get("user_id") or "")
+                household = str(p.get("instance_id") or "")
+                if household and not target_id:
+                    await self.unban_household(
+                        space_id,
+                        actor_username=owner,
+                        instance_id=household,
+                        on_behalf_of=on_behalf_of,
+                    )
+                    return
                 if not target_id:
                     return
-                await self.unban(space_id, actor_username=owner, user_id=target_id)
+                await self.unban(
+                    space_id,
+                    actor_username=owner,
+                    user_id=target_id,
+                    on_behalf_of=on_behalf_of,
+                )
             case "invite":
                 invitee_instance_id = str(p.get("invitee_instance_id") or "")
                 invitee_user_id = str(p.get("invitee_user_id") or "")
@@ -6356,7 +6445,13 @@ class SpaceService(
         actor_username: str,
         user_id: str,
         reason: str | None = None,
+        on_behalf_of: str | None = None,
     ) -> None:
+        """Ban a person. ``on_behalf_of`` names the remote admin whose
+        forwarded action the host runs as the owner — recorded as the
+        banner, so the owner's-ban rule (:meth:`_require_may_lift`) sees who
+        really banned."""
+        reason = reason[:MAX_BAN_REASON_CHARS] if reason else None
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         # Owner-offline-spaces epic (Phase 4b): a seed-holding delegated admin
@@ -6384,12 +6479,14 @@ class SpaceService(
             if target is None and remote_seat is None and self._remote_members
             else None
         )
+        banned_by = on_behalf_of or actor.user_id
         await self._spaces.ban_member(
             space_id,
             user_id,
-            banned_by=actor.user_id,
+            banned_by=banned_by,
             reason=reason,
         )
+        await self._emit_ban(space, banned=True, user_id=user_id, banned_by=banned_by)
         if remote_seat is not None:
             # The banned user is seated on ANOTHER household. ``ban_member``
             # only drops a local ``space_members`` row, so without this the
@@ -6489,6 +6586,217 @@ class SpaceService(
             )
         await self._rotate_and_distribute_space_key(space_id)
 
+    async def ban_household(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        instance_id: str,
+        reason: str | None = None,
+        on_behalf_of: str | None = None,
+    ) -> None:
+        """Ban a whole household from ``space_id`` (P7b): every person of
+        it, members and followers alike, on every path.
+
+        Owner / admin only (moderators keep content authority). Never the
+        owner household nor our own. On a member household without the
+        space seed the ban is forwarded to the host as the ``ban`` admin
+        action naming the household (a host of this branch's version, else
+        :class:`HostTooOldError`). Otherwise each live seat of the household
+        is told, then the ban row lands (from then on every seating path and
+        the §24.11 pipeline refuse the household), then the seats end the
+        way a removal ends them (:meth:`_end_household_seats`, ONE rotation).
+        """
+        reason = reason[:MAX_BAN_REASON_CHARS] if reason else None
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        if (
+            not instance_id
+            or instance_id == self._own_instance_id
+            or instance_id == space.owner_instance_id
+        ):
+            raise SpacePermissionError("this household cannot be banned")
+        if not await self._executes_locally_as_delegated_admin(space):
+            await self._require_host_for_household_bans(space)
+            if await self._forward_admin_action_if_remote(
+                space,
+                actor_username,
+                "ban",
+                {"instance_id": instance_id, "reason": reason},
+            ):
+                return
+        # The row first: from here every seating path refuses the household,
+        # so the seats listed next are all it will ever hold (no join or
+        # follow slips in between). The direct notices are not ban-filtered,
+        # so each seat is still told.
+        actor = await self._users.get(actor_username)
+        banned_by = on_behalf_of or (actor.user_id if actor is not None else None)
+        await self._spaces.ban_household(
+            space_id, instance_id, reason=reason, banned_by=banned_by
+        )
+        ending: list[SpaceRemoteMember] = (
+            await self._remote_members.list_for_instance(
+                space_id, instance_id, include_tombstoned=False
+            )
+            if self._remote_members is not None
+            else []
+        )
+        if ending and self._federation is not None:
+            for seat in ending:
+                await self._tell_removed_household(space_id, instance_id, seat.user_id)
+        await self._emit_ban(
+            space, banned=True, instance_id=instance_id, banned_by=banned_by
+        )
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=SpaceConfigEventType.MEMBER_BANNED.value,
+                payload={"instance_id": instance_id, "reason": reason},
+                sequence=space.config_sequence,
+            )
+        )
+        if ending:
+            await self._end_household_seats(space, instance_id, ending)
+
+    async def _end_household_seats(
+        self,
+        space: Space,
+        instance_id: str,
+        ending: list[SpaceRemoteMember],
+    ) -> None:
+        """A household ban's removal: end ``ending`` (the household's live
+        seats, already told) with the steps a removal takes — tombstone,
+        drop ``space_instances``, LEFT gossip, :class:`SpaceRemoteSeatEnded`
+        — then ONE rotation (k person bans would rotate k times), retire an
+        admin seat's authority on the owner, and last drop the §D2b seat."""
+        assert self._remote_members is not None
+        # Every live seat ends here, so the household is always left with
+        # none (``_end_remote_seats``' answer is always True).
+        await self._end_remote_seats(space, instance_id, ending)
+        for seat in ending:
+            await self._bus.publish(
+                SpaceRemoteSeatEnded(
+                    space_id=space.id, instance_id=instance_id, user_id=seat.user_id
+                )
+            )
+        await self._rotate_and_distribute_space_key(space.id)
+        if space.owner_instance_id == self._own_instance_id and any(
+            seat.role == SpaceRole.ADMIN
+            for seat in await self._remote_members.list_for_instance(
+                space.id, instance_id, include_tombstoned=True
+            )
+        ):
+            # An admin seat of the household — ending now, or one that ended
+            # earlier without a rotation — retires its authority here.
+            await self._bus.publish(
+                SpaceAdminAuthorityRevoked(space_id=space.id, instance_id=instance_id)
+            )
+        await self.revoke_space_session_if_orphaned(instance_id)
+
+    async def unban_household(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        instance_id: str,
+        on_behalf_of: str | None = None,
+    ) -> None:
+        """Lift a household ban (P7b). Re-seats nobody: its people join
+        again through any path, like after a person's unban. Only the owner
+        lifts the owner's ban (:meth:`_require_may_lift`)."""
+        space = await self._require_space(space_id)
+        member = await self._require_admin_or_owner(space, actor_username)
+        if not await self._executes_locally_as_delegated_admin(space):
+            await self._require_host_for_household_bans(space)
+            if await self._forward_admin_action_if_remote(
+                space, actor_username, "unban", {"instance_id": instance_id}
+            ):
+                return
+        await self._require_may_lift(
+            space,
+            lifter=on_behalf_of or member.user_id,
+            banner=await self._spaces.ban_banned_by(space_id, instance_id=instance_id),
+        )
+        await self._spaces.unban_household(space_id, instance_id)
+        await self._emit_ban(space, banned=False, instance_id=instance_id)
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=SpaceConfigEventType.MEMBER_UNBANNED.value,
+                payload={"instance_id": instance_id},
+                sequence=space.config_sequence,
+            )
+        )
+
+    async def _require_may_lift(
+        self, space: Space, *, lifter: str, banner: str | None
+    ) -> None:
+        """Only the owner lifts the owner's ban (P7b review finding 5): an
+        admin may lift an admin's ban or one whose banner is unknown, never
+        one the owner made."""
+        if not banner:
+            return
+        owner_user_id = await self.owner_user_id(space)
+        if banner == owner_user_id and lifter != owner_user_id:
+            raise SpacePermissionError("only the owner can lift the owner's ban")
+
+    async def _require_host_for_household_bans(self, space: Space) -> None:
+        """A household ban forwarded to a host that predates it would be
+        dropped there (no ``user_id``): refuse up front instead."""
+        host = space.owner_instance_id
+        if (
+            host
+            and host != self._own_instance_id
+            and self._federation is not None
+            and not await self._federation.peer_supports(
+                host, min_version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+            )
+        ):
+            raise HostTooOldError(host, feature="ban")
+
+    async def _emit_ban(
+        self,
+        space: Space,
+        *,
+        banned: bool,
+        user_id: str | None = None,
+        instance_id: str | None = None,
+        banned_by: str | None = None,
+    ) -> None:
+        """Tell every member household of a ban / unban (P7b), signed with
+        the space authority seed, so the owner and every admin household
+        hold the same list for their seating paths (leak L1) and members
+        drop a lifted ban (leak L2). Same audience as the LEFT gossip a ban
+        already sends; the banned household is no longer listed. Only to
+        households at the follower-seats version (older ones keep the
+        catch-up ``bans`` stream). Best effort: no seed, nothing sent."""
+        if self._federation is None:
+            return
+        try:
+            seed = await self.ensure_space_seed(space.id)
+        except Exception:
+            log.exception("ban event: ensure_space_seed failed for %s", space.id)
+            return
+        if seed is None:
+            return
+        event_type, payload = signed_ban_event(
+            space.id,
+            banned=banned,
+            seed=seed,
+            user_id=user_id,
+            instance_id=instance_id,
+            banned_by=banned_by,
+        )
+        try:
+            await self._federation.broadcast_to_space_members(
+                space.id,
+                event_type,
+                payload,
+                min_proto_version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
+            )
+        except Exception:
+            log.exception("ban event: broadcast failed for %s", space.id)
+
     async def _live_remote_seat(self, space_id: str, user_id: str):
         """The live remote seat ``user_id`` holds in ``space_id``, if any."""
         if self._remote_members is None:
@@ -6508,16 +6816,23 @@ class SpaceService(
         *,
         actor_username: str,
         user_id: str,
+        on_behalf_of: str | None = None,
     ) -> None:
         space = await self._require_space(space_id)
-        await self._require_admin_or_owner(space, actor_username)
+        member = await self._require_admin_or_owner(space, actor_username)
         if await self._forward_admin_action_if_remote(
             space, actor_username, "unban", {"user_id": user_id}
         ):
             return
+        await self._require_may_lift(
+            space,
+            lifter=on_behalf_of or member.user_id,
+            banner=await self._spaces.ban_banned_by(space_id, user_id=user_id),
+        )
         await self._spaces.unban_member(space_id, user_id)
-        # Unban clears a host-local ban flag only (the ban list never lived on
-        # member stubs, and unban re-adds no membership). It is a ROSTER /
+        await self._emit_ban(space, banned=False, user_id=user_id)
+        # Unban re-adds no membership; it reaches every member household as
+        # a signed SPACE_MEMBER_UNBANNED (``_emit_ban``, P7b). It is a ROSTER /
         # moderation event, not a config edit — it must NOT advance
         # config_sequence, and it isn't federated as config (see
         # SpaceConfigOutbound._ROSTER_EVENT_TYPES). The local bus event still
@@ -7653,6 +7968,16 @@ class SpaceService(
             )
         space = await self._require_space(space_id)
         actor_member = await self._require_admin_or_owner(space, actor_username)
+        # P7b — a banned person, or any person of a banned household, is
+        # never invited (owner decision (a): the household ban holds for
+        # explicit invites too; unban the household first).
+        if await banned_from_space(
+            self._spaces,
+            space_id,
+            user_id=invitee_user_id,
+            instance_id=invitee_instance_id,
+        ):
+            raise UserBannedError()
         # §D3 (Phase 3) — delegated-admin authority gate. The owner/host of a
         # space can always invite. A NON-owner ADMIN (a delegated admin whose
         # household doesn't host the space) may only mint an authoritative
@@ -8682,6 +9007,15 @@ class SpaceService(
         elif via != APPROVE_VIA_REVIEW:
             raise ValueError(f"unknown approval source {via!r}")
         remote_instance = row.get("remote_applicant_instance_id")
+        # P7b — a request filed before its person or household was banned is
+        # never approved (a remote approval would only mint a dead token).
+        if await banned_from_space(
+            self._spaces,
+            str(row["space_id"]),
+            user_id=str(row["user_id"]),
+            instance_id=str(remote_instance) if remote_instance else None,
+        ):
+            raise UserBannedError()
         # An admin/mod elevation (the applicant is ALREADY a member; an
         # admin link filed this). Approving is the owner's click that runs
         # the existing owner-only promote — ``set_role`` for a local member,
@@ -8947,7 +9281,9 @@ class SpaceService(
                 space_id,
             )
             return False
-        if await self._spaces.is_banned(space_id, user_id):
+        if await banned_from_space(
+            self._spaces, space_id, user_id=user_id, instance_id=instance_id
+        ):
             log.info("follow from %s refused: banned from %s", instance_id, space_id)
             return False
         if await self._remote_members.get(space_id, instance_id, user_id) is not None:

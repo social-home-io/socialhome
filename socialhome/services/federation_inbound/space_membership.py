@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import orjson
 
+from ...authority_sig import authority_payload_verified
 from ...domain.emoji import MAX_EMOJI_CODEPOINTS
 from ...domain.events import (
     RemoteSpaceCreated,
@@ -27,10 +28,11 @@ from ...domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
+    SpaceRole,
     SpaceType,
 )
 from ...federation.host_equivalence import (
-    acts_as_host,
+    may_sign_pages,
     touches_owner_household,
 )
 from ...federation.sync_manager import SYNC_REJECT_NOT_SEATED
@@ -380,27 +382,27 @@ class SpaceMembershipInboundHandlers:
                 return
         await self._space_repo.remove_space_instance(space_id, event.from_instance)
 
-    async def _is_from_the_host(self, event: FederationEvent, space_id: str) -> bool:
-        """Whether the §24.11-authenticated sender hosts ``space_id``.
+    async def _ban_is_authoritative(
+        self, event: FederationEvent, space_id: str
+    ) -> bool:
+        """Whether a ban / unban (P7b) speaks for ``space_id``'s authority.
 
-        A ban is a statement about somebody else's standing in a space,
-        and ``ban_member`` both inserts the ban row and deletes the
-        member — so an unauthenticated one is a household evicting the
-        space's own owner. Only the host decides that — or, on a household
-        a delegated admin invited, that admin household while delegation is
-        on and its admin seat lives (:mod:`socialhome.federation
-        .host_equivalence`, the same rule as the bans in its catch-up
-        stream). An unknown space is refused too, because there is no owner
-        to compare against and the sender picked the id.
+        A ban is a statement about somebody else's standing in a space, and
+        ``ban_member`` both inserts the ban row and deletes the member — so
+        an unauthenticated one is a household evicting the space's own
+        owner. Two things must hold, judged on THIS household's own rows:
 
-        Mirrors the ``SPACE_AGE_GATE_UPDATED`` / ``SPACE_MEMBER_ROLE_CHANGED``
-        host-authority guards. The roster-gossip family
-        (``SPACE_MEMBER_JOINED`` / ``_LEFT``) is the other accepted shape:
-        an authority signature over ``spaces.identity_public_key``, so a
-        delegated admin can act while the owner is offline. Bans have no
-        signing outbound today — when one is added, verify the signature
-        here as a second accepted branch rather than dropping the check.
-        """
+        * the §24.11-authenticated sender is a seed holder here: the owner,
+          or — delegation on — a household holding a live ``admin`` seat
+          in our roster mirror (:func:`may_sign_pages`). So the OWNER takes
+          a delegated admin's ban (leak L1: before, it refused it, and the
+          banned person came back through the owner's link), and a plain
+          member cannot replay a signed ban it saw (e.g. after an unban);
+        * the payload carries a valid space-authority signature under the
+          key we pin (``spaces.identity_public_key``) — proof the sender
+          holds the seed, bound to the target it names.
+
+        An unknown space is refused: no key to verify against."""
         space = await self._space_repo.get(space_id)
         if space is None:
             log.warning(
@@ -410,18 +412,64 @@ class SpaceMembershipInboundHandlers:
                 event.from_instance,
             )
             return False
-        if not await acts_as_host(
-            self._space_repo, self._seat_repo, space, event.from_instance
-        ):
+        if not await may_sign_pages(self._seat_repo, space, event.from_instance):
             log.warning(
-                "%s for %s from non-host %s (host=%s) — dropping",
+                "%s for %s from %s — not a seed holder of the space here; dropping",
                 event.event_type,
                 space_id,
                 event.from_instance,
-                space.owner_instance_id,
+            )
+            return False
+        if not authority_payload_verified(
+            event_type=event.event_type.value,
+            space_id=space_id,
+            payload=event.payload,
+            space_public_key_hex=str(space.identity_public_key or ""),
+        ):
+            log.warning(
+                "%s for %s from %s — no valid space-authority signature; dropping",
+                event.event_type,
+                space_id,
+                event.from_instance,
             )
             return False
         return True
+
+    @staticmethod
+    def _ban_target(event: FederationEvent) -> tuple[str, str]:
+        """``(user_id, instance_id)`` of a ban: exactly one is non-empty, or
+        both are empty (malformed)."""
+        raw_user = event.payload.get("user_id")
+        raw_inst = event.payload.get("instance_id")
+        user_id = raw_user if isinstance(raw_user, str) else ""
+        instance_id = raw_inst if isinstance(raw_inst, str) else ""
+        if bool(user_id) == bool(instance_id):
+            return "", ""
+        return user_id, instance_id
+
+    async def _refused_target(
+        self, event: FederationEvent, space_id: str, user_id: str, instance_id: str
+    ) -> bool:
+        """A target only the owner may name (its own household's people) —
+        or, for a household, the owner household itself, which nobody
+        bans."""
+        if user_id:
+            return await self._names_the_owner_household(event, space_id, user_id)
+        space = await self._space_repo.get(space_id)
+        if space is None or await touches_owner_household(
+            self._space_repo,
+            self._seat_repo,
+            space,
+            user_id="",
+            instance_id=instance_id,
+        ):
+            log.warning(
+                "%s for %s names the owner household — dropping",
+                event.event_type,
+                space_id,
+            )
+            return True
+        return False
 
     async def _names_the_owner_household(
         self, event: FederationEvent, space_id: str, user_id: str
@@ -445,21 +493,32 @@ class SpaceMembershipInboundHandlers:
         return False
 
     async def _on_banned(self, event: FederationEvent) -> None:
+        """A person or household ban (P7b) from a seed holder of the space:
+        stored for every seating path and the §24.11 ban step here. The
+        seats themselves end through the LEFT gossip the ban sent."""
         space_id = event.space_id or str(event.payload.get("space_id") or "")
-        user_id = str(event.payload.get("user_id") or "")
-        if not space_id or not user_id:
+        user_id, instance_id = self._ban_target(event)
+        if not space_id or not (user_id or instance_id):
             return
-        if not await self._is_from_the_host(event, space_id):
+        if not await self._ban_is_authoritative(event, space_id):
             return
-        if await self._names_the_owner_household(event, space_id, user_id):
+        if await self._refused_target(event, space_id, user_id, instance_id):
             return
+        reason = str(event.payload.get("reason") or "")[:500] or None
         banned_by = event.payload.get("banned_by")
-        reason = str(event.payload.get("reason") or "")[:500]
+        if instance_id:
+            await self._space_repo.ban_household(
+                space_id,
+                instance_id,
+                reason=reason,
+                banned_by=str(banned_by) if banned_by else None,
+            )
+            return
         await self._space_repo.ban_member(
             space_id=space_id,
             user_id=user_id,
             banned_by=str(banned_by) if banned_by else event.from_instance,
-            reason=reason or None,
+            reason=reason,
         )
         await self._bus.publish(
             RemoteSpaceMemberBanned(
@@ -470,15 +529,53 @@ class SpaceMembershipInboundHandlers:
         )
 
     async def _on_unbanned(self, event: FederationEvent) -> None:
+        """The unban of a person or household (P7b, leak L2: an unban used
+        to stay on the household that made it, so members kept refusing
+        the person's items)."""
         space_id = event.space_id or str(event.payload.get("space_id") or "")
-        user_id = str(event.payload.get("user_id") or "")
-        if not space_id or not user_id:
+        user_id, instance_id = self._ban_target(event)
+        if not space_id or not (user_id or instance_id):
             return
-        if not await self._is_from_the_host(event, space_id):
+        if not await self._ban_is_authoritative(event, space_id):
             return
-        if await self._names_the_owner_household(event, space_id, user_id):
+        if await self._refused_target(event, space_id, user_id, instance_id):
             return
-        await self._space_repo.unban_member(space_id, user_id)
+        if await self._lifts_the_owners_ban(event, space_id, user_id, instance_id):
+            return
+        if instance_id:
+            await self._space_repo.unban_household(space_id, instance_id)
+        else:
+            await self._space_repo.unban_member(space_id, user_id)
+
+    async def _lifts_the_owners_ban(
+        self, event: FederationEvent, space_id: str, user_id: str, instance_id: str
+    ) -> bool:
+        """An unban from anyone but the owner household of a ban the OWNER
+        made: refused (P7b review finding 5 — only the owner lifts the
+        owner's ban; an admin lifts an admin's or an unknown banner's)."""
+        space = await self._space_repo.get(space_id)
+        if space is None or event.from_instance == space.owner_instance_id:
+            return False
+        banner = await self._space_repo.ban_banned_by(
+            space_id, user_id=user_id or None, instance_id=instance_id or None
+        )
+        if not banner or banner != await self._owner_user_id(space_id):
+            return False
+        log.warning(
+            "%s for %s from %s would lift the owner's ban — dropping",
+            event.event_type,
+            space_id,
+            event.from_instance,
+        )
+        return True
+
+    async def _owner_user_id(self, space_id: str) -> str | None:
+        """The owner's user id here: the ``owner`` seat on the host, else the
+        one the host's roster recorded on a stub."""
+        for member in await self._space_repo.list_members(space_id):
+            if member.role == SpaceRole.OWNER:
+                return str(member.user_id)
+        return await self._space_repo.get_owner_user_id(space_id)
 
     async def _on_age_gate(self, event: FederationEvent) -> None:
         """§CP.F1 — the host set/changed the space's min_age.

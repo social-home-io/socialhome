@@ -77,6 +77,9 @@ GATED_METHODS: frozenset[str] = frozenset(
         "ownership_candidates",
         "ban",
         "unban",
+        # P7b — household bans: owner / admin, like a person's ban.
+        "ban_household",
+        "unban_household",
         "create_invite_token",
         "create_invite_link",
         "list_invite_links",

@@ -159,3 +159,31 @@ def verify_authority_event(
         ),
         sig,
     )
+
+
+def authority_payload_verified(
+    *,
+    event_type: str,
+    space_id: str,
+    payload: dict,
+    space_public_key_hex: str,
+) -> bool:
+    """Whether ``payload`` carries a valid space-authority signature (its
+    ``authority_sig`` / ``authority_sig_suite`` over the payload without
+    them) under the pinned ``space_public_key_hex``. Fail closed: a missing
+    field, an unknown suite or a bad key is ``False``."""
+    sig = payload.get("authority_sig")
+    suite = payload.get("authority_sig_suite")
+    if not isinstance(sig, str) or not sig or not isinstance(suite, str):
+        return False
+    try:
+        return verify_authority_event(
+            event_type=event_type,
+            space_id=space_id,
+            payload=strip_authority_sig_fields(payload),
+            authority_sig=sig,
+            authority_sig_suite=suite,
+            space_public_key=bytes.fromhex(space_public_key_hex),
+        )
+    except UnsupportedAuthoritySuite, ValueError, TypeError:
+        return False

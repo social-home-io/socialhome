@@ -110,6 +110,10 @@ class MembersMixin(ReceiverBase):
 
     async def _persist_bans(self, space_id: str, records: list[dict[str, Any]]) -> None:
         for r in records:
+            household = r.get("instance_id")
+            if isinstance(household, str) and household and not r.get("user_id"):
+                await self._persist_household_ban(space_id, household, r)
+                continue
             user_id = str(r.get("user_id") or "")
             banned_by = str(r.get("banned_by") or "")
             if not user_id or not banned_by:
@@ -131,6 +135,26 @@ class MembersMixin(ReceiverBase):
                         space_id=space_id, user_id=user_id, banned_by=banned_by
                     )
                 )
+
+    async def _persist_household_ban(
+        self, space_id: str, instance_id: str, r: dict[str, Any]
+    ) -> None:
+        """A household ban (P7b) from the acting host's catch-up stream —
+        never one naming the owner household. Its seats end through the
+        roster (``members``) the same stream carries."""
+        space = await self._space_repo.get(space_id)
+        if space is None or await touches_owner_household(
+            self._space_repo, None, space, user_id="", instance_id=instance_id
+        ):
+            return
+        reason = r.get("reason")
+        banned_by = r.get("banned_by")
+        await self._space_repo.ban_household(
+            space_id,
+            instance_id,
+            reason=str(reason)[:500] if isinstance(reason, str) else None,
+            banned_by=str(banned_by) if isinstance(banned_by, str) else None,
+        )
 
     async def _apply_picture_resets(
         self,

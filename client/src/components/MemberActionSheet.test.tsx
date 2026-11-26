@@ -194,3 +194,38 @@ describe('MemberActionSheet — making another household an admin', () => {
     expect(r2.baseElement.querySelector('[data-testid="admin-grant-check"]')).toBeNull()
   })
 })
+
+describe('MemberActionSheet bans (P7b)', () => {
+  it('a remote member can be banned as a person or with their whole household', async () => {
+    const { api } = await import('@/api')
+    const post = api.post as ReturnType<typeof vi.fn>
+    post.mockClear()
+    openMemberActions('sp-1', 'u-bob', 'member', 'peer-x', 'owner', false, 'Smith Household')
+    const onUpdate = vi.fn()
+    const r = render(<MemberActionSheet onUpdate={onUpdate} />)
+    const banHousehold = r.baseElement.querySelector('[data-action="ban-household"]') as HTMLElement
+    expect(banHousehold).toBeTruthy()
+    fireEvent.click(banHousehold)
+    // The confirm names the household and says what the ban covers.
+    await waitFor(() => expect(r.baseElement.textContent).toContain('Everyone from Smith Household'))
+    const confirm = [...r.baseElement.querySelectorAll('button')]
+      .filter(b => b.textContent === 'Ban household').pop()!
+    fireEvent.click(confirm)
+    await waitFor(() => expect(onUpdate).toHaveBeenCalled())
+    expect(post).toHaveBeenCalledWith('/api/spaces/sp-1/ban', { instance_id: 'peer-x' })
+  })
+
+  it('a member of this household offers only the person ban', () => {
+    openMemberActions('sp-1', 'u-bob', 'member', null, 'owner')
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(r.baseElement.querySelector('[data-action="ban-household"]')).toBeNull()
+    expect([...r.baseElement.querySelectorAll('button')].some(b => b.textContent === 'Ban')).toBe(true)
+  })
+
+  it('the owner seat offers no ban at all', () => {
+    openMemberActions('sp-1', 'u-own', 'owner', 'peer-host', 'admin')
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(r.baseElement.querySelector('[data-action="ban-household"]')).toBeNull()
+    expect([...r.baseElement.querySelectorAll('button')].some(b => b.textContent === 'Ban')).toBe(false)
+  })
+})

@@ -234,6 +234,35 @@ describe('SpaceMemberList — banned people by name', () => {
   })
 })
 
+describe('SpaceMemberList — banned households (P7b)', () => {
+  it('lists a household ban by its name and lifts it on its own route', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.endsWith('/members')) return []
+      if (url.endsWith('/bans')) {
+        return [
+          { kind: 'person', user_id: 'ru-rita', banned_at: '2026-01-01', display_name: 'Remote Rita' },
+          { kind: 'household', instance_id: 'peer-x', banned_at: '2026-01-01', household_name: 'Smith Household' },
+          { kind: 'household', instance_id: 'peer-y', banned_at: '2026-01-01', household_name: null },
+        ]
+      }
+      return []
+    })
+    const { api } = await import('@/api')
+    const del = api.delete as ReturnType<typeof vi.fn>
+    del.mockResolvedValue(undefined)
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" />)
+    await waitFor(() => expect(r.container.querySelectorAll('[data-ban-kind="household"]').length).toBe(2))
+    const names = [...r.container.querySelectorAll('[data-ban-kind="household"] .sh-member-name')]
+      .map(n => n.textContent)
+    expect(names).toEqual(['Smith Household', 'A household'])
+    expect(r.container.textContent).not.toContain('peer-y')
+    const unban = r.container.querySelector('[data-ban-kind="household"] button') as HTMLElement
+    fireEvent.click(unban)
+    await waitFor(() => expect(del).toHaveBeenCalledWith('/api/spaces/sp-1/household-bans/peer-x'))
+  })
+})
+
 describe('SpaceMemberList — tapping a member opens their person sheet', () => {
   const rows = [
     { user_id: 'u-m', display_name: 'Mo', role: 'moderator', joined_at: '2026-01-01' },

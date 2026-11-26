@@ -316,6 +316,14 @@ async def test_a_banned_person_cannot_follow(stack):
     assert _approved_sends(stack) == []
 
 
+async def test_a_person_of_a_banned_household_cannot_follow(stack):
+    """P7b — a household ban covers every person of it."""
+    space = await _hosted(stack)
+    await stack.spaces.ban_household(space.id, PEER)
+    assert await _approve_follow(stack, space.id) is False
+    assert _approved_sends(stack) == []
+
+
 async def test_a_follow_without_the_seat_store_fails_closed(stack):
     """Without the remote seat store "not seated already" cannot be proved:
     the follow is refused, never approved blind."""

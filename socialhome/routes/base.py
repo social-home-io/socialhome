@@ -375,6 +375,14 @@ class BaseView(web.View):
                     "can be changed from here.",
                     extra={"feature": exc.feature},
                 )
+            if exc.feature == "ban":
+                return error_response(
+                    409,
+                    "HOST_TOO_OLD",
+                    "The space's host household must be updated before a "
+                    "household can be banned from here.",
+                    extra={"feature": exc.feature},
+                )
             if exc.feature == "follow":
                 return error_response(
                     409,

@@ -99,6 +99,35 @@ async def test_member_without_user_id_records_nothing(setup):
     assert len(c.members) == 1
 
 
+async def test_household_bans(setup):
+    """P7b — the catch-up ``bans`` stream also carries household bans: a
+    record naming an ``instance_id`` and no ``user_id``."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "bans",
+        [
+            {
+                "space_id": "sp-1",
+                "instance_id": "peer-bad",
+                "reason": "spam",
+                "banned_by": "u-owner",
+            }
+        ],
+    )
+    assert c.household_bans == [("sp-1", "peer-bad", "spam")]
+    assert c.household_banners == ["u-owner"]
+    assert c.bans == []
+
+
+async def test_a_household_ban_naming_the_owner_household_is_dropped(setup):
+    """Nobody bans the owner household (here ``peer-a`` owns ``sp-1``)."""
+    r, c, kp = setup
+    await _send(r, kp, "bans", [{"space_id": "sp-1", "instance_id": "peer-a"}])
+    assert c.household_bans == []
+
+
 async def test_ban_missing_user_id_drops(setup):
     r, c, kp = setup
     await _send(r, kp, "bans", [{"banned_by": "admin"}])
