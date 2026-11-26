@@ -491,6 +491,32 @@ content key (below); a member's own leave still does. It never ends a
 member's seat. A follow still pending is left alone (it is answered
 within seconds).
 
+### Stepping up: a follower becomes a member (owner 2026-11-26)
+
+A follower may ask to join like anyone else, on every path, and an
+approved join turns the follower seat into a member seat — never a second
+seat. One rule, the existing join paths:
+
+- **A space this household hosts:** Join of an `open` space seats the
+  follower as a member at once (`_seat_local_member`: the row, the event,
+  the v_23 JOINED gossip with the new role); in `request` mode the ask is
+  filed, and the approval seats the same way.
+- **Another household's space:** the ask goes to its host — a
+  `SPACE_JOIN_REQUEST` when paired, the v_84 GFS bootstrap otherwise
+  (`request_join` forwards a follower's ask to `request_join_remote`). The
+  approval mints the bound member token as for anyone; when the follower's
+  household redeems it, the redeem spends it and seats the person over the
+  follower seat with the token's role (`_reack_seated_redeemer` steps
+  aside for a follower redeeming a writer token). The ACK carries the
+  member writer cert and channel grant; the JOINED gossip tells every
+  household the new role. A failed ACK restores the follower seat (never
+  un-seats). An explicit member link redeemed by a follower does the same.
+
+Gates are those of any join (ban, age gate, the local-community check). No
+rotation: rights only grow, and the person already holds the content key.
+A member never steps down by redeeming a follower link (the re-ACK keeps
+the member seat). Cost: one roster gossip per step up, like a promotion.
+
 ### Keys and rotation
 
 - **Join:** the content key rides the seat ACK; joining never rotates.

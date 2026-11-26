@@ -13297,3 +13297,86 @@ async def test_a_share_built_earlier_is_not_due_after_a_rotation_or_demotion(sta
     assert not await stack.space_svc.admin_seed_share_still_due(
         prepared, instance_id="relay-peer"
     )
+
+
+# ── P9 step up (owner 2026-11-26): a follower may become a member ──────
+
+
+async def _follower(stack, join_mode: JoinMode):
+    await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="P",
+        space_type=SpaceType.PUBLIC,
+        join_mode=join_mode,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    await stack.space_svc.follow_space(fan.user_id, space.id)
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+    return fan, space
+
+
+async def test_a_follower_joins_an_open_space_we_host_as_a_member(stack):
+    """Following then Join: the follower seat becomes a member seat at
+    once, like anyone's Join of an open space (it raised AlreadyMember)."""
+    fan, space = await _follower(stack, JoinMode.OPEN)
+    assert await stack.space_svc.request_join(space.id, user_id=fan.user_id) is None
+    seat = await stack.space_repo.get_member(space.id, fan.user_id)
+    assert seat is not None and seat.role == SpaceRole.MEMBER
+
+
+async def test_a_followers_request_to_join_is_approved_as_a_member(stack):
+    """Request mode: the follower's ask is filed for the admins; approving
+    it makes the follower seat a member seat."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    request_id = await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    assert request_id
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+    await stack.space_svc.approve_join_request(request_id, actor_username="anna")
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.MEMBER
+    )
+
+
+async def test_a_followers_join_of_a_space_hosted_elsewhere_goes_to_its_host(
+    stack, monkeypatch
+):
+    """A follower of another household's space asks that host (paired, or
+    through the GFS that lists it) — never a request filed here, where
+    nobody may answer it."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    await _hosted_elsewhere(stack, space.id)
+    asked: list = []
+
+    async def _remote(self, space_id, **kw):
+        asked.append((space_id, kw))
+        return "rq-remote"
+
+    monkeypatch.setattr(type(stack.space_svc), "request_join_remote", _remote)
+    assert (
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id, message="hi")
+        == "rq-remote"
+    )
+    assert asked == [
+        (
+            space.id,
+            {
+                "applicant_user_id": fan.user_id,
+                "host_instance_id": "another-household",
+                "message": "hi",
+            },
+        )
+    ]
+
+
+async def test_a_member_still_cannot_ask_to_join_again(stack):
+    """Only a follower steps up; a member's Join stays AlreadyMember."""
+    fan, space = await _follower(stack, JoinMode.OPEN)
+    await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    with pytest.raises(AlreadyMemberError):
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id)

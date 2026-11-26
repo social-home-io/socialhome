@@ -8885,8 +8885,19 @@ class SpaceService(
         at, so the answer says nothing about a space the caller can't
         see."""
         space, seat = await self.read_space(space_id, user_id)
-        if seat is not None:
+        if seat is not None and seat.role != SpaceRole.SUBSCRIBER:
             raise AlreadyMemberError()
+        if seat is not None and self._hosted_elsewhere(space):
+            # Step up (owner 2026-11-26): a follower of another household's
+            # space asks its host — paired, or through the GFS that lists it
+            # — like anyone's request; the approval's member token makes the
+            # follower seat a member seat when it is redeemed.
+            return await self.request_join_remote(
+                space_id,
+                applicant_user_id=user_id,
+                host_instance_id=space.owner_instance_id,
+                message=message,
+            )
         if space.join_mode is JoinMode.INVITE_ONLY:
             raise InviteOnlyError()
         if await self._spaces.is_banned(space_id, user_id):
@@ -9169,13 +9180,6 @@ class SpaceService(
         await self._answer_join_request(
             request_id, "approved", reviewed_by=actor.user_id
         )
-        member = SpaceMember(
-            space_id=row["space_id"],
-            user_id=row["user_id"],
-            role=SpaceRole.MEMBER,
-            joined_at=datetime.now(UTC).isoformat(),
-        )
-        await self._spaces.save_member(member)
         await self._bus.publish(
             SpaceJoinApproved(
                 space_id=row["space_id"],
@@ -9184,14 +9188,12 @@ class SpaceService(
                 approved_by=actor.user_id,
             )
         )
-        await self._bus.publish(
-            SpaceMemberJoined(
-                space_id=row["space_id"],
-                user_id=row["user_id"],
-                role=SpaceRole.MEMBER,
-            )
+        # The seat every local join makes — the row (over a follower seat
+        # on a step up), SpaceMemberJoined and the v_23 roster gossip, so
+        # member households learn the new member (or the stepped-up role).
+        return await self._seat_local_member(
+            space, row["user_id"], actor_user_id=actor.user_id
         )
-        return member
 
     async def _approve_remote_join_request(
         self,
