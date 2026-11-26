@@ -162,6 +162,7 @@ from .gfs_server_targets import (
     is_listing_target_id,
     refusal_outcome,
 )
+from .space_writer_households import SEAT_ROLES, holds_member_seat
 
 if TYPE_CHECKING:
     from ..domain.space import Space
@@ -1885,6 +1886,10 @@ class GfsChannelService:
         if grant is None or grant.channel_pass is None:
             # A publish-only member never takes a seat.
             return 0
+        if not await holds_member_seat(self._spaces, space_id, roles=SEAT_ROLES):
+            # No person of ours holds a seat any more (removed at a
+            # rotation: our last pass closed): no seat on the channel.
+            return 0
         done = 0
         item = GfsPublish(
             space_id=space_id,
@@ -1934,9 +1939,32 @@ class GfsChannelService:
             replace(req, signature=b64url_encode(sig)).to_wire(),
             conn,
             queued=True,
+            log_refusal=False,  # judged below: superseded or a fault
         )
         if outcome.kind == "delivered":
             self._seated.add((space_id, grant.channel_id, grant.epoch))
+        elif outcome.kind == "permanent":
+            now = await self.current_grant(space_id)
+            if now is None or (now.channel_id, now.epoch) != (
+                grant.channel_id,
+                grant.epoch,
+            ):
+                # Refused (that epoch closed) and our grant moved on
+                # meanwhile: nothing is wrong — the newer grant subscribes
+                # itself. Done.
+                log.info(
+                    "gfs.channel: GFS %s refused the seat of a superseded "
+                    "grant for space %s — the newer grant takes its own",
+                    conn.id,
+                    space_id,
+                )
+                return PublishOutcome.delivered()
+            log.warning(
+                "gfs.channel: GFS %s refused our seat for space %s with its "
+                "current grant",
+                conn.id,
+                space_id,
+            )
         return outcome
 
     async def _unsubscribe_all(self, channel_id: str, gfs_ids: tuple[str, ...]) -> None:
@@ -2195,6 +2223,7 @@ class GfsChannelService:
         conn: GfsConnection,
         *,
         queued: bool = False,
+        log_refusal: bool = True,
     ) -> PublishOutcome:
         """One POST. *queued*: the caller's retry queue honours a 429 (it is
         backpressure, logged at INFO; the queue's give-up is the WARNING) —
@@ -2208,7 +2237,9 @@ class GfsChannelService:
                 )
                 if refused_gfs_key(body, resp.status, resp.reason):
                     self._gfs.forget_addressee_key(conn)
-                if outcome.kind != "delivered":
+                if outcome.kind != "delivered" and (
+                    log_refusal or outcome.kind != "permanent"
+                ):
                     # A 429 is backpressure the retry queue honours (its
                     # give-up is the WARNING); anything else is a fault.
                     (log.info if queued and resp.status == 429 else log.warning)(

@@ -8,6 +8,7 @@ the code that checks them in production. Repositories are in-memory stubs.
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -78,9 +79,19 @@ class _Spaces:
     channels: dict[str, tuple[str, str]] = field(default_factory=dict)
     instances: dict[str, list[str]] = field(default_factory=dict)
     healed_at: dict[str, str] = field(default_factory=dict)
+    #: Spaces where no person of ours holds a seat any more (removed).
+    unseated: set[str] = field(default_factory=set)
 
     async def get(self, space_id):
         return self.spaces.get(space_id)
+
+    async def list_local_member_user_ids(self, space_id):
+        return [] if space_id in self.unseated else ["u-local"]
+
+    async def list_members(self, space_id):
+        if space_id in self.unseated:
+            return []
+        return [SimpleNamespace(user_id="u-local", role="member")]
 
     async def get_space_seed(self, space_id):
         return self.seeds.get(space_id)
@@ -2510,3 +2521,60 @@ async def test_a_subscribe_the_gfs_says_not_yet_to_is_retried_until_seated(
     stale = replace(item, payload={"channel_id": grant.channel_id, "epoch": 1})
     assert (await svc._retry_send(conn.id, stale)).kind == "delivered"
     assert not svc._seated
+
+
+async def test_a_household_removed_from_the_space_takes_no_seat(env, monkeypatch):
+    """Removed at a rotation (no person of ours holds a seat any more), a
+    household still holding its last grant must not keep asking the
+    channel's servers for a seat (on every reconnect): no POST at all."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    posts: list[str] = []
+    real = GfsChannelService._post
+
+    async def spy(self, client, url, body, conn, **kw):
+        posts.append(url)
+        return await real(self, client, url, body, conn, **kw)
+
+    monkeypatch.setattr(GfsChannelService, "_post", spy)
+    env.other.spaces.unseated.add(SPACE_ID)
+    assert await env.other.svc.subscribe(SPACE_ID) == 0
+    assert not [u for u in posts if u.endswith("/subscribe")]
+    conn = (await env.other.svc._capable())[0]
+    assert not env.other.svc._retry.pending(conn.id, SPACE_ID)
+
+
+async def test_a_refusal_of_a_grant_superseded_meanwhile_is_done_not_a_warning(
+    env, monkeypatch, caplog
+):
+    """The server refused the seat (its epoch closed) and by the answer our
+    grant has moved on: nothing is wrong — the newer grant subscribes
+    itself. Done, at INFO; the same refusal of a still-current grant stays
+    a WARNING (a real fault)."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    svc = env.other.svc
+    conn = (await svc._capable())[0]
+    grant = await svc.current_grant(SPACE_ID)
+    item = {"channel_id": grant.channel_id, "epoch": grant.epoch}
+    moved = replace(grant, epoch=grant.epoch + 1)
+
+    async def refused(self, client, url, body, conn, **kw):
+        return chan_mod.PublishOutcome.permanent()
+
+    real_grant = GfsChannelService.current_grant
+    calls = {"n": 0}
+
+    async def grant_seq(self, space_id):
+        calls["n"] += 1
+        return grant if calls["n"] == 1 else moved
+
+    monkeypatch.setattr(GfsChannelService, "_post", refused)
+    monkeypatch.setattr(GfsChannelService, "current_grant", grant_seq)
+    with caplog.at_level(logging.INFO):
+        outcome = await svc._post_subscribe(conn, SPACE_ID, item)
+    assert outcome.kind == "delivered"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # Still current at the answer: a permanent refusal, as before.
+    monkeypatch.setattr(GfsChannelService, "current_grant", real_grant)
+    assert (await svc._post_subscribe(conn, SPACE_ID, item)).kind == "permanent"

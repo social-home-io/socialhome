@@ -501,7 +501,13 @@ class GfsChannelService:
         if inst.status != "active":
             raise PermissionError("instance is not active")
         self._addressed(req.gfs_instance_id, req.gfs_key)
-        ch = await self._channel(req.channel_id)
+        ch = await self._channels.get(req.channel_id)
+        if ch is None:
+            # A registered household's seat for a channel not registered
+            # here: its grant can beat the owner's register (or follow a
+            # retirement): not yet — it retries, and drops the retry once
+            # its grant moves on.
+            raise ChannelEpochTooSoon(SUBSCRIBE_NOT_YET_RETRY_S)
         try:
             verify_channel_pass(
                 req.channel_pass,

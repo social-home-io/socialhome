@@ -539,6 +539,22 @@ async def test_a_pass_for_an_epoch_not_open_yet_is_a_429_not_a_refusal(gfs) -> N
     )
 
 
+async def test_a_subscribe_to_a_channel_not_registered_here_is_not_yet(gfs) -> None:
+    """A fresh channel's grant can reach a member before the owner's
+    register lands on this server (or after the owner retired it): no 403
+    the member gives up on, but 429 + Retry-After — it retries, and drops
+    the retry once its grant moves on. Only after identity verification."""
+    body = _subscribe_body(gfs.ch, gfs.member, 3)  # gfs.ch never registered
+    resp = await gfs.post("/gfs/channels/subscribe", json=body)
+    assert resp.status == 429
+    assert int(resp.headers["Retry-After"]) == SUBSCRIBE_NOT_YET_RETRY_S
+    repo = gfs.app_[gfs_channel_repo_key]
+    assert await repo.get(gfs.ch.id) is None
+    # An unknown household still gets the plain refusal, never the 429.
+    stranger = _subscribe_body(gfs.ch, _Household(), 3)
+    await _refused(await gfs.post("/gfs/channels/subscribe", json=stranger))
+
+
 async def test_unsubscribe_drops_the_seat(gfs) -> None:
     await _ready(gfs)
     await _seat(gfs, gfs.member)

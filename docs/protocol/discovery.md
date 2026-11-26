@@ -1755,7 +1755,11 @@ remains. They re-subscribe when a new grant arrives and on every GFS
 whose epoch the server has not opened YET (the owner rotated again while
 its notice waits out the step bound) is answered `429` + `Retry-After`,
 and the household's retry queue sends the subscribe again — only while that
-grant is still its current one.
+grant is still its current one. So is a channel the server does not know
+(the grant beat the owner's register there, or followed a retirement). A
+refusal (`403`, a closed epoch) of a grant already superseded is done (the
+newer grant subscribes itself); a household no person of which holds a
+seat any more (removed at a rotation) asks for no seat at all.
 
 **Members follow the owner's option, defensively.** A member never takes a
 seat on, or publishes into, the channel of a private space whose stored
