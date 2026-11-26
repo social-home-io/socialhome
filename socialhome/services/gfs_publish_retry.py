@@ -182,6 +182,16 @@ class GfsPublishRetryQueue:
         self._full_logged = False
         self._conn_full_logged: set[str] = set()
 
+    def expedite(self, space_id: str) -> None:
+        """Make every waiting retry of *space_id* due now (on every
+        connection): its state changed (a fresh channel), so what waits may
+        have nothing left to send and must not hold the rest back."""
+        now = time.monotonic()
+        for (_conn, space), conn in self._queues.items():
+            if space == space_id:
+                conn.due_at = min(conn.due_at, now)
+        self._wake.set()
+
     def pending(self, conn_id: str, space_id: str) -> bool:
         """Whether ``conn_id`` has publishes of ``space_id`` waiting (new
         ones of that space queue behind)."""

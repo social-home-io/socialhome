@@ -608,6 +608,11 @@ class GfsChannelService:
         ):
             return "none"
         log.info("gfs.channel: started channel %s for space %s", channel_id, space_id)
+        # What waits in the retry queue for the space names the old channel:
+        # due now, so it resolves at once (a notice of a replaced channel has
+        # nothing left to send) and the fresh channel's first notice — no
+        # step bound — does not wait a minute (or a restart) behind it.
+        self._retry.expedite(space_id)
         return "created"
 
     async def _register_all(
@@ -1444,33 +1449,23 @@ class GfsChannelService:
         found = await self._channel_seed(space)
         if found is None:
             return 0
-        if await self._crypto.get_current_epoch(space_id) is None:
+        epoch = await self._crypto.get_current_epoch(space_id)
+        if epoch is None:
             return 0
-        # A notice is STATE, not an event: it names only its channel, and
-        # whenever it is sent it announces that channel's CURRENT epoch. So
-        # it never queues behind an older notice (that one announces the
-        # same state, or names a channel since replaced: nothing to send),
-        # and at most one waits per server and space (dedupe).
+        # The notice names its channel: replayed after that channel was
+        # replaced it has nothing left to send (done). Notices of one channel
+        # keep their order (each epoch pins its own writer key).
         item = GfsPublish(
             space_id=space_id,
             event_type=_KIND_NOTICE,
-            payload={"channel_id": found[0]},
+            payload={"channel_id": found[0], "epoch": epoch},
         )
         done = 0
         for conn in await self._notice_targets(space):
             if only is not None and conn.id != only:
                 continue
-            outcome = await self._send(conn, item)
-            if outcome.kind == "delivered":
+            if await self._first_attempt(conn, item):
                 done += 1
-            elif outcome.kind == "transient" and not self._retry.enqueue(
-                conn.id, item, retry_after_s=outcome.retry_after_s
-            ):
-                log.warning(
-                    "gfs.channel: epoch notice to GFS %s is lost — the retry "
-                    "queue refused it",
-                    conn.id,
-                )
         return done
 
     async def _post_notice(
@@ -1489,13 +1484,9 @@ class GfsChannelService:
             # heal): nothing left to send — the fresh channel is announced
             # on its own.
             return PublishOutcome.delivered()
-        content_epoch = await self._crypto.get_current_epoch(space_id)
-        if content_epoch is None:
-            return PublishOutcome.permanent()
-        # The wire epoch: the CURRENT content epoch + the channel's secret
-        # offset (a notice is state, announced as it is when sent).
+        # The wire epoch: content epoch + the channel's secret offset.
         offset = derive_channel_epoch_offset(seed, space_id, channel_id)
-        epoch = int(content_epoch) + offset
+        epoch = int(data["epoch"]) + offset
         # The channel writer key is pinned on every notice: members publish
         # with it (anonymously — the one publish mode).
         wkc = issue_channel_writer_key(
@@ -1522,6 +1513,11 @@ class GfsChannelService:
                 )
         except OutboundFetchRefused as exc:
             return refusal_outcome(exc)
+        if outcome.kind == "transient":
+            now = await self._channel_seed(space)
+            if now is None or now[0] != channel_id:
+                # Replaced while this one was in flight: nothing to retry.
+                return PublishOutcome.delivered()
         if (
             held is None
             or space.owner_instance_id != self._own_instance_id
