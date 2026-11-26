@@ -505,7 +505,7 @@ describe('SpacePublicDetailPage — a global space\'s place pin', () => {
     })])
     const { getByTestId, getByText } = await renderPage()
     await waitFor(() => expect(getByTestId('place-distance').textContent).toContain('about 95 km away'))
-    expect(getByText('You’re expected to follow this space’s rules.')).toBeTruthy()
+    expect(getByText('You agree to keep to this space’s rules.')).toBeTruthy()
   })
 
   it('a radius hint: the suggestion, our verdict and the circle on a small map — a hint only', async () => {
@@ -524,7 +524,7 @@ describe('SpacePublicDetailPage — a global space\'s place pin', () => {
     expect(getByText('A hint only — nobody checks where people live when they join.')).toBeTruthy()
     // Still joinable — the rules apply, not the radius.
     expect(getByText('Request to join')).toBeTruthy()
-    expect(getByText('You’re expected to follow this space’s rules.')).toBeTruthy()
+    expect(getByText('You agree to keep to this space’s rules.')).toBeTruthy()
   })
 
   it('no pin (or no home): no distance', async () => {
@@ -761,5 +761,43 @@ describe('SpacePublicDetailPage — Join and Follow side by side (owner 2026-11-
     const { container, getByText } = await renderPage()
     await waitFor(() => getByText('Follow'))
     expect(container.textContent).not.toContain('Open to join')
+  })
+})
+
+describe('SpacePublicDetailPage — UX review fixes (P9)', () => {
+  const paired = (over: Partial<DirectoryEntry> = {}) => entry({
+    host_instance_id: 'peer-7', host_display_name: 'Keller household', host_is_paired: true,
+    scope: 'public', join_mode: 'request', allow_subscribers: true, ...over,
+  })
+
+  it('a waiting request says why Follow is greyed out, linked to the button', async () => {
+    cacheDirectoryEntries([paired({ request_pending: true })])
+    const { container, getByText } = await renderPage()
+    const why = await waitFor(() => getByText(
+      "Your request to join is waiting for the admins. You can follow once they've answered.",
+    ))
+    expect(why.getAttribute('id')).toBe('sh-about-follow-why')
+    const follow = [...container.querySelectorAll('button')].find(b => b.textContent === 'Follow')
+    expect(follow?.getAttribute('aria-describedby')).toBe('sh-about-follow-why')
+    expect(container.textContent).not.toContain('Follow to read along without joining')
+  })
+
+  it('a space you can only follow says how to become a member', async () => {
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'remote-9', host_display_name: null, host_is_paired: false,
+      scope: 'global', join_mode: 'open', allow_subscribers: true,
+    })])
+    const { getByText } = await renderPage()
+    await waitFor(() => getByText(
+      'Follow to read along. To become a member, ask a member for an invite link.',
+    ))
+  })
+
+  it('a follower can open the space it follows from here', async () => {
+    cacheDirectoryEntries([paired({ already_subscribed: true })])
+    const { getByText } = await renderPage()
+    await waitFor(() => getByText('Open space'))
+    fireEvent.click(getByText('Open space'))
+    expect(routeMock).toHaveBeenCalledWith('/spaces/sp-1')
   })
 })

@@ -340,6 +340,10 @@ export default function SpacePublicDetailPage() {
   const areaBlocks = verdict !== null && !verdictAllowsJoin(verdict) && ways.primary !== 'pending'
   const action: AboutAction | null = areaBlocks ? null : ways.primary
   const followBeside = areaBlocks ? null : ways.follow
+  // A request to join is out: Follow waits for its answer, and says so.
+  const followWaits = followBeside === 'follow' && ways.followDisabled
+  // A follower opens the space it follows from here too (posts, unfollow).
+  const openBeside = entry.already_subscribed === true && !entry.already_member
   const primaryLabel = action === null ? null : ABOUT_LABEL[action]()
   // A local community: its radius whoever hosts it — but the centre (and
   // so the map) only for a space this household hosts. A paired
@@ -405,27 +409,46 @@ export default function SpacePublicDetailPage() {
         )}
       </div>
 
-      {action && primaryLabel && (
+      {((action && primaryLabel) || openBeside) && (
         <div class="sh-space-public__cta-row">
-          <Button
-            onClick={() => void onPrimary(entry, action)}
-            disabled={action === 'pending' || action === 'joining' || action === 'following'}
-          >
-            {primaryLabel}
-          </Button>
+          {action && primaryLabel && (
+            <Button
+              onClick={() => void onPrimary(entry, action)}
+              disabled={action === 'pending' || action === 'joining' || action === 'following'}
+            >
+              {primaryLabel}
+            </Button>
+          )}
           {followBeside && (
             <Button
               variant="secondary"
               onClick={() => void onPrimary(entry, 'follow')}
               disabled={ways.followDisabled}
+              aria-describedby={followWaits ? 'sh-about-follow-why' : undefined}
             >
               {ABOUT_LABEL[followBeside]()}
             </Button>
           )}
+          {openBeside && (
+            <Button
+              variant={action ? 'secondary' : 'primary'}
+              onClick={() => void onPrimary(entry, 'open')}
+            >
+              {ABOUT_LABEL.open()}
+            </Button>
+          )}
         </div>
       )}
-      {followBeside === 'follow' && (
+      {followBeside === 'follow' && !followWaits && (
         <p class="sh-muted sh-space-public__follow-note">{t('space.public.follow_or_join')}</p>
+      )}
+      {followWaits && (
+        <p id="sh-about-follow-why" class="sh-muted sh-space-public__follow-note" role="status">
+          {t('space.public.request_out')}
+        </p>
+      )}
+      {action === 'follow' && !followBeside && (
+        <p class="sh-muted sh-space-public__follow-note">{t('space.public.follow_only')}</p>
       )}
       {entry.already_subscribed && (action === 'join' || action === 'request') && (
         <p class="sh-muted sh-space-public__follow-note">{t('space.public.step_up')}</p>

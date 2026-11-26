@@ -3737,6 +3737,8 @@
   "space.public.following_note": "El anfitrión añade a los seguidores por sí solo. Si está desconectado, ocurrirá cuando vuelva.",
   "space.public.follow_or_join": "Sigue este espacio para leerlo sin unirte. Los miembros ven quién lo sigue.",
   "space.public.step_up": "Sigues este espacio. Únete para participar como miembro.",
+  "space.public.request_out": "Tu solicitud para unirte espera a los admins. Podrás seguir este espacio cuando respondan.",
+  "space.public.follow_only": "Sigue este espacio para leerlo. Para ser miembro, pide a un miembro un enlace de invitación.",
   "space.public.join": "Unirme al espacio",
   "space.public.request_join": "Solicitar unirme",
   "space.public.hosted_by": "alojado por {host}",

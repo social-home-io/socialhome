@@ -3710,6 +3710,8 @@
   "space.public.following_note": "Le foyer hôte ajoute les abonnés de lui-même. S'il est hors ligne, cela se fera dès son retour.",
   "space.public.follow_or_join": "Suivez cet espace pour le lire sans le rejoindre. Les membres voient qui le suit.",
   "space.public.step_up": "Vous suivez cet espace. Rejoignez-le pour participer en tant que membre.",
+  "space.public.request_out": "Votre demande d'adhésion attend la réponse des admins. Vous pourrez suivre cet espace une fois qu'ils auront répondu.",
+  "space.public.follow_only": "Suivez cet espace pour le lire. Pour devenir membre, demandez un lien d'invitation à un membre.",
   "space.public.join": "Rejoindre l'espace",
   "space.public.request_join": "Demander à rejoindre",
   "space.public.hosted_by": "hébergé par {host}",
