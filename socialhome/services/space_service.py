@@ -655,6 +655,44 @@ def signed_roster_event(
     return event_type, payload
 
 
+def signed_ban_event(
+    space_id: str,
+    *,
+    banned: bool,
+    seed: bytes,
+    user_id: str | None = None,
+    instance_id: str | None = None,
+    reason: str | None = None,
+    banned_by: str | None = None,
+) -> tuple[FederationEventType, dict]:
+    """One ban / unban event (P7b), authority-signed with *seed*: a person
+    (``user_id``) or a household (``instance_id``). The one place its wire
+    shape is spelled, for :meth:`SpaceService._emit_ban` and the tests.
+    Changes no state."""
+    event_type = (
+        FederationEventType.SPACE_MEMBER_BANNED
+        if banned
+        else FederationEventType.SPACE_MEMBER_UNBANNED
+    )
+    payload: dict = {"space_id": space_id}
+    if user_id is not None:
+        payload["user_id"] = user_id
+    if instance_id is not None:
+        payload["instance_id"] = instance_id
+    if banned:
+        payload["reason"] = reason
+        payload["banned_by"] = banned_by
+    payload.update(
+        sign_authority_event(
+            event_type=event_type.value,
+            space_id=space_id,
+            payload=strip_authority_sig_fields(payload),
+            space_seed=seed,
+        )
+    )
+    return event_type, payload
+
+
 def _roster_parts(entries: list[dict]) -> list[list[dict]]:
     """*entries* cut into parts of at most
     :data:`ROSTER_SNAPSHOT_PART_BYTES` (at least one entry each), in order.
@@ -6408,6 +6446,9 @@ class SpaceService(
             banned_by=actor.user_id,
             reason=reason,
         )
+        await self._emit_ban(
+            space, banned=True, user_id=user_id, reason=reason, banned_by=actor.user_id
+        )
         if remote_seat is not None:
             # The banned user is seated on ANOTHER household. ``ban_member``
             # only drops a local ``space_members`` row, so without this the
@@ -6555,6 +6596,14 @@ class SpaceService(
             for seat in ending:
                 await self._tell_removed_household(space_id, instance_id, seat.user_id)
         await self._spaces.ban_household(space_id, instance_id, reason=reason)
+        actor = await self._users.get(actor_username)
+        await self._emit_ban(
+            space,
+            banned=True,
+            instance_id=instance_id,
+            reason=reason,
+            banned_by=actor.user_id if actor is not None else None,
+        )
         await self._bus.publish(
             SpaceConfigChanged(
                 space_id=space_id,
@@ -6612,6 +6661,7 @@ class SpaceService(
             ):
                 return
         await self._spaces.unban_household(space_id, instance_id)
+        await self._emit_ban(space, banned=False, instance_id=instance_id)
         await self._bus.publish(
             SpaceConfigChanged(
                 space_id=space_id,
@@ -6634,6 +6684,51 @@ class SpaceService(
             )
         ):
             raise HostTooOldError(host, feature="ban")
+
+    async def _emit_ban(
+        self,
+        space: Space,
+        *,
+        banned: bool,
+        user_id: str | None = None,
+        instance_id: str | None = None,
+        reason: str | None = None,
+        banned_by: str | None = None,
+    ) -> None:
+        """Tell every member household of a ban / unban (P7b), signed with
+        the space authority seed, so the owner and every admin household
+        hold the same list for their seating paths (leak L1) and members
+        drop a lifted ban (leak L2). Same audience as the LEFT gossip a ban
+        already sends; the banned household is no longer listed. Only to
+        households at the follower-seats version (older ones keep the
+        catch-up ``bans`` stream). Best effort: no seed, nothing sent."""
+        if self._federation is None:
+            return
+        try:
+            seed = await self.ensure_space_seed(space.id)
+        except Exception:
+            log.exception("ban event: ensure_space_seed failed for %s", space.id)
+            return
+        if seed is None:
+            return
+        event_type, payload = signed_ban_event(
+            space.id,
+            banned=banned,
+            seed=seed,
+            user_id=user_id,
+            instance_id=instance_id,
+            reason=reason,
+            banned_by=banned_by,
+        )
+        try:
+            await self._federation.broadcast_to_space_members(
+                space.id,
+                event_type,
+                payload,
+                min_proto_version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
+            )
+        except Exception:
+            log.exception("ban event: broadcast failed for %s", space.id)
 
     async def _live_remote_seat(self, space_id: str, user_id: str):
         """The live remote seat ``user_id`` holds in ``space_id``, if any."""
@@ -6662,6 +6757,7 @@ class SpaceService(
         ):
             return
         await self._spaces.unban_member(space_id, user_id)
+        await self._emit_ban(space, banned=False, user_id=user_id)
         # Unban clears a host-local ban flag only (the ban list never lived on
         # member stubs, and unban re-adds no membership). It is a ROSTER /
         # moderation event, not a config edit — it must NOT advance

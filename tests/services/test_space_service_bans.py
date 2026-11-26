@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from socialhome.authority_sig import authority_payload_verified
 from socialhome.domain.events import SpaceAdminAuthorityRevoked
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
@@ -184,3 +185,80 @@ async def test_the_host_runs_a_forwarded_household_ban(stack):
     ban.assert_awaited_once()
     assert ban.await_args.kwargs["instance_id"] == "bad-house"
     assert ban.await_args.kwargs["reason"] == "r"
+
+
+# ── The ban list reaches every member household, signed (P7b) ───────────
+
+
+def _ban_broadcasts(stack) -> list[tuple]:
+    return [
+        (c.args[1], c.args[2], c.kwargs)
+        for c in stack.fed.broadcast_to_space_members.await_args_list
+        if c.args[1]
+        in (
+            FederationEventType.SPACE_MEMBER_BANNED,
+            FederationEventType.SPACE_MEMBER_UNBANNED,
+        )
+    ]
+
+
+async def _signed_by_space(stack, space_id, event_type, payload) -> bool:
+    space = await stack.spaces.get(space_id)
+    return authority_payload_verified(
+        event_type=event_type.value,
+        space_id=space_id,
+        payload=payload,
+        space_public_key_hex=space.identity_public_key,
+    )
+
+
+async def test_a_household_ban_and_its_unban_are_signed_to_every_member(stack):
+    space = await _hosted(stack)
+    with patch.object(SpaceService, "_rotate_and_distribute_space_key", AsyncMock()):
+        await stack.svc.ban_household(
+            space.id, actor_username="owner", instance_id=PEER, reason="spam"
+        )
+        await stack.svc.unban_household(
+            space.id, actor_username="owner", instance_id=PEER
+        )
+    [(t1, p1, kw1), (t2, p2, kw2)] = _ban_broadcasts(stack)
+    assert t1 == FederationEventType.SPACE_MEMBER_BANNED
+    assert p1["instance_id"] == PEER and "user_id" not in p1
+    assert p1["reason"] == "spam"
+    assert t2 == FederationEventType.SPACE_MEMBER_UNBANNED
+    assert p2["instance_id"] == PEER
+    for t, p in ((t1, p1), (t2, p2)):
+        assert await _signed_by_space(stack, space.id, t, p)
+    for kw in (kw1, kw2):
+        assert kw["min_proto_version"] == FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+
+
+async def test_a_person_ban_and_unban_are_signed_to_every_member(stack):
+    space = await _hosted(stack)
+    await _seat_remote(stack, space.id, U_FAN, SpaceRole.MEMBER)
+    with patch.object(SpaceService, "_rotate_and_distribute_space_key", AsyncMock()):
+        await stack.svc.ban(space.id, actor_username="owner", user_id=U_FAN)
+        await stack.svc.unban(space.id, actor_username="owner", user_id=U_FAN)
+    [(t1, p1, _), (t2, p2, _)] = _ban_broadcasts(stack)
+    assert (t1, p1["user_id"]) == (FederationEventType.SPACE_MEMBER_BANNED, U_FAN)
+    assert (t2, p2["user_id"]) == (FederationEventType.SPACE_MEMBER_UNBANNED, U_FAN)
+    assert "instance_id" not in p1
+    assert await _signed_by_space(stack, space.id, t1, p1)
+    assert await _signed_by_space(stack, space.id, t2, p2)
+
+
+async def test_a_forwarded_ban_sends_no_ban_event(stack):
+    space = await _hosted(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='elsewhere' WHERE id=?", (space.id,)
+    )
+    with patch.object(
+        SpaceService,
+        "_executes_locally_as_delegated_admin",
+        AsyncMock(return_value=False),
+    ):
+        await stack.svc.ban_household(
+            space.id, actor_username="owner", instance_id=PEER
+        )
+        await stack.svc.ban(space.id, actor_username="owner", user_id=U_FAN)
+    assert _ban_broadcasts(stack) == []
