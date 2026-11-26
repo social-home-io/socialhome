@@ -270,6 +270,44 @@ def test_prune_drops_keys_with_no_hit_in_the_window():
     assert rl.is_allowed("b", limit=1, window_s=60) is False
 
 
+def test_max_keys_drops_the_least_recently_used_key():
+    """A limiter keyed on identities a peer can mint (author ids) is bounded:
+    past ``max_keys`` the key touched longest ago goes first."""
+    limiter = RateLimiter(max_keys=2)
+    limiter.is_allowed("a", limit=5, window_s=60)
+    limiter.is_allowed("b", limit=5, window_s=60)
+    limiter.is_allowed("a", limit=5, window_s=60)  # a is now the newest
+    limiter.is_allowed("c", limit=5, window_s=60)
+    assert limiter.key_count == 2
+    assert limiter.has_room("b", limit=1, window_s=60)  # b was dropped
+    assert not limiter.has_room("a", limit=2, window_s=60)  # a kept its 2
+
+
+def test_max_keys_keeps_a_refused_key_that_stays_busy():
+    """A key held at its limit stays in the map while it is being refused
+    (each refusal touches it), so new keys can't wipe its budget."""
+    limiter = RateLimiter(max_keys=2)
+    assert limiter.is_allowed("flood", limit=1, window_s=60)
+    limiter.is_allowed("x", limit=5, window_s=60)
+    assert not limiter.is_allowed("flood", limit=1, window_s=60)
+    limiter.is_allowed("y", limit=5, window_s=60)
+    assert not limiter.is_allowed("flood", limit=1, window_s=60)
+
+
+async def test_check_honours_max_keys():
+    limiter = RateLimiter(max_keys=1)
+    await limiter.check("u1", "/api/a", 5, 60)
+    await limiter.check("u2", "/api/a", 5, 60)
+    assert limiter.key_count == 1
+
+
+def test_no_max_keys_keeps_every_key():
+    limiter = RateLimiter()
+    for i in range(100):
+        limiter.is_allowed(f"k{i}", limit=1, window_s=60)
+    assert limiter.key_count == 100
+
+
 async def _hit_signed(mw, path: str, remote: str) -> int:
     """A signed-URL ``<img>`` fetch: the principal is the constant
     ``SIGNED_URL_PRINCIPAL`` whoever the browser belongs to."""
