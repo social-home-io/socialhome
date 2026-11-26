@@ -788,7 +788,7 @@ space-reaction → space-poll-vote → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
 gfs-moment-late-delete → gfs-join-request → gfs-space-follow →
-gfs-global-channel → gfs-follower-comment → members-page-catchup → verify``
+gfs-global-channel → gfs-follower-comment → gfs-space-bans → members-page-catchup → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
@@ -1123,6 +1123,26 @@ host a) before b unfollows.
 
 Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-global-channel,
 gfs-follower-comment, verify, down``.
+
+### ``gfs-space-bans`` — person and household bans on every path (P7b)
+
+Part of ``all`` (right after ``gfs-follower-comment``). a creates a global
+invite-only space with followers on and mints a member link; c and b (paired
+with a) join with the link, e (paired with nobody) follows through the GFS.
+
+1. **Person ban:** a bans b's person (``POST …/ban {user_id}``). b's seat
+   ends on a and on b; c, a plain member, holds the row (the signed
+   ``SPACE_MEMBER_BANNED`` reached it); b's link redeem is refused and b's
+   follow is refused by a (``refused: applicant banned``) or by b itself.
+2. **Household ban:** a bans e (``POST …/ban {instance_id}``). e's seat
+   ends on a and on e (told over the GFS); c holds the
+   ``space_instance_bans`` row; a fresh follow through the GFS and the
+   invite link (§D2b bootstrap through the GFS) both leave e unseated.
+3. **Unban:** a lifts both (``DELETE …/bans/{user_id}``,
+   ``DELETE …/household-bans/{instance_id}``); c drops both rows (signed
+   ``SPACE_MEMBER_UNBANNED``); nobody is re-seated.
+
+Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-space-bans, verify, down``.
 
 ### ``gfs-private-channel`` — a private space over an opaque channel (v_51 + ``private_gfs``)
 
