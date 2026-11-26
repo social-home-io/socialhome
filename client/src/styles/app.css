@@ -11200,7 +11200,29 @@ hr {
 .sh-member-row--moderator  { border-inline-start-color: color-mix(in srgb, var(--sh-warning) 50%, var(--sh-success)); }
 .sh-member-row--member     { border-inline-start-color: var(--sh-success); }
 .sh-member-row--subscriber { border-inline-start-color: var(--sh-text-muted); }
-.sh-member-row--banned     { opacity: 0.5; background: color-mix(in srgb, var(--sh-danger) 4%, transparent); border-inline-start-color: var(--sh-danger); }
+/* Banned: only who is faded — the reason and Unban stay readable. */
+.sh-member-row--banned     { background: color-mix(in srgb, var(--sh-danger) 4%, transparent); border-inline-start-color: var(--sh-danger); }
+.sh-member-row--banned .sh-avatar,
+.sh-member-row--banned .sh-member-name { opacity: 0.6; }
+.sh-ban-reason { color: var(--sh-text); font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
+.sh-ban-row-actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); justify-content: flex-end; }
+.sh-ban-list { display: flex; flex-direction: column; }
+/* The ban confirm: an optional reason under the consequences. */
+.sh-ban-dialog__reason { display: flex; flex-direction: column; gap: var(--sh-space-xs); margin-top: var(--sh-space-sm); font-weight: 600; }
+.sh-ban-dialog__reason textarea { font: inherit; font-weight: 400; width: 100%; box-sizing: border-box; }
+.sh-ban-dialog__hint { margin: var(--sh-space-xs) 0 0; font-size: var(--sh-font-size-sm); }
+/* Member sheet: whose household, and Remove / Ban as one group. */
+.sh-member-actions-household { margin: 0 0 var(--sh-space-sm); }
+.sh-member-actions-leave {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  flex-basis: 100%;
+  padding-top: var(--sh-space-sm);
+  border-top: 1px solid var(--sh-border);
+}
+.sh-member-actions-hint { flex-basis: 100%; margin: 0; font-size: var(--sh-font-size-sm); }
 .sh-member-row--me {
   background: color-mix(in srgb, var(--sh-primary) 6%, transparent);
 }

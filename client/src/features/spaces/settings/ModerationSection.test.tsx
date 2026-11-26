@@ -14,7 +14,8 @@ function space(over: Partial<Space> = {}): Space {
 }
 
 beforeEach(() => {
-  get.mockReset(); get.mockResolvedValue({ min_age: 0 })
+  get.mockReset()
+  get.mockImplementation(async (url: string) => url.endsWith('/bans') ? [] : { min_age: 0 })
   patch.mockReset(); patch.mockResolvedValue({}); toast.mockReset()
 })
 
@@ -65,5 +66,15 @@ describe('ModerationSection', () => {
     view.unmount()
     const remote = render(<ModerationSection space={space()} isRemoteSpace onUpdate={vi.fn()} />)
     expect(remote.queryByText('Age & safety')).toBeNull()
+  })
+
+  it('holds the bans list (owner decision C), hosted here or elsewhere', async () => {
+    for (const isRemoteSpace of [false, true]) {
+      const view = render(<ModerationSection space={space()} isRemoteSpace={isRemoteSpace} onUpdate={vi.fn()} />)
+      expect(view.getByTestId('space-bans-settings').querySelector('legend')?.textContent).toBe('Banned')
+      await waitFor(() => expect(view.getByTestId('bans-empty').textContent).toBe('Nobody is banned.'))
+      expect(get).toHaveBeenCalledWith('/api/spaces/s1/bans')
+      view.unmount()
+    }
   })
 })

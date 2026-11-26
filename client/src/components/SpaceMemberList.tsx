@@ -1,10 +1,10 @@
 /**
  * SpaceMemberList — member list view (§23.28).
  *
- * Also surfaces the banned-members list and a kebab menu that opens
- * :func:`openMemberActions` from :mod:`./MemberActionSheet`. Admins see
- * role changes, ban, and unban actions. Regular members see a read-only
- * list.
+ * A kebab menu opens :func:`openMemberActions` from
+ * :mod:`./MemberActionSheet`: admins see role changes, remove and ban.
+ * Who is banned lives in Settings › Moderation (``SpaceBanList``, owner
+ * decision C). Regular members see a read-only list.
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -16,7 +16,6 @@ import { LoadErrorState } from './LoadErrorState'
 import { Button } from './Button'
 import { t, isOne } from '@/i18n/i18n'
 import { openReport } from './ReportDialog'
-import { showToast } from './Toast'
 import { PersonButton } from './PersonButton'
 import { rosterPersonHint, type PersonHint } from '@/utils/personHint'
 import { openMemberActions, MemberActionSheet, roleLabel } from './MemberActionSheet'
@@ -85,45 +84,11 @@ interface Member {
   is_owner?: boolean
 }
 
-export interface Ban {
-  /** ``person``: one person's ban; ``household``: a whole household's. */
-  kind?: 'person' | 'household'
-  /** A person ban's id (absent on a household ban). */
-  user_id?: string
-  /** A household ban's household. */
-  instance_id?: string
-  /** A household ban: the paired household's name, null if unknown here. */
-  household_name?: string | null
-  banned_by?: string
-  banned_at: string
-  reason?: string | null
-  /** Server-resolved: the per-space name, else the person's household
-   *  name, else the space roster's — null when nobody here knows them. */
-  display_name?: string | null
-  /** The viewer's private nickname for them, if any. */
-  personal_alias?: string | null
-  /** Signed; null with no picture or across a guardian block. */
-  picture_url?: string | null
-}
-
-export function isHouseholdBan(b: Ban): boolean {
-  return b.kind === 'household'
-}
-
-/** A banned person's label: the name the server resolved (a remote
- *  person's too), else the viewer's nickname, else "Someone". A banned
- *  household: its name, else "A household". */
-export function banName(b: Ban): string {
-  if (isHouseholdBan(b)) return b.household_name || t('space.members.unknown_household')
-  return personLabel(b.display_name, b.personal_alias)
-}
-
 /** ``space.config.changed`` event types that mean a seat's role moved
  *  (``role_change_event_type`` in ``domain/space.py``). */
 const ROLE_EVENT_TYPES = new Set(['role_changed', 'admin_granted', 'admin_revoked'])
 
 const members = signal<Member[]>([])
-const bans = signal<Ban[]>([])
 const loading = signal(true)
 const loadFailed = signal(false)
 const canManage = signal(false)
@@ -147,23 +112,23 @@ interface Props {
    *  Followers group shows, with its count, even while empty. Off: only
    *  the members and their count (owner decision). */
   takesFollowers?: boolean
+  /** The space is hosted on another household (we hold a stub), and that
+   *  household — the owner's. An admin there never bans the owner
+   *  household's people (only the owner household decides about them). */
+  hostedElsewhere?: boolean
+  ownerInstanceId?: string | null
 }
 
 export function SpaceMemberList({
   spaceId, viewerRole, joinRequests = 0, adminsActForOwner = false,
-  takesFollowers = false,
+  takesFollowers = false, hostedElsewhere = false, ownerInstanceId = null,
 }: Props) {
   const follower = isFollower(viewerRole)
   const reload = () => {
     loading.value = true
     loadFailed.value = false
-    const p1 = api.get(`/api/spaces/${spaceId}/members`)
-    const p2 = hasSettingsAuthority(viewerRole)
-      ? api.get(`/api/spaces/${spaceId}/bans`).catch(() => [] as Ban[])
-      : Promise.resolve([] as Ban[])
-    Promise.all([p1, p2]).then(([mems, bansList]) => {
+    api.get(`/api/spaces/${spaceId}/members`).then((mems) => {
       members.value = mems as Member[]
-      bans.value = bansList as Ban[]
       canManage.value = hasSettingsAuthority(viewerRole)
       loading.value = false
     }).catch(() => {
@@ -244,18 +209,6 @@ export function SpaceMemberList({
       return <span class={`sh-badge sh-badge--${role}`}>{roleLabel(role)}</span>
     }
     return null
-  }
-
-  const unban = async (b: Ban) => {
-    try {
-      await api.delete(isHouseholdBan(b)
-        ? `/api/spaces/${spaceId}/household-bans/${encodeURIComponent(b.instance_id ?? '')}`
-        : `/api/spaces/${spaceId}/bans/${encodeURIComponent(b.user_id ?? '')}`)
-      showToast(t(isHouseholdBan(b) ? 'space.members.household_unbanned' : 'space.members.unbanned'), 'success')
-      reload()
-    } catch (e: any) {
-      showToast(e.message || t('space.members.unban_failed'), 'error')
-    }
   }
 
   // The sheet's nickname editor patches this row in place, so the new
@@ -395,6 +348,17 @@ export function SpaceMemberList({
               spaceId, m.user_id, m.is_owner ? 'owner' : m.role,
               m.instance_id ?? null, viewerRole, adminsActForOwner,
               m.household_name ?? null,
+              {
+                name: r.name,
+                // Our admins act on a space hosted elsewhere: the owner
+                // household's people are not theirs to ban.
+                ownerHousehold: hostedElsewhere && !!m.instance_id
+                  && m.instance_id === ownerInstanceId,
+                people: m.instance_id
+                  ? members.value.filter(x => x.instance_id === m.instance_id)
+                    .map(x => resolveName(x).name)
+                  : [],
+              },
             )}
           >
             ···
@@ -472,34 +436,6 @@ export function SpaceMemberList({
               ? <p class="sh-muted sh-member-followers__empty">{t('space.members.no_followers')}</p>
               : followers.map(renderRow)}
           </section>
-        )}
-        {canManage.value && bans.value.length > 0 && (
-          <>
-            <h2 class="sh-settings-section-heading">{t('space.members.banned_heading')}</h2>
-            {bans.value.map(b => (
-              <div key={isHouseholdBan(b) ? `h:${b.instance_id}` : `p:${b.user_id}`}
-                   class="sh-member-row sh-member-row--banned"
-                   data-ban-kind={isHouseholdBan(b) ? 'household' : 'person'}>
-                <Avatar name={banName(b)} src={b.picture_url ?? null} size={32} />
-                <div class="sh-member-info">
-                  <span class="sh-member-name">{banName(b)}</span>
-                  <span class="sh-badge sh-badge--danger">
-                    {t(isHouseholdBan(b) ? 'space.members.household_banned_badge' : 'space.members.banned_badge')}
-                  </span>
-                  {b.reason && (
-                    <span class="sh-muted">{b.reason}</span>
-                  )}
-                </div>
-                <Button
-                  variant="secondary"
-                  aria-label={t('space.members.unban_aria', { name: banName(b) })}
-                  onClick={() => unban(b)}
-                >
-                  {t('space.members.unban')}
-                </Button>
-              </div>
-            ))}
-          </>
         )}
       </div>
       <MemberActionSheet onUpdate={reload} />

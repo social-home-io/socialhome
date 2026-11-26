@@ -4,7 +4,7 @@ import { fireEvent, render, waitFor } from '@testing-library/preact'
 const { get, post, confirm } = vi.hoisted(() => ({
   get: vi.fn(), post: vi.fn(), confirm: vi.fn(),
 }))
-vi.mock('@/api', () => ({ api: { get, post } }))
+vi.mock('@/api', async (orig) => ({ ...(await orig<object>()), api: { get, post } }))
 vi.mock('@/ws', () => ({ ws: { on: () => () => {} } }))
 vi.mock('./confirm', () => ({ confirmDialog: confirm }))
 
@@ -181,5 +181,30 @@ describe('JoinRequestList — admin grants', () => {
     await waitFor(() => expect(view.getByText('Kim')).toBeTruthy())
     expect(view.queryByTestId('admin-grant-check')).toBeNull()
     expect(view.getByRole('button', { name: 'Make admin' })).toBeTruthy()
+  })
+
+  it('bans a household that keeps asking, from its request, and declines it (owner decision B)', async () => {
+    householdUsers.value = new Map() as never
+    post.mockReset()
+    post.mockResolvedValue({})
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests')
+      ? [
+        {
+          id: 'r9', space_id: 's1', user_id: 'u-spam', display_name: 'Spammy', requested_at: '',
+          remote_applicant_instance_id: 'peer-spam', via_gfs: true, unverified_household: 'Spam Farm',
+        },
+        { id: 'r10', space_id: 's1', user_id: 'u-home', display_name: 'Local', requested_at: '' },
+      ]
+      : []))
+    const view = render(<JoinRequestList spaceId="s1" />)
+    await waitFor(() => expect(view.getByText('Spammy')).toBeTruthy())
+    // Only a request from another household offers it.
+    const offers = view.container.querySelectorAll('[data-action="ban-requesting-household"]')
+    expect(offers.length).toBe(1)
+    fireEvent.click(offers[0])
+    await waitFor(() => expect(view.baseElement.textContent).toContain('Ban Spam Farm?'))
+    fireEvent.click(view.baseElement.querySelector('[data-action="ban-confirm"]') as HTMLElement)
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/api/spaces/s1/ban', { instance_id: 'peer-spam' }))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/api/spaces/s1/join-requests/r9/deny', {}))
   })
 })

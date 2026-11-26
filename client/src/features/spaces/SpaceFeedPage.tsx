@@ -612,6 +612,9 @@ export default function SpaceFeedPage() {
   const ownerId = spaceDetail.value?.owner_instance_id ?? null
   const syncLive = useSpaceSync(spaceId, spaceDetail.value?.sync)
   const hostedHere = !!ownerId && ownerId === instanceConfig.value?.instance_id
+  // Known to be hosted on another household (unknown → no: nothing hidden
+  // on a guess; the server refuses what it must).
+  const hostedElsewhere = !!ownerId && !!instanceConfig.value?.instance_id && !hostedHere
   const notSent = (author: string, postId: string) =>
     author === currentUser.value?.user_id && !!syncLive?.unsent_posts.includes(postId)
       ? <NotSentMark hostName={syncHostName(spaceMembers.value[spaceId]?.values(), ownerId)} hostedHere={hostedHere} />
@@ -961,6 +964,8 @@ export default function SpaceFeedPage() {
         <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value}
                          adminsActForOwner={features?.delegated_admin_authority === true}
                          takesFollowers={features?.allow_subscribers === true}
+                         ownerInstanceId={spaceDetail.value?.owner_instance_id ?? null}
+                         hostedElsewhere={hostedElsewhere}
                          joinRequests={attention?.spaceId === spaceId ? attention.joinRequests : 0} />
       )}
 

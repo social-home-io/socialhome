@@ -98,6 +98,11 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   },
   USER_ALREADY_MEMBER: () => t('error.user_already_member'),
   BANNED: () => t('error.banned'),
+  // A ban that may not be made, and the owner's ban an admin may not lift.
+  BAN_NOT_ALLOWED: (_b, p) => p.target === 'household'
+    ? t('error.ban_not_allowed_household')
+    : t('error.ban_not_allowed_person'),
+  OWNER_BAN: () => t('error.owner_ban'),
   USER_BANNED: () => t('error.user_banned'),
   INVITE_ONLY: () => t('error.invite_only'),
   INVITE_EXPIRED: () => t('error.invite_expired'),

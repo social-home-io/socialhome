@@ -45,6 +45,18 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("This space's host household needs an update before a household can be banned from here.")
   })
 
+  it('translates a refused ban and the owner-only unban (ban UX review)', () => {
+    expect(apiErrorMessage(403, '/api/spaces/s/ban', {
+      code: 'BAN_NOT_ALLOWED', detail: 'this household cannot be banned', params: { target: 'household' },
+    })).toBe("This household can't be banned from this space.")
+    expect(apiErrorMessage(403, '/api/spaces/s/ban', {
+      code: 'BAN_NOT_ALLOWED', detail: 'x', params: { target: 'person' },
+    })).toBe("Only the space owner's household decides about this person.")
+    expect(apiErrorMessage(403, '/api/spaces/s/bans/u', {
+      code: 'OWNER_BAN', detail: "only the owner can lift the owner's ban",
+    })).toBe('Only the space owner can lift this ban.')
+  })
+
   it('names a household video length and the 5-minute limit', () => {
     expect(apiErrorMessage(422, '/api/gallery/albums/a/items', {
       code: 'VIDEO_TOO_LONG', detail: 'x', params: { duration_s: 432, max_s: 300 },
