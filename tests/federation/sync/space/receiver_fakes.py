@@ -81,6 +81,12 @@ class _FakeSpaceRepo:
     ):
         self.bans.append((space_id, user_id, banned_by, reason))
 
+    async def is_banned(self, space_id, user_id):
+        return any(b[0] == space_id and b[1] == user_id for b in self.bans)
+
+    async def is_household_banned(self, space_id, instance_id):
+        return False
+
 
 class _FakeSpacePostRepo:
     def __init__(self):

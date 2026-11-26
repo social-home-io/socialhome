@@ -1042,7 +1042,13 @@ mirrors the host's members (a host stream lands there), whose rows and
 pictures every receiver refuses from it. Its own people's `members` rows
 still go because they carry the picture resets only their household may
 make (see "Receiver side" below). The session shape changes with the
-resource set, so the first session after the upgrade is a full one. Nor does any household but the owner stream the owner
+resource set, so the first session after the upgrade is a full one.
+A follower household (no writer seat) gets `bans` without each ban's
+free-text `reason` — who is banned (its authorship checks) and by whom
+(a person ban needs it), never why. And a receiver never saves a
+`members` record of a person the space bans, or of a person whose seat
+names a banned household (P9): a stale provider cannot put them back on
+the roster, as the live JOINED gossip cannot. Nor does any household but the owner stream the owner
 household's own member rows (the owner seat, any seat its household holds):
 a delegated admin that synced with the owner holds them too, but they may
 only come from the owner (`MembersExporter`), and a receiver drops one that

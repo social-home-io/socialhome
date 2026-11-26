@@ -11,8 +11,8 @@ space metadata a household shares, the same way on both paths:
 
 ``member_count`` is ``space_repo.MEMBER_COUNT_SQL`` (local seats and live
 remote seats, never a follower); ``follower_count`` is the live follower
-seats, local plus remote non-tombstoned (``FOLLOWER_COUNT_SQL``). A follower
-reached only through a GFS is not a roster seat yet, so it is not counted.
+seats, local plus remote non-tombstoned (``FOLLOWER_COUNT_SQL``) — since v_96
+a follower holds a roster seat on every path, a GFS follower too.
 
 A space that takes no followers (``allow_subscribers`` off) declares NO
 follower count (``follower_count`` is ``None`` and left off the wire;

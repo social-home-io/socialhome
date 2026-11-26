@@ -724,3 +724,33 @@ async def test_a_reset_of_a_member_already_without_a_picture_is_not_told(stack):
     heard = await _listen(stack)
     await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
     assert heard.events == []
+
+
+async def test_a_members_record_never_reseats_a_banned_person(stack):
+    """P9 (P7b Fable M3): the ``members`` catch-up saved every record, so a
+    provider that missed a ban (or replayed an old roster) put a banned
+    person back on this household's roster. The seat is skipped, like the
+    live JOINED gossip of a banned person."""
+    await stack.spaces.ban_member(
+        space_id=SPACE_ID, user_id="u-banned", banned_by="u-admin", reason=None
+    )
+    record = {
+        "user_id": "u-banned",
+        "role": "member",
+        "joined_at": "2026-01-01T00:00:00+00:00",
+    }
+    await _persist(stack, "members", [record])
+    assert await stack.spaces.get_member(SPACE_ID, "u-banned") is None
+
+
+async def test_a_members_record_never_reseats_a_banned_households_person(stack):
+    """The same for a person of a banned household (its seat names it)."""
+    await stack.spaces.ban_household(SPACE_ID, MEMBER_HOME)
+    await stack.spaces.delete_member(SPACE_ID, MEMBER)
+    record = {
+        "user_id": MEMBER,
+        "role": "member",
+        "joined_at": "2026-01-01T00:00:00+00:00",
+    }
+    await _persist(stack, "members", [record])
+    assert await stack.spaces.get_member(SPACE_ID, MEMBER) is None

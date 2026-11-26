@@ -14,6 +14,7 @@ from ....media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     reencode_peer_picture,
 )
+from ....services.space_member_guard import banned_from_space
 from ....services.space_service import apply_owner_statement_from_metadata
 from ...host_equivalence import is_owner_ban, touches_owner_household
 from .receiver_base import ReceiverBase, _sync_event
@@ -26,14 +27,39 @@ class MembersMixin(ReceiverBase):
 
     __slots__ = ()
 
+    async def _banned_person(self, space_id: str, user_id: str) -> bool:
+        """Whether ``space_id`` bans ``user_id`` or the household its seat
+        here (live or a tombstone) names — a ``members`` record never puts
+        such a person back on the roster (P7b Fable M3), like the live
+        JOINED gossip."""
+        seat_repo = self._authorship.seat_repo if self._authorship else None
+        seat = (
+            await seat_repo.get_including_tombstones(space_id, "", user_id)
+            if seat_repo is not None
+            else None
+        )
+        return await banned_from_space(
+            self._space_repo,
+            space_id,
+            user_id=user_id,
+            instance_id=seat.instance_id if seat is not None else None,
+        )
+
     async def _persist_members(
         self, space_id: str, records: list[dict[str, Any]]
     ) -> None:
         for r in records:
+            user_id = str(r.get("user_id") or "")
+            if await self._banned_person(space_id, user_id):
+                log.info(
+                    "space sync: a members record of a banned person in %s skipped",
+                    space_id,
+                )
+                continue
             await self._space_repo.save_member(
                 SpaceMember(
                     space_id=space_id,
-                    user_id=str(r.get("user_id") or ""),
+                    user_id=user_id,
                     role=str(r.get("role") or "member"),
                     joined_at=str(r.get("joined_at") or ""),
                     history_visible_from=r.get("history_visible_from"),
