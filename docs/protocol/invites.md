@@ -686,7 +686,9 @@ Cheapest check first; every rung has its own regression test.
 12. **Token + ban, in one statement** — `consume_invite_token`, a single
     atomic UPDATE guarding `uses_remaining > 0`, the expiry, **and** the
     §13.7 ban (`NOT EXISTS (SELECT 1 FROM space_bans …)` correlated on
-    the token's own space). Unknown / expired / exhausted / banned →
+    the token's own space) — and, since P7b, the redeeming household's
+    ban (`space_instance_bans`, by the authenticated instance id). Unknown
+    / expired / exhausted / banned →
     DENY. The ban used to be a second query run *after* the consume with
     no refund, so a banned household could spend a twenty-use link in
     twenty requests — and the distinct reason told it its own ban status
