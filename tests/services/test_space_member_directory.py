@@ -3522,3 +3522,33 @@ async def test_one_new_card_reaches_every_seated_household_in_one_broadcast():
     for d in deltas:
         assert _ids(d) == {newcomer["id"]}
         assert d["to"] not in _ids(d)
+
+
+async def test_one_broadcast_carries_each_recipient_class_its_own_base():
+    """P9 review F6: in the one delta fan-out, a household holding a
+    mailbox card (it follows every card) builds on ``dir_seq`` and one
+    without (mailbox cards only) on ``dir_seq_mbx`` — each copy its own."""
+    w = World()
+    households = [_hh() for _ in range(4)]
+    w.member(*households)
+    w.writers.writers[SPACE] = {h["id"] for h in households}
+    w.seat_all()
+    full, plain = households[1], households[2]
+    await w.card_from(full, _card(full, gfs=GFS))
+    # A mailbox-less card moves ``dir_seq`` only: the classes now differ.
+    await w.card_from(plain, _card(plain, gfs=None))
+    w.fed.directories.clear()
+    w.fed.broadcasts.clear()
+
+    newcomer = households[0]
+    await w.card_from(newcomer, _card(newcomer, gfs=GFS))
+    deltas = {
+        d["to"]: d["payload"]
+        for d in w.fed.directories
+        if not d["payload"].get("snapshot")
+    }
+    assert {full["id"], plain["id"]} <= set(deltas)
+    assert deltas[full["id"]]["base_seq"] != deltas[plain["id"]]["base_seq"]
+    assert deltas[full["id"]]["base_seq"] > deltas[plain["id"]]["base_seq"]
+    for to, payload in deltas.items():
+        assert to not in {c["instance_id"] for c in payload["cards"]}
